@@ -53,12 +53,14 @@
 - **多模态对话**: 支持 **Ollama** (本地) 和 **OpenAI 兼容接口** (云端) 作为对话核心。
 - **视觉能力**: 可接入 Vision 模型，角色可以实时“看到”屏幕内容并描述屏幕内容或图片。
 - **文生图**: 可接入 Stable Diffusion WebUI 或在线API接口，支持通过对话让LLM生成图片或者根据对话场景生成实时的页面背景图片。
+- **基础记忆系统**: 拥有基础记忆提取与回溯系统。能自动从对话中提取关键事实并进行长期存储 (SQLite)，支持基于语义检索 (RAG) 的实时上下文回溯与情感持久化。
 
 ### 🗣️ 语音交互
 - **语音合成 (TTS)**:
     - **GPT-SoVITS**: 情感表现力极佳，自定义角色声线，生态更加丰富。
     - **Browser TTS**: 浏览器原生轻量级 TTS。
 - **声音转换 (RVC)**: 支持 RVC (Retrieval-based Voice Conversion) 变声器接口，用于实现角色演唱歌曲。
+- **语音交互 (STT)**: Whisper/faster-whisper/whisper.cpp 模型初步支持。
 
 ### 🔌 扩展能力
 - **MCP 协议支持**: 实现了 **Model Context Protocol (MCP)** 客户端。
@@ -75,7 +77,6 @@
 - [ ] **高级记忆系统**: 基于向量数据库 (Vector DB) 和 RAG 的长期记忆检索。
 - [ ] **更强的插件系统**: 允许社区开发者编写MOD模块来扩展功能。
 - [ ] **角色市场/工坊**: 方便分享和下载角色预设。
-- [ ] **STT语音识别**: Whisper/faster-whisper/whisper.cpp 模型支持与验证。
 - [ ] **Live2D模型交互**: 与Live2D模型的实时交互反馈功能。
 
 ## 🛠️ 技术栈
@@ -83,7 +84,7 @@
 | 层级 | 技术 |
 |---|---|
 | **前端** | React + TypeScript + Tailwind CSS + shadcn/ui |
-| **后端** | Rust (Tauri v2) — ⚡ 极致性能 & 🔒 内存安全 |
+| **后端** | Rust (Tauri v2) |
 | **渲染** | PixiJS + Live2D Cubism SDK |
 | **数据** | SQLite (本地存储) |
 
@@ -98,7 +99,6 @@
 
 - [Node.js](https://nodejs.org/) (v18+)
 - [Rust](https://www.rust-lang.org/tools/install) (stable)
-- [Tauri 前置依赖](https://v2.tauri.app/start/prerequisites/)
 
 ### 安装与运行
 

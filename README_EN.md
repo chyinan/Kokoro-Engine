@@ -53,12 +53,14 @@ Features currently verified mainly in a local environment (RTX 4060 Laptop):
 - **Multimodal Conversation**: Supports **Ollama** (Local) and **OpenAI Compatible Interfaces** (Cloud) as the conversation core.
 - **Vision Capabilities**: Can integrate Vision models, allowing the character to "see" screen content in real-time and describe it or images.
 - **Text-to-Image**: Can integrate Stable Diffusion WebUI or online API interfaces, supporting image generation via dialogue or generating real-time background images based on conversation context.
+- **Basic Memory System**: Includes a fundamental memory extraction and recall system. Automatically extracts key facts from conversations for long-term storage (SQLite), supporting real-time context recall and emotion persistence through semantic retrieval (RAG).
 
 ### 🗣️ Voice Interaction
 - **Text-to-Speech (TTS)**:
     - **GPT-SoVITS**: Excellent emotional expressiveness, custom character voices, and a richer ecosystem.
     - **Browser TTS**: Lightweight browser-native TTS.
 - **Voice Conversion (RVC)**: Supports RVC (Retrieval-based Voice Conversion) interface for implementing character singing.
+- **Voice Interaction (STT)**: Initial support for Whisper/faster-whisper/whisper.cpp models.
 
 ### 🔌 Extended Capabilities
 - **MCP Protocol Support**: Implements **Model Context Protocol (MCP)** Client.
@@ -75,7 +77,6 @@ The following features are planned, in development, or **not yet tested/verified
 - [ ] **Advanced Memory System**: Long-term memory retrieval based on Vector Database (Vector DB) and RAG.
 - [ ] **Stronger Plugin System**: Allow community developers to write MOD modules to extend functionality.
 - [ ] **Character Market/Workshop**: Facilitate sharing and downloading character presets.
-- [ ] **STT Speech Recognition**: Support and verification for Whisper/faster-whisper/whisper.cpp models.
 - [ ] **Live2D Model Interaction**: Real-time interaction feedback functions with Live2D models.
 
 ## 🛠️ Tech Stack
@@ -83,7 +84,7 @@ The following features are planned, in development, or **not yet tested/verified
 | Layer | Technology |
 |---|---|
 | **Frontend** | React + TypeScript + Tailwind CSS + shadcn/ui |
-| **Backend** | Rust (Tauri v2) — ⚡ Extreme Performance & 🔒 Memory Safety |
+| **Backend** | Rust (Tauri v2) |
 | **Rendering** | PixiJS + Live2D Cubism SDK |
 | **Data** | SQLite (Local Storage) |
 
@@ -98,7 +99,6 @@ The following features are planned, in development, or **not yet tested/verified
 
 - [Node.js](https://nodejs.org/) (v18+)
 - [Rust](https://www.rust-lang.org/tools/install) (stable)
-- [Tauri Prerequisites](https://v2.tauri.app/start/prerequisites/)
 
 ### Installation & Running
 

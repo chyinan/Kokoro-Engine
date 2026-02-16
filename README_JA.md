@@ -52,13 +52,15 @@ Live2D、LLM、TTS、STT などの技術を統合し、高度にモジュール�
 ### 🧠 AI ブレイン
 - **マルチモーダル会話**: **Ollama** (ローカル) および **OpenAI 互換インターフェース** (クラウド) を会話のコアとしてサポート。
 - **視覚能力**: Vision モデルを統合可能。キャラクターは画面の内容をリアルタイムで「見て」、その内容や画像を説明できます。
-- **テキストからの画像生成 (Text-to-Image)**: Stable Diffusion WebUI またはオンライン API インターフェースを統合可能。会話による画像生成や、会話の文脈に基づいたリアルタイムの背景画像生成をサポート。
+- **テキストからの画像生成 (Text-to-Image)**: Stable Diffusion WebUI またはオンライン API インターフェースを統合可能。会話による画像生成や、会話の文맥に基づいたリアルタイムの背景画像生成をサポート。
+- **基礎記憶システム**: 基礎的な記憶抽出および想起システムを搭載。会話から重要な事実を自動的に抽出して長期保存 (SQLite) し、意味検索 (RAG) に基づくリアルタイムな文脈回想と感情の永続化をサポート。
 
 ### 🗣️ 音声インタラクション
 - **音声合成 (TTS)**:
     - **GPT-SoVITS**: 優れた感情表現、カスタムキャラクターボイス、豊富なエコシステム。
     - **Browser TTS**: ブラウザネイティブの軽量 TTS。
 - **ボイスチェンジャー (RVC)**: RVC (Retrieval-based Voice Conversion) インターフェースをサポートし、キャラクターの歌唱などを実現。
+- **音声認識 (STT)**: Whisper/faster-whisper/whisper.cpp モデルの初期サポート。
 
 ### 🔌 拡張能力
 - **MCP プロトコルサポート**: **Model Context Protocol (MCP)** クライアントを実装。
@@ -75,7 +77,6 @@ Live2D、LLM、TTS、STT などの技術を統合し、高度にモジュール�
 - [ ] **高度な記憶システム**: ベクトルデータベース (Vector DB) と RAG に基づく長期記憶の検索。
 - [ ] **より強力なプラグインシステム**: コミュニティ開発者が MOD モジュールを作成して機能を拡張できるようにする。
 - [ ] **キャラクターマーケット/ワークショップ**: キャラクタープリセットの共有とダウンロードを容易にする。
-- [ ] **STT 音声認識**: Whisper/faster-whisper/whisper.cpp モデルのサポートと検証。
 - [ ] **Live2D モデルインタラクション**: Live2D モデルとのリアルタイムな相互作用フィードバック機能。
 
 ## 🛠️ 技術スタック
@@ -83,7 +84,7 @@ Live2D、LLM、TTS、STT などの技術を統合し、高度にモジュール�
 | レイヤー | 技術 |
 |---|---|
 | **フロントエンド** | React + TypeScript + Tailwind CSS + shadcn/ui |
-| **バックエンド** | Rust (Tauri v2) — ⚡ 究極のパフォーマンス & 🔒 メモリ安全性 |
+| **バックエンド** | Rust (Tauri v2) |
 | **レンダリング** | PixiJS + Live2D Cubism SDK |
 | **データ** | SQLite (ローカルストレージ) |
 
@@ -98,7 +99,6 @@ Live2D、LLM、TTS、STT などの技術を統合し、高度にモジュール�
 
 - [Node.js](https://nodejs.org/) (v18+)
 - [Rust](https://www.rust-lang.org/tools/install) (stable)
-- [Tauri 前提条件](https://v2.tauri.app/start/prerequisites/)
 
 ### インストールと実行
 

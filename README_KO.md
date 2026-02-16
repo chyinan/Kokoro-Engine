@@ -53,12 +53,14 @@ Live2D, LLM, TTS 및 STT와 같은 기술을 통합하여 고도로 모듈화되
 - **멀티모달 대화**: **Ollama**(로컬) 및 **OpenAI 호환 인터페이스**(클라우드)를 대화의 핵심으로 지원합니다.
 - **시각 능력**: Vision 모델을 통합할 수 있으며, 캐릭터가 화면 내용을 실시간으로 "보고" 내용이나 이미지를 설명할 수 있습니다.
 - **텍스트-이미지 변환**: Stable Diffusion WebUI 또는 온라인 API 인터페이스를 통합할 수 있으며, 대화를 통한 이미지 생성 또는 대화 문맥에 따른 실시간 배경 이미지 생성을 지원합니다.
+- **기초 기억 시스템**: 기초적인 기억 추출 및 회상 시스템을 탑재했습니다. 대화에서 중요한 사실을 자동으로 추출하여 장기 저장(SQLite)하며, 의미 검색(RAG) 기반의 실시간 문맥 회상 및 감정 지속성을 지원합니다.
 
 ### 🗣️ 음성 인터랙션
 - **음성 합성 (TTS)**:
     - **GPT-SoVITS**: 뛰어난 감정 표현력, 사용자 정의 캐릭터 음성, 더 풍부한 생태계.
     - **Browser TTS**: 브라우저 네이티브 경량 TTS.
 - **음성 변환 (RVC)**: 캐릭터 노래 등을 구현하기 위한 RVC(Retrieval-based Voice Conversion) 인터페이스를 지원합니다.
+- **음성 인식 (STT)**: Whisper/faster-whisper/whisper.cpp 모델의 초기 지원.
 
 ### 🔌 확장 능력
 - **MCP 프로토콜 지원**: **Model Context Protocol (MCP)** 클라이언트를 구현했습니다.
@@ -75,7 +77,6 @@ Live2D, LLM, TTS 및 STT와 같은 기술을 통합하여 고도로 모듈화되
 - [ ] **고급 기억 시스템**: 벡터 데이터베이스(Vector DB) 및 RAG를 기반으로 한 장기 기억 검색.
 - [ ] **더 강력한 플러그인 시스템**: 커뮤니티 개발자가 MOD 모듈을 작성하여 기능을 확장할 수 있도록 허용.
 - [ ] **캐릭터 마켓/워크샵**: 캐릭터 프리셋 공유 및 다운로드 편의 제공.
-- [ ] **STT 음성 인식**: Whisper/faster-whisper/whisper.cpp 모델 지원 및 검증.
 - [ ] **Live2D 모델 인터랙션**: Live2D 모델과의 실시간 상호 작용 피드백 기능.
 
 ## 🛠️ 기술 스택
@@ -83,7 +84,7 @@ Live2D, LLM, TTS 및 STT와 같은 기술을 통합하여 고도로 모듈화되
 | 계층 | 기술 |
 |---|---|
 | **프론트엔드** | React + TypeScript + Tailwind CSS + shadcn/ui |
-| **백엔드** | Rust (Tauri v2) — ⚡ 극한의 성능 & 🔒 메모리 안전 |
+| **백엔드** | Rust (Tauri v2) |
 | **렌더링** | PixiJS + Live2D Cubism SDK |
 | **데이터** | SQLite (로컬 스토리지) |
 
@@ -98,7 +99,6 @@ Live2D, LLM, TTS 및 STT와 같은 기술을 통합하여 고도로 모듈화되
 
 - [Node.js](https://nodejs.org/) (v18+)
 - [Rust](https://www.rust-lang.org/tools/install) (stable)
-- [Tauri 전제 조건](https://v2.tauri.app/start/prerequisites/)
 
 ### 설치 및 실행
 

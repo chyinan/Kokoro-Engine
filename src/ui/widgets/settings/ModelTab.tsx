@@ -157,36 +157,41 @@ export default function ModelTab({
                 </div>
                 <div className="space-y-2 max-h-[220px] overflow-y-auto scrollable pr-1">
                     {/* Default Model (always present) */}
-                    <motion.button
-                        whileHover={{ scale: 1.01 }}
-                        whileTap={{ scale: 0.99 }}
-                        onClick={() => onCustomModelPathChange(null)}
+
+                    <div
                         className={clsx(
-                            "w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border text-left transition-all",
+                            "flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all",
                             isSelected(null)
                                 ? "bg-[var(--color-accent-subtle)] border-[var(--color-accent)]/40"
                                 : "bg-black/20 border-[var(--color-border)] hover:border-[var(--color-text-muted)]"
                         )}
                     >
-                        {/* Selection indicator */}
-                        <div className={clsx(
-                            "w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors",
-                            isSelected(null)
-                                ? "border-[var(--color-accent)] bg-[var(--color-accent)]"
-                                : "border-[var(--color-border)]"
-                        )}>
-                            {isSelected(null) && <Check size={12} strokeWidth={3} className="text-black" />}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                            <span className={clsx(
-                                "text-sm font-medium truncate block",
-                                isSelected(null) ? "text-[var(--color-accent)]" : "text-[var(--color-text-primary)]"
+                        <motion.button
+                            whileHover={{ scale: 1.01 }}
+                            whileTap={{ scale: 0.99 }}
+                            onClick={() => onCustomModelPathChange(null)}
+                            className="flex items-center gap-3 flex-1 min-w-0 text-left"
+                        >
+                            {/* Selection indicator */}
+                            <div className={clsx(
+                                "w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors",
+                                isSelected(null)
+                                    ? "border-[var(--color-accent)] bg-[var(--color-accent)]"
+                                    : "border-[var(--color-border)]"
                             )}>
-                                {t("settings.model.list.default")}
-                            </span>
-                            <span className="text-[10px] text-[var(--color-text-muted)]">{t("settings.model.list.builtin")}</span>
-                        </div>
-                    </motion.button>
+                                {isSelected(null) && <Check size={12} strokeWidth={3} className="text-black" />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <span className={clsx(
+                                    "text-sm font-medium truncate block",
+                                    isSelected(null) ? "text-[var(--color-accent)]" : "text-[var(--color-text-primary)]"
+                                )}>
+                                    {t("settings.model.list.default")}
+                                </span>
+                                <span className="text-[10px] text-[var(--color-text-muted)]">{t("settings.model.list.builtin")}</span>
+                            </div>
+                        </motion.button>
+                    </div>
 
                     {/* Imported Models */}
                     <AnimatePresence>
