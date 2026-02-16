@@ -57,5 +57,9 @@ Thumbs.db
 bin/
 include/
 
+# AI Models
+models/
+
+
 
 src-tauri/proptest-regressions/vision/tests/property_tests.txt
