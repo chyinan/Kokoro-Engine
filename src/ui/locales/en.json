@@ -1,0 +1,544 @@
+{
+    "common": {
+        "actions": {
+            "save": "SAVE",
+            "saved": "SAVED",
+            "cancel": "CANCEL",
+            "edit": "Edit",
+            "done": "Done",
+            "delete": "Delete",
+            "add": "Add"
+        }
+    },
+    "sing": {
+        "rvc_server": {
+            "title": "RVC Server",
+            "checking": "Checking...",
+            "online": "Online — Ready to Convert",
+            "offline": "Offline — Please start RVC Server",
+            "refresh": "REFRESH"
+        },
+        "file_selection": {
+            "title": "Song File",
+            "placeholder": "Select audio file (.mp3, .wav, .flac ...)"
+        },
+        "settings": {
+            "model_label": "RVC Voice Model",
+            "default_model": "Default",
+            "pitch_shift": "Pitch Shift (Semitones)",
+            "separate_vocals": {
+                "title": "Vocal Separation",
+                "description": "Automatically extract vocals from song"
+            },
+            "advanced": {
+                "toggle": "Advanced Settings",
+                "f0_method": {
+                    "label": "Pitch Algorithm (F0 Method)",
+                    "rmvpe": "RMVPE (Recommended)",
+                    "pm": "PM (Fast)",
+                    "harvest": "Harvest (Good for low pitch)",
+                    "crepe": "Crepe (High quality, GPU)"
+                },
+                "index_path": {
+                    "label": "Feature Index File (.index)",
+                    "placeholder": "Leave empty for default"
+                },
+                "index_rate": "Index Rate"
+            }
+        },
+        "actions": {
+            "convert": "Convert",
+            "converting": "Converting...",
+            "progress": {
+                "reading": "Reading audio...",
+                "converting": "Converting...",
+                "done": "Done!"
+            },
+            "play": "Play",
+            "pause": "Pause",
+            "success": "Conversion Complete!"
+        }
+    },
+    "settings": {
+        "title": "SETTINGS",
+        "tabs": {
+            "bg": "BACKGROUND",
+            "model": "MODEL",
+            "imagegen": "IMAGE GEN",
+            "api": "API",
+            "persona": "PERSONA",
+            "tts": "TTS",
+            "stt": "STT",
+            "sing": "SING",
+            "memory": "MEMORY",
+            "vision": "VISION",
+            "mods": "MODS",
+            "mcp": "MCP"
+        },
+        "app_language": {
+            "label": "Application Language",
+            "description": "Select the interface language"
+        },
+        "api": {
+            "provider_label": "LLM Provider",
+            "ollama_url": "Ollama Server URL",
+            "endpoint_url": "Endpoint URL",
+            "api_key": "API Key",
+            "fallback_env": "Fallback env:",
+            "model_label": "Model",
+            "fetch_models": "Fetch Available",
+            "fetching": "Fetching...",
+            "save_config": "Save LLM Config",
+            "saving": "Saving...",
+            "vision_mode": "Vision Mode",
+            "vision_desc": "Enable image upload in chat for multimodal models"
+        },
+        "persona": {
+            "user_profile": {
+                "title": "Your Profile",
+                "desc": "Tell the AI about yourself. This replaces {{user}} in character cards.",
+                "name_placeholder": "Your name",
+                "persona_placeholder": "Describe yourself (optional) — e.g. hobbies, personality, preferences..."
+            },
+            "response_lang": {
+                "label": "Response Language",
+                "desc": "Force the AI to respond in a specific language, regardless of your input language.",
+                "auto": "Auto (follow conversation)",
+                "custom": "Custom…",
+                "placeholder": "Enter language name, e.g. Français, Deutsch…"
+            },
+            "user_lang": {
+                "label": "User Language",
+                "desc": "Your preferred language. When different from Response Language, a translation will be attached to each message.",
+                "auto": "Auto (no translation)"
+            },
+            "list": {
+                "label": "Character List",
+                "loading": "Loading characters…",
+                "new": "NEW",
+                "import": "IMPORT",
+                "delete_confirm": "Delete \"{{name}}\"?",
+                "delete": "DELETE"
+            },
+            "status": {
+                "imported": "Imported \"{{name}}\" successfully!",
+                "import_failed": "Import failed: {{error}}"
+            },
+            "edit": {
+                "title": "Edit Character",
+                "name": "Name",
+                "name_placeholder": "Character name",
+                "nickname": "User Nickname",
+                "nickname_placeholder": "How the character addresses you (leave as {{user}} to use your profile name)",
+                "nickname_desc": "How this character addresses the user. Use {{user}} for your profile name, or set a custom nickname.",
+                "persona": "Persona",
+                "persona_placeholder": "Describe the character's personality, background, and behavior..."
+            }
+        },
+        "tts": {
+            "auto_speak": {
+                "label": "Auto-Speak Responses",
+                "desc": "Speak AI responses aloud using the selected TTS provider"
+            },
+            "active_settings": {
+                "title": "ACTIVE SETTINGS",
+                "provider": "Current Provider",
+                "unavailable": "(Unavailable)",
+                "browser": "BROWSER",
+                "voice": "Voice",
+                "no_voices": "No voices available",
+                "speed": "Speed",
+                "pitch": "Pitch",
+                "test": "▶ Test Voice"
+            },
+            "manage_providers": {
+                "title": "MANAGE PROVIDERS",
+                "refresh": "Refresh Status",
+                "loading": "Loading...",
+                "edit": "Edit",
+                "done": "Done",
+                "add": "+ Add",
+                "save_hint": "Changes are applied after clicking \"SAVE\" below."
+            },
+            "fields": {
+                "api_key": "API Key",
+                "server_url": "Server URL",
+                "base_url": "Base URL (Optional)",
+                "ref_audio": {
+                    "label": "Reference Audio Path",
+                    "desc": "Path to reference audio on the GPT-SoVITS server machine"
+                },
+                "prompt_text": {
+                    "label": "Prompt Text",
+                    "optional": "(optional)",
+                    "placeholder": "Leave empty for no-reference-text mode"
+                },
+                "prompt_lang": "Prompt Language",
+                "text_lang": "Text Language",
+                "install_path": {
+                    "label": "GPT-SoVITS Install Path",
+                    "desc": "Set path to auto-detect models, or leave empty and type model paths manually below"
+                },
+                "gpt_model": "GPT Model",
+                "sovits_model": "SoVITS Model",
+                "model_placeholder": "Select or type...",
+                "default_hint": "Leave empty to use server default.",
+                "model_id": "Model ID",
+                "model_path": "Model Path / Config"
+            }
+        },
+        "stt": {
+            "error_invalid_config": "Error: Invalid STT Configuration",
+            "voice_input": {
+                "title": "Voice Input",
+                "desc": "Enable microphone button in chat"
+            },
+            "provider": {
+                "label": "Speech Provider"
+            },
+            "providers": {
+                "openai": "OpenAI Whisper (Cloud)",
+                "whisper_cpp": "Whisper.cpp (Local)",
+                "faster_whisper": "Faster Whisper (Local)",
+                "local_whisper": "Local Whisper (Generic)"
+            },
+            "fields": {
+                "server_url": "Server URL",
+                "api_key_hint": "API Key (Leave empty to use env var)"
+            },
+            "auto_send": {
+                "title": "Auto-send",
+                "desc": "Send transcribed text automatically"
+            },
+            "language": {
+                "label": "Language",
+                "auto": "Auto-detect",
+                "hint": "Hint to improve recognition accuracy. \"Auto-detect\" works in most cases."
+            },
+            "voice_interrupt": {
+                "title": "Voice Interrupt",
+                "desc": "Speak to interrupt TTS playback"
+            },
+            "info": {
+                "openai": "Uses OpenAI Whisper API. Requires a valid API key.",
+                "whisper_cpp": "Connects to local whisper.cpp server at {{url}}.",
+                "generic": "Connects to a local OpenAI-compatible STT server."
+            }
+        },
+        "model": {
+            "display_mode": {
+                "label": "Display Mode",
+                "desc": "Controls how the Live2D model is framed on screen.",
+                "full": "Full Body",
+                "full_desc": "Show entire model",
+                "upper_thigh": "Upper + Thighs",
+                "upper_thigh_desc": "Waist-up with thighs",
+                "upper": "Upper Body",
+                "upper_desc": "Chest and above"
+            },
+            "list": {
+                "label": "Available Models",
+                "default": "Default Model (Haru)",
+                "builtin": "Built-in",
+                "empty": "No imported models yet"
+            },
+            "import": {
+                "button": "Import Live2D",
+                "loading": "Importing...",
+                "hint": "Select a .zip package or a .model3.json file."
+            }
+        },
+        "image_gen": {
+            "enable": {
+                "title": "ENABLE IMAGE GENERATION",
+                "desc": "Allow Chat to generate images from prompts"
+            },
+            "providers": {
+                "title": "PROVIDERS"
+            },
+            "fields": {
+                "api_key": "API Key",
+                "api_key_placeholder": "Required",
+                "sd_url": "SD WebUI URL",
+                "base_url": "Base URL (Optional)",
+                "model": "Model",
+                "fetch": "Fetch Available",
+                "fetching": "Fetching...",
+                "select_checkpoint": "Select checkpoint...",
+                "checkpoint_placeholder": "Optional checkpoint",
+                "size": "Image Size"
+            },
+            "test": {
+                "button": "Test Connection",
+                "testing": "Testing...",
+                "success": "Connected! {{count}} checkpoint(s) found.",
+                "failed": "Connection Failed",
+                "tip": "💡 Tip: Ensure SD WebUI is launched with <code class=\"text-[var(--color-accent)]\">--api</code> flag."
+            },
+            "test_gen": {
+                "label": "Test Generation",
+                "button": "Gen Test",
+                "generating": "Generating..."
+            },
+            "add": {
+                "openai": "OpenAI (DALL-E)",
+                "google": "Google Gemini",
+                "sd": "Stable Diffusion"
+            }
+        },
+        "background": {
+            "import": {
+                "label": "Import Images",
+                "files": "FILES",
+                "folder": "FOLDER",
+                "clear": "CLEAR ALL",
+                "count": "{{count}} image(s) loaded"
+            },
+            "enable": "Enable Background",
+            "mode": {
+                "label": "Background Mode",
+                "slideshow": "SLIDESHOW",
+                "generated": "GENERATED",
+                "static": "STATIC"
+            },
+            "slideshow": {
+                "rotation": {
+                    "label": "Rotation",
+                    "sequential": "Sequential",
+                    "random": "Random"
+                },
+                "interval": "Interval"
+            },
+            "generated": {
+                "title": "AI Generated Backgrounds",
+                "desc": "The background will automatically update based on the conversation context.<br/>Configure your AI provider in the <strong>IMAGE GEN</strong> tab."
+            },
+            "blur": {
+                "label": "Gaussian Blur",
+                "intensity": "Blur Intensity"
+            },
+            "preview": {
+                "label": "Imported Images"
+            }
+        },
+        "memory": {
+            "title": "Character Memories",
+            "count_one": "{{count}} memory",
+            "count_other": "{{count}} memories",
+            "active_char": "(active)",
+            "tabs": {
+                "list": "List",
+                "timeline": "Timeline",
+                "graph": "Graph"
+            },
+            "search": {
+                "placeholder": "Search memories..."
+            },
+            "loading": "Loading...",
+            "empty": {
+                "search": "No memories match your search",
+                "all": "No memories yet"
+            },
+            "load_more": "Load more",
+            "edit": {
+                "importance": "Importance"
+            },
+            "delete": {
+                "confirm": "Delete this memory?"
+            },
+            "time": {
+                "just_now": "just now",
+                "minutes_ago": "{{count}}m ago",
+                "hours_ago": "{{count}}h ago",
+                "days_ago": "{{count}}d ago"
+            },
+            "importance": {
+                "high": "HIGH",
+                "med": "MED",
+                "low": "LOW"
+            }
+        },
+        "vision": {
+            "enable": {
+                "label": "Screen Vision",
+                "desc": "Character can see your screen in real-time"
+            },
+            "provider": {
+                "label": "VLM Provider",
+                "ollama": "Ollama (Local — Recommended)",
+                "openai": "OpenAI (GPT-4o)"
+            },
+            "ollama": {
+                "warning": "Cannot connect to Ollama. Make sure Ollama is installed and running at"
+            },
+            "base_url": "Base URL",
+            "model": {
+                "label": "Model",
+                "recommend": {
+                    "ollama": "Recommended: minicpm-v, moondream2, llava",
+                    "openai": "Recommended: gpt-4o (supports vision)"
+                },
+                "not_installed_prefix": "(not installed)",
+                "install_warning": "Model \"{{model}}\" is not installed",
+                "install_desc": "This vision model needs to be downloaded before it can be used.",
+                "install_btn": "Install {{model}}",
+                "installing": "Installing {{model}}...",
+                "success": "Model \"{{model}}\" installed successfully!",
+                "failed": "Installation failed",
+                "retry": "Retry"
+            },
+            "progress": {
+                "initializing": "Initializing...",
+                "pulling_manifest": "Pulling manifest...",
+                "verifying": "Verifying...",
+                "writing": "Writing manifest...",
+                "cleanup": "Cleaning up...",
+                "downloading": "Downloading... {{percent}}%",
+                "complete": "Complete!"
+            },
+            "api_key": "API Key",
+            "interval": {
+                "label": "Capture Interval",
+                "desc": "Lower = more responsive but uses more resources"
+            },
+            "sensitivity": {
+                "label": "Change Sensitivity",
+                "desc": "Lower = more sensitive to screen changes ({{percent}}% pixel change required)"
+            },
+            "save": "Apply Changes",
+            "test": {
+                "button": "Test Capture",
+                "capturing": "Capturing..."
+            },
+            "privacy_note": "🔒 Screenshots are captured locally and sent directly to your configured VLM provider. They are never stored permanently — only the text description is kept in memory.",
+            "loading": "Loading vision config..."
+        },
+        "mcp": {
+            "title": "MCP Tool Servers",
+            "desc": "Connect external tools via Model Context Protocol",
+            "refresh_tooltip": "Refresh tools from all servers",
+            "add_button": "ADD",
+            "add_modal": {
+                "title": "Add MCP Server",
+                "desc": "Paste a standard <code class=\"px-1 py-0.5 rounded bg-black/30 text-[var(--color-accent)]\">mcpServers</code> JSON entry below.<br/>Supports single or multiple server definitions.",
+                "placeholder_error": "No server configurations found in JSON.",
+                "invalid_json": "Invalid JSON: {{error}}",
+                "failed_add": "Failed to add: {{error}}",
+                "success": "Added {{count}} server(s): {{names}}",
+                "insert_example": "Insert example",
+                "adding": "ADDING...",
+                "add_server": "ADD SERVER"
+            },
+            "info_note": "🔧 MCP servers provide external tools (filesystem, web search, databases, etc.) that the character can use during conversations.<br/>Tools from connected servers appear automatically in the character's tool list.",
+            "empty": {
+                "title": "No MCP servers configured yet",
+                "desc": "Click <strong>ADD</strong> to connect a tool server"
+            },
+            "loading": "Loading MCP servers...",
+            "status": {
+                "connecting": "Connecting...",
+                "disconnected": "Disconnected",
+                "error": "Error: {{error}}",
+                "tools_one": "{{count}} tool",
+                "tools_other": "{{count}} tools",
+                "retry": "Retry connection",
+                "remove": "Remove server"
+            }
+        }
+    },
+    "chat": {
+        "status": {
+            "streaming": "STREAMING",
+            "chat": "CHAT"
+        },
+        "translation": {
+            "hide": "Hide Translation",
+            "show": "Show Translation"
+        },
+        "errors": {
+            "image_too_large": "Image too large (max 5MB)",
+            "only_images": "Only image files are supported",
+            "upload_failed": "Failed to upload image",
+            "connection_error": "I'm having trouble connecting right now. Please check your API settings. 💭"
+        },
+        "input": {
+            "placeholder": "Speak to your companion...",
+            "attach_image": "Attach image",
+            "mic": {
+                "start": "Start voice input",
+                "listening": "Listening... (click to stop)",
+                "speaking": "Speaking detected...",
+                "transcribing": "Transcribing...",
+                "title": {
+                    "idle": "Voice input (VAD)",
+                    "listening": "Listening... click to stop",
+                    "speaking": "Speaking...",
+                    "transcribing": "Transcribing..."
+                }
+            }
+        },
+        "actions": {
+            "clear": "Clear conversation",
+            "collapse": "Collapse chat",
+            "open": "Open chat"
+        }
+    },
+    "header": {
+        "title": "KOKORO ENGINE",
+        "status": {
+            "online": "ONLINE",
+            "offline": "OFFLINE"
+        },
+        "settings": "Open settings"
+    },
+    "footer": {
+        "emotions": {
+            "neutral": "Neutral",
+            "happy": "Happy",
+            "excited": "Excited",
+            "smug": "Smug",
+            "shy": "Shy",
+            "thinking": "Thinking",
+            "surprised": "Surprised",
+            "worried": "Worried",
+            "sad": "Sad",
+            "angry": "Angry"
+        },
+        "mode": {
+            "auto": "AUTO",
+            "manual": "MANUAL",
+            "auto_desc": "Expression controlled by AI",
+            "manual_desc": "Expression controlled manually"
+        },
+        "set_expression": "Set expression: "
+    },
+    "mods": {
+        "title": "MOD MANAGER",
+        "actions": {
+            "import": "IMPORT",
+            "refresh": "Refresh mods",
+            "load": "LOAD",
+            "loading": "...",
+            "hide_ui": "Hide UI",
+            "show_ui": "Show UI"
+        },
+        "status": {
+            "failed_list": "Failed to load mods",
+            "loaded": "Mod \"{{id}}\" loaded",
+            "failed_load": "Failed to load \"{{id}}\"",
+            "installing": "Installing mod...",
+            "installed": "Installed: {{name}}",
+            "failed_import": "Failed to import mod"
+        },
+        "badges": {
+            "theme": "theme",
+            "layout": "layout",
+            "scripts": "scripts",
+            "components": "{{count}} components"
+        },
+        "empty": {
+            "title": "No mods installed",
+            "description": "Add mods to the <1>mods/</1> directory"
+        }
+    }
+}

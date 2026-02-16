@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Demo Echo Panel</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', -apple-system, sans-serif;
+            background: rgba(15, 15, 25, 0.85);
+            color: #e0e0e0;
+            padding: 12px;
+            font-size: 13px;
+            line-height: 1.4;
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 10px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(100, 200, 255, 0.2);
+        }
+        .header .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #00e5ff;
+            box-shadow: 0 0 6px #00e5ff;
+        }
+        .header h3 {
+            font-size: 13px;
+            font-weight: 600;
+            color: #b0e0ff;
+            letter-spacing: 0.5px;
+        }
+        .log-area {
+            max-height: 200px;
+            overflow-y: auto;
+            margin-bottom: 10px;
+        }
+        .log-entry {
+            padding: 4px 8px;
+            margin-bottom: 3px;
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.04);
+            font-size: 12px;
+            color: #a0c8ff;
+            word-break: break-all;
+        }
+        .log-entry.action {
+            color: #ffb347;
+            background: rgba(255, 179, 71, 0.08);
+        }
+        .log-entry.expression {
+            color: #90ee90;
+            background: rgba(144, 238, 144, 0.08);
+        }
+        .log-empty {
+            color: #666;
+            font-style: italic;
+            text-align: center;
+            padding: 20px 0;
+        }
+        .actions {
+            display: flex;
+            gap: 6px;
+        }
+        button {
+            padding: 6px 14px;
+            border: none;
+            border-radius: 6px;
+            background: linear-gradient(135deg, #0077cc, #00aaff);
+            color: white;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        button:hover {
+            opacity: 0.85;
+        }
+        button.secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: #aaa;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="dot"></div>
+        <h3>DEMO ECHO PANEL</h3>
+    </div>
+
+    <div class="log-area" id="logArea">
+        <div class="log-empty">Waiting for events…</div>
+    </div>
+
+    <div class="actions">
+        <button onclick="sendPing()">🏓 Ping Engine</button>
+        <button class="secondary" onclick="clearLogs()">Clear</button>
+    </div>
+
+    <script>
+        const logArea = document.getElementById('logArea');
+        let hasLogs = false;
+
+        function addLog(text, className) {
+            if (!hasLogs) {
+                logArea.innerHTML = '';
+                hasLogs = true;
+            }
+            const entry = document.createElement('div');
+            entry.className = 'log-entry' + (className ? ' ' + className : '');
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+            logArea.appendChild(entry);
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+
+        function clearLogs() {
+            logArea.innerHTML = '<div class="log-empty">Logs cleared</div>';
+            hasLogs = false;
+        }
+
+        function sendPing() {
+            Kokoro.action('ping', { timestamp: Date.now() });
+            addLog('→ Sent ping action to engine', 'action');
+        }
+
+        // Listen for prop updates from host
+        Kokoro.on('update', (props) => {
+            addLog('Props: ' + JSON.stringify(props));
+        });
+
+        // Listen for chat messages
+        Kokoro.on('chat-delta', (data) => {
+            addLog('💬 Chat: ' + (data.delta || ''));
+        });
+
+        // Listen for expression changes
+        Kokoro.on('chat-expression', (data) => {
+            addLog('😊 Expression: ' + (data.expression || '?') + ' (mood: ' + (data.mood || '?') + ')', 'expression');
+        });
+
+        // Listen for actions
+        Kokoro.on('chat-action', (data) => {
+            addLog('⚡ Action: ' + (data.action || '?'), 'action');
+        });
+
+        // Listen for script data from QuickJS
+        Kokoro.on('script-data', (data) => {
+            addLog('📦 Script data: ' + JSON.stringify(data.data || data));
+        });
+
+        addLog('DemoPanel initialized ✓');
+    </script>
+</body>
+</html>

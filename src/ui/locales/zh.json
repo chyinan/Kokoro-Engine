@@ -1,0 +1,544 @@
+{
+    "common": {
+        "actions": {
+            "save": "保存",
+            "saved": "已保存",
+            "cancel": "取消",
+            "edit": "编辑",
+            "done": "完成",
+            "delete": "删除",
+            "add": "添加"
+        }
+    },
+    "sing": {
+        "rvc_server": {
+            "title": "RVC Server",
+            "checking": "检测中...",
+            "online": "在线 — 可以开始转换",
+            "offline": "离线 — 请启动 RVC 服务器",
+            "refresh": "刷新"
+        },
+        "file_selection": {
+            "title": "歌曲文件",
+            "placeholder": "选择音频文件 (.mp3, .wav, .flac ...)"
+        },
+        "settings": {
+            "model_label": "RVC 声音模型",
+            "default_model": "默认",
+            "pitch_shift": "音高调整 (半音)",
+            "separate_vocals": {
+                "title": "人声分离",
+                "description": "自动从歌曲中提取人声"
+            },
+            "advanced": {
+                "toggle": "高级设置",
+                "f0_method": {
+                    "label": "音高提取算法 (F0 Method)",
+                    "rmvpe": "RMVPE (推荐)",
+                    "pm": "PM (快速)",
+                    "harvest": "Harvest (低音好)",
+                    "crepe": "Crepe (效果好，GPU)"
+                },
+                "index_path": {
+                    "label": "特征索引文件 (.index)",
+                    "placeholder": "留空使用默认"
+                },
+                "index_rate": "检索特征占比"
+            }
+        },
+        "actions": {
+            "convert": "开始转换",
+            "converting": "转换中...",
+            "progress": {
+                "reading": "读取音频...",
+                "converting": "转换中...",
+                "done": "完成！"
+            },
+            "play": "播放",
+            "pause": "暂停",
+            "success": "转换完成！"
+        }
+    },
+    "settings": {
+        "title": "设置",
+        "tabs": {
+            "bg": "背景",
+            "model": "模型",
+            "imagegen": "绘图",
+            "api": "API",
+            "persona": "人设",
+            "tts": "语音合成",
+            "stt": "语音识别",
+            "sing": "歌唱",
+            "memory": "记忆",
+            "vision": "视觉",
+            "mods": "模组",
+            "mcp": "MCP"
+        },
+        "app_language": {
+            "label": "应用语言",
+            "description": "选择界面语言"
+        },
+        "api": {
+            "provider_label": "大模型服务商",
+            "ollama_url": "Ollama 服务地址",
+            "endpoint_url": "接口地址 (Endpoint URL)",
+            "api_key": "API 密钥",
+            "fallback_env": "环境变量回退:",
+            "model_label": "模型名称",
+            "fetch_models": "获取可用模型",
+            "fetching": "获取中...",
+            "save_config": "保存 LLM 配置",
+            "saving": "保存中...",
+            "vision_mode": "视觉模式",
+            "vision_desc": "允许在对话中发送图片 (需要多模态模型)"
+        },
+        "persona": {
+            "user_profile": {
+                "title": "你的资料",
+                "desc": "告诉 AI 关于你的信息。这会替换角色卡片中的 {{user}}。",
+                "name_placeholder": "你的名字",
+                "persona_placeholder": "描述你自己 (可选) — 例如爱好、性格、偏好等..."
+            },
+            "response_lang": {
+                "label": "回复语言",
+                "desc": "强制 AI 使用特定语言回复，无论你使用什么语言输入。",
+                "auto": "自动 (跟随对话)",
+                "custom": "自定义...",
+                "placeholder": "输入语言名称，例如 Français, Deutsch…"
+            },
+            "user_lang": {
+                "label": "用户语言",
+                "desc": "你的首选语言。如果与回复语言不同，每条消息都会附带翻译。",
+                "auto": "自动 (无翻译)"
+            },
+            "list": {
+                "label": "角色列表",
+                "loading": "正在加载角色...",
+                "new": "新建",
+                "import": "导入",
+                "delete_confirm": "删除 \"{{name}}\"?",
+                "delete": "删除"
+            },
+            "status": {
+                "imported": "成功导入 \"{{name}}\"！",
+                "import_failed": "导入失败: {{error}}"
+            },
+            "edit": {
+                "title": "编辑角色",
+                "name": "名称",
+                "name_placeholder": "角色名称",
+                "nickname": "用户称呼",
+                "nickname_placeholder": "角色如何称呼你 (保留 {{user}} 使用你的资料名称)",
+                "nickname_desc": "角色如何称呼用户。使用 {{user}} 代表你的资料名称，或者设置自定义称呼。",
+                "persona": "人设",
+                "persona_placeholder": "描述角色的性格、背景和行为..."
+            }
+        },
+        "tts": {
+            "auto_speak": {
+                "label": "自动语音播放",
+                "desc": "使用选定的 TTS 服务朗读 AI 的回复"
+            },
+            "active_settings": {
+                "title": "当前设置",
+                "provider": "当前服务商",
+                "unavailable": "(不可用)",
+                "browser": "浏览器自带 (Browser)",
+                "voice": "语音/音色",
+                "no_voices": "无可用语音",
+                "speed": "语速",
+                "pitch": "音调",
+                "test": "▶ 测试语音"
+            },
+            "manage_providers": {
+                "title": "管理服务商",
+                "refresh": "刷新状态",
+                "loading": "加载中...",
+                "edit": "编辑",
+                "done": "完成",
+                "add": "+ 添加",
+                "save_hint": "修改将在点击下方的 \"保存\" 按钮后生效。"
+            },
+            "fields": {
+                "api_key": "API 密钥",
+                "server_url": "服务器地址",
+                "base_url": "API 地址 (可选)",
+                "ref_audio": {
+                    "label": "参考音频路径",
+                    "desc": "GPT-SoVITS 服务器机器上的参考音频文件路径"
+                },
+                "prompt_text": {
+                    "label": "参考文本",
+                    "optional": "(可选)",
+                    "placeholder": "留空以使用无参考文本模式"
+                },
+                "prompt_lang": "参考文本语言",
+                "text_lang": "目标文本语言",
+                "install_path": {
+                    "label": "GPT-SoVITS 安装路径",
+                    "desc": "设置路径以自动检测模型，或留空并手动输入模型路径"
+                },
+                "gpt_model": "GPT 模型",
+                "sovits_model": "SoVITS 模型",
+                "model_placeholder": "选择或输入...",
+                "default_hint": "留空以使用服务器默认值。",
+                "model_id": "模型 ID",
+                "model_path": "模型路径 / 配置"
+            }
+        },
+        "stt": {
+            "error_invalid_config": "错误：无效的语音转文字配置",
+            "voice_input": {
+                "title": "语音输入",
+                "desc": "在聊天中启用麦克风按钮"
+            },
+            "provider": {
+                "label": "语音服务提供商"
+            },
+            "providers": {
+                "openai": "OpenAI Whisper (云端)",
+                "whisper_cpp": "Whisper.cpp (本地)",
+                "faster_whisper": "Faster Whisper (本地)",
+                "local_whisper": "Local Whisper (通用)"
+            },
+            "fields": {
+                "server_url": "服务器地址",
+                "api_key_hint": "API Key (留空以使用环境变量)"
+            },
+            "auto_send": {
+                "title": "自动发送",
+                "desc": "语音转录完成后自动发送消息"
+            },
+            "language": {
+                "label": "语言",
+                "auto": "自动检测",
+                "hint": "提示以提高识别准确率。“自动检测”在大多数情况下有效。"
+            },
+            "voice_interrupt": {
+                "title": "语音打断",
+                "desc": "说话时打断语音播放"
+            },
+            "info": {
+                "openai": "使用 OpenAI Whisper API。需要有效的 API Key。",
+                "whisper_cpp": "连接到位于 {{url}} 的本地 whisper.cpp 服务器。",
+                "generic": "连接到本地 OpenAI 兼容的 STT 服务器。"
+            }
+        },
+        "model": {
+            "display_mode": {
+                "label": "显示模式",
+                "desc": "控制 Live2D 模型在屏幕上的显示范围。",
+                "full": "全身",
+                "full_desc": "显示完整模型",
+                "upper_thigh": "半身 (带大腿)",
+                "upper_thigh_desc": "腰部以上及大腿",
+                "upper": "半身",
+                "upper_desc": "仅胸部以上"
+            },
+            "list": {
+                "label": "可用模型",
+                "default": "默认模型 (Haru)",
+                "builtin": "内置",
+                "empty": "暂无导入的模型"
+            },
+            "import": {
+                "button": "导入 Live2D",
+                "loading": "导入中...",
+                "hint": "选择 .zip 压缩包或 .model3.json 文件。"
+            }
+        },
+        "image_gen": {
+            "enable": {
+                "title": "启用生图功能",
+                "desc": "允许在对话中通过提示词生成图片"
+            },
+            "providers": {
+                "title": "服务提供商"
+            },
+            "fields": {
+                "api_key": "API Key",
+                "api_key_placeholder": "必需",
+                "sd_url": "SD WebUI 地址",
+                "base_url": "API 地址 (可选)",
+                "model": "模型",
+                "fetch": "获取列表",
+                "fetching": "获取中...",
+                "select_checkpoint": "选择模型 checkpoint...",
+                "checkpoint_placeholder": "可选 checkpoint",
+                "size": "图片尺寸"
+            },
+            "test": {
+                "button": "测试连接",
+                "testing": "测试中...",
+                "success": "连接成功！发现 {{count}} 个 checkpoint。",
+                "failed": "连接失败",
+                "tip": "💡 提示：请确保 SD WebUI 启动时带上了 <code class=\"text-[var(--color-accent)]\">--api</code> 参数。"
+            },
+            "test_gen": {
+                "label": "生成测试",
+                "button": "测试生成",
+                "generating": "生成中..."
+            },
+            "add": {
+                "openai": "OpenAI (DALL-E)",
+                "google": "Google Gemini",
+                "sd": "Stable Diffusion"
+            }
+        },
+        "background": {
+            "import": {
+                "label": "导入图片",
+                "files": "文件",
+                "folder": "文件夹",
+                "clear": "清除全部",
+                "count": "已加载 {{count}} 张图片"
+            },
+            "enable": "启用背景",
+            "mode": {
+                "label": "背景模式",
+                "slideshow": "轮播",
+                "generated": "AI生成",
+                "static": "静态"
+            },
+            "slideshow": {
+                "rotation": {
+                    "label": "轮播顺序",
+                    "sequential": "顺序",
+                    "random": "随机"
+                },
+                "interval": "间隔时间"
+            },
+            "generated": {
+                "title": "AI 生成背景",
+                "desc": "背景将根据对话上下文自动更新。<br/>请在 <strong>生图设置</strong> 选项卡中配置 AI 提供商。"
+            },
+            "blur": {
+                "label": "高斯模糊",
+                "intensity": "模糊强度"
+            },
+            "preview": {
+                "label": "已导入图片"
+            }
+        },
+        "memory": {
+            "title": "角色记忆",
+            "count_one": "{{count}} 条记忆",
+            "count_other": "{{count}} 条记忆",
+            "active_char": "(当前)",
+            "tabs": {
+                "list": "列表",
+                "timeline": "时间轴",
+                "graph": "图谱"
+            },
+            "search": {
+                "placeholder": "搜索记忆..."
+            },
+            "loading": "加载中...",
+            "empty": {
+                "search": "没有找到匹配的记忆",
+                "all": "暂无记忆"
+            },
+            "load_more": "加载更多",
+            "edit": {
+                "importance": "重要性"
+            },
+            "delete": {
+                "confirm": "删除这条记忆？"
+            },
+            "time": {
+                "just_now": "刚刚",
+                "minutes_ago": "{{count}}分钟前",
+                "hours_ago": "{{count}}小时前",
+                "days_ago": "{{count}}天前"
+            },
+            "importance": {
+                "high": "高",
+                "med": "中",
+                "low": "低"
+            }
+        },
+        "vision": {
+            "enable": {
+                "label": "屏幕视觉",
+                "desc": "允许角色实时查看您的屏幕内容"
+            },
+            "provider": {
+                "label": "VLM 提供商",
+                "ollama": "Ollama (本地 - 推荐)",
+                "openai": "OpenAI (GPT-4o)"
+            },
+            "ollama": {
+                "warning": "无法连接到 Ollama。请确保 Ollama 已安装并运行在"
+            },
+            "base_url": "基础 URL",
+            "model": {
+                "label": "模型",
+                "recommend": {
+                    "ollama": "推荐: minicpm-v, moondream2, llava",
+                    "openai": "推荐: gpt-4o (支持视觉)"
+                },
+                "not_installed_prefix": "(未安装)",
+                "install_warning": "模型 \"{{model}}\" 未安装",
+                "install_desc": "需要先下载此视觉模型才能使用。",
+                "install_btn": "安装 {{model}}",
+                "installing": "正在安装 {{model}}...",
+                "success": "模型 \"{{model}}\" 安装成功！",
+                "failed": "安装失败",
+                "retry": "重试"
+            },
+            "progress": {
+                "initializing": "正在初始化...",
+                "pulling_manifest": "正在拉取清单...",
+                "verifying": "正在验证...",
+                "writing": "正在写入...",
+                "cleanup": "正在清理...",
+                "downloading": "下载中... {{percent}}%",
+                "complete": "完成！"
+            },
+            "api_key": "API 密钥",
+            "interval": {
+                "label": "捕获间隔",
+                "desc": "值越低响应越快，但资源占用越高"
+            },
+            "sensitivity": {
+                "label": "变化灵敏度",
+                "desc": "值越低对屏幕变化越敏感 (需 {{percent}}% 像素变化)"
+            },
+            "save": "应用更改",
+            "test": {
+                "button": "测试捕获",
+                "capturing": "捕获中..."
+            },
+            "privacy_note": "🔒 屏幕截图仅在本地处理并直接发送给您配置的 VLM 提供商。截图永远不会被永久保存——仅保留文本描述。",
+            "loading": "正在加载视觉配置..."
+        },
+        "mcp": {
+            "title": "MCP 工具服务器",
+            "desc": "通过模型上下文协议 (MCP) 连接外部工具",
+            "refresh_tooltip": "刷新所有服务器的工具",
+            "add_button": "添加",
+            "add_modal": {
+                "title": "添加 MCP 服务器",
+                "desc": "在下方粘贴标准 <code class=\"px-1 py-0.5 rounded bg-black/30 text-[var(--color-accent)]\">mcpServers</code> JSON 配置。<br/>支持单个或多个服务器定义。",
+                "placeholder_error": "JSON 中未找到服务器配置。",
+                "invalid_json": "无效的 JSON: {{error}}",
+                "failed_add": "添加失败: {{error}}",
+                "success": "已添加 {{count}} 个服务器: {{names}}",
+                "insert_example": "插入示例",
+                "adding": "添加中...",
+                "add_server": "添加服务器"
+            },
+            "info_note": "🔧 MCP 服务器提供外部工具 (文件系统、网络搜索、数据库等)，角色可在对话中使用这些工具。<br/>已连接服务器的工具会自动显示在角色的工具列表中。",
+            "empty": {
+                "title": "尚未配置 MCP 服务器",
+                "desc": "点击 <strong>添加</strong> 按钮连接工具服务器"
+            },
+            "loading": "正在加载 MCP 服务器...",
+            "status": {
+                "connecting": "连接中...",
+                "disconnected": "已断开",
+                "error": "错误: {{error}}",
+                "tools_one": "{{count}} 个工具",
+                "tools_other": "{{count}} 个工具",
+                "retry": "重试连接",
+                "remove": "移除服务器"
+            }
+        }
+    },
+    "chat": {
+        "status": {
+            "streaming": "生成中",
+            "chat": "对话"
+        },
+        "translation": {
+            "hide": "隐藏翻译",
+            "show": "显示翻译"
+        },
+        "errors": {
+            "image_too_large": "图片过大 (最大 5MB)",
+            "only_images": "仅支持图片文件",
+            "upload_failed": "图片上传失败",
+            "connection_error": "连接出现问题，请检查 API 设置。 💭"
+        },
+        "input": {
+            "placeholder": "与你的同伴对话...",
+            "attach_image": "发送图片",
+            "mic": {
+                "start": "开始语音输入",
+                "listening": "正在聆听... (点击停止)",
+                "speaking": "检测到说话...",
+                "transcribing": "转换中...",
+                "title": {
+                    "idle": "语音输入 (VAD)",
+                    "listening": "聆听中... 点击停止",
+                    "speaking": "说话中...",
+                    "transcribing": "转换中..."
+                }
+            }
+        },
+        "actions": {
+            "clear": "清空对话",
+            "collapse": "折叠对话",
+            "open": "展开对话"
+        }
+    },
+    "header": {
+        "title": "KOKORO 引擎",
+        "status": {
+            "online": "在线",
+            "offline": "离线"
+        },
+        "settings": "打开设置"
+    },
+    "footer": {
+        "emotions": {
+            "neutral": "中立",
+            "happy": "开心",
+            "excited": "兴奋",
+            "smug": "得意",
+            "shy": "害羞",
+            "thinking": "思考",
+            "surprised": "惊讶",
+            "worried": "担心",
+            "sad": "悲伤",
+            "angry": "生气"
+        },
+        "mode": {
+            "auto": "自动",
+            "manual": "手动",
+            "auto_desc": "由 AI 控制表情",
+            "manual_desc": "手动控制表情"
+        },
+        "set_expression": "设置表情: "
+    },
+    "mods": {
+        "title": "模组管理器",
+        "actions": {
+            "import": "导入",
+            "refresh": "刷新列表",
+            "load": "加载",
+            "loading": "...",
+            "hide_ui": "隐藏界面",
+            "show_ui": "显示界面"
+        },
+        "status": {
+            "failed_list": "加载模组列表失败",
+            "loaded": "模组 \"{{id}}\" 已加载",
+            "failed_load": "加载 \"{{id}}\" 失败",
+            "installing": "正在安装模组...",
+            "installed": "已安装: {{name}}",
+            "failed_import": "模组导入失败"
+        },
+        "badges": {
+            "theme": "主题",
+            "layout": "布局",
+            "scripts": "脚本",
+            "components": "{{count}} 个组件"
+        },
+        "empty": {
+            "title": "未安装模组",
+            "description": "请将模组添加到 <1>mods/</1> 目录"
+        }
+    }
+}

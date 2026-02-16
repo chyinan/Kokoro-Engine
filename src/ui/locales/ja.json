@@ -1,0 +1,544 @@
+{
+    "common": {
+        "actions": {
+            "save": "保存",
+            "saved": "保存完了",
+            "cancel": "キャンセル",
+            "edit": "編集",
+            "done": "完了",
+            "delete": "削除",
+            "add": "追加"
+        }
+    },
+    "sing": {
+        "rvc_server": {
+            "title": "RVC サーバー",
+            "checking": "確認中...",
+            "online": "オンライン — 変換準備完了",
+            "offline": "オフライン — RVCサーバーを起動してください",
+            "refresh": "更新"
+        },
+        "file_selection": {
+            "title": "曲ファイル",
+            "placeholder": "音声ファイルを選択 (.mp3, .wav, .flac ...)"
+        },
+        "settings": {
+            "model_label": "RVC 音声モデル",
+            "default_model": "デフォルト",
+            "pitch_shift": "ピッチシフト (半音)",
+            "separate_vocals": {
+                "title": "ボーカル分離",
+                "description": "曲からボーカルを自動抽出"
+            },
+            "advanced": {
+                "toggle": "詳細設定",
+                "f0_method": {
+                    "label": "ピッチ抽出アルゴリズム (F0 Method)",
+                    "rmvpe": "RMVPE (推奨)",
+                    "pm": "PM (高速)",
+                    "harvest": "Harvest (低音向け)",
+                    "crepe": "Crepe (高品質, GPU)"
+                },
+                "index_path": {
+                    "label": "特徴インデックスファイル (.index)",
+                    "placeholder": "デフォルトを使用する場合は空欄"
+                },
+                "index_rate": "インデックス率"
+            }
+        },
+        "actions": {
+            "convert": "変換開始",
+            "converting": "変換中...",
+            "progress": {
+                "reading": "音声読み込み中...",
+                "converting": "変換中...",
+                "done": "完了！"
+            },
+            "play": "再生",
+            "pause": "一時停止",
+            "success": "変換完了！"
+        }
+    },
+    "settings": {
+        "title": "設定",
+        "tabs": {
+            "bg": "背景",
+            "model": "モデル",
+            "imagegen": "画像生成",
+            "api": "API",
+            "persona": "ペルソナ",
+            "tts": "音声合成",
+            "stt": "音声認識",
+            "sing": "歌唱",
+            "memory": "記憶",
+            "vision": "ビジョン",
+            "mods": "MODS",
+            "mcp": "MCP"
+        },
+        "app_language": {
+            "label": "アプリケーション言語",
+            "description": "インターフェース言語を選択"
+        },
+        "api": {
+            "provider_label": "LLM プロバイダー",
+            "ollama_url": "Ollama サーバー URL",
+            "endpoint_url": "エンドポイント URL",
+            "api_key": "API キー",
+            "fallback_env": "環境変数フォールバック:",
+            "model_label": "モデル名",
+            "fetch_models": "モデル一覧を取得",
+            "fetching": "取得中...",
+            "save_config": "LLM 設定を保存",
+            "saving": "保存中...",
+            "vision_mode": "ビジョンモード",
+            "vision_desc": "マルチモーダルモデルでの画像アップロードを有効にする"
+        },
+        "persona": {
+            "user_profile": {
+                "title": "ユーザープロフィール",
+                "desc": "AIにあなたのことを教えてください。これはキャラクターカード内の {{user}} を置き換えます。",
+                "name_placeholder": "あなたの名前",
+                "persona_placeholder": "自己紹介 (任意) — 趣味、性格、好みなど..."
+            },
+            "response_lang": {
+                "label": "応答言語",
+                "desc": "入力言語に関わらず、特定の言語で応答させます。",
+                "auto": "自動 (会話に従う)",
+                "custom": "カスタム...",
+                "placeholder": "言語名を入力 (例: Français, Deutsch…)"
+            },
+            "user_lang": {
+                "label": "ユーザー言語",
+                "desc": "あなたの優先言語。応答言語と異なる場合、各メッセージに翻訳が添付されます。",
+                "auto": "自動 (翻訳なし)"
+            },
+            "list": {
+                "label": "キャラクターリスト",
+                "loading": "読み込み中...",
+                "new": "新規",
+                "import": "インポート",
+                "delete_confirm": "\"{{name}}\" を削除しますか？",
+                "delete": "削除"
+            },
+            "status": {
+                "imported": "\"{{name}}\" をインポートしました！",
+                "import_failed": "インポート失敗: {{error}}"
+            },
+            "edit": {
+                "title": "キャラクター編集",
+                "name": "名前",
+                "name_placeholder": "キャラクター名",
+                "nickname": "ユーザーの呼び方",
+                "nickname_placeholder": "キャラクターからの呼ばれ方 ({{user}} でプロフィールの名前を使用)",
+                "nickname_desc": "キャラクターがユーザーをどう呼ぶか。{{user}} でプロフィールの名前を使用するか、カスタムニックネームを設定します。",
+                "persona": "ペルソナ",
+                "persona_placeholder": "キャラクターの性格、背景、行動などを記述..."
+            }
+        },
+        "tts": {
+            "auto_speak": {
+                "label": "自動音声読み上げ",
+                "desc": "選択したTTSプロバイダーを使用してAIの応答を読み上げます"
+            },
+            "active_settings": {
+                "title": "アクティブ設定",
+                "provider": "現在のプロバイダー",
+                "unavailable": "(利用不可)",
+                "browser": "ブラウザ (Browser)",
+                "voice": "音声/声質",
+                "no_voices": "利用可能な音声がありません",
+                "speed": "速度",
+                "pitch": "ピッチ",
+                "test": "▶ テスト発話"
+            },
+            "manage_providers": {
+                "title": "プロバイダー管理",
+                "refresh": "状態を更新",
+                "loading": "読み込み中...",
+                "edit": "編集",
+                "done": "完了",
+                "add": "+ 追加",
+                "save_hint": "変更は下の「保存」ボタンをクリックすると反映されます。"
+            },
+            "fields": {
+                "api_key": "API キー",
+                "server_url": "サーバー URL",
+                "base_url": "API URL (オプション)",
+                "ref_audio": {
+                    "label": "参照オーディオパス",
+                    "desc": "GPT-SoVITSサーバー上の参照オーディオファイルへのパス"
+                },
+                "prompt_text": {
+                    "label": "参照テキスト",
+                    "optional": "(任意)",
+                    "placeholder": "空欄の場合、テキストなしモードを使用"
+                },
+                "prompt_lang": "参照テキスト言語",
+                "text_lang": "ターゲット言語",
+                "install_path": {
+                    "label": "GPT-SoVITS インストールパス",
+                    "desc": "モデルを自動検出するためのパス。空欄の場合は手動入力。"
+                },
+                "gpt_model": "GPT モデル",
+                "sovits_model": "SoVITS モデル",
+                "model_placeholder": "選択または入力...",
+                "default_hint": "空欄の場合、サーバーのデフォルトを使用。",
+                "model_id": "モデル ID",
+                "model_path": "モデルパス / 設定"
+            }
+        },
+        "stt": {
+            "error_invalid_config": "エラー：無効なSTT設定",
+            "voice_input": {
+                "title": "音声入力",
+                "desc": "チャットでマイクボタンを有効にする"
+            },
+            "provider": {
+                "label": "音声プロバイダー"
+            },
+            "providers": {
+                "openai": "OpenAI Whisper (クラウド)",
+                "whisper_cpp": "Whisper.cpp (ローカル)",
+                "faster_whisper": "Faster Whisper (ローカル)",
+                "local_whisper": "Local Whisper (汎用)"
+            },
+            "fields": {
+                "server_url": "サーバーURL",
+                "api_key_hint": "APIキー (環境変数を使用する場合は空のまま)"
+            },
+            "auto_send": {
+                "title": "自動送信",
+                "desc": "文字起こし完了後に自動送信"
+            },
+            "language": {
+                "label": "言語",
+                "auto": "自動検出",
+                "hint": "認識精度を向上させるヒント。「自動検出」はほとんどの場合機能します。"
+            },
+            "voice_interrupt": {
+                "title": "音声割り込み",
+                "desc": "発話中にTTS再生を中断する"
+            },
+            "info": {
+                "openai": "OpenAI Whisper APIを使用します。有効なAPIキーが必要です。",
+                "whisper_cpp": "{{url}} のローカルwhisper.cppサーバーに接続します。",
+                "generic": "ローカルのOpenAI互換STTサーバーに接続します。"
+            }
+        },
+        "model": {
+            "display_mode": {
+                "label": "表示モード",
+                "desc": "Live2Dモデルの画面表示範囲を制御します。",
+                "full": "全身",
+                "full_desc": "モデル全体を表示",
+                "upper_thigh": "上半身 (太ももまで)",
+                "upper_thigh_desc": "腰から上と太もも",
+                "upper": "上半身",
+                "upper_desc": "胸から上のみ"
+            },
+            "list": {
+                "label": "利用可能なモデル",
+                "default": "デフォルトモデル (Haru)",
+                "builtin": "組み込み",
+                "empty": "インポートされたモデルはありません"
+            },
+            "import": {
+                "button": "Live2Dをインポート",
+                "loading": "インポート中...",
+                "hint": ".zipパッケージまたは.model3.jsonファイルを選択してください。"
+            }
+        },
+        "image_gen": {
+            "enable": {
+                "title": "画像生成を有効化",
+                "desc": "チャットでプロンプトから画像を生成できるようにする"
+            },
+            "providers": {
+                "title": "プロバイダー"
+            },
+            "fields": {
+                "api_key": "APIキー",
+                "api_key_placeholder": "必須",
+                "sd_url": "SD WebUI URL",
+                "base_url": "ベースURL (オプション)",
+                "model": "モデル",
+                "fetch": "一覧を取得",
+                "fetching": "取得中...",
+                "select_checkpoint": "チェックポイントを選択...",
+                "checkpoint_placeholder": "チェックポイント (任意)",
+                "size": "画像サイズ"
+            },
+            "test": {
+                "button": "接続テスト",
+                "testing": "テスト中...",
+                "success": "接続成功！ {{count}} 個のチェックポイントが見つかりました。",
+                "failed": "接続失敗",
+                "tip": "💡 ヒント: SD WebUIが <code class=\"text-[var(--color-accent)]\">--api</code> フラグ付きで起動しているか確認してください。"
+            },
+            "test_gen": {
+                "label": "生成テスト",
+                "button": "テスト生成",
+                "generating": "生成中..."
+            },
+            "add": {
+                "openai": "OpenAI (DALL-E)",
+                "google": "Google Gemini",
+                "sd": "Stable Diffusion"
+            }
+        },
+        "background": {
+            "import": {
+                "label": "画像をインポート",
+                "files": "ファイル",
+                "folder": "フォルダ",
+                "clear": "すべてクリア",
+                "count": "{{count}} 枚の画像をロード済み"
+            },
+            "enable": "背景を有効化",
+            "mode": {
+                "label": "背景モード",
+                "slideshow": "スライドショー",
+                "generated": "AI生成",
+                "static": "静止画"
+            },
+            "slideshow": {
+                "rotation": {
+                    "label": "回転順序",
+                    "sequential": "順次",
+                    "random": "ランダム"
+                },
+                "interval": "間隔"
+            },
+            "generated": {
+                "title": "AI生成背景",
+                "desc": "会話のコンテキストに基づいて背景が自動的に更新されます。<br/><strong>画像生成</strong>タブでAIプロバイダーを設定してください。"
+            },
+            "blur": {
+                "label": "ガウスぼかし",
+                "intensity": "ぼかし強度"
+            },
+            "preview": {
+                "label": "インポートされた画像"
+            }
+        },
+        "memory": {
+            "title": "キャラクター記憶",
+            "count_one": "{{count}} 件の記憶",
+            "count_other": "{{count}} 件の記憶",
+            "active_char": "(アクティブ)",
+            "tabs": {
+                "list": "リスト",
+                "timeline": "タイムライン",
+                "graph": "グラフ"
+            },
+            "search": {
+                "placeholder": "記憶を検索..."
+            },
+            "loading": "読み込み中...",
+            "empty": {
+                "search": "一致する記憶がありません",
+                "all": "記憶はまだありません"
+            },
+            "load_more": "もっと読み込む",
+            "edit": {
+                "importance": "重要度"
+            },
+            "delete": {
+                "confirm": "この記憶を削除しますか？"
+            },
+            "time": {
+                "just_now": "たった今",
+                "minutes_ago": "{{count}}分前",
+                "hours_ago": "{{count}}時間前",
+                "days_ago": "{{count}}日前"
+            },
+            "importance": {
+                "high": "高",
+                "med": "中",
+                "low": "低"
+            }
+        },
+        "vision": {
+            "enable": {
+                "label": "画面認識 (Vision)",
+                "desc": "キャラクターが画面をリアルタイムで見ることができるようになります"
+            },
+            "provider": {
+                "label": "VLM プロバイダー",
+                "ollama": "Ollama (ローカル — 推奨)",
+                "openai": "OpenAI (GPT-4o)"
+            },
+            "ollama": {
+                "warning": "Ollamaに接続できません。Ollamaがインストールされ、以下で実行されていることを確認してください"
+            },
+            "base_url": "ベース URL",
+            "model": {
+                "label": "モデル",
+                "recommend": {
+                    "ollama": "推奨: minicpm-v, moondream2, llava",
+                    "openai": "推奨: gpt-4o (ビジョン対応)"
+                },
+                "not_installed_prefix": "(未インストール)",
+                "install_warning": "モデル \"{{model}}\" はインストールされていません",
+                "install_desc": "このビジョンモデルを使用するにはダウンロードが必要です。",
+                "install_btn": "{{model}} をインストール",
+                "installing": "{{model}} をインストール中...",
+                "success": "モデル \"{{model}}\" のインストールに成功しました！",
+                "failed": "インストール失敗",
+                "retry": "再試行"
+            },
+            "progress": {
+                "initializing": "初期化中...",
+                "pulling_manifest": "マニフェストを取得中...",
+                "verifying": "検証中...",
+                "writing": "書き込み中...",
+                "cleanup": "クリーンアップ中...",
+                "downloading": "ダウンロード中... {{percent}}%",
+                "complete": "完了！"
+            },
+            "api_key": "APIキー",
+            "interval": {
+                "label": "キャプチャ間隔",
+                "desc": "低いほど応答性が高くなりますが、リソース消費が増えます"
+            },
+            "sensitivity": {
+                "label": "変化感度",
+                "desc": "低いほど画面の変化に敏感になります ({{percent}}% のピクセル変化が必要)"
+            },
+            "save": "変更を適用",
+            "test": {
+                "button": "キャプチャテスト",
+                "capturing": "キャプチャ中..."
+            },
+            "privacy_note": "🔒 スクリーンショットはローカルで処理され、設定されたVLMプロバイダーに直接送信されます。永続的に保存されることはなく、テキスト記述のみがメモリに保持されます。",
+            "loading": "ビジョン設定を読み込み中..."
+        },
+        "mcp": {
+            "title": "MCP ツールサーバー",
+            "desc": "Model Context Protocol 経由で外部ツールを接続",
+            "refresh_tooltip": "全サーバーのツールを更新",
+            "add_button": "追加",
+            "add_modal": {
+                "title": "MCP サーバーを追加",
+                "desc": "標準の <code class=\"px-1 py-0.5 rounded bg-black/30 text-[var(--color-accent)]\">mcpServers</code> JSON エントリを以下に貼り付けてください。<br/>単一または複数のサーバー定義に対応しています。",
+                "placeholder_error": "JSON内にサーバー設定が見つかりません。",
+                "invalid_json": "無効な JSON: {{error}}",
+                "failed_add": "追加失敗: {{error}}",
+                "success": "{{count}} 個のサーバーを追加しました: {{names}}",
+                "insert_example": "例を挿入",
+                "adding": "追加中...",
+                "add_server": "サーバーを追加"
+            },
+            "info_note": "🔧 MCP サーバーは、キャラクターが会話中に使用できる外部ツール（ファイルシステム、Web検索、データベースなど）を提供します。<br/>接続されたサーバーのツールは自動的にキャラクターのツールリストに表示されます。",
+            "empty": {
+                "title": "MCP サーバーが設定されていません",
+                "desc": "<strong>追加</strong> をクリックしてツールサーバーを接続してください"
+            },
+            "loading": "MCP サーバーを読み込み中...",
+            "status": {
+                "connecting": "接続中...",
+                "disconnected": "切断",
+                "error": "エラー: {{error}}",
+                "tools_one": "{{count}} ツール",
+                "tools_other": "{{count}} ツール",
+                "retry": "再接続",
+                "remove": "サーバーを削除"
+            }
+        }
+    },
+    "chat": {
+        "status": {
+            "streaming": "生成中",
+            "chat": "チャット"
+        },
+        "translation": {
+            "hide": "翻訳を隠す",
+            "show": "翻訳を表示"
+        },
+        "errors": {
+            "image_too_large": "画像が大きすぎます (最大 5MB)",
+            "only_images": "画像ファイルのみ対応しています",
+            "upload_failed": "画像のアップロードに失敗しました",
+            "connection_error": "接続に問題が発生しました。API設定を確認してください。 💭"
+        },
+        "input": {
+            "placeholder": "話しかけてください...",
+            "attach_image": "画像を添付",
+            "mic": {
+                "start": "音声入力を開始",
+                "listening": "聞き取り中... (クリックで停止)",
+                "speaking": "発話を検出...",
+                "transcribing": "変換中...",
+                "title": {
+                    "idle": "音声入力 (VAD)",
+                    "listening": "聞き取り中... クリックで停止",
+                    "speaking": "発話中...",
+                    "transcribing": "変換中..."
+                }
+            }
+        },
+        "actions": {
+            "clear": "会話をクリア",
+            "collapse": "チャットを折りたたむ",
+            "open": "チャットを開く"
+        }
+    },
+    "header": {
+        "title": "KOKORO ENGINE",
+        "status": {
+            "online": "オンライン",
+            "offline": "オフライン"
+        },
+        "settings": "設定を開く"
+    },
+    "footer": {
+        "emotions": {
+            "neutral": "通常",
+            "happy": "嬉しい",
+            "excited": "ワクワク",
+            "smug": "ドヤ顔",
+            "shy": "恥ずかしい",
+            "thinking": "考え中",
+            "surprised": "驚き",
+            "worried": "心配",
+            "sad": "悲しい",
+            "angry": "怒り"
+        },
+        "mode": {
+            "auto": "自動",
+            "manual": "手動",
+            "auto_desc": "AIが表情を制御",
+            "manual_desc": "手動で表情を制御"
+        },
+        "set_expression": "表情を設定: "
+    },
+    "mods": {
+        "title": "Mod マネージャー",
+        "actions": {
+            "import": "インポート",
+            "refresh": "更新",
+            "load": "ロード",
+            "loading": "...",
+            "hide_ui": "UIを隠す",
+            "show_ui": "UIを表示"
+        },
+        "status": {
+            "failed_list": "Mod一覧の取得に失敗しました",
+            "loaded": "Mod \"{{id}}\" をロードしました",
+            "failed_load": "\"{{id}}\" のロードに失敗しました",
+            "installing": "Modをインストール中...",
+            "installed": "インストール完了: {{name}}",
+            "failed_import": "Modのインポートに失敗しました"
+        },
+        "badges": {
+            "theme": "テーマ",
+            "layout": "レイアウト",
+            "scripts": "スクリプト",
+            "components": "{{count}} コンポーネント"
+        },
+        "empty": {
+            "title": "Modがインストールされていません",
+            "description": "<1>mods/</1> ディレクトリにModを追加してください"
+        }
+    }
+}

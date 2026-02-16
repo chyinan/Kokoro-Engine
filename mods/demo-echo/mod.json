@@ -1,0 +1,14 @@
+{
+    "id": "demo-echo",
+    "name": "Demo Echo Panel",
+    "version": "1.0.0",
+    "description": "A demo mod that echoes chat messages and demonstrates action routing.",
+    "engine_version": "^0.2.0",
+    "components": {
+        "DemoPanel": "components/DemoPanel.html"
+    },
+    "scripts": [
+        "scripts/main.js"
+    ],
+    "permissions": []
+}

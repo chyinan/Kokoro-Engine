@@ -1,0 +1,4 @@
+# Database files - prevent restart loop when app writes to DB on startup
+*.db
+*.db-shm
+*.db-wal

@@ -1,0 +1,11 @@
+{
+    "id": "default_haru",
+    "name": "Haru (Default)",
+    "version": "1.0.0",
+    "description": "The default Haru character with the Kokoro Engine standard theme.",
+    "engine_version": "^0.2.0",
+    "theme": "theme.json",
+    "components": {},
+    "scripts": [],
+    "permissions": []
+}

@@ -1,0 +1,12 @@
+{
+    "id": "test-mod",
+    "name": "Test Mod",
+    "version": "1.0.0",
+    "description": "A test mod to verify the scripting system.",
+    "engine_version": "^0.2.0",
+    "scripts": [
+        "main.js"
+    ],
+    "components": {},
+    "permissions": []
+}

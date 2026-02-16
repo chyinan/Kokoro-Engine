@@ -1,0 +1,56 @@
+{
+    "_comment": "TTS configuration for Kokoro Engine",
+    "default_provider": "browser",
+    "cache": {
+        "enabled": true,
+        "max_entries": 500,
+        "ttl_secs": 3600
+    },
+    "queue": {
+        "max_concurrent": 3
+    },
+    "providers": [
+        {
+            "id": "browser",
+            "provider_type": "browser",
+            "enabled": true
+        },
+        {
+            "id": "openai",
+            "provider_type": "openai",
+            "enabled": false,
+            "api_key_env": "OPENAI_API_KEY",
+            "base_url": "https://api.openai.com/v1",
+            "model": "tts-1",
+            "default_voice": "alloy"
+        },
+        {
+            "id": "vits_local",
+            "provider_type": "local_vits",
+            "enabled": false,
+            "endpoint": "http://localhost:5000"
+        },
+        {
+            "id": "rvc_local",
+            "provider_type": "local_rvc",
+            "enabled": false,
+            "endpoint": "http://localhost:7865"
+        },
+        {
+            "id": "azure",
+            "provider_type": "azure",
+            "enabled": false,
+            "api_key_env": "AZURE_SPEECH_KEY",
+            "base_url": "https://eastus.tts.speech.microsoft.com/cognitiveservices/v1",
+            "default_voice": "en-US-JennyNeural"
+        },
+        {
+            "id": "elevenlabs",
+            "provider_type": "elevenlabs",
+            "enabled": false,
+            "api_key_env": "ELEVENLABS_API_KEY",
+            "base_url": "https://api.elevenlabs.io/v1",
+            "default_voice": "21m00Tcm4TlvDq8ikWAM"
+        }
+    ]
+}

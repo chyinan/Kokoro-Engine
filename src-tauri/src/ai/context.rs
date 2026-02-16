@@ -1,0 +1,484 @@
+use crate::ai::curiosity::CuriosityModule;
+use crate::ai::emotion::{EmotionPersonality, EmotionState};
+use crate::ai::idle_behaviors::IdleBehaviorSystem;
+use crate::ai::initiative::InitiativeSystem;
+use crate::ai::memory::MemoryManager;
+use crate::ai::router::{ModelRouter, ModelType};
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+use std::collections::VecDeque;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::Mutex;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub role: String,
+    pub content: String,
+    // Optional metadata
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemorySnippet {
+    pub id: i64,
+    pub content: String,
+    pub embedding: Vec<u8>,
+    pub created_at: i64,
+    pub importance: f64,
+}
+
+pub struct AIOrchestrator {
+    pub db: SqlitePool,
+    pub system_prompt: Arc<Mutex<String>>,
+    pub history: Arc<Mutex<VecDeque<Message>>>,
+    pub max_history_tokens: usize, // Soft limit for history
+    pub memory_manager: Arc<MemoryManager>,
+    pub router: Arc<ModelRouter>,
+    /// Counts user messages for periodic memory extraction triggers.
+    message_count: Arc<Mutex<u64>>,
+    /// Current character ID for memory isolation.
+    character_id: Arc<Mutex<String>>,
+    /// Emotion state with per-character personality.
+    pub emotion_state: Arc<Mutex<EmotionState>>,
+    /// Timestamp of last user activity (for idle detection).
+    pub last_activity: Arc<Mutex<Instant>>,
+    /// Total message count across sessions (for relationship depth).
+    pub conversation_count: Arc<Mutex<u64>>,
+    /// Preferred response language (e.g. "日本語", "English"). Empty = auto.
+    pub response_language: Arc<Mutex<String>>,
+    /// User's display language for inline translation (e.g. "中文"). Empty = disabled.
+    pub user_language: Arc<Mutex<String>>,
+
+    // Autonomous Behavior Modules
+    pub curiosity: Arc<Mutex<CuriosityModule>>,
+    pub initiative: Arc<Mutex<InitiativeSystem>>,
+    pub idle_behaviors: Arc<Mutex<IdleBehaviorSystem>>,
+}
+
+impl AIOrchestrator {
+    pub async fn new(db_url: &str) -> Result<Self> {
+        // Create database if it doesn't exist
+        let options = sqlx::sqlite::SqliteConnectOptions::from_str(db_url)?.create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await?;
+
+        // Ensure tables exist
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                created_at INTEGER NOT NULL,
+                importance REAL DEFAULT 0.5,
+                character_id TEXT NOT NULL DEFAULT 'default'
+            );",
+        )
+        .execute(&pool)
+        .await?;
+
+        // Migration: add character_id column to existing databases that lack it
+        let _ = sqlx::query(
+            "ALTER TABLE memories ADD COLUMN character_id TEXT NOT NULL DEFAULT 'default'",
+        )
+        .execute(&pool)
+        .await;
+
+        let memory_manager = Arc::new(MemoryManager::new(pool.clone()));
+
+        Ok(Self {
+            db: pool,
+            system_prompt: Arc::new(Mutex::new("You are a helpful assistant.".to_string())),
+            history: Arc::new(Mutex::new(VecDeque::new())),
+            max_history_tokens: 4000,
+            memory_manager,
+            router: Arc::new(ModelRouter::new()),
+            message_count: Arc::new(Mutex::new(0)),
+            character_id: Arc::new(Mutex::new("default".to_string())),
+            emotion_state: Arc::new(Mutex::new(EmotionState::new(EmotionPersonality::default()))),
+            last_activity: Arc::new(Mutex::new(Instant::now())),
+            conversation_count: Arc::new(Mutex::new(0)),
+            response_language: Arc::new(Mutex::new(String::new())),
+            user_language: Arc::new(Mutex::new(String::new())),
+            curiosity: Arc::new(Mutex::new(CuriosityModule::new())),
+            initiative: Arc::new(Mutex::new(InitiativeSystem::new())),
+            idle_behaviors: Arc::new(Mutex::new(IdleBehaviorSystem::new())),
+        })
+    }
+
+    pub async fn set_system_prompt(&self, prompt: String) {
+        // Parse emotion personality from the new persona text
+        let personality = EmotionPersonality::parse_from_persona(&prompt);
+        {
+            let mut emotion = self.emotion_state.lock().await;
+            emotion.set_personality(personality);
+        }
+        let mut sp = self.system_prompt.lock().await;
+        *sp = prompt;
+    }
+
+    pub async fn set_response_language(&self, language: String) {
+        let mut lang = self.response_language.lock().await;
+        *lang = language;
+    }
+
+    pub async fn set_user_language(&self, language: String) {
+        let mut lang = self.user_language.lock().await;
+        *lang = language;
+    }
+
+    /// Update emotion state with smoothing and return the smoothed values.
+    pub async fn update_emotion(&self, raw_emotion: &str, raw_mood: f32) -> (String, f32) {
+        let mut emotion = self.emotion_state.lock().await;
+        emotion.update(raw_emotion, raw_mood)
+    }
+
+    /// Get a natural-language description of current emotion for prompt injection.
+    pub async fn get_emotion_description(&self) -> String {
+        let emotion = self.emotion_state.lock().await;
+        emotion.describe()
+    }
+
+    /// Record user activity (resets idle timer).
+    pub async fn touch_activity(&self) {
+        let mut ts = self.last_activity.lock().await;
+        *ts = Instant::now();
+        let mut count = self.conversation_count.lock().await;
+        *count += 1;
+    }
+
+    /// Get seconds since last user activity.
+    pub async fn idle_seconds(&self) -> u64 {
+        let ts = self.last_activity.lock().await;
+        ts.elapsed().as_secs()
+    }
+
+    /// Get total conversation message count (approximate relationship depth).
+    pub async fn get_conversation_count(&self) -> u64 {
+        *self.conversation_count.lock().await
+    }
+
+    pub async fn set_character_id(&self, id: String) {
+        let mut cid = self.character_id.lock().await;
+        let changed = *cid != id;
+        *cid = id.clone();
+        drop(cid);
+
+        // Restore emotion snapshot from disk when switching characters
+        if changed {
+            if let Ok(Some(snap)) = self.memory_manager.load_emotion_snapshot(&id).await {
+                let mut emotion = self.emotion_state.lock().await;
+                emotion.restore_from_snapshot(&snap);
+                println!(
+                    "[Emotion] Restored snapshot for '{}': {} (mood={:.2})",
+                    id, snap.emotion, snap.mood
+                );
+            }
+        }
+    }
+
+    pub async fn get_character_id(&self) -> String {
+        self.character_id.lock().await.clone()
+    }
+
+    pub async fn add_message(&self, role: String, content: String) {
+        // Track user message count for memory extraction triggers
+        if role == "user" {
+            let mut count = self.message_count.lock().await;
+            *count += 1;
+        }
+
+        let mut history = self.history.lock().await;
+        history.push_back(Message {
+            role,
+            content: content.clone(),
+            metadata: None,
+        });
+
+        // Basic rolling window by count for now, implementation should be token-based primarily
+        if history.len() > 30 {
+            history.pop_front();
+        }
+    }
+
+    /// Returns the total count of user messages in this session.
+    pub async fn get_message_count(&self) -> u64 {
+        *self.message_count.lock().await
+    }
+
+    /// Returns the last `n` messages from history for memory extraction.
+    pub async fn get_recent_history(&self, n: usize) -> Vec<Message> {
+        let history = self.history.lock().await;
+        let start = if history.len() > n {
+            history.len() - n
+        } else {
+            0
+        };
+        history.iter().skip(start).cloned().collect()
+    }
+
+    /// Composes a prompt based on the user query, budgeting tokens for context
+    pub async fn compose_prompt(
+        &self,
+        query: &str,
+        allow_image_gen: bool,
+        tool_prompt: Option<String>,
+    ) -> Result<Vec<Message>> {
+        // 1. Determine Model logic
+        let model_type = self.router.route(query);
+        let _max_context = match model_type {
+            ModelType::Fast => 8000,
+            ModelType::Smart => 32000,
+            ModelType::Cheap => 4096,
+        };
+
+        // 2. Retrieval (RAG)
+        // Only if query looks like it needs context or every N turns
+        // For now, always try to fetch relevant memories (scoped to current character)
+        let cid = self.character_id.lock().await.clone();
+        let memories = self
+            .memory_manager
+            .search_memories(query, 5, &cid)
+            .await
+            .ok();
+
+        let sp = self.system_prompt.lock().await;
+        let history = self.history.lock().await;
+
+        let mut final_messages = Vec::new();
+
+        // -- System Prompt (P0) --
+        final_messages.push(Message {
+            role: "system".to_string(),
+            content: sp.clone(),
+            metadata: None,
+        });
+
+        // -- Emotion Context (P0.25) --
+        // Inject current emotional state so the LLM responds in character
+        let (emotion_desc, current_mood, current_emotion, mood_hist, _expressiveness) = {
+            let emotion = self.emotion_state.lock().await;
+            (
+                emotion.describe(),
+                emotion.mood(),
+                emotion.current_emotion().to_string(),
+                emotion.mood_history(),
+                emotion.personality().expressiveness,
+            )
+        };
+        final_messages.push(Message {
+            role: "system".to_string(),
+            content: emotion_desc,
+            metadata: Some(serde_json::json!({"type": "emotion_context"})),
+        });
+
+        // -- Style Adaptation (P0.3) --
+        // Adjust speaking style based on relationship depth and mood
+        let conversation_count = self.get_conversation_count().await;
+        let style = crate::ai::style_adapter::compute_style(
+            conversation_count,
+            current_mood,
+            &current_emotion,
+        );
+        final_messages.push(Message {
+            role: "system".to_string(),
+            content: style.prompt_instruction,
+            metadata: Some(
+                serde_json::json!({"type": "style_directive", "tier": format!("{:?}", style.tier)}),
+            ),
+        });
+
+        // -- Emotion Events (P0.35) --
+        // Inject special behavior instructions when mood is extreme
+        let emotion_events =
+            crate::ai::emotion_events::check_emotion_triggers(current_mood, &mood_hist);
+        for event in &emotion_events {
+            final_messages.push(Message {
+                role: "system".to_string(),
+                content: event.system_instruction.clone(),
+                metadata: Some(serde_json::json!({"type": "emotion_event", "event": format!("{:?}", event.event_type)})),
+            });
+        }
+
+        // -- Read response language early so other sections can reference it --
+        let resp_lang = {
+            let lang = self.response_language.lock().await;
+            lang.clone()
+        };
+
+        // -- Emotion Tag Instruction (P0.5) --
+        // Injected as a separate system message so it doesn't pollute the user's persona prompt
+        final_messages.push(Message {
+            role: "system".to_string(),
+            content: concat!(
+                "IMPORTANT: At the very end of EVERY response, append an emotion tag on a new line in this exact format:\n",
+                "[EMOTION:<emotion>|MOOD:<value>]\n",
+                "Where <emotion> is one of: neutral, happy, sad, angry, surprised, thinking, shy, smug, worried, excited\n",
+                "And <value> is a float from 0.0 (very negative mood) to 1.0 (very positive mood).\n",
+                "Example: [EMOTION:happy|MOOD:0.85]\n",
+                "This tag MUST be the absolute last thing in your response. Do not add anything after it."
+            ).to_string(),
+            metadata: Some(serde_json::json!({"type": "emotion_instruction"})),
+        });
+
+        // -- Action/Motion Instruction (P0.6) --
+        // Injected so the LLM can express physical gestures that map to Live2D motions
+        final_messages.push(Message {
+            role: "system".to_string(),
+            content: concat!(
+                "When your response involves a physical action or gesture, ",
+                "append an action tag BEFORE the [EMOTION:...] tag in this exact format:\n",
+                "[ACTION:<action>]\n",
+                "Where <action> is one of: idle, nod, shake, wave, dance, shy, think, surprise, cheer, tap\n",
+                "Only include this tag when a clear physical action/gesture is appropriate.\n",
+                "Example: I'd love to help! [ACTION:nod] [EMOTION:happy|MOOD:0.85]"
+            ).to_string(),
+            metadata: Some(serde_json::json!({"type": "action_instruction"})),
+        });
+
+        // -- Tool Call Instruction (P0.7) --
+        // Inject available tool definitions so the LLM can use [TOOL_CALL:...] tags
+        if let Some(ref tp) = tool_prompt {
+            if !tp.is_empty() {
+                final_messages.push(Message {
+                    role: "system".to_string(),
+                    content: tp.clone(),
+                    metadata: Some(serde_json::json!({"type": "tool_instruction"})),
+                });
+            }
+        }
+
+        // -- Image Prompt Instruction (P0.75) --
+        if allow_image_gen {
+            final_messages.push(Message {
+                role: "system".to_string(),
+                content: concat!(
+                    "When the conversation suggests a change in location or scene (e.g., 'Let's go to the forest', 'We are in a classroom now'), ",
+                    "you MAY append an image generation prompt to update the background. format:\n",
+                    "[IMAGE_PROMPT: <detailed English definition, e.g., 'A sunny classroom with large windows', 'A magical forest with glowing plants'>]\n",
+                    "Place this tag BEFORE the [EMOTION:...] tag.\n",
+                    "Only generate this if the location/scene changes or is explicitly requested."
+                ).to_string(),
+                metadata: Some(serde_json::json!({"type": "image_prompt_instruction"})),
+            });
+        }
+
+        // -- Relevant Memories (P1) --
+        // Upgraded: instruct the LLM to naturally reference these in conversation
+        if let Some(mems) = memories {
+            if !mems.is_empty() {
+                let memory_block = mems
+                    .iter()
+                    .map(|m| format!("- {}", m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                final_messages.push(Message {
+                    role: "system".to_string(),
+                    content: format!(
+                        concat!(
+                            "You remember these things about the user:\n{}\n\n",
+                            "Naturally reference these memories in conversation so the user feels you truly remember what they said. ",
+                            "Do not list them mechanically; weave them naturally into the dialogue. ",
+                            "If a memory is not relevant to the current topic, do not force it."
+                        ),
+                        memory_block
+                    ),
+                    metadata: Some(serde_json::json!({"type": "memory_injection"})),
+                });
+            }
+        }
+
+        // -- Session Summaries (P1.5) --
+        // Inject recent session summaries so the character remembers past conversations
+        if let Ok(summaries) = self.memory_manager.get_recent_summaries(&cid, 2).await {
+            if !summaries.is_empty() {
+                let summary_block = summaries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| format!("{}. {}", i + 1, s))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                final_messages.push(Message {
+                    role: "system".to_string(),
+                    content: format!(
+                        "Previous conversation summaries (most recent first):\n{}",
+                        summary_block
+                    ),
+                    metadata: Some(serde_json::json!({"type": "session_summary"})),
+                });
+            }
+        }
+
+        // -- Response Language Instruction (moved here for higher attention) --
+        // Force the LLM to respond in the user-configured language.
+        // Placed just before history so the LLM pays more attention to it.
+        if !resp_lang.is_empty() {
+            final_messages.push(Message {
+                role: "system".to_string(),
+                content: format!(
+                    "CRITICAL INSTRUCTION — LANGUAGE REQUIREMENT:\n\
+                     You MUST respond ENTIRELY in {}. \
+                     Regardless of what language the user writes in, \
+                     your reply MUST be written in {} only. \
+                     Do NOT switch to the user's input language. This is non-negotiable.",
+                    resp_lang, resp_lang
+                ),
+                metadata: Some(serde_json::json!({"type": "language_instruction"})),
+            });
+        }
+
+        // -- Translation Instruction --
+        // When response language and user language differ, ask LLM to append inline translation
+        {
+            let user_lang = self.user_language.lock().await;
+            if !user_lang.is_empty() && !resp_lang.is_empty() && *user_lang != resp_lang {
+                final_messages.push(Message {
+                    role: "system".to_string(),
+                    content: format!(
+                        "IMPORTANT: After your dialogue response (but BEFORE the [ACTION:...] and [EMOTION:...] tags), \
+                         append a translation of your ENTIRE dialogue response into {} using this EXACT format:\n\
+                         [TRANSLATE: <your entire response translated into {}>]\n\
+                         Only translate the dialogue text. Do NOT include any control tags like [ACTION:...], [EMOTION:...], or [IMAGE_PROMPT:...] inside the translation.\n\
+                         This translation tag is mandatory for every response.",
+                        user_lang, user_lang
+                    ),
+                    metadata: Some(serde_json::json!({"type": "translation_instruction"})),
+                });
+            }
+        }
+
+        // -- Recent History (P2) --
+        // Simple strategy: take last N messages that fit
+        // A real tokenizer count is needed here for precision.
+        // We will approximate 1 word = 1.3 tokens or just take last 10 messages.
+        let recent_count = 10;
+        let start_index = if history.len() > recent_count {
+            history.len() - recent_count
+        } else {
+            0
+        };
+
+        for msg in history.iter().skip(start_index) {
+            final_messages.push(msg.clone());
+        }
+
+        // -- Current User Query --
+        // (Caller usually adds this, but if we are composing the full context for the LLM API, we need it in history or appended)
+        // Assuming caller will append the *current* user message to this list or has already added it to history?
+        // Standard pattern: Add generic history, then caller adds current prompt.
+        // BUT current prompt is needed for RAG.
+        // We will assume the caller handles the *current* message appending to this returned context,
+        // OR we can make `compose_prompt` take the current message and add it.
+        // Let's stick to returning context *state*.
+
+        Ok(final_messages)
+    }
+
+    pub async fn clear_history(&self) {
+        let mut history = self.history.lock().await;
+        history.clear();
+    }
+}

@@ -1,0 +1,36 @@
+{
+    "id": "default_haru",
+    "name": "Kokoro Default",
+    "variables": {
+        "--color-accent": "#34d399",
+        "--color-bg-primary": "#050510",
+        "--color-bg-surface": "rgba(15, 15, 35, 0.75)",
+        "--color-bg-elevated": "rgba(20, 20, 50, 0.85)",
+        "--color-text-primary": "rgba(255, 255, 255, 0.92)",
+        "--color-text-secondary": "rgba(255, 255, 255, 0.6)",
+        "--color-text-muted": "rgba(255, 255, 255, 0.35)",
+        "--color-border": "rgba(255, 255, 255, 0.08)",
+        "--color-border-accent": "rgba(52, 211, 153, 0.3)"
+    },
+    "assets": {
+        "fonts": [
+            "https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap"
+        ]
+    },
+    "animations": {
+        "panelEntry": {
+            "initial": {
+                "opacity": 0,
+                "x": -30
+            },
+            "animate": {
+                "opacity": 1,
+                "x": 0
+            },
+            "transition": {
+                "duration": 0.5,
+                "ease": "easeOut"
+            }
+        }
+    }
+}
