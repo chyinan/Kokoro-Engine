@@ -1,3 +1,7 @@
+<div align="center">
+  <a href="README.md">简体中文</a> | <a href="README_EN.md">English</a> | <a href="README_JA.md">日本語</a> | <a href="README_KO.md">한국어</a> | <a href="README_RU.md">Русский</a>
+</div>
+
 <p align="center">
   <h1 align="center">Kokoro Engine</h1>
   <p align="center">
@@ -43,7 +47,7 @@
 ### 🎭 核心交互
 - **Live2D 模型**: 完整支持 Live2D Cubism SDK，支持视线追踪、动作触发。
 - **模型热切换**: 支持在应用内实时导入和切换不同的 Live2D 模型和观赏视角。
-- **多语言界面**: 完整的国际化均支持 (I18n)，界面语言可自由切换。
+- **多语言界面**: 完整的国际化支持 (I18n)，目前支持 **简体中文**、**English**、**日本語**、**한국어**。
 
 ### 🧠 AI 大脑
 - **多模态对话**: 支持 **Ollama** (本地) 和 **OpenAI 兼容接口** (云端) 作为对话核心。

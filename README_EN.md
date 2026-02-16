@@ -1,0 +1,154 @@
+<div align="center">
+  <a href="README.md">简体中文</a> | <a href="README_EN.md">English</a> | <a href="README_JA.md">日本語</a> | <a href="README_KO.md">한국어</a> | <a href="README_RU.md">Русский</a>
+</div>
+
+<p align="center">
+  <h1 align="center">Kokoro Engine</h1>
+  <p align="center">
+    Cross-platform Virtual Character Immersive Interaction Engine<br/>
+    <em>High freedom · Modular · Offline-first · Creator-friendly</em>
+  </p>
+</p>
+
+---
+
+> [!CAUTION]
+> **⚠️ Early Access Notice**
+>
+> **Kokoro Engine** is currently in **Alpha Development Stage**.
+>
+> This is an open-source project built by a single developer with limited resources (primary development machine is just an RTX 4060 laptop).
+>
+> - **🚧 Not Ready Out-of-the-Box**: Features are still iterating frequently and may require some technical background to configure.
+> - **💸 Funding & Testing Limitations**: Due to limited funds, **apart from LLM interfaces, other commercial APIs have not been fully tested**. Although the code is implemented, there is no guarantee that all commercial APIs will work perfectly.
+> - **🤝 Seeking Support**: If you find this project interesting or useful, please **Star** ⭐️ it! If you are a "generous donor" willing to sponsor API debugging funds or hardware upgrades, please check the sponsorship methods (TODO).
+
+---
+
+## ✨ Introduction
+
+**Kokoro Engine** is a cross-platform virtual character immersive interaction engine designed to let everyone have a "heartfelt" virtual companion on their desktop (inspired by Neuro-sama).
+It integrates technologies such as Live2D, LLM, TTS, and STT to build a highly modular and customizable interaction system.
+
+## 📸 Screenshots
+
+<div align="center">
+  <img src="pictures/Homepage.png" alt="Homepage" width="800" />
+  <p><em>Home Interface Preview</em></p>
+  <img src="pictures/Settings.png" alt="Settings" width="800" />
+  <p><em>Settings Interface Preview</em></p>
+</div>
+
+
+## ✅ Features
+
+Features currently verified mainly in a local environment (RTX 4060 Laptop):
+
+### 🎭 Core Interaction
+- **Live2D Models**: Full support for Live2D Cubism SDK, supporting eye tracking and motion triggering.
+- **Model Hot-Switching**: Supports real-time import and switching of different Live2D models and viewing angles within the app.
+- **Multi-language Interface**: Full Internationalization (I18n) support, currently supporting **Simplified Chinese**, **English**, **Japanese**, and **Korean**.
+
+### 🧠 AI Brain
+- **Multimodal Conversation**: Supports **Ollama** (Local) and **OpenAI Compatible Interfaces** (Cloud) as the conversation core.
+- **Vision Capabilities**: Can integrate Vision models, allowing the character to "see" screen content in real-time and describe it or images.
+- **Text-to-Image**: Can integrate Stable Diffusion WebUI or online API interfaces, supporting image generation via dialogue or generating real-time background images based on conversation context.
+
+### 🗣️ Voice Interaction
+- **Text-to-Speech (TTS)**:
+    - **GPT-SoVITS**: Excellent emotional expressiveness, custom character voices, and a richer ecosystem.
+    - **Browser TTS**: Lightweight browser-native TTS.
+- **Voice Conversion (RVC)**: Supports RVC (Retrieval-based Voice Conversion) interface for implementing character singing.
+
+### 🔌 Extended Capabilities
+- **MCP Protocol Support**: Implements **Model Context Protocol (MCP)** Client.
+    - Supports connection to any MCP Server (via stdio interaction).
+    - Characters can use tools provided by MCP Servers (such as file system, Web search, databases, etc.) to enhance capabilities.
+    - Supports managing MCP Servers via UI.
+
+## 📝 TODO / In Development
+
+The following features are planned, in development, or **not yet tested/verified due to device or funding limitations**:
+
+- [ ] **Deep Testing of Online Services**: Verify more commercial APIs besides LLM (e.g., Azure TTS, Google STT, etc.).
+- [ ] **Mobile Support**: iOS / Android client applications.
+- [ ] **Advanced Memory System**: Long-term memory retrieval based on Vector Database (Vector DB) and RAG.
+- [ ] **Stronger Plugin System**: Allow community developers to write MOD modules to extend functionality.
+- [ ] **Character Market/Workshop**: Facilitate sharing and downloading character presets.
+- [ ] **STT Speech Recognition**: Support and verification for Whisper/faster-whisper/whisper.cpp models.
+- [ ] **Live2D Model Interaction**: Real-time interaction feedback functions with Live2D models.
+
+## 🛠️ Tech Stack
+
+| Layer | Technology |
+|---|---|
+| **Frontend** | React + TypeScript + Tailwind CSS + shadcn/ui |
+| **Backend** | Rust (Tauri v2) — ⚡ Extreme Performance & 🔒 Memory Safety |
+| **Rendering** | PixiJS + Live2D Cubism SDK |
+| **Data** | SQLite (Local Storage) |
+
+> **🚀 Why Rust?**
+>
+> Thanks to the amazing performance of the Rust language, Kokoro Engine has **extremely low memory usage** and **extremely high execution efficiency**.
+> Even running 24/7 in the background, it won't slow down your system, truly achieving "lightweight" companionship.
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- [Node.js](https://nodejs.org/) (v18+)
+- [Rust](https://www.rust-lang.org/tools/install) (stable)
+- [Tauri Prerequisites](https://v2.tauri.app/start/prerequisites/)
+
+### Installation & Running
+
+```bash
+# Clone the repository
+git clone https://github.com/chyinan/kokoro-engine.git
+cd kokoro-engine
+
+# Install dependencies
+npm install
+
+# Start development server (Frontend + Tauri)
+npm run tauri dev
+```
+
+### Build for Distribution
+
+```bash
+npm run tauri build
+```
+
+## 🤝 Contributing
+
+**Kokoro Engine** extremely welcomes community contributions!
+Due to the limited energy and resources of the author, the development of the project cannot proceed without the support of developers. If you are interested in this project, welcome to:
+
+1. **Pull Requests**: Submit code fixes for bugs or add new features directly.
+2. **Issues**: Report problems you find or propose improvements.
+3. **Discussions**: Share your ideas in the discussions area.
+4. **Logo Design**: If you are good at design, welcome to design a Logo for Kokoro Engine! The current Logo is just temporary.
+
+Every contribution (even if it's just fixing a typo) makes Kokoro Engine better! Let's build the best desktop virtual companion together.
+
+## 📄 License
+
+The core code of this project is open-source under the **MIT License**.
+
+### ⚠️ Live2D Cubism SDK Disclaimer
+
+This project uses the **Live2D Cubism SDK**, which belongs to Live2D Inc.
+When using this project (including compiling, distributing, or modifying), you must agree to Live2D's license agreement:
+
+- **Live2D Proprietary Software License Agreement**: [https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html](https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html)
+- **Live2D Open Software License Agreement**: [https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html](https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html)
+
+> This open-source project falls under the category of "Individual/Small-Scale Enterprise" for non-profit or small-scale use.
+> If you are a medium-to-large enterprise with an annual turnover exceeding 10 million JPY, using this project may require a separate commercial license agreement with Live2D Inc.
+
+---
+
+**Kokoro Engine** is an open-source project.
+The specific Live2D libraries and models included or downloaded are subject to the **Live2D Proprietary Software License Agreement**.
+Live2D is a registered trademark of Live2D Inc.
