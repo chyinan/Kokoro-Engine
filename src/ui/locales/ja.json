@@ -91,7 +91,14 @@
             "save_config": "LLM 設定を保存",
             "saving": "保存中...",
             "vision_mode": "ビジョンモード",
-            "vision_desc": "マルチモーダルモデルでの画像アップロードを有効にする"
+            "vision_desc": "マルチモーダルモデルでの画像アップロードを有効にする",
+            "system_llm": {
+                "title": "システム LLM (意図解釈)",
+                "desc": "アクションや表情の制御に使用する独立したモデルです。コストや遅延を抑えるため、より小型で高速なモデル（例：gpt-4o-mini, llama3:8b）を推奨します。",
+                "provider": "プロバイダー",
+                "model_override": "モデル名 (任意)",
+                "same_as_active": "メインと同じ ({{provider}})"
+            }
         },
         "persona": {
             "user_profile": {

@@ -40,6 +40,13 @@ pub struct LlmConfig {
     #[serde(default = "default_active_provider")]
     pub active_provider: String,
 
+    /// Optional: Separate provider for system tasks (Intent Parsing).
+    /// If None, uses `active_provider`.
+    pub system_provider: Option<String>,
+
+    /// Optional: Override model for system tasks.
+    pub system_model: Option<String>,
+
     #[serde(default = "default_providers")]
     pub providers: Vec<LlmProviderConfig>,
 }
@@ -77,6 +84,8 @@ impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             active_provider: default_active_provider(),
+            system_provider: None,
+            system_model: None,
             providers: default_providers(),
         }
     }

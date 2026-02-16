@@ -214,6 +214,53 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
                 </div>
             </div>
 
+            {/* System LLM Config */}
+            <div className="pt-4 border-t border-[var(--color-border)]">
+                <div className="mb-3">
+                    <label className="text-xs font-medium text-[var(--color-text-main)] block mb-1">
+                        {t("settings.api.system_llm.title")}
+                    </label>
+                    <p className="text-[10px] text-[var(--color-text-muted)]">
+                        {t("settings.api.system_llm.desc")}
+                    </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                    {/* System Provider Selector */}
+                    <div>
+                        <label className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] font-semibold mb-1 block">
+                            {t("settings.api.system_llm.provider")}
+                        </label>
+                        <select
+                            value={config.system_provider || ""}
+                            onChange={(e) => setConfig({ ...config, system_provider: e.target.value || undefined })}
+                            className={clsx(inputClasses, "py-1.5 px-2")}
+                        >
+                            <option value="">{t("settings.api.system_llm.same_as_active", { provider: config.active_provider })}</option>
+                            {config.providers.map(p => (
+                                <option key={p.id} value={p.id}>
+                                    {p.id} ({p.provider_type})
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+
+                    {/* System Model Override */}
+                    <div>
+                        <label className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] font-semibold mb-1 block">
+                            {t("settings.api.system_llm.model_override")}
+                        </label>
+                        <input
+                            type="text"
+                            value={config.system_model || ""}
+                            onChange={(e) => setConfig({ ...config, system_model: e.target.value || undefined })}
+                            placeholder="default"
+                            className={clsx(inputClasses, "py-1.5 px-2 font-mono")}
+                        />
+                    </div>
+                </div>
+            </div>
+
             {/* Save button */}
             <div className="pt-2 border-t border-[var(--color-border)]">
                 <button

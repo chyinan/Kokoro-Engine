@@ -50,6 +50,49 @@ impl LlmService {
 
         Ok(())
     }
+    /// Get the system provider (or fallback to active).
+    pub async fn system_provider(&self) -> Arc<dyn LlmProvider> {
+        let config = self.config.read().await;
+        let system_id = config
+            .system_provider
+            .as_ref()
+            .unwrap_or(&config.active_provider);
+
+        // We can't easily reuse `build_provider` here without cloning config or restructuring.
+        // For simplicity, we'll re-implement lookup logic or better yet, store all providers in a map.
+        // BUT `LlmService` currently only holds the *active* provider instance.
+        // To support multi-provider efficiently, we should probably refactor LlmService to hold a map of providers.
+        // For now, let's just rebuild it on demand if it's different, OR (better) updated LlmService to hold a map.
+
+        // Wait, `LlmService` struct:
+        // provider: Arc<RwLock<Arc<dyn LlmProvider>>>,
+        // This only holds ONE.
+
+        // Refactoring LlmService to hold strict "active" is limiting.
+        // Let's change `LlmService` to hold the config and build providers on-the-fly OR hold a cache.
+        // Given the code structure, I will instantiate a new provider if `system_provider` is requested.
+        // This is safe because `build_provider` is cheap (just struct creation).
+
+        let provider_cfg = config
+            .providers
+            .iter()
+            .find(|p| p.id == *system_id)
+            .or_else(|| config.providers.iter().find(|p| p.enabled))
+            .or_else(|| config.providers.first());
+
+        if let Some(cfg) = provider_cfg {
+            // Apply system_model override if present
+            if let Some(ref model_override) = config.system_model {
+                let mut overlaid_cfg = cfg.clone();
+                overlaid_cfg.model = Some(model_override.clone());
+                return Arc::from(build_from_provider_config(&overlaid_cfg));
+            }
+            return Arc::from(build_from_provider_config(cfg));
+        }
+
+        // Fallback
+        self.provider.read().await.clone()
+    }
 }
 
 /// Factory: build the appropriate LlmProvider from config.

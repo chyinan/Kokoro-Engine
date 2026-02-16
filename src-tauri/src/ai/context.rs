@@ -223,7 +223,7 @@ impl AIOrchestrator {
     pub async fn compose_prompt(
         &self,
         query: &str,
-        allow_image_gen: bool,
+        _allow_image_gen: bool,
         tool_prompt: Option<String>,
     ) -> Result<Vec<Message>> {
         // 1. Determine Model logic
@@ -252,7 +252,11 @@ impl AIOrchestrator {
         // -- System Prompt (P0) --
         final_messages.push(Message {
             role: "system".to_string(),
-            content: sp.clone(),
+            content: format!(
+                "{}\n\n{}",
+                sp.clone(),
+                crate::ai::prompts::CORE_PERSONA_PROMPT
+            ),
             metadata: None,
         });
 
@@ -307,63 +311,6 @@ impl AIOrchestrator {
             let lang = self.response_language.lock().await;
             lang.clone()
         };
-
-        // -- Emotion Tag Instruction (P0.5) --
-        // Injected as a separate system message so it doesn't pollute the user's persona prompt
-        final_messages.push(Message {
-            role: "system".to_string(),
-            content: concat!(
-                "IMPORTANT: At the very end of EVERY response, append an emotion tag on a new line in this exact format:\n",
-                "[EMOTION:<emotion>|MOOD:<value>]\n",
-                "Where <emotion> is one of: neutral, happy, sad, angry, surprised, thinking, shy, smug, worried, excited\n",
-                "And <value> is a float from 0.0 (very negative mood) to 1.0 (very positive mood).\n",
-                "Example: [EMOTION:happy|MOOD:0.85]\n",
-                "This tag MUST be the absolute last thing in your response. Do not add anything after it."
-            ).to_string(),
-            metadata: Some(serde_json::json!({"type": "emotion_instruction"})),
-        });
-
-        // -- Action/Motion Instruction (P0.6) --
-        // Injected so the LLM can express physical gestures that map to Live2D motions
-        final_messages.push(Message {
-            role: "system".to_string(),
-            content: concat!(
-                "When your response involves a physical action or gesture, ",
-                "append an action tag BEFORE the [EMOTION:...] tag in this exact format:\n",
-                "[ACTION:<action>]\n",
-                "Where <action> is one of: idle, nod, shake, wave, dance, shy, think, surprise, cheer, tap\n",
-                "Only include this tag when a clear physical action/gesture is appropriate.\n",
-                "Example: I'd love to help! [ACTION:nod] [EMOTION:happy|MOOD:0.85]"
-            ).to_string(),
-            metadata: Some(serde_json::json!({"type": "action_instruction"})),
-        });
-
-        // -- Tool Call Instruction (P0.7) --
-        // Inject available tool definitions so the LLM can use [TOOL_CALL:...] tags
-        if let Some(ref tp) = tool_prompt {
-            if !tp.is_empty() {
-                final_messages.push(Message {
-                    role: "system".to_string(),
-                    content: tp.clone(),
-                    metadata: Some(serde_json::json!({"type": "tool_instruction"})),
-                });
-            }
-        }
-
-        // -- Image Prompt Instruction (P0.75) --
-        if allow_image_gen {
-            final_messages.push(Message {
-                role: "system".to_string(),
-                content: concat!(
-                    "When the conversation suggests a change in location or scene (e.g., 'Let's go to the forest', 'We are in a classroom now'), ",
-                    "you MAY append an image generation prompt to update the background. format:\n",
-                    "[IMAGE_PROMPT: <detailed English definition, e.g., 'A sunny classroom with large windows', 'A magical forest with glowing plants'>]\n",
-                    "Place this tag BEFORE the [EMOTION:...] tag.\n",
-                    "Only generate this if the location/scene changes or is explicitly requested."
-                ).to_string(),
-                metadata: Some(serde_json::json!({"type": "image_prompt_instruction"})),
-            });
-        }
 
         // -- Relevant Memories (P1) --
         // Upgraded: instruct the LLM to naturally reference these in conversation

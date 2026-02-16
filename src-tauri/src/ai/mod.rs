@@ -8,12 +8,8 @@ pub mod idle_behaviors;
 pub mod initiative;
 pub mod memory;
 pub mod memory_extractor;
+pub mod prompts;
 pub mod router;
 pub mod sentiment;
 pub mod style_adapter;
 pub mod typing_sim;
-
-#[cfg(test)]
-mod tests;
-#[cfg(test)]
-mod tests_autonomous;

@@ -109,6 +109,8 @@ export interface LlmProviderConfig {
 
 export interface LlmConfig {
     active_provider: string;
+    system_provider?: string;
+    system_model?: string;
     providers: LlmProviderConfig[];
 }
 

@@ -91,7 +91,14 @@
             "save_config": "保存 LLM 配置",
             "saving": "保存中...",
             "vision_mode": "视觉模式",
-            "vision_desc": "允许在对话中发送图片 (需要多模态模型)"
+            "vision_desc": "允许在对话中发送图片 (需要多模态模型)",
+            "system_llm": {
+                "title": "系统 LLM (意图解析)",
+                "desc": "用于控制动作和表情的独立模型。建议使用体积更小/速度更快的模型（如 gpt-4o-mini, llama3:8b）以节省成本并降低延迟。",
+                "provider": "服务商",
+                "model_override": "模型名称 (可选)",
+                "same_as_active": "与主模型一致 ({{provider}})"
+            }
         },
         "persona": {
             "user_profile": {

@@ -91,7 +91,14 @@
             "save_config": "Save LLM Config",
             "saving": "Saving...",
             "vision_mode": "Vision Mode",
-            "vision_desc": "Enable image upload in chat for multimodal models"
+            "vision_desc": "Enable image upload in chat for multimodal models",
+            "system_llm": {
+                "title": "System LLM (Intent Parsing)",
+                "desc": "Separate model for controlling actions/emotions. A smaller/faster model (e.g. gpt-4o-mini, llama3:8b) is recommended to save costs/latency.",
+                "provider": "PROVIDER",
+                "model_override": "MODEL NAME (OPTIONAL)",
+                "same_as_active": "Same as Active ({{provider}})"
+            }
         },
         "persona": {
             "user_profile": {
