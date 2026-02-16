@@ -26,6 +26,16 @@
 **Kokoro Engine** 是一个跨平台虚拟角色沉浸交互引擎，旨在让每个人都能在桌面上拥有一个“有心”的虚拟伙伴（灵感来源于 Neuro-sama）。
 它整合了 Live2D、LLM、TTS 和 STT 等技术，构建了一个高度模块化、可定制的交互系统。
 
+## 📸 截图 (Screenshots)
+
+<div align="center">
+  <img src="pictures/Homepage.png" alt="Homepage" width="800" />
+  <p><em>主界面预览</em></p>
+  <img src="pictures/Settings.png" alt="Settings" width="800" />
+  <p><em>设置界面预览</em></p>
+</div>
+
+
 ## ✅ 已完善功能 (Features)
 
 目前主要在本地环境（RTX 4060 Laptop）下验证通过的功能：
