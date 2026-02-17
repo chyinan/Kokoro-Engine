@@ -5,6 +5,7 @@ use super::interface::{
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
+use tokio::sync::Mutex;
 
 /// Local GPT-SoVITS provider — sends HTTP requests to a local GPT-SoVITS inference server.
 ///
@@ -26,6 +27,9 @@ pub struct LocalGPTSoVITSProvider {
     // Model weight paths
     gpt_weights: Option<String>,
     sovits_weights: Option<String>,
+    // Track active state to avoid redundant calls
+    active_gpt_weights: Mutex<Option<String>>,
+    active_sovits_weights: Mutex<Option<String>>,
 }
 
 #[derive(Serialize)]
@@ -62,6 +66,8 @@ impl LocalGPTSoVITSProvider {
             default_text_lang: "zh".to_string(),
             gpt_weights: None,
             sovits_weights: None,
+            active_gpt_weights: Mutex::new(None),
+            active_sovits_weights: Mutex::new(None),
         }
     }
 
@@ -122,6 +128,8 @@ impl LocalGPTSoVITSProvider {
             default_text_lang,
             gpt_weights,
             sovits_weights,
+            active_gpt_weights: Mutex::new(None),
+            active_sovits_weights: Mutex::new(None),
         })
     }
 }
@@ -175,29 +183,64 @@ impl TtsProvider for LocalGPTSoVITSProvider {
 
     async fn synthesize(&self, text: &str, params: TtsParams) -> Result<Vec<u8>, TtsError> {
         // Switch models if configured (server handles idempotent load).
+        // Switch models if configured (server handles idempotent load).
         let base = self.base_url.trim_end_matches('/');
+
         if let Some(gpt) = &self.gpt_weights {
-            let url = format!("{}/set_gpt_weights?weights_path={}", base, gpt);
-            if let Err(e) = self
-                .client
-                .get(&url)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-            {
-                eprintln!("[GPT-SoVITS] Failed to set GPT weights: {}", e);
+            let mut active = self.active_gpt_weights.lock().await;
+            if active.as_ref() != Some(gpt) {
+                let url = format!("{}/set_gpt_weights?weights_path={}", base, gpt);
+                // Use retry logic for weight setting too? Maybe overkill, but good for reliability.
+                // For now, simple request is fine, as it's local.
+                match self
+                    .client
+                    .get(&url)
+                    .timeout(std::time::Duration::from_secs(30))
+                    .send()
+                    .await
+                {
+                    Ok(res) if res.status().is_success() => {
+                        *active = Some(gpt.clone());
+                    }
+                    Ok(res) => {
+                        eprintln!(
+                            "[GPT-SoVITS] Failed to set GPT weights (status {}): {:?}",
+                            res.status(),
+                            res.text().await
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("[GPT-SoVITS] Failed to set GPT weights: {}", e);
+                    }
+                }
             }
         }
+
         if let Some(sovits) = &self.sovits_weights {
-            let url = format!("{}/set_sovits_weights?weights_path={}", base, sovits);
-            if let Err(e) = self
-                .client
-                .get(&url)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-            {
-                eprintln!("[GPT-SoVITS] Failed to set SoVITS weights: {}", e);
+            let mut active = self.active_sovits_weights.lock().await;
+            if active.as_ref() != Some(sovits) {
+                let url = format!("{}/set_sovits_weights?weights_path={}", base, sovits);
+                match self
+                    .client
+                    .get(&url)
+                    .timeout(std::time::Duration::from_secs(30))
+                    .send()
+                    .await
+                {
+                    Ok(res) if res.status().is_success() => {
+                        *active = Some(sovits.clone());
+                    }
+                    Ok(res) => {
+                        eprintln!(
+                            "[GPT-SoVITS] Failed to set SoVITS weights (status {}): {:?}",
+                            res.status(),
+                            res.text().await
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("[GPT-SoVITS] Failed to set SoVITS weights: {}", e);
+                    }
+                }
             }
         }
 

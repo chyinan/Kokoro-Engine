@@ -18,12 +18,16 @@ impl StableDiffusionProvider {
             id,
             base_url: base_url.unwrap_or_else(|| "http://127.0.0.1:7860".to_string()),
             _model: model,
-            client: Client::builder().no_proxy().build().unwrap_or_default(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .no_proxy()
+                .build()
+                .unwrap_or_default(),
         }
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct SdTxt2ImgRequest {
     prompt: String,
     negative_prompt: String,
@@ -59,29 +63,46 @@ impl ImageGenProvider for StableDiffusionProvider {
         // Parse size string "1024x1024" -> (1024, 1024)
         let (width, height) = parse_size(&params.size).unwrap_or((512, 512));
 
+        let steps = match params.quality.as_deref() {
+            Some("hd") | Some("high") | Some("best") => 50,
+            Some("fast") | Some("draft") | Some("turbo") => 15,
+            _ => 25,
+        };
+
+        // Map "style" string to styles vector if present
+        let styles = params.style.map(|s| vec![s]).unwrap_or_default();
+
         let body = SdTxt2ImgRequest {
             prompt: params.prompt,
             negative_prompt: params.negative_prompt.unwrap_or_default(),
             seed: -1,
-            styles: vec![],
+            styles,
             width,
             height,
-            steps: 25,      // Reasonable default
-            cfg_scale: 7.0, // Reasonable default
+            steps,
+            cfg_scale: 7.0,
             sampler_name: Some("Euler a".to_string()),
-            batch_size: 1,
+            // Note: Trait only supports returning one image, but we honor 'n' request
+            // even if we only return the first one (or maybe SD uses n for grid?).
+            // Ideally we should fix trait to return Vec<Image>.
+            batch_size: params.n,
         };
 
-        let body_json = serde_json::to_string(&body).unwrap_or_default();
-        println!("[ImageGen] Sending SD request: {}", body_json);
+        let client = self.client.clone();
+        let body_clone = body.clone();
+        let url_clone = url.clone();
 
-        let res = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ImageGenError::GenerationFailed(e.to_string()))?;
+        let res = crate::utils::http::request_with_retry(
+            move || {
+                let client = client.clone();
+                let url = url_clone.clone();
+                let body = body_clone.clone();
+                async move { client.post(&url).json(&body).send().await }
+            },
+            2,
+        )
+        .await
+        .map_err(|e| ImageGenError::GenerationFailed(e.to_string()))?;
 
         if !res.status().is_success() {
             let status = res.status();

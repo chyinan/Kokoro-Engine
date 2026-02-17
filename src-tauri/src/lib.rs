@@ -8,6 +8,7 @@ pub mod mcp;
 pub mod mods;
 pub mod stt;
 pub mod tts;
+pub mod utils;
 pub mod vision;
 use crate::mods::ModManager;
 use std::sync::Arc;
@@ -92,6 +93,8 @@ pub fn run() {
             stt::stream::process_audio_chunk,
             stt::stream::complete_audio_stream,
             stt::stream::discard_audio_stream,
+            stt::stream::snapshot_audio_stream,
+            stt::stream::prune_audio_buffer,
         ])
         .setup(|app| {
             let app_handle = app.handle();

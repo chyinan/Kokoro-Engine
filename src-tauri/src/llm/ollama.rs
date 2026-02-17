@@ -13,20 +13,22 @@ use std::pin::Pin;
 use tauri::Emitter;
 
 use crate::llm::openai::Message;
-use crate::llm::provider::LlmProvider;
+use crate::llm::provider::{LlmParams, LlmProvider};
 
 /// Ollama-native message format.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OllamaMessage {
     role: String,
     content: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OllamaChatRequest {
     model: String,
     messages: Vec<OllamaMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,8 +75,13 @@ pub struct OllamaProvider {
 
 impl OllamaProvider {
     pub fn new(base_url: Option<String>, model: String) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
         Self {
-            client: Client::new(),
+            client,
             base_url: base_url.unwrap_or_else(|| "http://localhost:11434".to_string()),
             model,
         }
@@ -83,13 +90,22 @@ impl OllamaProvider {
     /// List available models from the Ollama server.
     pub async fn list_models(base_url: &str) -> Result<Vec<OllamaModelInfo>, String> {
         let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-        let client = Client::new();
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| Client::new());
 
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to connect to Ollama at {}: {}", base_url, e))?;
+        let url_clone = url.clone();
+        let response = crate::utils::http::request_with_retry(
+            move || {
+                let client = client.clone();
+                let url = url_clone.clone();
+                async move { client.get(&url).send().await }
+            },
+            3,
+        )
+        .await
+        .map_err(|e| format!("Failed to connect to Ollama at {}: {}", base_url, e))?;
 
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -112,14 +128,37 @@ impl OllamaProvider {
         app_handle: tauri::AppHandle,
     ) -> Result<(), String> {
         let url = format!("{}/api/pull", base_url.trim_end_matches('/'));
-        let client = Client::new();
+        // Long timeout for pulls (e.g. 1 hour), or no timeout for the stream itself?
+        // reqwest timeout is for the whole request or connect? It's usually total.
+        // For streaming large files, we might not want a total timeout, but a read timeout.
+        // reqwest::ClientBuilder::timeout is total request timeout.
+        // We should probably rely on TCP keepalive or a very long timeout.
+        // Let's set it to 1 hour.
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(3600))
+            .build()
+            .unwrap_or_else(|_| Client::new());
 
-        let response = client
-            .post(&url)
-            .json(&serde_json::json!({ "model": model, "stream": true }))
-            .send()
-            .await
-            .map_err(|e| format!("Failed to connect to Ollama at {}: {}", base_url, e))?;
+        let model_str = model.to_string();
+        let url_clone = url.clone();
+
+        let response = crate::utils::http::request_with_retry(
+            move || {
+                let client = client.clone();
+                let url = url_clone.clone();
+                let model = model_str.clone();
+                async move {
+                    client
+                        .post(&url)
+                        .json(&serde_json::json!({ "model": model, "stream": true }))
+                        .send()
+                        .await
+                }
+            },
+            3,
+        )
+        .await
+        .map_err(|e| format!("Failed to connect to Ollama at {}: {}", base_url, e))?;
 
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -174,21 +213,60 @@ impl OllamaProvider {
 
 #[async_trait]
 impl LlmProvider for OllamaProvider {
-    async fn chat(&self, messages: Vec<Message>) -> Result<String, String> {
+    async fn chat(
+        &self,
+        messages: Vec<Message>,
+        options: Option<LlmParams>,
+    ) -> Result<String, String> {
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
+        let mut opts_map = serde_json::Map::new();
+        if let Some(opts) = options {
+            if let Some(t) = opts.temperature {
+                opts_map.insert("temperature".to_string(), serde_json::json!(t));
+            }
+            if let Some(m) = opts.max_tokens {
+                opts_map.insert("num_predict".to_string(), serde_json::json!(m));
+            }
+            if let Some(p) = opts.top_p {
+                opts_map.insert("top_p".to_string(), serde_json::json!(p));
+            }
+            if let Some(f) = opts.frequency_penalty {
+                opts_map.insert("frequency_penalty".to_string(), serde_json::json!(f));
+            }
+            if let Some(p) = opts.presence_penalty {
+                opts_map.insert("presence_penalty".to_string(), serde_json::json!(p));
+            }
+            if let Some(s) = opts.stop {
+                opts_map.insert("stop".to_string(), serde_json::json!(s));
+            }
+        }
+
         let request_body = OllamaChatRequest {
             model: self.model.clone(),
             messages: Self::convert_messages(messages),
             stream: false,
+            options: if opts_map.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(opts_map))
+            },
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| format!("Ollama request failed: {}", e))?;
+        let client = self.client.clone();
+        let body = request_body.clone();
+        let url_clone = url.clone();
+
+        let response = crate::utils::http::request_with_retry(
+            move || {
+                let client = client.clone();
+                let url = url_clone.clone();
+                let body = body.clone();
+                async move { client.post(&url).json(&body).send().await }
+            },
+            3,
+        )
+        .await
+        .map_err(|e| format!("Ollama request failed: {}", e))?;
 
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -206,21 +284,58 @@ impl LlmProvider for OllamaProvider {
     async fn chat_stream(
         &self,
         messages: Vec<Message>,
+        options: Option<LlmParams>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String, String>> + Send>>, String> {
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
+
+        let mut opts_map = serde_json::Map::new();
+        if let Some(opts) = options {
+            if let Some(t) = opts.temperature {
+                opts_map.insert("temperature".to_string(), serde_json::json!(t));
+            }
+            if let Some(m) = opts.max_tokens {
+                opts_map.insert("num_predict".to_string(), serde_json::json!(m));
+            }
+            if let Some(p) = opts.top_p {
+                opts_map.insert("top_p".to_string(), serde_json::json!(p));
+            }
+            if let Some(f) = opts.frequency_penalty {
+                opts_map.insert("frequency_penalty".to_string(), serde_json::json!(f));
+            }
+            if let Some(p) = opts.presence_penalty {
+                opts_map.insert("presence_penalty".to_string(), serde_json::json!(p));
+            }
+            if let Some(s) = opts.stop {
+                opts_map.insert("stop".to_string(), serde_json::json!(s));
+            }
+        }
+
         let request_body = OllamaChatRequest {
             model: self.model.clone(),
             messages: Self::convert_messages(messages),
             stream: true,
+            options: if opts_map.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(opts_map))
+            },
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| format!("Ollama request failed: {}", e))?;
+        let client = self.client.clone();
+        let body = request_body.clone();
+        let url_clone = url.clone();
+
+        let response = crate::utils::http::request_with_retry(
+            move || {
+                let client = client.clone();
+                let url = url_clone.clone();
+                let body = body.clone();
+                async move { client.post(&url).json(&body).send().await }
+            },
+            3,
+        )
+        .await
+        .map_err(|e| format!("Ollama request failed: {}", e))?;
 
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();

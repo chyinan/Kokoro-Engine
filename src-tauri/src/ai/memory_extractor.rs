@@ -68,7 +68,7 @@ pub async fn extract_and_store_memories(
         },
     ];
 
-    match provider.chat(messages).await {
+    match provider.chat(messages, None).await {
         Ok(response) => {
             // Try scored format first, fall back to plain string array
             let scored = parse_scored_response(&response);

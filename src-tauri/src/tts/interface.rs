@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::pin::Pin; // Add this
 
 // ── Error Types ────────────────────────────────────────
 
@@ -154,13 +155,17 @@ pub trait TtsProvider: Send + Sync {
 
     /// Streaming synthesis — returns chunks incrementally.
     /// Default implementation falls back to non-streaming `synthesize`.
+    /// Streaming synthesis — returns chunks incrementally.
+    /// Default implementation falls back to non-streaming `synthesize`.
     async fn synthesize_stream(
         &self,
         text: &str,
         params: TtsParams,
-    ) -> Result<Vec<Vec<u8>>, TtsError> {
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<Vec<u8>, TtsError>> + Send>>, TtsError>
+    {
         // Default: return entire audio as a single chunk
         let audio = self.synthesize(text, params).await?;
-        Ok(vec![audio])
+        let stream = futures::stream::once(async move { Ok(audio) });
+        Ok(Box::pin(stream))
     }
 }

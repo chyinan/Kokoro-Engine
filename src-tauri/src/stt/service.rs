@@ -1,7 +1,7 @@
 //! STT Service — manages providers and routes transcription requests.
 
 use super::config::{SttConfig, SttProviderConfig};
-use super::interface::{SttError, SttProvider};
+use super::interface::{AudioSource, SttEngine, SttError, TranscriptionResult};
 use super::openai::OpenAIWhisperProvider;
 use super::whisper_cpp::WhisperCppProvider;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct SttService {
-    providers: Arc<RwLock<Vec<Box<dyn SttProvider>>>>,
+    providers: Arc<RwLock<Vec<Arc<dyn SttEngine>>>>,
     config: Arc<RwLock<SttConfig>>,
 }
 
@@ -43,18 +43,18 @@ impl SttService {
     }
 
     /// Build a provider from config.
-    fn build_provider(config: &SttProviderConfig) -> Option<Box<dyn SttProvider>> {
+    fn build_provider(config: &SttProviderConfig) -> Option<Arc<dyn SttEngine>> {
         match config.provider_type.as_str() {
             "openai_whisper" | "faster_whisper" | "local_whisper" => {
                 let api_key = config.resolve_api_key().unwrap_or_default(); // Allow empty key for local
-                Some(Box::new(OpenAIWhisperProvider::new(
+                Some(Arc::new(OpenAIWhisperProvider::new(
                     config.id.clone(),
                     api_key,
                     config.base_url.clone(),
                     config.model.clone(),
                 )))
             }
-            "whisper_cpp" => Some(Box::new(WhisperCppProvider::new(config.base_url.clone()))),
+            "whisper_cpp" => Some(Arc::new(WhisperCppProvider::new(config.base_url.clone()))),
             other => {
                 eprintln!("[STT] Unknown provider type: {}", other);
                 None
@@ -66,10 +66,9 @@ impl SttService {
     /// If `language_override` is Some, use that; otherwise fall back to config language.
     pub async fn transcribe(
         &self,
-        audio: &[u8],
-        format: &str,
+        audio: &AudioSource,
         language_override: Option<&str>,
-    ) -> Result<String, SttError> {
+    ) -> Result<TranscriptionResult, SttError> {
         let config = self.config.read().await;
         let config_language = config.language.clone();
         let active_id = config.active_provider.clone();
@@ -77,18 +76,22 @@ impl SttService {
 
         let language = language_override.map(|s| s.to_string()).or(config_language);
 
-        let providers = self.providers.read().await;
+        let provider = {
+            let providers = self.providers.read().await;
 
-        // Find the active provider
-        let provider = providers
-            .iter()
-            .find(|p| p.id() == active_id)
-            .or_else(|| providers.first())
-            .ok_or_else(|| SttError::ProviderNotFound("No STT providers configured".to_string()))?;
+            // Find the active provider
+            providers
+                .iter()
+                .find(|p| p.id() == active_id)
+                .or_else(|| providers.first())
+                .cloned()
+                .ok_or_else(|| {
+                    SttError::ProviderNotFound("No STT providers configured".to_string())
+                })?
+        };
 
-        provider
-            .transcribe(audio, format, language.as_deref())
-            .await
+        // Lock is released here, so we can await safely without blocking
+        provider.transcribe(audio, language.as_deref()).await
     }
 
     /// Get the current config.

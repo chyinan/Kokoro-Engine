@@ -347,6 +347,10 @@ pub async fn stream_chat(
     llm_state: State<'_, LlmService>,
     action_registry: State<'_, std::sync::Arc<RwLock<crate::actions::ActionRegistry>>>,
     _vision_watcher: State<'_, crate::vision::watcher::VisionWatcher>,
+    vision_server: State<
+        '_,
+        std::sync::Arc<tokio::sync::Mutex<crate::vision::server::VisionServer>>,
+    >,
 ) -> Result<(), String> {
     // 0. Set character ID for memory isolation
     let char_id = request
@@ -411,7 +415,7 @@ pub async fn stream_chat(
 
     println!("[Chat] Running Intent Parser...");
     let intent_json_str = system_provider
-        .chat(intent_messages)
+        .chat(intent_messages, None)
         .await
         .unwrap_or_else(|e| {
             eprintln!("[Chat] Intent Parser failed: {}", e);
@@ -512,20 +516,66 @@ pub async fn stream_chat(
     // ── LAYER 3: PERSONA GENERATION ─────────────────────────────
 
     // Compose Persona Prompt
-    let mut client_messages = state
+    let prompt_messages = state
         .compose_prompt(
             &request.message,
             request.allow_image_gen.unwrap_or(false),
             None,
         )
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+    let mut client_messages: Vec<crate::llm::openai::Message> = prompt_messages
         .into_iter()
         .map(|m| crate::llm::openai::Message {
             role: m.role,
             content: crate::llm::openai::MessageContent::Text(m.content),
         })
-        .collect::<Vec<_>>();
+        .collect();
+
+    // Attach images to the last user message if present
+    if let Some(images) = &request.images {
+        if !images.is_empty() {
+            // Find the last message with role "user"
+            if let Some(last_user_msg) = client_messages.iter_mut().rfind(|m| m.role == "user") {
+                let text_content = last_user_msg.content.text();
+
+                // Process images: convert local URLs to base64
+                let mut processed_images = Vec::with_capacity(images.len());
+                let vision_server_guard = vision_server.lock().await;
+                let port = vision_server_guard.port;
+                let upload_dir = vision_server_guard.upload_dir.clone();
+                drop(vision_server_guard);
+
+                for img_url in images {
+                    let mut final_url = img_url.clone();
+                    // Check if local
+                    if img_url.contains(&format!("http://127.0.0.1:{}", port)) {
+                        // Extract filename
+                        if let Some(filename) = img_url.split("/vision/").nth(1) {
+                            let file_path = upload_dir.join(filename);
+                            if let Ok(file_content) = tokio::fs::read(&file_path).await {
+                                // Convert to base64
+                                use base64::Engine as _;
+                                let b64 =
+                                    base64::engine::general_purpose::STANDARD.encode(&file_content);
+                                // Detect mime type
+                                let mime = crate::vision::server::detect_image_mime(&file_content)
+                                    .unwrap_or("image/png".to_string());
+                                final_url = format!("data:{};base64,{}", mime, b64);
+                            }
+                        }
+                    }
+                    processed_images.push(final_url);
+                }
+
+                // Create multimodal content
+                last_user_msg.content =
+                    crate::llm::openai::MessageContent::with_images(text_content, processed_images);
+                println!("[Chat] Attached {} images to user message", images.len());
+            }
+        }
+    }
 
     // Inject System Feedback (Before the last user message or as system at end)
     // Best practice: System instruction near end of context
@@ -536,7 +586,7 @@ pub async fn stream_chat(
 
     // Stream Response
     let chat_provider = llm_state.provider().await;
-    let mut stream = chat_provider.chat_stream(client_messages).await?;
+    let mut stream = chat_provider.chat_stream(client_messages, None).await?;
 
     let mut full_response = String::new();
 

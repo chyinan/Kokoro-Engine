@@ -1,5 +1,5 @@
 use crate::stt::config::save_config;
-use crate::stt::{SttConfig, SttService};
+use crate::stt::{AudioSource, SttConfig, SttService};
 use tauri::command;
 use tauri::State;
 
@@ -10,10 +10,17 @@ pub async fn transcribe_audio(
     audio_bytes: Vec<u8>,
     format: String,
 ) -> Result<String, String> {
-    state
-        .transcribe(&audio_bytes, &format, None)
+    let source = AudioSource::Encoded {
+        data: audio_bytes,
+        format,
+    };
+
+    let result = state
+        .transcribe(&source, None)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    Ok(result.text)
 }
 
 /// Return the current STT config from disk.

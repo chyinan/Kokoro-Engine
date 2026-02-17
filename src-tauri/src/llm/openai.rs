@@ -1,3 +1,4 @@
+use super::provider::LlmParams;
 use eventsource_stream::Eventsource;
 use futures::Stream;
 use futures::StreamExt;
@@ -68,7 +69,12 @@ pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<Message>,
     pub stream: bool,
-    pub temperature: f32,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+    pub top_p: Option<f32>,
+    pub frequency_penalty: Option<f32>,
+    pub presence_penalty: Option<f32>,
+    pub stop: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,7 +103,10 @@ pub struct OpenAIClient {
 impl OpenAIClient {
     pub fn new(api_key: String, base_url: Option<String>, model: Option<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             model: model.unwrap_or_else(|| "gpt-3.5-turbo".to_string()),
@@ -105,24 +114,50 @@ impl OpenAIClient {
     }
 
     /// Non-streaming chat completion for internal tool-use (e.g. memory extraction).
-    pub async fn chat(&self, messages: Vec<Message>) -> Result<String, String> {
+    pub async fn chat(
+        &self,
+        messages: Vec<Message>,
+        options: Option<LlmParams>,
+    ) -> Result<String, String> {
         let url = format!("{}/chat/completions", self.base_url);
+        let opts = options.unwrap_or_default();
         let request_body = ChatCompletionRequest {
             model: self.model.clone(),
             messages,
             stream: false,
-            temperature: 0.3,
+            temperature: opts.temperature.or(Some(0.3)),
+            max_tokens: opts.max_tokens,
+            top_p: opts.top_p,
+            frequency_penalty: opts.frequency_penalty,
+            presence_penalty: opts.presence_penalty,
+            stop: opts.stop,
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| format!("Request failed: {}", e))?;
+        let client = self.client.clone();
+        let url_clone = url.clone();
+        let api_key = self.api_key.clone();
+        let body = request_body.clone();
+
+        let response = crate::utils::http::request_with_retry(
+            move || {
+                let client = client.clone();
+                let url = url_clone.clone();
+                let body = body.clone();
+                let api_key = api_key.clone();
+                async move {
+                    client
+                        .post(&url)
+                        .header("Authorization", format!("Bearer {}", api_key))
+                        .header("Content-Type", "application/json")
+                        .json(&body)
+                        .send()
+                        .await
+                }
+            },
+            2,
+        )
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
 
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -145,24 +180,47 @@ impl OpenAIClient {
     pub async fn chat_stream(
         &self,
         messages: Vec<Message>,
+        options: Option<LlmParams>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String, String>> + Send>>, String> {
         let url = format!("{}/chat/completions", self.base_url);
+        let opts = options.unwrap_or_default();
         let request_body = ChatCompletionRequest {
             model: self.model.clone(),
             messages,
             stream: true,
-            temperature: 0.7,
+            temperature: opts.temperature.or(Some(0.7)),
+            max_tokens: opts.max_tokens,
+            top_p: opts.top_p,
+            frequency_penalty: opts.frequency_penalty,
+            presence_penalty: opts.presence_penalty,
+            stop: opts.stop,
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| format!("Request failed: {}", e))?;
+        let client = self.client.clone();
+        let url_clone = url.clone();
+        let api_key = self.api_key.clone();
+        let body = request_body.clone();
+
+        let response = crate::utils::http::request_with_retry(
+            move || {
+                let client = client.clone();
+                let url = url_clone.clone();
+                let body = body.clone();
+                let api_key = api_key.clone();
+                async move {
+                    client
+                        .post(&url)
+                        .header("Authorization", format!("Bearer {}", api_key))
+                        .header("Content-Type", "application/json")
+                        .json(&body)
+                        .send()
+                        .await
+                }
+            },
+            2,
+        )
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
 
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();

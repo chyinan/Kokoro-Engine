@@ -87,7 +87,7 @@ pub async fn end_session(
 
             let client = OpenAIClient::new(request.api_key, request.endpoint, request.model);
 
-            match client.chat(messages).await {
+            match client.chat(messages, None).await {
                 Ok(summary) => {
                     let summary = summary.trim().to_string();
                     if !summary.is_empty() {

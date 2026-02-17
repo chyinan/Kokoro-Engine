@@ -1,12 +1,14 @@
+use super::config::ProviderConfig;
 use super::interface::{
     Gender, ProviderCapabilities, TtsEngine, TtsError, TtsParams, TtsProvider, VoiceProfile,
 };
-use super::config::ProviderConfig;
 use async_trait::async_trait;
+use futures::Stream;
 use reqwest::Client;
 use serde::Serialize;
+use std::pin::Pin; // Add this
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct TtsRequest {
     model: String,
     input: String,
@@ -32,7 +34,10 @@ impl OpenAITtsProvider {
         voice: Option<String>,
     ) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             model: model.unwrap_or_else(|| "tts-1".to_string()),
@@ -103,20 +108,44 @@ impl TtsProvider for OpenAITtsProvider {
         let request_body = TtsRequest {
             model: self.model.clone(),
             input: text.to_string(),
-            voice: params.voice.unwrap_or_else(|| self.default_voice.clone()),
+            voice: params
+                .voice
+                .unwrap_or_else(|| self.default_voice.clone())
+                .strip_prefix("openai_")
+                .unwrap_or_else(|| self.default_voice.as_str()) // careful here if default_voice has prefix?
+                // Wait, default_voice is usually stored without prefix in config, but let's be safe.
+                // Actually, voices() returns "openai_alloy", so UI likely sends "openai_alloy".
+                // We should strip it.
+                .to_string(),
             response_format: "mp3".to_string(),
             speed: params.speed,
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| TtsError::SynthesisFailed(format!("Request failed: {}", e)))?;
+        let client = self.client.clone();
+        let url_clone = url.clone();
+        let api_key = self.api_key.clone();
+        let body = request_body.clone();
+
+        let response = crate::utils::http::request_with_retry(
+            move || {
+                let client = client.clone();
+                let url = url_clone.clone();
+                let body = body.clone();
+                let api_key = api_key.clone();
+                async move {
+                    client
+                        .post(&url)
+                        .header("Authorization", format!("Bearer {}", api_key))
+                        .header("Content-Type", "application/json")
+                        .json(&body)
+                        .send()
+                        .await
+                }
+            },
+            2,
+        )
+        .await
+        .map_err(|e| TtsError::SynthesisFailed(format!("Request failed: {}", e)))?;
 
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -131,5 +160,67 @@ impl TtsProvider for OpenAITtsProvider {
             .await
             .map_err(|e| TtsError::SynthesisFailed(format!("Bytes error: {}", e)))?;
         Ok(bytes.to_vec())
+    }
+
+    async fn synthesize_stream(
+        &self,
+        text: &str,
+        params: TtsParams,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>, TtsError>> + Send>>, TtsError> {
+        let url = format!("{}/audio/speech", self.base_url);
+        let request_body = TtsRequest {
+            model: self.model.clone(),
+            input: text.to_string(),
+            voice: params
+                .voice
+                .unwrap_or_else(|| self.default_voice.clone())
+                .strip_prefix("openai_")
+                .unwrap_or_else(|| self.default_voice.as_str())
+                .to_string(),
+            response_format: "mp3".to_string(),
+            speed: params.speed,
+        };
+
+        let client = self.client.clone();
+        let url_clone = url.clone();
+        let api_key = self.api_key.clone();
+        let body = request_body.clone();
+
+        let response = crate::utils::http::request_with_retry(
+            move || {
+                let client = client.clone();
+                let url = url_clone.clone();
+                let body = body.clone();
+                let api_key = api_key.clone();
+                async move {
+                    client
+                        .post(&url)
+                        .header("Authorization", format!("Bearer {}", api_key))
+                        .header("Content-Type", "application/json")
+                        .json(&body)
+                        .send()
+                        .await
+                }
+            },
+            2,
+        )
+        .await
+        .map_err(|e| TtsError::SynthesisFailed(format!("Request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(TtsError::SynthesisFailed(format!(
+                "OpenAI API error: {}",
+                error_text
+            )));
+        }
+
+        use futures::StreamExt;
+        let stream = response.bytes_stream().map(|chunk_res| match chunk_res {
+            Ok(bytes) => Ok(bytes.to_vec()),
+            Err(e) => Err(TtsError::SynthesisFailed(format!("Stream error: {}", e))),
+        });
+
+        Ok(Box::pin(stream))
     }
 }

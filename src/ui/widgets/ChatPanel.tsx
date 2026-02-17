@@ -145,7 +145,26 @@ export default function ChatPanel() {
         }
     }, [sttAutoSend, startStreaming, stopStreaming]);
 
-    const { state: voiceState, volume: micVolume, start: startVoice, stop: stopVoice } = useVoiceInput(handleTranscription);
+    const { state: voiceState, volume: micVolume, partialText: sttPartialText, start: startVoice, stop: stopVoice } = useVoiceInput(handleTranscription);
+
+    // Effect: Sync partial STT text to input box for real-time feedback
+    useEffect(() => {
+        if (voiceState === VoiceState.Listening && sttPartialText) {
+            // If auto-send is OFF, we just show the text in the box so user can edit later
+            if (!sttAutoSend) {
+                setInput(sttPartialText);
+            }
+            // If auto-send is ON, we usually wait for finalization to send.
+            // But we could show a preview? For now, let's keep it simple:
+            // Only fill input if NOT auto-sending. 
+            // (If auto-sending, the text appears in chat history immediately upon finish).
+            // Actually, showing it in input box is good feedback even for auto-send (it enters chat on stop).
+            // But valid auto-send logic often clears input.
+            // Let's stick to: Always show in input box while speaking.
+            // When "Final" fires, if AutoSend -> Clear Input & Send. If Not -> Leave in Input.
+            setInput(sttPartialText);
+        }
+    }, [sttPartialText, voiceState, sttAutoSend]);
 
     // Sync vision state when localStorage changes (from Settings panel)
     useEffect(() => {
