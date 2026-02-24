@@ -1,0 +1,318 @@
+/* ================================================================
+   原神 (Genshin Impact) Theme — Design System
+   Kokoro Engine Official Demo MOD
+   
+   Visual Reference: Genshin Impact 4.x UI
+   - Dialogue: Dark translucent panel at bottom, gold name tag, 
+     diamond ornaments, player choices on right
+   - Settings: Paimon menu style — dark sidebar, warm parchment 
+     content area, ornamental borders
+   ================================================================ */
+
+/* ── Google Fonts (fallback) ──────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&family=Noto+Serif+SC:wght@400;600;700&display=swap');
+
+/* ── 汉仪文黑 (Genshin Impact Official Font) ─────── */
+@font-face {
+    font-family: 'HYWenHei';
+    src: url('../assets/HYWenHei-85W.ttf') format('truetype');
+    font-weight: normal;
+    font-style: normal;
+    font-display: swap;
+}
+
+/* ── Design Tokens ────────────────────────────────── */
+:root {
+    /* ── Core Palette ── */
+    --gi-parchment: #F0E6D3;
+    --gi-parchment-light: #F7F0E3;
+    --gi-parchment-dark: #E8D9C0;
+    --gi-ink: #3B4255;
+    --gi-ink-light: #4A5568;
+    --gi-ink-muted: rgba(59, 66, 85, 0.6);
+
+    /* Gold accents (Genshin signature) */
+    --gi-gold: #C6A963;
+    --gi-gold-light: #D4BE82;
+    --gi-gold-dim: rgba(198, 169, 99, 0.4);
+    --gi-gold-glow: rgba(198, 169, 99, 0.2);
+
+    /* Dark panels (dialogue, sidebar) */
+    --gi-dark: #1C1F2B;
+    --gi-dark-panel: rgba(28, 31, 43, 0.88);
+    --gi-dark-card: rgba(38, 42, 60, 0.85);
+    --gi-dark-hover: rgba(50, 55, 78, 0.9);
+    --gi-dark-input: rgba(22, 24, 35, 0.85);
+
+    /* Transparent overlays */
+    --gi-overlay: rgba(0, 0, 0, 0.45);
+    --gi-overlay-light: rgba(0, 0, 0, 0.25);
+
+    /* Borders */
+    --gi-border-gold: rgba(198, 169, 99, 0.5);
+    --gi-border-gold-dim: rgba(198, 169, 99, 0.2);
+    --gi-border-light: rgba(198, 169, 99, 0.12);
+    --gi-border-dark: rgba(255, 255, 255, 0.08);
+    --gi-border-warm: rgba(59, 66, 85, 0.15);
+
+    /* Interactive states */
+    --gi-accent: #E2C47D;
+    --gi-accent-hover: #F0D88F;
+    --gi-danger: #D4534B;
+    --gi-success: #63A66B;
+
+    /* Text (light-on-dark context) */
+    --gi-text-light: #ECE5D8;
+    --gi-text-gold: #D3BC8E;
+    --gi-text-dim: rgba(236, 229, 216, 0.45);
+
+    /* Text (dark-on-light context — settings panel) */
+    --gi-text-dark: #3B4255;
+    --gi-text-dark-secondary: #6B7280;
+
+    /* Radii */
+    --gi-radius-xs: 2px;
+    --gi-radius-sm: 4px;
+    --gi-radius-md: 6px;
+    --gi-radius-lg: 10px;
+
+    /* Typography */
+    --gi-font-sans: 'HYWenHei', 'Noto Sans SC', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+    --gi-font-serif: 'HYWenHei', 'Noto Serif SC', 'SimSun', serif;
+
+    /* Motion */
+    --gi-ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+    --gi-ease-out: cubic-bezier(0.0, 0.0, 0.2, 1);
+    --gi-duration: 0.2s;
+    --gi-duration-lg: 0.4s;
+}
+
+/* ── Reset ────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html,
+body {
+    width: 100%;
+    height: 100%;
+    font-family: var(--gi-font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow: hidden;
+}
+
+/* ── Scrollbar (dark context) ─────────────────────── */
+.gi-scrollbar-dark::-webkit-scrollbar {
+    width: 3px;
+}
+
+.gi-scrollbar-dark::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.gi-scrollbar-dark::-webkit-scrollbar-thumb {
+    background: rgba(198, 169, 99, 0.3);
+    border-radius: 4px;
+}
+
+.gi-scrollbar-dark::-webkit-scrollbar-thumb:hover {
+    background: rgba(198, 169, 99, 0.5);
+}
+
+/* ── Scrollbar (light context) ────────────────────── */
+.gi-scrollbar-light::-webkit-scrollbar {
+    width: 4px;
+}
+
+.gi-scrollbar-light::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.gi-scrollbar-light::-webkit-scrollbar-thumb {
+    background: rgba(59, 66, 85, 0.2);
+    border-radius: 4px;
+}
+
+.gi-scrollbar-light::-webkit-scrollbar-thumb:hover {
+    background: rgba(59, 66, 85, 0.4);
+}
+
+/* ── Ornamental Divider ───────────────────────────── */
+.gi-divider {
+    position: relative;
+    height: 1px;
+    background: linear-gradient(90deg,
+            transparent 0%,
+            var(--gi-border-gold) 20%,
+            var(--gi-gold) 50%,
+            var(--gi-border-gold) 80%,
+            transparent 100%);
+    margin: 16px 0;
+}
+
+.gi-divider::before {
+    content: '◆';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 8px;
+    color: var(--gi-gold);
+    background: inherit;
+    padding: 0 6px;
+}
+
+/* ── Diamond Bullet ───────────────────────────────── */
+.gi-diamond {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    background: var(--gi-gold);
+    transform: rotate(45deg);
+    flex-shrink: 0;
+}
+
+.gi-diamond-outline {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border: 1.5px solid var(--gi-gold);
+    transform: rotate(45deg);
+    flex-shrink: 0;
+}
+
+/* ── Animations ───────────────────────────────────── */
+@keyframes gi-fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes gi-slideUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes gi-slideInRight {
+    from {
+        opacity: 0;
+        transform: translateX(16px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+@keyframes gi-scaleIn {
+    from {
+        opacity: 0;
+        transform: scale(0.95);
+    }
+
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+@keyframes gi-typeChar {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+@keyframes gi-dotPulse {
+
+    0%,
+    80%,
+    100% {
+        transform: scale(0.5);
+        opacity: 0.3;
+    }
+
+    40% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+@keyframes gi-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@keyframes gi-goldPulse {
+
+    0%,
+    100% {
+        box-shadow: 0 0 6px var(--gi-gold-glow);
+    }
+
+    50% {
+        box-shadow: 0 0 16px rgba(198, 169, 99, 0.35);
+    }
+}
+
+/* ── Corner Ornament Mixin ────────────────────────── */
+.gi-ornament-corners {
+    position: relative;
+}
+
+.gi-ornament-corners::before,
+.gi-ornament-corners::after {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border-color: var(--gi-gold-dim);
+    border-style: solid;
+    pointer-events: none;
+}
+
+.gi-ornament-corners::before {
+    top: -1px;
+    left: -1px;
+    border-width: 2px 0 0 2px;
+}
+
+.gi-ornament-corners::after {
+    bottom: -1px;
+    right: -1px;
+    border-width: 0 2px 2px 0;
+}
+
+/* ── Utility ──────────────────────────────────────── */
+.gi-hidden {
+    display: none !important;
+}
+
+.gi-truncate {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}

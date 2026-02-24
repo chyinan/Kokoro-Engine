@@ -40,6 +40,38 @@ interface SettingsPanelProps {
     onDisplayModeChange: (mode: Live2DDisplayMode) => void;
     customModelPath: string | null;
     onCustomModelChange: (path: string | null) => void;
+    // Optional props for external state management (Mod support)
+    availableModels?: any[]; // Live2dModelInfo[]
+    persona?: string;
+    responseLanguage?: string;
+    ttsConfig?: TtsSystemConfig;
+    llmConfig?: any; // LlmConfig
+    sttConfig?: SttConfig;
+    visionConfig?: any; // VisionConfig
+    imageGenConfig?: ImageGenSystemConfig;
+    mcpServers?: any[]; // McpServerStatus[]
+    modList?: any[]; // ModManifest[]
+    ttsProviders?: ProviderStatus[];
+    ttsVoices?: VoiceProfile[];
+    // Dynamic State
+    voiceInterrupt?: boolean;
+    onVoiceInterruptChange?: (v: boolean) => void;
+    fetchedLlmModels?: string[];
+    scannedTtsModels?: Record<string, any>; // GptSovitsModels
+    // New: Full Parity Props
+    memoryList?: any[];
+    memoryTotal?: number;
+    rvcAvailable?: boolean;
+    rvcModels?: any[];
+    singProgress?: any;
+    sdModels?: string[];
+    capturedScreenUrl?: string | null;
+    userLanguage?: string;
+    activeCharacterId?: string;
+    characters?: any[];
+    // User Profile
+    userName?: string;
+    userPersona?: string;
 }
 
 const tabs: { id: TabId; label: string; icon: typeof Key }[] = [

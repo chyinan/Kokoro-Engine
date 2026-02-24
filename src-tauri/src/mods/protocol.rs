@@ -24,7 +24,23 @@ pub fn handle_mod_request<R: tauri::Runtime>(
     }
 
     let clean_path = path_str.strip_prefix('/').unwrap_or(path_str);
-    let file_path = PathBuf::from("mods").join(clean_path);
+
+    // Resolve the mods directory — during `cargo tauri dev` the CWD is
+    // `src-tauri/`, so we fall back to `../mods` if `mods/` doesn't exist.
+    let mods_base = {
+        let direct = PathBuf::from("mods");
+        if direct.exists() {
+            direct
+        } else {
+            let parent = PathBuf::from("../mods");
+            if parent.exists() {
+                parent
+            } else {
+                direct
+            }
+        }
+    };
+    let file_path = mods_base.join(clean_path);
 
     if !file_path.exists() {
         return tauri::http::Response::builder()
@@ -64,6 +80,17 @@ pub fn handle_mod_request<R: tauri::Runtime>(
             tauri::http::Response::builder()
                 .header("Content-Type", mime_type)
                 .header("Access-Control-Allow-Origin", "*")
+                .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                .header("Access-Control-Allow-Headers", "*")
+                // Permissive CSP for mod HTML — mods need full flexibility
+                .header(
+                    "Content-Security-Policy",
+                    "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; \
+                     img-src * data: blob:; \
+                     media-src * data: blob:; \
+                     script-src * 'unsafe-inline' 'unsafe-eval'; \
+                     style-src * 'unsafe-inline';",
+                )
                 .body(body)
                 .unwrap()
         }

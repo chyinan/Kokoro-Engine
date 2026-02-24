@@ -15,7 +15,12 @@ export class ComponentRegistry {
     private modComponents = new Map<string, ModComponentEntry>();
     private listeners = new Set<() => void>();
 
+    /**
+     * Register a core component. Will NOT overwrite a mod-registered
+     * component so that HMR / page reload doesn't clobber mod overrides.
+     */
     register(name: string, component: ComponentConstructor) {
+        if (this.modComponents.has(name)) return; // mod takes precedence
         this.components.set(name, component);
         this.notify();
     }
@@ -28,11 +33,16 @@ export class ComponentRegistry {
     registerModComponent(slotName: string, modId: string, src: string) {
         this.modComponents.set(slotName, { modId, src });
 
+        // Tauri v2: custom protocols are accessed via http://<scheme>.localhost/
+        // The backend emits mod://modId/path, but iframes need http://mod.localhost/modId/path
+        const iframeSrc = src.replace(/^mod:\/\//, 'http://mod.localhost/');
+        console.log(`[Registry] registerModComponent '${slotName}' → ${iframeSrc}`);
+
         // Create a wrapper React component for this mod iframe
         const ModWrapper: ComponentConstructor = (props: Record<string, unknown>) => {
             return IframeSandbox({
                 id: `${modId}-${slotName}`,
-                src,
+                src: iframeSrc,
                 permissions: [],
                 componentProps: props,
             });

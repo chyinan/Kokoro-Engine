@@ -164,20 +164,51 @@ pub fn run() {
             let mcp_manager = Arc::new(tokio::sync::Mutex::new(mcp_manager));
             app.manage(mcp_manager.clone());
 
-            // Connect MCP servers in background
+            // Connect MCP servers in background — per-server tasks so the
+            // manager lock is only held briefly and list_mcp_servers stays responsive.
             let mcp_mgr_clone = mcp_manager.clone();
             let mcp_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 // Delay to let app fully init
                 tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                let mut mgr = mcp_mgr_clone.lock().await;
-                mgr.connect_all().await;
-                drop(mgr);
-                // Register MCP tools into ActionRegistry
-                if let Some(registry) =
-                    mcp_app.try_state::<std::sync::Arc<tokio::sync::RwLock<crate::actions::ActionRegistry>>>()
-                {
-                    crate::mcp::bridge::register_mcp_tools(&mcp_mgr_clone, registry.inner()).await;
+
+                // Grab configs & mark "connecting", then release lock immediately
+                let configs = {
+                    let mut mgr = mcp_mgr_clone.lock().await;
+                    mgr.prepare_connect_all()
+                };
+
+                // Spawn a task per server so they connect in parallel
+                let mut handles = Vec::new();
+                for cfg in configs {
+                    let mgr_arc = mcp_mgr_clone.clone();
+                    let app_handle = mcp_app.clone();
+                    handles.push(tauri::async_runtime::spawn(async move {
+                        let connect_result = {
+                            let mut mgr = mgr_arc.lock().await;
+                            let result = mgr.connect_server(&cfg).await;
+                            mgr.clear_connecting(&cfg.name);
+                            if let Err(ref e) = result {
+                                mgr.set_connection_error(&cfg.name, e.to_string());
+                            }
+                            result
+                        };
+                        if let Ok(()) = connect_result {
+                            println!("[MCP] Connected '{}', registering tools...", cfg.name);
+                            if let Some(registry) =
+                                app_handle.try_state::<std::sync::Arc<tokio::sync::RwLock<crate::actions::ActionRegistry>>>()
+                            {
+                                crate::mcp::bridge::register_mcp_tools(&mgr_arc, registry.inner()).await;
+                            }
+                        } else if let Err(e) = connect_result {
+                            eprintln!("[MCP] Failed to connect '{}': {}", cfg.name, e);
+                        }
+                    }));
+                }
+
+                // Wait for all to finish (fire-and-forget is also fine)
+                for h in handles {
+                    let _ = h.await;
                 }
             });
 
@@ -189,7 +220,14 @@ pub fn run() {
             app.manage(Arc::new(tokio::sync::Mutex::new(vision_server)));
 
             // ModManager init: spawns QuickJS thread + event relay
-            let mut mod_manager = ModManager::new("mods");
+            let mut mods_path = std::path::PathBuf::from("mods");
+            if !mods_path.exists() {
+                 let parent_mods = std::path::Path::new("../mods");
+                 if parent_mods.exists() {
+                     mods_path = parent_mods.to_path_buf();
+                 }
+            }
+            let mut mod_manager = ModManager::new(mods_path);
             mod_manager.init(app.handle().clone());
             app.manage(tokio::sync::Mutex::new(mod_manager));
 

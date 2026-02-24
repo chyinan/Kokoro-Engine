@@ -5,7 +5,7 @@ use crate::llm::service::LlmService;
 use futures::StreamExt;
 use serde::Serialize;
 use std::collections::HashMap;
-use tauri::{Emitter, Manager, State, Window};
+use tauri::{Emitter, State, Window};
 use tokio::sync::RwLock;
 
 #[derive(serde::Deserialize)]
@@ -28,6 +28,7 @@ struct ExpressionEvent {
 }
 
 #[derive(Serialize, Clone)]
+#[allow(dead_code)]
 struct ChatImageGenEvent {
     prompt: String,
 }
@@ -45,10 +46,12 @@ struct IntentResponse {
     extra_info: Option<String>,
     // Optional: catch-all for system calls if we expand this
     #[serde(default)]
+    #[allow(dead_code)]
     system_call: Option<String>,
 }
 
 /// Valid emotion names that the LLM can output
+#[allow(dead_code)]
 const VALID_EMOTIONS: &[&str] = &[
     "neutral",
     "happy",
@@ -68,6 +71,7 @@ const VALID_ACTIONS: &[&str] = &[
 ];
 
 /// Mood value ranges for the keyword fallback
+#[allow(dead_code)]
 const EMOTION_MOODS: &[(&str, f32)] = &[
     ("excited", 0.95),
     ("happy", 0.85),
@@ -81,15 +85,20 @@ const EMOTION_MOODS: &[(&str, f32)] = &[
     ("angry", 0.15),
 ];
 
+#[allow(dead_code)]
 const TAG_PREFIX: &str = "[EMOTION:";
+#[allow(dead_code)]
 const IMAGE_TAG_PREFIX: &str = "[IMAGE_PROMPT:";
+#[allow(dead_code)]
 const ACTION_TAG_PREFIX: &str = "[ACTION:";
+#[allow(dead_code)]
 const TOOL_CALL_TAG_PREFIX: &str = "[TOOL_CALL:";
 
 // ── Tag Buffering ──────────────────────────────────────────
 
 /// Returns the byte position up to which it's safe to emit text to the user.
 /// Holds back any text that could be the start of an `[EMOTION:...]` or `[IMAGE_PROMPT:...]` tag.
+#[allow(dead_code)]
 fn find_safe_emit_boundary(text: &str) -> usize {
     if let Some(last_bracket) = text.rfind('[') {
         let suffix = &text[last_bracket..];
@@ -138,6 +147,7 @@ fn find_safe_emit_boundary(text: &str) -> usize {
 
 /// Parse `[IMAGE_PROMPT:...]` from the end of the text.
 /// Returns (cleaned_text, Option<prompt>).
+#[allow(dead_code)]
 fn parse_image_prompt_tag(text: &str) -> (String, Option<String>) {
     let trimmed = text.trim_end();
 
@@ -158,6 +168,7 @@ fn parse_image_prompt_tag(text: &str) -> (String, Option<String>) {
 
 /// Parse `[ACTION:xxx]` from the text.
 /// Returns (cleaned_text, Option<ActionEvent>).
+#[allow(dead_code)]
 fn parse_action_tag(text: &str) -> (String, Option<ActionEvent>) {
     let trimmed = text.trim_end();
 
@@ -180,6 +191,7 @@ fn parse_action_tag(text: &str) -> (String, Option<ActionEvent>) {
 
 /// Parsed tool call from `[TOOL_CALL:name|key=val|key=val]`
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 struct ToolCall {
     name: String,
     args: HashMap<String, String>,
@@ -187,6 +199,7 @@ struct ToolCall {
 
 /// Parse all `[TOOL_CALL:name|key=val|...]` tags from the text.
 /// Returns (cleaned_text, Vec<ToolCall>).
+#[allow(dead_code)]
 fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
     let mut result = text.to_string();
     let mut calls = Vec::new();
@@ -237,6 +250,7 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
 /// Parse `[EMOTION:xxx|MOOD:0.xx]` from the end of the response.
 /// Returns (cleaned_text, ExpressionEvent).
 /// Falls back to keyword detection if no valid tag is found.
+#[allow(dead_code)]
 fn parse_expression_tag(text: &str) -> (String, ExpressionEvent) {
     let trimmed = text.trim_end();
 
@@ -272,6 +286,7 @@ fn parse_expression_tag(text: &str) -> (String, ExpressionEvent) {
 }
 
 /// Fallback keyword-based emotion detection.
+#[allow(dead_code)]
 fn detect_expression_keywords(text: &str) -> ExpressionEvent {
     let lower = text.to_lowercase();
 
@@ -345,7 +360,7 @@ pub async fn stream_chat(
     state: State<'_, AIOrchestrator>,
     _imagegen_state: State<'_, ImageGenService>,
     llm_state: State<'_, LlmService>,
-    action_registry: State<'_, std::sync::Arc<RwLock<crate::actions::ActionRegistry>>>,
+    _action_registry: State<'_, std::sync::Arc<RwLock<crate::actions::ActionRegistry>>>,
     _vision_watcher: State<'_, crate::vision::watcher::VisionWatcher>,
     vision_server: State<
         '_,
@@ -448,30 +463,25 @@ pub async fn stream_chat(
     // ── EXECUTION & STATE UPDATE ────────────────────────────────
 
     // 1. Emotion Update
-    let mut current_expression = "neutral".to_string();
-    let mut current_mood = 0.5;
-
-    if let Some(emo) = intent.emotion_target {
-        let (new_expr, new_mood) = state.update_emotion(&emo, 0.5).await; // 0.5 as neutral mood strength change for now
-        current_expression = new_expr;
-        current_mood = new_mood;
+    let (current_expression, _current_mood) = if let Some(emo) = intent.emotion_target {
+        let (new_expr, new_mood) = state.update_emotion(&emo, 0.5).await;
 
         // Emit immediate visual update
         window
             .emit(
                 "chat-expression",
                 ExpressionEvent {
-                    expression: current_expression.clone(),
-                    mood: current_mood,
+                    expression: new_expr.clone(),
+                    mood: new_mood,
                 },
             )
             .map_err(|e| e.to_string())?;
+        (new_expr, new_mood)
     } else {
         // Just get current state
         let emotion_state = state.emotion_state.lock().await;
-        current_expression = emotion_state.current_emotion().to_string();
-        current_mood = emotion_state.mood();
-    }
+        (emotion_state.current_emotion().to_string(), emotion_state.mood())
+    };
 
     // 2. Action Execution
     if let Some(ref action) = intent.action_request {

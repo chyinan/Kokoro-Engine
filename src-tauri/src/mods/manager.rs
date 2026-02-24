@@ -166,6 +166,11 @@ impl ModManager {
     }
 
     pub fn scan_mods(&mut self) -> Vec<ModManifest> {
+        println!(
+            "[ModManager] Current Working Directory: {:?}",
+            std::env::current_dir()
+        );
+        println!("[ModManager] Scanning mods from: {:?}", self.mods_path);
         let mut mods = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.mods_path) {
             for entry in entries.flatten() {
@@ -173,21 +178,38 @@ impl ModManager {
                 if path.is_dir() {
                     let manifest_path = path.join("mod.json");
                     if manifest_path.exists() {
+                        println!("[ModManager] Found manifest at: {:?}", manifest_path);
                         if let Ok(content) = fs::read_to_string(&manifest_path) {
                             match serde_json::from_str::<ModManifest>(&content) {
                                 Ok(manifest) => {
+                                    println!(
+                                        "[ModManager] Successfully loaded mod: {}",
+                                        manifest.id
+                                    );
                                     mods.push(manifest.clone());
                                     self.loaded_mods.insert(manifest.id.clone(), manifest);
                                 }
                                 Err(e) => {
                                     eprintln!("Failed to parse mod.json in {:?}: {}", path, e);
+                                    println!(
+                                        "[ModManager] ERROR parsing mod.json in {:?}: {}",
+                                        path, e
+                                    );
                                 }
                             }
                         }
+                    } else {
+                        println!("[ModManager] No mod.json in check: {:?}", path);
                     }
                 }
             }
+        } else {
+            println!(
+                "[ModManager] Failed to read mods directory: {:?}",
+                self.mods_path
+            );
         }
+        println!("[ModManager] Total mods loaded: {}", mods.len());
         mods
     }
 

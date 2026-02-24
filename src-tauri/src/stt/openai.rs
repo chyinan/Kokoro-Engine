@@ -43,6 +43,7 @@ struct OpenAIResponse {
     #[serde(default)]
     segments: Vec<OpenAISegment>,
     #[serde(default)]
+    #[allow(dead_code)]
     duration: f32,
 }
 
@@ -77,7 +78,7 @@ impl SttEngine for OpenAIWhisperProvider {
 
         // 1. Dynamic Timeout Calculation
         // Base 10s + 2x audio duration. e.g. 30s audio -> 70s timeout.
-        let timeout_duration =
+        let _timeout_duration =
             Duration::from_secs(10) + Duration::from_secs_f32(duration_sec * 2.0);
 
         // 2. Prepare Form Data
@@ -109,7 +110,7 @@ impl SttEngine for OpenAIWhisperProvider {
         // Clone for closure capture
         let client = self.client.clone();
         let api_key = self.api_key.clone();
-        let base_url = self.base_url.clone(); // Needed if we reconstruct URL, but we have `url` string below.
+        let _base_url = self.base_url.clone(); // Needed if we reconstruct URL, but we have `url` string below.
         let model = self.model.clone();
         let language = language.map(|s| s.to_string());
         let mime_type = mime_type.to_string();

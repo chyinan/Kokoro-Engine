@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from "react";
 import { LayoutConfig, LayoutNode } from "./types";
 import { registry } from "../registry/ComponentRegistry";
 import { IframeSandbox } from "../mods/IframeSandbox";
@@ -5,8 +6,20 @@ import { AnimatePresence, motion } from "framer-motion";
 import { clsx } from "clsx";
 import { useTheme } from "../theme/ThemeContext";
 
+// Subscribe to registry changes so mod component overrides trigger re-renders.
+let registrySnapshot = 0;
+const subscribeRegistry = (onStoreChange: () => void) => {
+    return registry.subscribe(() => {
+        registrySnapshot++;
+        onStoreChange();
+    });
+};
+const getRegistrySnapshot = () => registrySnapshot;
+
 const LayoutNodeRenderer = ({ node }: { node: LayoutNode }) => {
     const { activeTheme } = useTheme();
+    // Re-render when registry changes (mod component registered / unregistered)
+    useSyncExternalStore(subscribeRegistry, getRegistrySnapshot);
 
     // ── mod-component: Render mod iframe directly from layout.json ──
     if (node.type === "mod-component" && node.src) {
@@ -27,6 +40,8 @@ const LayoutNodeRenderer = ({ node }: { node: LayoutNode }) => {
 
     if (node.type === "component" && node.component) {
         const Component = registry.get(node.component);
+        const isMod = registry.isModComponent(node.component);
+        console.log(`[LayoutRenderer] Lookup '${node.component}' → ${Component?.displayName || Component?.name || (Component ? 'found' : 'NOT FOUND')}  isMod=${isMod}`);
 
         // Get animation preset from theme or default
         const animation = node.motion && activeTheme?.animations?.[node.motion]
@@ -47,6 +62,18 @@ const LayoutNodeRenderer = ({ node }: { node: LayoutNode }) => {
                 <div
                     style={{ ...node.style, zIndex: node.zIndex || 0 }}
                     className="absolute inset-0 pointer-events-auto"
+                >
+                    {content}
+                </div>
+            );
+        }
+
+        // Mod component — render as full-screen overlay so the iframe
+        // can use the entire viewport (e.g. Genshin dialogue UI).
+        if (isMod) {
+            return (
+                <div
+                    style={{ position: "fixed", inset: 0, zIndex: node.zIndex || 20, pointerEvents: "auto" }}
                 >
                     {content}
                 </div>

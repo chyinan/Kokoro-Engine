@@ -5,12 +5,15 @@
  * Usage inside a MOD component HTML:
  *   Kokoro.on("update", (props) => { ... });
  *   Kokoro.emit("action", { target: "jump" });
+ *   const result = await Kokoro.invoke("list_mods", {});
  */
 (function () {
     "use strict";
 
     const listeners = {};
     let _ready = false;
+    let _invokeIdCounter = 0;
+    const _invokePending = new Map();
 
     const Kokoro = {
         /**
@@ -69,6 +72,36 @@
         },
 
         /**
+         * Invoke a Tauri command through the host window proxy.
+         * Returns a Promise that resolves with the command result.
+         * @param {string} command - Tauri command name
+         * @param {object} args - Command arguments
+         * @returns {Promise<*>}
+         */
+        invoke(command, args = {}) {
+            return new Promise((resolve, reject) => {
+                const id = `inv_${++_invokeIdCounter}`;
+                _invokePending.set(id, { resolve, reject });
+
+                window.parent.postMessage(
+                    {
+                        type: "invoke",
+                        payload: { id, command, args },
+                    },
+                    "*"
+                );
+
+                // Timeout after 30s
+                setTimeout(() => {
+                    if (_invokePending.has(id)) {
+                        _invokePending.delete(id);
+                        reject(new Error(`Invoke '${command}' timed out`));
+                    }
+                }, 30000);
+            });
+        },
+
+        /**
          * Log a message via the host engine console.
          * @param {...*} args
          */
@@ -116,6 +149,20 @@
                                 e
                             );
                         }
+                    }
+                }
+                break;
+            }
+            case "invoke-result": {
+                // Resolve/reject a pending Kokoro.invoke() call
+                const { id, result, error } = msg.payload || {};
+                if (id && _invokePending.has(id)) {
+                    const { resolve, reject } = _invokePending.get(id);
+                    _invokePending.delete(id);
+                    if (error) {
+                        reject(new Error(error));
+                    } else {
+                        resolve(result);
                     }
                 }
                 break;

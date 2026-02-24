@@ -3,6 +3,15 @@
 
 @import "tailwindcss";
 
+/* ── 汉仪文黑 (Genshin Impact Official Font) ─────────────── */
+@font-face {
+  font-family: 'HYWenHei';
+  src: url('/HYWenHei-85W.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* ═══════════════════════════════════════════════════════════
    Kokoro Engine — Neon Glass Design System
    All visual properties flow through CSS custom properties.
@@ -57,8 +66,8 @@
   --glass-blur: 12px;
 
   /* ─── Typography ─── */
-  --font-heading: 'Rajdhani', sans-serif;
-  --font-body: 'Quicksand', sans-serif;
+  --font-heading: 'HYWenHei', 'Rajdhani', sans-serif;
+  --font-body: 'HYWenHei', 'Quicksand', sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 
   --tracking-wide: 0.05em;
@@ -139,12 +148,15 @@ body,
 
 /* ── Hidden Scrollbar ──────────────────────────────────── */
 .scrollbar-hide {
-  scrollbar-width: none;          /* Firefox */
-  -ms-overflow-style: none;       /* IE/Edge */
+  scrollbar-width: none;
+  /* Firefox */
+  -ms-overflow-style: none;
+  /* IE/Edge */
 }
 
 .scrollbar-hide::-webkit-scrollbar {
-  display: none;                  /* Chrome/Safari/WebKit */
+  display: none;
+  /* Chrome/Safari/WebKit */
 }
 
 /* ── Focus Ring ─────────────────────────────────────────── */
@@ -195,5 +207,5 @@ body,
 
 /* ── Tailwind Theme Layer ───────────────────────────────── */
 @theme {
-  --font-sans: 'Quicksand', sans-serif;
+  --font-sans: 'HYWenHei', 'Quicksand', sans-serif;
 }

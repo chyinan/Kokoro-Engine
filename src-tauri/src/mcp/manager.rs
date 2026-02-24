@@ -116,7 +116,8 @@ impl McpManager {
         Ok(())
     }
 
-    /// Connect to all enabled servers.
+    /// Connect to all enabled servers (sequential, holds lock the entire time).
+    /// Prefer `prepare_connect_all` + per-server spawned tasks for non-blocking startup.
     pub async fn connect_all(&mut self) {
         let configs: Vec<McpServerConfig> =
             self.configs.iter().filter(|c| c.enabled).cloned().collect();
@@ -126,6 +127,17 @@ impl McpManager {
                 eprintln!("[MCP] Failed to connect '{}': {}", config.name, e);
             }
         }
+    }
+
+    /// Return all enabled configs and mark them as "connecting".
+    /// Caller should release the lock, then spawn per-server connection tasks.
+    pub fn prepare_connect_all(&mut self) -> Vec<McpServerConfig> {
+        let configs: Vec<McpServerConfig> =
+            self.configs.iter().filter(|c| c.enabled).cloned().collect();
+        for cfg in &configs {
+            self.mark_connecting(&cfg.name);
+        }
+        configs
     }
 
     /// Connect to a single server.
@@ -177,10 +189,29 @@ impl McpManager {
     }
 
     /// Get status of all configured servers.
+    /// Only locks individual clients that are actually connected — pending /
+    /// disconnected servers return immediately without extra lock contention.
     pub async fn list_status(&self) -> Vec<McpServerStatus> {
         let mut statuses = Vec::new();
 
         for config in &self.configs {
+            let is_pending = self.pending_connections.contains(&config.name);
+            let error = self.connection_errors.get(&config.name).cloned();
+
+            // Fast path: if the server is still connecting or has no client,
+            // skip the client lock entirely.
+            if is_pending {
+                statuses.push(McpServerStatus {
+                    name: config.name.clone(),
+                    connected: false,
+                    tool_count: 0,
+                    server_version: None,
+                    status: "connecting".to_string(),
+                    error: None,
+                });
+                continue;
+            }
+
             let (connected, tool_count, version) =
                 if let Some(client) = self.clients.get(&config.name) {
                     let c = client.lock().await;
@@ -193,13 +224,8 @@ impl McpManager {
                     (false, 0, None)
                 };
 
-            let is_pending = self.pending_connections.contains(&config.name);
-            let error = self.connection_errors.get(&config.name).cloned();
-
             let status = if connected {
                 "connected".to_string()
-            } else if is_pending {
-                "connecting".to_string()
             } else {
                 "disconnected".to_string()
             };

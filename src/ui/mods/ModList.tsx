@@ -171,7 +171,7 @@ export function ModList() {
                                     </p>
                                 </div>
                                 <div className="flex items-center gap-1.5 ml-2 shrink-0">
-                                    {mod.entry && (
+                                    {(mod.entry || (mod.scripts && mod.scripts.length > 0) || mod.theme || mod.layout || (mod.components && Object.keys(mod.components).length > 0)) && (
                                         <motion.button
                                             whileHover={{ scale: 1.05 }}
                                             whileTap={{ scale: 0.95 }}

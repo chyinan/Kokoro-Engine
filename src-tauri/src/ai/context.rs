@@ -224,7 +224,7 @@ impl AIOrchestrator {
         &self,
         query: &str,
         _allow_image_gen: bool,
-        tool_prompt: Option<String>,
+        _tool_prompt: Option<String>,
     ) -> Result<Vec<Message>> {
         // 1. Determine Model logic
         let model_type = self.router.route(query);

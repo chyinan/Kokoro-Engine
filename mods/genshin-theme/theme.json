@@ -1,0 +1,36 @@
+{
+    "id": "genshin-theme",
+    "name": "Genshin Impact",
+    "variables": {
+        "--color-accent": "#C6A963",
+        "--color-bg-primary": "#1C1F2B",
+        "--color-bg-surface": "rgba(28, 31, 43, 0.92)",
+        "--color-bg-elevated": "rgba(38, 42, 60, 0.95)",
+        "--color-text-primary": "#ECE5D8",
+        "--color-text-secondary": "#D3BC8E",
+        "--color-text-muted": "rgba(236, 229, 216, 0.45)",
+        "--color-border": "rgba(198, 169, 99, 0.2)",
+        "--color-border-accent": "rgba(198, 169, 99, 0.5)"
+    },
+    "assets": {
+        "fonts": [
+            "https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&family=Noto+Serif+SC:wght@400;600;700&display=swap"
+        ]
+    },
+    "animations": {
+        "panelEntry": {
+            "initial": {
+                "opacity": 0,
+                "y": 16
+            },
+            "animate": {
+                "opacity": 1,
+                "y": 0
+            },
+            "transition": {
+                "duration": 0.35,
+                "ease": "easeOut"
+            }
+        }
+    }
+}

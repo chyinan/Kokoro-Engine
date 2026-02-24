@@ -1,0 +1,2572 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Genshin Settings</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        /* ================================================================
+           Genshin Settings UI — Full Parity
+           ================================================================ */
+        body {
+            background: var(--gi-overlay);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .settings-root {
+            width: 95%;
+            max-width: 1000px;
+            height: 90%;
+            max-height: 650px;
+            display: flex;
+            border-radius: var(--gi-radius-lg);
+            overflow: hidden;
+            animation: gi-scaleIn 0.3s var(--gi-ease-out);
+            box-shadow:
+                0 0 0 1px var(--gi-border-gold-dim),
+                0 20px 60px rgba(0, 0, 0, 0.5),
+                0 0 40px rgba(198, 169, 99, 0.08);
+        }
+
+        /* ── Sidebar ────────────────────────────── */
+        .sidebar {
+            width: 220px;
+            flex-shrink: 0;
+            background: var(--gi-dark-panel);
+            border-right: 1px solid var(--gi-border-gold-dim);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar-header {
+            padding: 24px 20px 16px;
+            border-bottom: 1px solid var(--gi-border-gold-dim);
+        }
+
+        .sidebar-header h2 {
+            font-family: var(--gi-font-serif);
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--gi-gold-light);
+            letter-spacing: 2px;
+            text-align: center;
+        }
+
+        .sidebar-tabs {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px 0;
+        }
+
+        .sidebar-tab {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 24px;
+            color: var(--gi-text-dim);
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border-left: 3px solid transparent;
+        }
+
+        .sidebar-tab:hover {
+            color: var(--gi-text-light);
+            background: rgba(198, 169, 99, 0.06);
+        }
+
+        .sidebar-tab.active {
+            color: var(--gi-accent);
+            background: rgba(198, 169, 99, 0.1);
+            border-left-color: var(--gi-gold);
+        }
+
+        .sidebar-tab i {
+            width: 18px;
+            text-align: center;
+            font-style: normal;
+        }
+
+        /* ── Content ────────────────────────────── */
+        .content-panel {
+            flex: 1;
+            background: var(--gi-parchment);
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
+        .close-btn {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            z-index: 20;
+            width: 32px;
+            height: 32px;
+            border: 1px solid var(--gi-border-warm);
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.8);
+            color: var(--gi-ink);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+
+        .close-btn:hover {
+            background: var(--gi-danger);
+            border-color: var(--gi-danger);
+            color: white;
+            transform: rotate(90deg);
+        }
+
+        .content-header {
+            padding: 24px 32px 0;
+            flex-shrink: 0;
+        }
+
+        .content-header h3 {
+            font-family: var(--gi-font-serif);
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--gi-ink);
+            border-left: 4px solid var(--gi-gold);
+            padding-left: 12px;
+        }
+
+        .content-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px 32px 32px;
+        }
+
+        /* ── Generic Form Styles ────────────────── */
+        .setting-section {
+            margin-bottom: 24px;
+            background: rgba(255, 255, 255, 0.4);
+            border: 1px solid var(--gi-border-warm);
+            border-radius: var(--gi-radius-md);
+            padding: 16px;
+        }
+
+        .setting-section-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--gi-ink-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .setting-section-title::before {
+            content: '';
+            display: block;
+            width: 6px;
+            height: 6px;
+            background: var(--gi-gold);
+            transform: rotate(45deg);
+        }
+
+        .setting-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px dashed rgba(0, 0, 0, 0.05);
+        }
+
+        .setting-row:last-child {
+            border-bottom: none;
+        }
+
+        .setting-info {
+            flex: 1;
+            padding-right: 16px;
+        }
+
+        .setting-label {
+            font-size: 14px;
+            color: var(--gi-ink);
+            font-weight: 500;
+        }
+
+        .setting-desc {
+            font-size: 11px;
+            color: var(--gi-ink-muted);
+            margin-top: 2px;
+        }
+
+        /* Inputs */
+        .gi-input,
+        .gi-select,
+        .gi-textarea {
+            font-family: var(--gi-font-sans);
+            font-size: 13px;
+            border: 1px solid var(--gi-border-warm);
+            border-radius: var(--gi-radius-sm);
+            background: rgba(255, 255, 255, 0.7);
+            color: var(--gi-ink);
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        .gi-input {
+            padding: 6px 10px;
+            width: 200px;
+        }
+
+        .gi-select {
+            padding: 6px 10px;
+            min-width: 140px;
+            cursor: pointer;
+        }
+
+        .gi-textarea {
+            padding: 10px;
+            width: 100%;
+            min-height: 80px;
+            resize: vertical;
+            margin-top: 8px;
+        }
+
+        .gi-input:focus,
+        .gi-select:focus,
+        .gi-textarea:focus {
+            border-color: var(--gi-gold);
+            box-shadow: 0 0 0 2px var(--gi-gold-glow);
+            background: white;
+        }
+
+        /* Toggle Switch */
+        .gi-toggle {
+            position: relative;
+            width: 44px;
+            height: 24px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .gi-toggle.checked {
+            background: var(--gi-green);
+        }
+
+        .gi-toggle::after {
+            content: '';
+            position: absolute;
+            left: 2px;
+            top: 2px;
+            width: 20px;
+            height: 20px;
+            background: white;
+            border-radius: 50%;
+            transition: all 0.3s;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+        }
+
+        .gi-toggle.checked::after {
+            left: 22px;
+        }
+
+        /* Sliders */
+        .gi-slider-container {
+            width: 200px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .gi-slider {
+            flex: 1;
+            height: 4px;
+            background: rgba(0, 0, 0, 0.1);
+            border-radius: 2px;
+            appearance: none;
+            outline: none;
+        }
+
+        .gi-slider::-webkit-slider-thumb {
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--gi-gold);
+            cursor: pointer;
+            border: 2px solid white;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+        }
+
+        .gi-slider-val {
+            font-family: monospace;
+            font-size: 12px;
+            width: 32px;
+            text-align: right;
+            color: var(--gi-ink-muted);
+        }
+
+        /* Buttons */
+        .gi-btn {
+            padding: 8px 16px;
+            border: 1px solid var(--gi-border-gold-dim);
+            background: var(--gi-parchment);
+            color: var(--gi-ink);
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .gi-btn:hover {
+            background: white;
+            border-color: var(--gi-gold);
+            color: var(--gi-gold-dark);
+        }
+
+        .gi-btn.primary {
+            background: var(--gi-gold);
+            color: white;
+            border-color: var(--gi-gold);
+        }
+
+        .gi-btn.primary:hover {
+            background: var(--gi-gold-light);
+        }
+
+        .gi-btn.danger {
+            border-color: var(--gi-danger);
+            color: var(--gi-danger);
+        }
+
+        .gi-btn.danger:hover {
+            background: var(--gi-danger);
+            color: white;
+        }
+
+        /* Image Grid */
+        .img-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+            gap: 12px;
+        }
+
+        .img-card {
+            aspect-ratio: 16/9;
+            border-radius: 6px;
+            overflow: hidden;
+            border: 2px solid transparent;
+            cursor: pointer;
+            position: relative;
+        }
+
+        .img-card img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .img-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .img-card.active {
+            border-color: var(--gi-gold);
+        }
+
+        .img-delete-btn {
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            background: rgba(0, 0, 0, 0.5);
+            color: white;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            display: none;
+        }
+
+        .img-card:hover .img-delete-btn {
+            display: flex;
+        }
+
+        .img-delete-btn:hover {
+            background: var(--gi-danger);
+        }
+
+        /* List Items (Mods/MCP) */
+        .list-item {
+            background: rgba(255, 255, 255, 0.6);
+            border: 1px solid transparent;
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 8px;
+        }
+
+        .list-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 600;
+            color: var(--gi-ink);
+        }
+
+        .list-item-desc {
+            font-size: 11px;
+            color: var(--gi-ink-muted);
+            margin-top: 4px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ccc;
+            display: inline-block;
+            margin-right: 6px;
+        }
+
+        .status-dot.connected {
+            background: var(--gi-green);
+        }
+
+        .status-dot.error {
+            background: var(--gi-danger);
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="settings-root">
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h2>系统设置</h2>
+            </div>
+            <div class="sidebar-tabs" id="sidebarTabs">
+                <div class="sidebar-tab active" data-tab="bg" data-title="背景">背景</div>
+                <div class="sidebar-tab" data-tab="model" data-title="模型">模型</div>
+                <div class="sidebar-tab" data-tab="persona" data-title="人设">人设</div>
+                <div class="sidebar-tab" data-tab="api" data-title="LLM API">LLM API</div>
+                <div class="sidebar-tab" data-tab="tts" data-title="语音合成 (TTS)">语音合成 (TTS)</div>
+                <div class="sidebar-tab" data-tab="stt" data-title="语音识别 (STT)">语音识别 (STT)</div>
+                <div class="sidebar-tab" data-tab="sing" data-title="唱歌 (Sing)">唱歌 (Sing)</div>
+                <div class="sidebar-tab" data-tab="memory" data-title="记忆 (Memory)">记忆 (Memory)</div>
+                <div class="sidebar-tab" data-tab="vision" data-title="视觉 (Vision)">视觉 (Vision)</div>
+                <div class="sidebar-tab" data-tab="imagegen" data-title="绘图">绘图</div>
+                <div class="sidebar-tab" data-tab="mods" data-title="模组">模组</div>
+                <div class="sidebar-tab" data-tab="mcp" data-title="MCP 服务">MCP 服务</div>
+            </div>
+        </div>
+
+        <!-- Content -->
+        <div class="content-panel">
+            <div class="close-btn" id="closeBtn">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+            </div>
+
+            <div class="content-header">
+                <h3 id="panelTitle">背景设置</h3>
+            </div>
+
+            <div class="content-body" id="panelBody">
+                <!-- Content injected by JS -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="http://mod.localhost/mod-sdk.js"></script>
+    <script>
+        (async () => {
+            // State
+            let state = {};
+            let activeTab = 'bg';
+
+            // DOM
+            const body = document.getElementById('panelBody');
+            const title = document.getElementById('panelTitle');
+            const closeBtn = document.getElementById('closeBtn');
+
+            // ── Tab Management ────────────────
+            document.getElementById('sidebarTabs').addEventListener('click', (e) => {
+                const tab = e.target.closest('.sidebar-tab');
+                if (!tab) return;
+
+                document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                activeTab = tab.dataset.tab;
+                title.textContent = tab.dataset.title || tab.innerText.trim();
+                render();
+            });
+
+            closeBtn.addEventListener('click', () => Kokoro.action('close_settings'));
+
+            // ── Rendering Logic ───────────────
+            function render() {
+                body.innerHTML = '';
+                // Ensure state exists
+                if (!state) return;
+
+                switch (activeTab) {
+                    case 'bg': renderBackground(); break;
+                    case 'model': renderModel(); break;
+                    case 'persona': renderPersona(); break;
+                    case 'api': renderLLM(); break;
+                    case 'tts': renderTTS(); break;
+                    case 'stt': renderSTT(); break;
+                    case 'sing': renderSing(); break;
+                    case 'memory': renderMemory(); break;
+                    case 'vision': renderVision(); break;
+                    case 'imagegen': renderImageGen(); break;
+                    case 'mods': renderMods(); break;
+                    case 'mcp': renderMCP(); break;
+                }
+            }
+
+            // ── 1. Background Tab ────────────────
+            function renderBackground() {
+                const ctrls = state.backgroundControls || {};
+                const config = ctrls.config || {};
+                const images = ctrls.images || [];
+
+                // Config Section
+                const cfgSec = createSection("基础设置");
+                cfgSec.appendChild(createToggle("启用背景", "是否显示背景图片", config.enabled, (v) => {
+                    Kokoro.action('set_bg_config', { enabled: v });
+                }));
+
+                const modeOpts = [
+                    { value: 'slideshow', label: '轮播图片' },
+                    { value: 'generated', label: 'AI 生成' },
+                    { value: 'static', label: '静态图片' }
+                ];
+                cfgSec.appendChild(createSelect("模式", "背景来源模式", modeOpts, config.mode, (v) => {
+                    Kokoro.action('set_bg_config', { mode: v });
+                }));
+
+                if (config.mode === 'slideshow') {
+                    cfgSec.appendChild(createToggle("随机轮播", "随机顺序播放图片", config.rotation === 'random', (v) => {
+                        Kokoro.action('set_bg_config', { rotation: v ? 'random' : 'sequential' });
+                    }));
+                    cfgSec.appendChild(createSlider("轮播间隔 (秒)", 5, 300, 5, config.interval || 30, (v) => {
+                        Kokoro.action('set_bg_config', { interval: parseInt(v) });
+                    }));
+                }
+
+                cfgSec.appendChild(createToggle("背景模糊", "对背景图片应用模糊效果", config.blur, (v) => {
+                    Kokoro.action('set_bg_config', { blur: v });
+                }));
+
+                if (config.blur) {
+                    cfgSec.appendChild(createSlider("模糊强度", 2, 30, 1, config.blurAmount || 5, (v) => {
+                        Kokoro.action('set_bg_config', { blurAmount: parseInt(v) });
+                    }));
+                }
+                body.appendChild(cfgSec);
+
+                // Image Grid
+                const imgSec = createSection("图片管理 (" + images.length + ")");
+                const grid = document.createElement('div');
+                grid.className = 'img-grid';
+
+                images.forEach((url, i) => {
+                    const card = document.createElement('div');
+                    card.className = 'img-card' + (state.bgImage === url ? ' active' : '');
+                    const img = document.createElement('img');
+                    img.src = url;
+                    card.appendChild(img);
+
+                    const delBtn = document.createElement('div');
+                    delBtn.className = 'img-delete-btn';
+                    delBtn.innerHTML = '✕';
+                    delBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        Kokoro.action('remove_bg_image', { index: i });
+                    };
+                    card.appendChild(delBtn);
+
+                    card.onclick = () => Kokoro.action('set_background', { url });
+                    grid.appendChild(card);
+                });
+                imgSec.appendChild(grid);
+
+                // Import/Clear
+                const actionsRow = document.createElement('div');
+                actionsRow.style.marginTop = '16px';
+                actionsRow.style.display = 'flex';
+                actionsRow.style.gap = '10px';
+
+                const clearBtn = document.createElement('button');
+                clearBtn.className = 'gi-btn danger';
+                clearBtn.innerText = '清空所有图片';
+                clearBtn.onclick = () => {
+                    if (confirm('确定要清空所有背景图片吗？')) Kokoro.action('clear_bg_images');
+                };
+                actionsRow.appendChild(clearBtn);
+
+                const importBtn = document.createElement('button');
+                importBtn.className = 'gi-btn primary';
+                importBtn.innerText = '+ 导入图片';
+                importBtn.onclick = () => Kokoro.action('import_bg_images');
+                actionsRow.appendChild(importBtn);
+
+                imgSec.appendChild(actionsRow);
+                body.appendChild(imgSec);
+            }
+
+            // ── 2. Model Tab ────────────────
+            function renderModel() {
+                // Display Mode selector
+                const dispSec = createSection("显示模式");
+                const displayModes = [
+                    { value: 'full', label: '全身' },
+                    { value: 'upper-thigh', label: '半身' },
+                    { value: 'upper', label: '上半身' }
+                ];
+                dispSec.appendChild(createSelect("显示模式", "控制 Live2D 模型显示范围", displayModes, state.displayMode || 'full', (v) => {
+                    Kokoro.action('set_display_mode', { mode: v });
+                }));
+                body.appendChild(dispSec);
+
+                // Current model
+                const modelSec = createSection("模型选择");
+                modelSec.appendChild(createRow("当前模型",
+                    `<div class="gi-input" style="width:100%;text-overflow:ellipsis;overflow:hidden;white-space:nowrap">${escapeHtml(state.customModelPath || '默认模型')}</div>`
+                ));
+
+                // Model list from state
+                const models = state.availableModels || [];
+                if (models.length > 0) {
+                    const list = document.createElement('div');
+                    list.style.marginTop = '8px';
+
+                    // Default model option
+                    const defItem = document.createElement('div');
+                    defItem.className = 'list-item' + (!state.customModelPath ? ' active' : '');
+                    defItem.style.cursor = 'pointer';
+                    defItem.innerHTML = `<div class="list-item-header"><span>默认模型</span><span style="font-size:10px;opacity:0.6">内置</span></div>`;
+                    defItem.onclick = () => Kokoro.action('set_custom_model', { path: null });
+                    list.appendChild(defItem);
+
+                    models.forEach(m => {
+                        const item = document.createElement('div');
+                        item.className = 'list-item' + (state.customModelPath === m.path ? ' active' : '');
+                        item.style.cursor = 'pointer';
+                        item.style.display = 'flex';
+                        item.style.justifyContent = 'space-between';
+                        item.style.alignItems = 'center';
+
+                        const infoDiv = document.createElement('div');
+                        infoDiv.style.flex = '1';
+                        infoDiv.style.minWidth = '0';
+                        infoDiv.innerHTML = `
+                            <div class="list-item-header">
+                                <span>${escapeHtml(m.name)}</span>
+                                <span style="font-size:10px;opacity:0.6">${escapeHtml(m.path || '')}</span>
+                            </div>
+                        `;
+                        infoDiv.onclick = () => Kokoro.action('set_custom_model', { path: m.path });
+                        item.appendChild(infoDiv);
+
+                        // Delete button
+                        const delBtn = document.createElement('button');
+                        delBtn.className = 'gi-btn danger';
+                        delBtn.style.padding = '4px 10px';
+                        delBtn.style.fontSize = '10px';
+                        delBtn.style.marginLeft = '8px';
+                        delBtn.style.flexShrink = '0';
+                        delBtn.textContent = '删除';
+                        delBtn.onclick = (e) => {
+                            e.stopPropagation();
+                            if (confirm(`确定删除模型 "${m.name}" 吗？`)) {
+                                Kokoro.action('delete_live2d_model', { name: m.name });
+                            }
+                        };
+                        item.appendChild(delBtn);
+
+                        list.appendChild(item);
+                    });
+                    modelSec.appendChild(list);
+                }
+
+                // Action buttons
+                const actRow = document.createElement('div');
+                actRow.style.marginTop = '12px';
+                actRow.style.display = 'flex';
+                actRow.style.gap = '8px';
+                actRow.innerHTML = `
+                    <button class="gi-btn" onclick="Kokoro.action('refresh_models')">刷新列表</button>
+                    <button class="gi-btn primary" onclick="Kokoro.action('import_model')">导入模型</button>
+                `;
+                modelSec.appendChild(actRow);
+
+                const hint = document.createElement('div');
+                hint.className = 'setting-desc';
+                hint.style.marginTop = '8px';
+                hint.textContent = '支持 .zip 包或 .model3.json 文件';
+                modelSec.appendChild(hint);
+
+                body.appendChild(modelSec);
+            }
+
+            // ── 3. Persona Tab ────────────────
+            function renderPersona() {
+                // Character list section
+                const charSec = createSection("角色列表");
+                const characters = state.characters || [];
+                const activeCharId = state.activeCharacterId || 'default';
+
+                if (characters.length > 0) {
+                    const charList = document.createElement('div');
+                    characters.forEach(c => {
+                        const item = document.createElement('div');
+                        item.className = 'list-item' + (String(c.id) === String(activeCharId) ? ' active' : '');
+                        item.style.cursor = 'pointer';
+                        item.innerHTML = `
+                            <div class="list-item-header">
+                                <span>${escapeHtml(c.name || 'Unnamed')}</span>
+                                <span style="font-size:10px;opacity:0.6">${c.sourceFormat && c.sourceFormat !== 'manual' ? escapeHtml(c.sourceFormat) : ''}</span>
+                            </div>
+                        `;
+                        item.onclick = () => Kokoro.action('select_character', { id: c.id });
+                        charList.appendChild(item);
+                    });
+                    charSec.appendChild(charList);
+                } else {
+                    charSec.appendChild(createRow("", "<div style='text-align:center;color:var(--gi-ink-muted)'>暂无角色</div>"));
+                }
+
+                // Action buttons
+                const charActions = document.createElement('div');
+                charActions.style.display = 'flex';
+                charActions.style.gap = '8px';
+                charActions.style.marginTop = '8px';
+                charActions.innerHTML = `
+                    <button class="gi-btn" onclick="Kokoro.action('create_character')">新建角色</button>
+                    <button class="gi-btn" onclick="Kokoro.action('import_character')">导入角色卡</button>
+                `;
+                charSec.appendChild(charActions);
+                body.appendChild(charSec);
+
+                // Active character edit section
+                const section = createSection("角色设定");
+                section.appendChild(createRow("角色人设", `
+                    <textarea class="gi-textarea" id="persona_text">${escapeHtml(state.persona || '')}</textarea>
+                `));
+                setTimeout(() => {
+                    const el = document.getElementById('persona_text');
+                    if (el) el.onchange = function () { Kokoro.action('set_persona', { persona: this.value }); };
+                }, 0);
+
+                const responseLangOpts = [
+                    { value: '', label: '自动 (Auto)' },
+                    { value: '中文', label: '中文 (Chinese)' },
+                    { value: 'English', label: 'English' },
+                    { value: '日本語', label: '日本語 (Japanese)' },
+                    { value: '한국어', label: '한국어 (Korean)' }
+                ];
+                section.appendChild(createSelect("回复语言", "AI 回复使用的语言", responseLangOpts, state.responseLanguage, (v) => {
+                    Kokoro.action('set_language', { language: v });
+                }));
+                body.appendChild(section);
+
+                // User Profile Section
+                const userSec = createSection("用户设定");
+                userSec.appendChild(createRow("用户名称", `
+                    <input class="gi-input" type="text" value="${escapeHtml(state.userName || '')}" id="user_name_input">
+                `));
+                setTimeout(() => {
+                    const el = document.getElementById('user_name_input');
+                    if (el) el.onchange = function () { Kokoro.action('set_user_name', { name: this.value }); };
+                }, 0);
+
+                userSec.appendChild(createRow("用户人设", `
+                    <textarea class="gi-textarea" placeholder="描述你自己，让 AI 更好地了解你..." id="user_persona_text">${escapeHtml(state.userPersona || '')}</textarea>
+                `));
+                setTimeout(() => {
+                    const el = document.getElementById('user_persona_text');
+                    if (el) el.onchange = function () { Kokoro.action('set_user_persona', { persona: this.value }); };
+                }, 0);
+
+                const userLangOpts = [
+                    { value: '', label: '自动 (Auto)' },
+                    { value: '中文', label: '中文 (Chinese)' },
+                    { value: 'English', label: 'English' },
+                    { value: '日本語', label: '日本語 (Japanese)' },
+                    { value: '한국어', label: '한국어 (Korean)' }
+                ];
+                userSec.appendChild(createSelect("用户语言", "您使用的语言", userLangOpts, state.userLanguage, (v) => {
+                    Kokoro.action('set_user_language', { language: v });
+                }));
+                body.appendChild(userSec);
+            }
+
+            // ── 4. API Tab ────────────────
+            function renderLLM() {
+                const config = state.llmConfig || {};
+                const providers = config.providers || [];
+                const activeId = config.active_provider || '';
+                const activeProv = providers.find(p => p.id === activeId) || providers[0] || {};
+                const isOllama = activeProv.provider_type === 'ollama';
+
+                // Provider selector buttons
+                const provSec = createSection("LLM 服务商");
+                if (providers.length > 0) {
+                    const btnRow = document.createElement('div');
+                    btnRow.style.display = 'flex';
+                    btnRow.style.gap = '8px';
+                    btnRow.style.marginBottom = '12px';
+                    providers.forEach(p => {
+                        const btn = document.createElement('button');
+                        btn.className = 'gi-btn' + (p.id === activeId ? ' primary' : '');
+                        btn.style.flex = '1';
+                        btn.innerHTML = `<div>${p.id}</div><div style="font-size:10px;opacity:0.6">${p.provider_type === 'ollama' ? 'Local' : 'Cloud'}</div>`;
+                        btn.onclick = () => {
+                            config.active_provider = p.id;
+                            Kokoro.action('save_llm_config', { config });
+                        };
+                        btnRow.appendChild(btn);
+                    });
+                    provSec.appendChild(btnRow);
+                }
+                body.appendChild(provSec);
+
+                // Active provider config
+                const cfgSec = createSection("模型配置");
+
+                if (!isOllama) {
+                    cfgSec.appendChild(createRow("API Key", `
+                        <input class="gi-input" type="password" value="${escapeHtml(activeProv.api_key || '')}" id="llm_api_key">
+                    `));
+                    // Bind change event after DOM insert
+                    setTimeout(() => {
+                        const el = document.getElementById('llm_api_key');
+                        if (el) el.onchange = function () {
+                            activeProv.api_key = this.value;
+                            config.providers = providers.map(p => p.id === activeProv.id ? activeProv : p);
+                            Kokoro.action('save_llm_config', { config });
+                        };
+                    }, 0);
+
+                    if (activeProv.api_key_env) {
+                        const envNote = document.createElement('div');
+                        envNote.className = 'setting-desc';
+                        envNote.innerHTML = `环境变量回退: <strong>${activeProv.api_key_env}</strong>`;
+                        cfgSec.appendChild(envNote);
+                    }
+                }
+
+                cfgSec.appendChild(createRow("Base URL", `
+                    <input class="gi-input" type="text" value="${escapeHtml(activeProv.base_url || '')}" id="llm_base_url"
+                        placeholder="${isOllama ? 'http://localhost:11434' : 'https://api.openai.com/v1'}">
+                `));
+                setTimeout(() => {
+                    const el = document.getElementById('llm_base_url');
+                    if (el) el.onchange = function () {
+                        activeProv.base_url = this.value;
+                        config.providers = providers.map(p => p.id === activeProv.id ? activeProv : p);
+                        Kokoro.action('save_llm_config', { config });
+                    };
+                }, 0);
+
+                // Model with fetch button
+                const modelRow = document.createElement('div');
+                modelRow.className = 'setting-row';
+                modelRow.innerHTML = `
+                    <div class="setting-info"><div class="setting-label">模型名称</div></div>
+                    <div class="setting-ctrl" style="display:flex; gap:6px; align-items:center">
+                        <input class="gi-input" type="text" value="${escapeHtml(activeProv.model || '')}" id="llm_model"
+                            placeholder="${isOllama ? 'llama3' : 'gpt-4'}">
+                        <button class="gi-btn" id="fetchModelsBtn" style="white-space:nowrap">获取模型</button>
+                    </div>
+                `;
+                cfgSec.appendChild(modelRow);
+                setTimeout(() => {
+                    const modelEl = document.getElementById('llm_model');
+                    if (modelEl) modelEl.onchange = function () {
+                        activeProv.model = this.value;
+                        config.providers = providers.map(p => p.id === activeProv.id ? activeProv : p);
+                        Kokoro.action('save_llm_config', { config });
+                    };
+                    const fetchBtn = document.getElementById('fetchModelsBtn');
+                    if (fetchBtn) fetchBtn.onclick = () => {
+                        Kokoro.action('fetch_llm_models', {
+                            providerType: activeProv.provider_type,
+                            baseUrl: activeProv.base_url,
+                            apiKey: activeProv.api_key
+                        });
+                    };
+                }, 0);
+
+                // Show fetched models from state
+                const fetched = state.fetchedLlmModels || [];
+                if (fetched.length > 0) {
+                    const modelListSec = document.createElement('div');
+                    modelListSec.className = 'setting-desc';
+                    modelListSec.style.marginTop = '6px';
+                    modelListSec.innerHTML = `可用模型 (${fetched.length}): ` +
+                        fetched.slice(0, 20).map(m => `<span style="cursor:pointer;text-decoration:underline" onclick="document.getElementById('llm_model').value='${escapeHtml(m)}'; document.getElementById('llm_model').dispatchEvent(new Event('change'))">${escapeHtml(m)}</span>`).join(', ');
+                    cfgSec.appendChild(modelListSec);
+                }
+
+                body.appendChild(cfgSec);
+
+                // System LLM section
+                const sysSec = createSection("系统 LLM (意图解析)");
+                const sysDesc = document.createElement('div');
+                sysDesc.className = 'setting-desc';
+                sysDesc.style.marginBottom = '10px';
+                sysDesc.textContent = '用于控制动作和表情的独立模型。建议使用体积更小/速度更快的模型以节省成本并降低延迟。';
+                sysSec.appendChild(sysDesc);
+
+                const sysProvOpts = [{ value: '', label: `同主模型 (${activeId})` }].concat(
+                    providers.map(p => ({ value: p.id, label: `${p.id} (${p.provider_type})` }))
+                );
+                sysSec.appendChild(createSelect("服务商", "", sysProvOpts, config.system_provider || '', (v) => {
+                    config.system_provider = v || undefined;
+                    Kokoro.action('save_llm_config', { config });
+                }));
+
+                sysSec.appendChild(createRow("模型名称 (可选)", `
+                    <input class="gi-input" type="text" value="${escapeHtml(config.system_model || '')}" id="llm_sys_model" placeholder="默认">
+                `));
+                setTimeout(() => {
+                    const el = document.getElementById('llm_sys_model');
+                    if (el) el.onchange = function () {
+                        config.system_model = this.value || undefined;
+                        Kokoro.action('save_llm_config', { config });
+                    };
+                }, 0);
+
+                body.appendChild(sysSec);
+
+                // Save button
+                const saveRow = document.createElement('div');
+                saveRow.style.marginTop = '16px';
+                saveRow.innerHTML = '<button class="gi-btn primary" style="width:100%" onclick="Kokoro.action(\'save_llm_config\', { config: state.llmConfig })">保存 LLM 配置</button>';
+                body.appendChild(saveRow);
+
+                // Vision Mode toggle
+                const visionSec = createSection("视觉模式");
+                visionSec.appendChild(createToggle("Vision Mode", "允许 AI 使用视觉能力分析屏幕", state.visionEnabled, (v) => {
+                    Kokoro.action('set_vision_enabled', { enabled: v });
+                }));
+                body.appendChild(visionSec);
+            }
+
+            // ── 5. TTS Tab ────────────────
+            function renderTTS() {
+                const ttsConfig = state.ttsConfig || {};
+                const ttsProviders = ttsConfig.providers || [];
+                const activeProvId = ttsConfig.default_provider || '';
+                const activeProv = ttsProviders.find(p => p.id === activeProvId) || ttsProviders[0] || {};
+                const sec = createSection("TTS 设置");
+
+                // Provider selector
+                const provOpts = ttsProviders.map(p => ({ value: p.id, label: `${p.id} (${p.provider_type})` }));
+                sec.appendChild(createSelect("服务商", "选择 TTS 引擎", provOpts, activeProvId, (v) => {
+                    ttsConfig.default_provider = v;
+                    Kokoro.action('save_tts_config', { config: ttsConfig });
+                }));
+
+                // Voice selector — filtered by active provider
+                const allVoices = state.ttsVoices || [];
+                const voices = allVoices
+                    .filter(v => v.provider_id === activeProvId)
+                    .map(v => ({ value: v.voice_id, label: v.name }));
+                if (voices.length > 0) {
+                    sec.appendChild(createSelect("音色", "选择说话声音", voices, activeProv.default_voice || '', (v) => {
+                        activeProv.default_voice = v;
+                        ttsConfig.providers = ttsProviders.map(p => p.id === activeProv.id ? activeProv : p);
+                        Kokoro.action('save_tts_config', { config: ttsConfig });
+                    }));
+                }
+
+                // Base URL — hide for browser provider
+                const provType = activeProv.provider_type || '';
+                if (provType !== 'browser') {
+                    sec.appendChild(createRow("Base URL", `
+                        <input class="gi-input" type="text" value="${escapeHtml(activeProv.base_url || activeProv.endpoint || '')}" id="tts_base_url">
+                    `));
+                    setTimeout(() => {
+                        const el = document.getElementById('tts_base_url');
+                        if (el) el.onchange = function () {
+                            activeProv.base_url = this.value;
+                            ttsConfig.providers = ttsProviders.map(p => p.id === activeProv.id ? activeProv : p);
+                            Kokoro.action('save_tts_config', { config: ttsConfig });
+                        };
+                    }, 0);
+
+                    // GPT-SoVITS specific: install_path + scan button + model dropdowns
+                    if (provType === 'gpt_sovits') {
+                        // Install Path + Scan
+                        const installPath = (activeProv.extra && activeProv.extra.install_path) || '';
+                        sec.appendChild(createRow("安装路径", `
+                            <div style="display:flex;gap:6px;align-items:center;width:100%">
+                                <input class="gi-input" type="text" value="${escapeHtml(installPath)}" id="tts_install_path" style="flex:1" placeholder="GPT-SoVITS 安装目录">
+                                <button class="gi-btn" id="tts_scan_btn" style="white-space:nowrap">扫描模型</button>
+                            </div>
+                        `));
+                        setTimeout(() => {
+                            const pathEl = document.getElementById('tts_install_path');
+                            const scanBtn = document.getElementById('tts_scan_btn');
+                            if (pathEl) pathEl.onchange = function () {
+                                if (!activeProv.extra) activeProv.extra = {};
+                                activeProv.extra.install_path = this.value;
+                                ttsConfig.providers = ttsProviders.map(p => p.id === activeProv.id ? activeProv : p);
+                                Kokoro.action('save_tts_config', { config: ttsConfig });
+                            };
+                            if (scanBtn) scanBtn.onclick = () => {
+                                const path = document.getElementById('tts_install_path')?.value || '';
+                                if (path) {
+                                    scanBtn.textContent = '扫描中...';
+                                    scanBtn.disabled = true;
+                                    Kokoro.action('scan_gpt_sovits_models', { providerId: activeProv.id, installPath: path });
+                                    setTimeout(() => { scanBtn.textContent = '扫描模型'; scanBtn.disabled = false; }, 3000);
+                                }
+                            };
+                        }, 0);
+
+                        // GPT Model dropdown
+                        const scanned = (state.scannedTtsModels || {})[activeProv.id] || {};
+                        const gptModels = scanned.gpt_models || [];
+                        const sovitsModels = scanned.sovits_models || [];
+                        const gptWeights = (activeProv.extra && activeProv.extra.gpt_weights) || '';
+                        const sovitsWeights = (activeProv.extra && activeProv.extra.sovits_weights) || '';
+
+                        if (gptModels.length > 0) {
+                            const gptOpts = gptModels.map(m => ({ value: m, label: m.split('/').pop() || m }));
+                            gptOpts.unshift({ value: '', label: '-- 选择 GPT 模型 --' });
+                            sec.appendChild(createSelect("GPT 模型", "GPT 权重文件", gptOpts, gptWeights, (v) => {
+                                if (!activeProv.extra) activeProv.extra = {};
+                                activeProv.extra.gpt_weights = v;
+                                ttsConfig.providers = ttsProviders.map(p => p.id === activeProv.id ? activeProv : p);
+                                Kokoro.action('save_tts_config', { config: ttsConfig });
+                            }));
+                        } else {
+                            sec.appendChild(createRow("GPT 模型", `
+                                <input class="gi-input" type="text" value="${escapeHtml(gptWeights)}" id="tts_gpt_weights" placeholder="GPT_weights_v2Pro/xxx.ckpt">
+                            `));
+                            setTimeout(() => {
+                                const el = document.getElementById('tts_gpt_weights');
+                                if (el) el.onchange = function () {
+                                    if (!activeProv.extra) activeProv.extra = {};
+                                    activeProv.extra.gpt_weights = this.value;
+                                    ttsConfig.providers = ttsProviders.map(p => p.id === activeProv.id ? activeProv : p);
+                                    Kokoro.action('save_tts_config', { config: ttsConfig });
+                                };
+                            }, 0);
+                        }
+
+                        if (sovitsModels.length > 0) {
+                            const sOpts = sovitsModels.map(m => ({ value: m, label: m.split('/').pop() || m }));
+                            sOpts.unshift({ value: '', label: '-- 选择 SoVITS 模型 --' });
+                            sec.appendChild(createSelect("SoVITS 模型", "SoVITS 权重文件", sOpts, sovitsWeights, (v) => {
+                                if (!activeProv.extra) activeProv.extra = {};
+                                activeProv.extra.sovits_weights = v;
+                                ttsConfig.providers = ttsProviders.map(p => p.id === activeProv.id ? activeProv : p);
+                                Kokoro.action('save_tts_config', { config: ttsConfig });
+                            }));
+                        } else {
+                            sec.appendChild(createRow("SoVITS 模型", `
+                                <input class="gi-input" type="text" value="${escapeHtml(sovitsWeights)}" id="tts_sovits_weights" placeholder="SoVITS_weights_v2Pro/xxx.pth">
+                            `));
+                            setTimeout(() => {
+                                const el = document.getElementById('tts_sovits_weights');
+                                if (el) el.onchange = function () {
+                                    if (!activeProv.extra) activeProv.extra = {};
+                                    activeProv.extra.sovits_weights = this.value;
+                                    ttsConfig.providers = ttsProviders.map(p => p.id === activeProv.id ? activeProv : p);
+                                    Kokoro.action('save_tts_config', { config: ttsConfig });
+                                };
+                            }, 0);
+                        }
+
+                        // Hint
+                        const hint = document.createElement('div');
+                        hint.className = 'setting-desc';
+                        hint.style.marginTop = '4px';
+                        hint.textContent = '留空表示使用默认模型';
+                        sec.appendChild(hint);
+
+                    } else {
+                        // Generic model field for non-GPT-SoVITS providers
+                        sec.appendChild(createRow("Model", `
+                            <input class="gi-input" type="text" value="${escapeHtml(activeProv.model || '')}" id="tts_model">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById('tts_model');
+                            if (el) el.onchange = function () {
+                                activeProv.model = this.value;
+                                ttsConfig.providers = ttsProviders.map(p => p.id === activeProv.id ? activeProv : p);
+                                Kokoro.action('save_tts_config', { config: ttsConfig });
+                            };
+                        }, 0);
+                    }
+                }
+
+                // ── Playback Settings Section ──
+                const playSec = createSection("播放设置");
+
+                // Auto-read toggle
+                playSec.appendChild(createToggle("自动朗读", "AI 回复后自动播放语音", state.ttsEnabled, (v) => {
+                    Kokoro.action('set_tts_enabled', { enabled: v });
+                }));
+
+                // Speed slider
+                playSec.appendChild(createSlider("语速", 0.5, 2.0, 0.1, state.ttsSpeed || 1.0, (v) => {
+                    Kokoro.action('set_tts_speed', { speed: v });
+                }, 'x'));
+
+                // Pitch slider — conditional on provider support
+                const currentProvStatus = (state.ttsProviders || []).find(p => p.id === activeProvId);
+                if (currentProvStatus && currentProvStatus.capabilities && currentProvStatus.capabilities.supports_pitch) {
+                    playSec.appendChild(createSlider("音调", 0.5, 2.0, 0.1, state.ttsPitch || 1.0, (v) => {
+                        Kokoro.action('set_tts_pitch', { pitch: v });
+                    }, 'x'));
+                }
+
+                // Test voice button
+                const testRow = document.createElement('div');
+                testRow.style.marginTop = '8px';
+                const testBtn = document.createElement('button');
+                testBtn.className = 'gi-btn';
+                testBtn.style.width = '100%';
+                testBtn.textContent = '试听语音';
+                testBtn.onclick = () => Kokoro.action('test_tts');
+                testRow.appendChild(testBtn);
+                playSec.appendChild(testRow);
+
+                body.appendChild(playSec);
+
+                // ── Provider Management Section ──
+                const mgmtSec = createSection("Provider 管理");
+
+                ttsProviders.forEach((provider, index) => {
+                    const provItem = document.createElement('div');
+                    provItem.className = 'list-item';
+                    provItem.style.marginBottom = '10px';
+
+                    // Header with toggle + name + delete
+                    const header = document.createElement('div');
+                    header.style.display = 'flex';
+                    header.style.justifyContent = 'space-between';
+                    header.style.alignItems = 'center';
+
+                    const leftSide = document.createElement('div');
+                    leftSide.style.display = 'flex';
+                    leftSide.style.alignItems = 'center';
+                    leftSide.style.gap = '10px';
+
+                    // Enable toggle
+                    const toggle = document.createElement('div');
+                    toggle.className = 'gi-toggle' + (provider.enabled !== false ? ' checked' : '');
+                    toggle.onclick = () => {
+                        toggle.classList.toggle('checked');
+                        provider.enabled = !provider.enabled;
+                        ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                        Kokoro.action('save_tts_config', { config: ttsConfig });
+                    };
+                    leftSide.appendChild(toggle);
+
+                    const nameSpan = document.createElement('span');
+                    nameSpan.style.fontWeight = '600';
+                    nameSpan.textContent = `${provider.id} (${provider.provider_type})`;
+                    leftSide.appendChild(nameSpan);
+                    header.appendChild(leftSide);
+
+                    // Delete button (not for browser)
+                    if (provider.id !== 'browser') {
+                        const delBtn = document.createElement('button');
+                        delBtn.className = 'gi-btn danger';
+                        delBtn.style.padding = '4px 10px';
+                        delBtn.style.fontSize = '11px';
+                        delBtn.textContent = '删除';
+                        delBtn.onclick = () => {
+                            ttsConfig.providers = ttsProviders.filter((_, i) => i !== index);
+                            Kokoro.action('save_tts_config', { config: ttsConfig });
+                        };
+                        header.appendChild(delBtn);
+                    }
+                    provItem.appendChild(header);
+
+                    // Config fields based on provider type
+                    const pType = provider.provider_type || '';
+                    const fieldsDiv = document.createElement('div');
+                    fieldsDiv.style.marginTop = '8px';
+
+                    // API Key (openai/azure/elevenlabs)
+                    if (['openai', 'azure', 'elevenlabs'].includes(pType)) {
+                        const keyId = `tts_prov_key_${index}`;
+                        fieldsDiv.appendChild(createRow("API Key", `
+                            <input class="gi-input" type="password" value="${escapeHtml(provider.api_key || '')}" id="${keyId}" placeholder="sk-...">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById(keyId);
+                            if (el) el.onchange = function () {
+                                provider.api_key = this.value;
+                                ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                                Kokoro.action('save_tts_config', { config: ttsConfig });
+                            };
+                        }, 0);
+                    }
+
+                    // Base URL (openai/local_vits/gpt_sovits/local_rvc)
+                    if (['openai', 'local_vits', 'gpt_sovits', 'local_rvc'].includes(pType)) {
+                        const urlId = `tts_prov_url_${index}`;
+                        const placeholder = pType === 'gpt_sovits' ? 'http://127.0.0.1:9880' :
+                            pType.includes('local') ? 'http://127.0.0.1:5000' : 'https://api.openai.com/v1';
+                        fieldsDiv.appendChild(createRow("Base URL", `
+                            <input class="gi-input" type="text" value="${escapeHtml(provider.base_url || provider.endpoint || '')}" id="${urlId}" placeholder="${placeholder}">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById(urlId);
+                            if (el) el.onchange = function () {
+                                provider.base_url = this.value;
+                                ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                                Kokoro.action('save_tts_config', { config: ttsConfig });
+                            };
+                        }, 0);
+                    }
+
+                    // GPT-SoVITS specific fields
+                    if (pType === 'gpt_sovits') {
+                        if (!provider.extra) provider.extra = {};
+
+                        // ref_audio_path (required)
+                        const refId = `tts_prov_ref_${index}`;
+                        fieldsDiv.appendChild(createRow("参考音频路径 *", `
+                            <input class="gi-input" type="text" value="${escapeHtml(provider.extra.ref_audio_path || '')}" id="${refId}" placeholder="D:/path/to/reference.wav">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById(refId);
+                            if (el) el.onchange = function () {
+                                provider.extra.ref_audio_path = this.value;
+                                ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                                Kokoro.action('save_tts_config', { config: ttsConfig });
+                            };
+                        }, 0);
+
+                        // prompt_text
+                        const ptId = `tts_prov_pt_${index}`;
+                        fieldsDiv.appendChild(createRow("提示文本（可选）", `
+                            <input class="gi-input" type="text" value="${escapeHtml(provider.extra.prompt_text || '')}" id="${ptId}" placeholder="参考音频对应的文本">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById(ptId);
+                            if (el) el.onchange = function () {
+                                provider.extra.prompt_text = this.value;
+                                ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                                Kokoro.action('save_tts_config', { config: ttsConfig });
+                            };
+                        }, 0);
+
+                        // prompt_lang + text_lang
+                        const langOpts = [
+                            { value: 'zh', label: '中文' }, { value: 'en', label: 'English' },
+                            { value: 'ja', label: '日本語' }, { value: 'ko', label: '한국어' },
+                            { value: 'yue', label: '粵語' }, { value: 'auto', label: 'Auto' }
+                        ];
+                        fieldsDiv.appendChild(createSelect("提示语言", "", langOpts, provider.extra.prompt_lang || 'zh', (v) => {
+                            provider.extra.prompt_lang = v;
+                            ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                            Kokoro.action('save_tts_config', { config: ttsConfig });
+                        }));
+                        fieldsDiv.appendChild(createSelect("合成语言", "", langOpts, provider.extra.text_lang || 'zh', (v) => {
+                            provider.extra.text_lang = v;
+                            ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                            Kokoro.action('save_tts_config', { config: ttsConfig });
+                        }));
+                    }
+
+                    // Model field (openai/azure)
+                    if (['openai', 'azure'].includes(pType)) {
+                        const mId = `tts_prov_model_${index}`;
+                        fieldsDiv.appendChild(createRow("Model", `
+                            <input class="gi-input" type="text" value="${escapeHtml(provider.model || '')}" id="${mId}" placeholder="tts-1">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById(mId);
+                            if (el) el.onchange = function () {
+                                provider.model = this.value;
+                                ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                                Kokoro.action('save_tts_config', { config: ttsConfig });
+                            };
+                        }, 0);
+                    }
+
+                    // Model path (local_vits/local_rvc)
+                    if (pType.includes('local')) {
+                        const mpId = `tts_prov_mpath_${index}`;
+                        fieldsDiv.appendChild(createRow("模型路径", `
+                            <input class="gi-input" type="text" value="${escapeHtml(provider.model_path || '')}" id="${mpId}" placeholder="path/to/model.pth">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById(mpId);
+                            if (el) el.onchange = function () {
+                                provider.model_path = this.value;
+                                ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                                Kokoro.action('save_tts_config', { config: ttsConfig });
+                            };
+                        }, 0);
+                    }
+
+                    provItem.appendChild(fieldsDiv);
+                    mgmtSec.appendChild(provItem);
+                });
+
+                // Add Provider buttons
+                const addRow = document.createElement('div');
+                addRow.style.marginTop = '12px';
+                addRow.style.display = 'grid';
+                addRow.style.gridTemplateColumns = 'repeat(2, 1fr)';
+                addRow.style.gap = '8px';
+                ['openai', 'local_vits', 'gpt_sovits', 'local_rvc', 'azure', 'elevenlabs'].forEach(type => {
+                    const btn = document.createElement('button');
+                    btn.className = 'gi-btn';
+                    btn.textContent = '+ ' + type.replace('_', ' ');
+                    btn.onclick = () => {
+                        const newId = type + '_' + (ttsProviders.filter(p => p.provider_type === type).length + 1);
+                        ttsConfig.providers.push({
+                            id: newId,
+                            provider_type: type,
+                            enabled: true,
+                            base_url: '',
+                            api_key: '',
+                            model: '',
+                            extra: {}
+                        });
+                        Kokoro.action('save_tts_config', { config: ttsConfig });
+                    };
+                    addRow.appendChild(btn);
+                });
+                mgmtSec.appendChild(addRow);
+
+                body.appendChild(mgmtSec);
+
+                // Save
+                const saveRow = document.createElement('div');
+                saveRow.style.marginTop = '12px';
+                saveRow.innerHTML = '<button class="gi-btn primary" style="width:100%" onclick="Kokoro.action(\'save_tts_config\', { config: state.ttsConfig })">保存 TTS 配置</button>';
+                sec.appendChild(saveRow);
+
+                body.appendChild(sec);
+            }
+
+            // ── 6. STT Tab ────────────────
+            function renderSTT() {
+                const config = state.sttConfig || {};
+                const sttProviders = config.providers || [];
+                const activeProvId = config.active_provider || '';
+                const activeProv = sttProviders.find(p => p.id === activeProvId) || sttProviders[0] || {};
+                const sec = createSection("语音识别");
+
+                // Enable STT toggle
+                const isEnabled = activeProv.enabled !== false;
+                sec.appendChild(createToggle("启用语音输入", "开启语音识别功能", isEnabled, (v) => {
+                    if (activeProv.id) {
+                        config.providers = sttProviders.map(p => p.id === activeProv.id ? { ...p, enabled: v } : p);
+                    }
+                    Kokoro.action('save_stt_config', { config });
+                }));
+
+                sec.appendChild(createToggle("自动发送", "说话结束自动发送", config.auto_send, (v) => {
+                    config.auto_send = v;
+                    Kokoro.action('save_stt_config', { config });
+                }));
+
+                sec.appendChild(createToggle("允许打断", "说话时是否打断 AI 回复", state.voiceInterrupt, (v) => {
+                    Kokoro.action('set_voice_interrupt', { enabled: v });
+                }));
+
+                // Language dropdown
+                const sttLangOpts = [
+                    { value: '', label: '自动检测 (Auto)' },
+                    { value: 'zh', label: '中文 (Chinese)' },
+                    { value: 'en', label: 'English' },
+                    { value: 'ja', label: '日本語 (Japanese)' },
+                    { value: 'ko', label: '한국어 (Korean)' },
+                    { value: 'es', label: 'Español (Spanish)' },
+                    { value: 'fr', label: 'Français (French)' },
+                    { value: 'de', label: 'Deutsch (German)' },
+                    { value: 'ru', label: 'Русский (Russian)' }
+                ];
+                sec.appendChild(createSelect("识别语言", "语音识别的目标语言", sttLangOpts, config.language || '', (v) => {
+                    config.language = v || undefined;
+                    Kokoro.action('save_stt_config', { config });
+                }));
+
+                // Provider selector
+                const provOpts = sttProviders.map(p => ({ value: p.id, label: `${p.id} (${p.provider_type})` }));
+                if (provOpts.length === 0) {
+                    provOpts.push({ value: 'browser', label: 'browser' }, { value: 'whisper_cpp', label: 'whisper_cpp' });
+                }
+                sec.appendChild(createSelect("引擎", "STT 服务商", provOpts, config.active_provider, (v) => {
+                    config.active_provider = v;
+                    // Enable the selected provider
+                    config.providers = sttProviders.map(p => ({ ...p, enabled: p.id === v ? true : p.enabled }));
+                    Kokoro.action('save_stt_config', { config });
+                }));
+
+                // Provider config fields
+                if (activeProv.provider_type) {
+                    const provCfgSec = document.createElement('div');
+                    provCfgSec.style.marginTop = '8px';
+
+                    // Base URL (for non-openai_whisper)
+                    if (activeProv.provider_type !== 'openai_whisper') {
+                        const urlId = 'stt_prov_url';
+                        provCfgSec.appendChild(createRow("服务器地址", `
+                            <input class="gi-input" type="text" value="${escapeHtml(activeProv.base_url || '')}" id="${urlId}" placeholder="http://127.0.0.1:8080">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById(urlId);
+                            if (el) el.onchange = function () {
+                                config.providers = sttProviders.map(p => p.id === activeProv.id ? { ...p, base_url: this.value } : p);
+                                Kokoro.action('save_stt_config', { config });
+                            };
+                        }, 0);
+                    }
+
+                    // API Key (openai_whisper)
+                    if (activeProv.provider_type === 'openai_whisper') {
+                        const keyId = 'stt_prov_key';
+                        provCfgSec.appendChild(createRow("API Key", `
+                            <input class="gi-input" type="password" value="${escapeHtml(activeProv.api_key || '')}" id="${keyId}" placeholder="sk-...">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById(keyId);
+                            if (el) el.onchange = function () {
+                                config.providers = sttProviders.map(p => p.id === activeProv.id ? { ...p, api_key: this.value } : p);
+                                Kokoro.action('save_stt_config', { config });
+                            };
+                        }, 0);
+                    }
+
+                    sec.appendChild(provCfgSec);
+                }
+
+                // Save
+                const saveRow = document.createElement('div');
+                saveRow.style.marginTop = '12px';
+                saveRow.innerHTML = '<button class="gi-btn primary" style="width:100%" onclick="Kokoro.action(\'save_stt_config\', { config: state.sttConfig })">保存 STT 配置</button>';
+                sec.appendChild(saveRow);
+
+                // Info note
+                const infoNote = document.createElement('div');
+                infoNote.style.marginTop = '12px';
+                infoNote.style.padding = '10px';
+                infoNote.style.background = 'rgba(0,0,0,0.03)';
+                infoNote.style.borderRadius = '6px';
+                infoNote.style.fontSize = '11px';
+                infoNote.style.color = 'var(--gi-ink-muted)';
+                const provType = activeProv.provider_type || '';
+                if (provType === 'openai_whisper') {
+                    infoNote.textContent = 'ℹ️ 使用 OpenAI Whisper API 进行语音识别，需要有效的 API Key。';
+                } else if (provType === 'whisper_cpp') {
+                    infoNote.textContent = 'ℹ️ 使用本地 whisper.cpp 服务器进行语音识别，请确保服务器已启动。地址: ' + (activeProv.base_url || '默认地址');
+                } else {
+                    infoNote.textContent = 'ℹ️ 使用浏览器内置语音识别功能，无需额外配置。';
+                }
+                sec.appendChild(infoNote);
+
+                body.appendChild(sec);
+            }
+
+            // ── 7. Sing Tab ────────────────
+            // Local state for sing tab controls
+            let singSelectedModel = '';
+            let singPitch = 0;
+            let singVocalSep = true;
+            let singAudioPath = null;
+            let singAudioName = '';
+            let singShowAdvanced = false;
+            let singF0Method = 'rmvpe';
+            let singIndexPath = '';
+            let singIndexRate = 0.75;
+
+            function renderSing() {
+                const sec = createSection("RVC 唱歌转换");
+
+                // RVC Status
+                const rvcStatus = state.rvcAvailable ?
+                    '<span style="color:var(--gi-green)">● 服务在线</span>' :
+                    '<span style="color:var(--gi-danger)">● 服务未连接</span>';
+
+                sec.appendChild(createRow("服务状态", `
+                    <div style="display:flex; justify-content:flex-end; align-items:center; gap:10px; width:100%">
+                        ${rvcStatus}
+                        <button class="gi-btn" onclick="Kokoro.action('check_rvc_status')">刷新状态</button>
+                    </div>
+                `));
+
+                // Model Select
+                const models = (state.rvcModels || []).map(m => ({ value: m.name, label: m.name }));
+                sec.appendChild(createSelect("RVC 模型", "选择变声模型", models, singSelectedModel, (v) => {
+                    singSelectedModel = v;
+                }));
+
+                // Controls
+                sec.appendChild(createSlider("音调偏移 (Pitch)", -12, 12, 1, singPitch, (v) => {
+                    singPitch = parseInt(v);
+                }));
+                sec.appendChild(createToggle("人声分离", "自动分离伴奏和人声", singVocalSep, (v) => {
+                    singVocalSep = v;
+                }));
+
+                // File select + convert
+                const fileRow = document.createElement('div');
+                fileRow.className = 'setting-row';
+                fileRow.innerHTML = `
+                    <div class="setting-info"><div class="setting-label">音频文件</div>
+                        <div class="setting-desc">${singAudioName ? escapeHtml(singAudioName) : '未选择文件'}</div>
+                    </div>
+                    <div class="setting-ctrl" style="display:flex; gap:6px">
+                        <button class="gi-btn" id="singSelectFile">选择文件</button>
+                        <button class="gi-btn primary" id="singConvert" ${!singAudioPath ? 'disabled style="opacity:0.5"' : ''}>开始转换</button>
+                    </div>
+                `;
+                sec.appendChild(fileRow);
+
+                setTimeout(() => {
+                    const selectBtn = document.getElementById('singSelectFile');
+                    if (selectBtn) selectBtn.onclick = async () => {
+                        try {
+                            const result = await Kokoro.invoke('plugin:dialog|open', {
+                                multiple: false,
+                                filters: [{ name: 'Audio', extensions: ['mp3', 'wav', 'flac', 'ogg', 'm4a', 'aac'] }]
+                            });
+                            if (result) {
+                                singAudioPath = result;
+                                singAudioName = result.split(/[\\/]/).pop() || 'unknown';
+                                render();
+                            }
+                        } catch (e) {
+                            console.error('[Sing] File dialog failed:', e);
+                        }
+                    };
+                    const convertBtn = document.getElementById('singConvert');
+                    if (convertBtn) convertBtn.onclick = async () => {
+                        if (!singAudioPath) return;
+                        convertBtn.disabled = true;
+                        convertBtn.textContent = '转换中...';
+                        try {
+                            const result = await Kokoro.invoke('convert_singing', {
+                                audioPath: singAudioPath,
+                                modelName: singSelectedModel || null,
+                                pitchShift: singPitch || null,
+                                separateVocals: singVocalSep,
+                                f0Method: singF0Method || null,
+                                indexPath: singIndexPath || null,
+                                indexRate: singIndexRate
+                            });
+                            if (result && result.output_path) {
+                                convertBtn.textContent = '✓ 完成';
+                            }
+                        } catch (e) {
+                            console.error('[Sing] Conversion failed:', e);
+                            convertBtn.textContent = '失败';
+                        }
+                        setTimeout(() => render(), 2000);
+                    };
+                }, 0);
+
+                // Progress display
+                const progress = state.singProgress;
+                if (progress) {
+                    const progRow = document.createElement('div');
+                    progRow.className = 'setting-desc';
+                    progRow.style.marginTop = '8px';
+                    progRow.innerHTML = `进度: ${Math.round((progress.progress || 0) * 100)}% — ${progress.stage || ''}`;
+                    sec.appendChild(progRow);
+                }
+
+                // ── Advanced Settings ──
+                const advToggle = document.createElement('div');
+                advToggle.style.marginTop = '12px';
+                advToggle.style.cursor = 'pointer';
+                advToggle.style.display = 'flex';
+                advToggle.style.justifyContent = 'space-between';
+                advToggle.style.alignItems = 'center';
+                advToggle.style.padding = '8px 0';
+                advToggle.style.borderTop = '1px dashed rgba(0,0,0,0.1)';
+                advToggle.innerHTML = `
+                    <span style="font-size:12px;color:var(--gi-ink-muted)">高级设置</span>
+                    <span style="font-size:12px;color:var(--gi-ink-muted)">${singShowAdvanced ? '▲' : '▼'}</span>
+                `;
+                advToggle.onclick = () => {
+                    singShowAdvanced = !singShowAdvanced;
+                    render();
+                };
+                sec.appendChild(advToggle);
+
+                if (singShowAdvanced) {
+                    const advSec = document.createElement('div');
+                    advSec.style.marginTop = '8px';
+
+                    // F0 Method
+                    const f0Opts = [
+                        { value: 'rmvpe', label: 'RMVPE (推荐)' },
+                        { value: 'pm', label: 'PM' },
+                        { value: 'harvest', label: 'Harvest' },
+                        { value: 'crepe', label: 'CREPE' }
+                    ];
+                    advSec.appendChild(createSelect("F0 Method", "基频提取算法", f0Opts, singF0Method, (v) => {
+                        singF0Method = v;
+                    }));
+
+                    // Index file path
+                    advSec.appendChild(createRow("Index 文件路径", `
+                        <input class="gi-input" type="text" value="${escapeHtml(singIndexPath)}" id="sing_index_path" placeholder="可选，.index 文件路径">
+                    `));
+                    setTimeout(() => {
+                        const el = document.getElementById('sing_index_path');
+                        if (el) el.onchange = function () { singIndexPath = this.value; };
+                    }, 0);
+
+                    // Index Rate slider
+                    advSec.appendChild(createSlider("Index Rate", 0, 1, 0.05, singIndexRate, (v) => {
+                        singIndexRate = parseFloat(v);
+                    }));
+
+                    sec.appendChild(advSec);
+                }
+
+                body.appendChild(sec);
+            }
+
+            // ── 8. Memory Tab ────────────────
+            let _memoryFetched = false;
+            let _memoryCharId = null;
+            let _memoryPage = 0;
+            let _memorySearch = '';
+            let _memoryEditId = null;
+            let _memoryEditContent = '';
+            let _memoryEditImportance = 0.5;
+            const _memoryPageSize = 50;
+
+            function renderMemory() {
+                const sec = createSection("长期记忆库");
+                const memories = state.memoryList || [];
+                const total = state.memoryTotal || memories.length;
+                if (_memoryCharId === null) {
+                    _memoryCharId = state.activeCharacterId || 'default';
+                }
+                const charId = _memoryCharId;
+
+                // Character selector dropdown
+                const characters = state.characters || [];
+                if (characters.length > 0) {
+                    const charOpts = characters.map(c => ({
+                        value: String(c.id),
+                        label: c.name || 'Unnamed'
+                    }));
+                    sec.appendChild(createSelect("角色", "选择查看记忆的角色", charOpts, String(charId), (v) => {
+                        _memoryCharId = v;
+                        _memoryPage = 0;
+                        _memoryFetched = true;
+                        Kokoro.action('list_memories', { characterId: v, limit: _memoryPageSize, offset: 0 });
+                    }));
+                }
+
+                // Search box
+                const searchRow = document.createElement('div');
+                searchRow.style.marginBottom = '10px';
+                searchRow.innerHTML = `
+                    <input class="gi-input" type="text" value="${escapeHtml(_memorySearch)}" id="memory_search" placeholder="搜索记忆..." style="width:100%">
+                `;
+                sec.appendChild(searchRow);
+                setTimeout(() => {
+                    const el = document.getElementById('memory_search');
+                    if (el) el.oninput = function () { _memorySearch = this.value; render(); };
+                }, 0);
+
+                // Auto-fetch once when tab is first shown
+                if (!_memoryFetched) {
+                    _memoryFetched = true;
+                    Kokoro.action('list_memories', { characterId: charId, limit: _memoryPageSize, offset: _memoryPage * _memoryPageSize });
+                }
+
+                // Client-side filter
+                const filtered = _memorySearch.trim()
+                    ? memories.filter(m => (m.content || '').toLowerCase().includes(_memorySearch.toLowerCase()))
+                    : memories;
+
+                if (filtered.length === 0) {
+                    sec.appendChild(createRow("", "<div style='text-align:center; color:var(--gi-ink-muted)'>暂无记忆记录</div>"));
+                } else {
+                    const countNote = document.createElement('div');
+                    countNote.className = 'setting-desc';
+                    countNote.textContent = `共 ${total} 条记忆` + (_memorySearch ? ` (过滤显示 ${filtered.length} 条)` : '');
+                    sec.appendChild(countNote);
+
+                    const list = document.createElement('div');
+                    filtered.forEach(mem => {
+                        const item = document.createElement('div');
+                        item.className = 'list-item';
+                        const timeStr = mem.created_at ? new Date(mem.created_at * 1000).toLocaleString() : '';
+
+                        if (_memoryEditId === mem.id) {
+                            // Edit mode
+                            item.innerHTML = `
+                                <div style="margin-bottom:6px">
+                                    <textarea class="gi-textarea" id="mem_edit_content" style="min-height:60px">${escapeHtml(_memoryEditContent)}</textarea>
+                                </div>
+                                <div class="setting-row" style="padding:4px 0">
+                                    <div class="setting-info"><div class="setting-label">重要度</div></div>
+                                    <div class="gi-slider-container">
+                                        <input type="range" class="gi-slider" min="0" max="1" step="0.1" value="${_memoryEditImportance}" id="mem_edit_imp">
+                                        <div class="gi-slider-val" id="mem_edit_imp_val">${_memoryEditImportance}</div>
+                                    </div>
+                                </div>
+                                <div style="display:flex;gap:6px;margin-top:6px">
+                                    <button class="gi-btn primary" id="mem_save_btn" style="padding:4px 12px;font-size:11px">保存</button>
+                                    <button class="gi-btn" id="mem_cancel_btn" style="padding:4px 12px;font-size:11px">取消</button>
+                                </div>
+                            `;
+                            setTimeout(() => {
+                                const contentEl = document.getElementById('mem_edit_content');
+                                if (contentEl) contentEl.oninput = function () { _memoryEditContent = this.value; };
+                                const impEl = document.getElementById('mem_edit_imp');
+                                const impVal = document.getElementById('mem_edit_imp_val');
+                                if (impEl) impEl.oninput = function () {
+                                    _memoryEditImportance = parseFloat(this.value);
+                                    if (impVal) impVal.textContent = this.value;
+                                };
+                                const saveBtn = document.getElementById('mem_save_btn');
+                                if (saveBtn) saveBtn.onclick = () => {
+                                    Kokoro.action('update_memory', { id: mem.id, content: _memoryEditContent, importance: _memoryEditImportance });
+                                    _memoryEditId = null;
+                                    _memoryFetched = false;
+                                    render();
+                                };
+                                const cancelBtn = document.getElementById('mem_cancel_btn');
+                                if (cancelBtn) cancelBtn.onclick = () => { _memoryEditId = null; render(); };
+                            }, 0);
+                        } else {
+                            // Display mode
+                            const header = document.createElement('div');
+                            header.className = 'list-item-header';
+
+                            const contentSpan = document.createElement('span');
+                            contentSpan.textContent = (mem.content || '').substring(0, 50) + (mem.content && mem.content.length > 50 ? '...' : '');
+                            header.appendChild(contentSpan);
+
+                            const btnGroup = document.createElement('div');
+                            btnGroup.style.display = 'flex';
+                            btnGroup.style.gap = '4px';
+                            btnGroup.style.alignItems = 'center';
+
+                            const timeSpan = document.createElement('span');
+                            timeSpan.style.fontSize = '10px';
+                            timeSpan.style.opacity = '0.6';
+                            timeSpan.textContent = timeStr;
+                            btnGroup.appendChild(timeSpan);
+
+                            // Edit button
+                            const editBtn = document.createElement('button');
+                            editBtn.className = 'gi-btn';
+                            editBtn.style.padding = '2px 8px';
+                            editBtn.style.fontSize = '10px';
+                            editBtn.textContent = '编辑';
+                            editBtn.onclick = () => {
+                                _memoryEditId = mem.id;
+                                _memoryEditContent = mem.content || '';
+                                _memoryEditImportance = mem.importance || 0.5;
+                                render();
+                            };
+                            btnGroup.appendChild(editBtn);
+
+                            // Delete button
+                            const delBtn = document.createElement('button');
+                            delBtn.className = 'gi-btn danger';
+                            delBtn.style.padding = '2px 8px';
+                            delBtn.style.fontSize = '10px';
+                            delBtn.textContent = '删除';
+                            delBtn.onclick = () => {
+                                if (confirm('确定删除这条记忆？')) {
+                                    Kokoro.action('delete_memory', { id: mem.id });
+                                    _memoryFetched = false;
+                                    render();
+                                }
+                            };
+                            btnGroup.appendChild(delBtn);
+
+                            header.appendChild(btnGroup);
+                            item.appendChild(header);
+
+                            const descDiv = document.createElement('div');
+                            descDiv.className = 'list-item-desc';
+                            descDiv.textContent = `重要度: ${mem.importance || 0}`;
+                            item.appendChild(descDiv);
+                        }
+
+                        list.appendChild(item);
+                    });
+                    sec.appendChild(list);
+                }
+
+                // Pagination
+                const totalPages = Math.ceil(total / _memoryPageSize);
+                if (totalPages > 1) {
+                    const pageRow = document.createElement('div');
+                    pageRow.style.marginTop = '12px';
+                    pageRow.style.display = 'flex';
+                    pageRow.style.justifyContent = 'center';
+                    pageRow.style.gap = '10px';
+                    pageRow.style.alignItems = 'center';
+
+                    const prevBtn = document.createElement('button');
+                    prevBtn.className = 'gi-btn';
+                    prevBtn.textContent = '上一页';
+                    prevBtn.disabled = _memoryPage <= 0;
+                    if (_memoryPage <= 0) prevBtn.style.opacity = '0.5';
+                    prevBtn.onclick = () => {
+                        if (_memoryPage > 0) {
+                            _memoryPage--;
+                            _memoryFetched = true;
+                            Kokoro.action('list_memories', { characterId: charId, limit: _memoryPageSize, offset: _memoryPage * _memoryPageSize });
+                        }
+                    };
+                    pageRow.appendChild(prevBtn);
+
+                    const pageInfo = document.createElement('span');
+                    pageInfo.style.fontSize = '12px';
+                    pageInfo.style.color = 'var(--gi-ink-muted)';
+                    pageInfo.textContent = `${_memoryPage + 1} / ${totalPages}`;
+                    pageRow.appendChild(pageInfo);
+
+                    const nextBtn = document.createElement('button');
+                    nextBtn.className = 'gi-btn';
+                    nextBtn.textContent = '下一页';
+                    nextBtn.disabled = _memoryPage >= totalPages - 1;
+                    if (_memoryPage >= totalPages - 1) nextBtn.style.opacity = '0.5';
+                    nextBtn.onclick = () => {
+                        if (_memoryPage < totalPages - 1) {
+                            _memoryPage++;
+                            _memoryFetched = true;
+                            Kokoro.action('list_memories', { characterId: charId, limit: _memoryPageSize, offset: _memoryPage * _memoryPageSize });
+                        }
+                    };
+                    pageRow.appendChild(nextBtn);
+
+                    sec.appendChild(pageRow);
+                }
+
+                // Refresh button
+                const refreshRow = document.createElement('div');
+                refreshRow.style.marginTop = '12px';
+                const refreshBtn = document.createElement('button');
+                refreshBtn.className = 'gi-btn';
+                refreshBtn.textContent = '刷新记忆列表';
+                refreshBtn.onclick = () => {
+                    _memoryFetched = false;
+                    Kokoro.action('list_memories', { characterId: charId, limit: _memoryPageSize, offset: _memoryPage * _memoryPageSize });
+                };
+                refreshRow.appendChild(refreshBtn);
+                sec.appendChild(refreshRow);
+
+                body.appendChild(sec);
+            }
+
+            // ── 9. Vision Tab ────────────────
+            function renderVision() {
+                const config = state.visionConfig || {};
+                const sec = createSection("视觉能力");
+
+                sec.appendChild(createToggle("启用视觉", "允许 AI 看见屏幕", config.enabled, (v) => {
+                    config.enabled = v;
+                    Kokoro.action('save_vision_config', { config });
+                }));
+
+                const provOpts = [
+                    { value: 'ollama', label: 'Ollama' },
+                    { value: 'openai', label: 'OpenAI' }
+                ];
+                sec.appendChild(createSelect("服务商", "Vision 模型后端", provOpts, config.vlm_provider, (v) => {
+                    config.vlm_provider = v;
+                    Kokoro.action('save_vision_config', { config });
+                }));
+
+                sec.appendChild(createRow("Base URL", `
+                    <input class="gi-input" type="text" value="${escapeHtml(config.vlm_base_url || '')}" id="vision_base_url">
+                `));
+                setTimeout(() => {
+                    const el = document.getElementById('vision_base_url');
+                    if (el) el.onchange = function () {
+                        config.vlm_base_url = this.value;
+                        Kokoro.action('save_vision_config', { config });
+                    };
+                }, 0);
+
+                if (config.vlm_provider !== 'ollama') {
+                    sec.appendChild(createRow("API Key", `
+                        <input class="gi-input" type="password" value="${escapeHtml(config.vlm_api_key || '')}" id="vision_api_key">
+                    `));
+                    setTimeout(() => {
+                        const el = document.getElementById('vision_api_key');
+                        if (el) el.onchange = function () {
+                            config.vlm_api_key = this.value;
+                            Kokoro.action('save_vision_config', { config });
+                        };
+                    }, 0);
+                }
+
+                sec.appendChild(createRow("Model", `
+                    <input class="gi-input" type="text" value="${escapeHtml(config.vlm_model || '')}" id="vision_model">
+                `));
+                setTimeout(() => {
+                    const el = document.getElementById('vision_model');
+                    if (el) el.onchange = function () {
+                        config.vlm_model = this.value;
+                        Kokoro.action('save_vision_config', { config });
+                    };
+                }, 0);
+
+                sec.appendChild(createSlider("检测间隔 (秒)", 5, 60, 5, config.interval_secs || 5, (v) => {
+                    config.interval_secs = parseInt(v);
+                    Kokoro.action('save_vision_config', { config });
+                }));
+
+                sec.appendChild(createSlider("变化灵敏度", 1, 20, 1, Math.round((config.change_threshold || 0.1) * 100), (v) => {
+                    config.change_threshold = parseInt(v) / 100;
+                    Kokoro.action('save_vision_config', { config });
+                }, '%'));
+
+                sec.appendChild(createRow("测试", `
+                    <button class="gi-btn" id="vision_test_btn">截图测试</button>
+                `));
+                setTimeout(() => {
+                    const btn = document.getElementById('vision_test_btn');
+                    if (btn) btn.onclick = () => {
+                        btn.textContent = '截图中...';
+                        btn.disabled = true;
+                        Kokoro.action('capture_screen');
+                        setTimeout(() => { btn.textContent = '截图测试'; btn.disabled = false; }, 3000);
+                    };
+                }, 0);
+
+                // Screenshot test result display
+                if (state.capturedScreenUrl) {
+                    const resultDiv = document.createElement('div');
+                    resultDiv.style.marginTop = '8px';
+                    resultDiv.style.padding = '10px';
+                    resultDiv.style.background = 'rgba(0,0,0,0.03)';
+                    resultDiv.style.borderRadius = '6px';
+                    resultDiv.style.fontSize = '11px';
+                    resultDiv.style.color = 'var(--gi-ink-muted)';
+                    resultDiv.textContent = '👁️ ' + state.capturedScreenUrl;
+                    sec.appendChild(resultDiv);
+                }
+
+                // Privacy note
+                const privacyNote = document.createElement('div');
+                privacyNote.style.marginTop = '12px';
+                privacyNote.style.padding = '10px';
+                privacyNote.style.background = 'rgba(0,0,0,0.03)';
+                privacyNote.style.borderRadius = '6px';
+                privacyNote.style.fontSize = '11px';
+                privacyNote.style.color = 'var(--gi-ink-muted)';
+                privacyNote.textContent = '🔒 隐私说明：截图仅在本地处理并发送至您配置的 VLM 服务商进行分析，不会存储或分享给第三方。';
+                sec.appendChild(privacyNote);
+
+                // Save button
+                const saveRow = document.createElement('div');
+                saveRow.style.marginTop = '12px';
+                saveRow.innerHTML = '<button class="gi-btn primary" style="width:100%" onclick="Kokoro.action(\'save_vision_config\', { config: state.visionConfig })">保存 Vision 配置</button>';
+                sec.appendChild(saveRow);
+
+                body.appendChild(sec);
+            }
+
+            // ── 10. ImageGen Tab ────────────────
+            function renderImageGen() {
+                const config = state.imageGenConfig || {};
+                const sec = createSection("绘图设置 (STABLE DIFFUSION)");
+
+                sec.appendChild(createToggle("启用绘图", "允许 AI 生成图片", config.enabled, (v) => {
+                    config.enabled = v;
+                    Kokoro.action('save_image_gen_config', { config });
+                }));
+
+                const providers = config.providers || [];
+                providers.forEach((p, idx) => {
+                    const provLabel = `${p.id || ('后端 #' + (idx + 1))}`;
+                    const provType = p.provider_type || 'stable_diffusion';
+                    const sub = createSection(`◆ ${provLabel} (${provType.toUpperCase()})`);
+                    sub.style.background = 'rgba(0,0,0,0.03)';
+
+                    // Per-provider enable toggle
+                    sub.appendChild(createToggle("启用", `启用 ${provLabel}`, p.enabled !== false, (v) => {
+                        config.providers[idx].enabled = v;
+                        Kokoro.action('save_image_gen_config', { config });
+                    }));
+
+                    // Base URL
+                    const urlId = `imggen_url_${idx}`;
+                    sub.appendChild(createRow("Base URL", `
+                        <input class="gi-input" type="text" value="${escapeHtml(p.base_url || '')}" id="${urlId}">
+                    `));
+                    setTimeout(() => {
+                        const el = document.getElementById(urlId);
+                        if (el) el.onchange = function () {
+                            config.providers[idx].base_url = this.value;
+                            Kokoro.action('save_image_gen_config', { config });
+                        };
+                    }, 0);
+
+                    // API Key (for OpenAI providers)
+                    if (provType === 'openai') {
+                        const keyId = `imggen_key_${idx}`;
+                        sub.appendChild(createRow("API Key", `
+                            <input class="gi-input" type="password" value="${escapeHtml(p.api_key || '')}" id="${keyId}" placeholder="${p.api_key_env ? '环境变量回退: ' + p.api_key_env : ''}">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById(keyId);
+                            if (el) el.onchange = function () {
+                                config.providers[idx].api_key = this.value;
+                                Kokoro.action('save_image_gen_config', { config });
+                            };
+                        }, 0);
+                    }
+
+                    // Model field
+                    const modelId = `imggen_model_${idx}`;
+                    const sdModels = state.sdModels || [];
+
+                    if (provType === 'stable_diffusion' && sdModels.length > 0) {
+                        // SD has scanned models — show dropdown
+                        const modelOpts = sdModels.map(m => ({ value: m, label: m }));
+                        modelOpts.unshift({ value: '', label: '-- 选择模型 --' });
+                        const modelRow = createSelect("模型", "SD 模型", modelOpts, p.model || '', (v) => {
+                            config.providers[idx].model = v;
+                            Kokoro.action('save_image_gen_config', { config });
+                        });
+                        sub.appendChild(modelRow);
+                    } else {
+                        // Text input with fetch button for SD
+                        const fetchBtnHtml = provType === 'stable_diffusion'
+                            ? `<button class="gi-btn" id="imggen_fetch_${idx}" style="white-space:nowrap;margin-left:6px">获取列表</button>`
+                            : '';
+                        sub.appendChild(createRow("模型", `
+                            <div style="display:flex;gap:0;align-items:center;width:100%">
+                                <input class="gi-input" type="text" value="${escapeHtml(p.model || '')}" id="${modelId}" style="flex:1" placeholder="${provType === 'openai' ? 'dall-e-3' : ''}">
+                                ${fetchBtnHtml}
+                            </div>
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById(modelId);
+                            if (el) el.onchange = function () {
+                                config.providers[idx].model = this.value;
+                                Kokoro.action('save_image_gen_config', { config });
+                            };
+                            const fetchBtn = document.getElementById(`imggen_fetch_${idx}`);
+                            if (fetchBtn) fetchBtn.onclick = () => {
+                                const baseUrl = config.providers[idx].base_url || '';
+                                if (!baseUrl) return;
+                                fetchBtn.textContent = '获取中...';
+                                fetchBtn.disabled = true;
+                                Kokoro.action('test_sd_connection', { baseUrl });
+                                setTimeout(() => { fetchBtn.textContent = '获取列表'; fetchBtn.disabled = false; }, 4000);
+                            };
+                        }, 0);
+                    }
+
+                    // Image size
+                    const sizeId = `imggen_size_${idx}`;
+                    sub.appendChild(createRow("图片尺寸", `
+                        <input class="gi-input" type="text" value="${escapeHtml(p.size || '512x512')}" id="${sizeId}" placeholder="512x512">
+                    `));
+                    setTimeout(() => {
+                        const el = document.getElementById(sizeId);
+                        if (el) el.onchange = function () {
+                            config.providers[idx].size = this.value;
+                            Kokoro.action('save_image_gen_config', { config });
+                        };
+                    }, 0);
+
+
+                    // Test + Generate Test + Delete buttons
+                    const btnRow = document.createElement('div');
+                    btnRow.style.display = 'flex';
+                    btnRow.style.gap = '8px';
+                    btnRow.style.marginTop = '8px';
+
+                    const testBtn = document.createElement('button');
+                    testBtn.className = 'gi-btn';
+                    testBtn.textContent = '测试连接';
+                    testBtn.onclick = () => Kokoro.action('test_sd_connection', { baseUrl: p.base_url || '' });
+                    btnRow.appendChild(testBtn);
+
+                    const genTestBtn = document.createElement('button');
+                    genTestBtn.className = 'gi-btn';
+                    genTestBtn.textContent = '测试生成';
+                    genTestBtn.onclick = () => {
+                        genTestBtn.textContent = '生成中...';
+                        genTestBtn.disabled = true;
+                        Kokoro.action('test_image_gen', { providerId: p.id });
+                        setTimeout(() => { genTestBtn.textContent = '测试生成'; genTestBtn.disabled = false; }, 5000);
+                    };
+                    btnRow.appendChild(genTestBtn);
+
+                    const delBtn = document.createElement('button');
+                    delBtn.className = 'gi-btn danger';
+                    delBtn.textContent = '删除';
+                    delBtn.onclick = () => {
+                        config.providers.splice(idx, 1);
+                        Kokoro.action('save_image_gen_config', { config });
+                        render();
+                    };
+                    btnRow.appendChild(delBtn);
+
+                    sub.appendChild(btnRow);
+                    sec.appendChild(sub);
+                });
+
+                // Add provider buttons
+                const addRow = document.createElement('div');
+                addRow.style.marginTop = '12px';
+                addRow.style.display = 'flex';
+                addRow.style.gap = '8px';
+
+                const addSdBtn = document.createElement('button');
+                addSdBtn.className = 'gi-btn primary';
+                addSdBtn.textContent = '+ 添加 SD WebUI 后端';
+                addSdBtn.onclick = () => {
+                    if (!config.providers) config.providers = [];
+                    config.providers.push({
+                        id: `sd_${config.providers.length + 1}`,
+                        provider_type: "stable_diffusion",
+                        base_url: "http://127.0.0.1:7860",
+                        enabled: true,
+                        size: "512x512"
+                    });
+                    Kokoro.action('save_image_gen_config', { config });
+                    render();
+                };
+                addRow.appendChild(addSdBtn);
+
+                const addOaiBtn = document.createElement('button');
+                addOaiBtn.className = 'gi-btn primary';
+                addOaiBtn.textContent = '+ 添加 OpenAI 后端';
+                addOaiBtn.onclick = () => {
+                    if (!config.providers) config.providers = [];
+                    const existingOai = config.providers.filter(p => p.provider_type === 'openai').length;
+                    config.providers.push({
+                        id: existingOai > 0 ? `openai_${existingOai + 1}` : 'openai',
+                        provider_type: "openai",
+                        base_url: "",
+                        api_key: "",
+                        model: "dall-e-3",
+                        enabled: true,
+                        size: "1024x1024",
+                        quality: "standard"
+                    });
+                    Kokoro.action('save_image_gen_config', { config });
+                    render();
+                };
+                addRow.appendChild(addOaiBtn);
+
+                sec.appendChild(addRow);
+
+                // Save
+                const saveRow = document.createElement('div');
+                saveRow.style.marginTop = '12px';
+                saveRow.innerHTML = '<button class="gi-btn primary" style="width:100%" onclick="Kokoro.action(\'save_image_gen_config\', { config: state.imageGenConfig })">保存绘图配置</button>';
+                sec.appendChild(saveRow);
+
+                body.appendChild(sec);
+            }
+
+            // ── 11. Mods Tab ────────────────
+            function renderMods() {
+                const sec = createSection("模组列表");
+                const list = state.modList || [];
+
+                if (list.length === 0) {
+                    sec.appendChild(createRow("", "未检测到模组"));
+                } else {
+                    list.forEach(mod => {
+                        const row = document.createElement('div');
+                        row.className = 'list-item';
+                        row.innerHTML = `
+                            <div class="list-item-header">
+                                <span>${escapeHtml(mod.name || mod.id)} <small style="opacity:0.5">v${escapeHtml(mod.version || '?')}</small></span>
+                                <span style="font-size:10px;opacity:0.6">${escapeHtml(mod.id || '')}</span>
+                            </div>
+                            <div class="list-item-desc">${escapeHtml(mod.description || '')}</div>
+                        `;
+                        sec.appendChild(row);
+                    });
+                }
+
+                // Refresh button
+                const actRow = document.createElement('div');
+                actRow.style.marginTop = '12px';
+                actRow.innerHTML = '<button class="gi-btn" onclick="Kokoro.action(\'refresh_mods\')">\u5237\u65b0\u6a21\u7ec4\u5217\u8868</button>';
+                sec.appendChild(actRow);
+
+                body.appendChild(sec);
+            }
+
+            // ── 12. MCP Tab ────────────────
+            let _mcpShowAdd = false;
+            let _mcpJsonInput = '';
+            let _mcpPollTimer = null;
+
+            function renderMCP() {
+                const sec = createSection("MCP 服务器");
+                const servers = state.mcpServers || [];
+
+                // Auto-poll for connecting servers
+                const hasConnecting = servers.some(s => s.status === 'connecting');
+                if (hasConnecting && !_mcpPollTimer) {
+                    _mcpPollTimer = setInterval(() => {
+                        Kokoro.action('list_mcp_servers');
+                    }, 2000);
+                } else if (!hasConnecting && _mcpPollTimer) {
+                    clearInterval(_mcpPollTimer);
+                    _mcpPollTimer = null;
+                }
+
+                if (servers.length === 0) {
+                    sec.appendChild(createRow("", "无活跃 MCP 连接"));
+                } else {
+                    servers.forEach(srv => {
+                        const row = document.createElement('div');
+                        row.className = 'list-item';
+                        const statusClass = srv.status === 'connected' ? 'connected' : (srv.status === 'connecting' ? '' : 'error');
+
+                        const header = document.createElement('div');
+                        header.className = 'list-item-header';
+
+                        const nameSpan = document.createElement('span');
+                        nameSpan.innerHTML = `<span class="status-dot ${statusClass}"></span>${escapeHtml(srv.name)}`;
+                        header.appendChild(nameSpan);
+
+                        // Action buttons per server
+                        const btnGroup = document.createElement('div');
+                        btnGroup.style.display = 'flex';
+                        btnGroup.style.gap = '6px';
+                        btnGroup.style.alignItems = 'center';
+
+                        const statusSpan = document.createElement('span');
+                        statusSpan.style.fontSize = '10px';
+                        statusSpan.style.opacity = '0.6';
+                        statusSpan.textContent = srv.status || 'unknown';
+                        btnGroup.appendChild(statusSpan);
+
+                        // Reconnect button (for disconnected)
+                        if (srv.status === 'disconnected') {
+                            const reconBtn = document.createElement('button');
+                            reconBtn.className = 'gi-btn';
+                            reconBtn.style.padding = '2px 8px';
+                            reconBtn.style.fontSize = '10px';
+                            reconBtn.textContent = '重连';
+                            reconBtn.onclick = () => Kokoro.action('reconnect_mcp_server', { name: srv.name });
+                            btnGroup.appendChild(reconBtn);
+                        }
+
+                        // Connecting spinner
+                        if (srv.status === 'connecting') {
+                            const spinSpan = document.createElement('span');
+                            spinSpan.style.fontSize = '10px';
+                            spinSpan.style.color = 'var(--gi-gold)';
+                            spinSpan.textContent = '连接中...';
+                            btnGroup.appendChild(spinSpan);
+                        }
+
+                        // Delete button
+                        const delBtn = document.createElement('button');
+                        delBtn.className = 'gi-btn danger';
+                        delBtn.style.padding = '2px 8px';
+                        delBtn.style.fontSize = '10px';
+                        delBtn.textContent = '删除';
+                        delBtn.onclick = () => Kokoro.action('remove_mcp_server', { name: srv.name });
+                        btnGroup.appendChild(delBtn);
+
+                        header.appendChild(btnGroup);
+                        row.appendChild(header);
+
+                        const desc = document.createElement('div');
+                        desc.className = 'list-item-desc';
+                        desc.innerHTML = `${srv.tool_count || 0} tools${srv.server_version ? ', v' + srv.server_version : ''}${srv.error ? ' — <span style="color:var(--gi-danger)">' + escapeHtml(srv.error) + '</span>' : ''}`;
+                        row.appendChild(desc);
+
+                        sec.appendChild(row);
+                    });
+                }
+
+                // Action buttons
+                const actRow = document.createElement('div');
+                actRow.style.marginTop = '12px';
+                actRow.style.display = 'flex';
+                actRow.style.gap = '8px';
+
+                const refreshBtn = document.createElement('button');
+                refreshBtn.className = 'gi-btn';
+                refreshBtn.textContent = '刷新工具';
+                refreshBtn.onclick = () => Kokoro.action('refresh_mcp_tools');
+                actRow.appendChild(refreshBtn);
+
+                const addToggleBtn = document.createElement('button');
+                addToggleBtn.className = 'gi-btn primary';
+                addToggleBtn.textContent = _mcpShowAdd ? '取消' : '+ 添加服务器';
+                addToggleBtn.onclick = () => {
+                    _mcpShowAdd = !_mcpShowAdd;
+                    render();
+                };
+                actRow.appendChild(addToggleBtn);
+
+                sec.appendChild(actRow);
+
+                // Add server panel
+                if (_mcpShowAdd) {
+                    const addSec = createSection("添加 MCP 服务器");
+                    addSec.style.marginTop = '12px';
+
+                    const desc = document.createElement('div');
+                    desc.className = 'setting-desc';
+                    desc.style.marginBottom = '8px';
+                    desc.textContent = '粘贴 MCP 服务器 JSON 配置（支持单个或多个服务器）';
+                    addSec.appendChild(desc);
+
+                    const textarea = document.createElement('textarea');
+                    textarea.className = 'gi-textarea';
+                    textarea.style.fontFamily = 'monospace';
+                    textarea.style.fontSize = '11px';
+                    textarea.style.minHeight = '120px';
+                    textarea.value = _mcpJsonInput;
+                    textarea.placeholder = `"my-server": {\n  "command": "npx",\n  "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"],\n  "transportType": "stdio"\n}`;
+                    textarea.oninput = (e) => { _mcpJsonInput = e.target.value; };
+                    addSec.appendChild(textarea);
+
+                    const addBtnRow = document.createElement('div');
+                    addBtnRow.style.marginTop = '8px';
+                    addBtnRow.style.display = 'flex';
+                    addBtnRow.style.justifyContent = 'space-between';
+                    addBtnRow.style.alignItems = 'center';
+
+                    const exampleBtn = document.createElement('button');
+                    exampleBtn.className = 'gi-btn';
+                    exampleBtn.style.fontSize = '11px';
+                    exampleBtn.textContent = '插入示例';
+                    exampleBtn.onclick = () => {
+                        _mcpJsonInput = `"my-server": {\n  "command": "npx",\n  "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],\n  "transportType": "stdio"\n}`;
+                        render();
+                    };
+                    addBtnRow.appendChild(exampleBtn);
+
+                    const confirmBtn = document.createElement('button');
+                    confirmBtn.className = 'gi-btn primary';
+                    confirmBtn.textContent = '添加服务器';
+                    confirmBtn.onclick = () => {
+                        if (!_mcpJsonInput.trim()) return;
+                        Kokoro.action('add_mcp_server', { json: _mcpJsonInput });
+                        _mcpJsonInput = '';
+                        _mcpShowAdd = false;
+                        render();
+                    };
+                    addBtnRow.appendChild(confirmBtn);
+
+                    addSec.appendChild(addBtnRow);
+                    sec.appendChild(addSec);
+                }
+
+                body.appendChild(sec);
+            }
+
+            // ── Helpers ──────────────────────────
+            function createSection(title) {
+                const div = document.createElement('div');
+                div.className = 'setting-section';
+                if (title) {
+                    const h = document.createElement('div');
+                    h.className = 'setting-section-title';
+                    h.innerText = title;
+                    div.appendChild(h);
+                }
+                return div;
+            }
+
+            function createRow(label, contentHtml) {
+                const row = document.createElement('div');
+                row.className = 'setting-row';
+                row.innerHTML = `
+                    <div class="setting-info">
+                        <div class="setting-label">${label}</div>
+                    </div>
+                    <div class="setting-ctrl">${contentHtml}</div>
+                `;
+                return row;
+            }
+
+            function createToggle(label, desc, checked, onChange) {
+                const row = document.createElement('div');
+                row.className = 'setting-row';
+
+                const info = document.createElement('div');
+                info.className = 'setting-info';
+                info.innerHTML = `<div class="setting-label">${label}</div><div class="setting-desc">${desc}</div>`;
+                row.appendChild(info);
+
+                const toggle = document.createElement('div');
+                toggle.className = 'gi-toggle' + (checked ? ' checked' : '');
+                toggle.onclick = () => {
+                    const newVal = !toggle.classList.contains('checked');
+                    toggle.classList.toggle('checked');
+                    onChange(newVal);
+                };
+                row.appendChild(toggle);
+
+                return row;
+            }
+
+            function createSelect(label, desc, options, selected, onChange) {
+                const row = document.createElement('div');
+                row.className = 'setting-row';
+
+                const info = document.createElement('div');
+                info.className = 'setting-info';
+                info.innerHTML = `<div class="setting-label">${label}</div><div class="setting-desc">${desc}</div>`;
+                row.appendChild(info);
+
+                const sel = document.createElement('select');
+                sel.className = 'gi-select';
+                options.forEach(o => {
+                    const opt = document.createElement('option');
+                    opt.value = o.value;
+                    opt.innerText = o.label;
+                    if (o.value == selected) opt.selected = true;
+                    sel.appendChild(opt);
+                });
+                sel.onchange = (e) => onChange(e.target.value);
+                row.appendChild(sel);
+
+                return row;
+            }
+
+            function createSlider(label, min, max, step, val, onChange, suffix) {
+                const row = document.createElement('div');
+                row.className = 'setting-row';
+
+                const info = document.createElement('div');
+                info.className = 'setting-info';
+                info.innerHTML = `<div class="setting-label">${label}</div>`;
+
+                const ctrl = document.createElement('div');
+                ctrl.className = 'gi-slider-container';
+
+                const input = document.createElement('input');
+                input.type = 'range';
+                input.className = 'gi-slider';
+                input.min = min;
+                input.max = max;
+                input.step = step;
+                input.value = val;
+
+                const sfx = suffix || '';
+                const disp = document.createElement('div');
+                disp.className = 'gi-slider-val';
+                disp.innerText = val + sfx;
+
+                input.oninput = (e) => {
+                    disp.innerText = e.target.value + sfx;
+                    onChange(e.target.value);
+                };
+
+                ctrl.appendChild(input);
+                ctrl.appendChild(disp);
+                row.appendChild(info);
+                row.appendChild(ctrl);
+
+                return row;
+            }
+
+            function escapeHtml(text) {
+                if (!text) return '';
+                return text
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;")
+                    .replace(/'/g, "&#039;");
+            }
+
+            // ── Global Action Helpers ────────────
+            window.saveSTT = (cfg) => Kokoro.action('save_stt_config', { config: cfg });
+            window.saveVision = (cfg) => Kokoro.action('save_vision_config', { config: cfg });
+            window.saveImageGen = (cfg) => Kokoro.action('save_image_gen_config', { config: cfg });
+
+            window.updateImgGenProv = (idx, key, val) => {
+                const config = state.imageGenConfig;
+                if (!config.providers[idx]) return;
+                config.providers[idx][key] = val;
+                saveImageGen(config);
+            };
+
+            window.addImgGenProv = () => {
+                const config = state.imageGenConfig;
+                config.providers.push({
+                    provider_type: "stable_diffusion",
+                    base_url: "http://127.0.0.1:8188",
+                    enabled: true
+                });
+                saveImageGen(config);
+                render();
+            };
+
+            window.removeImgGenProv = (idx) => {
+                const config = state.imageGenConfig;
+                config.providers.splice(idx, 1);
+                saveImageGen(config);
+                render();
+            };
+
+            // ── Init ──────────────────────────────
+            Kokoro.on('update', (newState) => {
+                state = newState;
+                render();
+            });
+
+            Kokoro.on('connect', () => {
+                console.log("Settings panel connected");
+            });
+
+        })();
+    </script>
+</body>
+
+</html>
