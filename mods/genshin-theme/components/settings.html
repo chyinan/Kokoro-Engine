@@ -831,6 +831,13 @@
                     Kokoro.action('set_user_language', { language: v });
                 }));
                 body.appendChild(userSec);
+
+                // Proactive (Idle Auto-Talk) Section
+                const proactiveSec = createSection("闲置搭话");
+                proactiveSec.appendChild(createToggle("启用闲置搭话", "闲置一段时间后 AI 会主动发起对话（消耗额外 Token）", state.proactiveEnabled !== false, (v) => {
+                    Kokoro.action('set_proactive_enabled', { enabled: v });
+                }));
+                body.appendChild(proactiveSec);
             }
 
             // ── 4. API Tab ────────────────

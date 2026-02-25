@@ -119,6 +119,10 @@
                 "desc": "Your preferred language. When different from Response Language, a translation will be attached to each message.",
                 "auto": "Auto (no translation)"
             },
+            "proactive": {
+                "label": "Idle Auto-Talk",
+                "desc": "When enabled, the character will proactively start conversations after a period of idle. This consumes extra tokens."
+            },
             "list": {
                 "label": "Character List",
                 "loading": "Loading characters…",

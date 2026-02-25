@@ -4,7 +4,7 @@ use std::time::Duration;
 /// retries a request closure with exponential backoff
 /// Retries on:
 /// - Network errors
-/// - 429 Too Many Requests
+/// - 429 Too Many Requests (respects Retry-After header)
 /// - 5xx Server Errors
 ///
 /// Returns the last Response (even if error status) or the last Network Error as String.
@@ -35,11 +35,20 @@ where
 
                 // Retry on rate limit or server error
                 if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                    // 优先使用 Retry-After 头指定的等待时间
+                    let retry_delay = response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .map(Duration::from_secs)
+                        .unwrap_or(delay);
+
                     eprintln!(
                         "[HTTP] Request failed with status {}, retrying in {:?} (attempt {}/{})",
-                        status, delay, attempt, max_retries
+                        status, retry_delay, attempt, max_retries
                     );
-                    tokio::time::sleep(delay).await;
+                    tokio::time::sleep(retry_delay).await;
                     delay = std::cmp::min(delay * 2, Duration::from_secs(60)); // Cap at 60s
                     continue;
                 }

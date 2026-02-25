@@ -40,6 +40,8 @@ pub fn run() {
             commands::context::set_persona,
             commands::context::set_response_language,
             commands::context::set_user_language,
+            commands::context::set_proactive_enabled,
+            commands::context::get_proactive_enabled,
             commands::context::clear_history,
             commands::context::end_session,
             commands::tts::synthesize,

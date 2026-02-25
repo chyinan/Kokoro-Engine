@@ -20,12 +20,16 @@ impl OpenAIImageGenProvider {
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             model: model.unwrap_or_else(|| "dall-e-3".to_string()),
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .map_err(|e| format!("Failed to build HTTP client: {}", e))
+                .expect("HTTP client build should not fail"),
         }
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct OpenAIRequest {
     model: String,
     prompt: String,
@@ -66,14 +70,30 @@ impl ImageGenProvider for OpenAIImageGenProvider {
             response_format: "b64_json".to_string(),
         };
 
-        let res = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ImageGenError::GenerationFailed(e.to_string()))?;
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let url_clone = url.clone();
+        let body_clone = body.clone();
+
+        let res = crate::utils::http::request_with_retry(
+            move || {
+                let client = client.clone();
+                let url = url_clone.clone();
+                let body = body_clone.clone();
+                let api_key = api_key.clone();
+                async move {
+                    client
+                        .post(&url)
+                        .header("Authorization", format!("Bearer {}", api_key))
+                        .json(&body)
+                        .send()
+                        .await
+                }
+            },
+            2,
+        )
+        .await
+        .map_err(|e| ImageGenError::GenerationFailed(e.to_string()))?;
 
         if !res.status().is_success() {
             let status = res.status();

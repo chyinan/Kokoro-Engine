@@ -52,7 +52,10 @@ impl CloudTTSProvider {
     pub fn azure_style(config: &ProviderConfig) -> Option<Self> {
         let api_key = config.resolve_api_key()?;
         Some(Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("HTTP client build should not fail"),
             provider_id: config.id.clone(),
             api_key,
             base_url: config.base_url.clone().unwrap_or_else(|| {
@@ -79,7 +82,10 @@ impl CloudTTSProvider {
     pub fn elevenlabs_style(config: &ProviderConfig) -> Option<Self> {
         let api_key = config.resolve_api_key()?;
         Some(Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("HTTP client build should not fail"),
             provider_id: config.id.clone(),
             api_key,
             base_url: config

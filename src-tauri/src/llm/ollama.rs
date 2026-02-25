@@ -78,7 +78,7 @@ impl OllamaProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .expect("HTTP client build should not fail");
 
         Self {
             client,
@@ -93,7 +93,7 @@ impl OllamaProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .expect("HTTP client build should not fail");
 
         let url_clone = url.clone();
         let response = crate::utils::http::request_with_retry(
@@ -137,7 +137,7 @@ impl OllamaProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(3600))
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .expect("HTTP client build should not fail");
 
         let model_str = model.to_string();
         let url_clone = url.clone();
@@ -230,11 +230,12 @@ impl LlmProvider for OllamaProvider {
             if let Some(p) = opts.top_p {
                 opts_map.insert("top_p".to_string(), serde_json::json!(p));
             }
+            // Ollama 使用 repeat_penalty 而非 frequency_penalty/presence_penalty
             if let Some(f) = opts.frequency_penalty {
-                opts_map.insert("frequency_penalty".to_string(), serde_json::json!(f));
+                opts_map.insert("repeat_penalty".to_string(), serde_json::json!(1.0 + f));
             }
-            if let Some(p) = opts.presence_penalty {
-                opts_map.insert("presence_penalty".to_string(), serde_json::json!(p));
+            if opts.presence_penalty.is_some() {
+                eprintln!("[LLM/Ollama] presence_penalty is not supported by Ollama, ignoring");
             }
             if let Some(s) = opts.stop {
                 opts_map.insert("stop".to_string(), serde_json::json!(s));
@@ -278,7 +279,10 @@ impl LlmProvider for OllamaProvider {
             .await
             .map_err(|e| format!("Failed to parse Ollama response: {}", e))?;
 
-        Ok(chunk.message.and_then(|m| m.content).unwrap_or_default())
+        Ok(chunk.message
+            .and_then(|m| m.content)
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| "Ollama returned empty response content".to_string())?)
     }
 
     async fn chat_stream(
@@ -299,11 +303,12 @@ impl LlmProvider for OllamaProvider {
             if let Some(p) = opts.top_p {
                 opts_map.insert("top_p".to_string(), serde_json::json!(p));
             }
+            // Ollama 使用 repeat_penalty 而非 frequency_penalty/presence_penalty
             if let Some(f) = opts.frequency_penalty {
-                opts_map.insert("frequency_penalty".to_string(), serde_json::json!(f));
+                opts_map.insert("repeat_penalty".to_string(), serde_json::json!(1.0 + f));
             }
-            if let Some(p) = opts.presence_penalty {
-                opts_map.insert("presence_penalty".to_string(), serde_json::json!(p));
+            if opts.presence_penalty.is_some() {
+                eprintln!("[LLM/Ollama] presence_penalty is not supported by Ollama, ignoring");
             }
             if let Some(s) = opts.stop {
                 opts_map.insert("stop".to_string(), serde_json::json!(s));
@@ -354,16 +359,26 @@ impl LlmProvider for OllamaProvider {
                         if line.is_empty() {
                             continue;
                         }
-                        if let Ok(chunk) = serde_json::from_str::<OllamaStreamChunk>(line) {
-                            if chunk.done {
-                                break;
-                            }
-                            if let Some(msg) = chunk.message {
-                                if let Some(content) = msg.content {
-                                    if !content.is_empty() {
-                                        contents.push(content);
+                        match serde_json::from_str::<OllamaStreamChunk>(line) {
+                            Ok(chunk) => {
+                                if chunk.done {
+                                    break;
+                                }
+                                if let Some(msg) = chunk.message {
+                                    if let Some(content) = msg.content {
+                                        if !content.is_empty() {
+                                            contents.push(content);
+                                        }
                                     }
                                 }
+                            }
+                            Err(e) => {
+                                // 区分真正的解析错误和非 JSON 数据
+                                if line.starts_with('{') {
+                                    eprintln!("[LLM/Ollama] Stream JSON parse error: {} — line: {}", e, &line[..line.len().min(200)]);
+                                    return Err(format!("Stream parse error: {}", e));
+                                }
+                                // 非 JSON 行，忽略
                             }
                         }
                     }

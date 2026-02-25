@@ -42,6 +42,19 @@ pub fn handle_mod_request<R: tauri::Runtime>(
     };
     let file_path = mods_base.join(clean_path);
 
+    // Security: 验证规范路径在 mods 目录内，防止符号链接绕过
+    if let (Ok(canonical_base), Ok(canonical_file)) = (
+        mods_base.canonicalize(),
+        file_path.canonicalize(),
+    ) {
+        if !canonical_file.starts_with(&canonical_base) {
+            return tauri::http::Response::builder()
+                .status(403)
+                .body(b"Forbidden".to_vec())
+                .unwrap();
+        }
+    }
+
     if !file_path.exists() {
         return tauri::http::Response::builder()
             .status(404)

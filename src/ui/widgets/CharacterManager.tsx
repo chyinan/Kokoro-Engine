@@ -10,8 +10,8 @@ import { clsx } from "clsx";
 import { Plus, Upload, Trash2, UserCircle, Check, X, User } from "lucide-react";
 import { characterDb, type CharacterProfile } from "../../lib/db";
 import { parseCharacterCard } from "../../lib/character-card-parser";
-import { setPersona } from "../../lib/kokoro-bridge";
-import { Languages } from "lucide-react";
+import { setPersona, setProactiveEnabled, getProactiveEnabled } from "../../lib/kokoro-bridge";
+import { Languages, MessageCircle } from "lucide-react";
 import { useTranslation, Trans } from "react-i18next";
 
 // ── Shared style tokens (matching SettingsPanel) ───
@@ -119,10 +119,16 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
     const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
     const [importFeedback, setImportFeedback] = useState<string | null>(null);
     const [userProfile, setUserProfile] = useState<UserProfile>(loadUserProfile);
+    const [proactiveEnabled, setProactiveEnabledState] = useState(true);
 
     // Stable ref for the callback to avoid re-triggering loadCharacters
     const onPersonaChangeRef = useRef(onPersonaChange);
     onPersonaChangeRef.current = onPersonaChange;
+
+    // Fetch proactive setting from backend on mount
+    useEffect(() => {
+        getProactiveEnabled().then(setProactiveEnabledState).catch(() => {});
+    }, []);
 
     // ── Load characters on mount ───────────────────
 
@@ -418,6 +424,35 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                         className={clsx(inputClasses, "mt-2")}
                     />
                 )}
+            </div>
+
+            {/* ── Proactive Messages (Idle Auto-Talk) ── */}
+            <div>
+                <label className={labelClasses}>
+                    <MessageCircle size={12} strokeWidth={2} className="inline-block mr-1.5 -mt-0.5" />
+                    {t("settings.persona.proactive.label")}
+                </label>
+                <p className="text-[10px] text-[var(--color-text-muted)] mb-3 -mt-1">
+                    {t("settings.persona.proactive.desc")}
+                </p>
+                <button
+                    onClick={() => {
+                        const next = !proactiveEnabled;
+                        setProactiveEnabledState(next);
+                        setProactiveEnabled(next).catch(e => console.error("[CharacterManager] Failed to set proactive:", e));
+                    }}
+                    className={clsx(
+                        "relative inline-flex h-6 w-11 items-center rounded-full transition-colors",
+                        proactiveEnabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
+                    )}
+                >
+                    <span
+                        className={clsx(
+                            "inline-block h-4 w-4 rounded-full bg-white transition-transform",
+                            proactiveEnabled ? "translate-x-6" : "translate-x-1"
+                        )}
+                    />
+                </button>
             </div>
 
             {/* ── Divider ── */}

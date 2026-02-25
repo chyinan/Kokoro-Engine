@@ -90,6 +90,14 @@ export async function setUserLanguage(language: string): Promise<void> {
     return invoke("set_user_language", { language });
 }
 
+export async function setProactiveEnabled(enabled: boolean): Promise<void> {
+    return invoke("set_proactive_enabled", { enabled });
+}
+
+export async function getProactiveEnabled(): Promise<boolean> {
+    return invoke("get_proactive_enabled");
+}
+
 export async function clearHistory(): Promise<void> {
     return invoke("clear_history");
 }

@@ -32,6 +32,19 @@ pub fn handle_live2d_request(
         let clean_path = path_str.strip_prefix('/').unwrap_or(&path_str);
         let file_path = models_dir.join(clean_path);
 
+        // Security: 验证规范路径在 models 目录内，防止符号链接绕过
+        if let (Ok(canonical_base), Ok(canonical_file)) = (
+            models_dir.canonicalize(),
+            file_path.canonicalize(),
+        ) {
+            if !canonical_file.starts_with(&canonical_base) {
+                return tauri::http::Response::builder()
+                    .status(403)
+                    .body(b"Forbidden".to_vec())
+                    .unwrap();
+            }
+        }
+
         if !file_path.exists() || !file_path.is_file() {
             eprintln!(
                 "[live2d protocol] 404 Not Found: {} (resolved to {:?})",

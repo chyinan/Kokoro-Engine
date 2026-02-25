@@ -23,7 +23,10 @@ impl GoogleImageGenProvider {
             id: config.id.clone(),
             api_key,
             model,
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .expect("HTTP client build should not fail"),
         })
     }
 }
@@ -46,7 +49,7 @@ impl ImageGenProvider for GoogleImageGenProvider {
 
     async fn generate(&self, params: ImageGenParams) -> Result<ImageGenResponse, ImageGenError> {
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:predict?key={}",
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateImages?key={}",
             self.model, self.api_key
         );
 
@@ -61,22 +64,36 @@ impl ImageGenProvider for GoogleImageGenProvider {
         };
 
         let body = json!({
-            "instances": [
-                {
-                    "prompt": params.prompt
+            "prompt": params.prompt,
+            "config": {
+                "numberOfImages": 1,
+                "aspectRatio": aspect_ratio,
+                "outputOptions": {
+                    "mimeType": "image/png"
                 }
-            ],
-            "parameters": {
-                "sampleCount": 1,
-                "aspectRatio": aspect_ratio
             }
         });
 
-        let res = self.client.post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ImageGenError::GenerationFailed(format!("Network Error: {}", e)))?;
+        let client = self.client.clone();
+        let url_clone = url.clone();
+        let body_clone = body.clone();
+
+        let res = crate::utils::http::request_with_retry(
+            move || {
+                let client = client.clone();
+                let url = url_clone.clone();
+                let body = body_clone.clone();
+                async move {
+                    client.post(&url)
+                        .json(&body)
+                        .send()
+                        .await
+                }
+            },
+            2,
+        )
+        .await
+        .map_err(|e| ImageGenError::GenerationFailed(format!("Network Error: {}", e)))?;
 
         if !res.status().is_success() {
             let error_text = res.text().await.unwrap_or_default();
@@ -87,19 +104,20 @@ impl ImageGenProvider for GoogleImageGenProvider {
             .map_err(|e| ImageGenError::GenerationFailed(format!("JSON Error: {}", e)))?;
 
         // Parse response
-        // Structure: { "predictions": [ { "bytesBase64Encoded": "..." } ] }
-        let predictions = json.get("predictions")
+        // Structure: { "generatedImages": [ { "image": { "imageBytes": "..." } } ] }
+        let generated_images = json.get("generatedImages")
             .and_then(|v| v.as_array())
-            .ok_or(ImageGenError::GenerationFailed("Missing 'predictions' array".to_string()))?;
+            .ok_or(ImageGenError::GenerationFailed("Missing 'generatedImages' array".to_string()))?;
 
-        if predictions.is_empty() {
-            return Err(ImageGenError::GenerationFailed("No predictions returned".to_string()));
+        if generated_images.is_empty() {
+            return Err(ImageGenError::GenerationFailed("No images returned".to_string()));
         }
 
-        let first_prediction = &predictions[0];
-        let b64_data = first_prediction.get("bytesBase64Encoded")
+        let first_image = &generated_images[0];
+        let b64_data = first_image.get("image")
+            .and_then(|v| v.get("imageBytes"))
             .and_then(|v| v.as_str())
-            .ok_or(ImageGenError::GenerationFailed("Missing 'bytesBase64Encoded' field".to_string()))?;
+            .ok_or(ImageGenError::GenerationFailed("Missing 'image.imageBytes' field".to_string()))?;
 
         // Decode Base64
         use base64::{Engine as _, engine::general_purpose};

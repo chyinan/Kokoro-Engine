@@ -72,6 +72,7 @@ interface SettingsPanelProps {
     // User Profile
     userName?: string;
     userPersona?: string;
+    proactiveEnabled?: boolean;
 }
 
 const tabs: { id: TabId; label: string; icon: typeof Key }[] = [

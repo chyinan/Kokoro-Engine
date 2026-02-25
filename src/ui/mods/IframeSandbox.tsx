@@ -73,7 +73,7 @@ async function convertBlobUrls(obj: unknown): Promise<unknown> {
 export const IframeSandbox = ({
     src,
     id,
-    permissions = [],
+    permissions: _permissions = [],
     componentProps,
     onModEvent,
 }: IframeSandboxProps) => {

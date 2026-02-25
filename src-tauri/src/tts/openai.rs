@@ -37,7 +37,7 @@ impl OpenAITtsProvider {
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .unwrap_or_else(|_| Client::new()),
+                .expect("HTTP client build should not fail"),
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             model: model.unwrap_or_else(|| "tts-1".to_string()),
@@ -105,18 +105,11 @@ impl TtsProvider for OpenAITtsProvider {
 
     async fn synthesize(&self, text: &str, params: TtsParams) -> Result<Vec<u8>, TtsError> {
         let url = format!("{}/audio/speech", self.base_url);
+        let raw_voice = params.voice.unwrap_or_else(|| self.default_voice.clone());
         let request_body = TtsRequest {
             model: self.model.clone(),
             input: text.to_string(),
-            voice: params
-                .voice
-                .unwrap_or_else(|| self.default_voice.clone())
-                .strip_prefix("openai_")
-                .unwrap_or_else(|| self.default_voice.as_str()) // careful here if default_voice has prefix?
-                // Wait, default_voice is usually stored without prefix in config, but let's be safe.
-                // Actually, voices() returns "openai_alloy", so UI likely sends "openai_alloy".
-                // We should strip it.
-                .to_string(),
+            voice: raw_voice.strip_prefix("openai_").unwrap_or(&raw_voice).to_string(),
             response_format: "mp3".to_string(),
             speed: params.speed,
         };
@@ -168,15 +161,11 @@ impl TtsProvider for OpenAITtsProvider {
         params: TtsParams,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>, TtsError>> + Send>>, TtsError> {
         let url = format!("{}/audio/speech", self.base_url);
+        let raw_voice = params.voice.unwrap_or_else(|| self.default_voice.clone());
         let request_body = TtsRequest {
             model: self.model.clone(),
             input: text.to_string(),
-            voice: params
-                .voice
-                .unwrap_or_else(|| self.default_voice.clone())
-                .strip_prefix("openai_")
-                .unwrap_or_else(|| self.default_voice.as_str())
-                .to_string(),
+            voice: raw_voice.strip_prefix("openai_").unwrap_or(&raw_voice).to_string(),
             response_format: "mp3".to_string(),
             speed: params.speed,
         };

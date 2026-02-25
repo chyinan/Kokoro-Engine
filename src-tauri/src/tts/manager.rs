@@ -418,5 +418,28 @@ impl TtsService {
 }
 
 fn split_sentences(text: &str) -> Vec<&str> {
-    text.split_inclusive(&['.', '!', '?'][..]).collect()
+    // 支持中英文标点分句
+    let mut result = Vec::new();
+    let mut last = 0;
+    for (i, c) in text.char_indices() {
+        match c {
+            '.' | '!' | '?' | '。' | '！' | '？' => {
+                let end = i + c.len_utf8();
+                let segment = &text[last..end];
+                if !segment.trim().is_empty() {
+                    result.push(segment);
+                }
+                last = end;
+            }
+            _ => {}
+        }
+    }
+    // 处理末尾没有标点的剩余文本
+    if last < text.len() {
+        let remaining = &text[last..];
+        if !remaining.trim().is_empty() {
+            result.push(remaining);
+        }
+    }
+    result
 }

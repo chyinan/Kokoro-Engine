@@ -88,6 +88,7 @@ import {
   getTtsConfig,
   setPersona,
   setResponseLanguage,
+  getProactiveEnabled,
   // Config Getters
   getLlmConfig,
   getImageGenConfig,
@@ -120,7 +121,7 @@ import {
   checkRvcStatus,
   listRvcModels,
   convertSinging,
-  onSingingProgress,
+  // onSingingProgress — reserved for future use
   // New: ImageGen
   testSdConnection,
   // New: Vision
@@ -206,6 +207,7 @@ function App() {
   const [sdModels, setSdModels] = useState<string[]>([]);
   const [capturedScreenUrl, setCapturedScreenUrl] = useState<string | null>(null);
   const [userLanguage, setUserLanguageState] = useState(() => localStorage.getItem("kokoro_user_language") || "zh");
+  const [proactiveEnabled, setProactiveEnabledState] = useState(true);
 
   const modelUrl = useMemo(() => {
     if (customModelPath) {
@@ -244,7 +246,8 @@ function App() {
       getImageGenConfig(),
       listMcpServers(),
       listMods(),
-    ]).then(([tts, llm, stt, vision, imageGen, mcp, mods]) => {
+      getProactiveEnabled(),
+    ]).then(([tts, llm, stt, vision, imageGen, mcp, mods, proactive]) => {
       setTtsConfig(tts);
       setLlmConfig(llm);
       setSttConfig(stt);
@@ -252,6 +255,7 @@ function App() {
       setImageGenConfig(imageGen);
       setMcpServers(mcp);
       setModList(mods);
+      setProactiveEnabledState(proactive);
     }).catch(err => console.error("[App] Failed to fetch initial configs:", err));
 
     // These may be slower (file system scans, network)
@@ -479,6 +483,14 @@ function App() {
 
     if (detail.action === 'set_voice_interrupt') {
       setVoiceInterrupt(!!detail.data?.enabled);
+    }
+
+    if (detail.action === 'set_proactive_enabled') {
+      const enabled = !!detail.data?.enabled;
+      setProactiveEnabledState(enabled);
+      import("./lib/kokoro-bridge").then(({ setProactiveEnabled }) => {
+        setProactiveEnabled(enabled).catch(console.error);
+      });
     }
 
     // ── Background Config Actions ────────────────────
@@ -850,6 +862,7 @@ function App() {
             // User Profile (from localStorage)
             userName={localStorage.getItem('kokoro_user_name') || ''}
             userPersona={localStorage.getItem('kokoro_user_persona') || ''}
+            proactiveEnabled={proactiveEnabled}
           />
         );
 

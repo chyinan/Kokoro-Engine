@@ -63,3 +63,4 @@ models/
 
 
 src-tauri/proptest-regressions/vision/tests/property_tests.txt
+.claude

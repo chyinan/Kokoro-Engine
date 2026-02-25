@@ -57,6 +57,8 @@ pub struct AIOrchestrator {
     pub curiosity: Arc<Mutex<CuriosityModule>>,
     pub initiative: Arc<Mutex<InitiativeSystem>>,
     pub idle_behaviors: Arc<Mutex<IdleBehaviorSystem>>,
+    /// Whether proactive (idle auto-talk) messages are enabled.
+    pub proactive_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AIOrchestrator {
@@ -105,6 +107,7 @@ impl AIOrchestrator {
             curiosity: Arc::new(Mutex::new(CuriosityModule::new())),
             initiative: Arc::new(Mutex::new(InitiativeSystem::new())),
             idle_behaviors: Arc::new(Mutex::new(IdleBehaviorSystem::new())),
+            proactive_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         })
     }
 
@@ -127,6 +130,16 @@ impl AIOrchestrator {
     pub async fn set_user_language(&self, language: String) {
         let mut lang = self.user_language.lock().await;
         *lang = language;
+    }
+
+    /// Enable or disable proactive (idle auto-talk) messages.
+    pub fn set_proactive_enabled(&self, enabled: bool) {
+        self.proactive_enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Check if proactive messages are enabled.
+    pub fn is_proactive_enabled(&self) -> bool {
+        self.proactive_enabled.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Update emotion state with smoothing and return the smoothed values.

@@ -116,6 +116,7 @@ impl StdioTransport {
 
         // ── Writer task: receives requests from channel, writes to stdin ──
         let mut stdin = stdin;
+        let pending_cleanup = pending.clone();
         tokio::spawn(async move {
             while let Some((request, responder)) = rx.recv().await {
                 // Store responder for this request ID
@@ -127,10 +128,19 @@ impl StdioTransport {
 
                 if let Err(e) = stdin.write_all(line.as_bytes()).await {
                     eprintln!("[MCP/Stdio] Write error: {}", e);
+                    // 清理所有 pending 请求，通知等待者连接已断开
+                    let mut pending = pending_cleanup.lock().await;
+                    for (_, responder) in pending.drain() {
+                        let _ = responder.send(Err("Transport write error: connection lost".to_string()));
+                    }
                     break;
                 }
                 if let Err(e) = stdin.flush().await {
                     eprintln!("[MCP/Stdio] Flush error: {}", e);
+                    let mut pending = pending_cleanup.lock().await;
+                    for (_, responder) in pending.drain() {
+                        let _ = responder.send(Err("Transport flush error: connection lost".to_string()));
+                    }
                     break;
                 }
             }
@@ -138,6 +148,7 @@ impl StdioTransport {
 
         // ── Reader task: reads stdout lines, dispatches to pending responders ──
         let reader = BufReader::new(stdout);
+        let pending_reader_cleanup = pending.clone();
         tokio::spawn(async move {
             let mut lines = reader.lines();
             loop {
@@ -174,14 +185,22 @@ impl StdioTransport {
                         }
                     }
                     Ok(None) => {
-                        // EOF — process exited
+                        // EOF — process exited, 清理所有 pending 请求
                         eprintln!("[MCP/Stdio] Server process exited (stdout closed)");
                         connected_clone.store(false, Ordering::SeqCst);
+                        let mut pending = pending_reader_cleanup.lock().await;
+                        for (_, responder) in pending.drain() {
+                            let _ = responder.send(Err("MCP server process exited".to_string()));
+                        }
                         break;
                     }
                     Err(e) => {
                         eprintln!("[MCP/Stdio] Read error: {}", e);
                         connected_clone.store(false, Ordering::SeqCst);
+                        let mut pending = pending_reader_cleanup.lock().await;
+                        for (_, responder) in pending.drain() {
+                            let _ = responder.send(Err(format!("MCP transport read error: {}", e)));
+                        }
                         break;
                     }
                 }
@@ -230,20 +249,22 @@ impl McpTransport for StdioTransport {
             return Err("Transport disconnected".to_string());
         }
 
-        // Notifications use id=0 but we don't wait for response
-        // Actually per JSON-RPC spec, notifications MUST NOT have an id field.
-        // We send it via the writer but don't register a responder.
-        let line = serde_json::to_string(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        }))
-        .map_err(|e| e.to_string())?;
+        // JSON-RPC 通知没有 id 字段，也不需要等待响应
+        // 通过 sender channel 发送，使用一个不会被读取的 responder
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id,
+            method: method.to_string(),
+            params,
+        };
 
-        // We can't write directly to stdin from here, so we use a dummy oneshot
-        // Actually, let's just skip notification support for now — most MCP usage
-        // is request/response. We can add true notification support later.
-        let _ = line;
+        let (tx, _rx) = oneshot::channel();
+        self.sender
+            .send((request, tx))
+            .await
+            .map_err(|_| "Transport channel closed".to_string())?;
+
         Ok(())
     }
 

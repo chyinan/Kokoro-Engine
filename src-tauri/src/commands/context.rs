@@ -27,6 +27,23 @@ pub async fn set_user_language(
 }
 
 #[tauri::command]
+pub async fn set_proactive_enabled(
+    enabled: bool,
+    state: State<'_, AIOrchestrator>,
+) -> Result<(), String> {
+    state.set_proactive_enabled(enabled);
+    println!("[AI] Proactive messages {}", if enabled { "enabled" } else { "disabled" });
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_proactive_enabled(
+    state: State<'_, AIOrchestrator>,
+) -> Result<bool, String> {
+    Ok(state.is_proactive_enabled())
+}
+
+#[tauri::command]
 pub async fn clear_history(state: State<'_, AIOrchestrator>) -> Result<(), String> {
     state.clear_history().await;
     Ok(())

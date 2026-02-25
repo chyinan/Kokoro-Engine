@@ -100,16 +100,15 @@ impl ModManager {
                     ScriptCommand::DispatchEvent { event, payload } => {
                         // Call globalThis.__dispatch(event, payload) in QuickJS
                         ctx.with(|ctx| {
+                            // 使用 serde_json 双重编码确保安全，避免字符串拼接注入
+                            let event_json = serde_json::to_string(&event).unwrap_or_default();
                             let payload_str = serde_json::to_string(&payload).unwrap_or_default();
-                            // Escape for embedding in a JS backtick template literal
-                            let escaped = payload_str
-                                .replace('\\', "\\\\")
-                                .replace('`', "\\`")
-                                .replace("${", "\\${");
+                            // 二次编码：将 JSON 字符串本身编码为 JS 字符串字面量
+                            let payload_escaped = serde_json::to_string(&payload_str).unwrap_or_default();
                             let dispatch_code = format!(
-                                "globalThis.__dispatch(\"{}\", JSON.parse(`{}`));",
-                                event.replace('"', "\\\""),
-                                escaped
+                                "globalThis.__dispatch({}, JSON.parse({}));",
+                                event_json,
+                                payload_escaped
                             );
                             if let Err(_e) = ctx.eval::<(), _>(dispatch_code.as_str()) {
                                 // Silently ignore — expected when no mods register listeners

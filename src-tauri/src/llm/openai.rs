@@ -106,7 +106,7 @@ impl OpenAIClient {
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
-                .unwrap_or_else(|_| Client::new()),
+                .expect("HTTP client build should not fail"),
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             model: model.unwrap_or_else(|| "gpt-3.5-turbo".to_string()),
@@ -169,9 +169,18 @@ impl OpenAIClient {
             .await
             .map_err(|e| format!("Failed to parse response: {}", e))?;
 
-        let content = body["choices"][0]["message"]["content"]
+        // 检查 choices 数组是否存在且非空
+        let choices = body["choices"]
+            .as_array()
+            .ok_or_else(|| "API response missing 'choices' array".to_string())?;
+
+        let first_choice = choices
+            .first()
+            .ok_or_else(|| "API response 'choices' array is empty".to_string())?;
+
+        let content = first_choice["message"]["content"]
             .as_str()
-            .unwrap_or("")
+            .ok_or_else(|| "API response missing 'message.content'".to_string())?
             .to_string();
 
         Ok(content)
@@ -246,7 +255,20 @@ impl OpenAIClient {
                                 }
                                 Ok(None)
                             }
-                            Err(_) => Ok(None), // Ignore parse errors for keep-alives etc
+                            Err(e) => {
+                                // 区分空行/keep-alive 和真正的解析错误
+                                let trimmed = event.data.trim();
+                                if trimmed.is_empty() {
+                                    Ok(None)
+                                } else if trimmed.starts_with('{') {
+                                    // 看起来是 JSON 但解析失败，可能是 API 错误响应
+                                    eprintln!("[LLM/OpenAI] Stream JSON parse error: {} — data: {}", e, &trimmed[..trimmed.len().min(200)]);
+                                    Err(format!("Stream parse error: {}", e))
+                                } else {
+                                    // 非 JSON 数据，可能是 keep-alive 或注释
+                                    Ok(None)
+                                }
+                            }
                         }
                     }
                     Err(e) => Err(format!("Stream error: {}", e)),

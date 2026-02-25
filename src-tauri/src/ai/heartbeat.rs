@@ -139,7 +139,10 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
         }
 
         // 4. Initiative System (Proactive Messaging)
-        // Only run initiative check if cooldown has passed
+        // Only run initiative check if proactive is enabled and cooldown has passed
+        if !orchestrator.is_proactive_enabled() {
+            continue;
+        }
         if last_proactive_ts.elapsed().as_secs() >= config.cooldown_secs {
             let decision = {
                 let mut initiative = orchestrator.initiative.lock().await;

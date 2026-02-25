@@ -63,7 +63,6 @@ impl OpenAIProvider {
 }
 
 #[async_trait]
-#[async_trait]
 impl LlmProvider for OpenAIProvider {
     async fn chat(
         &self,

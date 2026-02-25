@@ -31,7 +31,10 @@ impl OpenAIWhisperProvider {
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             model: model.unwrap_or_else(|| "whisper-1".to_string()),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300)) // 5 分钟默认超时，长音频需要更多时间
+                .build()
+                .expect("HTTP client build should not fail"),
         }
     }
 }
@@ -78,7 +81,7 @@ impl SttEngine for OpenAIWhisperProvider {
 
         // 1. Dynamic Timeout Calculation
         // Base 10s + 2x audio duration. e.g. 30s audio -> 70s timeout.
-        let _timeout_duration =
+        let timeout_duration =
             Duration::from_secs(10) + Duration::from_secs_f32(duration_sec * 2.0);
 
         // 2. Prepare Form Data
@@ -110,7 +113,6 @@ impl SttEngine for OpenAIWhisperProvider {
         // Clone for closure capture
         let client = self.client.clone();
         let api_key = self.api_key.clone();
-        let _base_url = self.base_url.clone(); // Needed if we reconstruct URL, but we have `url` string below.
         let model = self.model.clone();
         let language = language.map(|s| s.to_string());
         let mime_type = mime_type.to_string();
@@ -138,15 +140,6 @@ impl SttEngine for OpenAIWhisperProvider {
                         .file_name(file_name)
                         .mime_str(&mime_type)
                         .unwrap();
-                    // Note: reqwest::Error doesn't easily wrap custom errors, but we can't return SttError here.
-                    // Actually Part::mime_str error is not reqwest::Error.
-                    // Simple fix: expect/unwrap because mime_type is verified safe above?
-                    // Or just use text/plain if fail?
-                    // Let's use expect for now as we control mime types in the match above.
-                    // Actually, mime_str returns reqwest::Error in newer versions?
-                    // No, it returns generic Error.
-                    // We can just ignore the error inside this retry loop for simplicity or map it.
-                    // Let's assume valid mime types from our match block.
 
                     let mut form = multipart::Form::new()
                         .part("file", part)
@@ -160,8 +153,9 @@ impl SttEngine for OpenAIWhisperProvider {
                     client
                         .post(url.as_str())
                         .header("Authorization", format!("Bearer {}", api_key))
+                        .timeout(timeout_duration)
                         .multipart(form)
-                        .send() // timeout is on client
+                        .send()
                         .await
                 }
             },
