@@ -63,10 +63,19 @@
 - **语音交互 (STT)**: Whisper/faster-whisper/whisper.cpp 模型初步支持。
 
 ### 🔌 扩展能力
+- **MOD 系统**: 内置模块化 MOD 框架，支持通过 HTML/CSS/JS 替换聊天面板、设置面板等核心 UI 组件，支持自定义主题和 QuickJS 脚本沙箱。
 - **MCP 协议支持**: 实现了 **Model Context Protocol (MCP)** 客户端。
     - 支持连接任意 MCP Server (通过 stdio 交互)。
     - 角色可以调用 MCP Server 提供的工具（如文件系统、Web 搜索、数据库等）来增强能力。
     - 支持通过 UI 来管理 MCP Server。
+
+### 🎮 官方示范 MOD：原神风格 UI
+
+项目内置了一个完整的官方示范 MOD（`mods/genshin-theme`），以原神游戏的视觉风格重新设计了聊天和设置界面：
+
+- 完整替换聊天面板和设置面板，与原生功能完全对等
+- 包含角色管理、LLM/TTS/STT/Vision/ImageGen 配置、MCP 管理、背景设置、记忆管理等全部设置项
+- 可作为社区开发者创建自定义 UI MOD 的参考模板
 
 ## 📝 待办事项 / 开发中 (TODO)
 

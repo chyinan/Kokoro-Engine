@@ -63,10 +63,19 @@ Features currently verified mainly in a local environment (RTX 4060 Laptop):
 - **Voice Interaction (STT)**: Initial support for Whisper/faster-whisper/whisper.cpp models.
 
 ### 🔌 Extended Capabilities
+- **MOD System**: Built-in modular MOD framework that allows replacing core UI components (chat panel, settings panel, etc.) with custom HTML/CSS/JS, with support for custom themes and a QuickJS script sandbox.
 - **MCP Protocol Support**: Implements **Model Context Protocol (MCP)** Client.
     - Supports connection to any MCP Server (via stdio interaction).
     - Characters can use tools provided by MCP Servers (such as file system, Web search, databases, etc.) to enhance capabilities.
     - Supports managing MCP Servers via UI.
+
+### 🎮 Official Demo MOD: Genshin Impact Style UI
+
+The project includes a complete official demo MOD (`mods/genshin-theme`) that redesigns the chat and settings interfaces in the visual style of Genshin Impact:
+
+- Fully replaces the chat and settings panels with complete feature parity
+- Includes character management, LLM/TTS/STT/Vision/ImageGen configuration, MCP management, background settings, memory management, and all other settings
+- Serves as a reference template for community developers creating custom UI MODs
 
 ## 📝 TODO / In Development
 
