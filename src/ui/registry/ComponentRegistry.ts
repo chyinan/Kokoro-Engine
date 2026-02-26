@@ -66,6 +66,17 @@ export class ComponentRegistry {
         this.notify();
     }
 
+    /**
+     * 清除所有 mod 注册的组件，恢复原生模式
+     */
+    clearAllModComponents() {
+        for (const [slot] of this.modComponents.entries()) {
+            this.components.delete(slot);
+        }
+        this.modComponents.clear();
+        this.notify();
+    }
+
     get(name: string): ComponentConstructor | undefined {
         return this.components.get(name);
     }

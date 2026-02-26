@@ -2,6 +2,7 @@ pub mod actions;
 pub mod character;
 pub mod chat;
 pub mod context;
+pub mod conversation;
 pub mod database;
 pub mod imagegen;
 pub mod live2d;

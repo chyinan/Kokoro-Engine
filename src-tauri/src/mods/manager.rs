@@ -383,6 +383,14 @@ impl ModManager {
     pub fn get_active_layout(&self) -> Option<&JsonValue> {
         self.active_layout.as_ref()
     }
+
+    /// 卸载当前活跃的 Mod（清除主题、布局、组件），恢复原生模式
+    pub fn unload_mod<R: tauri::Runtime>(&mut self, app_handle: &tauri::AppHandle<R>) {
+        self.active_theme = None;
+        self.active_layout = None;
+        let _ = app_handle.emit("mod:unload", ());
+        println!("[ModManager] Active mod unloaded, native mode restored");
+    }
 }
 
 #[cfg(test)]

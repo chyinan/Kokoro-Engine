@@ -78,12 +78,14 @@ import {
   onModComponentsRegister,
   onModUiMessage,
   onModScriptEvent,
+  onModUnload,
   onChatDelta,
   onChatDone,
   onChatExpression,
   onChatAction,
   streamChat,
   dispatchModEvent,
+  unloadMod,
   listLive2dModels,
   getTtsConfig,
   setPersona,
@@ -381,6 +383,20 @@ function App() {
       });
     });
 
+    // ── MOD System: Unload — reset to native mode ──
+    const unlistenModUnload = onModUnload(() => {
+      console.log("[App] Mod unloaded, restoring native mode");
+      // 清除所有 mod 注册的组件
+      registry.clearAllModComponents();
+      // 重新注册核心组件
+      registerCoreComponents();
+      // 重置主题：恢复默认 CSS 变量
+      const root = document.documentElement;
+      root.removeAttribute("style");
+      document.body.style.backgroundImage = "";
+      document.body.style.backgroundColor = "";
+    });
+
     return () => {
       ttsService.cleanup();
       unlistenImageGen.then(unlisten => unlisten());
@@ -392,6 +408,7 @@ function App() {
       unlistenModAction.then(unlisten => unlisten());
       unlistenModChatDone.then(unlisten => unlisten());
       unlistenModScriptEvent.then(unlisten => unlisten());
+      unlistenModUnload.then(unlisten => unlisten());
     };
   }, []);
 
@@ -563,6 +580,11 @@ function App() {
         .then(() => listMcpServers())
         .then(servers => setMcpServers(servers))
         .catch(err => console.error('[App] MCP refresh failed:', err));
+    }
+
+    // ── Mod Unload Action ─────────────────────────────
+    if (detail.action === 'unload_mod') {
+      unloadMod().catch(err => console.error('[App] Mod unload failed:', err));
     }
 
     // ── Memory Actions ─────────────────────────────
@@ -759,7 +781,7 @@ function App() {
   useEffect(() => {
     document.addEventListener('kokoro:mod-action', handleModAction);
     return () => document.removeEventListener('kokoro:mod-action', handleModAction);
-  }, []);
+  });
 
   // Determine active background based on mode
   let activeBackgroundUrl = bgSlideshow.currentUrl;

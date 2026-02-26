@@ -492,6 +492,14 @@
             "clear": "Clear conversation",
             "collapse": "Collapse chat",
             "open": "Open chat"
+        },
+        "history": {
+            "title": "Chat History",
+            "newChat": "New Chat",
+            "delete": "Delete conversation",
+            "rename": "Rename",
+            "empty": "No conversations yet",
+            "confirmDelete": "Delete this conversation?"
         }
     },
     "header": {
@@ -530,6 +538,7 @@
             "refresh": "Refresh mods",
             "load": "LOAD",
             "loading": "...",
+            "unload": "Unload",
             "hide_ui": "Hide UI",
             "show_ui": "Show UI"
         },
@@ -537,6 +546,7 @@
             "failed_list": "Failed to load mods",
             "loaded": "Mod \"{{id}}\" loaded",
             "failed_load": "Failed to load \"{{id}}\"",
+            "unloaded": "Mod unloaded, native mode restored",
             "installing": "Installing mod...",
             "installed": "Installed: {{name}}",
             "failed_import": "Failed to import mod"

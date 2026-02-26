@@ -122,3 +122,13 @@ pub async fn dispatch_mod_event(
     let manager = mod_manager.lock().await;
     manager.dispatch_event(&event, payload).await
 }
+
+#[command]
+pub async fn unload_mod(
+    mod_manager: State<'_, Mutex<ModManager>>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let mut manager = mod_manager.lock().await;
+    manager.unload_mod(&app_handle);
+    Ok(())
+}

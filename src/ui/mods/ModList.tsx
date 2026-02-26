@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { RefreshCw, Play, Eye, EyeOff, Package, AlertCircle, Import } from "lucide-react";
-import { listMods, loadMod, installMod, type ModManifest } from "../../lib/kokoro-bridge";
+import { RefreshCw, Play, Eye, EyeOff, Package, AlertCircle, Import, RotateCcw } from "lucide-react";
+import { listMods, loadMod, installMod, unloadMod, type ModManifest } from "../../lib/kokoro-bridge";
 import { open } from "@tauri-apps/plugin-dialog";
 import { IframeSandbox } from "./IframeSandbox";
 import { useTranslation, Trans } from "react-i18next";
@@ -48,6 +48,16 @@ export function ModList() {
             showStatus(t("mods.status.failed_load", { id }), "error");
         } finally {
             setLoadingMod(null);
+        }
+    };
+
+    const handleUnload = async () => {
+        try {
+            await unloadMod();
+            showStatus(t("mods.status.unloaded"), "success");
+        } catch (e) {
+            console.error("Failed to unload mod:", e);
+            showStatus(String(e), "error");
         }
     };
 
@@ -121,6 +131,16 @@ export function ModList() {
                     </h2>
                 </div>
                 <div className="flex gap-2">
+                    <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        onClick={handleUnload}
+                        className="flex items-center gap-1 px-3 py-1.5 rounded bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-warning)] hover:border-[var(--color-warning)] transition-colors"
+                        title={t("mods.actions.unload")}
+                    >
+                        <RotateCcw size={12} strokeWidth={1.5} />
+                        {t("mods.actions.unload")}
+                    </motion.button>
                     <motion.button
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.95 }}

@@ -492,6 +492,14 @@
             "clear": "清空对话",
             "collapse": "折叠对话",
             "open": "展开对话"
+        },
+        "history": {
+            "title": "对话记录",
+            "newChat": "新对话",
+            "delete": "删除对话",
+            "rename": "重命名",
+            "empty": "暂无对话记录",
+            "confirmDelete": "确定删除这条对话记录吗？"
         }
     },
     "header": {
@@ -530,6 +538,7 @@
             "refresh": "刷新列表",
             "load": "加载",
             "loading": "...",
+            "unload": "卸载模组",
             "hide_ui": "隐藏界面",
             "show_ui": "显示界面"
         },
@@ -537,6 +546,7 @@
             "failed_list": "加载模组列表失败",
             "loaded": "模组 \"{{id}}\" 已加载",
             "failed_load": "加载 \"{{id}}\" 失败",
+            "unloaded": "模组已卸载，已恢复原生模式",
             "installing": "正在安装模组...",
             "installed": "已安装: {{name}}",
             "failed_import": "模组导入失败"

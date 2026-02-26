@@ -492,6 +492,14 @@
             "clear": "대화 지우기",
             "collapse": "채팅 접기",
             "open": "채팅 열기"
+        },
+        "history": {
+            "title": "대화 기록",
+            "newChat": "새 대화",
+            "delete": "대화 삭제",
+            "rename": "이름 변경",
+            "empty": "대화 기록이 없습니다",
+            "confirmDelete": "이 대화를 삭제하시겠습니까?"
         }
     },
     "header": {
@@ -530,6 +538,7 @@
             "refresh": "새로고침",
             "load": "로드",
             "loading": "...",
+            "unload": "언로드",
             "hide_ui": "UI 숨기기",
             "show_ui": "UI 보기"
         },
@@ -537,6 +546,7 @@
             "failed_list": "모드 목록 로드 실패",
             "loaded": "모드 \"{{id}}\" 로드됨",
             "failed_load": "\"{{id}}\" 로드 실패",
+            "unloaded": "모드가 언로드되었습니다. 네이티브 모드로 복원되었습니다",
             "installing": "모드 설치 중...",
             "installed": "설치됨: {{name}}",
             "failed_import": "모드 가져오기 실패"

@@ -492,6 +492,14 @@
             "clear": "会話をクリア",
             "collapse": "チャットを折りたたむ",
             "open": "チャットを開く"
+        },
+        "history": {
+            "title": "会話履歴",
+            "newChat": "新しい会話",
+            "delete": "会話を削除",
+            "rename": "名前を変更",
+            "empty": "会話履歴はありません",
+            "confirmDelete": "この会話を削除しますか？"
         }
     },
     "header": {
@@ -530,6 +538,7 @@
             "refresh": "更新",
             "load": "ロード",
             "loading": "...",
+            "unload": "アンロード",
             "hide_ui": "UIを隠す",
             "show_ui": "UIを表示"
         },
@@ -537,6 +546,7 @@
             "failed_list": "Mod一覧の取得に失敗しました",
             "loaded": "Mod \"{{id}}\" をロードしました",
             "failed_load": "\"{{id}}\" のロードに失敗しました",
+            "unloaded": "Modをアンロードしました。ネイティブモードに復元しました",
             "installing": "Modをインストール中...",
             "installed": "インストール完了: {{name}}",
             "failed_import": "Modのインポートに失敗しました"

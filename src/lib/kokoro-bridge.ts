@@ -303,6 +303,14 @@ export async function dispatchModEvent(event: string, payload: unknown): Promise
     return invoke("dispatch_mod_event", { event, payload });
 }
 
+export async function unloadMod(): Promise<void> {
+    return invoke("unload_mod");
+}
+
+export async function onModUnload(callback: () => void): Promise<UnlistenFn> {
+    return listen<void>("mod:unload", () => callback());
+}
+
 export async function onModScriptEvent(
     callback: (data: { event: string; payload: unknown }) => void
 ): Promise<UnlistenFn> {
@@ -595,6 +603,51 @@ export async function refreshMcpTools(): Promise<void> {
 
 export async function reconnectMcpServer(name: string): Promise<void> {
     return invoke("reconnect_mcp_server", { name });
+}
+
+// ── Conversation History ───────────────────────────────
+
+export interface Conversation {
+    id: string;
+    character_id: string;
+    title: string;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface ConversationMessage {
+    role: string;
+    content: string;
+    metadata?: string;
+    created_at: string;
+}
+
+export async function listConversations(characterId: string): Promise<Conversation[]> {
+    return invoke<Conversation[]>("list_conversations", {
+        request: { character_id: characterId },
+    });
+}
+
+export async function loadConversation(id: string): Promise<ConversationMessage[]> {
+    return invoke<ConversationMessage[]>("load_conversation", {
+        request: { id },
+    });
+}
+
+export async function deleteConversation(id: string): Promise<void> {
+    return invoke("delete_conversation", {
+        request: { id },
+    });
+}
+
+export async function createConversation(): Promise<string> {
+    return invoke<string>("create_conversation");
+}
+
+export async function renameConversation(id: string, title: string): Promise<void> {
+    return invoke("rename_conversation", {
+        request: { id, title },
+    });
 }
 
 // ── Singing (RVC Voice Conversion) ──────────────────────

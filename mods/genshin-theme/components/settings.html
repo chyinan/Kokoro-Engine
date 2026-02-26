@@ -2239,10 +2239,12 @@
                     });
                 }
 
-                // Refresh button
+                // Refresh button + Unload button
                 const actRow = document.createElement('div');
                 actRow.style.marginTop = '12px';
-                actRow.innerHTML = '<button class="gi-btn" onclick="Kokoro.action(\'refresh_mods\')">\u5237\u65b0\u6a21\u7ec4\u5217\u8868</button>';
+                actRow.style.display = 'flex';
+                actRow.style.gap = '8px';
+                actRow.innerHTML = '<button class="gi-btn" onclick="Kokoro.action(\'refresh_mods\')">刷新模组列表</button><button class="gi-btn" onclick="Kokoro.invoke(\'unload_mod\', {})" style="border-color:var(--gi-gold-dim);color:var(--gi-gold-dim)">卸载当前模组</button>';
                 sec.appendChild(actRow);
 
                 body.appendChild(sec);

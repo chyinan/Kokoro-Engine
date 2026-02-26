@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, Languages } from "lucide-react";
-import { streamChat, onChatDelta, onChatDone, onChatError, clearHistory, uploadVisionImage, synthesize, onToolCallResult } from "../../lib/kokoro-bridge";
+import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, Languages, History } from "lucide-react";
+import { streamChat, onChatDelta, onChatDone, onChatError, clearHistory, uploadVisionImage, synthesize, onToolCallResult, listConversations, loadConversation } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal } from "../hooks";
 import { useTranslation } from "react-i18next";
+import ConversationSidebar from "./ConversationSidebar";
 
 // ── Types ──────────────────────────────────────────────────
 interface ChatMessage {
@@ -106,6 +107,26 @@ export default function ChatPanel() {
     const [visionEnabled, setVisionEnabled] = useState(() => localStorage.getItem("kokoro_vision_enabled") === "true");
     const [pendingImages, setPendingImages] = useState<string[]>([]);
     const [isUploading, setIsUploading] = useState(false);
+
+    // 对话历史侧边栏
+    const [sidebarOpen, setSidebarOpen] = useState(false);
+
+    // 自动恢复最近对话
+    useEffect(() => {
+        const characterId = localStorage.getItem("kokoro_active_character_id") || "default";
+        listConversations(characterId).then(convs => {
+            if (convs.length > 0) {
+                loadConversation(convs[0].id).then(msgs => {
+                    const chatMsgs: ChatMessage[] = msgs.map(m => ({
+                        role: m.role === "user" ? "user" as const : "kokoro" as const,
+                        text: m.content,
+                    }));
+                    setMessages(chatMsgs);
+                }).catch(err => console.error("[ChatPanel] Failed to restore conversation:", err));
+            }
+        }).catch(() => { /* backend not ready */ });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     // STT (Speech-to-Text) �?Advanced VAD Mode
     const sttEnabled = localStorage.getItem("kokoro_stt_enabled") === "true";
@@ -558,6 +579,16 @@ export default function ChatPanel() {
                 {error && <ErrorToast message={error} onDismiss={() => setError(null)} />}
             </AnimatePresence>
 
+            {/* 对话历史侧边栏 */}
+            <ConversationSidebar
+                open={sidebarOpen}
+                onClose={() => setSidebarOpen(false)}
+                onLoadMessages={(msgs) => {
+                    setMessages(msgs);
+                    setSidebarOpen(false);
+                }}
+            />
+
             {/* Header �?clean and minimal */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
                 <div className="flex items-center gap-2">
@@ -572,6 +603,21 @@ export default function ChatPanel() {
                     </span>
                 </div>
                 <div className="flex items-center gap-1">
+                    <motion.button
+                        whileHover={{ scale: 1.1 }}
+                        whileTap={{ scale: 0.95 }}
+                        onClick={() => setSidebarOpen(prev => !prev)}
+                        className={clsx(
+                            "p-2 rounded-md transition-colors",
+                            sidebarOpen
+                                ? "text-[var(--color-accent)]"
+                                : "text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
+                        )}
+                        aria-label={t("chat.history.title")}
+                        title={t("chat.history.title")}
+                    >
+                        <History size={14} strokeWidth={1.5} />
+                    </motion.button>
                     <motion.button
                         whileHover={{ scale: 1.1 }}
                         whileTap={{ scale: 0.95 }}

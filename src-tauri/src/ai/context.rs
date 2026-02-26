@@ -59,6 +59,8 @@ pub struct AIOrchestrator {
     pub idle_behaviors: Arc<Mutex<IdleBehaviorSystem>>,
     /// Whether proactive (idle auto-talk) messages are enabled.
     pub proactive_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// 当前活跃对话 ID
+    pub current_conversation_id: Arc<Mutex<Option<String>>>,
 }
 
 impl AIOrchestrator {
@@ -88,6 +90,33 @@ impl AIOrchestrator {
         .execute(&pool)
         .await;
 
+        // 对话记录持久化表
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                character_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '新对话',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .execute(&pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS conversation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                metadata TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );",
+        )
+        .execute(&pool)
+        .await?;
+
         let memory_manager = Arc::new(MemoryManager::new(pool.clone()));
 
         Ok(Self {
@@ -108,6 +137,7 @@ impl AIOrchestrator {
             initiative: Arc::new(Mutex::new(InitiativeSystem::new())),
             idle_behaviors: Arc::new(Mutex::new(IdleBehaviorSystem::new())),
             proactive_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            current_conversation_id: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -205,7 +235,7 @@ impl AIOrchestrator {
 
         let mut history = self.history.lock().await;
         history.push_back(Message {
-            role,
+            role: role.clone(),
             content: content.clone(),
             metadata: None,
         });
@@ -214,6 +244,69 @@ impl AIOrchestrator {
         if history.len() > 30 {
             history.pop_front();
         }
+        drop(history);
+
+        // 持久化到数据库
+        let _ = self.persist_message(&role, &content).await;
+    }
+
+    /// 将消息持久化到 SQLite，如果没有活跃对话则自动创建
+    async fn persist_message(&self, role: &str, content: &str) -> Result<()> {
+        let cid = self.character_id.lock().await.clone();
+        let mut conv_id_lock = self.current_conversation_id.lock().await;
+
+        let conv_id = if let Some(ref id) = *conv_id_lock {
+            id.clone()
+        } else {
+            // 自动创建新对话
+            let new_id = uuid::Uuid::new_v4().to_string();
+            let title = if role == "user" {
+                let chars: Vec<char> = content.chars().collect();
+                if chars.len() > 20 {
+                    format!("{}...", chars[..20].iter().collect::<String>())
+                } else {
+                    content.to_string()
+                }
+            } else {
+                "新对话".to_string()
+            };
+            let now = chrono::Utc::now().to_rfc3339();
+
+            sqlx::query(
+                "INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+            )
+            .bind(&new_id)
+            .bind(&cid)
+            .bind(&title)
+            .bind(&now)
+            .bind(&now)
+            .execute(&self.db)
+            .await?;
+
+            *conv_id_lock = Some(new_id.clone());
+            new_id
+        };
+        drop(conv_id_lock);
+
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)"
+        )
+        .bind(&conv_id)
+        .bind(role)
+        .bind(content)
+        .bind(&now)
+        .execute(&self.db)
+        .await?;
+
+        // 更新对话的 updated_at
+        sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(&conv_id)
+            .execute(&self.db)
+            .await?;
+
+        Ok(())
     }
 
     /// Returns the total count of user messages in this session.
@@ -440,5 +533,8 @@ impl AIOrchestrator {
     pub async fn clear_history(&self) {
         let mut history = self.history.lock().await;
         history.clear();
+        // 清空当前对话 ID，下次发消息时会创建新对话
+        let mut conv_id = self.current_conversation_id.lock().await;
+        *conv_id = None;
     }
 }
