@@ -22,15 +22,33 @@ export function ThemeProvider({ children, initialTheme }: { children: ReactNode;
     // Listen for mod theme overrides dispatched from App.tsx
     useEffect(() => {
         const handleModTheme = (event: Event) => {
-            const customEvent = event as CustomEvent<ThemeConfig>;
+            const customEvent = event as CustomEvent<ThemeConfig | null>;
             if (customEvent.detail) {
                 console.log("[ThemeProvider] Applying mod theme:", customEvent.detail.name);
                 setActiveTheme(customEvent.detail);
+            } else {
+                // detail === null → 卸载 Mod，恢复默认主题
+                console.log("[ThemeProvider] Mod theme cleared, restoring defaults");
+                setActiveTheme(initialTheme || null);
+
+                // 移除 Mod 注入的 CSS 变量
+                const root = document.documentElement;
+                root.removeAttribute("style");
+
+                // 移除 Mod 加载的字体 <link> 标签
+                document.querySelectorAll('link[rel="stylesheet"][href*="mod.localhost"], link[rel="stylesheet"][href*="fonts.googleapis"]').forEach(el => el.remove());
+
+                // 重置 body 背景
+                document.body.style.backgroundImage = "";
+                document.body.style.backgroundColor = "";
+                document.body.style.backgroundSize = "";
+                document.body.style.backgroundPosition = "";
+                document.body.style.backgroundRepeat = "";
             }
         };
         document.addEventListener("kokoro:mod-theme", handleModTheme);
         return () => document.removeEventListener("kokoro:mod-theme", handleModTheme);
-    }, []);
+    }, [initialTheme]);
 
     useEffect(() => {
         if (!activeTheme) return;

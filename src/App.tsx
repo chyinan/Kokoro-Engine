@@ -390,11 +390,8 @@ function App() {
       registry.clearAllModComponents();
       // 重新注册核心组件
       registerCoreComponents();
-      // 重置主题：恢复默认 CSS 变量
-      const root = document.documentElement;
-      root.removeAttribute("style");
-      document.body.style.backgroundImage = "";
-      document.body.style.backgroundColor = "";
+      // 重置主题：通知 ThemeProvider 恢复默认
+      document.dispatchEvent(new CustomEvent("kokoro:mod-theme", { detail: null }));
     });
 
     return () => {
