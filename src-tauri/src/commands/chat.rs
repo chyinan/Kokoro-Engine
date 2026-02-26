@@ -19,6 +19,10 @@ pub struct ChatRequest {
     pub character_id: Option<String>,
     /// Optional override for the full message history (used for proactive triggers)
     pub messages: Option<Vec<crate::llm::openai::Message>>,
+    /// If true, neither the user message nor the assistant response is saved to history.
+    /// Used for touch interactions where the action description shouldn't appear in chat.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -398,8 +402,8 @@ pub async fn stream_chat(
         let _ = window.emit("chat-typing", &typing_params);
     }
 
-    // 1. Update History with User Message
-    if request.messages.is_none() {
+    // 1. Update History with User Message (skip for hidden/touch interactions)
+    if request.messages.is_none() && !request.hidden {
         state
             .add_message("user".to_string(), request.message.clone())
             .await;
@@ -614,8 +618,8 @@ pub async fn stream_chat(
         }
     }
 
-    // 7. Update History with final response
-    if !full_response.is_empty() {
+    // 7. Update History with final response (skip for hidden/touch interactions)
+    if !full_response.is_empty() && !request.hidden {
         state
             .add_message("assistant".to_string(), full_response.clone())
             .await;

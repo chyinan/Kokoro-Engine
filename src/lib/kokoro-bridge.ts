@@ -166,6 +166,8 @@ export interface ChatRequest {
     images?: string[];
     character_id?: string;
     messages?: any[];
+    /** If true, neither user message nor response is saved to chat history */
+    hidden?: boolean;
 }
 
 export async function streamChat(request: ChatRequest): Promise<void> {

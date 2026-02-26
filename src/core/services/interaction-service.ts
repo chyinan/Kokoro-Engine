@@ -1,19 +1,29 @@
 /**
- * InteractionService — Handles physical touch/click reactions on the Live2D model.
+ * InteractionService — LLM-driven touch reaction system.
  *
- * Maps hit area taps to emotion changes, motion playback, and spoken lines.
- * Supports combo detection (rapid taps) and cooldown to prevent spam.
+ * Detects gesture types (tap / long_press / rapid_tap) and delegates
+ * all personality-aware reactions to the backend LLM pipeline.
+ * A lightweight "surprised" confirmation animation bridges the latency gap.
+ *
  * Also provides preset action sequences (chained animations).
  */
 import type { EmotionState, ActionIntent } from "../../features/live2d/Live2DController";
-
-import { streamChat } from "../../lib/kokoro-bridge";
+import { streamChat, onChatDone } from "../../lib/kokoro-bridge";
 
 // ── Types ──────────────────────────────────────────
 
-interface TouchReaction {
-    emotion: EmotionState;
-    action?: ActionIntent;
+export type GestureType = "tap" | "long_press" | "rapid_tap";
+
+export interface GestureEvent {
+    hitArea: string;
+    gesture: GestureType;
+    consecutiveTaps: number;
+}
+
+export interface InteractionEvent {
+    hitArea: string;
+    gesture: GestureType;
+    isCombo: boolean;
 }
 
 interface ActionStep {
@@ -26,43 +36,6 @@ interface ActionSequence {
     name: string;
     steps: ActionStep[];
 }
-
-export interface InteractionEvent {
-    hitArea: string;
-    emotion: EmotionState;
-    action?: ActionIntent;
-    isCombo: boolean;   // Whether this was triggered by rapid tapping
-}
-
-// ── Reaction Maps ──────────────────────────────────
-
-const TOUCH_REACTIONS: Record<string, TouchReaction[]> = {
-    Head: [
-        { emotion: "happy", action: "nod" },
-        { emotion: "happy", action: "nod" },
-    ],
-    Body: [
-        { emotion: "surprised", action: "surprise" },
-        { emotion: "shy", action: "shy" },
-    ],
-    Face: [
-        { emotion: "shy", action: "shy" },
-        { emotion: "happy", action: "nod" },
-    ],
-};
-
-// Combo reactions: triggered after rapid consecutive taps on same area
-const COMBO_REACTIONS: Record<string, TouchReaction> = {
-    Head: { emotion: "shy", action: "shy" },
-    Body: { emotion: "angry", action: "shake" },
-    Face: { emotion: "angry", action: "shake" },
-};
-
-// Fallback for unknown hit areas
-const DEFAULT_REACTION: TouchReaction = {
-    emotion: "surprised",
-    action: "surprise",
-};
 
 // ── Preset Sequences ───────────────────────────────
 
@@ -109,19 +82,32 @@ type ControllerProxy = {
 
 export class InteractionService {
     private cooldownMs = 500;
-    private comboThresholdMs = 1500;   // Max gap between taps to count as combo
-    private comboTriggerCount = 3;     // Taps needed to trigger combo reaction
+    private comboThresholdMs = 1500;
+    private comboTriggerCount = 3;
 
     private lastTapTime = 0;
     private lastHitArea = "";
     private consecutiveTaps = 0;
     private listeners: ReactionCallback[] = [];
 
+    // Busy state: prevents overlapping LLM calls from touch
+    private isChatBusy = false;
+    private pendingGesture: { gesture: GestureEvent; controller: ControllerProxy } | null = null;
+    private unlistenChatDone: (() => void) | null = null;
+
+    constructor() {
+        // Listen for chat-done to know when LLM finishes responding
+        onChatDone(() => {
+            this.isChatBusy = false;
+            this.processPendingGesture();
+        }).then(fn => { this.unlistenChatDone = fn; });
+    }
+
     /**
-     * Handle a hit area tap from the Live2D model.
-     * Returns the interaction event, also broadcasts to listeners.
+     * Handle a gesture event from the Live2D viewer.
+     * Plays a brief confirmation animation, then sends to LLM.
      */
-    async handleTouch(hitArea: string, controller: ControllerProxy): Promise<InteractionEvent | null> {
+    async handleGesture(gesture: GestureEvent, controller: ControllerProxy): Promise<InteractionEvent | null> {
         const now = Date.now();
 
         // Cooldown check
@@ -129,63 +115,103 @@ export class InteractionService {
             return null;
         }
 
-        // Combo tracking
-        if (hitArea === this.lastHitArea && now - this.lastTapTime < this.comboThresholdMs) {
-            this.consecutiveTaps++;
+        // Rapid-tap tracking for "tap" gestures
+        if (gesture.gesture === "tap") {
+            if (gesture.hitArea === this.lastHitArea && now - this.lastTapTime < this.comboThresholdMs) {
+                this.consecutiveTaps++;
+            } else {
+                this.consecutiveTaps = 1;
+            }
+
+            // Upgrade to rapid_tap if threshold reached
+            if (this.consecutiveTaps >= this.comboTriggerCount) {
+                gesture = {
+                    ...gesture,
+                    gesture: "rapid_tap",
+                    consecutiveTaps: this.consecutiveTaps,
+                };
+                this.consecutiveTaps = 0;
+            }
         } else {
-            this.consecutiveTaps = 1;
+            this.consecutiveTaps = 0;
         }
 
         this.lastTapTime = now;
-        this.lastHitArea = hitArea;
+        this.lastHitArea = gesture.hitArea;
 
-        // Determine reaction
-        let reaction: TouchReaction;
-        let isCombo = false;
+        // Play lightweight confirmation animation (expression only, no motion)
+        controller.setEmotion("surprised");
 
-        if (this.consecutiveTaps >= this.comboTriggerCount && COMBO_REACTIONS[hitArea]) {
-            reaction = COMBO_REACTIONS[hitArea];
-            isCombo = true;
-            this.consecutiveTaps = 0; // Reset combo counter
-        } else {
-            const candidates = TOUCH_REACTIONS[hitArea] || [DEFAULT_REACTION];
-            reaction = candidates[Math.floor(Math.random() * candidates.length)];
+        // If LLM is busy, queue this gesture (keep only the latest)
+        if (this.isChatBusy) {
+            this.pendingGesture = { gesture, controller };
+            // Still broadcast the event so listeners know a touch happened
+            const event: InteractionEvent = {
+                hitArea: gesture.hitArea,
+                gesture: gesture.gesture,
+                isCombo: gesture.gesture === "rapid_tap",
+            };
+            this.broadcast(event);
+            return event;
         }
 
-        // Apply physical reaction (motion/emotion) immediately
-        controller.setEmotion(reaction.emotion);
-        if (reaction.action) {
-            controller.playActionMotion(reaction.action);
-        }
+        return this.sendGestureToLLM(gesture, controller);
+    }
 
-        // Trigger LLM to respond to the touch
-        // We send a descriptive action message.
-        // The message format is "(User touches your [Area])"
-        const actionDescription = isCombo
-            ? `(User repeatedly touches your ${hitArea})`
-            : `(User touches your ${hitArea})`;
+    private async sendGestureToLLM(gesture: GestureEvent, _controller: ControllerProxy): Promise<InteractionEvent> {
+        this.isChatBusy = true;
+
+        // Format message based on gesture type
+        const message = this.formatGestureMessage(gesture);
 
         try {
             await streamChat({
-                message: actionDescription,
+                message,
                 character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
+                hidden: true,
             });
         } catch (err) {
             console.error("[InteractionService] Failed to trigger LLM:", err);
+            this.isChatBusy = false;
         }
 
-        // Build event
         const event: InteractionEvent = {
-            hitArea,
-            emotion: reaction.emotion,
-            action: reaction.action,
-            isCombo,
+            hitArea: gesture.hitArea,
+            gesture: gesture.gesture,
+            isCombo: gesture.gesture === "rapid_tap",
         };
 
-        // Broadcast
         this.broadcast(event);
-
         return event;
+    }
+
+    private formatGestureMessage(gesture: GestureEvent): string {
+        let action: string;
+        switch (gesture.gesture) {
+            case "tap":
+                action = `(User taps your ${gesture.hitArea})`;
+                break;
+            case "long_press":
+                action = `(User holds your ${gesture.hitArea})`;
+                break;
+            case "rapid_tap":
+                action = `(User rapidly pokes your ${gesture.hitArea} ${gesture.consecutiveTaps} times)`;
+                break;
+        }
+
+        // Reinforce response language so LLM doesn't get pulled into English
+        const lang = localStorage.getItem("kokoro_response_language");
+        if (lang) {
+            action += `\n[Respond in ${lang}]`;
+        }
+        return action;
+    }
+
+    private processPendingGesture(): void {
+        if (!this.pendingGesture) return;
+        const { gesture, controller } = this.pendingGesture;
+        this.pendingGesture = null;
+        this.sendGestureToLLM(gesture, controller);
     }
 
     /**
@@ -226,6 +252,10 @@ export class InteractionService {
         return () => {
             this.listeners = this.listeners.filter(l => l !== callback);
         };
+    }
+
+    destroy(): void {
+        this.unlistenChatDone?.();
     }
 
     private broadcast(event: InteractionEvent): void {

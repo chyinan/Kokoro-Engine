@@ -109,14 +109,14 @@
             },
             "response_lang": {
                 "label": "Response Language",
-                "desc": "Force the AI to respond in a specific language, regardless of your input language.",
+                "desc": "Force the AI to respond in a specific language, regardless of your input language. Effectiveness depends on model capability; some models may not fully comply.",
                 "auto": "Auto (follow conversation)",
                 "custom": "Custom…",
                 "placeholder": "Enter language name, e.g. Français, Deutsch…"
             },
             "user_lang": {
                 "label": "User Language",
-                "desc": "Your preferred language. When different from Response Language, a translation will be attached to each message.",
+                "desc": "Your preferred language. When different from Response Language, a translation will be attached to each message. Effectiveness depends on model capability; some models may not fully comply.",
                 "auto": "Auto (no translation)"
             },
             "proactive": {

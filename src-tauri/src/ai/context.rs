@@ -410,15 +410,28 @@ impl AIOrchestrator {
         let sp = self.system_prompt.lock().await;
         let history = self.history.lock().await;
 
+        // -- Read response language early so all sections can reference it --
+        let resp_lang = {
+            let lang = self.response_language.lock().await;
+            lang.clone()
+        };
+
         let mut final_messages = Vec::new();
 
         // -- System Prompt (P0) --
+        // Embed language requirement early for primacy effect
+        let lang_preamble = if !resp_lang.is_empty() {
+            format!("\n\n[LANGUAGE: You speak {}. All your replies must be in {}.]", resp_lang, resp_lang)
+        } else {
+            String::new()
+        };
         final_messages.push(Message {
             role: "system".to_string(),
             content: format!(
-                "{}\n\n{}",
+                "{}\n\n{}{}",
                 sp.clone(),
-                crate::ai::prompts::CORE_PERSONA_PROMPT
+                crate::ai::prompts::CORE_PERSONA_PROMPT,
+                lang_preamble
             ),
             metadata: None,
         });
@@ -468,12 +481,6 @@ impl AIOrchestrator {
                 metadata: Some(serde_json::json!({"type": "emotion_event", "event": format!("{:?}", event.event_type)})),
             });
         }
-
-        // -- Read response language early so other sections can reference it --
-        let resp_lang = {
-            let lang = self.response_language.lock().await;
-            lang.clone()
-        };
 
         // -- Relevant Memories (P1) --
         // Upgraded: instruct the LLM to naturally reference these in conversation
@@ -573,6 +580,20 @@ impl AIOrchestrator {
 
         for msg in history.iter().skip(start_index) {
             final_messages.push(msg.clone());
+        }
+
+        // -- Final Language Reminder (recency effect) --
+        // Placed after history so it's the last system instruction the LLM sees.
+        // LLMs pay strongest attention to the beginning and end of context.
+        if !resp_lang.is_empty() {
+            final_messages.push(Message {
+                role: "system".to_string(),
+                content: format!(
+                    "[Reminder] Respond in {} only. Do not follow the user's input language.",
+                    resp_lang
+                ),
+                metadata: Some(serde_json::json!({"type": "language_reminder"})),
+            });
         }
 
         // -- Current User Query --

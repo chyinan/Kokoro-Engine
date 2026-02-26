@@ -13,7 +13,7 @@ import { Live2DModel } from "pixi-live2d-display/cubism4";
 import { Live2DController, type EmotionState, type ActionIntent, type IdleBehavior } from "./Live2DController";
 import { onChatExpression, onChatAction } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
-import { interactionService } from "../../core/services/interaction-service";
+import { interactionService, type GestureEvent } from "../../core/services/interaction-service";
 
 // Register PIXI to the global window for pixi-live2d-display internals
 const win = window as Window & { PIXI?: typeof PIXI };
@@ -233,16 +233,68 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                     // Ensure model is interactive
                     model.interactive = true;
 
-                    // Hit area tap events → interaction reactions
-                    model.on("hit", (hitAreas: string[]) => {
-                        hitAreas.forEach((area) => {
-                            onHitAreaTap?.(area);
-                            // Feed to interaction service for emotion/motion/line reactions
-                            const ctrl = getActiveController();
-                            if (ctrl) {
-                                interactionService.handleTouch(area, ctrl);
+                    // ── Pointer-based gesture detection ──
+                    // Replaces model.on("hit") with tap / long_press detection
+                    const LONG_PRESS_MS = 600;
+                    let pointerDownTime = 0;
+                    let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+                    let longPressFired = false;
+
+                    const hitTestFirst = (globalX: number, globalY: number): string | null => {
+                        const hits = model.hitTest(globalX, globalY);
+                        return hits.length > 0 ? hits[0] : null;
+                    };
+
+                    const handleGesture = (hitArea: string, gesture: GestureEvent["gesture"]) => {
+                        onHitAreaTap?.(hitArea);
+                        const ctrl = getActiveController();
+                        if (ctrl) {
+                            const event: GestureEvent = {
+                                hitArea,
+                                gesture,
+                                consecutiveTaps: 1,
+                            };
+                            interactionService.handleGesture(event, ctrl);
+                        }
+                    };
+
+                    model.on("pointerdown", (e: PIXI.InteractionEvent) => {
+                        pointerDownTime = Date.now();
+                        longPressFired = false;
+                        const { x, y } = e.data.global;
+
+                        longPressTimer = setTimeout(() => {
+                            longPressFired = true;
+                            const hitArea = hitTestFirst(x, y);
+                            if (hitArea) {
+                                handleGesture(hitArea, "long_press");
                             }
-                        });
+                        }, LONG_PRESS_MS);
+                    });
+
+                    model.on("pointerup", (e: PIXI.InteractionEvent) => {
+                        if (longPressTimer) {
+                            clearTimeout(longPressTimer);
+                            longPressTimer = null;
+                        }
+                        // If long press already fired, ignore the up event
+                        if (longPressFired) return;
+
+                        const elapsed = Date.now() - pointerDownTime;
+                        if (elapsed < LONG_PRESS_MS) {
+                            const { x, y } = e.data.global;
+                            const hitArea = hitTestFirst(x, y);
+                            if (hitArea) {
+                                handleGesture(hitArea, "tap");
+                            }
+                        }
+                    });
+
+                    model.on("pointerupoutside", () => {
+                        if (longPressTimer) {
+                            clearTimeout(longPressTimer);
+                            longPressTimer = null;
+                        }
                     });
 
                     app.stage.addChild(model as unknown as PIXI.DisplayObject);
