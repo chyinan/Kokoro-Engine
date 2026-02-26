@@ -478,6 +478,7 @@ export interface MemoryRecord {
     content: string;
     created_at: number;
     importance: number;
+    tier: string;
 }
 
 export interface ListMemoriesResponse {
@@ -500,6 +501,12 @@ export async function updateMemory(id: number, content: string, importance: numb
 export async function deleteMemory(id: number): Promise<void> {
     return invoke("delete_memory", {
         request: { id },
+    });
+}
+
+export async function updateMemoryTier(id: number, tier: string): Promise<void> {
+    return invoke("update_memory_tier", {
+        request: { id, tier },
     });
 }
 

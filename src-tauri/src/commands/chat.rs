@@ -639,6 +639,27 @@ pub async fn stream_chat(
         });
     }
 
+    // Periodic memory consolidation (every 20 user messages)
+    if msg_count > 0 && msg_count % 20 == 0 {
+        let memory_mgr = state.memory_manager.clone();
+        let char_id_for_consolidation = char_id.clone();
+        let provider_for_consolidation = llm_state.provider().await;
+        tauri::async_runtime::spawn(async move {
+            match memory_mgr
+                .consolidate_memories(&char_id_for_consolidation, provider_for_consolidation)
+                .await
+            {
+                Ok(count) if count > 0 => {
+                    println!("[Memory] Consolidated {} memory clusters", count);
+                }
+                Err(e) => {
+                    eprintln!("[Memory] Consolidation failed: {}", e);
+                }
+                _ => {}
+            }
+        });
+    }
+
     window.emit("chat-done", ()).map_err(|e| e.to_string())?;
 
     Ok(())

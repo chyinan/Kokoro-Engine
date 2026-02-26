@@ -80,3 +80,24 @@ pub async fn delete_memory(
         .await
         .map_err(|e| e.to_string())
 }
+
+#[derive(Deserialize)]
+pub struct UpdateMemoryTierRequest {
+    pub id: i64,
+    pub tier: String,
+}
+
+#[tauri::command]
+pub async fn update_memory_tier(
+    request: UpdateMemoryTierRequest,
+    state: State<'_, AIOrchestrator>,
+) -> Result<(), String> {
+    if request.tier != "core" && request.tier != "ephemeral" {
+        return Err("tier must be 'core' or 'ephemeral'".to_string());
+    }
+    state
+        .memory_manager
+        .update_memory_tier(request.id, &request.tier)
+        .await
+        .map_err(|e| e.to_string())
+}

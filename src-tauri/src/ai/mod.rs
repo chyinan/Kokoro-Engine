@@ -13,3 +13,6 @@ pub mod router;
 pub mod sentiment;
 pub mod style_adapter;
 pub mod typing_sim;
+
+#[cfg(test)]
+mod tests;

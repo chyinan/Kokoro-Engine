@@ -23,12 +23,52 @@ async fn setup_db() -> SqlitePool {
             embedding BLOB NOT NULL,
             created_at INTEGER NOT NULL,
             importance REAL DEFAULT 0.5,
-            character_id TEXT NOT NULL DEFAULT 'default'
+            character_id TEXT NOT NULL DEFAULT 'default',
+            tier TEXT NOT NULL DEFAULT 'ephemeral',
+            consolidated_from TEXT
         );",
     )
     .execute(&pool)
     .await
     .unwrap();
+
+    // FTS5 virtual table
+    sqlx::query(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, content='memories', content_rowid='id');",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Sync triggers
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+            INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+        END;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
+        END;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
+            INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+        END;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
     pool
 }
 
@@ -37,13 +77,14 @@ async fn insert_memory(pool: &SqlitePool, content: &str, character_id: &str) {
     let fake_embedding: Vec<f32> = vec![0.1, 0.2, 0.3]; // deterministic fake
     let embedding_bytes = bincode::serialize(&fake_embedding).unwrap();
     sqlx::query(
-        "INSERT INTO memories (content, embedding, created_at, importance, character_id) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO memories (content, embedding, created_at, importance, character_id, tier) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(content)
     .bind(embedding_bytes)
     .bind(chrono::Utc::now().timestamp())
     .bind(0.5)
     .bind(character_id)
+    .bind("ephemeral")
     .execute(pool)
     .await
     .unwrap();
@@ -307,4 +348,233 @@ fn cosine_similarity_zero_vector_returns_zero() {
         0.0,
         "Zero vector should yield 0.0 (commutative)"
     );
+}
+
+// ── Helper: insert memory with tier and importance ────────
+
+async fn insert_memory_with_tier(
+    pool: &SqlitePool,
+    content: &str,
+    character_id: &str,
+    importance: f64,
+    tier: &str,
+    embedding: &[f32],
+    created_at: i64,
+) {
+    let embedding_bytes = bincode::serialize(embedding).unwrap();
+    sqlx::query(
+        "INSERT INTO memories (content, embedding, created_at, importance, character_id, tier) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(content)
+    .bind(embedding_bytes)
+    .bind(created_at)
+    .bind(importance)
+    .bind(character_id)
+    .bind(tier)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+// ── Phase 1: Tiered Memory Tests ──────────────────────────
+
+#[tokio::test]
+async fn tier_column_defaults_to_ephemeral() {
+    let pool = setup_db().await;
+    insert_memory(&pool, "some fact", "alice").await;
+
+    let row = sqlx::query("SELECT tier FROM memories WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let tier: String = row.get("tier");
+    assert_eq!(tier, "ephemeral");
+}
+
+#[tokio::test]
+async fn core_tier_can_be_set() {
+    let pool = setup_db().await;
+    let emb: Vec<f32> = vec![1.0, 0.0, 0.0];
+    insert_memory_with_tier(&pool, "User's name is Alice", "char1", 0.9, "core", &emb, chrono::Utc::now().timestamp()).await;
+
+    let row = sqlx::query("SELECT tier, importance FROM memories WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let tier: String = row.get("tier");
+    let importance: f64 = row.get("importance");
+    assert_eq!(tier, "core");
+    assert!((importance - 0.9).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn tier_migration_defaults_existing_rows() {
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+
+    // Create legacy table without tier column
+    sqlx::query(
+        "CREATE TABLE memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            created_at INTEGER NOT NULL,
+            importance REAL DEFAULT 0.5,
+            character_id TEXT NOT NULL DEFAULT 'default'
+        );",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Insert a legacy row
+    let emb_bytes = bincode::serialize(&vec![0.1_f32, 0.2, 0.3]).unwrap();
+    sqlx::query("INSERT INTO memories (content, embedding, created_at) VALUES (?, ?, ?)")
+        .bind("old memory")
+        .bind(&emb_bytes)
+        .bind(0i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Run migration
+    let _ = sqlx::query("ALTER TABLE memories ADD COLUMN tier TEXT NOT NULL DEFAULT 'ephemeral'")
+        .execute(&pool)
+        .await;
+
+    let row = sqlx::query("SELECT tier FROM memories WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let tier: String = row.get("tier");
+    assert_eq!(tier, "ephemeral", "Legacy rows should default to 'ephemeral'");
+}
+
+// ── Phase 2: FTS5 / Hybrid Retrieval Tests ────────────────
+
+#[tokio::test]
+async fn fts5_keyword_search_finds_exact_match() {
+    let pool = setup_db().await;
+    insert_memory(&pool, "User's birthday is March 15th", "alice").await;
+    insert_memory(&pool, "User likes chocolate cake", "alice").await;
+    insert_memory(&pool, "User works at Anthropic", "alice").await;
+
+    // Search for "birthday" — should find exactly one
+    let rows = sqlx::query(
+        "SELECT m.content FROM memories_fts f JOIN memories m ON m.id = f.rowid WHERE memories_fts MATCH '\"birthday\"' AND m.character_id = 'alice'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    let content: String = rows[0].get("content");
+    assert!(content.contains("birthday"));
+}
+
+#[tokio::test]
+async fn fts5_syncs_on_delete() {
+    let pool = setup_db().await;
+    insert_memory(&pool, "User loves Rust programming", "bob").await;
+
+    // Verify FTS has it
+    let before = sqlx::query(
+        "SELECT COUNT(*) as cnt FROM memories_fts WHERE memories_fts MATCH '\"Rust\"'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(before.get::<i64, _>("cnt"), 1);
+
+    // Delete the memory
+    sqlx::query("DELETE FROM memories WHERE id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // FTS should be empty now
+    let after = sqlx::query(
+        "SELECT COUNT(*) as cnt FROM memories_fts WHERE memories_fts MATCH '\"Rust\"'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(after.get::<i64, _>("cnt"), 0, "FTS should sync on delete");
+}
+
+#[tokio::test]
+async fn fts5_handles_special_characters() {
+    let pool = setup_db().await;
+    insert_memory(&pool, "User's email is test@example.com", "alice").await;
+
+    // The escape function wraps words in quotes
+    let query = super::memory::escape_fts5_query("test@example.com");
+    assert!(!query.is_empty());
+    // Should not panic or error
+    let result = sqlx::query(&format!(
+        "SELECT COUNT(*) as cnt FROM memories_fts WHERE memories_fts MATCH '{}'",
+        query.replace('\'', "''")
+    ))
+    .fetch_one(&pool)
+    .await;
+    assert!(result.is_ok());
+}
+
+// ── Phase 3: Consolidation Logic Tests ────────────────────
+
+#[tokio::test]
+async fn similar_memories_are_in_same_cluster() {
+    // Test the clustering logic by checking cosine similarity threshold
+    let a = vec![1.0, 0.0, 0.0];
+    let b = vec![0.95, 0.31, 0.0]; // cos sim ≈ 0.95 > 0.75
+    let c = vec![0.0, 0.0, 1.0]; // cos sim ≈ 0.0 < 0.75
+
+    let sim_ab = cosine_similarity(&a, &b);
+    let sim_ac = cosine_similarity(&a, &c);
+
+    assert!(sim_ab > 0.75, "Similar vectors should exceed threshold: {}", sim_ab);
+    assert!(sim_ac < 0.75, "Dissimilar vectors should be below threshold: {}", sim_ac);
+}
+
+#[tokio::test]
+async fn consolidated_from_column_stores_json() {
+    let pool = setup_db().await;
+    let emb: Vec<f32> = vec![1.0, 0.0, 0.0];
+    let emb_bytes = bincode::serialize(&emb).unwrap();
+    let source_ids = vec![1i64, 2, 3];
+    let json = serde_json::to_string(&source_ids).unwrap();
+
+    sqlx::query(
+        "INSERT INTO memories (content, embedding, created_at, importance, character_id, tier, consolidated_from) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind("Merged memory")
+    .bind(&emb_bytes)
+    .bind(chrono::Utc::now().timestamp())
+    .bind(0.9)
+    .bind("alice")
+    .bind("core")
+    .bind(&json)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let row = sqlx::query("SELECT consolidated_from, tier FROM memories WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let cf: String = row.get("consolidated_from");
+    let tier: String = row.get("tier");
+    let parsed: Vec<i64> = serde_json::from_str(&cf).unwrap();
+    assert_eq!(parsed, vec![1, 2, 3]);
+    assert_eq!(tier, "core");
+}
+
+#[tokio::test]
+async fn escape_fts5_query_handles_empty_and_quotes() {
+    use super::memory::escape_fts5_query;
+
+    assert_eq!(escape_fts5_query(""), "");
+    assert_eq!(escape_fts5_query("hello world"), "\"hello\" OR \"world\"");
+    // Quotes should be stripped to prevent injection
+    assert_eq!(escape_fts5_query("hello\"world"), "\"helloworld\"");
+    assert_eq!(escape_fts5_query("  spaced  "), "\"spaced\"");
 }

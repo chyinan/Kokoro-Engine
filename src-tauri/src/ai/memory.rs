@@ -16,6 +16,12 @@ const MEMORY_HALF_LIFE_DAYS: f64 = 30.0;
 /// Cosine similarity threshold above which a new memory is considered a duplicate.
 const DEDUP_THRESHOLD: f32 = 0.9;
 
+/// Cosine similarity threshold for memory consolidation clustering.
+const CONSOLIDATION_THRESHOLD: f32 = 0.75;
+
+/// Maximum number of memories in a single consolidation cluster.
+const MAX_CLUSTER_SIZE: usize = 5;
+
 /// Local model directory path (relative to working dir).
 #[allow(dead_code)]
 const LOCAL_MODEL_DIR: &str =
@@ -141,7 +147,7 @@ impl MemoryManager {
     }
 
     pub async fn add_memory(&self, content: &str, character_id: &str) -> Result<()> {
-        let embedding = self.embed(&content).await?;
+        let embedding = self.embed(content).await?;
         let embedding_bytes: Vec<u8> = bincode::serialize(&embedding)?;
         let now = chrono::Utc::now().timestamp();
 
@@ -158,13 +164,14 @@ impl MemoryManager {
         }
 
         sqlx::query(
-            "INSERT INTO memories (content, embedding, created_at, importance, character_id) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO memories (content, embedding, created_at, importance, character_id, tier) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(content)
         .bind(embedding_bytes)
         .bind(now)
         .bind(0.5) // Default importance
         .bind(character_id)
+        .bind("ephemeral")
         .execute(&self.db)
         .await?;
 
@@ -202,7 +209,88 @@ impl MemoryManager {
         Ok(false)
     }
 
+    /// Like `deduplicate_or_refresh`, but also upgrades importance and tier if the
+    /// new extraction has higher importance than the existing duplicate.
+    async fn deduplicate_or_upgrade(
+        &self,
+        new_embedding: &[f32],
+        character_id: &str,
+        now: i64,
+        new_importance: f64,
+    ) -> Result<bool> {
+        let rows =
+            sqlx::query("SELECT id, embedding, importance FROM memories WHERE character_id = ?")
+                .bind(character_id)
+                .fetch_all(&self.db)
+                .await?;
+
+        for row in rows {
+            let existing_bytes: Vec<u8> = row.get("embedding");
+            let existing: Vec<f32> = bincode::deserialize(&existing_bytes)?;
+            let sim = cosine_similarity(new_embedding, &existing);
+            if sim > DEDUP_THRESHOLD {
+                let id: i64 = row.get("id");
+                let existing_importance: f64 = row.get("importance");
+                let best_importance = existing_importance.max(new_importance);
+                let tier = if best_importance >= 0.8 {
+                    "core"
+                } else {
+                    "ephemeral"
+                };
+                sqlx::query(
+                    "UPDATE memories SET created_at = ?, importance = ?, tier = ? WHERE id = ?",
+                )
+                .bind(now)
+                .bind(best_importance)
+                .bind(tier)
+                .bind(id)
+                .execute(&self.db)
+                .await?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub async fn search_memories(
+        &self,
+        query: &str,
+        limit: usize,
+        character_id: &str,
+    ) -> Result<Vec<MemorySnippet>> {
+        // Run semantic search and BM25 search in parallel
+        let semantic_results = self.semantic_search(query, limit * 2, character_id).await?;
+        let bm25_results = self.bm25_search(query, character_id, limit * 2).await.unwrap_or_default();
+
+        // RRF (Reciprocal Rank Fusion) with k=60
+        let k = 60.0_f32;
+        let mut rrf_scores: std::collections::HashMap<i64, (f32, MemorySnippet)> = std::collections::HashMap::new();
+
+        for (rank, mem) in semantic_results.iter().enumerate() {
+            let score = 1.0 / (k + rank as f32 + 1.0);
+            rrf_scores.entry(mem.id).or_insert((0.0, mem.clone())).0 += score;
+        }
+
+        for (rank, (id, _bm25_score)) in bm25_results.iter().enumerate() {
+            let score = 1.0 / (k + rank as f32 + 1.0);
+            if let Some(entry) = rrf_scores.get_mut(id) {
+                entry.0 += score;
+            } else {
+                // BM25 found a memory not in semantic results — fetch it
+                if let Ok(Some(snippet)) = self.fetch_memory_snippet(*id).await {
+                    rrf_scores.insert(*id, (score, snippet));
+                }
+            }
+        }
+
+        let mut fused: Vec<(f32, MemorySnippet)> = rrf_scores.into_values().collect();
+        fused.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(fused.into_iter().take(limit).map(|(_, m)| m).collect())
+    }
+
+    /// Pure semantic (embedding) search with time decay, respecting tier.
+    async fn semantic_search(
         &self,
         query: &str,
         limit: usize,
@@ -210,10 +298,8 @@ impl MemoryManager {
     ) -> Result<Vec<MemorySnippet>> {
         let query_embedding = self.embed(query).await?;
 
-        // Fetch memories for the given character (assuming < 10k items per character)
-        // For larger datasets, we'd use a real vector index or sqlite-vss
         let rows =
-            sqlx::query("SELECT id, content, embedding, created_at, importance FROM memories WHERE character_id = ?")
+            sqlx::query("SELECT id, content, embedding, created_at, importance, tier FROM memories WHERE character_id = ?")
                 .bind(character_id)
                 .fetch_all(&self.db)
                 .await?;
@@ -227,10 +313,16 @@ impl MemoryManager {
 
             let similarity = cosine_similarity(&query_embedding, &embedding);
 
-            // Apply time decay: score = similarity * 0.5^(age_days / half_life)
             let created_at: i64 = row.get("created_at");
-            let age_days = (now - created_at) as f64 / 86400.0;
-            let decay = (0.5_f64).powf(age_days / MEMORY_HALF_LIFE_DAYS) as f32;
+            let tier: String = row.get("tier");
+
+            // Core memories never decay; ephemeral memories use time decay
+            let decay = if tier == "core" {
+                1.0_f32
+            } else {
+                let age_days = (now - created_at) as f64 / 86400.0;
+                (0.5_f64).powf(age_days / MEMORY_HALF_LIFE_DAYS) as f32
+            };
             let final_score = similarity * decay;
 
             let memory = MemorySnippet {
@@ -239,20 +331,74 @@ impl MemoryManager {
                 embedding: embedding_bytes,
                 created_at,
                 importance: row.get("importance"),
+                tier,
             };
 
             scored_memories.push((memory, final_score));
         }
 
-        // Sort by similarity descending
         scored_memories.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Take top K
         Ok(scored_memories
             .into_iter()
             .take(limit)
             .map(|(m, _)| m)
             .collect())
+    }
+
+    /// BM25 keyword search via FTS5. Returns (memory_id, bm25_score) pairs.
+    async fn bm25_search(
+        &self,
+        query: &str,
+        character_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(i64, f64)>> {
+        let fts_query = escape_fts5_query(query);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = sqlx::query(
+            "SELECT m.id, bm25(memories_fts) AS score \
+             FROM memories_fts f \
+             JOIN memories m ON m.id = f.rowid \
+             WHERE memories_fts MATCH ? AND m.character_id = ? \
+             ORDER BY score \
+             LIMIT ?",
+        )
+        .bind(&fts_query)
+        .bind(character_id)
+        .bind(limit as i64)
+        .fetch_all(&self.db)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let id: i64 = r.get("id");
+                let score: f64 = r.get("score");
+                (id, score)
+            })
+            .collect())
+    }
+
+    /// Fetch a single memory snippet by ID.
+    async fn fetch_memory_snippet(&self, id: i64) -> Result<Option<MemorySnippet>> {
+        let row = sqlx::query(
+            "SELECT id, content, embedding, created_at, importance, tier FROM memories WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.db)
+        .await?;
+
+        Ok(row.map(|r| MemorySnippet {
+            id: r.get("id"),
+            content: r.get("content"),
+            embedding: r.get("embedding"),
+            created_at: r.get("created_at"),
+            importance: r.get("importance"),
+            tier: r.get("tier"),
+        }))
     }
 }
 
@@ -379,22 +525,25 @@ impl MemoryManager {
         let embedding_bytes: Vec<u8> = bincode::serialize(&embedding)?;
         let now = chrono::Utc::now().timestamp();
 
-        // Deduplication check
+        // Deduplication check — also upgrades importance/tier if duplicate found
         if let Ok(true) = self
-            .deduplicate_or_refresh(&embedding, character_id, now)
+            .deduplicate_or_upgrade(&embedding, character_id, now, importance)
             .await
         {
             return Ok(());
         }
 
+        let tier = if importance >= 0.8 { "core" } else { "ephemeral" };
+
         sqlx::query(
-            "INSERT INTO memories (content, embedding, created_at, importance, character_id) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO memories (content, embedding, created_at, importance, character_id, tier) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(content)
         .bind(embedding_bytes)
         .bind(now)
         .bind(importance.clamp(0.0, 1.0))
         .bind(character_id)
+        .bind(tier)
         .execute(&self.db)
         .await?;
 
@@ -411,7 +560,7 @@ impl MemoryManager {
         offset: i64,
     ) -> Result<Vec<MemoryRecord>> {
         let rows = sqlx::query_as::<_, MemoryRow>(
-            "SELECT rowid AS rowid, content, created_at, importance FROM memories WHERE character_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            "SELECT rowid AS rowid, content, created_at, importance, tier FROM memories WHERE character_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
         )
         .bind(character_id)
         .bind(limit)
@@ -426,6 +575,7 @@ impl MemoryManager {
                 content: r.content,
                 created_at: r.created_at,
                 importance: r.importance,
+                tier: r.tier,
             })
             .collect())
     }
@@ -440,16 +590,20 @@ impl MemoryManager {
     }
 
     /// Update a memory's content and importance. Re-embeds the content.
+    /// Automatically syncs tier based on new importance.
     pub async fn update_memory(&self, id: i64, content: &str, importance: f64) -> Result<()> {
         let embedding = self.embed(content).await?;
         let embedding_bytes: Vec<u8> = bincode::serialize(&embedding)?;
+        let clamped = importance.clamp(0.0, 1.0);
+        let tier = if clamped >= 0.8 { "core" } else { "ephemeral" };
 
         sqlx::query(
-            "UPDATE memories SET content = ?, embedding = ?, importance = ? WHERE rowid = ?",
+            "UPDATE memories SET content = ?, embedding = ?, importance = ?, tier = ? WHERE rowid = ?",
         )
         .bind(content)
         .bind(embedding_bytes)
-        .bind(importance.clamp(0.0, 1.0))
+        .bind(clamped)
+        .bind(tier)
         .bind(id)
         .execute(&self.db)
         .await?;
@@ -465,6 +619,161 @@ impl MemoryManager {
             .await?;
         Ok(())
     }
+
+    /// Update a memory's tier (e.g. "core" or "ephemeral").
+    pub async fn update_memory_tier(&self, id: i64, tier: &str) -> Result<()> {
+        sqlx::query("UPDATE memories SET tier = ? WHERE rowid = ?")
+            .bind(tier)
+            .bind(id)
+            .execute(&self.db)
+            .await?;
+        Ok(())
+    }
+}
+
+// ── Memory Consolidation ──────────────────────────────────────
+
+impl MemoryManager {
+    /// Find clusters of similar memories and merge them via LLM.
+    /// Inserts consolidated memories and deletes the source fragments.
+    pub async fn consolidate_memories(
+        &self,
+        character_id: &str,
+        provider: std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
+    ) -> Result<usize> {
+        // 1. Load all memories with embeddings for this character
+        let rows = sqlx::query(
+            "SELECT id, content, embedding, created_at, importance, tier FROM memories WHERE character_id = ?",
+        )
+        .bind(character_id)
+        .fetch_all(&self.db)
+        .await?;
+
+        if rows.len() < 2 {
+            return Ok(0);
+        }
+
+        // Parse into (id, content, embedding, importance, tier)
+        let mut entries: Vec<(i64, String, Vec<f32>, f64, String)> = Vec::new();
+        for row in &rows {
+            let embedding_bytes: Vec<u8> = row.get("embedding");
+            let embedding: Vec<f32> = bincode::deserialize(&embedding_bytes)?;
+            entries.push((
+                row.get("id"),
+                row.get("content"),
+                embedding,
+                row.get("importance"),
+                row.get("tier"),
+            ));
+        }
+
+        // 2. Greedy clustering: group similar memories
+        let mut used = vec![false; entries.len()];
+        let mut clusters: Vec<Vec<usize>> = Vec::new();
+
+        for i in 0..entries.len() {
+            if used[i] {
+                continue;
+            }
+            let mut cluster = vec![i];
+            used[i] = true;
+
+            for j in (i + 1)..entries.len() {
+                if used[j] || cluster.len() >= MAX_CLUSTER_SIZE {
+                    break;
+                }
+                let sim = cosine_similarity(&entries[i].2, &entries[j].2);
+                if sim > CONSOLIDATION_THRESHOLD {
+                    cluster.push(j);
+                    used[j] = true;
+                }
+            }
+
+            // Only consolidate clusters with 2+ memories
+            if cluster.len() >= 2 {
+                clusters.push(cluster);
+            }
+        }
+
+        if clusters.is_empty() {
+            return Ok(0);
+        }
+
+        let mut consolidated_count = 0;
+
+        // 3. For each cluster, merge via LLM
+        for cluster in &clusters {
+            let facts: Vec<&str> = cluster.iter().map(|&idx| entries[idx].1.as_str()).collect();
+            let source_ids: Vec<i64> = cluster.iter().map(|&idx| entries[idx].0).collect();
+
+            // Inherit max importance; if any is core, result is core
+            let max_importance = cluster
+                .iter()
+                .map(|&idx| entries[idx].3)
+                .fold(0.0_f64, f64::max);
+            let tier = if cluster.iter().any(|&idx| entries[idx].4 == "core") {
+                "core"
+            } else {
+                "ephemeral"
+            };
+
+            // Call LLM to merge facts
+            let merged = match merge_facts_via_llm(&facts, &provider).await {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("[Memory] Consolidation LLM call failed: {}", e);
+                    continue;
+                }
+            };
+
+            if merged.trim().is_empty() {
+                continue;
+            }
+
+            // 4. Insert consolidated memory
+            let embedding = match self.embed(&merged).await {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("[Memory] Failed to embed consolidated memory: {}", e);
+                    continue;
+                }
+            };
+            let embedding_bytes: Vec<u8> = bincode::serialize(&embedding)?;
+            let now = chrono::Utc::now().timestamp();
+            let consolidated_from_json = serde_json::to_string(&source_ids)?;
+
+            sqlx::query(
+                "INSERT INTO memories (content, embedding, created_at, importance, character_id, tier, consolidated_from) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&merged)
+            .bind(&embedding_bytes)
+            .bind(now)
+            .bind(max_importance)
+            .bind(character_id)
+            .bind(tier)
+            .bind(&consolidated_from_json)
+            .execute(&self.db)
+            .await?;
+
+            // 5. Delete source memories
+            for id in &source_ids {
+                sqlx::query("DELETE FROM memories WHERE id = ?")
+                    .bind(id)
+                    .execute(&self.db)
+                    .await?;
+            }
+
+            consolidated_count += 1;
+            println!(
+                "[Memory] Consolidated {} memories into: {}",
+                source_ids.len(),
+                &merged[..merged.len().min(80)]
+            );
+        }
+
+        Ok(consolidated_count)
+    }
 }
 
 /// Row type for paginated memory listing.
@@ -474,6 +783,7 @@ struct MemoryRow {
     content: String,
     created_at: i64,
     importance: f64,
+    tier: String,
 }
 
 /// Public record type returned to frontend via Tauri commands.
@@ -483,6 +793,23 @@ pub struct MemoryRecord {
     pub content: String,
     pub created_at: i64,
     pub importance: f64,
+    pub tier: String,
+}
+
+/// Escape user input for FTS5 MATCH syntax.
+/// Wraps each word in double quotes and joins with OR.
+pub(crate) fn escape_fts5_query(query: &str) -> String {
+    let words: Vec<String> = query
+        .split_whitespace()
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            // Remove any double quotes from the word to prevent injection
+            w.replace('"', "")
+        })
+        .filter(|w| !w.is_empty())
+        .map(|clean| format!("\"{}\"", clean))
+        .collect();
+    words.join(" OR ")
 }
 
 pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -495,4 +822,39 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     } else {
         dot_product / (norm_a * norm_b)
     }
+}
+
+/// Use LLM to merge multiple related facts into a single consolidated memory.
+async fn merge_facts_via_llm(
+    facts: &[&str],
+    provider: &std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
+) -> Result<String> {
+    use crate::llm::openai::{Message, MessageContent};
+
+    let facts_list = facts
+        .iter()
+        .enumerate()
+        .map(|(i, f)| format!("{}. {}", i + 1, f))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let prompt = format!(
+        "You are a memory consolidation assistant. Merge the following related facts into a single, \
+         concise, and complete memory entry. Preserve all important details. Do not add information \
+         that is not present in the original facts. Output only the merged memory text, nothing else.\n\n\
+         Facts:\n{}",
+        facts_list
+    );
+
+    let messages = vec![Message {
+        role: "user".to_string(),
+        content: MessageContent::Text(prompt),
+    }];
+
+    let result = provider
+        .chat(messages, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("LLM merge failed: {}", e))?;
+
+    Ok(result.trim().to_string())
 }

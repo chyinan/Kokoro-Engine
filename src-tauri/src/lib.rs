@@ -75,6 +75,7 @@ pub fn run() {
             commands::memory::list_memories,
             commands::memory::update_memory,
             commands::memory::delete_memory,
+            commands::memory::update_memory_tier,
             commands::conversation::list_conversations,
             commands::conversation::load_conversation,
             commands::conversation::delete_conversation,

@@ -29,6 +29,7 @@ pub struct MemorySnippet {
     pub embedding: Vec<u8>,
     pub created_at: i64,
     pub importance: f64,
+    pub tier: String,
 }
 
 pub struct AIOrchestrator {
@@ -77,7 +78,9 @@ impl AIOrchestrator {
                 embedding BLOB NOT NULL,
                 created_at INTEGER NOT NULL,
                 importance REAL DEFAULT 0.5,
-                character_id TEXT NOT NULL DEFAULT 'default'
+                character_id TEXT NOT NULL DEFAULT 'default',
+                tier TEXT NOT NULL DEFAULT 'ephemeral',
+                consolidated_from TEXT
             );",
         )
         .execute(&pool)
@@ -86,6 +89,60 @@ impl AIOrchestrator {
         // Migration: add character_id column to existing databases that lack it
         let _ = sqlx::query(
             "ALTER TABLE memories ADD COLUMN character_id TEXT NOT NULL DEFAULT 'default'",
+        )
+        .execute(&pool)
+        .await;
+
+        // Migration: add tier column for tiered memory (Phase 1)
+        let _ = sqlx::query(
+            "ALTER TABLE memories ADD COLUMN tier TEXT NOT NULL DEFAULT 'ephemeral'",
+        )
+        .execute(&pool)
+        .await;
+
+        // Migration: add consolidated_from column for memory consolidation (Phase 3)
+        let _ = sqlx::query(
+            "ALTER TABLE memories ADD COLUMN consolidated_from TEXT",
+        )
+        .execute(&pool)
+        .await;
+
+        // FTS5 virtual table for hybrid retrieval (Phase 2)
+        sqlx::query(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, content='memories', content_rowid='id');",
+        )
+        .execute(&pool)
+        .await?;
+
+        // Sync triggers: keep FTS index in sync with memories table
+        let _ = sqlx::query(
+            "CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+            END;",
+        )
+        .execute(&pool)
+        .await;
+
+        let _ = sqlx::query(
+            "CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
+            END;",
+        )
+        .execute(&pool)
+        .await;
+
+        let _ = sqlx::query(
+            "CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
+                INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+            END;",
+        )
+        .execute(&pool)
+        .await;
+
+        // Rebuild FTS index to backfill any existing data
+        let _ = sqlx::query(
+            "INSERT INTO memories_fts(memories_fts) VALUES('rebuild');",
         )
         .execute(&pool)
         .await;

@@ -53,7 +53,7 @@ Features currently verified mainly in a local environment (RTX 4060 Laptop):
 - **Multimodal Conversation**: Supports **Ollama** (Local) and **OpenAI Compatible Interfaces** (Cloud) as the conversation core.
 - **Multimodal Capabilities**: Can integrate Vision models, supporting **screen capture** or **image upload**, allowing the character to "see" and describe the content.
 - **Text-to-Image**: Can integrate Stable Diffusion WebUI or online API interfaces, supporting image generation via dialogue or generating real-time background images based on conversation context.
-- **Basic Memory System**: Includes a fundamental memory extraction and recall system. Automatically extracts key facts from conversations for long-term storage (SQLite), supporting real-time context recall and emotion persistence through semantic retrieval (RAG).
+- **Tiered Memory System**: Features a three-layer memory architecture — tiered memory (core facts never forgotten, ephemeral memories naturally decay), hybrid semantic + keyword retrieval (embedding cosine similarity + FTS5 BM25 with RRF rank fusion), and LLM-driven automatic memory consolidation (similar fragmented memories are clustered and merged). Automatically extracts key facts from conversations for long-term storage (SQLite), with real-time context recall and emotion persistence.
 
 ### 🗣️ Voice Interaction
 - **Text-to-Speech (TTS)**:
@@ -83,7 +83,7 @@ The following features are planned, in development, or **not yet tested/verified
 
 - [ ] **Deep Testing of Online Services**: Verify more commercial APIs besides LLM (e.g., Azure TTS, Google STT, etc.).
 - [ ] **Mobile Support**: iOS / Android client applications.
-- [ ] **Advanced Memory System**: Long-term memory retrieval based on Vector Database (Vector DB) and RAG.
+- [x] **Tiered Memory System**: Tiered memory (core/ephemeral), hybrid retrieval (semantic + BM25 RRF fusion), and LLM-driven memory consolidation.
 - [ ] **Stronger Plugin System**: Allow community developers to write MOD modules to extend functionality.
 - [ ] **Character Market/Workshop**: Facilitate sharing and downloading character presets.
 - [ ] **Live2D Model Interaction**: Real-time interaction feedback functions with Live2D models.
