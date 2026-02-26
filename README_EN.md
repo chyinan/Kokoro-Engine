@@ -141,6 +141,12 @@ Due to the limited energy and resources of the author, the development of the pr
 
 Every contribution (even if it's just fixing a typo) makes Kokoro Engine better! Let's build the best desktop virtual companion together.
 
+## ❤️ Sponsor
+
+If you find Kokoro Engine helpful, consider sponsoring to support the ongoing development of the project.
+
+👉 [**View Sponsorship Options**](SPONSOR.md)
+
 ## 📄 License
 
 The core code of this project is open-source under the **MIT License**.

@@ -141,7 +141,13 @@ npm run tauri build
 
  
 您的每一份贡献（哪怕只是修改一个错别字）都能让 Kokoro Engine 变得更好！让我们一起打造最棒的桌面虚拟伙伴。
- 
+
+## ❤️ 赞助支持
+
+如果你觉得 Kokoro Engine 对你有帮助，欢迎通过赞助支持项目的持续开发。
+
+👉 [**查看赞助方式 / Sponsor**](SPONSOR.md)
+
 ## 📄 License (许可协议)
 
 本项目核心代码遵循 **MIT 协议** 开源。
