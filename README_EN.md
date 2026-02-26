@@ -21,7 +21,7 @@
 >
 > - **🚧 Not Ready Out-of-the-Box**: Features are still iterating frequently and may require some technical background to configure.
 > - **💸 Funding & Testing Limitations**: Due to limited funds, **apart from LLM interfaces, other commercial APIs have not been fully tested**. Although the code is implemented, there is no guarantee that all commercial APIs will work perfectly.
-> - **🤝 Seeking Support**: If you find this project interesting or useful, please **Star** ⭐️ it! If you are a "generous donor" willing to sponsor API debugging funds or hardware upgrades, please check the sponsorship methods (TODO).
+> - **🤝 Seeking Support**: If you find this project interesting or useful, please **Star** ⭐️ it! If you are a "generous donor" willing to sponsor API debugging funds or hardware upgrades, please check the [sponsorship methods](SPONSOR.md).
 
 ---
 
