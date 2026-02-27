@@ -1,103 +1,287 @@
 # Kokoro Engine — Architecture
 
-> **Version:** 1.0  
-> **Last Updated:** 2026-02-11  
-> **Companion Document:** [PRD.md](file:///d:/Program/Kokoro%20Engine/docs/PRD.md)
+> **Version:** 2.0
+> **Last Updated:** 2026-02-27
+> **Companion Document:** [PRD.md](PRD.md) · [API Specification](API%20specification.md) · [MOD System Design](MOD_system_design.md)
 
 ---
 
 ## 1. High-Level Overview
 
-Kokoro Engine is a **Tauri-based desktop application** split into two isolated layers communicating over a typed IPC bridge.
+Kokoro Engine is a **Tauri v2 desktop application** with a dual-layer architecture: a React + TypeScript frontend and a Rust backend, communicating over a typed IPC bridge. It integrates Live2D rendering, LLM conversation, TTS/STT, Vision, Image Generation, MCP protocol, and a MOD system.
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                        Tauri Window                            │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │              Frontend  (React + TypeScript)              │  │
-│  │                                                          │  │
-│  │  ┌─────────┐  ┌──────────┐  ┌────────┐  ┌───────────┐  │  │
-│  │  │ Live2D  │  │  Chat UI │  │  Mods  │  │  Theming  │  │  │
-│  │  │ Viewer  │  │  Panel   │  │  List  │  │  Engine   │  │  │
-│  │  └────┬────┘  └────┬─────┘  └───┬────┘  └───────────┘  │  │
-│  │       │            │            │                        │  │
-│  │  ─────┴────────────┴────────────┴──────                  │  │
-│  │           kokoro-bridge.ts  (Typed IPC)                  │  │
-│  └──────────────────────┬───────────────────────────────────┘  │
-│                         │  Tauri invoke / events                │
-│  ┌──────────────────────┴───────────────────────────────────┐  │
-│  │               Backend  (Rust / Tauri)                    │  │
-│  │                                                          │  │
-│  │  ┌──────────┐  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐  │  │
-│  │  │    AI    │  │ LLM  │  │ TTS  │  │ Mods │  │  DB  │  │  │
-│  │  │Orchestr. │  │Adaptr│  │ Svc  │  │ Mgr  │  │SQLite│  │  │
-│  │  └──────────┘  └──────┘  └──────┘  └──────┘  └──────┘  │  │
-│  └──────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                           Tauri Window                               │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │                Frontend  (React + TypeScript)                  │  │
+│  │                                                                │  │
+│  │  ┌─────────┐ ┌────────┐ ┌──────┐ ┌───────┐ ┌──────────────┐  │  │
+│  │  │ Live2D  │ │  Chat  │ │ Mods │ │ Theme │ │   Settings   │  │  │
+│  │  │ Viewer  │ │ Panel  │ │ List │ │Engine │ │    Panel     │  │  │
+│  │  └────┬────┘ └───┬────┘ └──┬───┘ └───────┘ └──────┬───────┘  │  │
+│  │       │          │         │                       │          │  │
+│  │  ─────┴──────────┴─────────┴───────────────────────┴────────  │  │
+│  │                  kokoro-bridge.ts  (Typed IPC)                 │  │
+│  └──────────────────────────┬────────────────────────────────────┘  │
+│                              │  Tauri invoke / events                │
+│  ┌──────────────────────────┴────────────────────────────────────┐  │
+│  │                  Backend  (Rust / Tauri v2)                    │  │
+│  │                                                                │  │
+│  │  ┌────────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌───────┐ ┌──────────┐  │  │
+│  │  │   AI   │ │ LLM │ │ TTS │ │ STT │ │Vision │ │ ImageGen │  │  │
+│  │  │Orchstr.│ │Adapt│ │ Svc │ │ Svc │ │Watcher│ │   Svc    │  │  │
+│  │  └────────┘ └─────┘ └─────┘ └─────┘ └───────┘ └──────────┘  │  │
+│  │  ┌────────┐ ┌─────┐ ┌─────────┐ ┌──────────┐ ┌───────────┐  │  │
+│  │  │Actions │ │ MCP │ │  Mods   │ │ Memory   │ │  SQLite   │  │  │
+│  │  │Registry│ │Client│ │ Manager │ │ Manager  │ │ +FastEmbed│  │  │
+│  │  └────────┘ └─────┘ └─────────┘ └──────────┘ └───────────┘  │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 2. Project Structure
 
+### 2.1 Frontend (`src/`)
+
 ```
-Kokoro Engine/
-├── src/                          # Frontend (React + TS)
-│   ├── App.tsx                   # Root — layout config + providers
-│   ├── main.tsx                  # Entry point
-│   ├── core/                     # Core services & init
-│   │   ├── init.tsx              # Component registration bootstrap
-│   │   ├── services.ts           # Singleton service instances
-│   │   ├── services/             # Service implementations
-│   │   └── types/                # Shared TypeScript types
-│   ├── features/
-│   │   └── live2d/               # Live2D rendering & interaction
-│   │       ├── Live2DViewer.tsx   # PixiJS + Cubism renderer
-│   │       ├── Live2DController.ts
-│   │       └── ...
-│   ├── ui/                       # UI framework
-│   │   ├── layout/               # Declarative layout engine
-│   │   ├── theme/                # Theme system & defaults
-│   │   ├── registry/             # Component registry
-│   │   ├── mods/                 # Mod UI components
-│   │   └── widgets/              # Reusable UI widgets
-│   └── lib/                      # Shared utilities
-│       ├── kokoro-bridge.ts      # Typed IPC bridge
-│       ├── audio-player.ts       # Web Audio playback
-│       └── utils.ts
+src/
+├── App.tsx                        # Root — MOD system orchestration + layout
+├── main.tsx                       # React entry point
+├── index.css                      # Global styles
 │
-├── src-tauri/                    # Backend (Rust)
-│   └── src/
-│       ├── main.rs               # Tauri entry point
-│       ├── lib.rs                # App builder & module wiring
-│       ├── commands/             # IPC command handlers
-│       │   ├── system.rs         # Engine info, status
-│       │   ├── character.rs      # Character state, expressions
-│       │   ├── chat.rs           # Streaming chat
-│       │   ├── context.rs        # Persona & history management
-│       │   ├── database.rs       # DB init & vector store
-│       │   ├── tts.rs            # Speech synthesis
-│       │   └── mods.rs           # Mod listing & loading
-│       ├── ai/                   # AI Orchestrator
-│       │   ├── context.rs        # Prompt assembly & context mgmt
-│       │   ├── memory.rs         # Conversation memory
-│       │   └── router.rs         # Intent routing
-│       ├── llm/                  # LLM Adapters
-│       │   ├── openai.rs         # OpenAI-compatible adapter
-│       │   └── context.rs        # LLM context/config
-│       ├── tts/                  # TTS Service
-│       │   ├── interface.rs      # TtsProvider trait
-│       │   ├── manager.rs        # Provider registry + dispatch
-│       │   └── openai.rs         # OpenAI TTS provider
-│       └── mods/                 # Mod System
-│           ├── manager.rs        # Mod discovery & lifecycle
-│           ├── manifest.rs       # Mod metadata schema
-│           ├── protocol.rs       # mod:// URI scheme handler
-│           └── api.rs            # Mod API surface
+├── core/                          # Service initialization & singletons
+│   ├── init.tsx                   # Component registration bootstrap
+│   ├── services.ts                # Service exports
+│   ├── services/
+│   │   ├── interaction-service.ts # User interaction handling
+│   │   ├── mod-service.ts         # MOD lifecycle management
+│   │   ├── tts-service.ts         # TTS service wrapper
+│   │   └── voice-interrupt-service.ts
+│   └── types/
+│       └── mod.ts                 # Shared type definitions
 │
-└── mods/                         # User-installed mods
-    ├── default/                  # Built-in default mod
-    └── example-mod/              # Example community mod
+├── features/live2d/               # Live2D rendering (PixiJS 6 + Cubism SDK)
+│   ├── Live2DViewer.tsx           # Main Live2D component
+│   ├── Live2DController.ts        # Model control & animation
+│   ├── LipSyncProcessor.ts       # Mouth sync with audio
+│   └── AudioDebug.tsx             # Audio debugging UI
+│
+├── ui/
+│   ├── layout/                    # Declarative layout engine (JSON-driven)
+│   │   ├── LayoutRenderer.tsx     # JSON config → React component tree
+│   │   └── types.ts               # LayoutNode, LayoutConfig, ThemeConfig
+│   ├── registry/                  # Component registration (singleton)
+│   │   └── ComponentRegistry.ts   # Core/MOD component registry
+│   ├── theme/                     # Theme system (CSS variables)
+│   │   ├── ThemeContext.tsx        # Theme provider & context
+│   │   └── default.ts             # Default theme config
+│   ├── mods/                      # MOD system integration
+│   │   ├── ModMessageBus.ts       # iframe ↔ host message routing
+│   │   ├── IframeSandbox.tsx      # iframe sandbox wrapper
+│   │   └── ModList.tsx            # MOD list UI
+│   ├── hooks/                     # React hooks
+│   │   ├── useBackgroundSlideshow.ts
+│   │   ├── useTypingReveal.ts
+│   │   └── useVoiceInput.ts
+│   ├── widgets/                   # UI components
+│   │   ├── ChatPanel.tsx          # Chat interface (streaming + tool calls)
+│   │   ├── SettingsPanel.tsx      # Settings modal (12 tabs)
+│   │   ├── HeaderBar.tsx          # Top bar
+│   │   ├── FooterBar.tsx          # Bottom bar (emotion display)
+│   │   ├── BackgroundLayer.tsx    # Background rendering
+│   │   ├── CharacterManager.tsx   # Character CRUD
+│   │   ├── ConversationSidebar.tsx
+│   │   ├── MemoryPanel.tsx        # Memory management UI
+│   │   ├── memory/
+│   │   │   ├── MemoryTimeline.tsx # Timeline view
+│   │   │   └── MemoryGraph.tsx    # Keyword graph (CJK-aware)
+│   │   └── settings/              # Settings tabs
+│   │       ├── ApiTab.tsx         # LLM/API config
+│   │       ├── TtsTab.tsx         # TTS provider setup
+│   │       ├── SttTab.tsx         # Speech-to-text config
+│   │       ├── SingTab.tsx        # RVC singing config
+│   │       ├── ModelTab.tsx       # Live2D model selection
+│   │       ├── BackgroundTab.tsx  # Background slideshow
+│   │       ├── VisionTab.tsx      # Vision/screenshot config
+│   │       └── McpTab.tsx         # MCP server management
+│   ├── locales/                   # i18n (4 languages)
+│   │   ├── zh.json                # Simplified Chinese
+│   │   ├── en.json                # English
+│   │   ├── ja.json                # Japanese
+│   │   └── ko.json                # Korean
+│   └── i18n.ts                    # i18next configuration
+│
+├── lib/                           # Utilities & bridges
+│   ├── kokoro-bridge.ts           # Typed IPC wrapper (all Tauri invoke calls)
+│   ├── db.ts                      # IndexedDB for character storage
+│   ├── audio-player.ts            # Audio playback utilities
+│   ├── character-card-parser.ts   # Character card import (JSON/PNG)
+│   └── utils.ts
+│
+└── components/ui/                 # Radix UI primitives
+    └── button.tsx
+```
+
+### 2.2 Backend (`src-tauri/src/`)
+
+```
+src-tauri/src/
+├── main.rs                        # Tauri entry point
+├── lib.rs                         # Module exports & Tauri setup
+│
+├── commands/                      # 19 IPC command modules
+│   ├── chat.rs                    # stream_chat (SSE streaming + tool feedback loop)
+│   ├── context.rs                 # set_persona, set_language, proactive control
+│   ├── character.rs               # Character state management
+│   ├── conversation.rs            # Conversation history CRUD
+│   ├── database.rs                # DB initialization & vector store
+│   ├── tts.rs                     # TTS synthesis & config
+│   ├── stt.rs                     # Speech-to-text transcription
+│   ├── llm.rs                     # LLM config & model listing
+│   ├── vision.rs                  # Screen capture & VLM analysis
+│   ├── imagegen.rs                # Image generation
+│   ├── mcp.rs                     # MCP server management
+│   ├── mods.rs                    # MOD loading & lifecycle
+│   ├── live2d.rs                  # Live2D model management
+│   ├── live2d_protocol.rs         # live2d:// protocol handler
+│   ├── memory.rs                  # Memory CRUD & tiering
+│   ├── singing.rs                 # RVC voice conversion
+│   ├── actions.rs                 # Action registry & execution
+│   ├── system.rs                  # Engine info & system status
+│   └── mod.rs
+│
+├── ai/                            # AI orchestration & autonomous behavior
+│   ├── context.rs                 # AIOrchestrator — prompt assembly, context mgmt
+│   ├── emotion.rs                 # Emotion state & personality model
+│   ├── emotion_events.rs          # Emotion event types
+│   ├── expression_driver.rs       # Expression → Live2D mapping
+│   ├── memory.rs                  # Memory manager (vector DB + tiering)
+│   ├── memory_extractor.rs        # Auto-extract memories from chat
+│   ├── sentiment.rs               # Sentiment analysis
+│   ├── style_adapter.rs           # Response style adaptation
+│   ├── router.rs                  # Model routing (Fast/Smart/Cheap)
+│   ├── prompts.rs                 # System prompt templates
+│   ├── typing_sim.rs              # Typing animation simulation
+│   ├── curiosity.rs               # Curiosity module (proactive questions)
+│   ├── initiative.rs              # Initiative system (proactive talking)
+│   ├── idle_behaviors.rs          # Idle action triggers
+│   ├── heartbeat.rs               # Periodic background tasks
+│   └── mod.rs
+│
+├── llm/                           # LLM adapters
+│   ├── service.rs                 # LlmService (main interface)
+│   ├── provider.rs                # LlmProvider trait
+│   ├── openai.rs                  # OpenAI-compatible API adapter
+│   ├── ollama.rs                  # Ollama local inference
+│   ├── context.rs                 # LLM context management
+│   ├── llm_config.rs              # Config persistence
+│   └── mod.rs
+│
+├── tts/                           # Text-to-speech (15+ providers)
+│   ├── manager.rs                 # TtsService (main interface)
+│   ├── interface.rs               # TtsProvider trait & types
+│   ├── router.rs                  # Provider routing logic
+│   ├── config.rs                  # Config persistence
+│   ├── cache.rs                   # Audio caching
+│   ├── queue.rs                   # TTS queue management
+│   ├── voice_registry.rs          # Voice profile registry
+│   ├── emotion_tts.rs             # Emotion-aware TTS
+│   ├── openai.rs                  # OpenAI TTS
+│   ├── browser.rs                 # Browser TTS (Web Speech API)
+│   ├── local_gpt_sovits.rs        # GPT-SoVITS local
+│   ├── local_vits.rs              # VITS local
+│   ├── local_rvc.rs               # RVC voice conversion
+│   ├── cloud_base.rs              # Cloud provider base
+│   └── mod.rs
+│
+├── stt/                           # Speech-to-text
+│   ├── service.rs                 # SttService
+│   ├── interface.rs               # SttProvider trait
+│   ├── config.rs                  # Config persistence
+│   ├── openai.rs                  # OpenAI Whisper
+│   ├── whisper_cpp.rs             # Whisper.cpp local
+│   ├── stream.rs                  # Audio streaming (chunked)
+│   └── mod.rs
+│
+├── vision/                        # Screen capture & VLM analysis
+│   ├── server.rs                  # Vision HTTP server
+│   ├── capture.rs                 # xcap screenshot
+│   ├── context.rs                 # Vision context
+│   ├── config.rs                  # Config persistence
+│   ├── watcher.rs                 # Screen change watcher (pixel diff)
+│   └── mod.rs
+│
+├── imagegen/                      # Image generation
+│   ├── service.rs                 # ImageGenService
+│   ├── interface.rs               # ImageGenProvider trait
+│   ├── config.rs                  # Config persistence
+│   ├── openai.rs                  # OpenAI DALL-E
+│   ├── stable_diffusion.rs        # Stable Diffusion WebUI
+│   ├── google.rs                  # Google Gemini
+│   └── mod.rs
+│
+├── mcp/                           # Model Context Protocol client
+│   ├── manager.rs                 # McpManager (server lifecycle)
+│   ├── client.rs                  # McpClient (JSON-RPC 2.0)
+│   ├── transport.rs               # stdio + Streamable HTTP transport
+│   ├── bridge.rs                  # MCP tools → ActionRegistry bridge
+│   └── mod.rs
+│
+├── actions/                       # Action registry (LLM tool calling)
+│   ├── registry.rs                # ActionHandler trait, ActionRegistry
+│   ├── builtin.rs                 # Built-in actions (8 handlers)
+│   └── mod.rs
+│
+├── mods/                          # MOD system (QuickJS sandbox)
+│   ├── manager.rs                 # ModManager (lifecycle)
+│   ├── manifest.rs                # mod.json parsing
+│   ├── protocol.rs                # mod:// protocol handler
+│   ├── theme.rs                   # Theme JSON parsing
+│   ├── api.rs                     # QuickJS API (Kokoro.*)
+│   └── mod.rs
+│
+├── config.rs                      # Global config types
+└── utils/
+    ├── http.rs                    # HTTP utilities
+    └── mod.rs
+```
+
+### 2.3 MOD System (`mods/`)
+
+```
+mods/
+├── default/                       # Default Haru character
+│   ├── mod.json                   # Manifest
+│   └── theme.json                 # Default theme variables
+│
+└── genshin-theme/                 # Genshin Impact UI theme (demo MOD)
+    ├── mod.json                   # Manifest with component overrides
+    ├── theme.json                 # Genshin color palette & animations
+    ├── components/
+    │   ├── chat.html              # Chat panel override (iframe)
+    │   ├── settings.html          # Settings panel override
+    │   └── style.css
+    └── assets/
+        └── HYWenHei-85W.ttf      # Genshin font
+```
+
+### 2.4 Database (SQLite + FastEmbed)
+
+```
+~/.local/share/com.chyin.kokoro/   # (or OS-appropriate app data dir)
+├── kokoro.db                      # SQLite database
+│   ├── memories                   # content, embedding, importance, tier, character_id
+│   ├── conversations              # chat history
+│   └── characters                 # character metadata
+├── llm_config.json
+├── tts_config.json
+├── stt_config.json
+├── vision_config.json
+├── imagegen_config.json
+└── mcp_servers.json
 ```
 
 ---
@@ -113,10 +297,12 @@ graph TD
     LR --> CR["ComponentRegistry"]
     CR --> L2D["Live2DStage"]
     CR --> CP["ChatPanel"]
+    CR --> SP["SettingsPanel"]
     CR --> ML["ModList"]
 
     L2D --> Pixi["PixiJS + Cubism SDK"]
     CP --> Bridge["kokoro-bridge.ts"]
+    SP --> Bridge
     ML --> Bridge
 
     Bridge -->|"invoke()"| Tauri["Tauri IPC"]
@@ -129,17 +315,14 @@ graph TD
     end
 ```
 
-**Key patterns:**
-
 | Pattern | Implementation |
 |---|---|
 | **Declarative layout** | JSON config → `LayoutRenderer` → grid/layer/component tree |
-| **Component registry** | `ComponentRegistry` — register-by-name, resolve at render time |
-| **Theming** | `ThemeProvider` context with replaceable `defaultTheme` |
+| **Component registry** | `ComponentRegistry` — register-by-name, resolve at render time, MOD override support |
+| **Theming** | `ThemeProvider` context with CSS variable injection, MOD theme override |
 | **Typed IPC** | `kokoro-bridge.ts` wraps every `invoke()` with TypeScript types |
-| **Event streaming** | `onChatDelta` / `onChatDone` / `onChatError` via Tauri events |
-
----
+| **Event streaming** | `onChatDelta` / `onChatDone` / `onChatTranslation` / `onChatError` via Tauri events |
+| **i18n** | i18next with 4 languages (zh, en, ja, ko) |
 
 ### 3.2 Backend Layer
 
@@ -147,28 +330,48 @@ graph TD
 graph TD
     CMD["commands/"] -->|"manage()"| AIO["AIOrchestrator"]
     CMD --> TTS["TtsService"]
+    CMD --> STT["SttService"]
+    CMD --> VIS["VisionWatcher"]
+    CMD --> IMG["ImageGenService"]
+    CMD --> MCP["McpManager"]
     CMD --> MM["ModManager"]
+    CMD --> ACT["ActionRegistry"]
 
     AIO --> CTX["Context Manager"]
-    AIO --> MEM["Memory"]
-    AIO --> RTR["Router"]
+    AIO --> MEM["Memory Manager"]
+    AIO --> EMO["Emotion System"]
+    AIO --> HB["Heartbeat"]
     AIO --> LLM["LLM Adapter"]
 
+    HB --> INIT["Initiative"]
+    HB --> IDLE["Idle Behaviors"]
+    HB --> CUR["Curiosity"]
+
     LLM --> OAI["openai.rs"]
+    LLM --> OLL["ollama.rs"]
 
     TTS --> IF["TtsProvider trait"]
+    IF --> SOVITS["GPT-SoVITS"]
     IF --> OAITTS["OpenAI TTS"]
-    IF --> FUTURE["Future providers..."]
+    IF --> BTTS["Browser TTS"]
+    IF --> RVC["RVC"]
 
-    MM --> MAN["Manifest parser"]
-    MM --> PROTO["mod:// protocol"]
+    MCP --> BRIDGE["MCP Bridge"]
+    BRIDGE --> ACT
 
     subgraph "AI Pipeline"
         AIO
         CTX
         MEM
-        RTR
+        EMO
         LLM
+    end
+
+    subgraph "Autonomous Behavior"
+        HB
+        INIT
+        IDLE
+        CUR
     end
 
     subgraph "TTS Pipeline"
@@ -176,22 +379,23 @@ graph TD
         IF
     end
 
-    subgraph "Mod System"
-        MM
-        MAN
-        PROTO
+    subgraph "Tool System"
+        ACT
+        MCP
+        BRIDGE
     end
 ```
 
-**Key patterns:**
-
 | Pattern | Implementation |
 |---|---|
-| **Pluggable LLM** | `llm::openai` implements OpenAI-compatible streaming; new adapters added by module |
-| **Pluggable TTS** | `TtsProvider` trait — providers register with `TtsService` at startup |
-| **Managed state** | Tauri `app.manage()` — `AIOrchestrator`, `TtsService`, `ModManager` |
-| **Async-first** | All I/O uses `tokio` async runtime; SSE streaming for chat |
-| **Mod isolation** | `ModManager` runs mod JS via QuickJS in a separate thread |
+| **Pluggable LLM** | OpenAI-compatible + Ollama adapters; Fast/Smart/Cheap model routing |
+| **Pluggable TTS** | `TtsProvider` trait — 15+ providers with emotion-aware synthesis |
+| **Pluggable ImageGen** | `ImageGenProvider` trait — Stable Diffusion, DALL-E, Gemini |
+| **Tool calling** | `ActionHandler` trait with `needs_feedback()` for feedback loop control |
+| **MCP integration** | MCP tools auto-registered into `ActionRegistry` via `bridge.rs` |
+| **Managed state** | Tauri `app.manage()` — AIOrchestrator, TtsService, McpManager, etc. |
+| **Async-first** | All I/O uses `tokio` async runtime; `Arc<RwLock<T>>` for shared state |
+| **Mod isolation** | QuickJS ES2020 sandbox + iframe sandboxing for UI components |
 
 ---
 
@@ -201,35 +405,49 @@ All frontend ↔ backend communication flows through **`kokoro-bridge.ts`** (fro
 
 ### Commands (invoke-based)
 
-| Command | Direction | Purpose |
+| Command | Module | Purpose |
 |---|---|---|
-| `get_engine_info` | FE → BE | Engine name, version, platform |
-| `get_system_status` | FE → BE | Running state, active modules, memory |
-| `get_character_state` | FE → BE | Character name, expression, mood |
-| `set_expression` | FE → BE | Update character expression |
-| `send_message` | FE → BE | Non-streaming chat message |
-| `stream_chat` | FE → BE | Start streaming chat session |
-| `set_persona` | FE → BE | Set character system prompt |
-| `clear_history` | FE → BE | Reset conversation history |
-| `init_db` | FE → BE | Initialize SQLite database |
-| `test_vector_store` | FE → BE | Verify vector store functionality |
-| `synthesize` | FE → BE | TTS synthesis → raw audio bytes |
-| `list_mods` | FE → BE | Enumerate installed mods |
-| `load_mod` | FE → BE | Activate and load a mod |
+| `stream_chat` | chat.rs | Start streaming chat with tool feedback loop |
+| `set_persona` | context.rs | Set character system prompt |
+| `set_response_language` | context.rs | Set response language |
+| `set_proactive_enabled` | context.rs | Toggle proactive (idle) messages |
+| `clear_history` | context.rs | Reset conversation history |
+| `get_character_state` | character.rs | Character name, expression |
+| `set_expression` | character.rs | Update character expression |
+| `list_conversations` | conversation.rs | List conversation history |
+| `load_conversation` | conversation.rs | Load specific conversation |
+| `init_db` | database.rs | Initialize SQLite database |
+| `synthesize` | tts.rs | TTS synthesis → audio bytes |
+| `get_tts_config` / `set_tts_config` | tts.rs | TTS provider configuration |
+| `transcribe` | stt.rs | Speech-to-text transcription |
+| `get_llm_config` / `set_llm_config` | llm.rs | LLM provider configuration |
+| `capture_screen` | vision.rs | Screen capture for VLM |
+| `generate_image` | imagegen.rs | Image generation |
+| `list_mcp_servers` | mcp.rs | Enumerate MCP servers |
+| `connect_mcp_server` | mcp.rs | Connect to MCP server |
+| `list_mods` / `load_mod` | mods.rs | MOD discovery & loading |
+| `list_live2d_models` | live2d.rs | Available Live2D models |
+| `search_memories` | memory.rs | Hybrid memory search |
+| `get_engine_info` | system.rs | Engine name, version, platform |
 
 ### Events (streaming)
 
 | Event | Direction | Payload |
 |---|---|---|
-| `chat-delta` | BE → FE | `string` — incremental text chunk |
-| `chat-error` | BE → FE | `string` — error message |
+| `chat-delta` | BE → FE | `string` — incremental text chunk (tags buffered) |
 | `chat-done` | BE → FE | `void` — stream complete signal |
+| `chat-error` | BE → FE | `string` — error message |
+| `chat-translation` | BE → FE | `string` — combined translation from all rounds |
+| `chat-tool-result` | BE → FE | `{tool, result}` — tool execution result |
+| `chat-expression` | BE → FE | `{expression, mood}` — emotion update |
+| `chat-image-gen` | BE → FE | Image generation event |
+| `proactive-trigger` | BE → FE | Proactive message trigger |
 
 ---
 
 ## 5. Module Deep Dives
 
-### 5.1 AI Pipeline
+### 5.1 AI Pipeline & Tool Feedback Loop
 
 ```
 User message
@@ -237,76 +455,155 @@ User message
     ▼
 ┌──────────────┐     ┌───────────────┐     ┌──────────────┐
 │   Context    │────▶│   Prompt      │────▶│  LLM Adapter │
-│   Manager    │     │   Assembly    │     │  (OpenAI)    │
+│   Manager    │     │   Assembly    │     │(OpenAI/Ollama)│
 └──────────────┘     └───────────────┘     └──────┬───────┘
                                                    │
-                                                   ▼ SSE stream
-                                           ┌──────────────┐
-                                           │  chat-delta  │──▶ Frontend
-                                           │  events      │
-                                           └──────────────┘
+                              ┌─────────────────────┘
+                              ▼
+                     ┌─────────────────┐
+                     │  Tool Feedback  │ (max 5 rounds)
+                     │     Loop        │
+                     └────────┬────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+        ┌──────────┐   ┌──────────┐   ┌──────────┐
+        │chat-delta│   │ Parse    │   │ Execute  │
+        │ events   │   │[TOOL_CALL│   │ Actions  │
+        │(buffered)│   │  tags]   │   │          │
+        └──────────┘   └──────────┘   └────┬─────┘
+                                           │
+                              ┌─────────────┘
+                              ▼
+                     ┌─────────────────┐
+                     │ needs_feedback? │
+                     └────────┬────────┘
+                         yes/ \no
+                        /     \
+                       ▼       ▼
+              [inject result  [break loop]
+               → next round]
 ```
 
-- **Context Manager** (`ai/context.rs`) — Maintains conversation history (rolling window), assembles the full prompt from persona + lorebook + history + dynamic state.
-- **Memory** (`ai/memory.rs`) — Persistent conversation storage in SQLite.
-- **Router** (`ai/router.rs`) — Intent classification and routing (e.g., action vs. dialogue).
-- **LLM Adapter** (`llm/openai.rs`) — Sends requests to OpenAI-compatible APIs, parses SSE `data:` chunks, emits Tauri events.
+**Tool Feedback Loop** (`commands/chat.rs`):
+1. LLM streams response → `chat-delta` events (with tag buffering)
+2. Parse `[TOOL_CALL:name|args]` tags from response
+3. If no tool calls → break (final round)
+4. Execute tools via `ActionRegistry`
+5. Check `needs_feedback()` — info-retrieval tools (get_time, search_memory, MCP tools) return `true`; side-effect tools (change_expression, play_sound) return `false`
+6. If any tool needs feedback → inject assistant message + tool results into context → next round
+7. If no tool needs feedback → break
 
----
+**Stream Buffering**: `[TOOL_CALL:...]` and `[TRANSLATE:...]` tags are held in a buffer during streaming and never sent to the frontend raw.
 
-### 5.2 TTS Pipeline
+### 5.2 Action System
+
+```
+ActionRegistry
+├── Built-in Actions (builtin.rs)
+│   ├── get_time            (needs_feedback: true)
+│   ├── search_memory       (needs_feedback: true)
+│   ├── forget_memory       (needs_feedback: true)
+│   ├── store_memory        (needs_feedback: false)
+│   ├── change_expression   (needs_feedback: false)
+│   ├── set_background      (needs_feedback: false)
+│   ├── send_notification   (needs_feedback: false)
+│   └── play_sound          (needs_feedback: false)
+│
+└── MCP Tools (bridge.rs)       (needs_feedback: true, always)
+    └── Dynamically registered from connected MCP servers
+```
+
+### 5.3 Memory System
+
+Three-layer architecture:
+
+| Layer | Description |
+|---|---|
+| **Core memories** | Important facts, permanently stored, never decay |
+| **Ephemeral memories** | Temporary observations, naturally decay over time |
+| **Consolidated memories** | LLM-driven clustering of similar fragments |
+
+**Retrieval**: Hybrid semantic + keyword search
+- Embedding cosine similarity (FastEmbed all-MiniLM-L6-v2, ONNX offline)
+- FTS5 BM25 full-text search
+- RRF (Reciprocal Rank Fusion) for rank merging
+
+**Auto-extraction**: `memory_extractor.rs` automatically identifies key facts from conversations and stores them.
+
+### 5.4 Autonomous Behavior System
+
+The **heartbeat** (`ai/heartbeat.rs`) runs periodic background tasks:
+
+| Module | Purpose |
+|---|---|
+| `initiative.rs` | Proactive talking — character initiates conversation when user is idle |
+| `idle_behaviors.rs` | Idle actions — expression changes, ambient animations |
+| `curiosity.rs` | Curiosity — character asks questions about topics of interest |
+
+Triggers are time-based (idle duration) and context-aware (time of day, conversation history).
+
+### 5.5 TTS Pipeline
 
 ```
 Text ──▶ TtsService ──▶ TtsProvider::synthesize() ──▶ Audio bytes
               │
-              ├─▶ OpenAI TTS provider
-              └─▶ (future) Local / Azure / etc.
+              ├─▶ GPT-SoVITS (local, emotion-aware)
+              ├─▶ OpenAI TTS
+              ├─▶ Browser TTS (Web Speech API)
+              ├─▶ RVC (voice conversion)
+              ├─▶ VITS (local)
+              └─▶ Cloud providers (Azure, Google, etc.)
 ```
 
-- **`TtsProvider` trait** — `id() → String`, `synthesize(text, params) → Vec<u8>`
-- **`TtsService`** — Registry of providers; dispatches to the active provider
-- **`TtsParams`** — Voice, speed, pitch, emotion
-- **Frontend `audio-player.ts`** — Decodes audio bytes, plays via Web Audio API
+- **`TtsProvider` trait** — `synthesize(text, params) → Vec<u8>`
+- **Emotion-aware**: `emotion_tts.rs` adjusts voice parameters based on character emotion
+- **Caching**: `cache.rs` caches synthesized audio
+- **Queue**: `queue.rs` manages sequential playback
 
----
-
-### 5.3 Mod System
+### 5.6 MCP Protocol
 
 ```
-mods/
-├── example-mod/
-│   ├── manifest.json      ← Mod metadata
-│   └── index.js           ← Entry point (QuickJS sandbox)
+MCP Server (external process)
+    │ stdio / Streamable HTTP
+    ▼
+McpClient (JSON-RPC 2.0)
+    │
+    ▼
+McpManager (server lifecycle)
+    │
+    ▼
+MCP Bridge → ActionRegistry
+    │
+    ▼
+LLM tool calling via [TOOL_CALL:...] tags
 ```
 
-- **`ModManager`** — Discovers mods from the `mods/` directory, parses manifests, loads entry points.
-- **`mod://` protocol** — Custom Tauri URI scheme serving mod assets with directory traversal protection.
-- **Mod sandboxing** — JavaScript mods run in a QuickJS runtime on a dedicated thread, isolated from the main Rust process.
+- Supports **stdio** and **Streamable HTTP** transports
+- MCP tools are automatically registered as `ActionHandler` instances
+- All MCP tools default to `needs_feedback: true`
 
----
+### 5.7 MOD System
 
-### 5.4 UI Framework
-
-```mermaid
-graph LR
-    JSON["Layout JSON"] --> LR["LayoutRenderer"]
-    LR --> G["Grid Node"]
-    LR --> L["Layer Node"]
-    LR --> C["Component Node"]
-    C --> CR["ComponentRegistry.get()"]
-    CR --> RC["React Component"]
+```
+mods/example-mod/
+├── mod.json          # Manifest (id, name, version, components, scripts, permissions)
+├── theme.json        # CSS variables, fonts, animations
+├── layout.json       # Optional layout overrides
+├── components/       # HTML files (rendered in iframe sandbox)
+└── scripts/          # QuickJS ES2020 code
 ```
 
-- **Declarative layout** — The UI is described as a JSON tree of `layer`, `grid`, and `component` nodes.
-- **Component registry** — Components are registered by name (`Live2DStage`, `ChatPanel`, `ModList`) at app init; the layout engine resolves them at render time.
-- **Theming** — `ThemeProvider` wraps the tree; themes define colors, fonts, and spacing tokens.
-- **Mod UI injection** — Mods can register new components into the registry, which can then be referenced in layout configs.
+- **UI Components**: HTML/CSS/JS in iframe sandbox, communicate via `ModMessageBus` (postMessage)
+- **Scripts**: QuickJS runtime with `Kokoro.*` API (`Kokoro.on()`, `Kokoro.emit()`, `Kokoro.ui.send()`, `Kokoro.character.setExpression()`)
+- **Themes**: CSS variable injection, font loading, animation definitions
+- **`mod://` protocol**: Custom URI scheme serving mod assets with path traversal protection
 
 ---
 
 ## 6. Data Flow Diagrams
 
-### 6.1 Chat Message Flow
+### 6.1 Chat Message Flow (with Tool Feedback)
 
 ```mermaid
 sequenceDiagram
@@ -315,19 +612,33 @@ sequenceDiagram
     participant BR as kokoro-bridge
     participant CMD as commands/chat
     participant AI as AIOrchestrator
-    participant LLM as OpenAI API
+    participant LLM as LLM API
+    participant ACT as ActionRegistry
 
     U->>CP: Type message
     CP->>BR: streamChat(request)
     BR->>CMD: invoke("stream_chat")
-    CMD->>AI: assemble prompt
-    AI->>LLM: POST /chat/completions (stream: true)
-    loop SSE chunks
-        LLM-->>CMD: data: {"delta": "..."}
-        CMD-->>BR: emit("chat-delta", text)
-        BR-->>CP: onChatDelta callback
-        CP-->>U: Render incremental text
+    CMD->>AI: compose_prompt()
+
+    loop Tool Feedback Loop (max 5 rounds)
+        AI->>LLM: POST /chat/completions (stream)
+        loop SSE chunks
+            LLM-->>CMD: data: {"delta": "..."}
+            CMD-->>BR: emit("chat-delta", buffered text)
+            BR-->>CP: onChatDelta callback
+        end
+        CMD->>CMD: parse [TOOL_CALL:...] tags
+        alt Has tool calls with needs_feedback
+            CMD->>ACT: execute tools
+            ACT-->>CMD: tool results
+            CMD-->>BR: emit("chat-tool-result")
+            CMD->>CMD: inject results → next round
+        else No tool calls or no feedback needed
+            CMD->>CMD: break loop
+        end
     end
+
+    CMD-->>BR: emit("chat-translation", combined)
     CMD-->>BR: emit("chat-done")
     BR-->>CP: onChatDone callback
 ```
@@ -352,7 +663,6 @@ sequenceDiagram
     CMD-->>BR: Uint8Array
     BR-->>FE: audio data
     FE->>AP: play(audioData)
-    AP-->>FE: Audio playback via Web Audio API
 ```
 
 ---
@@ -361,15 +671,19 @@ sequenceDiagram
 
 | Decision | Rationale |
 |---|---|
-| **Tauri over Electron** | Smaller binary, native Rust backend, lower memory footprint |
+| **Tauri v2 over Electron** | Smaller binary, native Rust backend, lower memory footprint |
 | **Typed IPC bridge** | Single source of truth for FE↔BE contract; catches mismatches at compile time |
-| **Trait-based plugins** | `TtsProvider` and future `LlmProvider` traits enable swapping implementations without changing consumers |
-| **Declarative layout** | Enables mod-driven UI composition; layouts can be loaded from JSON config files |
-| **Component registry** | Decouples layout definition from component implementation; mods can inject new components |
-| **Offline-first startup** | AI orchestrator failure is non-fatal; app launches without network |
-| **QuickJS for mods** | Sandboxed JS runtime prevents mods from accessing host filesystem or network directly |
-| **SQLite for storage** | Zero-config, embedded, resilient to crashes — ideal for local-first desktop apps |
-| **SSE streaming for chat** | Token-by-token delivery for real-time character responses |
+| **Trait-based plugins** | `TtsProvider`, `LlmProvider`, `ImageGenProvider`, `ActionHandler` traits enable swapping implementations |
+| **Tool feedback loop** | LLM sees tool results and can incorporate them naturally, enabling info-retrieval tools |
+| **`needs_feedback` trait method** | Prevents infinite loops from side-effect tools while ensuring info tools get results back |
+| **Stream tag buffering** | `[TOOL_CALL:...]` and `[TRANSLATE:...]` tags never leak to frontend display |
+| **Declarative layout** | Enables MOD-driven UI composition; layouts loaded from JSON config |
+| **Component registry** | Decouples layout from implementation; MODs can inject/override components |
+| **Offline-first** | AI orchestrator failure is non-fatal; app launches without network |
+| **QuickJS for MOD scripts** | Sandboxed JS runtime prevents MODs from accessing host filesystem/network |
+| **SQLite + FastEmbed** | Zero-config embedded DB with local vector embeddings (all-MiniLM-L6-v2 ONNX) |
+| **SSE streaming** | Token-by-token delivery for real-time character responses |
+| **Intl.Segmenter for CJK** | Browser-native word segmentation for Chinese/Japanese/Korean in memory graph |
 
 ---
 
@@ -377,29 +691,35 @@ sequenceDiagram
 
 ### Error Handling
 
-- **Backend** — All commands return `Result<T, String>` to the frontend; panics are caught.
-- **AI fallback** — If `AIOrchestrator` init fails, the app continues running without AI capabilities.
-- **Mod isolation** — Mod execution errors are contained within the QuickJS sandbox.
+- **Backend** — All commands return `Result<T, String>` to the frontend
+- **Tool execution** — Failed tool results are fed back to LLM so it can respond gracefully
+- **AI fallback** — If `AIOrchestrator` init fails, the app continues without AI
+- **MOD isolation** — MOD execution errors are contained within QuickJS sandbox / iframe
 
 ### Security
 
-- **`mod://` protocol** — Blocks `..` path traversal; serves only from the `mods/` directory.
-- **API keys** — Read from environment variables, not hardcoded. Config-driven loading planned.
+- **`mod://` protocol** — Blocks `..` path traversal; serves only from `mods/` directory
+- **iframe sandbox** — MOD UI components run in sandboxed iframes with restricted permissions
+- **API keys** — Stored in local config files, never transmitted except to configured endpoints
 
 ### Performance
 
-- **Lazy initialization** — AI infrastructure is lazy-loaded (not at startup).
-- **Async I/O** — All network and database operations use `tokio` async runtime.
-- **PixiJS rendering** — GPU-accelerated Live2D rendering at 60fps.
+- **Lazy initialization** — AI infrastructure is lazy-loaded
+- **Async I/O** — All network and database operations use `tokio` async runtime
+- **PixiJS rendering** — GPU-accelerated Live2D rendering at 60fps
+- **Audio caching** — TTS results cached to avoid redundant synthesis
+- **Stream buffering** — Minimal overhead tag detection during streaming
 
 ---
 
-## 9. Future Architecture Extensions
+## 9. Statistics
 
-| Extension | Architectural Impact |
+| Metric | Value |
 |---|---|
-| **Vector DB / RAG** | New `memory/` module behind the `AIOrchestrator`; lazy-loaded |
-| **Story engine** | New `narrative/` module with event scripting; hooks into `Router` |
-| **Mobile companion** | Shared Rust core via Tauri Mobile; reduced frontend feature set |
-| **Mod marketplace** | New `marketplace/` service; extends `ModManager` with remote registry |
-| **Custom LLM adapters** | New implementations of a future `LlmProvider` trait |
+| Frontend files | ~55 TypeScript/TSX |
+| Backend files | ~107 Rust |
+| Languages | 4 (zh, en, ja, ko) |
+| TTS providers | 15+ |
+| LLM support | OpenAI-compatible + Ollama |
+| Built-in actions | 8 |
+| MCP transport | stdio + Streamable HTTP |
