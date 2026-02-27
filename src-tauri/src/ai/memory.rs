@@ -14,7 +14,7 @@ pub struct MemoryManager {
 const MEMORY_HALF_LIFE_DAYS: f64 = 30.0;
 
 /// Cosine similarity threshold above which a new memory is considered a duplicate.
-const DEDUP_THRESHOLD: f32 = 0.9;
+const DEDUP_THRESHOLD: f32 = 0.85;
 
 /// Cosine similarity threshold for memory consolidation clustering.
 const CONSOLIDATION_THRESHOLD: f32 = 0.75;
@@ -176,6 +176,15 @@ impl MemoryManager {
         .await?;
 
         Ok(())
+    }
+
+    /// Return all memory content strings for a given character (used for dedup in extraction).
+    pub async fn get_all_memory_contents(&self, character_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT content FROM memories WHERE character_id = ? ORDER BY importance DESC LIMIT 50")
+            .bind(character_id)
+            .fetch_all(&self.db)
+            .await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("content")).collect())
     }
 
     /// Check for duplicate memories. If a near-duplicate exists (similarity > threshold),

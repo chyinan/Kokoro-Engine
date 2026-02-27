@@ -47,8 +47,37 @@ pub async fn extract_and_store_memories(
     character_id: String,
 ) {
     if recent_history.is_empty() {
+        println!("[Memory] extract_and_store_memories called but history is empty");
         return;
     }
+
+    println!("[Memory] Starting extraction for '{}' with {} history messages", character_id, recent_history.len());
+
+    // Fetch existing memories so the LLM can avoid duplicates
+    let existing_memories = match memory_manager
+        .get_all_memory_contents(&character_id)
+        .await
+    {
+        Ok(mems) => mems,
+        Err(e) => {
+            eprintln!("[Memory] Failed to fetch existing memories: {}", e);
+            Vec::new()
+        }
+    };
+
+    let existing_block = if existing_memories.is_empty() {
+        String::new()
+    } else {
+        let list = existing_memories
+            .iter()
+            .map(|m| format!("- {}", m))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n\nYou already have these memories stored. Do NOT extract facts that are already covered below (even if worded differently):\n{}",
+            list
+        )
+    };
 
     // Build the conversation transcript for the LLM
     let transcript = recent_history
@@ -60,7 +89,7 @@ pub async fn extract_and_store_memories(
     let messages = vec![
         LLMMessage {
             role: "system".to_string(),
-            content: MessageContent::Text(EXTRACTION_PROMPT.to_string()),
+            content: MessageContent::Text(format!("{}{}", EXTRACTION_PROMPT, existing_block)),
         },
         LLMMessage {
             role: "user".to_string(),
