@@ -589,9 +589,13 @@ export async function onToolCallResult(callback: (event: ToolCallEvent) => void)
 
 export interface McpServerConfig {
     name: string;
-    command: string;
-    args: string[];
-    env: Record<string, string>;
+    /** "stdio" (default) or "streamable_http" */
+    type?: string;
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    /** HTTP endpoint URL (for streamable_http transport) */
+    url?: string;
     enabled: boolean;
 }
 

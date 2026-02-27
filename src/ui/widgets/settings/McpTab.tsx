@@ -45,11 +45,14 @@ function parseMcpJson(raw: string): McpServerConfig[] {
     const configs: McpServerConfig[] = [];
     for (const [name, entry] of Object.entries(servers)) {
         const e = entry as any;
+        const transportType = e.type || e.transportType || "stdio";
         configs.push({
             name,
+            type: transportType,
             command: e.command || "",
             args: e.args || [],
             env: e.env || {},
+            url: e.url || undefined,
             enabled: e.disabled === true ? false : true,
         });
     }
@@ -60,8 +63,14 @@ function parseMcpJson(raw: string): McpServerConfig[] {
 // ── Example placeholder ─────────────────────────────────
 const EXAMPLE_JSON = `"my-server": {
   "command": "npx",
-  "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
-  "transportType": "stdio"
+  "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+}
+
+or for HTTP-based servers:
+
+"remote-server": {
+  "type": "streamable_http",
+  "url": "https://example.com/mcp"
 }`;
 
 // ── Component ───────────────────────────────────────────

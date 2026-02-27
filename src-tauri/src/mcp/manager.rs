@@ -3,7 +3,7 @@
 //! Loads server configs, starts/stops servers, aggregates tools.
 
 use super::client::McpClient;
-use super::transport::StdioTransport;
+use super::transport::{StdioTransport, StreamableHttpTransport};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -17,17 +17,28 @@ use tokio::sync::Mutex;
 pub struct McpServerConfig {
     /// Display name for this server.
     pub name: String,
-    /// Command to spawn (e.g., "npx", "python", "node").
+    /// Transport type: "stdio" (default) or "streamable_http".
+    #[serde(default = "default_transport_type", rename = "type")]
+    pub transport_type: String,
+    /// Command to spawn (for stdio transport).
+    #[serde(default)]
     pub command: String,
-    /// Arguments to the command.
+    /// Arguments to the command (for stdio transport).
     #[serde(default)]
     pub args: Vec<String>,
-    /// Extra environment variables.
+    /// Extra environment variables (for stdio transport).
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// HTTP endpoint URL (for streamable_http transport).
+    #[serde(default)]
+    pub url: Option<String>,
     /// Whether to auto-connect on startup.
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+fn default_transport_type() -> String {
+    "stdio".to_string()
 }
 
 fn default_true() -> bool {
@@ -142,12 +153,30 @@ impl McpManager {
 
     /// Connect to a single server.
     pub async fn connect_server(&mut self, config: &McpServerConfig) -> Result<(), String> {
-        println!("[MCP] Connecting to '{}'...", config.name);
+        println!("[MCP] Connecting to '{}' (transport: {})...", config.name, config.transport_type);
 
-        let transport =
-            StdioTransport::spawn(&config.command, &config.args, Some(&config.env)).await?;
+        let transport: Arc<dyn super::transport::McpTransport> = match config.transport_type.as_str() {
+            "streamable_http" | "sse" => {
+                let url = config.url.as_deref().ok_or_else(|| {
+                    format!("Server '{}' has type '{}' but no 'url' configured", config.name, config.transport_type)
+                })?;
+                Arc::new(StreamableHttpTransport::new(url))
+            }
+            _ => {
+                // Default: stdio
+                if config.command.is_empty() {
+                    return Err(format!(
+                        "Server '{}' has stdio transport but no 'command' configured",
+                        config.name
+                    ));
+                }
+                Arc::new(
+                    StdioTransport::spawn(&config.command, &config.args, Some(&config.env)).await?,
+                )
+            }
+        };
 
-        let mut client = McpClient::new(Arc::new(transport));
+        let mut client = McpClient::new(transport);
         client.connect().await?;
 
         self.clients

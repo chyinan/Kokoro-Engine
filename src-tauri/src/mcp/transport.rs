@@ -1,7 +1,7 @@
 //! MCP Transport Layer — trait-based abstraction for MCP server communication.
 //!
-//! Currently implements stdio transport (subprocess stdin/stdout).
-//! Designed to be extended with SSE/HTTP transports in the future.
+//! Implements stdio transport (subprocess stdin/stdout) and
+//! Streamable HTTP transport (POST JSON-RPC to an HTTP endpoint).
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -282,4 +282,177 @@ impl McpTransport for StdioTransport {
 
         Ok(())
     }
+}
+
+// ── Streamable HTTP Transport ──────────────────────────
+
+/// Communicates with an MCP server over HTTP POST (Streamable HTTP transport).
+/// Each JSON-RPC request is sent as a POST to the endpoint URL.
+pub struct StreamableHttpTransport {
+    url: String,
+    client: reqwest::Client,
+    next_id: AtomicU64,
+    connected: Arc<std::sync::atomic::AtomicBool>,
+    /// MCP session ID returned by the server via `Mcp-Session-Id` header.
+    session_id: Arc<Mutex<Option<String>>>,
+}
+
+impl StreamableHttpTransport {
+    /// Create a new HTTP transport pointing at the given URL.
+    pub fn new(url: &str) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_default();
+
+        Self {
+            url: url.trim_end_matches('/').to_string(),
+            client,
+            next_id: AtomicU64::new(1),
+            connected: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            session_id: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+#[async_trait]
+impl McpTransport for StreamableHttpTransport {
+    async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        if !self.is_connected() {
+            return Err("Transport disconnected".to_string());
+        }
+
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params.unwrap_or(Value::Null),
+        });
+
+        let mut req = self
+            .client
+            .post(&self.url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
+
+        // Attach session ID if we have one
+        if let Some(ref sid) = *self.session_id.lock().await {
+            req = req.header("Mcp-Session-Id", sid.clone());
+        }
+
+        let resp = req
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+        // Capture session ID from response header
+        if let Some(sid) = resp.headers().get("mcp-session-id") {
+            if let Ok(s) = sid.to_str() {
+                *self.session_id.lock().await = Some(s.to_string());
+            }
+        }
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            self.connected.store(false, Ordering::SeqCst);
+            return Err(format!("HTTP {}: {}", status, text));
+        }
+
+        // Check content type — may be JSON or SSE
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        if content_type.contains("text/event-stream") {
+            // SSE: read events until we find the JSON-RPC response
+            let text = resp.text().await.map_err(|e| format!("SSE read error: {}", e))?;
+            parse_sse_response(&text, id)
+        } else {
+            // Plain JSON response
+            let json_resp: JsonRpcResponse = resp
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+
+            if let Some(error) = json_resp.error {
+                Err(error.to_string())
+            } else {
+                Ok(json_resp.result.unwrap_or(Value::Null))
+            }
+        }
+    }
+
+    async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), String> {
+        if !self.is_connected() {
+            return Err("Transport disconnected".to_string());
+        }
+
+        // JSON-RPC notification: no `id` field
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params.unwrap_or(Value::Null),
+        });
+
+        let mut req = self
+            .client
+            .post(&self.url)
+            .header("Content-Type", "application/json");
+
+        if let Some(ref sid) = *self.session_id.lock().await {
+            req = req.header("Mcp-Session-Id", sid.clone());
+        }
+
+        let resp = req
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP notify failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("HTTP notify error {}: {}", status, text));
+        }
+
+        Ok(())
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::SeqCst)
+    }
+
+    async fn shutdown(&self) -> Result<(), String> {
+        self.connected.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Parse a JSON-RPC response from an SSE text stream.
+/// Looks for `data:` lines containing JSON with a matching `id`.
+fn parse_sse_response(sse_text: &str, expected_id: u64) -> Result<Value, String> {
+    for line in sse_text.lines() {
+        let line = line.trim();
+        if let Some(data) = line.strip_prefix("data:") {
+            let data = data.trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(data) {
+                if resp.id == Some(expected_id) {
+                    if let Some(error) = resp.error {
+                        return Err(error.to_string());
+                    }
+                    return Ok(resp.result.unwrap_or(Value::Null));
+                }
+            }
+        }
+    }
+    Err("No matching JSON-RPC response found in SSE stream".to_string())
 }
