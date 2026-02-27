@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, Languages, History } from "lucide-react";
+import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, Languages, History, RefreshCw } from "lucide-react";
 import { streamChat, onChatDelta, onChatDone, onChatError, clearHistory, uploadVisionImage, synthesize, onToolCallResult, listConversations, loadConversation } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal } from "../hooks";
@@ -14,6 +14,7 @@ interface ChatMessage {
     text: string;
     images?: string[];
     translation?: string;
+    isError?: boolean;
 }
 
 // ── Typing Indicator ───────────────────────────────────────
@@ -102,6 +103,8 @@ export default function ChatPanel() {
     const messagesContainerRef = useRef<HTMLDivElement>(null);
     const userScrolledRef = useRef(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    // Store last failed request for retry
+    const lastFailedRequestRef = useRef<{ message: string; images?: string[]; allowImageGen?: boolean } | null>(null);
 
     // Vision Mode
     const [visionEnabled, setVisionEnabled] = useState(() => localStorage.getItem("kokoro_vision_enabled") === "true");
@@ -117,10 +120,21 @@ export default function ChatPanel() {
         listConversations(characterId).then(convs => {
             if (convs.length > 0) {
                 loadConversation(convs[0].id).then(msgs => {
-                    const chatMsgs: ChatMessage[] = msgs.map(m => ({
-                        role: m.role === "user" ? "user" as const : "kokoro" as const,
-                        text: m.content,
-                    }));
+                    const chatMsgs: ChatMessage[] = msgs.map(m => {
+                        if (m.role !== "user") {
+                            const translateMatch = m.content.match(/\[TRANSLATE:\s*([\s\S]*?)\](?=\s*(?:\[(?:ACTION|EMOTION|IMAGE_PROMPT))[:|]|\s*$)/i);
+                            const translation = translateMatch ? translateMatch[1].trim() : undefined;
+                            const text = m.content
+                                .replace(/\[ACTION:\w+\]\s*/g, "")
+                                .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
+                                .replace(/\[EMOTION:[^\]]*\]/g, "")
+                                .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
+                                .replace(/\[TRANSLATE:[\s\S]*?\](?=\s*(?:\[(?:ACTION|EMOTION|IMAGE_PROMPT))[:|]|\s*$)/gi, "")
+                                .trim();
+                            return { role: "kokoro" as const, text, translation };
+                        }
+                        return { role: "user" as const, text: m.content };
+                    });
                     setMessages(chatMsgs);
                 }).catch(err => console.error("[ChatPanel] Failed to restore conversation:", err));
             }
@@ -433,14 +447,14 @@ export default function ChatPanel() {
         resetReveal();
         rawResponseRef.current = "";
 
+        // Check if background mode is "generated"
+        let allowImageGen = false;
         try {
-            // Check if background mode is "generated" �?if so, allow the LLM to create contextual backgrounds
-            let allowImageGen = false;
-            try {
-                const bgConfig = JSON.parse(localStorage.getItem("kokoro_bg_config") || "{}");
-                allowImageGen = bgConfig.mode === "generated";
-            } catch { /* ignore */ }
+            const bgConfig = JSON.parse(localStorage.getItem("kokoro_bg_config") || "{}");
+            allowImageGen = bgConfig.mode === "generated";
+        } catch { /* ignore */ }
 
+        try {
             await streamChat({
                 message: trimmed || "(image attached)",
                 allow_image_gen: allowImageGen,
@@ -452,10 +466,56 @@ export default function ChatPanel() {
             setIsThinking(false);
             setError(err instanceof Error ? err.message : String(err));
 
+            // Save failed request for retry
+            lastFailedRequestRef.current = { message: trimmed || "(image attached)", images: imagesToSend.length > 0 ? imagesToSend : undefined, allowImageGen };
+
             setTimeout(() => {
                 setMessages(prev => [...prev, {
                     role: "kokoro",
-                    text: t("chat.errors.connection_error")
+                    text: t("chat.errors.connection_error"),
+                    isError: true,
+                }]);
+            }, 500);
+        }
+    };
+
+    // ── Retry last failed message ─────────────────────────────
+    const handleRetry = async () => {
+        const req = lastFailedRequestRef.current;
+        if (!req || isStreaming) return;
+
+        // Remove the error message
+        setMessages(prev => {
+            const last = prev[prev.length - 1];
+            if (last && last.isError) return prev.slice(0, -1);
+            return prev;
+        });
+
+        lastFailedRequestRef.current = null;
+        startStreaming();
+        setIsThinking(true);
+        userScrolledRef.current = false;
+        resetReveal();
+        rawResponseRef.current = "";
+
+        try {
+            await streamChat({
+                message: req.message,
+                allow_image_gen: req.allowImageGen,
+                images: req.images,
+                character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
+            });
+        } catch (err) {
+            stopStreaming();
+            setIsThinking(false);
+            setError(err instanceof Error ? err.message : String(err));
+            lastFailedRequestRef.current = req;
+
+            setTimeout(() => {
+                setMessages(prev => [...prev, {
+                    role: "kokoro",
+                    text: t("chat.errors.connection_error"),
+                    isError: true,
                 }]);
             }, 500);
         }
@@ -674,6 +734,16 @@ export default function ChatPanel() {
                                 </div>
                             )}
                             {msg.text}
+                            {/* Retry button for error messages */}
+                            {msg.isError && (
+                                <button
+                                    onClick={handleRetry}
+                                    className="flex items-center gap-1.5 mt-2 px-3 py-1.5 rounded-md text-[11px] font-medium bg-[var(--color-accent)]/15 border border-[var(--color-accent)]/30 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25 transition-colors"
+                                >
+                                    <RefreshCw size={12} strokeWidth={2} />
+                                    {t("chat.actions.retry")}
+                                </button>
+                            )}
                             {/* Translation toggle �?WeChat style */}
                             {msg.role === "kokoro" && msg.translation && (
                                 <div className="mt-2 -mb-1">

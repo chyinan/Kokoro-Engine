@@ -53,10 +53,21 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
         if (id === activeId) return;
         try {
             const msgs: ConversationMessage[] = await loadConversation(id);
-            const chatMsgs: ChatMessage[] = msgs.map(m => ({
-                role: m.role === "user" ? "user" : "kokoro",
-                text: m.content,
-            }));
+            const chatMsgs: ChatMessage[] = msgs.map(m => {
+                if (m.role !== "user") {
+                    const translateMatch = m.content.match(/\[TRANSLATE:\s*([\s\S]*?)\](?=\s*(?:\[(?:ACTION|EMOTION|IMAGE_PROMPT))[:|]|\s*$)/i);
+                    const translation = translateMatch ? translateMatch[1].trim() : undefined;
+                    const text = m.content
+                        .replace(/\[ACTION:\w+\]\s*/g, "")
+                        .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
+                        .replace(/\[EMOTION:[^\]]*\]/g, "")
+                        .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
+                        .replace(/\[TRANSLATE:[\s\S]*?\](?=\s*(?:\[(?:ACTION|EMOTION|IMAGE_PROMPT))[:|]|\s*$)/gi, "")
+                        .trim();
+                    return { role: "kokoro" as const, text, translation };
+                }
+                return { role: "user" as const, text: m.content };
+            });
             setActiveId(id);
             onLoadMessages(chatMsgs);
         } catch (err) {
