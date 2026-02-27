@@ -6,7 +6,7 @@
  */
 import { useState, useEffect, useCallback } from "react";
 import { clsx } from "clsx";
-import { RefreshCw, Check, AlertCircle } from "lucide-react";
+import { RefreshCw, Check, AlertCircle, Save, Trash2 } from "lucide-react";
 import { motion } from "framer-motion";
 import { inputClasses, labelClasses } from "../../styles/settings-primitives";
 import { useTranslation } from "react-i18next";
@@ -17,6 +17,7 @@ import {
     listOllamaModels,
     type LlmConfig,
     type LlmProviderConfig,
+    type LlmPreset,
 } from "../../../lib/kokoro-bridge";
 
 export interface ApiTabProps {
@@ -33,6 +34,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
     const [error, setError] = useState<string | null>(null);
     const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [isLoadingModels, setIsLoadingModels] = useState(false);
+    const [selectedPresetId, setSelectedPresetId] = useState<string>("");
 
     // Load config from backend on mount
     useEffect(() => {
@@ -64,6 +66,73 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
         },
         [config, activeProvider]
     );
+
+    const handleSavePreset = useCallback(() => {
+        if (!config) return;
+        const existing = selectedPresetId
+            ? config.presets?.find((p) => p.id === selectedPresetId)
+            : null;
+        const defaultName = existing?.name || "";
+        const name = window.prompt(t("settings.api.preset.name_prompt"), defaultName);
+        if (!name) return;
+
+        const preset: LlmPreset = {
+            id: existing?.id || crypto.randomUUID(),
+            name,
+            active_provider: config.active_provider,
+            system_provider: config.system_provider,
+            system_model: config.system_model,
+            providers: JSON.parse(JSON.stringify(config.providers)),
+        };
+
+        const presets = [...(config.presets || [])];
+        const idx = presets.findIndex((p) => p.id === preset.id);
+        if (idx >= 0) {
+            presets[idx] = preset;
+        } else {
+            presets.push(preset);
+        }
+
+        const updated = { ...config, presets };
+        setConfig(updated);
+        setSelectedPresetId(preset.id);
+        saveLlmConfig(updated).catch((e) => setError(String(e)));
+    }, [config, selectedPresetId, t]);
+
+    const handleLoadPreset = useCallback(
+        (presetId: string) => {
+            if (!config) return;
+            setSelectedPresetId(presetId);
+            if (!presetId) return;
+
+            const preset = config.presets?.find((p) => p.id === presetId);
+            if (!preset) return;
+
+            const updated: LlmConfig = {
+                ...config,
+                active_provider: preset.active_provider,
+                system_provider: preset.system_provider,
+                system_model: preset.system_model,
+                providers: JSON.parse(JSON.stringify(preset.providers)),
+            };
+            setConfig(updated);
+            saveLlmConfig(updated).catch((e) => setError(String(e)));
+        },
+        [config]
+    );
+
+    const handleDeletePreset = useCallback(() => {
+        if (!config || !selectedPresetId) return;
+        const preset = config.presets?.find((p) => p.id === selectedPresetId);
+        if (!preset) return;
+        if (!window.confirm(`${t("settings.api.preset.delete")} "${preset.name}"?`)) return;
+
+        const presets = (config.presets || []).filter((p) => p.id !== selectedPresetId);
+        const updated = { ...config, presets };
+        setConfig(updated);
+        setSelectedPresetId("");
+        saveLlmConfig(updated).catch((e) => setError(String(e)));
+    }, [config, selectedPresetId, t]);
 
     const handleSave = async () => {
         if (!config) return;
@@ -126,6 +195,38 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
 
     return (
         <div className="space-y-4">
+            {/* Preset Selector */}
+            <div>
+                <label className={labelClasses}>{t("settings.api.preset.label")}</label>
+                <div className="flex gap-2">
+                    <select
+                        value={selectedPresetId}
+                        onChange={(e) => handleLoadPreset(e.target.value)}
+                        className={clsx(inputClasses, "flex-1 py-1.5 px-2")}
+                    >
+                        <option value="">{t("settings.api.preset.current")}</option>
+                        {(config.presets || []).map((p) => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                    </select>
+                    <button
+                        onClick={handleSavePreset}
+                        className="px-3 py-1.5 text-xs rounded-lg border border-[var(--color-accent)] text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 transition-all flex items-center gap-1"
+                        title={t("settings.api.preset.save")}
+                    >
+                        <Save size={12} />
+                    </button>
+                    <button
+                        onClick={handleDeletePreset}
+                        disabled={!selectedPresetId}
+                        className="px-3 py-1.5 text-xs rounded-lg border border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-red-400 hover:text-red-400 disabled:opacity-30 disabled:pointer-events-none transition-all flex items-center gap-1"
+                        title={t("settings.api.preset.delete")}
+                    >
+                        <Trash2 size={12} />
+                    </button>
+                </div>
+            </div>
+
             {/* Provider Selector */}
             <div>
                 <label className={labelClasses}>{t("settings.api.provider_label")}</label>

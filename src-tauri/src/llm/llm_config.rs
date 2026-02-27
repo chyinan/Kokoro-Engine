@@ -35,6 +35,16 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmPreset {
+    pub id: String,
+    pub name: String,
+    pub active_provider: String,
+    pub system_provider: Option<String>,
+    pub system_model: Option<String>,
+    pub providers: Vec<LlmProviderConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     /// ID of the active provider (must match one of `providers[].id`).
     #[serde(default = "default_active_provider")]
@@ -49,6 +59,9 @@ pub struct LlmConfig {
 
     #[serde(default = "default_providers")]
     pub providers: Vec<LlmProviderConfig>,
+
+    #[serde(default)]
+    pub presets: Vec<LlmPreset>,
 }
 
 fn default_active_provider() -> String {
@@ -87,6 +100,7 @@ impl Default for LlmConfig {
             system_provider: None,
             system_model: None,
             providers: default_providers(),
+            presets: Vec::new(),
         }
     }
 }

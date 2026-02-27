@@ -115,11 +115,21 @@ export interface LlmProviderConfig {
     extra?: Record<string, unknown>;
 }
 
+export interface LlmPreset {
+    id: string;
+    name: string;
+    active_provider: string;
+    system_provider?: string;
+    system_model?: string;
+    providers: LlmProviderConfig[];
+}
+
 export interface LlmConfig {
     active_provider: string;
     system_provider?: string;
     system_model?: string;
     providers: LlmProviderConfig[];
+    presets?: LlmPreset[];
 }
 
 export interface OllamaModelInfo {
