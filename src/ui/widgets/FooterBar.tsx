@@ -31,17 +31,6 @@ const emotions: EmotionDef[] = [
     { id: "angry", icon: Angry, color: "text-red-400" },
 ];
 
-// ── Mood helpers ───────────────────────────────────
-
-/** Returns a gradient stop color based on mood value (0.0=bad → 1.0=great) */
-function moodToColor(mood: number): string {
-    if (mood >= 0.8) return "#34d399"; // emerald
-    if (mood >= 0.6) return "#a3e635"; // lime
-    if (mood >= 0.4) return "#facc15"; // yellow
-    if (mood >= 0.2) return "#fb923c"; // orange
-    return "#f87171";                   // red
-}
-
 /** Height of the invisible hover trigger zone at the bottom of the screen */
 const TRIGGER_ZONE_HEIGHT = 12;
 /** Delay (ms) before hiding the footer after mouse leaves */
@@ -52,7 +41,6 @@ const HIDE_DELAY = 400;
 export default function FooterBar() {
     const { t } = useTranslation();
     const [activeEmotion, setActiveEmotion] = useState<EmotionState>("neutral");
-    const [mood, setMood] = useState(0.5);
     const [engineVersion, setEngineVersion] = useState("");
     const [visible, setVisible] = useState(false);
     const [isAutoMode, setIsAutoMode] = useState(true); // LLM auto-controls expression
@@ -103,7 +91,6 @@ export default function FooterBar() {
         onChatExpression((data) => {
             if (isAutoMode) {
                 setActiveEmotion(data.expression as EmotionState);
-                setMood(data.mood);
             }
         }).then(fn => { unlisten = fn; });
 

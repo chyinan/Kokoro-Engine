@@ -29,8 +29,37 @@ const STOPWORDS = new Set([
     "their", "what", "so", "up", "out", "if", "about", "who", "get", "which", "go", "me", "when", "make", "can", "like", "time", "no",
     "just", "know", "take", "people", "into", "year", "your", "good", "some", "could", "them", "see", "other", "than", "then", "now",
     "look", "only", "come", "its", "over", "think", "also", "back", "after", "use", "two", "how", "our", "work", "first", "well", "way",
-    "even", "new", "want", "because", "any", "these", "give", "day", "most", "us", "is", "am", "are", "was", "were"
+    "even", "new", "want", "because", "any", "these", "give", "day", "most", "us", "is", "am", "are", "was", "were",
+    // CJK stopwords
+    "の", "は", "が", "を", "に", "で", "と", "も", "な", "だ", "です", "ます", "する", "した", "して", "から", "まで", "より", "ない", "ある", "いる", "れる", "られる", "こと", "もの", "ため", "よう", "など", "それ", "これ", "あの", "その",
+    "的", "了", "是", "在", "我", "有", "和", "就", "不", "人", "都", "一", "个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好", "自己", "这", "他", "她", "吗", "什么", "那", "里", "吧", "啊", "呢", "哦", "嗯",
 ]);
+
+/** Check if a string contains CJK characters */
+function hasCJK(text: string): boolean {
+    return /[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]/.test(text);
+}
+
+/** Extract keywords from text, supporting both CJK and Latin scripts */
+function extractKeywords(text: string): string[] {
+    const cleaned = text.toLowerCase().replace(/[.,/#!$%^&*;:{}=\-_`~()[\]"'?!？！。、，…～☺️]/g, "");
+
+    if (hasCJK(cleaned) && typeof Intl !== "undefined" && "Segmenter" in Intl) {
+        // Use Intl.Segmenter for CJK-aware word segmentation
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const segmenter = new (Intl as any).Segmenter(undefined, { granularity: "word" });
+        const segments = Array.from(segmenter.segment(cleaned)) as Array<{ segment: string; isWordLike: boolean }>;
+        return segments
+            .filter(s => s.isWordLike)
+            .map(s => s.segment.trim())
+            .filter(w => w.length >= 2 && !STOPWORDS.has(w));
+    }
+
+    // Fallback: whitespace split for Latin scripts
+    return cleaned
+        .split(/\s+/)
+        .filter(w => w.length > 3 && !STOPWORDS.has(w));
+}
 
 export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -42,11 +71,8 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
         const cooccurrences: Record<string, number> = {}; // "key1|key2" -> count
 
         memories.forEach(mem => {
-            // Simple keyword extraction: lowercase, remove punctuation, split
-            const words = mem.content.toLowerCase()
-                .replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "")
-                .split(/\s+/)
-                .filter(w => w.length > 3 && !STOPWORDS.has(w));
+            // Keyword extraction with CJK support
+            const words = extractKeywords(mem.content);
 
             const uniqueWords = Array.from(new Set(words));
 

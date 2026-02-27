@@ -502,6 +502,13 @@ pub async fn stream_chat(
         let (cleaned_text, tool_calls) = parse_tool_call_tags(&round_response);
         let (cleaned_text, round_translation) = extract_translate_tags(&cleaned_text);
 
+        println!("[Chat] Round {} raw response ({} chars): ...{}",
+            round + 1,
+            round_response.len(),
+            round_response.chars().rev().take(100).collect::<String>().chars().rev().collect::<String>());
+        println!("[Chat] Round {} translation: {:?}", round + 1, round_translation);
+        println!("[Chat] Round {} tool_calls: {}", round + 1, tool_calls.len());
+
         // Collect translation from this round
         if let Some(t) = round_translation {
             all_translations.push(t);
