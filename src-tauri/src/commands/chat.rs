@@ -5,7 +5,7 @@ use crate::llm::service::LlmService;
 use futures::StreamExt;
 use serde::Serialize;
 use std::collections::HashMap;
-use tauri::{Emitter, State, Window};
+use tauri::{Emitter, Manager, State, Window};
 use tokio::sync::RwLock;
 
 #[derive(serde::Deserialize)]
@@ -529,12 +529,19 @@ pub async fn stream_chat(
 
     // ── LAYER 3: PERSONA GENERATION ─────────────────────────────
 
+    // Generate tool prompt from action registry
+    let tool_prompt = {
+        let registry = _action_registry.read().await;
+        let prompt = registry.generate_tool_prompt();
+        if prompt.is_empty() { None } else { Some(prompt) }
+    };
+
     // Compose Persona Prompt
     let prompt_messages = state
         .compose_prompt(
             &request.message,
             request.allow_image_gen.unwrap_or(false),
-            None,
+            tool_prompt,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -618,7 +625,34 @@ pub async fn stream_chat(
         }
     }
 
-    // 7. Update History with final response (skip for hidden/touch interactions)
+    // 7. Parse and execute TOOL_CALLs from the response
+    let (cleaned_response, tool_calls) = parse_tool_call_tags(&full_response);
+    if !tool_calls.is_empty() {
+        let registry = _action_registry.read().await;
+        for tc in &tool_calls {
+            println!("[ToolCall] Executing: {} with args {:?}", tc.name, tc.args);
+            let ctx = crate::actions::registry::ActionContext {
+                app: window.app_handle().clone(),
+                character_id: char_id.clone(),
+            };
+            match registry.execute(&tc.name, tc.args.clone(), ctx).await {
+                Ok(result) => {
+                    println!("[ToolCall] {} => {}", tc.name, result.message);
+                    let _ = window.emit("tool-call-result", serde_json::json!({
+                        "tool": tc.name,
+                        "result": result.message,
+                    }));
+                }
+                Err(e) => {
+                    eprintln!("[ToolCall] {} failed: {}", tc.name, e.0);
+                }
+            }
+        }
+        // Use cleaned response (without tool call tags) for history
+        full_response = cleaned_response;
+    }
+
+    // 8. Update History with final response (skip for hidden/touch interactions)
     if !full_response.is_empty() && !request.hidden {
         state
             .add_message("assistant".to_string(), full_response.clone())
@@ -627,7 +661,9 @@ pub async fn stream_chat(
 
     // Periodic memory extraction
     let msg_count = state.get_message_count().await;
+    println!("[Memory] User message count: {}, trigger at next multiple of 5", msg_count);
     if msg_count > 0 && msg_count % 5 == 0 {
+        println!("[Memory] Triggering memory extraction (count={})", msg_count);
         let history = state.get_recent_history(10).await;
         let memory_mgr = state.memory_manager.clone();
         let char_id_for_mem = char_id.clone();

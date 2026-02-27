@@ -387,7 +387,7 @@ impl AIOrchestrator {
         &self,
         query: &str,
         _allow_image_gen: bool,
-        _tool_prompt: Option<String>,
+        tool_prompt: Option<String>,
     ) -> Result<Vec<Message>> {
         // 1. Determine Model logic
         let model_type = self.router.route(query);
@@ -563,6 +563,18 @@ impl AIOrchestrator {
                         user_lang, user_lang
                     ),
                     metadata: Some(serde_json::json!({"type": "translation_instruction"})),
+                });
+            }
+        }
+
+        // -- Tool/Action Prompt --
+        // Inject available tools so the LLM knows it can call them
+        if let Some(ref tp) = tool_prompt {
+            if !tp.is_empty() {
+                final_messages.push(Message {
+                    role: "system".to_string(),
+                    content: tp.clone(),
+                    metadata: Some(serde_json::json!({"type": "tool_prompt"})),
                 });
             }
         }
