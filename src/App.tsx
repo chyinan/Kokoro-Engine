@@ -209,7 +209,10 @@ function App() {
   const [sdModels, setSdModels] = useState<string[]>([]);
   const [capturedScreenUrl, setCapturedScreenUrl] = useState<string | null>(null);
   const [userLanguage, setUserLanguageState] = useState(() => localStorage.getItem("kokoro_user_language") || "zh");
-  const [proactiveEnabled, setProactiveEnabledState] = useState(true);
+  const [proactiveEnabled, setProactiveEnabledState] = useState(() => {
+    const saved = localStorage.getItem("kokoro_proactive_enabled");
+    return saved !== null ? saved === "true" : true;
+  });
 
   const modelUrl = useMemo(() => {
     if (customModelPath) {
@@ -258,6 +261,7 @@ function App() {
       setMcpServers(mcp);
       setModList(mods);
       setProactiveEnabledState(proactive);
+      localStorage.setItem("kokoro_proactive_enabled", String(proactive));
     }).catch(err => console.error("[App] Failed to fetch initial configs:", err));
 
     // These may be slower (file system scans, network)
@@ -502,6 +506,7 @@ function App() {
     if (detail.action === 'set_proactive_enabled') {
       const enabled = !!detail.data?.enabled;
       setProactiveEnabledState(enabled);
+      localStorage.setItem("kokoro_proactive_enabled", String(enabled));
       import("./lib/kokoro-bridge").then(({ setProactiveEnabled }) => {
         setProactiveEnabled(enabled).catch(console.error);
       });
