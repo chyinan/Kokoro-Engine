@@ -28,6 +28,7 @@ _bmad-output
 .agent
 .cursor
 .agent/workflows
+CLAUDE.md
 
 # Rust
 src-tauri/target/

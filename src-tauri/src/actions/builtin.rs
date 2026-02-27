@@ -24,6 +24,10 @@ impl ActionHandler for GetTimeAction {
         vec![]
     }
 
+    fn needs_feedback(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         _args: HashMap<String, String>,
@@ -164,6 +168,10 @@ impl ActionHandler for SearchMemoryAction {
         }]
     }
 
+    fn needs_feedback(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         args: HashMap<String, String>,
@@ -280,6 +288,10 @@ impl ActionHandler for ForgetMemoryAction {
             description: "Description of the memory to forget".to_string(),
             required: true,
         }]
+    }
+
+    fn needs_feedback(&self) -> bool {
+        true
     }
 
     async fn execute(

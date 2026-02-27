@@ -390,12 +390,12 @@ export default function ChatPanel() {
                 if (aborted || isStreamingRef.current) return;
                 console.log("[ChatPanel] Proactive trigger:", event.payload);
 
-                const { instruction, prompt_messages } = event.payload;
+                const { instruction } = event.payload;
 
                 // Push a new empty kokoro message so delta handler doesn't overwrite previous message
                 setMessages(prev => [...prev, { role: "kokoro" as const, text: "" }]);
 
-                // Start streaming with override messages
+                // Start streaming — compose_prompt() handles full context (system prompt, memory, emotion, history, language)
                 startStreaming();
                 setIsThinking(true);
                 userScrolledRef.current = false;
@@ -403,8 +403,8 @@ export default function ChatPanel() {
                 rawResponseRef.current = "";
 
                 streamChat({
-                    message: instruction, // Used for logging or fallback
-                    messages: prompt_messages, // Override with full context
+                    message: instruction,
+                    hidden: true,
                     character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
                 }).catch(err => {
                     stopStreaming();

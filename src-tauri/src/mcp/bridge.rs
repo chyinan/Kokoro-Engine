@@ -81,6 +81,10 @@ impl ActionHandler for McpToolHandler {
         Self::schema_to_params(&self.input_schema)
     }
 
+    fn needs_feedback(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         args: HashMap<String, String>,

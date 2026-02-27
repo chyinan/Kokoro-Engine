@@ -17,10 +17,8 @@ pub struct ChatRequest {
     pub allow_image_gen: Option<bool>,
     pub images: Option<Vec<String>>,
     pub character_id: Option<String>,
-    /// Optional override for the full message history (used for proactive triggers)
-    pub messages: Option<Vec<crate::llm::openai::Message>>,
     /// If true, neither the user message nor the assistant response is saved to history.
-    /// Used for touch interactions where the action description shouldn't appear in chat.
+    /// Used for touch interactions and proactive triggers where the instruction shouldn't appear in chat.
     #[serde(default)]
     pub hidden: bool,
 }
@@ -54,148 +52,32 @@ struct IntentResponse {
     system_call: Option<String>,
 }
 
-/// Valid emotion names that the LLM can output
-#[allow(dead_code)]
-const VALID_EMOTIONS: &[&str] = &[
-    "neutral",
-    "happy",
-    "sad",
-    "angry",
-    "surprised",
-    "thinking",
-    "shy",
-    "smug",
-    "worried",
-    "excited",
-];
-
-/// Valid action names that the LLM can output
+/// Valid action names for the intent parser
 const VALID_ACTIONS: &[&str] = &[
     "idle", "nod", "shake", "wave", "dance", "shy", "think", "surprise", "cheer", "tap",
 ];
 
-/// Mood value ranges for the keyword fallback
-#[allow(dead_code)]
-const EMOTION_MOODS: &[(&str, f32)] = &[
-    ("excited", 0.95),
-    ("happy", 0.85),
-    ("smug", 0.7),
-    ("surprised", 0.65),
-    ("shy", 0.6),
-    ("thinking", 0.5),
-    ("neutral", 0.5),
-    ("worried", 0.35),
-    ("sad", 0.2),
-    ("angry", 0.15),
-];
-
-#[allow(dead_code)]
-const TAG_PREFIX: &str = "[EMOTION:";
-#[allow(dead_code)]
-const IMAGE_TAG_PREFIX: &str = "[IMAGE_PROMPT:";
-#[allow(dead_code)]
-const ACTION_TAG_PREFIX: &str = "[ACTION:";
-#[allow(dead_code)]
 const TOOL_CALL_TAG_PREFIX: &str = "[TOOL_CALL:";
 
-// ── Tag Buffering ──────────────────────────────────────────
-
-/// Returns the byte position up to which it's safe to emit text to the user.
-/// Holds back any text that could be the start of an `[EMOTION:...]` or `[IMAGE_PROMPT:...]` tag.
-#[allow(dead_code)]
-fn find_safe_emit_boundary(text: &str) -> usize {
-    if let Some(last_bracket) = text.rfind('[') {
-        let suffix = &text[last_bracket..];
-
-        // Check for EMOTION tag
-        if suffix.len() < TAG_PREFIX.len() {
-            if TAG_PREFIX.starts_with(suffix) {
-                return last_bracket;
-            }
-        } else if suffix.starts_with(TAG_PREFIX) {
-            return last_bracket;
-        }
-
-        // Check for IMAGE_PROMPT tag
-        if suffix.len() < IMAGE_TAG_PREFIX.len() {
-            if IMAGE_TAG_PREFIX.starts_with(suffix) {
-                return last_bracket;
-            }
-        } else if suffix.starts_with(IMAGE_TAG_PREFIX) {
-            return last_bracket;
-        }
-
-        // Check for ACTION tag
-        if suffix.len() < ACTION_TAG_PREFIX.len() {
-            if ACTION_TAG_PREFIX.starts_with(suffix) {
-                return last_bracket;
-            }
-        } else if suffix.starts_with(ACTION_TAG_PREFIX) {
-            return last_bracket;
-        }
-
-        // Check for TOOL_CALL tag
-        if suffix.len() < TOOL_CALL_TAG_PREFIX.len() {
-            if TOOL_CALL_TAG_PREFIX.starts_with(suffix) {
-                return last_bracket;
-            }
-        } else if suffix.starts_with(TOOL_CALL_TAG_PREFIX) {
-            return last_bracket;
+/// Strip any `<tool_result>...</tool_result>` blocks or stray tags that the LLM may echo back.
+fn strip_leaked_tags(text: &str) -> String {
+    let mut result = text.to_string();
+    // Remove <tool_result>...</tool_result> blocks (greedy within single block)
+    while let Some(start) = result.find("<tool_result>") {
+        if let Some(end) = result[start..].find("</tool_result>") {
+            let tag_end = start + end + "</tool_result>".len();
+            result = format!("{}{}", result[..start].trim_end(), result[tag_end..].trim_start());
+        } else {
+            // Unclosed tag — remove from <tool_result> to end of line
+            let line_end = result[start..].find('\n').map(|i| start + i).unwrap_or(result.len());
+            result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
         }
     }
-
-    text.len()
-}
-
-// ── Tag Parsing ────────────────────────────────────────────
-
-/// Parse `[IMAGE_PROMPT:...]` from the end of the text.
-/// Returns (cleaned_text, Option<prompt>).
-#[allow(dead_code)]
-fn parse_image_prompt_tag(text: &str) -> (String, Option<String>) {
-    let trimmed = text.trim_end();
-
-    if let Some(bracket_start) = trimmed.rfind(IMAGE_TAG_PREFIX) {
-        let tag_text = &trimmed[bracket_start..];
-
-        if let Some(bracket_end) = tag_text.find(']') {
-            let inner = &tag_text[IMAGE_TAG_PREFIX.len()..bracket_end];
-            let prompt = inner.trim().to_string();
-
-            let cleaned = trimmed[..bracket_start].trim_end().to_string();
-            return (cleaned, Some(prompt));
-        }
-    }
-
-    (text.to_string(), None)
-}
-
-/// Parse `[ACTION:xxx]` from the text.
-/// Returns (cleaned_text, Option<ActionEvent>).
-#[allow(dead_code)]
-fn parse_action_tag(text: &str) -> (String, Option<ActionEvent>) {
-    let trimmed = text.trim_end();
-
-    if let Some(bracket_start) = trimmed.rfind(ACTION_TAG_PREFIX) {
-        let tag_text = &trimmed[bracket_start..];
-
-        if let Some(bracket_end) = tag_text.find(']') {
-            let inner = &tag_text[ACTION_TAG_PREFIX.len()..bracket_end];
-            let action = inner.trim().to_lowercase();
-
-            if VALID_ACTIONS.contains(&action.as_str()) {
-                let cleaned = trimmed[..bracket_start].trim_end().to_string();
-                return (cleaned, Some(ActionEvent { action }));
-            }
-        }
-    }
-
-    (text.to_string(), None)
+    result.trim().to_string()
 }
 
 /// Parsed tool call from `[TOOL_CALL:name|key=val|key=val]`
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 struct ToolCall {
     name: String,
     args: HashMap<String, String>,
@@ -203,12 +85,10 @@ struct ToolCall {
 
 /// Parse all `[TOOL_CALL:name|key=val|...]` tags from the text.
 /// Returns (cleaned_text, Vec<ToolCall>).
-#[allow(dead_code)]
 fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
     let mut result = text.to_string();
     let mut calls = Vec::new();
 
-    // Find all TOOL_CALL tags (iterate from end to preserve positions)
     while let Some(start) = result.rfind(TOOL_CALL_TAG_PREFIX) {
         let rest = &result[start..];
         if let Some(end_bracket) = rest.find(']') {
@@ -230,7 +110,6 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
                 calls.push(ToolCall { name, args });
             }
 
-            // Remove the tag from the text
             let tag_end = start + end_bracket + 1;
             result = format!(
                 "{}{}",
@@ -246,113 +125,8 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
         }
     }
 
-    // Reverse so calls are in order of appearance
     calls.reverse();
     (result.trim().to_string(), calls)
-}
-
-/// Parse `[EMOTION:xxx|MOOD:0.xx]` from the end of the response.
-/// Returns (cleaned_text, ExpressionEvent).
-/// Falls back to keyword detection if no valid tag is found.
-#[allow(dead_code)]
-fn parse_expression_tag(text: &str) -> (String, ExpressionEvent) {
-    let trimmed = text.trim_end();
-
-    if let Some(bracket_start) = trimmed.rfind("[EMOTION:") {
-        let tag_text = &trimmed[bracket_start..];
-
-        if let Some(bracket_end) = tag_text.find(']') {
-            let inner = &tag_text[9..bracket_end]; // skip "[EMOTION:"
-
-            if let Some(pipe_pos) = inner.find("|MOOD:") {
-                let emotion = inner[..pipe_pos].trim().to_lowercase();
-                let mood_str = inner[pipe_pos + 6..].trim();
-
-                if VALID_EMOTIONS.contains(&emotion.as_str()) {
-                    let mood = mood_str.parse::<f32>().unwrap_or(0.5).clamp(0.0, 1.0);
-                    let cleaned = trimmed[..bracket_start].trim_end().to_string();
-
-                    return (
-                        cleaned,
-                        ExpressionEvent {
-                            expression: emotion,
-                            mood,
-                        },
-                    );
-                }
-            }
-        }
-    }
-
-    // Fallback: keyword-based detection
-    let expression = detect_expression_keywords(text);
-    (text.to_string(), expression)
-}
-
-/// Fallback keyword-based emotion detection.
-#[allow(dead_code)]
-fn detect_expression_keywords(text: &str) -> ExpressionEvent {
-    let lower = text.to_lowercase();
-
-    let checks: &[(&str, &[&str])] = &[
-        (
-            "excited",
-            &["!!", "amazing", "awesome", "fantastic", "incredible", "wow"],
-        ),
-        (
-            "happy",
-            &[
-                "glad",
-                "happy",
-                "great",
-                "wonderful",
-                "love",
-                "enjoy",
-                "pleased",
-            ],
-        ),
-        ("smug", &["obviously", "of course", "naturally", "clearly"]),
-        ("shy", &["blush", "embarrass", "flatter", "oh my"]),
-        ("surprised", &["surprise", "unexpected", "no way", "whoa"]),
-        (
-            "thinking",
-            &[
-                "hmm",
-                "let me think",
-                "consider",
-                "perhaps",
-                "maybe",
-                "interesting",
-            ],
-        ),
-        (
-            "worried",
-            &["worry", "concern", "unfortunately", "afraid", "anxious"],
-        ),
-        ("sad", &["sad", "sorry", "unfortunate", "miss", "regret"]),
-        ("angry", &["angry", "frustrat", "unacceptable", "terrible"]),
-    ];
-
-    for (emotion, keywords) in checks {
-        for kw in *keywords {
-            if lower.contains(kw) {
-                let mood = EMOTION_MOODS
-                    .iter()
-                    .find(|(e, _)| *e == *emotion)
-                    .map(|(_, m)| *m)
-                    .unwrap_or(0.5);
-                return ExpressionEvent {
-                    expression: emotion.to_string(),
-                    mood,
-                };
-            }
-        }
-    }
-
-    ExpressionEvent {
-        expression: "neutral".to_string(),
-        mood: 0.5,
-    }
 }
 
 // ── Stream Chat Command ────────────────────────────────────
@@ -403,7 +177,7 @@ pub async fn stream_chat(
     }
 
     // 1. Update History with User Message (skip for hidden/touch interactions)
-    if request.messages.is_none() && !request.hidden {
+    if !request.hidden {
         state
             .add_message("user".to_string(), request.message.clone())
             .await;
@@ -605,32 +379,59 @@ pub async fn stream_chat(
         content: crate::llm::openai::MessageContent::Text(system_feedback),
     });
 
-    // Stream Response
+    // Stream Response with Tool Call Feedback Loop
+    const MAX_TOOL_ROUNDS: usize = 5;
     let chat_provider = llm_state.provider().await;
-    let mut stream = chat_provider.chat_stream(client_messages, None).await?;
+    let mut all_cleaned_text = String::new();
 
-    let mut full_response = String::new();
+    for round in 0..MAX_TOOL_ROUNDS {
+        println!("[Chat] Tool loop round {}", round + 1);
 
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(content) => {
-                full_response.push_str(&content);
-                window
-                    .emit("chat-delta", content)
-                    .map_err(|e| e.to_string())?;
-            }
-            Err(e) => {
-                window.emit("chat-error", e).map_err(|e| e.to_string())?;
+        let mut stream = chat_provider
+            .chat_stream(client_messages.clone(), None)
+            .await?;
+
+        let mut round_response = String::new();
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(content) => {
+                    round_response.push_str(&content);
+                    window
+                        .emit("chat-delta", &content)
+                        .map_err(|e| e.to_string())?;
+                }
+                Err(e) => {
+                    window.emit("chat-error", e).map_err(|e| e.to_string())?;
+                }
             }
         }
-    }
 
-    // 7. Parse and execute TOOL_CALLs from the response
-    let (cleaned_response, tool_calls) = parse_tool_call_tags(&full_response);
-    if !tool_calls.is_empty() {
+        let (cleaned_text, tool_calls) = parse_tool_call_tags(&round_response);
+
+        // Accumulate cleaned text for history
+        if !cleaned_text.is_empty() {
+            if !all_cleaned_text.is_empty() {
+                all_cleaned_text.push(' ');
+            }
+            all_cleaned_text.push_str(&cleaned_text);
+        }
+
+        // No tool calls → final round
+        if tool_calls.is_empty() {
+            break;
+        }
+
+        // Execute tool calls and collect results
         let registry = _action_registry.read().await;
+        let mut tool_results = Vec::new();
+        let mut any_needs_feedback = false;
+
         for tc in &tool_calls {
             println!("[ToolCall] Executing: {} with args {:?}", tc.name, tc.args);
+            if registry.needs_feedback(&tc.name) {
+                any_needs_feedback = true;
+            }
             let ctx = crate::actions::registry::ActionContext {
                 app: window.app_handle().clone(),
                 character_id: char_id.clone(),
@@ -638,19 +439,58 @@ pub async fn stream_chat(
             match registry.execute(&tc.name, tc.args.clone(), ctx).await {
                 Ok(result) => {
                     println!("[ToolCall] {} => {}", tc.name, result.message);
-                    let _ = window.emit("tool-call-result", serde_json::json!({
-                        "tool": tc.name,
-                        "result": result.message,
-                    }));
+                    let _ = window.emit(
+                        "chat-tool-result",
+                        serde_json::json!({
+                            "tool": tc.name,
+                            "result": result.message,
+                        }),
+                    );
+                    tool_results.push(format!("- {}: {}", tc.name, result.message));
                 }
                 Err(e) => {
                     eprintln!("[ToolCall] {} failed: {}", tc.name, e.0);
+                    let _ = window.emit(
+                        "chat-tool-result",
+                        serde_json::json!({
+                            "tool": tc.name,
+                            "result": format!("Error: {}", e.0),
+                        }),
+                    );
+                    tool_results.push(format!("- {}: Error: {}", tc.name, e.0));
                 }
             }
         }
-        // Use cleaned response (without tool call tags) for history
-        full_response = cleaned_response;
+        drop(registry);
+
+        // Only continue the loop if at least one tool needs its result fed back to the LLM
+        if !any_needs_feedback {
+            println!("[Chat] No feedback-requiring tools, ending loop");
+            break;
+        }
+
+        // Append assistant message + tool results to context for next round
+        client_messages.push(crate::llm::openai::Message {
+            role: "assistant".to_string(),
+            content: crate::llm::openai::MessageContent::Text(round_response),
+        });
+        client_messages.push(crate::llm::openai::Message {
+            role: "system".to_string(),
+            content: crate::llm::openai::MessageContent::Text(format!(
+                "[Internal tool callback — NOT a user message]\n\
+                The assistant message above is YOUR own previous output. You called some tools, and here are the results:\n\
+                {}\n\n\
+                Instructions:\n\
+                - Incorporate these results naturally into your dialogue.\n\
+                - Do NOT echo raw data, JSON, or any <tool_result> tags.\n\
+                - Do NOT say the message was repeated or sent again — it was not.\n\
+                - Simply continue talking to the user as if you just learned this information.",
+                tool_results.join("\n")
+            )),
+        });
     }
+
+    let full_response = strip_leaked_tags(&all_cleaned_text);
 
     // 8. Update History with final response (skip for hidden/touch interactions)
     if !full_response.is_empty() && !request.hidden {

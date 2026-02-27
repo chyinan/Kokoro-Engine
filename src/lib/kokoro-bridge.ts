@@ -175,7 +175,6 @@ export interface ChatRequest {
     allow_image_gen?: boolean;
     images?: string[];
     character_id?: string;
-    messages?: any[];
     /** If true, neither user message nor response is saved to chat history */
     hidden?: boolean;
 }

@@ -90,6 +90,13 @@ pub trait ActionHandler: Send + Sync {
     /// Parameter definitions
     fn parameters(&self) -> Vec<ActionParam>;
 
+    /// Whether the LLM needs to see the result of this action to continue its response.
+    /// Return `true` for information-retrieval tools (get_time, search_memory, etc.).
+    /// Return `false` (default) for side-effect tools (change_expression, play_sound, etc.).
+    fn needs_feedback(&self) -> bool {
+        false
+    }
+
     /// Execute the action with the given arguments
     async fn execute(
         &self,
@@ -133,6 +140,16 @@ impl ActionRegistry {
         handler.execute(args, ctx).await
     }
 
+    /// Check if a named action needs its result fed back to the LLM.
+    /// Unknown tools (e.g. MCP tools) default to true — safer to do an extra round
+    /// than to swallow results the LLM needs.
+    pub fn needs_feedback(&self, name: &str) -> bool {
+        self.handlers
+            .get(name)
+            .map(|h| h.needs_feedback())
+            .unwrap_or(true)
+    }
+
     /// List all registered actions (for LLM prompt injection).
     pub fn list_actions(&self) -> Vec<ActionInfo> {
         self.handlers
@@ -155,6 +172,10 @@ impl ActionRegistry {
         let mut lines = vec![
             "You have the following tools available. To use a tool, include a tag in your response:".to_string(),
             "[TOOL_CALL:tool_name|param1=value1|param2=value2]".to_string(),
+            String::new(),
+            "When you use a tool, the system will execute it and return the result to you. You can then use the result to continue your response naturally.".to_string(),
+            "For information-retrieval tools (e.g. get_time, search_memory), wait for the result before answering the user's question.".to_string(),
+            "For side-effect tools (e.g. change_expression), the system will confirm execution; you do not need to elaborate further.".to_string(),
             String::new(),
             "Available tools:".to_string(),
         ];
@@ -184,7 +205,7 @@ impl ActionRegistry {
         }
 
         lines.push(String::new());
-        lines.push("You may include multiple [TOOL_CALL:...] tags. Place them BEFORE the [EMOTION:...] tag.".to_string());
+        lines.push("You may include multiple [TOOL_CALL:...] tags in a single response.".to_string());
         lines.push(
             "Only use tools when they are genuinely helpful for the user's request.".to_string(),
         );

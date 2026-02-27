@@ -555,10 +555,10 @@ impl AIOrchestrator {
                 final_messages.push(Message {
                     role: "system".to_string(),
                     content: format!(
-                        "IMPORTANT: After your dialogue response (but BEFORE the [ACTION:...] and [EMOTION:...] tags), \
+                        "IMPORTANT: After your dialogue response, \
                          append a translation of your ENTIRE dialogue response into {} using this EXACT format:\n\
                          [TRANSLATE: <your entire response translated into {}>]\n\
-                         Only translate the dialogue text. Do NOT include any control tags like [ACTION:...], [EMOTION:...], or [IMAGE_PROMPT:...] inside the translation.\n\
+                         Only translate the dialogue text. Do NOT include any control tags inside the translation.\n\
                          This translation tag is mandatory for every response.",
                         user_lang, user_lang
                     ),

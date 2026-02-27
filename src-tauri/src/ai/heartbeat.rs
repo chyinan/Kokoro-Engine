@@ -5,7 +5,6 @@
 
 use crate::ai::context::AIOrchestrator;
 use crate::ai::initiative::InitiativeDecision;
-use crate::llm::openai::{Message as LLMMessage, MessageContent};
 use chrono::Timelike;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -44,16 +43,6 @@ fn time_of_day_context() -> &'static str {
         18..=20 => "It is evening.",
         21..=23 => "It is night.",
         _ => "It is late night / early hours. The user should probably rest.",
-    }
-}
-
-/// Get relationship depth description based on conversation count.
-fn relationship_context(count: u64) -> &'static str {
-    match count {
-        0..=10 => "You have just met the user. Stay polite and keep an appropriate distance.",
-        11..=50 => "You are somewhat familiar with the user. You can be a bit more casual.",
-        51..=200 => "You are good friends with the user. Speak in a close, natural way.",
-        _ => "You are very close with the user. Speak in an intimate, natural manner.",
     }
 }
 
@@ -196,89 +185,16 @@ async fn trigger_proactive_message(
     instruction: &str,
 ) {
     let time_ctx = time_of_day_context();
-    let conversation_count = orchestrator.get_conversation_count().await;
-    let rel_ctx = relationship_context(conversation_count);
-    let emotion_desc = orchestrator.get_emotion_description().await;
-    let system_prompt = orchestrator.system_prompt.lock().await.clone();
     let idle_secs = orchestrator.idle_seconds().await;
 
+    // Build a lightweight instruction — compose_prompt() handles system prompt,
+    // memory, emotion, history, language settings, etc.
     let full_instruction = format!(
-        "User has been idle for {:.0} minutes.\n{}\nInstruction: {}\n",
+        "User has been idle for {:.0} minutes. {} {}",
         idle_secs as f64 / 60.0,
         time_ctx,
         instruction
     );
-
-    // Read language settings so proactive messages respect them
-    let resp_lang = {
-        let lang = orchestrator.response_language.lock().await;
-        lang.clone()
-    };
-    let user_lang = {
-        let lang = orchestrator.user_language.lock().await;
-        lang.clone()
-    };
-
-    let mut lang_instruction = String::new();
-    if !resp_lang.is_empty() {
-        lang_instruction.push_str(&format!(
-            "\n\nCRITICAL INSTRUCTION — LANGUAGE REQUIREMENT:\n\
-             You MUST respond ENTIRELY in {}. \
-             Regardless of what language the user writes in, \
-             your reply MUST be written in {} only. \
-             Do NOT switch to any other language. This is non-negotiable.",
-            resp_lang, resp_lang
-        ));
-    }
-    if !user_lang.is_empty() && !resp_lang.is_empty() && user_lang != resp_lang {
-        lang_instruction.push_str(&format!(
-            "\n\nIMPORTANT: After your dialogue response (but BEFORE the [EMOTION:...] tag), \
-             append a translation of your ENTIRE dialogue response into {} using this EXACT format:\n\
-             [TRANSLATE: <your entire response translated into {}>]\n\
-             Only translate the dialogue text. Do NOT include any control tags inside the translation.\n\
-             This translation tag is mandatory for every response.",
-            user_lang, user_lang
-        ));
-    }
-
-    // Build recent conversation history so the proactive message is contextually relevant
-    let recent_history = orchestrator.get_recent_history(6).await;
-
-    let mut messages = vec![
-        LLMMessage {
-            role: "system".to_string(),
-            content: MessageContent::Text(format!(
-                "{}\n\n{}\n{}\n{}\n\n{}\n\n{}{}",
-                system_prompt,
-                emotion_desc,
-                rel_ctx,
-                time_ctx,
-                full_instruction,
-                concat!(
-                    "IMPORTANT: Keep your message short (1-2 sentences). ",
-                    "Be natural and in character. ",
-                    "Your message should feel like a natural continuation of the conversation, not a random topic change. ",
-                    "At the end, append an emotion tag: [EMOTION:<emotion>|MOOD:<value>]\n",
-                    "Do NOT use any other tags."
-                ),
-                lang_instruction
-            )),
-        },
-    ];
-
-    // Inject recent conversation history so the AI knows what was discussed
-    for msg in &recent_history {
-        messages.push(LLMMessage {
-            role: msg.role.clone(),
-            content: MessageContent::Text(msg.content.clone()),
-        });
-    }
-
-    // Final user instruction for generation
-    messages.push(LLMMessage {
-        role: "user".to_string(),
-        content: MessageContent::Text("(System: generate a proactive message)".to_string()),
-    });
 
     println!(
         "[Heartbeat] Trigger '{}' fired: {}",
@@ -290,8 +206,7 @@ async fn trigger_proactive_message(
         serde_json::json!({
             "trigger": trigger_type,
             "idle_seconds": idle_secs,
-            "instruction": instruction,
-            "prompt_messages": messages,
+            "instruction": full_instruction,
         }),
     );
 
