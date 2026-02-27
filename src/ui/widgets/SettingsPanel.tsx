@@ -90,7 +90,7 @@ const tabs: { id: TabId; label: string; icon: typeof Key }[] = [
     { id: "mcp", label: "settings.tabs.mcp", icon: Server },
 ];
 
-export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange }: SettingsPanelProps) {
+export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, sttConfig: sttConfigProp, voiceInterrupt: voiceInterruptProp }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [activeTab, setActiveTab] = useState<TabId>("bg");
     const bg = backgroundControls;
@@ -119,13 +119,10 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
             setTtsProviderId(localStorage.getItem("kokoro_tts_provider") || "browser");
             setTtsEnabled(localStorage.getItem("kokoro_tts_enabled") === "true");
             setVisionEnabled(localStorage.getItem("kokoro_vision_enabled") === "true");
-            setSttEnabled(localStorage.getItem("kokoro_stt_enabled") === "true");
-            setSttAutoSend(localStorage.getItem("kokoro_stt_auto_send") === "true");
-            setSttLanguage(localStorage.getItem("kokoro_stt_language") || "");
-            setVoiceInterrupt(localStorage.getItem("kokoro_voice_interrupt") === "true");
+            setVoiceInterrupt(voiceInterruptProp ?? localStorage.getItem("kokoro_voice_interrupt") === "true");
             setResponseLang(localStorage.getItem("kokoro_response_language") || "");
             setUserLang(localStorage.getItem("kokoro_user_language") || "");
-            // Fetch backend data
+            // Fetch backend data (TTS, ImageGen only — STT uses prop)
             fetchData();
         }
     }, [isOpen, displayMode, customModelPath, bg.config]);
@@ -160,10 +157,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
     const [saved, setSaved] = useState(false);
 
     // STT state
-    const [localSttConfig, setLocalSttConfig] = useState<SttConfig | null>(null);
-    const [sttEnabled, setSttEnabled] = useState(() => localStorage.getItem("kokoro_stt_enabled") === "true"); // Keeping for now as UI toggle often wraps config
-    const [sttAutoSend, setSttAutoSend] = useState(() => localStorage.getItem("kokoro_stt_auto_send") === "true");
-    const [sttLanguage, setSttLanguage] = useState(() => localStorage.getItem("kokoro_stt_language") || "");
+    const [localSttConfig, setLocalSttConfig] = useState<SttConfig | null>(sttConfigProp ?? null);
     const [voiceInterrupt, setVoiceInterrupt] = useState(() => localStorage.getItem("kokoro_voice_interrupt") === "true");
 
     // Response Language
@@ -199,18 +193,21 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
     const fetchData = async () => {
         setIsTtsLoading(true);
         try {
-            const [providers, voices, ttsConfig, imageGenConfig, sttConfig] = await Promise.all([
+            const [providers, voices, ttsConfig, imageGenConfig] = await Promise.all([
                 listTtsProviders(),
                 listTtsVoices(),
                 getTtsConfig(),
                 getImageGenConfig(),
-                getSttConfig(),
             ]);
             setTtsProviders(providers);
             setTtsVoices(voices);
             setLocalTtsConfig(ttsConfig);
             setLocalImageGenConfig(imageGenConfig);
-            setLocalSttConfig(sttConfig);
+            // STT config comes from prop (sttConfigProp), no need to re-fetch
+            if (!localSttConfig && !sttConfigProp) {
+                const sttConfig = await getSttConfig();
+                setLocalSttConfig(sttConfig);
+            }
         } catch (e) {
             console.error("[SettingsPanel] Failed to fetch data:", e);
         } finally {
@@ -227,9 +224,12 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
         localStorage.setItem("kokoro_tts_provider", ttsProviderId);
         localStorage.setItem("kokoro_tts_enabled", ttsEnabled ? "true" : "false");
         localStorage.setItem("kokoro_vision_enabled", visionEnabled ? "true" : "false");
-        localStorage.setItem("kokoro_stt_enabled", sttEnabled ? "true" : "false");
-        localStorage.setItem("kokoro_stt_auto_send", sttAutoSend ? "true" : "false");
-        localStorage.setItem("kokoro_stt_language", sttLanguage);
+        if (localSttConfig) {
+            const activeSttProvider = localSttConfig.providers?.find(p => p.id === localSttConfig.active_provider);
+            localStorage.setItem("kokoro_stt_enabled", activeSttProvider?.enabled ? "true" : "false");
+            localStorage.setItem("kokoro_stt_auto_send", localSttConfig.auto_send ? "true" : "false");
+            localStorage.setItem("kokoro_stt_language", localSttConfig.language || "");
+        }
         localStorage.setItem("kokoro_voice_interrupt", voiceInterrupt ? "true" : "false");
         localStorage.setItem("kokoro_response_language", responseLang);
         localStorage.setItem("kokoro_user_language", userLang);

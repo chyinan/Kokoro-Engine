@@ -30,7 +30,13 @@ export default function SttTab({
     onVoiceInterruptChange,
 }: SttTabProps) {
     const { t } = useTranslation();
-    const activeProvider = sttConfig?.providers?.find(p => p.id === sttConfig.active_provider);
+    const activeProvider = sttConfig?.providers?.find(p => p.id === sttConfig.active_provider)
+        ?? sttConfig?.providers?.[0];
+
+    // If active_provider doesn't match any provider, fix it
+    if (sttConfig && activeProvider && sttConfig.active_provider !== activeProvider.id) {
+        onSttConfigChange({ ...sttConfig, active_provider: activeProvider.id });
+    }
 
     if (!sttConfig || !sttConfig.providers) {
         return <div className="p-4 text-sm text-red-400">{t("settings.stt.error_invalid_config")}</div>;
