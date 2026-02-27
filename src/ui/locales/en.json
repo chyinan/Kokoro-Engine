@@ -98,6 +98,14 @@
                 "provider": "PROVIDER",
                 "model_override": "MODEL NAME (OPTIONAL)",
                 "same_as_active": "Same as Active ({{provider}})"
+            },
+            "preset": {
+                "label": "Presets",
+                "current": "Current",
+                "save": "Save Preset",
+                "delete": "Delete",
+                "name_prompt": "Enter preset name",
+                "loaded": "Loaded"
             }
         },
         "persona": {
@@ -377,7 +385,7 @@
             "provider": {
                 "label": "VLM Provider",
                 "ollama": "Ollama (Local — Recommended)",
-                "openai": "OpenAI (GPT-4o)"
+                "openai": "OpenAI"
             },
             "ollama": {
                 "warning": "Cannot connect to Ollama. Make sure Ollama is installed and running at"
@@ -491,7 +499,8 @@
         "actions": {
             "clear": "Clear conversation",
             "collapse": "Collapse chat",
-            "open": "Open chat"
+            "open": "Open chat",
+            "retry": "Retry"
         },
         "history": {
             "title": "Chat History",

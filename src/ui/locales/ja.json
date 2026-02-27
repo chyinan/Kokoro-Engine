@@ -98,6 +98,14 @@
                 "provider": "プロバイダー",
                 "model_override": "モデル名 (任意)",
                 "same_as_active": "メインと同じ ({{provider}})"
+            },
+            "preset": {
+                "label": "プリセット",
+                "current": "現在の設定",
+                "save": "プリセット保存",
+                "delete": "削除",
+                "name_prompt": "プリセット名を入力",
+                "loaded": "読み込み済み"
             }
         },
         "persona": {
@@ -377,7 +385,7 @@
             "provider": {
                 "label": "VLM プロバイダー",
                 "ollama": "Ollama (ローカル — 推奨)",
-                "openai": "OpenAI (GPT-4o)"
+                "openai": "OpenAI"
             },
             "ollama": {
                 "warning": "Ollamaに接続できません。Ollamaがインストールされ、以下で実行されていることを確認してください"
@@ -491,7 +499,8 @@
         "actions": {
             "clear": "会話をクリア",
             "collapse": "チャットを折りたたむ",
-            "open": "チャットを開く"
+            "open": "チャットを開く",
+            "retry": "再試行"
         },
         "history": {
             "title": "会話履歴",

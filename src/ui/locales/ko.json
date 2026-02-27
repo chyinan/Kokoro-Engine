@@ -98,6 +98,14 @@
                 "provider": "제공자",
                 "model_override": "모델 이름 (선택 사항)",
                 "same_as_active": "메인 모델과 동일 ({{provider}})"
+            },
+            "preset": {
+                "label": "프리셋",
+                "current": "현재 설정",
+                "save": "프리셋 저장",
+                "delete": "삭제",
+                "name_prompt": "프리셋 이름 입력",
+                "loaded": "로드됨"
             }
         },
         "persona": {
@@ -377,7 +385,7 @@
             "provider": {
                 "label": "VLM 공급자",
                 "ollama": "Ollama (로컬 — 권장)",
-                "openai": "OpenAI (GPT-4o)"
+                "openai": "OpenAI"
             },
             "ollama": {
                 "warning": "Ollama에 연결할 수 없습니다. Ollama가 설치되어 있고 다음 주소에서 실행 중인지 확인하세요:"
@@ -491,7 +499,8 @@
         "actions": {
             "clear": "대화 지우기",
             "collapse": "채팅 접기",
-            "open": "채팅 열기"
+            "open": "채팅 열기",
+            "retry": "재시도"
         },
         "history": {
             "title": "대화 기록",

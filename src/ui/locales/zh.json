@@ -98,6 +98,14 @@
                 "provider": "服务商",
                 "model_override": "模型名称 (可选)",
                 "same_as_active": "与主模型一致 ({{provider}})"
+            },
+            "preset": {
+                "label": "预设",
+                "current": "当前配置",
+                "save": "保存预设",
+                "delete": "删除",
+                "name_prompt": "输入预设名称",
+                "loaded": "已加载"
             }
         },
         "persona": {
@@ -377,7 +385,7 @@
             "provider": {
                 "label": "VLM 提供商",
                 "ollama": "Ollama (本地 - 推荐)",
-                "openai": "OpenAI (GPT-4o)"
+                "openai": "OpenAI"
             },
             "ollama": {
                 "warning": "无法连接到 Ollama。请确保 Ollama 已安装并运行在"
@@ -491,7 +499,8 @@
         "actions": {
             "clear": "清空对话",
             "collapse": "折叠对话",
-            "open": "展开对话"
+            "open": "展开对话",
+            "retry": "重试"
         },
         "history": {
             "title": "对话记录",
