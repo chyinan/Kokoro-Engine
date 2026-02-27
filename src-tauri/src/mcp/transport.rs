@@ -323,12 +323,15 @@ impl McpTransport for StreamableHttpTransport {
         }
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": method,
-            "params": params.unwrap_or(Value::Null),
         });
+        // Only include "params" when provided — some servers reject null params
+        if let Some(p) = params {
+            body["params"] = p;
+        }
 
         let mut req = self
             .client
@@ -394,16 +397,19 @@ impl McpTransport for StreamableHttpTransport {
         }
 
         // JSON-RPC notification: no `id` field
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
-            "params": params.unwrap_or(Value::Null),
         });
+        if let Some(p) = params {
+            body["params"] = p;
+        }
 
         let mut req = self
             .client
             .post(&self.url)
-            .header("Content-Type", "application/json");
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
 
         if let Some(ref sid) = *self.session_id.lock().await {
             req = req.header("Mcp-Session-Id", sid.clone());

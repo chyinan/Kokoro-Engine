@@ -116,10 +116,10 @@ impl McpClient {
         );
 
         // Step 2: Send initialized notification
-        let _ = self
-            .transport
-            .notify("notifications/initialized", None)
-            .await;
+        self.transport
+            .notify("notifications/initialized", Some(serde_json::json!({})))
+            .await
+            .map_err(|e| format!("Failed to send initialized notification: {}", e))?;
 
         // Step 3: List tools (if server supports tools)
         if init.capabilities.tools.is_some() {
@@ -131,7 +131,7 @@ impl McpClient {
 
     /// Refresh the tool list from the server.
     pub async fn refresh_tools(&mut self) -> Result<(), String> {
-        let result = self.transport.request("tools/list", None).await?;
+        let result = self.transport.request("tools/list", Some(serde_json::json!({}))).await?;
 
         #[derive(Deserialize)]
         struct ToolListResult {
