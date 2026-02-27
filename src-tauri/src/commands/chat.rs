@@ -58,6 +58,30 @@ const VALID_ACTIONS: &[&str] = &[
 ];
 
 const TOOL_CALL_TAG_PREFIX: &str = "[TOOL_CALL:";
+const TRANSLATE_TAG_PREFIX: &str = "[TRANSLATE:";
+
+/// Tag prefixes that should be buffered (not emitted to frontend mid-stream).
+const BUFFERED_TAG_PREFIXES: &[&str] = &[TOOL_CALL_TAG_PREFIX, TRANSLATE_TAG_PREFIX];
+
+/// Returns the byte position up to which it's safe to emit text to the frontend.
+/// Holds back any suffix that could be the start of a known tag prefix.
+fn find_safe_emit_boundary(text: &str) -> usize {
+    if let Some(last_bracket) = text.rfind('[') {
+        let suffix = &text[last_bracket..];
+        for prefix in BUFFERED_TAG_PREFIXES {
+            if suffix.len() < prefix.len() {
+                // Partial match — could still become a full tag
+                if prefix.starts_with(suffix) {
+                    return last_bracket;
+                }
+            } else if suffix.starts_with(prefix) {
+                // Full prefix match — definitely a tag, hold it
+                return last_bracket;
+            }
+        }
+    }
+    text.len()
+}
 
 /// Strip any `<tool_result>...</tool_result>` blocks or stray tags that the LLM may echo back.
 fn strip_leaked_tags(text: &str) -> String {
@@ -74,6 +98,53 @@ fn strip_leaked_tags(text: &str) -> String {
         }
     }
     result.trim().to_string()
+}
+
+/// Strip `[TRANSLATE:...]` tags from text.
+fn strip_translate_tags(text: &str) -> String {
+    let mut result = text.to_string();
+    while let Some(start) = result.find(TRANSLATE_TAG_PREFIX) {
+        if let Some(end_bracket) = result[start..].find(']') {
+            let tag_end = start + end_bracket + 1;
+            result = format!("{}{}", result[..start].trim_end(), result[tag_end..].trim_start());
+        } else {
+            // Unclosed tag — remove from [TRANSLATE: to end
+            result = result[..start].trim_end().to_string();
+        }
+    }
+    result.trim().to_string()
+}
+
+/// Extract the content inside `[TRANSLATE:...]` tags, then strip them from text.
+/// Returns (cleaned_text, Option<translation>).
+fn extract_translate_tags(text: &str) -> (String, Option<String>) {
+    let mut translations = Vec::new();
+    let mut result = text.to_string();
+    while let Some(start) = result.find(TRANSLATE_TAG_PREFIX) {
+        if let Some(end_bracket) = result[start..].find(']') {
+            let inner = &result[start + TRANSLATE_TAG_PREFIX.len()..start + end_bracket];
+            let trimmed = inner.trim();
+            if !trimmed.is_empty() {
+                translations.push(trimmed.to_string());
+            }
+            let tag_end = start + end_bracket + 1;
+            result = format!("{}{}", result[..start].trim_end(), result[tag_end..].trim_start());
+        } else {
+            // Unclosed tag — extract what we can
+            let inner = &result[start + TRANSLATE_TAG_PREFIX.len()..];
+            let trimmed = inner.trim();
+            if !trimmed.is_empty() {
+                translations.push(trimmed.to_string());
+            }
+            result = result[..start].trim_end().to_string();
+        }
+    }
+    let translation = if translations.is_empty() {
+        None
+    } else {
+        Some(translations.join(" "))
+    };
+    (result.trim().to_string(), translation)
 }
 
 /// Parsed tool call from `[TOOL_CALL:name|key=val|key=val]`
@@ -383,6 +454,7 @@ pub async fn stream_chat(
     const MAX_TOOL_ROUNDS: usize = 5;
     let chat_provider = llm_state.provider().await;
     let mut all_cleaned_text = String::new();
+    let mut all_translations = Vec::new();
 
     for round in 0..MAX_TOOL_ROUNDS {
         println!("[Chat] Tool loop round {}", round + 1);
@@ -392,14 +464,23 @@ pub async fn stream_chat(
             .await?;
 
         let mut round_response = String::new();
+        let mut emit_buffer = String::new();
 
         while let Some(result) = stream.next().await {
             match result {
                 Ok(content) => {
                     round_response.push_str(&content);
-                    window
-                        .emit("chat-delta", &content)
-                        .map_err(|e| e.to_string())?;
+                    emit_buffer.push_str(&content);
+
+                    // Only emit text up to the safe boundary (before any potential tag)
+                    let safe = find_safe_emit_boundary(&emit_buffer);
+                    if safe > 0 {
+                        let to_emit = emit_buffer[..safe].to_string();
+                        emit_buffer = emit_buffer[safe..].to_string();
+                        window
+                            .emit("chat-delta", &to_emit)
+                            .map_err(|e| e.to_string())?;
+                    }
                 }
                 Err(e) => {
                     window.emit("chat-error", e).map_err(|e| e.to_string())?;
@@ -407,7 +488,24 @@ pub async fn stream_chat(
             }
         }
 
+        // Flush remaining buffer — strip any complete tags before emitting
+        if !emit_buffer.is_empty() {
+            let (cleaned_remainder, _) = parse_tool_call_tags(&emit_buffer);
+            let cleaned_remainder = strip_translate_tags(&cleaned_remainder);
+            if !cleaned_remainder.is_empty() {
+                window
+                    .emit("chat-delta", &cleaned_remainder)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
         let (cleaned_text, tool_calls) = parse_tool_call_tags(&round_response);
+        let (cleaned_text, round_translation) = extract_translate_tags(&cleaned_text);
+
+        // Collect translation from this round
+        if let Some(t) = round_translation {
+            all_translations.push(t);
+        }
 
         // Accumulate cleaned text for history
         if !cleaned_text.is_empty() {
@@ -491,6 +589,12 @@ pub async fn stream_chat(
     }
 
     let full_response = strip_leaked_tags(&all_cleaned_text);
+
+    // Emit combined translation from all rounds
+    if !all_translations.is_empty() {
+        let combined_translation = all_translations.join(" ");
+        let _ = window.emit("chat-translation", &combined_translation);
+    }
 
     // 8. Update History with final response (skip for hidden/touch interactions)
     if !full_response.is_empty() && !request.hidden {

@@ -161,19 +161,8 @@ export default function FooterBar() {
                         )}
                         style={{ pointerEvents: "auto" }}
                     >
-                        {/* Left: Mood indicator + Active emotion */}
+                        {/* Left: Active emotion */}
                         <div className="flex items-center gap-3 shrink-0 z-10">
-                            {/* Mood dot */}
-                            <div className="flex flex-col items-center gap-1">
-                                <div
-                                    className="w-3 h-3 rounded-full shadow-lg transition-colors duration-500"
-                                    style={{ backgroundColor: moodToColor(mood) }}
-                                    title={`Mood: ${Math.round(mood * 100)}%`}
-                                />
-                                <span className="text-[8px] font-mono text-[var(--color-text-muted)] leading-none">
-                                    {Math.round(mood * 100)}
-                                </span>
-                            </div>
 
                             {/* Active emotion display */}
                             <div className="flex items-center gap-1.5">

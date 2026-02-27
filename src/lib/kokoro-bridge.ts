@@ -195,6 +195,10 @@ export async function onChatDone(callback: () => void): Promise<UnlistenFn> {
     return listen<void>("chat-done", () => callback());
 }
 
+export async function onChatTranslation(callback: (translation: string) => void): Promise<UnlistenFn> {
+    return listen<string>("chat-translation", (event) => callback(event.payload));
+}
+
 // ── Expression Events ──────────────────────────────
 
 export interface ExpressionEvent {

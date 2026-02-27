@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, Languages, History, RefreshCw } from "lucide-react";
-import { streamChat, onChatDelta, onChatDone, onChatError, clearHistory, uploadVisionImage, synthesize, onToolCallResult, listConversations, loadConversation } from "../../lib/kokoro-bridge";
+import { streamChat, onChatDelta, onChatDone, onChatError, onChatTranslation, clearHistory, uploadVisionImage, synthesize, onToolCallResult, listConversations, loadConversation } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal } from "../hooks";
 import { useTranslation } from "react-i18next";
@@ -81,8 +81,10 @@ export default function ChatPanel() {
         setIsStreaming(false);
     }, []);
 
-    // Raw (unfiltered) full response text �?accumulated from all deltas
+    // Raw (unfiltered) full response text — accumulated from all deltas
     const rawResponseRef = useRef("");
+    // Translation received from backend chat-translation event
+    const translationRef = useRef<string | undefined>(undefined);
 
     // Typing reveal: per-character animation
     const { pushDelta, flush: flushReveal, reset: resetReveal } = useTypingReveal({
@@ -280,6 +282,13 @@ export default function ChatPanel() {
             if (aborted) { unDelta(); return; }
             cleanups.push(unDelta);
 
+            const unTranslation = await onChatTranslation((translation: string) => {
+                if (aborted) return;
+                translationRef.current = translation;
+            });
+            if (aborted) { unTranslation(); return; }
+            cleanups.push(unTranslation);
+
             const unDone = await onChatDone(() => {
                 if (aborted) return;
                 // Flush any remaining buffered text immediately
@@ -294,9 +303,8 @@ export default function ChatPanel() {
                 // This explicit update bypasses that check.
                 const fullText = rawResponseRef.current;
                 if (fullText) {
-                    // Extract translation from [TRANSLATE: ...] tag
-                    const translateMatch = fullText.match(/\[TRANSLATE:\s*([\s\S]*?)\](?=\s*(?:\[(?:ACTION|EMOTION|IMAGE_PROMPT))[:|]|\s*$)/i);
-                    const translationText = translateMatch ? translateMatch[1].trim() : undefined;
+                    // Use translation from backend event (handles multi-round tool calls correctly)
+                    const translationText = translationRef.current;
 
                     setMessages(prev => {
                         const last = prev[prev.length - 1];
@@ -306,7 +314,7 @@ export default function ChatPanel() {
                                 .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
                                 .replace(/\[EMOTION:[^\]]*\]/g, "")
                                 .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-                                .replace(/\[TRANSLATE:[\s\S]*?\](?=\s*(?:\[(?:ACTION|EMOTION|IMAGE_PROMPT))[:|]|\s*$)/gi, "");
+                                .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "");
                             return [...prev.slice(0, -1), { ...last, text: cleanText, translation: translationText }];
                         }
                         return prev;
@@ -335,7 +343,7 @@ export default function ChatPanel() {
                             .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
                             .replace(/\[ACTION:\w+\]/g, "")
                             .replace(/\[TOOL_CALL:[^\]]*\]/g, "")
-                            .replace(/\[TRANSLATE:[\s\S]*?\](?=\s*(?:\[(?:ACTION|EMOTION|IMAGE_PROMPT))[:|]|\s*$)/gi, "")
+                            .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "")
                             .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{27BF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]/gu, "")
                             .trim();
 
@@ -401,6 +409,7 @@ export default function ChatPanel() {
                 userScrolledRef.current = false;
                 resetReveal();
                 rawResponseRef.current = "";
+                translationRef.current = undefined;
 
                 streamChat({
                     message: instruction,
@@ -446,6 +455,7 @@ export default function ChatPanel() {
         userScrolledRef.current = false;
         resetReveal();
         rawResponseRef.current = "";
+        translationRef.current = undefined;
 
         // Check if background mode is "generated"
         let allowImageGen = false;
@@ -497,6 +507,7 @@ export default function ChatPanel() {
         userScrolledRef.current = false;
         resetReveal();
         rawResponseRef.current = "";
+        translationRef.current = undefined;
 
         try {
             await streamChat({
