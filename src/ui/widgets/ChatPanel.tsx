@@ -124,14 +124,19 @@ export default function ChatPanel() {
                 loadConversation(convs[0].id).then(msgs => {
                     const chatMsgs: ChatMessage[] = msgs.map(m => {
                         if (m.role !== "user") {
-                            const translateMatch = m.content.match(/\[TRANSLATE:\s*([\s\S]*?)\](?=\s*(?:\[(?:ACTION|EMOTION|IMAGE_PROMPT))[:|]|\s*$)/i);
-                            const translation = translateMatch ? translateMatch[1].trim() : undefined;
+                            // Read translation from metadata (persisted as JSON)
+                            let translation: string | undefined;
+                            if (m.metadata) {
+                                try {
+                                    const meta = JSON.parse(m.metadata);
+                                    if (meta.translation) translation = meta.translation;
+                                } catch { /* ignore malformed metadata */ }
+                            }
                             const text = m.content
                                 .replace(/\[ACTION:\w+\]\s*/g, "")
                                 .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
                                 .replace(/\[EMOTION:[^\]]*\]/g, "")
                                 .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-                                .replace(/\[TRANSLATE:[\s\S]*?\](?=\s*(?:\[(?:ACTION|EMOTION|IMAGE_PROMPT))[:|]|\s*$)/gi, "")
                                 .trim();
                             return { role: "kokoro" as const, text, translation };
                         }
@@ -430,6 +435,21 @@ export default function ChatPanel() {
                 });
             });
             cleanups.push(() => unProactive());
+
+            // Listen for interaction triggers (touch/click on Live2D model)
+            // interaction-service already calls streamChat, we just need to prepare ChatPanel for receiving deltas
+            const unInteraction = await listen<any>("interaction-trigger", () => {
+                if (aborted || isStreamingRef.current) return;
+
+                setMessages(prev => [...prev, { role: "kokoro" as const, text: "" }]);
+                startStreaming();
+                setIsThinking(true);
+                userScrolledRef.current = false;
+                resetReveal();
+                rawResponseRef.current = "";
+                translationRef.current = undefined;
+            });
+            cleanups.push(() => unInteraction());
         };
 
         setup();

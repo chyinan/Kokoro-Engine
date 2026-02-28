@@ -284,6 +284,10 @@ impl AIOrchestrator {
     }
 
     pub async fn add_message(&self, role: String, content: String) {
+        self.add_message_with_metadata(role, content, None).await;
+    }
+
+    pub async fn add_message_with_metadata(&self, role: String, content: String, metadata: Option<String>) {
         // Track user message count for memory extraction triggers
         if role == "user" {
             let mut count = self.message_count.lock().await;
@@ -304,11 +308,11 @@ impl AIOrchestrator {
         drop(history);
 
         // 持久化到数据库
-        let _ = self.persist_message(&role, &content).await;
+        let _ = self.persist_message(&role, &content, metadata.as_deref()).await;
     }
 
     /// 将消息持久化到 SQLite，如果没有活跃对话则自动创建
-    async fn persist_message(&self, role: &str, content: &str) -> Result<()> {
+    async fn persist_message(&self, role: &str, content: &str, metadata: Option<&str>) -> Result<()> {
         let cid = self.character_id.lock().await.clone();
         let mut conv_id_lock = self.current_conversation_id.lock().await;
 
@@ -347,11 +351,12 @@ impl AIOrchestrator {
 
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
-            "INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)"
+            "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)"
         )
         .bind(&conv_id)
         .bind(role)
         .bind(content)
+        .bind(metadata)
         .bind(&now)
         .execute(&self.db)
         .await?;

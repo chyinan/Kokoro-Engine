@@ -339,7 +339,11 @@ pub async fn stream_chat(
             let action_name = if VALID_ACTIONS.contains(&action.as_str()) {
                 action.clone()
             } else if let Some(ref extra) = intent.extra_info {
-                extra.clone()
+                if VALID_ACTIONS.contains(&extra.as_str()) {
+                    extra.clone()
+                } else {
+                    "idle".to_string()
+                }
             } else {
                 "idle".to_string()
             };
@@ -441,6 +445,15 @@ pub async fn stream_chat(
                 println!("[Chat] Attached {} images to user message", images.len());
             }
         }
+    }
+
+    // For hidden messages (touch interactions), the user message wasn't added to
+    // history, so we must explicitly include it in the context for the LLM to see.
+    if request.hidden {
+        client_messages.push(crate::llm::openai::Message {
+            role: "user".to_string(),
+            content: crate::llm::openai::MessageContent::Text(request.message.clone()),
+        });
     }
 
     // Inject System Feedback (Before the last user message or as system at end)
@@ -605,8 +618,14 @@ pub async fn stream_chat(
 
     // 8. Update History with final response (skip for hidden/touch interactions)
     if !full_response.is_empty() && !request.hidden {
+        let metadata = if !all_translations.is_empty() {
+            let combined = all_translations.join(" ");
+            Some(serde_json::json!({ "translation": combined }).to_string())
+        } else {
+            None
+        };
         state
-            .add_message("assistant".to_string(), full_response.clone())
+            .add_message_with_metadata("assistant".to_string(), full_response.clone(), metadata)
             .await;
     }
 
