@@ -9,6 +9,7 @@
  */
 import type { EmotionState, ActionIntent } from "../../features/live2d/Live2DController";
 import { streamChat, onChatDone } from "../../lib/kokoro-bridge";
+import { emit } from "@tauri-apps/api/event";
 
 // ── Types ──────────────────────────────────────────
 
@@ -73,6 +74,23 @@ const PRESET_SEQUENCES: ActionSequence[] = [
 ];
 
 // ── Service ────────────────────────────────────────
+
+/**
+ * Normalize hit area names to natural English descriptions for LLM messages.
+ * Handles both legacy HitArea names (e.g. "Body", "Head") and new region
+ * descriptions that already come through as natural names.
+ */
+const HIT_AREA_DESCRIPTIONS: Record<string, string> = {
+    // Legacy HitArea names (from model3.json)
+    Body: "body",
+    Head: "head",
+    Face: "face",
+    // Already-natural names pass through as-is
+};
+
+function describeHitArea(hitArea: string): string {
+    return HIT_AREA_DESCRIPTIONS[hitArea] ?? hitArea;
+}
 
 type ReactionCallback = (event: InteractionEvent) => void;
 type ControllerProxy = {
@@ -164,6 +182,9 @@ export class InteractionService {
         // Format message based on gesture type
         const message = this.formatGestureMessage(gesture);
 
+        // Notify ChatPanel to start streaming (same pattern as proactive-trigger)
+        await emit("interaction-trigger", { gesture: gesture.gesture, hitArea: gesture.hitArea });
+
         try {
             await streamChat({
                 message,
@@ -186,16 +207,17 @@ export class InteractionService {
     }
 
     private formatGestureMessage(gesture: GestureEvent): string {
+        const area = describeHitArea(gesture.hitArea);
         let action: string;
         switch (gesture.gesture) {
             case "tap":
-                action = `(User taps your ${gesture.hitArea})`;
+                action = `(User taps your ${area})`;
                 break;
             case "long_press":
-                action = `(User holds your ${gesture.hitArea})`;
+                action = `(User holds your ${area})`;
                 break;
             case "rapid_tap":
-                action = `(User rapidly pokes your ${gesture.hitArea} ${gesture.consecutiveTaps} times)`;
+                action = `(User rapidly pokes your ${area} ${gesture.consecutiveTaps} times)`;
                 break;
         }
 

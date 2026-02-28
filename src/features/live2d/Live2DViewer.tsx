@@ -11,6 +11,7 @@ import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from 
 import * as PIXI from "pixi.js";
 import { Live2DModel } from "pixi-live2d-display/cubism4";
 import { Live2DController, type EmotionState, type ActionIntent, type IdleBehavior } from "./Live2DController";
+import { drawableHitTest, estimateRegionByY, REGION_DESCRIPTIONS } from "./DrawableHitTest";
 import { onChatExpression, onChatAction } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { interactionService, type GestureEvent } from "../../core/services/interaction-service";
@@ -172,6 +173,9 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
             // Load the Live2D model
             let cancelled = false;
 
+            // Clear PIXI texture cache to avoid stale error results from previous loads
+            PIXI.utils.clearTextureCache();
+
             const loadModel = async () => {
                 try {
                     const model = await Live2DModel.from(modelUrl, {
@@ -240,9 +244,18 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                     let longPressTimer: ReturnType<typeof setTimeout> | null = null;
                     let longPressFired = false;
 
-                    const hitTestFirst = (globalX: number, globalY: number): string | null => {
+                    const hitTestFirst = (globalX: number, globalY: number): string => {
+                        // Level 1: Drawable mesh hit test → semantic body region
+                        const region = drawableHitTest(model, globalX, globalY);
+                        if (region) return REGION_DESCRIPTIONS[region];
+
+                        // Level 2: Original HitArea detection (for models that define them)
                         const hits = model.hitTest(globalX, globalY);
-                        return hits.length > 0 ? hits[0] : null;
+                        if (hits.length > 0) return hits[0];
+
+                        // Level 3: Y-coordinate estimation (fallback)
+                        const fallback = estimateRegionByY(model, globalY);
+                        return REGION_DESCRIPTIONS[fallback];
                     };
 
                     const handleGesture = (hitArea: string, gesture: GestureEvent["gesture"]) => {
@@ -265,10 +278,7 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
 
                         longPressTimer = setTimeout(() => {
                             longPressFired = true;
-                            const hitArea = hitTestFirst(x, y);
-                            if (hitArea) {
-                                handleGesture(hitArea, "long_press");
-                            }
+                            handleGesture(hitTestFirst(x, y), "long_press");
                         }, LONG_PRESS_MS);
                     });
 
@@ -283,10 +293,7 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                         const elapsed = Date.now() - pointerDownTime;
                         if (elapsed < LONG_PRESS_MS) {
                             const { x, y } = e.data.global;
-                            const hitArea = hitTestFirst(x, y);
-                            if (hitArea) {
-                                handleGesture(hitArea, "tap");
-                            }
+                            handleGesture(hitTestFirst(x, y), "tap");
                         }
                     });
 
