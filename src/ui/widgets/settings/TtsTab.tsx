@@ -548,7 +548,7 @@ export default function TtsTab({
                 {/* Add Provider Dropdown */}
                 <div className="pt-2">
                     <div className="grid grid-cols-2 gap-2">
-                        {["openai", "local_vits", "gpt_sovits", "local_rvc", "azure", "elevenlabs"].map(type => (
+                        {["openai", "local_vits", "gpt_sovits", "azure", "elevenlabs"].map(type => (
                             <button
                                 key={type}
                                 onClick={() => addProvider(type)}
