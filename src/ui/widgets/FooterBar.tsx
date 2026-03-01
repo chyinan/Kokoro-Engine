@@ -103,6 +103,7 @@ export default function FooterBar() {
         let unlisten: (() => void) | undefined;
 
         onChatExpression((data) => {
+            console.log("[FooterBar] Received chat-expression event:", data);
             setActiveEmotion(data.expression as EmotionState);
         }).then(fn => { unlisten = fn; });
 
