@@ -83,15 +83,19 @@ export default function FooterBar() {
             .catch(() => setEngineVersion("—"));
     }, []);
 
-    // Load initial emotion state from backend
+    // Load initial emotion state from backend (delayed to allow backend to restore state)
     useEffect(() => {
-        getEmotionState()
-            .then(state => {
-                setActiveEmotion(state.emotion as EmotionState);
-            })
-            .catch(err => {
-                console.error("[FooterBar] Failed to get emotion state:", err);
-            });
+        const timer = setTimeout(() => {
+            getEmotionState()
+                .then(state => {
+                    setActiveEmotion(state.emotion as EmotionState);
+                })
+                .catch(err => {
+                    console.error("[FooterBar] Failed to get emotion state:", err);
+                });
+        }, 2500); // Slightly longer than backend's 2s delay
+
+        return () => clearTimeout(timer);
     }, []);
 
     // Subscribe to LLM expression events
