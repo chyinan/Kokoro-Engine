@@ -141,9 +141,7 @@ pub fn run() {
                         if let Ok(content) = std::fs::read_to_string(&jailbreak_path) {
                             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                                 if let Some(prompt) = val.get("prompt").and_then(|v| v.as_str()) {
-                                    tauri::async_runtime::block_on(async {
-                                        orchestrator.set_jailbreak_prompt(prompt.to_string()).await;
-                                    });
+                                    orchestrator.set_jailbreak_prompt(prompt.to_string()).await;
                                     println!("[AI] Restored jailbreak_prompt ({} chars)", prompt.len());
                                 }
                             }
