@@ -52,7 +52,7 @@ export const defaultTheme: ThemeConfig = {
         // Typography
         "--font-heading": "'Rajdhani', sans-serif",
         "--font-body": "'Quicksand', sans-serif",
-        "--font-mono": "'JetBrains Mono', 'Fira Code', monospace",
+        "--font-mono": "'JetBrains Mono', 'Fira Code', 'Consolas', 'Microsoft YaHei', 'SimHei', monospace",
     },
     assets: {
         fonts: [

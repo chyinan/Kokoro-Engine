@@ -68,7 +68,7 @@
   /* ─── Typography ─── */
   --font-heading: 'HYWenHei', 'Rajdhani', sans-serif;
   --font-body: 'HYWenHei', 'Quicksand', sans-serif;
-  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', 'Microsoft YaHei', 'SimHei', monospace;
 
   --tracking-wide: 0.05em;
   --tracking-wider: 0.1em;
