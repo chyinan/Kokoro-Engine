@@ -343,6 +343,10 @@ export async function importLive2dZip(zipPath: string): Promise<string> {
     return invoke<string>("import_live2d_zip", { zipPath });
 }
 
+export async function importLive2dFolder(modelJsonPath: string): Promise<string> {
+    return invoke<string>("import_live2d_folder", { modelJsonPath });
+}
+
 export async function listLive2dModels(): Promise<Live2dModelInfo[]> {
     return invoke<Live2dModelInfo[]>("list_live2d_models");
 }
@@ -725,4 +729,50 @@ export async function convertSinging(
 
 export async function onSingingProgress(callback: (event: SingingProgressEvent) => void): Promise<UnlistenFn> {
     return listen<SingingProgressEvent>("singing:progress", (event) => callback(event.payload));
+}
+
+// ── Telegram Bot ──────────────────────────────────
+
+export interface TelegramConfig {
+    enabled: boolean;
+    bot_token?: string;
+    bot_token_env?: string;
+    allowed_chat_ids: number[];
+    send_voice_reply: boolean;
+}
+
+export interface TelegramStatus {
+    running: boolean;
+    enabled: boolean;
+    has_token: boolean;
+}
+
+export async function getTelegramConfig(): Promise<TelegramConfig> {
+    return invoke<TelegramConfig>("get_telegram_config");
+}
+
+export async function saveTelegramConfig(config: TelegramConfig): Promise<void> {
+    return invoke("save_telegram_config", { config });
+}
+
+export async function startTelegramBot(): Promise<void> {
+    return invoke("start_telegram_bot");
+}
+
+export async function stopTelegramBot(): Promise<void> {
+    return invoke("stop_telegram_bot");
+}
+
+export async function getTelegramStatus(): Promise<TelegramStatus> {
+    return invoke<TelegramStatus>("get_telegram_status");
+}
+
+export interface TelegramChatSync {
+    role: string;
+    text: string;
+    translation?: string;
+}
+
+export async function onTelegramChatSync(callback: (data: TelegramChatSync) => void): Promise<UnlistenFn> {
+    return listen<TelegramChatSync>("telegram:chat-sync", (event) => callback(event.payload));
 }

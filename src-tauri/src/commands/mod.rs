@@ -14,5 +14,6 @@ pub mod mods;
 pub mod singing;
 pub mod stt;
 pub mod system;
+pub mod telegram;
 pub mod tts;
 pub mod vision;

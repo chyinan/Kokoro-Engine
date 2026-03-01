@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Sparkles, Brain, Mic, Music, Eye, Server } from "lucide-react";
+import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Sparkles, Brain, Mic, Music, Eye, Server, Bot } from "lucide-react";
 import { ModList } from "../mods/ModList";
 import CharacterManager from "./CharacterManager";
 import ImageGenSettings from "./ImageGenSettings";
@@ -14,13 +14,14 @@ import ModelTab from "./settings/ModelTab";
 import BackgroundTab from "./settings/BackgroundTab";
 import VisionTab from "./settings/VisionTab";
 import McpTab from "./settings/McpTab";
+import TelegramTab from "./settings/TelegramTab";
 import { useTranslation } from "react-i18next";
 import { setPersona, setResponseLanguage, setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, getImageGenConfig, saveImageGenConfig, getSttConfig, saveSttConfig } from "../../lib/kokoro-bridge";
 import type { ProviderStatus, VoiceProfile, TtsSystemConfig, ImageGenSystemConfig, SttConfig } from "../../lib/kokoro-bridge";
 import type { BackgroundConfig } from "../hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "../../features/live2d/Live2DViewer";
 
-type TabId = "api" | "persona" | "tts" | "stt" | "sing" | "mods" | "bg" | "model" | "imagegen" | "memory" | "vision" | "mcp";
+type TabId = "api" | "persona" | "tts" | "stt" | "sing" | "mods" | "bg" | "model" | "imagegen" | "memory" | "vision" | "mcp" | "telegram";
 
 export interface BackgroundControls {
     config: BackgroundConfig;
@@ -88,6 +89,7 @@ const tabs: { id: TabId; label: string; icon: typeof Key }[] = [
     { id: "vision", label: "settings.tabs.vision", icon: Eye },
     { id: "mods", label: "settings.tabs.mods", icon: Package },
     { id: "mcp", label: "settings.tabs.mcp", icon: Server },
+    { id: "telegram", label: "Telegram", icon: Bot },
 ];
 
 export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, sttConfig: sttConfigProp, voiceInterrupt: voiceInterruptProp }: SettingsPanelProps) {
@@ -467,6 +469,9 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                             )}
                             {activeTab === "mcp" && (
                                 <McpTab />
+                            )}
+                            {activeTab === "telegram" && (
+                                <TelegramTab />
                             )}
                         </div>
 

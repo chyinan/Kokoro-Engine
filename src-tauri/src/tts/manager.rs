@@ -410,6 +410,36 @@ impl TtsService {
         );
     }
 
+    /// Synthesize text to raw audio bytes without requiring an AppHandle.
+    /// Used by services that need audio data directly (e.g. Telegram bot).
+    pub async fn synthesize_text(&self, text: &str, params: Option<TtsParams>) -> Result<Vec<u8>, String> {
+        let params = params.unwrap_or_default();
+        let router = TtsRouter::new(self.providers.clone(), self.default_provider.clone());
+        let route = router
+            .select_provider(None, params.required_capabilities.as_ref())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let providers = self.providers.read().await;
+        let provider = providers
+            .get(&route.provider_id)
+            .ok_or_else(|| format!("Provider {} not found", route.provider_id))?;
+
+        let mut stream = provider
+            .synthesize_stream(text, params)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut audio = Vec::new();
+        while let Some(chunk_res) = stream.next().await {
+            match chunk_res {
+                Ok(chunk) => audio.extend_from_slice(&chunk),
+                Err(e) => return Err(format!("TTS stream error: {}", e)),
+            }
+        }
+        Ok(audio)
+    }
+
     /// Clear the synthesis cache.
     pub async fn clear_cache(&self) {
         let mut cache = self.cache.write().await;
