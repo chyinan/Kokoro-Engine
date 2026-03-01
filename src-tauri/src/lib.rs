@@ -149,12 +149,18 @@ pub fn run() {
                             }
                         }
 
-                        // Restore emotion state from disk
-                        if let Err(e) = orchestrator.load_emotion_state().await {
-                            println!("[AI] Failed to restore emotion state: {}", e);
-                        }
-
                         app_handle.manage(orchestrator);
+
+                        // Restore emotion state from disk (delayed to allow persona to load first)
+                        let emotion_app = app_handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                            if let Some(orch) = emotion_app.try_state::<crate::ai::context::AIOrchestrator>() {
+                                if let Err(e) = orch.load_emotion_state().await {
+                                    println!("[AI] Failed to restore emotion state: {}", e);
+                                }
+                            }
+                        });
                     }
                     Err(e) => {
                         eprintln!("AI Orchestrator init failed (will run without AI): {}", e);

@@ -294,12 +294,19 @@ impl EmotionState {
 
     /// Replace personality (when switching characters).
     pub fn set_personality(&mut self, personality: EmotionPersonality) {
+        self.set_personality_with_reset(personality, true);
+    }
+
+    /// Replace personality with optional state reset.
+    pub fn set_personality_with_reset(&mut self, personality: EmotionPersonality, reset_state: bool) {
         self.personality = personality;
-        // Reset to new character's default mood
-        self.mood = self.personality.default_mood;
-        self.current_emotion = "neutral".to_string();
-        self.accumulated_inertia = 0.0;
-        self.history.clear();
+        if reset_state {
+            // Reset to new character's default mood
+            self.mood = self.personality.default_mood;
+            self.current_emotion = "neutral".to_string();
+            self.accumulated_inertia = 0.0;
+            self.history.clear();
+        }
     }
 
     /// Decay mood toward the character's default resting mood.

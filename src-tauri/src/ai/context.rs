@@ -208,11 +208,15 @@ impl AIOrchestrator {
     }
 
     pub async fn set_system_prompt(&self, prompt: String) {
+        self.set_system_prompt_with_reset(prompt, true).await;
+    }
+
+    pub async fn set_system_prompt_with_reset(&self, prompt: String, reset_emotion: bool) {
         // Parse emotion personality from the new persona text
         let personality = EmotionPersonality::parse_from_persona(&prompt);
         {
             let mut emotion = self.emotion_state.lock().await;
-            emotion.set_personality(personality);
+            emotion.set_personality_with_reset(personality, reset_emotion);
         }
         let mut sp = self.system_prompt.lock().await;
         *sp = prompt;
@@ -253,9 +257,15 @@ impl AIOrchestrator {
         let app_data = dirs_next::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("com.chyin.kokoro");
+
+        // 确保目录存在
+        std::fs::create_dir_all(&app_data)?;
+
         let path = app_data.join("emotion_state.json");
         let json = serde_json::to_string_pretty(&*emotion)?;
         std::fs::write(&path, json)?;
+        println!("[AI] Saved emotion state: {} (mood: {:.2}) to {:?}",
+                 emotion.current_emotion(), emotion.mood(), path);
         Ok(())
     }
 
@@ -294,7 +304,9 @@ impl AIOrchestrator {
         };
 
         // Save emotion state to disk after update
-        let _ = self.save_emotion_state().await;
+        if let Err(e) = self.save_emotion_state().await {
+            eprintln!("[AI] Failed to save emotion state: {}", e);
+        }
 
         result
     }
