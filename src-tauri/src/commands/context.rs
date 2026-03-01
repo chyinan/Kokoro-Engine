@@ -33,6 +33,13 @@ pub async fn set_proactive_enabled(
 ) -> Result<(), String> {
     state.set_proactive_enabled(enabled);
     println!("[AI] Proactive messages {}", if enabled { "enabled" } else { "disabled" });
+
+    // Persist to disk
+    let app_data = dirs_next::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("com.chyin.kokoro");
+    let path = app_data.join("proactive_enabled.json");
+    let _ = std::fs::write(&path, serde_json::json!({ "enabled": enabled }).to_string());
     Ok(())
 }
 

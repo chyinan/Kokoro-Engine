@@ -118,6 +118,19 @@ pub fn run() {
                 let db_url = "sqlite://kokoro.db";
                 match crate::ai::context::AIOrchestrator::new(db_url).await {
                     Ok(orchestrator) => {
+                        // Restore proactive_enabled from disk
+                        let proactive_dir = dirs_next::data_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join("com.chyin.kokoro");
+                        let proactive_path = proactive_dir.join("proactive_enabled.json");
+                        if let Ok(content) = std::fs::read_to_string(&proactive_path) {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                                if let Some(enabled) = val.get("enabled").and_then(|v| v.as_bool()) {
+                                    orchestrator.set_proactive_enabled(enabled);
+                                    println!("[AI] Restored proactive_enabled={}", enabled);
+                                }
+                            }
+                        }
                         app_handle.manage(orchestrator);
                     }
                     Err(e) => {
