@@ -5,7 +5,7 @@ import {
     Smile, Frown, Zap, Meh,
     Brain, Heart, Sparkles, AlertTriangle, PartyPopper, Angry
 } from "lucide-react";
-import { setExpression, getEngineInfo, onChatExpression } from "../../lib/kokoro-bridge";
+import { setExpression, getEngineInfo, onChatExpression, getEmotionState } from "../../lib/kokoro-bridge";
 import type { EmotionState } from "../../features/live2d/Live2DController";
 import { useTranslation } from "react-i18next";
 
@@ -82,6 +82,17 @@ export default function FooterBar() {
         getEngineInfo()
             .then(info => setEngineVersion(info.version))
             .catch(() => setEngineVersion("—"));
+    }, []);
+
+    // Load initial emotion state from backend
+    useEffect(() => {
+        getEmotionState()
+            .then(state => {
+                setActiveEmotion(state.emotion as EmotionState);
+            })
+            .catch(err => {
+                console.error("[FooterBar] Failed to get emotion state:", err);
+            });
     }, []);
 
     // Subscribe to LLM expression events

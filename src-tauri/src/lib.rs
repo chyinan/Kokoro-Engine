@@ -41,6 +41,7 @@ pub fn run() {
             commands::context::set_persona,
             commands::context::set_character_name,
             commands::context::set_user_name,
+            commands::context::get_emotion_state,
             commands::context::set_response_language,
             commands::context::set_user_language,
             commands::context::set_jailbreak_prompt,

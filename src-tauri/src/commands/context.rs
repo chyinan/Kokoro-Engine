@@ -2,6 +2,23 @@ use crate::ai::context::AIOrchestrator;
 use crate::llm::openai::{Message as LLMMessage, MessageContent, OpenAIClient};
 use tauri::State;
 
+#[derive(serde::Serialize)]
+pub struct EmotionStateResponse {
+    pub emotion: String,
+    pub mood: f32,
+}
+
+#[tauri::command]
+pub async fn get_emotion_state(
+    state: State<'_, AIOrchestrator>,
+) -> Result<EmotionStateResponse, String> {
+    let emotion = state.emotion_state.lock().await;
+    Ok(EmotionStateResponse {
+        emotion: emotion.current_emotion().to_string(),
+        mood: emotion.mood(),
+    })
+}
+
 #[tauri::command]
 pub async fn set_persona(prompt: String, state: State<'_, AIOrchestrator>) -> Result<(), String> {
     state.set_system_prompt(prompt).await;

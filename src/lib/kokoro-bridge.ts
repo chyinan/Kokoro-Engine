@@ -90,6 +90,15 @@ export async function setUserName(name: string): Promise<void> {
     return invoke("set_user_name", { name });
 }
 
+export interface EmotionStateResponse {
+    emotion: string;
+    mood: number;
+}
+
+export async function getEmotionState(): Promise<EmotionStateResponse> {
+    return invoke("get_emotion_state");
+}
+
 export async function setResponseLanguage(language: string): Promise<void> {
     return invoke("set_response_language", { language });
 }
