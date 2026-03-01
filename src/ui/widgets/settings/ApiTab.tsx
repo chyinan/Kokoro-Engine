@@ -338,7 +338,18 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
                             className={clsx(inputClasses, "py-1.5 px-2")}
                         >
                             <option value="">{t("settings.api.system_llm.same_as_active", { provider: config.active_provider })}</option>
+                            {/* Show providers from current config */}
                             {config.providers.map(p => (
+                                <option key={p.id} value={p.id}>
+                                    {p.id} ({p.provider_type})
+                                </option>
+                            ))}
+                            {/* Also show providers from all presets */}
+                            {config.presets?.flatMap(preset =>
+                                preset.providers.filter(p =>
+                                    !config.providers.some(cp => cp.id === p.id)
+                                )
+                            ).map(p => (
                                 <option key={p.id} value={p.id}>
                                     {p.id} ({p.provider_type})
                                 </option>
