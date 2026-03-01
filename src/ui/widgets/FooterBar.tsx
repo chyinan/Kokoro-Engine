@@ -43,7 +43,6 @@ export default function FooterBar() {
     const [activeEmotion, setActiveEmotion] = useState<EmotionState>("neutral");
     const [engineVersion, setEngineVersion] = useState("");
     const [visible, setVisible] = useState(false);
-    const [isAutoMode, setIsAutoMode] = useState(true); // LLM auto-controls expression
     const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Clear any pending hide timer
@@ -100,27 +99,19 @@ export default function FooterBar() {
         let unlisten: (() => void) | undefined;
 
         onChatExpression((data) => {
-            if (isAutoMode) {
-                setActiveEmotion(data.expression as EmotionState);
-            }
+            setActiveEmotion(data.expression as EmotionState);
         }).then(fn => { unlisten = fn; });
 
         return () => { unlisten?.(); };
-    }, [isAutoMode]);
+    }, []);
 
     const handleExpressionClick = useCallback(async (emotion: EmotionState) => {
         try {
             await setExpression(emotion);
             setActiveEmotion(emotion);
-            // When user manually clicks, disable auto mode temporarily
-            setIsAutoMode(false);
         } catch (e) {
             console.error("[FooterBar] Failed to set expression:", e);
         }
-    }, []);
-
-    const handleAutoToggle = useCallback(() => {
-        setIsAutoMode(prev => !prev);
     }, []);
 
     const activeEmotionDef = emotions.find(e => e.id === activeEmotion) ?? emotions[0];
@@ -176,20 +167,6 @@ export default function FooterBar() {
                                     {t(`footer.emotions.${activeEmotionDef.id}`)}
                                 </span>
                             </div>
-
-                            {/* Auto/Manual toggle */}
-                            <button
-                                onClick={handleAutoToggle}
-                                className={clsx(
-                                    "px-2 py-0.5 rounded text-[9px] font-mono uppercase tracking-wider transition-colors border",
-                                    isAutoMode
-                                        ? "border-[var(--color-accent)]/30 text-[var(--color-accent)] bg-[var(--color-accent-subtle)]"
-                                        : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]"
-                                )}
-                                title={isAutoMode ? t("footer.mode.auto_desc") : t("footer.mode.manual_desc")}
-                            >
-                                {isAutoMode ? t("footer.mode.auto") : t("footer.mode.manual")}
-                            </button>
                         </div>
 
                         {/* Center: Expression grid — absolutely centered */}
