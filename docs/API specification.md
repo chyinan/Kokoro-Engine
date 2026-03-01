@@ -1,7 +1,7 @@
 # Kokoro Engine — API Specification
 
-> **Version:** 1.0  
-> **Last Updated:** 2026-02-11  
+> **Version:** 1.1
+> **Last Updated:** 2026-03-01
 > **Transport:** Tauri IPC (`invoke` + event system)  
 > **Companion:** [architecture.md](file:///d:/Program/Kokoro%20Engine/docs/architecture.md)
 
@@ -17,11 +17,20 @@
 6. [Context Management](#6-context-management)
 7. [Database Commands](#7-database-commands)
 8. [TTS Commands](#8-tts-commands)
-9. [Mod System Commands](#9-mod-system-commands)
-10. [Events](#10-events)
-11. [Custom Protocols](#11-custom-protocols)
-12. [Error Handling](#12-error-handling)
-13. [Frontend Bridge Reference](#13-frontend-bridge-reference)
+9. [STT Commands](#9-stt-commands)
+10. [LLM Commands](#10-llm-commands)
+11. [Vision Commands](#11-vision-commands)
+12. [ImageGen Commands](#12-imagegen-commands)
+13. [Memory Commands](#13-memory-commands)
+14. [Live2D Commands](#14-live2d-commands)
+15. [MCP Commands](#15-mcp-commands)
+16. [Mod System Commands](#16-mod-system-commands)
+17. [Telegram Commands](#17-telegram-commands)
+18. [Action Commands](#18-action-commands)
+19. [Events](#19-events)
+20. [Custom Protocols](#20-custom-protocols)
+21. [Error Handling](#21-error-handling)
+22. [Frontend Bridge Reference](#22-frontend-bridge-reference)
 
 ---
 
@@ -623,19 +632,90 @@ streamChat(request: ChatRequest):            Promise<void>
 onChatDelta(cb: (delta: string) => void):    Promise<UnlistenFn>
 onChatError(cb: (error: string) => void):    Promise<UnlistenFn>
 onChatDone(cb: () => void):                  Promise<UnlistenFn>
+onChatTranslation(cb):                       Promise<UnlistenFn>
+onChatExpression(cb):                        Promise<UnlistenFn>
 
 // Context
 setPersona(prompt: string):                  Promise<void>
+setCharacterName(name: string):              Promise<void>
+setUserName(name: string):                   Promise<void>
+setResponseLanguage(lang: string):           Promise<void>
+setUserLanguage(lang: string):               Promise<void>
+setJailbreakPrompt(prompt: string):          Promise<void>
+getJailbreakPrompt():                        Promise<string>
+setProactiveEnabled(enabled: boolean):       Promise<void>
+getProactiveEnabled():                       Promise<boolean>
 clearHistory():                              Promise<void>
+deleteLastMessages(count: number):           Promise<void>
+endSession():                                Promise<void>
+getEmotionState():                           Promise<EmotionStateResponse>
 
 // Database
 initDb():                                    Promise<string>
 testVectorStore():                           Promise<DbTestResult>
 
 // TTS
-synthesize(text: string, config: TtsConfig): Promise<Uint8Array>
+synthesize(text, config):                    Promise<Uint8Array>
+getTtsConfig():                              Promise<TtsConfig>
+saveTtsConfig(config):                       Promise<void>
+
+// STT
+transcribeAudio(data, config):               Promise<string>
+getSttConfig():                              Promise<SttConfig>
+saveSttConfig(config):                       Promise<void>
+
+// LLM
+getLlmConfig():                              Promise<LlmConfig>
+saveLlmConfig(config):                       Promise<void>
+listOllamaModels(baseUrl):                   Promise<OllamaModelInfo[]>
+fetchModels(baseUrl, apiKey):                Promise<string[]>
+
+// Vision
+captureScreen():                             Promise<string>
+
+// ImageGen
+generateImage(prompt, width, height):        Promise<ImageGenResult>
+getImagegenConfig():                         Promise<ImageGenSystemConfig>
+saveImagegenConfig(config):                  Promise<void>
+
+// Memory
+listMemories(characterId, opts):             Promise<Memory[]>
+updateMemory(id, updates):                   Promise<void>
+deleteMemory(id):                            Promise<void>
+updateMemoryTier(id, tier):                  Promise<void>
+
+// Live2D
+listLive2dModels():                          Promise<Live2dModelInfo[]>
+importLive2dZip(zipPath):                    Promise<string>
+importLive2dFolder(folderPath):              Promise<string>
+deleteLive2dModel(modelName):                Promise<void>
+
+// MCP
+listMcpServers():                            Promise<McpServerConfig[]>
+addMcpServer(config):                        Promise<void>
+removeMcpServer(id):                         Promise<void>
+refreshMcpTools(id):                         Promise<void>
+reconnectMcpServer(id):                      Promise<void>
 
 // Mods
 listMods():                                  Promise<ModManifest[]>
-loadMod(modId: string):                      Promise<ModManifest>
+loadMod(modId):                              Promise<ModManifest>
+installMod(zipPath):                         Promise<void>
+unloadMod(modId):                            Promise<void>
+
+// Telegram
+getTelegramConfig():                         Promise<TelegramConfig>
+saveTelegramConfig(config):                  Promise<void>
+startTelegramBot():                          Promise<void>
+stopTelegramBot():                           Promise<void>
+getTelegramStatus():                         Promise<TelegramStatus>
+
+// Actions
+listActions():                               Promise<ActionInfo[]>
+executeAction(name, args):                   Promise<string>
+
+// Singing (RVC)
+checkRvcStatus():                            Promise<boolean>
+listRvcModels():                             Promise<RvcModelInfo[]>
+convertSinging(params):                      Promise<Uint8Array>
 ```
