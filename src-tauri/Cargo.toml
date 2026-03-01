@@ -44,6 +44,7 @@ warp = "0.3"
 filetime = "0.2"
 xcap = "0.0.14"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+teloxide = { version = "0.13", features = ["macros"] }
 
 [features]
 stress = []

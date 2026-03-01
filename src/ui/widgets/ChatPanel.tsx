@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, Languages, History, RefreshCw } from "lucide-react";
-import { streamChat, onChatDelta, onChatDone, onChatError, onChatTranslation, clearHistory, uploadVisionImage, synthesize, onToolCallResult, listConversations, loadConversation } from "../../lib/kokoro-bridge";
+import { streamChat, onChatDelta, onChatDone, onChatError, onChatTranslation, clearHistory, uploadVisionImage, synthesize, onToolCallResult, listConversations, loadConversation, onTelegramChatSync } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal } from "../hooks";
 import { useTranslation } from "react-i18next";
@@ -394,6 +394,18 @@ export default function ChatPanel() {
             });
             if (aborted) { unToolResult(); return; }
             cleanups.push(unToolResult);
+
+            // Telegram chat sync — show messages from Telegram bot in desktop UI
+            const unTelegramSync = await onTelegramChatSync((data) => {
+                if (aborted) return;
+                if (data.role === "user") {
+                    setMessages(prev => [...prev, { role: "user", text: data.text }]);
+                } else {
+                    setMessages(prev => [...prev, { role: "kokoro", text: data.text, translation: data.translation }]);
+                }
+            });
+            if (aborted) { unTelegramSync(); return; }
+            cleanups.push(unTelegramSync);
 
             // Interaction reactions (touch/click on Live2D model) handled via auto-generated LLM prompt in interaction-service.ts
             // We no longer listen here to avoid double-handling or showing hardcoded lines.

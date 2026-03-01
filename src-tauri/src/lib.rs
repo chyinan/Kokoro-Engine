@@ -7,6 +7,7 @@ pub mod llm;
 pub mod mcp;
 pub mod mods;
 pub mod stt;
+pub mod telegram;
 pub mod tts;
 pub mod utils;
 pub mod vision;
@@ -60,6 +61,7 @@ pub fn run() {
             commands::mods::dispatch_mod_event,
             commands::mods::unload_mod,
             commands::live2d::import_live2d_zip,
+            commands::live2d::import_live2d_folder,
             commands::live2d::list_live2d_models,
             commands::live2d::delete_live2d_model,
             commands::imagegen::generate_image,
@@ -99,6 +101,11 @@ pub fn run() {
             commands::singing::list_rvc_models,
             commands::singing::list_rvc_models,
             commands::singing::convert_singing,
+            commands::telegram::get_telegram_config,
+            commands::telegram::save_telegram_config,
+            commands::telegram::start_telegram_bot,
+            commands::telegram::stop_telegram_bot,
+            commands::telegram::get_telegram_status,
             stt::stream::process_audio_chunk,
             stt::stream::complete_audio_stream,
             stt::stream::discard_audio_stream,
@@ -264,6 +271,25 @@ pub fn run() {
 
             // Audio Buffer for Streaming STT
             app.manage(crate::stt::stream::AudioBuffer::new());
+
+            // Telegram Bot
+            let telegram_config_path = app_data.join("telegram_config.json");
+            let telegram_config = crate::telegram::load_config(&telegram_config_path);
+            let telegram_enabled = telegram_config.enabled;
+            let telegram_service = crate::telegram::TelegramService::new(telegram_config);
+            app.manage(telegram_service.clone());
+
+            // Auto-start Telegram bot if enabled
+            if telegram_enabled {
+                let tg_app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // Delay to let all services initialize
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    if let Err(e) = telegram_service.start(tg_app).await {
+                        eprintln!("[Telegram] Auto-start failed: {}", e);
+                    }
+                });
+            }
 
             Ok(())
         })
