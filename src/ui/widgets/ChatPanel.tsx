@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, Languages, History, RefreshCw } from "lucide-react";
+import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
 import { streamChat, onChatDelta, onChatDone, onChatError, onChatTranslation, clearHistory, uploadVisionImage, synthesize, onToolCallResult, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal } from "../hooks";
 import { useTranslation } from "react-i18next";
 import ConversationSidebar from "./ConversationSidebar";
+import { ChatMessage } from "./ChatMessage";
 
 // ── Types ──────────────────────────────────────────────────
 interface ChatMessage {
@@ -528,49 +529,6 @@ export default function ChatPanel() {
         }
     };
 
-    // ── Retry last failed message ─────────────────────────────
-    const handleRetry = async () => {
-        const req = lastFailedRequestRef.current;
-        if (!req || isStreaming) return;
-
-        // Remove the error message
-        setMessages(prev => {
-            const last = prev[prev.length - 1];
-            if (last && last.isError) return prev.slice(0, -1);
-            return prev;
-        });
-
-        lastFailedRequestRef.current = null;
-        startStreaming();
-        setIsThinking(true);
-        userScrolledRef.current = false;
-        resetReveal();
-        rawResponseRef.current = "";
-        translationRef.current = undefined;
-
-        try {
-            await streamChat({
-                message: req.message,
-                allow_image_gen: req.allowImageGen,
-                images: req.images,
-                character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
-            });
-        } catch (err) {
-            stopStreaming();
-            setIsThinking(false);
-            setError(err instanceof Error ? err.message : String(err));
-            lastFailedRequestRef.current = req;
-
-            setTimeout(() => {
-                setMessages(prev => [...prev, {
-                    role: "kokoro",
-                    text: t("chat.errors.connection_error"),
-                    isError: true,
-                }]);
-            }, 500);
-        }
-    };
-
     // ── Image upload ───────────────────────────────────────
     const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -760,126 +718,103 @@ export default function ChatPanel() {
             >
                 <AnimatePresence initial={false}>
                     {messages.map((msg, i) => (
-                        <motion.div
+                        <ChatMessage
                             key={`${i}-${msg.role}`}
-                            initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                            transition={{ duration: 0.3 }}
-                            className={clsx(
-                                "max-w-[85%] p-3 rounded-lg text-sm leading-relaxed font-body",
-                                msg.role === "user"
-                                    ? "ml-auto bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30 text-[var(--color-accent)] rounded-tr-none"
-                                    : "mr-auto bg-slate-900/50 border border-slate-700/50 text-slate-300 rounded-tl-none"
-                            )}
-                        >
-                            {msg.images && msg.images.length > 0 && (
-                                <div className="flex flex-wrap gap-1.5 mb-2">
-                                    {msg.images.map((url, imgIdx) => (
-                                        <img
-                                            key={imgIdx}
-                                            src={url}
-                                            alt="attached"
-                                            className="max-w-[180px] max-h-[120px] rounded-md object-cover border border-white/10"
-                                        />
-                                    ))}
-                                </div>
-                            )}
-                            {msg.text}
-                            {/* Regenerate button for last kokoro message */}
-                            {msg.role === "kokoro" && i === messages.length - 1 && !isStreaming && (
-                                <button
-                                    onClick={async () => {
-                                        // Find the last user message
-                                        const lastUserIndex = messages.slice(0, i).reverse().findIndex(m => m.role === "user");
-                                        if (lastUserIndex === -1) return;
-                                        const userMsgIndex = i - 1 - lastUserIndex;
-                                        const userMsg = messages[userMsgIndex];
+                            message={msg}
+                            index={i}
+                            isStreaming={isStreaming}
+                            isTranslationExpanded={expandedTranslations.has(i)}
+                            onToggleTranslation={() => {
+                                setExpandedTranslations(prev => {
+                                    const next = new Set(prev);
+                                    if (next.has(i)) next.delete(i);
+                                    else next.add(i);
+                                    return next;
+                                });
+                            }}
+                            onEdit={async (newText) => {
+                                const updatedMessages = [...messages];
+                                updatedMessages[i] = { ...msg, text: newText };
+                                setMessages(updatedMessages);
 
-                                        // Remove this kokoro message from UI
-                                        setMessages(prev => prev.slice(0, -1));
-
-                                        // Delete the last assistant message from backend history
+                                if (msg.role === "user") {
+                                    const messagesToDelete = messages.length - i - 1;
+                                    if (messagesToDelete > 0) {
+                                        setMessages(prev => prev.slice(0, i + 1));
                                         try {
-                                            await deleteLastMessages(1);
+                                            await deleteLastMessages(messagesToDelete);
                                         } catch (e) {
-                                            console.error("[ChatPanel] Failed to delete last message:", e);
+                                            console.error("[ChatPanel] Failed to delete messages:", e);
                                         }
+                                    }
 
-                                        // Resend the user message
-                                        startStreaming();
-                                        setIsThinking(true);
-                                        userScrolledRef.current = false;
-                                        resetReveal();
-                                        rawResponseRef.current = "";
-                                        translationRef.current = undefined;
+                                    startStreaming();
+                                    setIsThinking(true);
+                                    userScrolledRef.current = false;
+                                    resetReveal();
+                                    rawResponseRef.current = "";
+                                    translationRef.current = undefined;
 
-                                        const allowImageGen = (() => {
-                                            try {
-                                                const bgConfig = JSON.parse(localStorage.getItem("kokoro_bg_config") || "{}");
-                                                return bgConfig.mode === "generated";
-                                            } catch { return false; }
-                                        })();
+                                    const allowImageGen = (() => {
+                                        try {
+                                            const bgConfig = JSON.parse(localStorage.getItem("kokoro_bg_config") || "{}");
+                                            return bgConfig.mode === "generated";
+                                        } catch { return false; }
+                                    })();
 
-                                        streamChat({
-                                            message: userMsg.text,
-                                            images: userMsg.images,
-                                            allow_image_gen: allowImageGen,
-                                            character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
-                                        }).catch(err => {
-                                            stopStreaming();
-                                            setIsThinking(false);
-                                            setError(err instanceof Error ? err.message : String(err));
-                                        });
-                                    }}
-                                    className="flex items-center gap-1 mt-2 px-2 py-1 rounded-md text-[10px] font-medium bg-slate-800/50 border border-slate-700/50 text-slate-400 hover:text-[var(--color-accent)] hover:border-[var(--color-accent)]/30 transition-colors"
-                                >
-                                    <RefreshCw size={11} strokeWidth={1.5} />
-                                    重新生成
-                                </button>
-                            )}
-                            {/* Retry button for error messages */}
-                            {msg.isError && (
-                                <button
-                                    onClick={handleRetry}
-                                    className="flex items-center gap-1.5 mt-2 px-3 py-1.5 rounded-md text-[11px] font-medium bg-[var(--color-accent)]/15 border border-[var(--color-accent)]/30 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25 transition-colors"
-                                >
-                                    <RefreshCw size={12} strokeWidth={2} />
-                                    {t("chat.actions.retry")}
-                                </button>
-                            )}
-                            {/* Translation toggle �?WeChat style */}
-                            {msg.role === "kokoro" && msg.translation && (
-                                <div className="mt-2 -mb-1">
-                                    <button
-                                        onClick={() => setExpandedTranslations(prev => {
-                                            const next = new Set(prev);
-                                            if (next.has(i)) next.delete(i);
-                                            else next.add(i);
-                                            return next;
-                                        })}
-                                        className="flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
-                                    >
-                                        <Languages size={11} strokeWidth={1.5} />
-                                        {expandedTranslations.has(i) ? t("chat.translation.hide") : t("chat.translation.show")}
-                                    </button>
-                                    <AnimatePresence>
-                                        {expandedTranslations.has(i) && (
-                                            <motion.div
-                                                initial={{ height: 0, opacity: 0 }}
-                                                animate={{ height: "auto", opacity: 1 }}
-                                                exit={{ height: 0, opacity: 0 }}
-                                                transition={{ duration: 0.2 }}
-                                                className="overflow-hidden"
-                                            >
-                                                <div className="mt-1.5 pt-1.5 border-t border-slate-700/40 text-xs text-[var(--color-text-muted)] leading-relaxed">
-                                                    {msg.translation}
-                                                </div>
-                                            </motion.div>
-                                        )}
-                                    </AnimatePresence>
-                                </div>
-                            )}
-                        </motion.div>
+                                    streamChat({
+                                        message: newText,
+                                        images: msg.images,
+                                        allow_image_gen: allowImageGen,
+                                        character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
+                                    }).catch(err => {
+                                        stopStreaming();
+                                        setIsThinking(false);
+                                        setError(err instanceof Error ? err.message : String(err));
+                                    });
+                                }
+                            }}
+                            onRegenerate={async () => {
+                                const lastUserIndex = messages.slice(0, i).reverse().findIndex(m => m.role === "user");
+                                if (lastUserIndex === -1) return;
+                                const userMsgIndex = i - 1 - lastUserIndex;
+                                const userMsg = messages[userMsgIndex];
+
+                                const messagesToDelete = messages.length - i;
+                                setMessages(prev => prev.slice(0, i));
+
+                                try {
+                                    await deleteLastMessages(messagesToDelete);
+                                } catch (e) {
+                                    console.error("[ChatPanel] Failed to delete messages:", e);
+                                }
+
+                                startStreaming();
+                                setIsThinking(true);
+                                userScrolledRef.current = false;
+                                resetReveal();
+                                rawResponseRef.current = "";
+                                translationRef.current = undefined;
+
+                                const allowImageGen = (() => {
+                                    try {
+                                        const bgConfig = JSON.parse(localStorage.getItem("kokoro_bg_config") || "{}");
+                                        return bgConfig.mode === "generated";
+                                    } catch { return false; }
+                                })();
+
+                                streamChat({
+                                    message: userMsg.text,
+                                    images: userMsg.images,
+                                    allow_image_gen: allowImageGen,
+                                    character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
+                                }).catch(err => {
+                                    stopStreaming();
+                                    setIsThinking(false);
+                                    setError(err instanceof Error ? err.message : String(err));
+                                });
+                            }}
+                        />
                     ))}
 
                     {isThinking && <TypingIndicator />}
