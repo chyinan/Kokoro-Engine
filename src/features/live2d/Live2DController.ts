@@ -5,7 +5,7 @@ import type { AudioAnalysis } from "../../lib/audio-player";
 
 export type AnimationState = "Idle" | "Speaking" | "Interactive";
 export type EmotionState =
-    | "neutral"
+    | "calm"
     | "happy"
     | "sad"
     | "angry"
@@ -65,7 +65,7 @@ const MOTION_PRIORITY = {
 export class Live2DController {
     private model: Live2DModel | null = null;
     private lipSync: LipSyncProcessor;
-    private currentEmotion: EmotionState = "neutral";
+    private currentEmotion: EmotionState = "calm";
     private currentState: AnimationState = "Idle";
 
     // Callbacks for external systems (e.g. Mod hooks)

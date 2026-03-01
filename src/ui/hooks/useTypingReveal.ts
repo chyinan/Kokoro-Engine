@@ -58,7 +58,7 @@ export function useTypingReveal({ onReveal, active }: UseTypingRevealOptions) {
     const revealedRef = useRef("");     // Already revealed text
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const speedRef = useRef<TypingSpeed>("Normal");
-    const emotionRef = useRef("neutral");
+    const emotionRef = useRef("calm");
     const correctionCooldown = useRef(0); // Prevent correction spam
     const activeRef = useRef(active);
 

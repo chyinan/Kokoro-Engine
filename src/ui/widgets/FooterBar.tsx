@@ -19,7 +19,7 @@ interface EmotionDef {
 }
 
 const emotions: EmotionDef[] = [
-    { id: "neutral", icon: Meh, color: "text-gray-400" },
+    { id: "calm", icon: Meh, color: "text-gray-400" },
     { id: "happy", icon: Smile, color: "text-emerald-400" },
     { id: "excited", icon: PartyPopper, color: "text-yellow-400" },
     { id: "smug", icon: Sparkles, color: "text-amber-400" },
@@ -40,7 +40,7 @@ const HIDE_DELAY = 400;
 
 export default function FooterBar() {
     const { t } = useTranslation();
-    const [activeEmotion, setActiveEmotion] = useState<EmotionState>("neutral");
+    const [activeEmotion, setActiveEmotion] = useState<EmotionState>("calm");
     const [engineVersion, setEngineVersion] = useState("");
     const [visible, setVisible] = useState(false);
     const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -100,14 +100,23 @@ export default function FooterBar() {
 
     // Subscribe to LLM expression events
     useEffect(() => {
+        console.log("[FooterBar] Setting up chat-expression listener...");
         let unlisten: (() => void) | undefined;
 
         onChatExpression((data) => {
             console.log("[FooterBar] Received chat-expression event:", data);
             setActiveEmotion(data.expression as EmotionState);
-        }).then(fn => { unlisten = fn; });
+        }).then(fn => {
+            unlisten = fn;
+            console.log("[FooterBar] chat-expression listener registered");
+        }).catch(err => {
+            console.error("[FooterBar] Failed to register chat-expression listener:", err);
+        });
 
-        return () => { unlisten?.(); };
+        return () => {
+            console.log("[FooterBar] Cleaning up chat-expression listener");
+            unlisten?.();
+        };
     }, []);
 
     const handleExpressionClick = useCallback(async (emotion: EmotionState) => {

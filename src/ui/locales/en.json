@@ -547,7 +547,7 @@
     },
     "footer": {
         "emotions": {
-            "neutral": "Calm",
+            "calm": "Calm",
             "happy": "Happy",
             "excited": "Excited",
             "smug": "Smug",

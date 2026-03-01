@@ -4,7 +4,7 @@
  * Manages OpenAI and Ollama providers through backend `LlmConfig`.
  * Provider-specific fields shown/hidden based on active provider type.
  */
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { clsx } from "clsx";
 import { RefreshCw, Check, AlertCircle, Save, Trash2 } from "lucide-react";
 import { motion } from "framer-motion";
@@ -53,6 +53,26 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
     const activeProvider = config
         ? config.providers.find((p) => p.id === config.active_provider) ?? config.providers[0]
         : null;
+
+    // Collect all unique providers from current config and all presets
+    const allAvailableProviders = useMemo(() => {
+        if (!config) return [];
+        const providerMap = new Map<string, LlmProviderConfig>();
+
+        // Add current providers
+        config.providers.forEach(p => providerMap.set(p.id, p));
+
+        // Add providers from all presets
+        (config.presets || []).forEach(preset => {
+            preset.providers.forEach(p => {
+                if (!providerMap.has(p.id)) {
+                    providerMap.set(p.id, p);
+                }
+            });
+        });
+
+        return Array.from(providerMap.values());
+    }, [config]);
 
     const updateActiveProvider = useCallback(
         (updates: Partial<LlmProviderConfig>) => {
@@ -108,12 +128,27 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
             const preset = config.presets?.find((p) => p.id === presetId);
             if (!preset) return;
 
+            // Merge providers: keep all existing providers, update/add from preset
+            const providerMap = new Map<string, LlmProviderConfig>();
+
+            // Start with current providers
+            config.providers.forEach(p => providerMap.set(p.id, p));
+
+            // Add/update from all presets (to ensure all providers are available)
+            (config.presets || []).forEach(ps => {
+                ps.providers.forEach(p => {
+                    if (!providerMap.has(p.id)) {
+                        providerMap.set(p.id, JSON.parse(JSON.stringify(p)));
+                    }
+                });
+            });
+
             const updated: LlmConfig = {
                 ...config,
                 active_provider: preset.active_provider,
                 system_provider: preset.system_provider,
                 system_model: preset.system_model,
-                providers: JSON.parse(JSON.stringify(preset.providers)),
+                providers: Array.from(providerMap.values()),
             };
             setConfig(updated);
             saveLlmConfig(updated).catch((e) => setError(String(e)));
@@ -139,7 +174,44 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
         setSaving(true);
         setError(null);
         try {
-            await saveLlmConfig(config);
+            // Merge all providers from all presets to ensure they're all available
+            const providerMap = new Map<string, LlmProviderConfig>();
+
+            // Start with current providers
+            config.providers.forEach(p => providerMap.set(p.id, p));
+
+            // Add providers from all presets
+            (config.presets || []).forEach(preset => {
+                preset.providers.forEach(p => {
+                    if (!providerMap.has(p.id)) {
+                        providerMap.set(p.id, JSON.parse(JSON.stringify(p)));
+                    }
+                });
+            });
+
+            let updatedConfig = {
+                ...config,
+                providers: Array.from(providerMap.values()),
+            };
+
+            // If a preset is selected, also update that preset with current config
+            if (selectedPresetId) {
+                const presets = [...(updatedConfig.presets || [])];
+                const idx = presets.findIndex((p) => p.id === selectedPresetId);
+                if (idx >= 0) {
+                    presets[idx] = {
+                        ...presets[idx],
+                        active_provider: updatedConfig.active_provider,
+                        system_provider: updatedConfig.system_provider,
+                        system_model: updatedConfig.system_model,
+                        providers: JSON.parse(JSON.stringify(updatedConfig.providers)),
+                    };
+                    updatedConfig = { ...updatedConfig, presets };
+                }
+            }
+
+            await saveLlmConfig(updatedConfig);
+            setConfig(updatedConfig);
             setSaved(true);
             setTimeout(() => setSaved(false), 2000);
         } catch (e) {
@@ -173,6 +245,31 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
         }
     };
 
+    // Check if current config matches a preset (must be before any conditional returns)
+    const matchingPreset = useMemo(() => {
+        if (!config || selectedPresetId) return null;
+
+        return (config.presets || []).find(preset => {
+            // Check basic fields
+            if (preset.active_provider !== config.active_provider ||
+                preset.system_provider !== config.system_provider ||
+                preset.system_model !== config.system_model) {
+                return false;
+            }
+
+            // Deep compare active provider config
+            const currentActiveProvider = config.providers.find(p => p.id === config.active_provider);
+            const presetActiveProvider = preset.providers.find(p => p.id === preset.active_provider);
+
+            if (!currentActiveProvider || !presetActiveProvider) return false;
+
+            // Compare key fields of active provider
+            return currentActiveProvider.model === presetActiveProvider.model &&
+                   currentActiveProvider.base_url === presetActiveProvider.base_url &&
+                   currentActiveProvider.api_key === presetActiveProvider.api_key;
+        });
+    }, [config, selectedPresetId]);
+
     if (loading) {
         return (
             <div className="flex items-center justify-center py-8 text-[var(--color-text-muted)]">
@@ -204,7 +301,9 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
                         onChange={(e) => handleLoadPreset(e.target.value)}
                         className={clsx(inputClasses, "flex-1 py-1.5 px-2")}
                     >
-                        <option value="">{t("settings.api.preset.current")}</option>
+                        <option value="">
+                            {matchingPreset ? matchingPreset.name : t("settings.api.preset.current")}
+                        </option>
                         {(config.presets || []).map((p) => (
                             <option key={p.id} value={p.id}>{p.name}</option>
                         ))}
@@ -249,6 +348,32 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
                         </button>
                     ))}
                 </div>
+            </div>
+
+            {/* Provider ID */}
+            <div>
+                <label className={labelClasses}>Provider ID</label>
+                <input
+                    type="text"
+                    value={activeProvider.id || ""}
+                    onChange={(e) => {
+                        const newId = e.target.value.trim();
+                        if (!newId) return;
+                        // Update the provider id
+                        setConfig({
+                            ...config,
+                            providers: config.providers.map((p) =>
+                                p.id === activeProvider.id ? { ...p, id: newId } : p
+                            ),
+                            active_provider: config.active_provider === activeProvider.id ? newId : config.active_provider,
+                        });
+                    }}
+                    placeholder="e.g., comiai, xianyu-opus"
+                    className={clsx(inputClasses, "font-mono")}
+                />
+                <p className="text-[9px] text-[var(--color-text-muted)] mt-1">
+                    Unique identifier for this provider (used in system LLM selection)
+                </p>
             </div>
 
             {/* API Key (OpenAI only) */}
@@ -338,18 +463,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
                             className={clsx(inputClasses, "py-1.5 px-2")}
                         >
                             <option value="">{t("settings.api.system_llm.same_as_active", { provider: config.active_provider })}</option>
-                            {/* Show providers from current config */}
-                            {config.providers.map(p => (
-                                <option key={p.id} value={p.id}>
-                                    {p.id} ({p.provider_type})
-                                </option>
-                            ))}
-                            {/* Also show providers from all presets */}
-                            {config.presets?.flatMap(preset =>
-                                preset.providers.filter(p =>
-                                    !config.providers.some(cp => cp.id === p.id)
-                                )
-                            ).map(p => (
+                            {allAvailableProviders.map(p => (
                                 <option key={p.id} value={p.id}>
                                     {p.id} ({p.provider_type})
                                 </option>

@@ -68,7 +68,7 @@ const PRESET_SEQUENCES: ActionSequence[] = [
         name: "sleepy",
         steps: [
             { emotion: "thinking", action: "idle", delayMs: 800 },
-            { emotion: "neutral", action: "nod", delayMs: 1000 },
+            { emotion: "calm", action: "nod", delayMs: 1000 },
         ],
     },
 ];
