@@ -85,6 +85,8 @@ export default function ChatPanel() {
     const rawResponseRef = useRef("");
     // Translation received from backend chat-translation event
     const translationRef = useRef<string | undefined>(undefined);
+    // When true, the next delta must create a new kokoro bubble (even if the last message is already kokoro)
+    const forceNewBubbleRef = useRef(false);
 
     // Typing reveal: per-character animation
     const { pushDelta, flush: flushReveal, reset: resetReveal } = useTypingReveal({
@@ -275,9 +277,10 @@ export default function ChatPanel() {
                 // Ensure a kokoro message exists for the reveal to update into
                 setMessages(prev => {
                     const last = prev[prev.length - 1];
-                    if (last && last.role === "kokoro") {
+                    if (last && last.role === "kokoro" && !forceNewBubbleRef.current) {
                         return prev; // message already exists — don't create a duplicate
                     }
+                    forceNewBubbleRef.current = false;
                     return [...prev, { role: "kokoro", text: "" }];
                 });
 
@@ -417,8 +420,9 @@ export default function ChatPanel() {
 
                 const { instruction } = event.payload;
 
-                // Push a new empty kokoro message so delta handler doesn't overwrite previous message
-                setMessages(prev => [...prev, { role: "kokoro" as const, text: "" }]);
+                // Mark that the next delta should create a new bubble
+                // (don't push an empty message now — avoids blank bubble + double bubble)
+                forceNewBubbleRef.current = true;
 
                 // Start streaming — compose_prompt() handles full context (system prompt, memory, emotion, history, language)
                 startStreaming();
@@ -436,7 +440,8 @@ export default function ChatPanel() {
                     stopStreaming();
                     setIsThinking(false);
                     setError(err instanceof Error ? err.message : String(err));
-                    // Remove the empty placeholder we pushed for this proactive message
+                    forceNewBubbleRef.current = false;
+                    // Remove the empty placeholder if one was created by delta handler
                     setMessages(prev => {
                         const last = prev[prev.length - 1];
                         if (last && last.role === "kokoro" && !last.text) {
@@ -453,7 +458,7 @@ export default function ChatPanel() {
             const unInteraction = await listen<any>("interaction-trigger", () => {
                 if (aborted || isStreamingRef.current) return;
 
-                setMessages(prev => [...prev, { role: "kokoro" as const, text: "" }]);
+                forceNewBubbleRef.current = true;
                 startStreaming();
                 setIsThinking(true);
                 userScrolledRef.current = false;
