@@ -785,6 +785,51 @@ export default function ChatPanel() {
                                 </div>
                             )}
                             {msg.text}
+                            {/* Regenerate button for last kokoro message */}
+                            {msg.role === "kokoro" && i === messages.length - 1 && !isStreaming && (
+                                <button
+                                    onClick={() => {
+                                        // Find the last user message
+                                        const lastUserIndex = messages.slice(0, i).reverse().findIndex(m => m.role === "user");
+                                        if (lastUserIndex === -1) return;
+                                        const userMsgIndex = i - 1 - lastUserIndex;
+                                        const userMsg = messages[userMsgIndex];
+
+                                        // Remove this kokoro message
+                                        setMessages(prev => prev.slice(0, -1));
+
+                                        // Resend the user message
+                                        startStreaming();
+                                        setIsThinking(true);
+                                        userScrolledRef.current = false;
+                                        resetReveal();
+                                        rawResponseRef.current = "";
+                                        translationRef.current = undefined;
+
+                                        const allowImageGen = (() => {
+                                            try {
+                                                const bgConfig = JSON.parse(localStorage.getItem("kokoro_bg_config") || "{}");
+                                                return bgConfig.mode === "generated";
+                                            } catch { return false; }
+                                        })();
+
+                                        streamChat({
+                                            message: userMsg.text,
+                                            images: userMsg.images,
+                                            allow_image_gen: allowImageGen,
+                                            character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
+                                        }).catch(err => {
+                                            stopStreaming();
+                                            setIsThinking(false);
+                                            setError(err instanceof Error ? err.message : String(err));
+                                        });
+                                    }}
+                                    className="flex items-center gap-1 mt-2 px-2 py-1 rounded-md text-[10px] font-medium bg-slate-800/50 border border-slate-700/50 text-slate-400 hover:text-[var(--color-accent)] hover:border-[var(--color-accent)]/30 transition-colors"
+                                >
+                                    <RefreshCw size={11} strokeWidth={1.5} />
+                                    重新生成
+                                </button>
+                            )}
                             {/* Retry button for error messages */}
                             {msg.isError && (
                                 <button
