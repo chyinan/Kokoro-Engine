@@ -41,6 +41,8 @@ pub fn run() {
             commands::context::set_persona,
             commands::context::set_response_language,
             commands::context::set_user_language,
+            commands::context::set_jailbreak_prompt,
+            commands::context::get_jailbreak_prompt,
             commands::context::set_proactive_enabled,
             commands::context::get_proactive_enabled,
             commands::context::clear_history,
@@ -119,11 +121,12 @@ pub fn run() {
                 let db_url = "sqlite://kokoro.db";
                 match crate::ai::context::AIOrchestrator::new(db_url).await {
                     Ok(orchestrator) => {
-                        // Restore proactive_enabled from disk
-                        let proactive_dir = dirs_next::data_dir()
+                        let app_data_dir = dirs_next::data_dir()
                             .unwrap_or_else(|| std::path::PathBuf::from("."))
                             .join("com.chyin.kokoro");
-                        let proactive_path = proactive_dir.join("proactive_enabled.json");
+
+                        // Restore proactive_enabled from disk
+                        let proactive_path = app_data_dir.join("proactive_enabled.json");
                         if let Ok(content) = std::fs::read_to_string(&proactive_path) {
                             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                                 if let Some(enabled) = val.get("enabled").and_then(|v| v.as_bool()) {
@@ -132,6 +135,20 @@ pub fn run() {
                                 }
                             }
                         }
+
+                        // Restore jailbreak_prompt from disk
+                        let jailbreak_path = app_data_dir.join("jailbreak_prompt.json");
+                        if let Ok(content) = std::fs::read_to_string(&jailbreak_path) {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                                if let Some(prompt) = val.get("prompt").and_then(|v| v.as_str()) {
+                                    tauri::async_runtime::block_on(async {
+                                        orchestrator.set_jailbreak_prompt(prompt.to_string()).await;
+                                    });
+                                    println!("[AI] Restored jailbreak_prompt ({} chars)", prompt.len());
+                                }
+                            }
+                        }
+
                         app_handle.manage(orchestrator);
                     }
                     Err(e) => {

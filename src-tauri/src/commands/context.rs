@@ -27,6 +27,30 @@ pub async fn set_user_language(
 }
 
 #[tauri::command]
+pub async fn set_jailbreak_prompt(
+    prompt: String,
+    state: State<'_, AIOrchestrator>,
+) -> Result<(), String> {
+    state.set_jailbreak_prompt(prompt.clone()).await;
+
+    // Persist to disk
+    let app_data = dirs_next::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("com.chyin.kokoro");
+    let path = app_data.join("jailbreak_prompt.json");
+    let _ = std::fs::write(&path, serde_json::json!({ "prompt": prompt }).to_string());
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_jailbreak_prompt(
+    state: State<'_, AIOrchestrator>,
+) -> Result<String, String> {
+    Ok(state.get_jailbreak_prompt().await)
+}
+
+#[tauri::command]
 pub async fn set_proactive_enabled(
     enabled: bool,
     state: State<'_, AIOrchestrator>,

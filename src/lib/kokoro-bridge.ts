@@ -90,6 +90,14 @@ export async function setUserLanguage(language: string): Promise<void> {
     return invoke("set_user_language", { language });
 }
 
+export async function setJailbreakPrompt(prompt: string): Promise<void> {
+    return invoke("set_jailbreak_prompt", { prompt });
+}
+
+export async function getJailbreakPrompt(): Promise<string> {
+    return invoke("get_jailbreak_prompt");
+}
+
 export async function setProactiveEnabled(enabled: boolean): Promise<void> {
     return invoke("set_proactive_enabled", { enabled });
 }

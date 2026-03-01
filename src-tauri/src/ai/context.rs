@@ -53,6 +53,8 @@ pub struct AIOrchestrator {
     pub response_language: Arc<Mutex<String>>,
     /// User's display language for inline translation (e.g. "中文"). Empty = disabled.
     pub user_language: Arc<Mutex<String>>,
+    /// Jailbreak prompt prefix (prepended to all system prompts). Empty = disabled.
+    pub jailbreak_prompt: Arc<Mutex<String>>,
 
     // Autonomous Behavior Modules
     pub curiosity: Arc<Mutex<CuriosityModule>>,
@@ -190,6 +192,7 @@ impl AIOrchestrator {
             conversation_count: Arc::new(Mutex::new(0)),
             response_language: Arc::new(Mutex::new(String::new())),
             user_language: Arc::new(Mutex::new(String::new())),
+            jailbreak_prompt: Arc::new(Mutex::new(String::new())),
             curiosity: Arc::new(Mutex::new(CuriosityModule::new())),
             initiative: Arc::new(Mutex::new(InitiativeSystem::new())),
             idle_behaviors: Arc::new(Mutex::new(IdleBehaviorSystem::new())),
@@ -207,6 +210,16 @@ impl AIOrchestrator {
         }
         let mut sp = self.system_prompt.lock().await;
         *sp = prompt;
+    }
+
+    pub async fn set_jailbreak_prompt(&self, prompt: String) {
+        let mut jp = self.jailbreak_prompt.lock().await;
+        *jp = prompt;
+    }
+
+    pub async fn get_jailbreak_prompt(&self) -> String {
+        let jp = self.jailbreak_prompt.lock().await;
+        jp.clone()
     }
 
     pub async fn set_response_language(&self, language: String) {
@@ -430,14 +443,29 @@ impl AIOrchestrator {
         } else {
             String::new()
         };
-        final_messages.push(Message {
-            role: "system".to_string(),
-            content: format!(
+
+        // Prepend jailbreak prompt if configured
+        let jailbreak = self.jailbreak_prompt.lock().await.clone();
+        let system_content = if !jailbreak.is_empty() {
+            format!(
+                "{}\n\n{}\n\n{}{}",
+                jailbreak,
+                sp.clone(),
+                crate::ai::prompts::CORE_PERSONA_PROMPT,
+                lang_preamble
+            )
+        } else {
+            format!(
                 "{}\n\n{}{}",
                 sp.clone(),
                 crate::ai::prompts::CORE_PERSONA_PROMPT,
                 lang_preamble
-            ),
+            )
+        };
+
+        final_messages.push(Message {
+            role: "system".to_string(),
+            content: system_content,
             metadata: None,
         });
 
