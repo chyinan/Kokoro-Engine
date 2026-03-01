@@ -805,3 +805,56 @@ export interface TelegramChatSync {
 export async function onTelegramChatSync(callback: (data: TelegramChatSync) => void): Promise<UnlistenFn> {
     return listen<TelegramChatSync>("telegram:chat-sync", (event) => callback(event.payload));
 }
+
+// ── Backup / Restore ──────────────────────────────
+
+export interface BackupStats {
+    memories: number;
+    conversations: number;
+    messages: number;
+    configs: number;
+}
+
+export interface ExportResult {
+    path: string;
+    size_bytes: number;
+    stats: BackupStats;
+}
+
+export interface BackupManifest {
+    version: string;
+    created_at: string;
+    app_version: string;
+}
+
+export interface ImportPreview {
+    manifest: BackupManifest;
+    has_database: boolean;
+    has_configs: boolean;
+    config_files: string[];
+    stats: BackupStats;
+}
+
+export interface ImportOptions {
+    import_database: boolean;
+    import_configs: boolean;
+    conflict_strategy: "skip" | "overwrite";
+}
+
+export interface ImportResult {
+    imported_memories: number;
+    imported_conversations: number;
+    imported_configs: number;
+}
+
+export async function exportData(exportPath: string): Promise<ExportResult> {
+    return invoke<ExportResult>("export_data", { exportPath });
+}
+
+export async function previewImport(filePath: string): Promise<ImportPreview> {
+    return invoke<ImportPreview>("preview_import", { filePath });
+}
+
+export async function importData(filePath: string, options: ImportOptions): Promise<ImportResult> {
+    return invoke<ImportResult>("import_data", { filePath, options });
+}

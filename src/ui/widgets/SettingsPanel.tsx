@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Sparkles, Brain, Mic, Music, Eye, Server, Bot, Shield } from "lucide-react";
+import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Sparkles, Brain, Mic, Music, Eye, Server, Bot, Shield, HardDrive } from "lucide-react";
 import { ModList } from "../mods/ModList";
 import CharacterManager from "./CharacterManager";
 import ImageGenSettings from "./ImageGenSettings";
@@ -16,13 +16,14 @@ import VisionTab from "./settings/VisionTab";
 import McpTab from "./settings/McpTab";
 import TelegramTab from "./settings/TelegramTab";
 import { JailbreakTab } from "./settings/JailbreakTab";
+import { BackupTab } from "./settings/BackupTab";
 import { useTranslation } from "react-i18next";
 import { setPersona, setResponseLanguage, setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, getImageGenConfig, saveImageGenConfig, getSttConfig, saveSttConfig } from "../../lib/kokoro-bridge";
 import type { ProviderStatus, VoiceProfile, TtsSystemConfig, ImageGenSystemConfig, SttConfig } from "../../lib/kokoro-bridge";
 import type { BackgroundConfig } from "../hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "../../features/live2d/Live2DViewer";
 
-type TabId = "api" | "persona" | "tts" | "stt" | "sing" | "mods" | "bg" | "model" | "imagegen" | "memory" | "vision" | "mcp" | "telegram" | "jailbreak";
+type TabId = "api" | "persona" | "tts" | "stt" | "sing" | "mods" | "bg" | "model" | "imagegen" | "memory" | "vision" | "mcp" | "telegram" | "jailbreak" | "backup";
 
 export interface BackgroundControls {
     config: BackgroundConfig;
@@ -92,6 +93,7 @@ const tabs: { id: TabId; label: string; icon: typeof Key }[] = [
     { id: "mcp", label: "settings.tabs.mcp", icon: Server },
     { id: "telegram", label: "settings.tabs.telegram", icon: Bot },
     { id: "jailbreak", label: "settings.tabs.jailbreak", icon: Shield },
+    { id: "backup", label: "settings.tabs.backup", icon: HardDrive },
 ];
 
 export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, sttConfig: sttConfigProp, voiceInterrupt: voiceInterruptProp }: SettingsPanelProps) {
@@ -477,6 +479,9 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                             )}
                             {activeTab === "jailbreak" && (
                                 <JailbreakTab />
+                            )}
+                            {activeTab === "backup" && (
+                                <BackupTab />
                             )}
                         </div>
 
