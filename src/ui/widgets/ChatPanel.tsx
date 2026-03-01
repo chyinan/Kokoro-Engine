@@ -145,6 +145,7 @@ export default function ChatPanel() {
                         return { role: "user" as const, text: m.content };
                     });
                     setMessages(chatMsgs);
+                    setExpandedTranslations(new Set()); // Reset translation expand state on conversation load
                 }).catch(err => console.error("[ChatPanel] Failed to restore conversation:", err));
             }
         }).catch(() => { /* backend not ready */ });
@@ -694,6 +695,7 @@ export default function ChatPanel() {
                 onClose={() => setSidebarOpen(false)}
                 onLoadMessages={(msgs) => {
                     setMessages(msgs);
+                    setExpandedTranslations(new Set()); // Reset translation expand state
                     setSidebarOpen(false);
                 }}
             />
