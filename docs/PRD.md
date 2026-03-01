@@ -1,8 +1,8 @@
 # Kokoro Engine — Product Requirements Document
 
-> **Version:** 1.0  
-> **Last Updated:** 2026-02-11  
-> **Status:** Draft
+> **Version:** 1.1
+> **Last Updated:** 2026-03-01
+> **Status:** Active Development
 
 ---
 
@@ -52,21 +52,35 @@
 
 ## 4. MVP Scope (Phase 1–2)
 
-### Must Have
+### Must Have (All Completed ✅)
 
-- [ ] Live2D model viewer with interaction (gaze, expressions, hit areas)
-- [ ] Chat system (text input / output)
-- [ ] Pluggable LLM API adapter (OpenAI-compatible)
-- [ ] Pluggable TTS system (local / cloud / fallback)
-- [ ] Context manager (conversation history, prompt assembly)
-- [ ] Basic character state (mood, expression)
+- [x] Live2D model viewer with interaction (gaze, expressions, hit areas, drawable-level hit testing)
+- [x] Chat system (text input / output, streaming, message editing, continue-from)
+- [x] Pluggable LLM API adapter (OpenAI-compatible + Ollama, multi-provider with presets)
+- [x] Pluggable TTS system (GPT-SoVITS, VITS, OpenAI, Azure, ElevenLabs, Browser TTS)
+- [x] Context manager (conversation history, prompt assembly, jailbreak prompts with {{char}}/{{user}} placeholders)
+- [x] Character state (emotion system with persistence across restarts, expression sync)
 
-### Explicitly Out of Scope for MVP
+### Post-MVP (Completed ✅)
 
-- ~~Vector memory / RAG systems~~
-- ~~Embedding models~~
+- [x] Vector memory / RAG systems (three-layer memory: core/ephemeral/consolidated)
+- [x] Embedding models (FastEmbed all-MiniLM-L6-v2, ONNX offline)
+- [x] MOD system (HTML/CSS/JS UI override, QuickJS script sandbox, custom themes)
+- [x] MCP protocol support (stdio + Streamable HTTP, auto tool registration)
+- [x] Vision system (screen capture, VLM analysis, pixel diff detection)
+- [x] Image generation (Stable Diffusion WebUI, DALL-E, Google Gemini)
+- [x] STT (Whisper, faster-whisper, whisper.cpp)
+- [x] RVC voice conversion (singing)
+- [x] Autonomous behavior (curiosity, initiative, idle behaviors)
+- [x] Telegram Bot remote interaction (long polling, text/voice/photo, session commands)
+- [x] Multi-provider LLM (unique Provider IDs, separate main/system LLM)
+- [x] i18n (5 languages: zh, en, ja, ko, ru)
+
+### Explicitly Out of Scope (for now)
+
 - ~~Cloud sync~~
 - ~~Social features~~
+- Mobile clients (iOS / Android)
 
 ---
 
@@ -131,24 +145,28 @@
 
 ---
 
-## 8. Long-Term Vision (Post-MVP)
+## 8. Long-Term Vision
 
 ```mermaid
 graph LR
-    A[MVP] --> B[Advanced Memory]
+    A[MVP ✅] --> B[Advanced Memory ✅]
     A --> C[Story Engine]
     A --> D[Mobile App]
-    A --> E[Mod Ecosystem]
+    A --> E[Mod Ecosystem ✅]
+    A --> F[Remote Access ✅]
 
-    B -->|Semantic recall| B1[Vector DB + RAG]
+    B -->|Semantic recall| B1[Vector DB + RAG ✅]
     C -->|Branching narrative| C1[Event scripting]
     D -->|Companion| D1[iOS / Android]
     E -->|Community| E1[Mod marketplace]
+    F -->|Telegram Bot| F1[Text/Voice/Photo ✅]
 ```
 
-| Feature | Description |
-|---|---|
-| Advanced Memory | Semantic recall via vector DB and RAG |
-| Story / Narrative Engine | Branching storylines with event scripting |
-| Mobile Companion App | iOS and Android native clients |
-| Community Mod Ecosystem | Sharing characters, themes, and plugins |
+| Feature | Status | Description |
+|---|---|---|
+| Advanced Memory | ✅ Done | Three-layer memory (core/ephemeral/consolidated), hybrid search (semantic + BM25 RRF), LLM-driven consolidation |
+| MOD Ecosystem | ✅ Done | HTML/CSS/JS UI override, QuickJS sandbox, custom themes, Genshin demo MOD |
+| Remote Access | ✅ Done | Telegram Bot with text/voice/photo, session commands, Chat ID whitelist |
+| Story / Narrative Engine | 🔮 Planned | Branching storylines with event scripting |
+| Mobile Companion App | 🔮 Planned | iOS and Android native clients |
+| Character Marketplace | 🔮 Planned | Sharing characters, themes, and plugins |

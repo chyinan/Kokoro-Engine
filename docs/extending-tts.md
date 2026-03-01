@@ -1,7 +1,7 @@
 # Extending TTS — Adding a New Backend
 
-> **Version:** 1.0  
-> **Last Updated:** 2026-02-12
+> **Version:** 1.1
+> **Last Updated:** 2026-03-01
 
 This guide explains how to add a new TTS provider to Kokoro Engine. The system is designed around the `TtsProvider` trait — implement it, register in config, and the engine handles routing, caching, and playback automatically.
 
@@ -10,17 +10,19 @@ This guide explains how to add a new TTS provider to Kokoro Engine. The system i
 ## Architecture Overview
 
 ```
-┌─────────────────┐    ┌──────────┐    ┌──────────┐
-│  TtsService     │───▶│ TtsRouter│───▶│ Provider │──▶ Audio
-│  (manager.rs)   │    │          │    │          │
-│                 │    │ Scoring  │    ├──────────┤
-│  Cache ◀──────┐ │    │ Fallback │    │ OpenAI   │
-│  Queue        │ │    └──────────┘    │ VITS     │
-│               │ │                    │ RVC      │
-│  speak()──────┘ │                    │ Browser  │
-└─────────────────┘                    │ Cloud    │
-                                       │ YourNew  │
-                                       └──────────┘
+┌─────────────────┐    ┌──────────┐    ┌────────────┐
+│  TtsService     │───▶│ TtsRouter│───▶│  Provider  │──▶ Audio
+│  (manager.rs)   │    │          │    │            │
+│                 │    │ Scoring  │    ├────────────┤
+│  Cache ◀──────┐ │    │ Fallback │    │ GPT-SoVITS │
+│  Queue        │ │    └──────────┘    │ VITS       │
+│               │ │                    │ OpenAI     │
+│  speak()──────┘ │                    │ Azure      │
+└─────────────────┘                    │ ElevenLabs │
+                                       │ Browser    │
+                                       │ RVC        │
+                                       │ YourNew    │
+                                       └────────────┘
 ```
 
 ---
