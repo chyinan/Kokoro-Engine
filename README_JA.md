@@ -58,6 +58,10 @@ Live2D、LLM、TTS、STT などの技術を統合し、高度にモジュール�
 ### 🗣️ 音声インタラクション
 - **音声合成 (TTS)**:
     - **GPT-SoVITS**: 優れた感情表現、カスタムキャラクターボイス、豊富なエコシステム。
+    - **VITS**: vits-simple-api などのローカル VITS 推論サーバーと互換。
+    - **OpenAI TTS**: OpenAI 互換のクラウド音声合成 API をサポート。
+    - **Azure TTS**: Microsoft Azure Cognitive Services 音声合成。
+    - **ElevenLabs**: 高品質 AI 音声合成、ボイスクローニング対応。
     - **Browser TTS**: ブラウザネイティブの軽量 TTS。
 - **ボイスチェンジャー (RVC)**: RVC (Retrieval-based Voice Conversion) インターフェースをサポートし、キャラクターの歌唱などを実現。
 - **音声認識 (STT)**: Whisper/faster-whisper/whisper.cpp モデルの初期サポート。

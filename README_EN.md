@@ -58,6 +58,10 @@ Features currently verified mainly in a local environment (RTX 4060 Laptop):
 ### 🗣️ Voice Interaction
 - **Text-to-Speech (TTS)**:
     - **GPT-SoVITS**: Excellent emotional expressiveness, custom character voices, and a richer ecosystem.
+    - **VITS**: Compatible with local VITS inference servers such as vits-simple-api.
+    - **OpenAI TTS**: Supports OpenAI-compatible cloud speech synthesis APIs.
+    - **Azure TTS**: Microsoft Azure Cognitive Services speech synthesis.
+    - **ElevenLabs**: High-quality AI speech synthesis with voice cloning support.
     - **Browser TTS**: Lightweight browser-native TTS.
 - **Voice Conversion (RVC)**: Supports RVC (Retrieval-based Voice Conversion) interface for implementing character singing.
 - **Voice Interaction (STT)**: Initial support for Whisper/faster-whisper/whisper.cpp models.

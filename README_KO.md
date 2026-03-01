@@ -58,6 +58,10 @@ Live2D, LLM, TTS 및 STT와 같은 기술을 통합하여 고도로 모듈화되
 ### 🗣️ 음성 인터랙션
 - **음성 합성 (TTS)**:
     - **GPT-SoVITS**: 뛰어난 감정 표현력, 사용자 정의 캐릭터 음성, 더 풍부한 생태계.
+    - **VITS**: vits-simple-api 등 로컬 VITS 추론 서버와 호환.
+    - **OpenAI TTS**: OpenAI 호환 클라우드 음성 합성 API 지원.
+    - **Azure TTS**: Microsoft Azure Cognitive Services 음성 합성.
+    - **ElevenLabs**: 고품질 AI 음성 합성, 음성 클로닝 지원.
     - **Browser TTS**: 브라우저 네이티브 경량 TTS.
 - **음성 변환 (RVC)**: 캐릭터 노래 등을 구현하기 위한 RVC(Retrieval-based Voice Conversion) 인터페이스를 지원합니다.
 - **음성 인식 (STT)**: Whisper/faster-whisper/whisper.cpp 모델의 초기 지원.

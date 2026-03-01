@@ -58,6 +58,10 @@
 ### 🗣️ 语音交互
 - **语音合成 (TTS)**:
     - **GPT-SoVITS**: 情感表现力极佳，自定义角色声线，生态更加丰富。
+    - **VITS**: 兼容 vits-simple-api 等本地 VITS 推理服务器。
+    - **OpenAI TTS**: 支持 OpenAI 兼容的云端语音合成接口。
+    - **Azure TTS**: 微软 Azure 认知服务语音合成。
+    - **ElevenLabs**: 高质量 AI 语音合成，支持语音克隆。
     - **Browser TTS**: 浏览器原生轻量级 TTS。
 - **声音转换 (RVC)**: 支持 RVC (Retrieval-based Voice Conversion) 变声器接口，用于实现角色演唱歌曲。
 - **语音交互 (STT)**: Whisper/faster-whisper/whisper.cpp 模型初步支持。
