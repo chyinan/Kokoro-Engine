@@ -500,7 +500,11 @@
             "edit": "編集",
             "regenerate": "再生成",
             "save": "保存 (Ctrl+Enter)",
-            "cancel": "キャンセル (Esc)"
+            "cancel": "キャンセル (Esc)",
+            "clear": "会話をクリア",
+            "collapse": "チャットを折りたたむ",
+            "open": "チャットを開く",
+            "retry": "再試行"
         },
         "errors": {
             "image_too_large": "画像が大きすぎます (最大 5MB)",
@@ -523,12 +527,6 @@
                     "transcribing": "変換中..."
                 }
             }
-        },
-        "actions": {
-            "clear": "会話をクリア",
-            "collapse": "チャットを折りたたむ",
-            "open": "チャットを開く",
-            "retry": "再試行"
         },
         "history": {
             "title": "会話履歴",

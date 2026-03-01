@@ -500,7 +500,11 @@
             "edit": "编辑",
             "regenerate": "重新生成",
             "save": "保存 (Ctrl+Enter)",
-            "cancel": "取消 (Esc)"
+            "cancel": "取消 (Esc)",
+            "clear": "清空对话",
+            "collapse": "折叠对话",
+            "open": "展开对话",
+            "retry": "重试"
         },
         "errors": {
             "image_too_large": "图片过大 (最大 5MB)",
@@ -523,12 +527,6 @@
                     "transcribing": "转换中..."
                 }
             }
-        },
-        "actions": {
-            "clear": "清空对话",
-            "collapse": "折叠对话",
-            "open": "展开对话",
-            "retry": "重试"
         },
         "history": {
             "title": "对话记录",

@@ -500,7 +500,11 @@
             "edit": "편집",
             "regenerate": "재생성",
             "save": "저장 (Ctrl+Enter)",
-            "cancel": "취소 (Esc)"
+            "cancel": "취소 (Esc)",
+            "clear": "대화 지우기",
+            "collapse": "채팅 접기",
+            "open": "채팅 열기",
+            "retry": "재시도"
         },
         "errors": {
             "image_too_large": "이미지가 너무 큽니다 (최대 5MB)",
@@ -523,12 +527,6 @@
                     "transcribing": "변환 중..."
                 }
             }
-        },
-        "actions": {
-            "clear": "대화 지우기",
-            "collapse": "채팅 접기",
-            "open": "채팅 열기",
-            "retry": "재시도"
         },
         "history": {
             "title": "대화 기록",
