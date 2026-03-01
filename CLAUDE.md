@@ -65,15 +65,16 @@ Frontend (React + TS)  ←→  kokoro-bridge.ts (Typed IPC)  ←→  Backend (Ru
 
 ### 后端 (`src-tauri/src/`)
 
-- `commands/` — 18 个 IPC 命令处理模块（chat、tts、stt、llm、vision、imagegen、mcp、mods 等）
-- `ai/` — AI 编排器：上下文管理（context.rs）、情感系统（emotion.rs）、记忆系统（memory.rs）、自主行为（好奇心、主动发言、闲置动作）
-- `llm/` — LLM 适配器（OpenAI 兼容接口、Ollama），支持 Fast/Smart/Cheap 模型路由
-- `tts/` — TTS 服务，15+ 提供商（GPT-SoVITS、OpenAI、Azure、Google、Browser TTS、RVC 等），trait 化插件架构
+- `commands/` — 20 个 IPC 命令处理模块（chat、tts、stt、llm、vision、imagegen、mcp、mods、telegram 等）
+- `ai/` — AI 编排器：上下文管理（context.rs）、情感系统（emotion.rs，持久化）、记忆系统（memory.rs）、自主行为（好奇心、主动发言、闲置动作）
+- `llm/` — LLM 适配器（OpenAI 兼容接口、Ollama），支持多 Provider + 预设切换、Fast/Smart/Cheap 模型路由
+- `tts/` — TTS 服务，6 个提供商（GPT-SoVITS、VITS、OpenAI、Azure、ElevenLabs、Browser TTS），trait 化插件架构
 - `stt/` — 语音识别（Whisper、OpenAI）
 - `vision/` — 屏幕截图 + VLM 分析（xcap 截图，像素差异检测）
 - `imagegen/` — 图片生成（Stable Diffusion WebUI、OpenAI DALL-E、Google Gemini）
-- `mcp/` — Model Context Protocol 客户端（stdio 传输，JSON-RPC 2.0）
+- `mcp/` — Model Context Protocol 客户端（stdio + Streamable HTTP 传输，JSON-RPC 2.0）
 - `mods/` — MOD 系统：manifest 解析、`mod://` 协议、QuickJS (ES2020) 脚本沙箱
+- `telegram/` — Telegram Bot 远程交互（teloxide 长轮询，Chat ID 白名单，文字/语音/图片消息桥接）
 - `actions/` — 动作注册表，用于 LLM tool calling
 
 ### MOD 系统 (`mods/`)
@@ -102,7 +103,7 @@ MOD JS API：`Kokoro.on()`、`Kokoro.emit()`、`Kokoro.ui.send()`、`Kokoro.char
 ## 配置文件位置
 
 运行时配置存储在 `~/.local/share/com.chyin.kokoro/`（或对应 OS 的 app data 目录）：
-`llm_config.json`、`tts_config.json`、`stt_config.json`、`vision_config.json`、`imagegen_config.json`、`mcp_servers.json`
+`llm_config.json`、`tts_config.json`、`stt_config.json`、`vision_config.json`、`imagegen_config.json`、`mcp_servers.json`、`telegram_config.json`、`emotion_state.json`
 
 ## 数据库
 

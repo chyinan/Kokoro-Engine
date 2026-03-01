@@ -1,7 +1,7 @@
 # Kokoro Engine — Architecture
 
-> **Version:** 2.0
-> **Last Updated:** 2026-02-27
+> **Version:** 2.1
+> **Last Updated:** 2026-03-01
 > **Companion Document:** [PRD.md](PRD.md) · [API Specification](API%20specification.md) · [MOD System Design](MOD_system_design.md)
 
 ---
@@ -67,6 +67,7 @@ src/
 │   ├── Live2DViewer.tsx           # Main Live2D component
 │   ├── Live2DController.ts        # Model control & animation
 │   ├── LipSyncProcessor.ts       # Mouth sync with audio
+│   ├── DrawableHitTest.ts        # Drawable-level hit testing for body regions
 │   └── AudioDebug.tsx             # Audio debugging UI
 │
 ├── ui/
@@ -88,30 +89,35 @@ src/
 │   │   └── useVoiceInput.ts
 │   ├── widgets/                   # UI components
 │   │   ├── ChatPanel.tsx          # Chat interface (streaming + tool calls)
+│   │   ├── ChatMessage.tsx        # Chat message bubble (edit, continue-from, regenerate)
 │   │   ├── SettingsPanel.tsx      # Settings modal (12 tabs)
 │   │   ├── HeaderBar.tsx          # Top bar
-│   │   ├── FooterBar.tsx          # Bottom bar (emotion display)
+│   │   ├── FooterBar.tsx          # Bottom bar (emotion display, real-time sync)
 │   │   ├── BackgroundLayer.tsx    # Background rendering
 │   │   ├── CharacterManager.tsx   # Character CRUD
 │   │   ├── ConversationSidebar.tsx
 │   │   ├── MemoryPanel.tsx        # Memory management UI
+│   │   ├── ImageGenSettings.tsx   # Image generation settings
 │   │   ├── memory/
 │   │   │   ├── MemoryTimeline.tsx # Timeline view
 │   │   │   └── MemoryGraph.tsx    # Keyword graph (CJK-aware)
 │   │   └── settings/              # Settings tabs
-│   │       ├── ApiTab.tsx         # LLM/API config
+│   │       ├── ApiTab.tsx         # LLM/API config (multi-provider, presets)
 │   │       ├── TtsTab.tsx         # TTS provider setup
 │   │       ├── SttTab.tsx         # Speech-to-text config
 │   │       ├── SingTab.tsx        # RVC singing config
 │   │       ├── ModelTab.tsx       # Live2D model selection
 │   │       ├── BackgroundTab.tsx  # Background slideshow
 │   │       ├── VisionTab.tsx      # Vision/screenshot config
-│   │       └── McpTab.tsx         # MCP server management
-│   ├── locales/                   # i18n (4 languages)
+│   │       ├── McpTab.tsx         # MCP server management
+│   │       ├── JailbreakTab.tsx   # Jailbreak prompt config ({{char}}/{{user}} placeholders)
+│   │       └── TelegramTab.tsx    # Telegram Bot config
+│   ├── locales/                   # i18n (5 languages)
 │   │   ├── zh.json                # Simplified Chinese
 │   │   ├── en.json                # English
 │   │   ├── ja.json                # Japanese
-│   │   └── ko.json                # Korean
+│   │   ├── ko.json                # Korean
+│   │   └── ru.json                # Russian
 │   └── i18n.ts                    # i18next configuration
 │
 ├── lib/                           # Utilities & bridges
@@ -132,9 +138,9 @@ src-tauri/src/
 ├── main.rs                        # Tauri entry point
 ├── lib.rs                         # Module exports & Tauri setup
 │
-├── commands/                      # 19 IPC command modules
+├── commands/                      # 20 IPC command modules
 │   ├── chat.rs                    # stream_chat (SSE streaming + tool feedback loop)
-│   ├── context.rs                 # set_persona, set_language, proactive control
+│   ├── context.rs                 # set_persona, set_language, proactive control, emotion state
 │   ├── character.rs               # Character state management
 │   ├── conversation.rs            # Conversation history CRUD
 │   ├── database.rs                # DB initialization & vector store
@@ -151,6 +157,7 @@ src-tauri/src/
 │   ├── singing.rs                 # RVC voice conversion
 │   ├── actions.rs                 # Action registry & execution
 │   ├── system.rs                  # Engine info & system status
+│   ├── telegram.rs                # Telegram Bot config & control
 │   └── mod.rs
 │
 ├── ai/                            # AI orchestration & autonomous behavior
@@ -243,6 +250,11 @@ src-tauri/src/
 │   ├── api.rs                     # QuickJS API (Kokoro.*)
 │   └── mod.rs
 │
+├── telegram/                      # Telegram Bot remote interaction
+│   ├── bot.rs                     # Bot core logic (message handling, voice/image bridge)
+│   ├── config.rs                  # TelegramConfig (token, whitelist, options)
+│   └── mod.rs                     # TelegramService lifecycle (start/stop)
+│
 ├── config.rs                      # Global config types
 └── utils/
     ├── http.rs                    # HTTP utilities
@@ -276,12 +288,14 @@ mods/
 │   ├── memories                   # content, embedding, importance, tier, character_id
 │   ├── conversations              # chat history
 │   └── characters                 # character metadata
-├── llm_config.json
+├── llm_config.json                # LLM provider config (multi-provider, presets)
 ├── tts_config.json
 ├── stt_config.json
 ├── vision_config.json
 ├── imagegen_config.json
-└── mcp_servers.json
+├── mcp_servers.json
+├── telegram_config.json           # Telegram Bot config (token, whitelist)
+└── emotion_state.json             # Persisted emotion state across restarts
 ```
 
 ---
@@ -322,7 +336,7 @@ graph TD
 | **Theming** | `ThemeProvider` context with CSS variable injection, MOD theme override |
 | **Typed IPC** | `kokoro-bridge.ts` wraps every `invoke()` with TypeScript types |
 | **Event streaming** | `onChatDelta` / `onChatDone` / `onChatTranslation` / `onChatError` via Tauri events |
-| **i18n** | i18next with 4 languages (zh, en, ja, ko) |
+| **i18n** | i18next with 5 languages (zh, en, ja, ko, ru) |
 
 ### 3.2 Backend Layer
 
@@ -336,6 +350,7 @@ graph TD
     CMD --> MCP["McpManager"]
     CMD --> MM["ModManager"]
     CMD --> ACT["ActionRegistry"]
+    CMD --> TG["TelegramService"]
 
     AIO --> CTX["Context Manager"]
     AIO --> MEM["Memory Manager"]
@@ -412,6 +427,9 @@ All frontend ↔ backend communication flows through **`kokoro-bridge.ts`** (fro
 | `set_response_language` | context.rs | Set response language |
 | `set_proactive_enabled` | context.rs | Toggle proactive (idle) messages |
 | `clear_history` | context.rs | Reset conversation history |
+| `set_character_name` | context.rs | Set character name for placeholder mapping |
+| `set_user_name` | context.rs | Set user name for placeholder mapping |
+| `get_emotion_state` | context.rs | Get current emotion and mood |
 | `get_character_state` | character.rs | Character name, expression |
 | `set_expression` | character.rs | Update character expression |
 | `list_conversations` | conversation.rs | List conversation history |
@@ -429,6 +447,9 @@ All frontend ↔ backend communication flows through **`kokoro-bridge.ts`** (fro
 | `list_live2d_models` | live2d.rs | Available Live2D models |
 | `search_memories` | memory.rs | Hybrid memory search |
 | `get_engine_info` | system.rs | Engine name, version, platform |
+| `get_telegram_config` / `save_telegram_config` | telegram.rs | Telegram Bot configuration |
+| `start_telegram_bot` / `stop_telegram_bot` | telegram.rs | Telegram Bot lifecycle control |
+| `get_telegram_status` | telegram.rs | Telegram Bot running status |
 
 ### Events (streaming)
 
@@ -549,11 +570,12 @@ Triggers are time-based (idle duration) and context-aware (time of day, conversa
 Text ──▶ TtsService ──▶ TtsProvider::synthesize() ──▶ Audio bytes
               │
               ├─▶ GPT-SoVITS (local, emotion-aware)
+              ├─▶ VITS (local, vits-simple-api compatible)
               ├─▶ OpenAI TTS
+              ├─▶ Azure TTS (Cognitive Services)
+              ├─▶ ElevenLabs (voice cloning)
               ├─▶ Browser TTS (Web Speech API)
-              ├─▶ RVC (voice conversion)
-              ├─▶ VITS (local)
-              └─▶ Cloud providers (Azure, Google, etc.)
+              └─▶ RVC (voice conversion post-processing)
 ```
 
 - **`TtsProvider` trait** — `synthesize(text, params) → Vec<u8>`
@@ -598,6 +620,27 @@ mods/example-mod/
 - **Scripts**: QuickJS runtime with `Kokoro.*` API (`Kokoro.on()`, `Kokoro.emit()`, `Kokoro.ui.send()`, `Kokoro.character.setExpression()`)
 - **Themes**: CSS variable injection, font loading, animation definitions
 - **`mod://` protocol**: Custom URI scheme serving mod assets with path traversal protection
+
+### 5.8 Telegram Bot
+
+```
+Telegram ←→ teloxide (long polling) ←→ TelegramService (background task)
+                                            ↓
+                                  app_handle.try_state::<T>()
+                                            ↓
+                          ┌─────────────────┼─────────────────┐
+                          ↓                 ↓                 ↓
+                    AIOrchestrator    TtsService        ImageGenService
+                    + LlmService      (voice reply)     (image gen)
+                    (text chat)       SttService
+                                      (voice transcribe)
+```
+
+- **Long polling** — No public IP required; uses `teloxide` Rust framework
+- **Access control** — Chat ID whitelist; unauthorized messages are silently ignored
+- **Session commands** — `/new` (new conversation), `/continue` (resume desktop session), `/status`
+- **Message types** — Text, voice (STT → LLM → TTS), photo (with Vision)
+- **Desktop sync** — Telegram messages are synced to the desktop chat UI in real-time
 
 ---
 
@@ -684,6 +727,10 @@ sequenceDiagram
 | **SQLite + FastEmbed** | Zero-config embedded DB with local vector embeddings (all-MiniLM-L6-v2 ONNX) |
 | **SSE streaming** | Token-by-token delivery for real-time character responses |
 | **Intl.Segmenter for CJK** | Browser-native word segmentation for Chinese/Japanese/Korean in memory graph |
+| **Multi-provider LLM** | Unique Provider IDs allow different providers for main LLM and system LLM; presets for quick switching |
+| **Emotion persistence** | Emotion state saved to disk and restored on startup, surviving app restarts |
+| **Jailbreak placeholders** | `{{char}}` and `{{user}}` placeholder mapping in jailbreak prompts, consistent with Persona |
+| **Telegram Bot bridge** | Long-polling Telegram Bot bridges to internal services without public IP requirement |
 
 ---
 
@@ -716,10 +763,11 @@ sequenceDiagram
 
 | Metric | Value |
 |---|---|
-| Frontend files | ~55 TypeScript/TSX |
-| Backend files | ~107 Rust |
-| Languages | 4 (zh, en, ja, ko) |
-| TTS providers | 15+ |
-| LLM support | OpenAI-compatible + Ollama |
+| Frontend files | ~60 TypeScript/TSX |
+| Backend files | ~110 Rust |
+| Languages | 5 (zh, en, ja, ko, ru) |
+| TTS providers | 6 (GPT-SoVITS, VITS, OpenAI, Azure, ElevenLabs, Browser) |
+| LLM support | OpenAI-compatible + Ollama (multi-provider with presets) |
 | Built-in actions | 8 |
 | MCP transport | stdio + Streamable HTTP |
+| Remote access | Telegram Bot (long polling) |
