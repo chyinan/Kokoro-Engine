@@ -4,9 +4,8 @@ import { useTranslation } from "react-i18next";
 import { FolderOpen, RefreshCw, AlertCircle, Trash2, Check } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { open } from "@tauri-apps/plugin-dialog";
-import { exists } from "@tauri-apps/plugin-fs";
 import { labelClasses } from "../../styles/settings-primitives";
-import { importLive2dZip, listLive2dModels, deleteLive2dModel } from "../../../lib/kokoro-bridge";
+import { importLive2dZip, importLive2dFolder, listLive2dModels, deleteLive2dModel } from "../../../lib/kokoro-bridge";
 import type { Live2dModelInfo } from "../../../lib/kokoro-bridge";
 import type { Live2DDisplayMode } from "../../../features/live2d/Live2DViewer";
 
@@ -67,11 +66,16 @@ export default function ModelTab({
                         setIsImporting(false);
                     }
                 } else {
-                    const fileExists = await exists(selected);
-                    if (fileExists) {
-                        onCustomModelPathChange(selected);
-                    } else {
-                        console.error("Selected file does not exist:", selected);
+                    // .model3.json selected — copy the folder into app data
+                    setIsImporting(true);
+                    try {
+                        const modelPath = await importLive2dFolder(selected);
+                        onCustomModelPathChange(modelPath);
+                        await fetchModels();
+                    } catch (e) {
+                        console.error("Failed to import Live2D folder:", e);
+                    } finally {
+                        setIsImporting(false);
                     }
                 }
             }
