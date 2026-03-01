@@ -73,7 +73,8 @@
             "memory": "記憶",
             "vision": "ビジョン",
             "mods": "MODS",
-            "mcp": "MCP"
+            "mcp": "MCP",
+            "telegram": "Telegram"
         },
         "app_language": {
             "label": "アプリケーション言語",
@@ -570,5 +571,28 @@
             "title": "Modがインストールされていません",
             "description": "<1>mods/</1> ディレクトリにModを追加してください"
         }
+    },
+    "telegram": {
+        "title": "Telegram Bot",
+        "status": {
+            "running": "実行中",
+            "stopped": "停止中"
+        },
+        "auto_start": "起動時に自動開始",
+        "bot_token": {
+            "label": "ボットトークン",
+            "placeholder": "123456:ABC-DEF...",
+            "hint": "Telegram の @BotFather から取得、または環境変数を設定：{{env}}"
+        },
+        "whitelist": {
+            "label": "許可されたチャット ID",
+            "desc": "これらのチャット ID のみがボットと対話できます。空 = すべて拒否。",
+            "placeholder": "チャット ID（数字）",
+            "add": "追加"
+        },
+        "voice_reply": "音声返信を送信（TTS）",
+        "save": "保存",
+        "start": "開始",
+        "stop": "停止"
     }
 }

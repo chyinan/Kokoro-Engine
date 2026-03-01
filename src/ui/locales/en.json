@@ -73,7 +73,8 @@
             "memory": "MEMORY",
             "vision": "VISION",
             "mods": "MODS",
-            "mcp": "MCP"
+            "mcp": "MCP",
+            "telegram": "TELEGRAM"
         },
         "app_language": {
             "label": "Application Language",
@@ -570,5 +571,28 @@
             "title": "No mods installed",
             "description": "Add mods to the <1>mods/</1> directory"
         }
+    },
+    "telegram": {
+        "title": "Telegram Bot",
+        "status": {
+            "running": "Running",
+            "stopped": "Stopped"
+        },
+        "auto_start": "Auto-start on launch",
+        "bot_token": {
+            "label": "BOT TOKEN",
+            "placeholder": "123456:ABC-DEF...",
+            "hint": "Get from @BotFather on Telegram. Or set env var: {{env}}"
+        },
+        "whitelist": {
+            "label": "ALLOWED CHAT IDS",
+            "desc": "Only these chat IDs can interact with the bot. Empty = reject all.",
+            "placeholder": "Chat ID (number)",
+            "add": "Add"
+        },
+        "voice_reply": "Send voice replies (TTS)",
+        "save": "Save",
+        "start": "Start",
+        "stop": "Stop"
     }
 }

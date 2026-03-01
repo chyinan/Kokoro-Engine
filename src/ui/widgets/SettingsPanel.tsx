@@ -89,7 +89,7 @@ const tabs: { id: TabId; label: string; icon: typeof Key }[] = [
     { id: "vision", label: "settings.tabs.vision", icon: Eye },
     { id: "mods", label: "settings.tabs.mods", icon: Package },
     { id: "mcp", label: "settings.tabs.mcp", icon: Server },
-    { id: "telegram", label: "Telegram", icon: Bot },
+    { id: "telegram", label: "settings.tabs.telegram", icon: Bot },
 ];
 
 export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, sttConfig: sttConfigProp, voiceInterrupt: voiceInterruptProp }: SettingsPanelProps) {

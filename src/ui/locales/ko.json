@@ -73,7 +73,8 @@
             "memory": "기억",
             "vision": "시각",
             "mods": "모드",
-            "mcp": "MCP"
+            "mcp": "MCP",
+            "telegram": "Telegram"
         },
         "app_language": {
             "label": "애플리케이션 언어",
@@ -570,5 +571,28 @@
             "title": "설치된 모드 없음",
             "description": "<1>mods/</1> 디렉토리에 모드를 추가하세요"
         }
+    },
+    "telegram": {
+        "title": "Telegram 봇",
+        "status": {
+            "running": "실행 중",
+            "stopped": "중지됨"
+        },
+        "auto_start": "시작 시 자동 실행",
+        "bot_token": {
+            "label": "봇 토큰",
+            "placeholder": "123456:ABC-DEF...",
+            "hint": "Telegram @BotFather에서 받거나 환경 변수를 설정하세요: {{env}}"
+        },
+        "whitelist": {
+            "label": "허용된 채팅 ID",
+            "desc": "이 채팅 ID만 봇과 상호작용할 수 있습니다. 비어 있으면 모두 거부.",
+            "placeholder": "채팅 ID (숫자)",
+            "add": "추가"
+        },
+        "voice_reply": "음성 답장 보내기 (TTS)",
+        "save": "저장",
+        "start": "시작",
+        "stop": "중지"
     }
 }

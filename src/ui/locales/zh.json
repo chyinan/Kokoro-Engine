@@ -73,7 +73,8 @@
             "memory": "记忆",
             "vision": "视觉",
             "mods": "模组",
-            "mcp": "MCP"
+            "mcp": "MCP",
+            "telegram": "Telegram"
         },
         "app_language": {
             "label": "应用语言",
@@ -570,5 +571,28 @@
             "title": "未安装模组",
             "description": "请将模组添加到 <1>mods/</1> 目录"
         }
+    },
+    "telegram": {
+        "title": "Telegram 机器人",
+        "status": {
+            "running": "运行中",
+            "stopped": "已停止"
+        },
+        "auto_start": "启动时自动运行",
+        "bot_token": {
+            "label": "机器人令牌",
+            "placeholder": "123456:ABC-DEF...",
+            "hint": "从 Telegram @BotFather 获取，或设置环境变量：{{env}}"
+        },
+        "whitelist": {
+            "label": "允许的聊天 ID",
+            "desc": "只有这些聊天 ID 可以与机器人交互。留空 = 拒绝所有。",
+            "placeholder": "聊天 ID（数字）",
+            "add": "添加"
+        },
+        "voice_reply": "发送语音回复（TTS）",
+        "save": "保存",
+        "start": "启动",
+        "stop": "停止"
     }
 }

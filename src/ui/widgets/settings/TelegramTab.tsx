@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { clsx } from "clsx";
 import { Bot, Shield, Volume2, Loader2, Play, Square, RefreshCw } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import {
     getTelegramConfig, saveTelegramConfig,
     startTelegramBot, stopTelegramBot, getTelegramStatus,
@@ -10,6 +11,7 @@ import type { TelegramConfig, TelegramStatus } from "../../../lib/kokoro-bridge"
 import { inputClasses, labelClasses } from "../../styles/settings-primitives";
 
 export default function TelegramTab() {
+    const { t } = useTranslation();
     const [config, setConfig] = useState<TelegramConfig | null>(null);
     const [status, setStatus] = useState<TelegramStatus | null>(null);
     const [loading, setLoading] = useState(true);
@@ -19,7 +21,6 @@ export default function TelegramTab() {
 
     useEffect(() => {
         loadAll();
-        // Poll status every 5s
         pollRef.current = setInterval(() => {
             getTelegramStatus().then(setStatus).catch(() => {});
         }, 5000);
@@ -58,7 +59,6 @@ export default function TelegramTab() {
 
     const handleStart = async () => {
         try {
-            // Save first if dirty
             if (dirty && config) {
                 await saveTelegramConfig(config);
                 setDirty(false);
@@ -113,9 +113,9 @@ export default function TelegramTab() {
                 <div className="flex items-center gap-3">
                     <Bot size={16} strokeWidth={1.5} className="text-[var(--color-accent)]" />
                     <div>
-                        <div className="text-sm font-heading font-semibold">Telegram Bot</div>
+                        <div className="text-sm font-heading font-semibold">{t("telegram.title")}</div>
                         <div className="text-xs text-[var(--color-text-muted)]">
-                            {isRunning ? "Running" : "Stopped"}
+                            {isRunning ? t("telegram.status.running") : t("telegram.status.stopped")}
                         </div>
                     </div>
                     <div className={clsx(
@@ -131,7 +131,7 @@ export default function TelegramTab() {
                             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-heading
                                 bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30 transition-colors"
                         >
-                            <Square size={12} /> Stop
+                            <Square size={12} /> {t("telegram.stop")}
                         </motion.button>
                     ) : (
                         <motion.button
@@ -141,7 +141,7 @@ export default function TelegramTab() {
                                 bg-[var(--color-accent)]/20 text-[var(--color-accent)] border border-[var(--color-accent)]/30
                                 hover:bg-[var(--color-accent)]/30 transition-colors"
                         >
-                            <Play size={12} /> Start
+                            <Play size={12} /> {t("telegram.start")}
                         </motion.button>
                     )}
                     <motion.button
@@ -156,7 +156,7 @@ export default function TelegramTab() {
 
             {/* Enable on startup */}
             <div className="flex items-center justify-between">
-                <div className="text-sm text-[var(--color-text-secondary)]">Auto-start on launch</div>
+                <div className="text-sm text-[var(--color-text-secondary)]">{t("telegram.auto_start")}</div>
                 <motion.button
                     whileTap={{ scale: 0.95 }}
                     onClick={() => update({ enabled: !config.enabled })}
@@ -180,16 +180,16 @@ export default function TelegramTab() {
 
             {/* Bot Token */}
             <div>
-                <label className={labelClasses}>Bot Token</label>
+                <label className={labelClasses}>{t("telegram.bot_token.label")}</label>
                 <input
                     type="password"
                     value={config.bot_token ?? ""}
                     onChange={e => update({ bot_token: e.target.value || undefined })}
-                    placeholder="123456:ABC-DEF..."
+                    placeholder={t("telegram.bot_token.placeholder")}
                     className={inputClasses}
                 />
                 <div className="text-xs text-[var(--color-text-muted)] mt-1">
-                    Get from @BotFather on Telegram. Or set env var: {config.bot_token_env ?? "TELEGRAM_BOT_TOKEN"}
+                    {t("telegram.bot_token.hint", { env: config.bot_token_env ?? "TELEGRAM_BOT_TOKEN" })}
                 </div>
             </div>
 
@@ -197,10 +197,10 @@ export default function TelegramTab() {
             <div>
                 <label className={labelClasses}>
                     <Shield size={12} className="inline mr-1" />
-                    Allowed Chat IDs
+                    {t("telegram.whitelist.label")}
                 </label>
                 <div className="text-xs text-[var(--color-text-muted)] mb-2">
-                    Only these chat IDs can interact with the bot. Empty = reject all.
+                    {t("telegram.whitelist.desc")}
                 </div>
                 <div className="flex gap-2 mb-2">
                     <input
@@ -208,7 +208,7 @@ export default function TelegramTab() {
                         value={chatIdInput}
                         onChange={e => setChatIdInput(e.target.value)}
                         onKeyDown={e => e.key === "Enter" && addChatId()}
-                        placeholder="Chat ID (number)"
+                        placeholder={t("telegram.whitelist.placeholder")}
                         className={clsx(inputClasses, "flex-1")}
                     />
                     <motion.button
@@ -218,7 +218,7 @@ export default function TelegramTab() {
                             bg-[var(--color-bg-surface)] border border-[var(--color-border)]
                             hover:border-[var(--color-accent)] transition-colors"
                     >
-                        Add
+                        {t("telegram.whitelist.add")}
                     </motion.button>
                 </div>
                 {config.allowed_chat_ids.length > 0 && (
@@ -246,7 +246,7 @@ export default function TelegramTab() {
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                     <Volume2 size={14} className="text-[var(--color-text-muted)]" />
-                    <div className="text-sm text-[var(--color-text-secondary)]">Send voice replies (TTS)</div>
+                    <div className="text-sm text-[var(--color-text-secondary)]">{t("telegram.voice_reply")}</div>
                 </div>
                 <motion.button
                     whileTap={{ scale: 0.95 }}
@@ -279,7 +279,7 @@ export default function TelegramTab() {
                     className="w-full py-2.5 rounded-md text-sm font-heading font-semibold
                         bg-[var(--color-accent)] text-black hover:brightness-110 transition-all"
                 >
-                    Save
+                    {t("telegram.save")}
                 </motion.button>
             )}
         </div>
