@@ -100,8 +100,40 @@ pub async fn delete_last_messages(
     let mut history = state.history.lock().await;
     let current_len = history.len();
     let to_remove = count.min(current_len);
+
+    if to_remove == 0 {
+        return Ok(());
+    }
+
     history.truncate(current_len - to_remove);
     println!("[AI] Deleted last {} message(s) from history", to_remove);
+
+    // 同时删除数据库中的消息
+    let conv_id = state.current_conversation_id.lock().await.clone();
+    if let Some(conversation_id) = conv_id {
+        // 获取该对话的所有消息 ID，按顺序排列
+        let message_ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC"
+        )
+        .bind(&conversation_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // 删除最后 to_remove 条消息
+        if message_ids.len() >= to_remove {
+            let ids_to_delete = &message_ids[message_ids.len() - to_remove..];
+            for id in ids_to_delete {
+                sqlx::query("DELETE FROM conversation_messages WHERE id = ?")
+                    .bind(id)
+                    .execute(&state.db)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            println!("[AI] Deleted {} message(s) from database", to_remove);
+        }
+    }
+
     Ok(())
 }
 

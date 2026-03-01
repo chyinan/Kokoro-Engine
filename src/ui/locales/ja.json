@@ -495,6 +495,13 @@
             "hide": "翻訳を隠す",
             "show": "翻訳を表示"
         },
+        "actions": {
+            "continue_from": "ここから続ける",
+            "edit": "編集",
+            "regenerate": "再生成",
+            "save": "保存 (Ctrl+Enter)",
+            "cancel": "キャンセル (Esc)"
+        },
         "errors": {
             "image_too_large": "画像が大きすぎます (最大 5MB)",
             "only_images": "画像ファイルのみ対応しています",

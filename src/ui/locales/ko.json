@@ -495,6 +495,13 @@
             "hide": "번역 숨기기",
             "show": "번역 보기"
         },
+        "actions": {
+            "continue_from": "여기서부터 계속",
+            "edit": "편집",
+            "regenerate": "재생성",
+            "save": "저장 (Ctrl+Enter)",
+            "cancel": "취소 (Esc)"
+        },
         "errors": {
             "image_too_large": "이미지가 너무 큽니다 (최대 5MB)",
             "only_images": "이미지 파일만 지원됩니다",

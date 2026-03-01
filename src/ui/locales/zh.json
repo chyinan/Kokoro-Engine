@@ -495,6 +495,13 @@
             "hide": "隐藏翻译",
             "show": "显示翻译"
         },
+        "actions": {
+            "continue_from": "从这里继续",
+            "edit": "编辑",
+            "regenerate": "重新生成",
+            "save": "保存 (Ctrl+Enter)",
+            "cancel": "取消 (Esc)"
+        },
         "errors": {
             "image_too_large": "图片过大 (最大 5MB)",
             "only_images": "仅支持图片文件",

@@ -495,6 +495,17 @@
             "hide": "Hide Translation",
             "show": "Show Translation"
         },
+        "actions": {
+            "continue_from": "Continue from here",
+            "edit": "Edit",
+            "regenerate": "Regenerate",
+            "save": "Save (Ctrl+Enter)",
+            "cancel": "Cancel (Esc)",
+            "clear": "Clear conversation",
+            "collapse": "Collapse chat",
+            "open": "Open chat",
+            "retry": "Retry"
+        },
         "errors": {
             "image_too_large": "Image too large (max 5MB)",
             "only_images": "Only image files are supported",
@@ -516,12 +527,6 @@
                     "transcribing": "Transcribing..."
                 }
             }
-        },
-        "actions": {
-            "clear": "Clear conversation",
-            "collapse": "Collapse chat",
-            "open": "Open chat",
-            "retry": "Retry"
         },
         "history": {
             "title": "Chat History",

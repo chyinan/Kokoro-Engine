@@ -95,14 +95,14 @@ export function ChatMessage({
                         <button
                             onClick={handleSaveEdit}
                             className="p-1.5 rounded-md bg-[var(--color-accent)]/20 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/30 transition-colors"
-                            title="保存 (Ctrl+Enter)"
+                            title={t("chat.actions.save")}
                         >
                             <Check size={14} />
                         </button>
                         <button
                             onClick={handleCancelEdit}
                             className="p-1.5 rounded-md bg-slate-800/50 text-slate-400 hover:text-slate-300 transition-colors"
-                            title="取消 (Esc)"
+                            title={t("chat.actions.cancel")}
                         >
                             <X size={14} />
                         </button>
@@ -119,7 +119,7 @@ export function ChatMessage({
                             <button
                                 onClick={onContinueFrom}
                                 className="p-1.5 rounded-md bg-slate-800/90 backdrop-blur-sm text-slate-400 hover:text-[var(--color-accent)] hover:bg-slate-700/90 transition-colors shadow-lg"
-                                title="从这里继续"
+                                title={t("chat.actions.continue_from")}
                             >
                                 <CornerDownLeft size={12} strokeWidth={1.5} />
                             </button>
@@ -128,7 +128,7 @@ export function ChatMessage({
                             <button
                                 onClick={handleStartEdit}
                                 className="p-1.5 rounded-md bg-slate-800/90 backdrop-blur-sm text-slate-400 hover:text-[var(--color-accent)] hover:bg-slate-700/90 transition-colors shadow-lg"
-                                title="编辑"
+                                title={t("chat.actions.edit")}
                             >
                                 <Edit2 size={12} strokeWidth={1.5} />
                             </button>
@@ -138,7 +138,7 @@ export function ChatMessage({
                                 <button
                                     onClick={onRegenerate}
                                     className="p-1.5 rounded-md bg-slate-800/90 backdrop-blur-sm text-slate-400 hover:text-[var(--color-accent)] hover:bg-slate-700/90 transition-colors shadow-lg"
-                                    title="重新生成"
+                                    title={t("chat.actions.regenerate")}
                                 >
                                     <RefreshCw size={12} strokeWidth={1.5} />
                                 </button>
