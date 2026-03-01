@@ -102,6 +102,10 @@ export async function clearHistory(): Promise<void> {
     return invoke("clear_history");
 }
 
+export async function deleteLastMessages(count: number): Promise<void> {
+    return invoke("delete_last_messages", { count });
+}
+
 // ── LLM Config Management ──────────────────────────
 
 export interface LlmProviderConfig {

@@ -56,6 +56,19 @@ pub async fn clear_history(state: State<'_, AIOrchestrator>) -> Result<(), Strin
     Ok(())
 }
 
+#[tauri::command]
+pub async fn delete_last_messages(
+    count: usize,
+    state: State<'_, AIOrchestrator>,
+) -> Result<(), String> {
+    let mut history = state.history.lock().await;
+    let current_len = history.len();
+    let to_remove = count.min(current_len);
+    history.truncate(current_len - to_remove);
+    println!("[AI] Deleted last {} message(s) from history", to_remove);
+    Ok(())
+}
+
 /// End the current session: generate a summary from recent history, save it,
 /// then clear conversation history. The summary generation runs in background.
 #[derive(serde::Deserialize)]

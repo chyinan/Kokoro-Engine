@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, Languages, History, RefreshCw } from "lucide-react";
-import { streamChat, onChatDelta, onChatDone, onChatError, onChatTranslation, clearHistory, uploadVisionImage, synthesize, onToolCallResult, listConversations, loadConversation, onTelegramChatSync } from "../../lib/kokoro-bridge";
+import { streamChat, onChatDelta, onChatDone, onChatError, onChatTranslation, clearHistory, uploadVisionImage, synthesize, onToolCallResult, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal } from "../hooks";
 import { useTranslation } from "react-i18next";
@@ -788,15 +788,22 @@ export default function ChatPanel() {
                             {/* Regenerate button for last kokoro message */}
                             {msg.role === "kokoro" && i === messages.length - 1 && !isStreaming && (
                                 <button
-                                    onClick={() => {
+                                    onClick={async () => {
                                         // Find the last user message
                                         const lastUserIndex = messages.slice(0, i).reverse().findIndex(m => m.role === "user");
                                         if (lastUserIndex === -1) return;
                                         const userMsgIndex = i - 1 - lastUserIndex;
                                         const userMsg = messages[userMsgIndex];
 
-                                        // Remove this kokoro message
+                                        // Remove this kokoro message from UI
                                         setMessages(prev => prev.slice(0, -1));
+
+                                        // Delete the last assistant message from backend history
+                                        try {
+                                            await deleteLastMessages(1);
+                                        } catch (e) {
+                                            console.error("[ChatPanel] Failed to delete last message:", e);
+                                        }
 
                                         // Resend the user message
                                         startStreaming();

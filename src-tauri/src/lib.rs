@@ -44,6 +44,7 @@ pub fn run() {
             commands::context::set_proactive_enabled,
             commands::context::get_proactive_enabled,
             commands::context::clear_history,
+            commands::context::delete_last_messages,
             commands::context::end_session,
             commands::tts::synthesize,
             commands::tts::list_tts_providers,
