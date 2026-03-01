@@ -88,9 +88,9 @@ The following features are planned, in development, or **not yet tested/verified
 - [ ] **Deep Testing of Online Services**: Verify more commercial APIs besides LLM (e.g., Azure TTS, Google STT, etc.).
 - [ ] **Mobile Support**: iOS / Android client applications.
 - [x] **Tiered Memory System**: Tiered memory (core/ephemeral), hybrid retrieval (semantic + BM25 RRF fusion), and LLM-driven memory consolidation.
-- [ ] **Stronger Plugin System**: Allow community developers to write MOD modules to extend functionality.
+- [x] **MOD Plugin System**: Allow community developers to write MOD modules to extend functionality (HTML/CSS/JS + QuickJS script sandbox).
+- [x] **Live2D Model Interaction**: Real-time interaction feedback with Live2D models (eye tracking, motion triggers, expression sync).
 - [ ] **Character Market/Workshop**: Facilitate sharing and downloading character presets.
-- [ ] **Live2D Model Interaction**: Real-time interaction feedback functions with Live2D models.
 
 ## 🛠️ Tech Stack
 
