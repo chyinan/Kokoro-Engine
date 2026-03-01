@@ -248,6 +248,34 @@ impl AIOrchestrator {
         *un = name;
     }
 
+    pub async fn save_emotion_state(&self) -> Result<()> {
+        let emotion = self.emotion_state.lock().await;
+        let app_data = dirs_next::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("com.chyin.kokoro");
+        let path = app_data.join("emotion_state.json");
+        let json = serde_json::to_string_pretty(&*emotion)?;
+        std::fs::write(&path, json)?;
+        Ok(())
+    }
+
+    pub async fn load_emotion_state(&self) -> Result<()> {
+        let app_data = dirs_next::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("com.chyin.kokoro");
+        let path = app_data.join("emotion_state.json");
+
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)?;
+            let loaded_state: EmotionState = serde_json::from_str(&content)?;
+            let mut emotion = self.emotion_state.lock().await;
+            *emotion = loaded_state;
+            println!("[AI] Restored emotion state: {} (mood: {:.2})",
+                     emotion.current_emotion(), emotion.mood());
+        }
+        Ok(())
+    }
+
     /// Enable or disable proactive (idle auto-talk) messages.
     pub fn set_proactive_enabled(&self, enabled: bool) {
         self.proactive_enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
@@ -260,8 +288,15 @@ impl AIOrchestrator {
 
     /// Update emotion state with smoothing and return the smoothed values.
     pub async fn update_emotion(&self, raw_emotion: &str, raw_mood: f32) -> (String, f32) {
-        let mut emotion = self.emotion_state.lock().await;
-        emotion.update(raw_emotion, raw_mood)
+        let result = {
+            let mut emotion = self.emotion_state.lock().await;
+            emotion.update(raw_emotion, raw_mood)
+        };
+
+        // Save emotion state to disk after update
+        let _ = self.save_emotion_state().await;
+
+        result
     }
 
     /// Get a natural-language description of current emotion for prompt injection.

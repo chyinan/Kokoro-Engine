@@ -146,7 +146,7 @@ pub struct EmotionEntry {
 // ── Emotion State ──────────────────────────────────────────
 
 /// Tracks the character's emotional state with smooth transitions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmotionState {
     current_emotion: String,
     mood: f32,

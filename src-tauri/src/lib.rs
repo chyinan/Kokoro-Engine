@@ -149,6 +149,11 @@ pub fn run() {
                             }
                         }
 
+                        // Restore emotion state from disk
+                        if let Err(e) = orchestrator.load_emotion_state().await {
+                            println!("[AI] Failed to restore emotion state: {}", e);
+                        }
+
                         app_handle.manage(orchestrator);
                     }
                     Err(e) => {
