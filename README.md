@@ -68,6 +68,10 @@
     - 支持连接任意 MCP Server (通过 stdio 交互)。
     - 角色可以调用 MCP Server 提供的工具（如文件系统、Web 搜索、数据库等）来增强能力。
     - 支持通过 UI 来管理 MCP Server。
+- **Telegram Bot 远程交互**: 内置 Telegram Bot 服务，无需公网 IP 即可通过手机远程与角色对话。
+    - 支持文字、语音、图片消息，桥接到完整的 LLM/TTS/STT/ImageGen 管线。
+    - Chat ID 白名单访问控制，会话命令 (`/new`, `/continue`, `/status`)。
+    - 桌面端聊天框实时同步 Telegram 消息。
 
 ### 🎮 官方示范 MOD：原神风格 UI
 

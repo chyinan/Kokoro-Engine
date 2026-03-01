@@ -68,6 +68,10 @@ Live2D, LLM, TTS 및 STT와 같은 기술을 통합하여 고도로 모듈화되
     - 모든 MCP Server에 연결 지원(stdio 상호 작용을 통해).
     - 캐릭터는 MCP Server에서 제공하는 도구(파일 시스템, 웹 검색, 데이터베이스 등)를 사용하여 능력을 확장할 수 있습니다.
     - UI를 통해 MCP Server 관리 지원.
+- **Telegram Bot 원격 상호작용**: 내장 Telegram Bot 서비스로 공인 IP 없이 스마트폰에서 캐릭터와 대화 가능.
+    - 텍스트, 음성, 사진 메시지를 지원하며 LLM/TTS/STT/ImageGen 파이프라인에 브리지.
+    - Chat ID 화이트리스트 접근 제어, 세션 명령어 (`/new`, `/continue`, `/status`).
+    - 데스크톱 채팅 UI에 Telegram 메시지 실시간 동기화.
 
 ### 🎮 공식 데모 MOD: 원신 스타일 UI
 

@@ -68,6 +68,10 @@ Features currently verified mainly in a local environment (RTX 4060 Laptop):
     - Supports connection to any MCP Server (via stdio interaction).
     - Characters can use tools provided by MCP Servers (such as file system, Web search, databases, etc.) to enhance capabilities.
     - Supports managing MCP Servers via UI.
+- **Telegram Bot Remote Interaction**: Built-in Telegram Bot service for chatting with your character from your phone — no public IP required.
+    - Supports text, voice, and photo messages, bridging to the full LLM/TTS/STT/ImageGen pipeline.
+    - Chat ID whitelist access control, session commands (`/new`, `/continue`, `/status`).
+    - Desktop chat UI syncs Telegram messages in real-time.
 
 ### 🎮 Official Demo MOD: Genshin Impact Style UI
 
