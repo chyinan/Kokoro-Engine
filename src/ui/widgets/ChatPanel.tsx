@@ -275,12 +275,13 @@ export default function ChatPanel() {
                 rawResponseRef.current += delta;
 
                 // Ensure a kokoro message exists for the reveal to update into
+                const needsNewBubble = forceNewBubbleRef.current;
+                forceNewBubbleRef.current = false;
                 setMessages(prev => {
                     const last = prev[prev.length - 1];
-                    if (last && last.role === "kokoro" && !forceNewBubbleRef.current) {
+                    if (last && last.role === "kokoro" && !needsNewBubble) {
                         return prev; // message already exists — don't create a duplicate
                     }
-                    forceNewBubbleRef.current = false;
                     return [...prev, { role: "kokoro", text: "" }];
                 });
 
