@@ -814,6 +814,18 @@ export default function ChatPanel() {
                                     setError(err instanceof Error ? err.message : String(err));
                                 });
                             }}
+                            onContinueFrom={async () => {
+                                // 删除该消息之后的所有消息
+                                const messagesToDelete = messages.length - i - 1;
+                                if (messagesToDelete > 0) {
+                                    setMessages(prev => prev.slice(0, i + 1));
+                                    try {
+                                        await deleteLastMessages(messagesToDelete);
+                                    } catch (e) {
+                                        console.error("[ChatPanel] Failed to delete messages:", e);
+                                    }
+                                }
+                            }}
                         />
                     ))}
 

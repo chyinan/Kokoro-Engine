@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Edit2, RefreshCw, Check, X, Languages } from "lucide-react";
+import { Edit2, RefreshCw, Check, X, Languages, CornerDownLeft } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 interface ChatMessageProps {
@@ -18,6 +18,7 @@ interface ChatMessageProps {
     onToggleTranslation: () => void;
     onEdit: (newText: string) => void;
     onRegenerate: () => void;
+    onContinueFrom: () => void;
 }
 
 export function ChatMessage({
@@ -27,6 +28,7 @@ export function ChatMessage({
     onToggleTranslation,
     onEdit,
     onRegenerate,
+    onContinueFrom,
 }: ChatMessageProps) {
     const { t } = useTranslation();
     const [isEditing, setIsEditing] = useState(false);
@@ -113,6 +115,15 @@ export function ChatMessage({
                     {/* 悬停显示的操作按钮 */}
                     {!isStreaming && !msg.isError && (
                         <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                            {/* 从这里继续按钮 */}
+                            <button
+                                onClick={onContinueFrom}
+                                className="p-1.5 rounded-md bg-slate-800/90 backdrop-blur-sm text-slate-400 hover:text-[var(--color-accent)] hover:bg-slate-700/90 transition-colors shadow-lg"
+                                title="从这里继续"
+                            >
+                                <CornerDownLeft size={12} strokeWidth={1.5} />
+                            </button>
+
                             {/* 编辑按钮 */}
                             <button
                                 onClick={handleStartEdit}
