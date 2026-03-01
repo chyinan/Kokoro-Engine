@@ -733,46 +733,10 @@ export default function ChatPanel() {
                                 });
                             }}
                             onEdit={async (newText) => {
+                                // Simply update the message text without triggering regeneration
                                 const updatedMessages = [...messages];
                                 updatedMessages[i] = { ...msg, text: newText };
                                 setMessages(updatedMessages);
-
-                                if (msg.role === "user") {
-                                    const messagesToDelete = messages.length - i - 1;
-                                    if (messagesToDelete > 0) {
-                                        setMessages(prev => prev.slice(0, i + 1));
-                                        try {
-                                            await deleteLastMessages(messagesToDelete);
-                                        } catch (e) {
-                                            console.error("[ChatPanel] Failed to delete messages:", e);
-                                        }
-                                    }
-
-                                    startStreaming();
-                                    setIsThinking(true);
-                                    userScrolledRef.current = false;
-                                    resetReveal();
-                                    rawResponseRef.current = "";
-                                    translationRef.current = undefined;
-
-                                    const allowImageGen = (() => {
-                                        try {
-                                            const bgConfig = JSON.parse(localStorage.getItem("kokoro_bg_config") || "{}");
-                                            return bgConfig.mode === "generated";
-                                        } catch { return false; }
-                                    })();
-
-                                    streamChat({
-                                        message: newText,
-                                        images: msg.images,
-                                        allow_image_gen: allowImageGen,
-                                        character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
-                                    }).catch(err => {
-                                        stopStreaming();
-                                        setIsThinking(false);
-                                        setError(err instanceof Error ? err.message : String(err));
-                                    });
-                                }
                             }}
                             onRegenerate={async () => {
                                 const lastUserIndex = messages.slice(0, i).reverse().findIndex(m => m.role === "user");
