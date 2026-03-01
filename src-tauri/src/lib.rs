@@ -39,6 +39,8 @@ pub fn run() {
             commands::database::test_vector_store,
             commands::chat::stream_chat,
             commands::context::set_persona,
+            commands::context::set_character_name,
+            commands::context::set_user_name,
             commands::context::set_response_language,
             commands::context::set_user_language,
             commands::context::set_jailbreak_prompt,

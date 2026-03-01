@@ -9,6 +9,18 @@ pub async fn set_persona(prompt: String, state: State<'_, AIOrchestrator>) -> Re
 }
 
 #[tauri::command]
+pub async fn set_character_name(name: String, state: State<'_, AIOrchestrator>) -> Result<(), String> {
+    state.set_character_name(name).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_user_name(name: String, state: State<'_, AIOrchestrator>) -> Result<(), String> {
+    state.set_user_name(name).await;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn set_response_language(
     language: String,
     state: State<'_, AIOrchestrator>,

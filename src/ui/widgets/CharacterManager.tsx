@@ -10,7 +10,7 @@ import { clsx } from "clsx";
 import { Plus, Upload, Trash2, UserCircle, Check, X, User } from "lucide-react";
 import { characterDb, type CharacterProfile } from "../../lib/db";
 import { parseCharacterCard } from "../../lib/character-card-parser";
-import { setPersona, setProactiveEnabled, getProactiveEnabled } from "../../lib/kokoro-bridge";
+import { setPersona, setCharacterName, setUserName, setProactiveEnabled, getProactiveEnabled } from "../../lib/kokoro-bridge";
 import { Languages, MessageCircle } from "lucide-react";
 import { useTranslation, Trans } from "react-i18next";
 
@@ -138,6 +138,10 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
             const all = await characterDb.getAll();
             setCharacters(all);
 
+            // Initialize user name on backend
+            const currentUserProfile = loadUserProfile();
+            setUserName(currentUserProfile.name).catch(e => console.error("[CharacterManager] Failed to set user name:", e));
+
             // Restore active selection
             const savedId = localStorage.getItem(ACTIVE_CHAR_KEY);
             if (savedId && all.find(c => c.id === Number(savedId))) {
@@ -148,12 +152,14 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                 const prompt = composeSystemPrompt(char);
                 onPersonaChangeRef.current(prompt);
                 setPersona(prompt).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
+                setCharacterName(char.name).catch(e => console.error("[CharacterManager] Failed to set character name:", e));
             } else if (all.length > 0) {
                 setActiveId(all[0].id!);
                 setEditChar(all[0]);
                 const prompt = composeSystemPrompt(all[0]);
                 onPersonaChangeRef.current(prompt);
                 setPersona(prompt).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
+                setCharacterName(all[0].name).catch(e => console.error("[CharacterManager] Failed to set character name:", e));
             } else {
                 // No characters yet — insert default
                 const defaultChar = makeDefaultCharacter();
@@ -165,6 +171,7 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                 const prompt = composeSystemPrompt(created);
                 onPersonaChangeRef.current(prompt);
                 setPersona(prompt).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
+                setCharacterName(created.name).catch(e => console.error("[CharacterManager] Failed to set character name:", e));
                 localStorage.setItem(ACTIVE_CHAR_KEY, String(newId));
             }
         } catch (err) {
@@ -189,6 +196,7 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
         onPersonaChangeRef.current(prompt);
         // Immediately push to backend so LLM uses the new persona
         setPersona(prompt).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
+        setCharacterName(char.name).catch(e => console.error("[CharacterManager] Failed to set character name:", e));
     };
 
     // ── Create new character ───────────────────────
@@ -229,6 +237,7 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
             onPersonaChangeRef.current(prompt);
             // Push updated persona to backend immediately
             setPersona(prompt).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
+            setCharacterName(editChar.name).catch(e => console.error("[CharacterManager] Failed to set character name:", e));
         } catch (err) {
             console.error("[CharacterManager] Failed to update character:", err);
         }
@@ -317,6 +326,7 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
             onPersonaChangeRef.current(composeSystemPrompt(editChar, userProfile));
             // Push updated persona to backend immediately
             setPersona(composeSystemPrompt(editChar, userProfile)).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
+            setUserName(userProfile.name).catch(e => console.error("[CharacterManager] Failed to set user name:", e));
         }
     };
 

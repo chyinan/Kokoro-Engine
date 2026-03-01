@@ -82,6 +82,14 @@ export async function setPersona(prompt: string): Promise<void> {
     return invoke("set_persona", { prompt });
 }
 
+export async function setCharacterName(name: string): Promise<void> {
+    return invoke("set_character_name", { name });
+}
+
+export async function setUserName(name: string): Promise<void> {
+    return invoke("set_user_name", { name });
+}
+
 export async function setResponseLanguage(language: string): Promise<void> {
     return invoke("set_response_language", { language });
 }

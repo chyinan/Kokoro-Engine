@@ -55,6 +55,10 @@ pub struct AIOrchestrator {
     pub user_language: Arc<Mutex<String>>,
     /// Jailbreak prompt prefix (prepended to all system prompts). Empty = disabled.
     pub jailbreak_prompt: Arc<Mutex<String>>,
+    /// Character name for {{char}} placeholder replacement.
+    character_name: Arc<Mutex<String>>,
+    /// User name for {{user}} placeholder replacement.
+    user_name: Arc<Mutex<String>>,
 
     // Autonomous Behavior Modules
     pub curiosity: Arc<Mutex<CuriosityModule>>,
@@ -193,6 +197,8 @@ impl AIOrchestrator {
             response_language: Arc::new(Mutex::new(String::new())),
             user_language: Arc::new(Mutex::new(String::new())),
             jailbreak_prompt: Arc::new(Mutex::new(String::new())),
+            character_name: Arc::new(Mutex::new("Kokoro".to_string())),
+            user_name: Arc::new(Mutex::new("User".to_string())),
             curiosity: Arc::new(Mutex::new(CuriosityModule::new())),
             initiative: Arc::new(Mutex::new(InitiativeSystem::new())),
             idle_behaviors: Arc::new(Mutex::new(IdleBehaviorSystem::new())),
@@ -230,6 +236,16 @@ impl AIOrchestrator {
     pub async fn set_user_language(&self, language: String) {
         let mut lang = self.user_language.lock().await;
         *lang = language;
+    }
+
+    pub async fn set_character_name(&self, name: String) {
+        let mut cn = self.character_name.lock().await;
+        *cn = name;
+    }
+
+    pub async fn set_user_name(&self, name: String) {
+        let mut un = self.user_name.lock().await;
+        *un = name;
     }
 
     /// Enable or disable proactive (idle auto-talk) messages.
@@ -447,9 +463,16 @@ impl AIOrchestrator {
         // Prepend jailbreak prompt if configured
         let jailbreak = self.jailbreak_prompt.lock().await.clone();
         let system_content = if !jailbreak.is_empty() {
+            // Replace {{char}} and {{user}} placeholders
+            let char_name = self.character_name.lock().await.clone();
+            let user_name = self.user_name.lock().await.clone();
+            let processed_jailbreak = jailbreak
+                .replace("{{char}}", &char_name)
+                .replace("{{user}}", &user_name);
+
             format!(
                 "{}\n\n{}\n\n{}{}",
-                jailbreak,
+                processed_jailbreak,
                 sp.clone(),
                 crate::ai::prompts::CORE_PERSONA_PROMPT,
                 lang_preamble
