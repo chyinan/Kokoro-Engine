@@ -273,7 +273,7 @@ pub async fn stream_chat(
         crate::llm::openai::Message {
             role: "user".to_string(),
             content: crate::llm::openai::MessageContent::Text(format!(
-                "User message: {}\nContext: (Character: {})",
+                "Classify the following text and return JSON only.\nText: [{}]\nCharacter context: {}",
                 request.message, char_id
             )),
         },
