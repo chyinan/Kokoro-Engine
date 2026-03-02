@@ -98,7 +98,7 @@ export const JailbreakTab: React.FC = () => {
                     <h3 className="text-xs font-heading font-semibold text-[var(--color-text-primary)] mb-1 uppercase tracking-wider">
                         {t('settings.jailbreak.title')}
                     </h3>
-                    <p className="text-xs text-[var(--color-text-secondary)] leading-relaxed font-sans">
+                    <p className="text-xs text-[var(--color-text-secondary)] leading-relaxed font-body">
                         {t('settings.jailbreak.description')}
                     </p>
                 </div>
@@ -119,7 +119,7 @@ export const JailbreakTab: React.FC = () => {
                     )}
                 />
                 <div className="flex items-center justify-between text-xs">
-                    <span className="text-[var(--color-text-muted)] font-sans">
+                    <span className="text-[var(--color-text-muted)] font-body">
                         {t('settings.jailbreak.charCount', { count: prompt.length })}
                     </span>
                 </div>
