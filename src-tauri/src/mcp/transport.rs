@@ -1,7 +1,8 @@
 //! MCP Transport Layer — trait-based abstraction for MCP server communication.
 //!
-//! Implements stdio transport (subprocess stdin/stdout) and
-//! Streamable HTTP transport (POST JSON-RPC to an HTTP endpoint).
+//! Implements stdio transport (subprocess stdin/stdout),
+//! Streamable HTTP transport (POST JSON-RPC to an HTTP endpoint),
+//! and SSE transport (GET event stream + POST to dynamic endpoint).
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -81,9 +82,24 @@ impl StdioTransport {
         args: &[String],
         env: Option<&HashMap<String, String>>,
     ) -> Result<Self, String> {
-        let mut cmd = Command::new(command);
-        cmd.args(args)
-            .stdin(std::process::Stdio::piped())
+        // On Windows, commands like "npx", "tsx" are actually .cmd/.bat scripts.
+        // Spawn via cmd.exe /C so Windows can resolve them automatically.
+        #[cfg(target_os = "windows")]
+        let mut cmd = {
+            let mut c = Command::new("cmd");
+            let mut cmd_args = vec!["/C".to_string(), command.to_string()];
+            cmd_args.extend(args.iter().cloned());
+            c.args(&cmd_args);
+            c
+        };
+        #[cfg(not(target_os = "windows"))]
+        let mut cmd = {
+            let mut c = Command::new(command);
+            c.args(args);
+            c
+        };
+
+        cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
@@ -461,4 +477,300 @@ fn parse_sse_response(sse_text: &str, expected_id: u64) -> Result<Value, String>
         }
     }
     Err("No matching JSON-RPC response found in SSE stream".to_string())
+}
+
+// ── SSE Transport ──────────────────────────────────────
+
+/// Communicates with an MCP server using the SSE transport protocol.
+///
+/// Protocol flow:
+/// 1. GET the configured URL to establish an SSE event stream
+/// 2. Server sends `event: endpoint` with the POST path (e.g. `/messages?sessionId=xxx`)
+/// 3. Client POSTs JSON-RPC requests to `{origin}{endpoint_path}`
+/// 4. Server pushes `event: message` with JSON-RPC responses via the SSE stream
+pub struct SseTransport {
+    /// The full SSE endpoint URL provided by the user (e.g. "http://localhost:8080/sse").
+    sse_url: String,
+    /// Origin extracted from the URL (e.g. "http://localhost:8080") for building POST URLs.
+    origin: String,
+    client: reqwest::Client,
+    next_id: AtomicU64,
+    connected: Arc<std::sync::atomic::AtomicBool>,
+    /// POST endpoint path received from the SSE stream (e.g. "/messages?sessionId=xxx").
+    post_endpoint: Arc<Mutex<Option<String>>>,
+    /// Pending request map: request ID → oneshot sender for the response.
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+}
+
+impl SseTransport {
+    pub fn new(url: &str) -> Self {
+        // No global timeout — SSE stream is long-lived.
+        // Per-request timeouts are applied on POST calls instead.
+        let client = reqwest::Client::builder()
+            .build()
+            .unwrap_or_default();
+
+        // Extract origin (scheme + host + port) from the URL for building POST URLs.
+        // e.g. "http://localhost:8080/sse" → "http://localhost:8080"
+        let origin = match reqwest::Url::parse(url) {
+            Ok(parsed) => parsed.origin().ascii_serialization(),
+            Err(_) => url.trim_end_matches('/').to_string(),
+        };
+
+        Self {
+            sse_url: url.to_string(),
+            origin,
+            client,
+            next_id: AtomicU64::new(1),
+            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            post_endpoint: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Establish the SSE connection by GET-ing the configured URL.
+    /// Spawns a background task that reads the event stream and dispatches responses.
+    pub async fn connect(&self) -> Result<(), String> {
+        println!("[MCP/SSE] Connecting to {}", self.sse_url);
+
+        let resp = self
+            .client
+            .get(&self.sse_url)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .map_err(|e| format!("SSE GET failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("SSE connect failed HTTP {}: {}", status, text));
+        }
+
+        self.connected.store(true, Ordering::SeqCst);
+
+        let connected = self.connected.clone();
+        let post_endpoint = self.post_endpoint.clone();
+        let pending = self.pending.clone();
+
+        // Spawn background task to read the SSE stream
+        tokio::spawn(async move {
+            use futures::StreamExt;
+
+            let mut stream = resp.bytes_stream();
+            let mut buffer = String::new();
+            let mut current_event = String::new();
+
+            while let Some(chunk) = stream.next().await {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("[MCP/SSE] Stream read error: {}", e);
+                        break;
+                    }
+                };
+
+                let text = match std::str::from_utf8(&chunk) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+
+                buffer.push_str(text);
+
+                // Process complete lines from the buffer
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+
+                    if line.is_empty() {
+                        // Empty line = end of event, reset event type
+                        current_event.clear();
+                        continue;
+                    }
+
+                    if let Some(event_type) = line.strip_prefix("event:") {
+                        current_event = event_type.trim().to_string();
+                    } else if let Some(data) = line.strip_prefix("data:") {
+                        let data = data.trim();
+
+                        match current_event.as_str() {
+                            "endpoint" => {
+                                println!("[MCP/SSE] Received endpoint: {}", data);
+                                *post_endpoint.lock().await = Some(data.to_string());
+                            }
+                            "message" => {
+                                if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(data) {
+                                    if let Some(id) = resp.id {
+                                        if let Some(sender) = pending.lock().await.remove(&id) {
+                                            let result = if let Some(error) = resp.error {
+                                                Err(error.to_string())
+                                            } else {
+                                                Ok(resp.result.unwrap_or(Value::Null))
+                                            };
+                                            let _ = sender.send(result);
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Ignore unknown event types
+                            }
+                        }
+                    }
+                    // Ignore lines that don't match event:/data: (e.g. comments starting with :)
+                }
+            }
+
+            // Stream ended — mark disconnected and notify all pending requests
+            eprintln!("[MCP/SSE] Event stream closed");
+            connected.store(false, Ordering::SeqCst);
+            let mut pending = pending.lock().await;
+            for (_, sender) in pending.drain() {
+                let _ = sender.send(Err("SSE stream closed".to_string()));
+            }
+        });
+
+        // Wait for the endpoint to be received (with timeout)
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if self.post_endpoint.lock().await.is_some() {
+                println!("[MCP/SSE] Connected successfully");
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                self.connected.store(false, Ordering::SeqCst);
+                return Err("Timed out waiting for SSE endpoint event".to_string());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Build the full POST URL from the base URL and the endpoint path.
+    async fn get_post_url(&self) -> Result<String, String> {
+        let endpoint = self
+            .post_endpoint
+            .lock()
+            .await
+            .clone()
+            .ok_or("SSE endpoint not yet received")?;
+
+        // The endpoint may be an absolute path or a relative path
+        if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+            Ok(endpoint)
+        } else {
+            Ok(format!("{}{}", self.origin, endpoint))
+        }
+    }
+}
+
+#[async_trait]
+impl McpTransport for SseTransport {
+    async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        if !self.is_connected() {
+            return Err("Transport disconnected".to_string());
+        }
+
+        let url = self.get_post_url().await?;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+
+        let mut body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+        });
+        if let Some(p) = params {
+            body["params"] = p;
+        }
+
+        // Register pending response before sending
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
+
+        // POST the request (with per-request timeout, not global)
+        let resp = self
+            .client
+            .post(&url)
+            .timeout(std::time::Duration::from_secs(30))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                // Clean up pending on send failure
+                let pending = self.pending.clone();
+                let id = id;
+                tokio::spawn(async move {
+                    pending.lock().await.remove(&id);
+                });
+                format!("SSE POST failed: {}", e)
+            })?;
+
+        if !resp.status().is_success() {
+            self.pending.lock().await.remove(&id);
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("SSE POST HTTP {}: {}", status, text));
+        }
+
+        // Wait for the response to arrive via the SSE stream
+        tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+            .await
+            .map_err(|_| {
+                let pending = self.pending.clone();
+                let id = id;
+                tokio::spawn(async move {
+                    pending.lock().await.remove(&id);
+                });
+                format!("MCP SSE request '{}' timed out", method)
+            })?
+            .map_err(|_| "SSE response channel dropped".to_string())?
+    }
+
+    async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), String> {
+        if !self.is_connected() {
+            return Err("Transport disconnected".to_string());
+        }
+
+        let url = self.get_post_url().await?;
+
+        let mut body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+        });
+        if let Some(p) = params {
+            body["params"] = p;
+        }
+
+        let resp = self
+            .client
+            .post(&url)
+            .timeout(std::time::Duration::from_secs(30))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("SSE notify POST failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("SSE notify HTTP {}: {}", status, text));
+        }
+
+        Ok(())
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::SeqCst)
+    }
+
+    async fn shutdown(&self) -> Result<(), String> {
+        self.connected.store(false, Ordering::SeqCst);
+        // Clean up all pending requests
+        let mut pending = self.pending.lock().await;
+        for (_, sender) in pending.drain() {
+            let _ = sender.send(Err("Transport shutting down".to_string()));
+        }
+        Ok(())
+    }
 }
