@@ -145,6 +145,7 @@ pub async fn register_mcp_tools(
     drop(mgr); // Release lock before acquiring registry write lock
 
     let mut reg = registry.write().await;
+    reg.clear_mcp_tools();
     for (server_name, tool) in tools {
         let handler = McpToolHandler {
             server_name,
@@ -153,6 +154,6 @@ pub async fn register_mcp_tools(
             input_schema: tool.input_schema,
             manager: manager.clone(),
         };
-        reg.register(handler);
+        reg.register_mcp(handler);
     }
 }

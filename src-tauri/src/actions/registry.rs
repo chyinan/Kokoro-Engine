@@ -109,12 +109,14 @@ pub trait ActionHandler: Send + Sync {
 
 pub struct ActionRegistry {
     handlers: HashMap<String, Arc<dyn ActionHandler>>,
+    mcp_tool_names: std::collections::HashSet<String>,
 }
 
 impl ActionRegistry {
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
+            mcp_tool_names: std::collections::HashSet::new(),
         }
     }
 
@@ -125,7 +127,20 @@ impl ActionRegistry {
         self.handlers.insert(name, Arc::new(handler));
     }
 
-    /// Execute a named action.
+    /// Register an MCP tool handler (tracked separately for cleanup).
+    pub fn register_mcp(&mut self, handler: impl ActionHandler + 'static) {
+        let name = handler.name().to_string();
+        self.mcp_tool_names.insert(name.clone());
+        self.handlers.insert(name, Arc::new(handler));
+    }
+
+    /// Remove all previously registered MCP tools.
+    pub fn clear_mcp_tools(&mut self) {
+        for name in self.mcp_tool_names.drain() {
+            self.handlers.remove(&name);
+        }
+    }
+
     pub async fn execute(
         &self,
         name: &str,
