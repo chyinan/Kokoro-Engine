@@ -142,13 +142,6 @@ impl McpClient {
             .map_err(|e| format!("Failed to parse tools/list: {}", e))?;
 
         println!("[MCP] Discovered {} tools", list.tools.len());
-        for tool in &list.tools {
-            println!(
-                "  - {}: {}",
-                tool.name,
-                tool.description.as_deref().unwrap_or("(no description)")
-            );
-        }
 
         self.tools = list.tools;
         Ok(())
