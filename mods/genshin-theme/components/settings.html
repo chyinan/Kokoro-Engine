@@ -119,8 +119,8 @@
         }
 
         .close-btn:hover {
-            background: var(--gi-danger);
-            border-color: var(--gi-danger);
+            background: #f87171;
+            border-color: #f87171;
             color: white;
             transform: rotate(90deg);
         }
@@ -257,7 +257,7 @@
         }
 
         .gi-toggle.checked {
-            background: var(--gi-green);
+            background: #4ade80;
         }
 
         .gi-toggle::after {
@@ -343,12 +343,12 @@
         }
 
         .gi-btn.danger {
-            border-color: var(--gi-danger);
-            color: var(--gi-danger);
+            border-color: #f87171;
+            color: #f87171;
         }
 
         .gi-btn.danger:hover {
-            background: var(--gi-danger);
+            background: #f87171;
             color: white;
         }
 
@@ -404,7 +404,7 @@
         }
 
         .img-delete-btn:hover {
-            background: var(--gi-danger);
+            background: #f87171;
         }
 
         /* List Items (Mods/MCP) */
@@ -445,11 +445,11 @@
         }
 
         .status-dot.connected {
-            background: var(--gi-green);
+            background: #4ade80;
         }
 
         .status-dot.error {
-            background: var(--gi-danger);
+            background: #f87171;
         }
 
         /* Scrollbar */
@@ -1557,7 +1557,7 @@
                 // RVC Status
                 const rvcStatus = state.rvcAvailable ?
                     '<span style="color:var(--gi-green)">● 服务在线</span>' :
-                    '<span style="color:var(--gi-danger)">● 服务未连接</span>';
+                    '<span style="color:#f87171">● 服务未连接</span>';
 
                 sec.appendChild(createRow("服务状态", `
                     <div style="display:flex; justify-content:flex-end; align-items:center; gap:10px; width:100%">
@@ -2384,7 +2384,7 @@
 
                         const desc = document.createElement('div');
                         desc.className = 'list-item-desc';
-                        desc.innerHTML = `${srv.tool_count || 0} tools${srv.server_version ? ', v' + srv.server_version : ''}${srv.error ? ' — <span style="color:var(--gi-danger)">' + escapeHtml(srv.error) + '</span>' : ''}`;
+                        desc.innerHTML = `${srv.tool_count || 0} tools${srv.server_version ? ', v' + srv.server_version : ''}${srv.error ? ' — <span style="color:#f87171">' + escapeHtml(srv.error) + '</span>' : ''}`;
                         row.appendChild(desc);
 
                         sec.appendChild(row);
