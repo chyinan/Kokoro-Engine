@@ -17,7 +17,7 @@ import type { Live2DDisplayMode } from "./features/live2d/Live2DViewer";
 registerCoreComponents();
 
 // Build layout config as a function of displayMode
-function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string }): LayoutConfig {
+function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; gazeTracking: boolean }): LayoutConfig {
   return {
     root: {
       id: "root-layer",
@@ -31,6 +31,7 @@ function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string }
           props: {
             modelUrl: displayMode.modelUrl,
             displayMode: displayMode.mode,
+            gazeTracking: displayMode.gazeTracking,
           }
         },
         {
@@ -175,6 +176,15 @@ function App() {
     () => localStorage.getItem("kokoro_custom_model_path")
   );
 
+  const [gazeTracking, setGazeTracking] = useState<boolean>(
+    () => localStorage.getItem("kokoro_gaze_tracking") !== "false"
+  );
+
+  const handleGazeTrackingChange = (enabled: boolean) => {
+    setGazeTracking(enabled);
+    localStorage.setItem("kokoro_gaze_tracking", enabled ? "true" : "false");
+  };
+
   // ── Global Settings State ──
   const [availableModels, setAvailableModels] = useState<Live2dModelInfo[]>([]);
   const [persona, setPersonaState] = useState(() => localStorage.getItem("kokoro_persona") || "");
@@ -221,7 +231,7 @@ function App() {
     return "https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display/test/assets/haru/haru_greeter_t03.model3.json";
   }, [customModelPath]);
 
-  const layout = useMemo(() => createLayout({ mode: displayMode, modelUrl }), [displayMode, modelUrl]);
+  const layout = useMemo(() => createLayout({ mode: displayMode, modelUrl, gazeTracking }), [displayMode, modelUrl, gazeTracking]);
 
   const handleDisplayModeChange = (mode: Live2DDisplayMode) => {
     setDisplayMode(mode);
@@ -854,6 +864,8 @@ function App() {
             onDisplayModeChange={handleDisplayModeChange}
             customModelPath={customModelPath}
             onCustomModelChange={handleCustomModelChange}
+            gazeTracking={gazeTracking}
+            onGazeTrackingChange={handleGazeTrackingChange}
             // External state for Mod
             availableModels={availableModels}
             persona={persona}

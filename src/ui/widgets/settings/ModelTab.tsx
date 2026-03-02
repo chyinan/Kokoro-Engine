@@ -14,11 +14,14 @@ export interface ModelTabProps {
     onDisplayModeChange: (mode: Live2DDisplayMode) => void;
     customModelPath: string | null;
     onCustomModelPathChange: (path: string | null) => void;
+    gazeTracking?: boolean;
+    onGazeTrackingChange?: (enabled: boolean) => void;
 }
 
 export default function ModelTab({
     displayMode, onDisplayModeChange,
     customModelPath, onCustomModelPathChange,
+    gazeTracking = true, onGazeTrackingChange,
 }: ModelTabProps) {
     const { t } = useTranslation();
     const [isImporting, setIsImporting] = useState(false);
@@ -142,6 +145,33 @@ export default function ModelTab({
                         </motion.button>
                     ))}
                 </div>
+            </div>
+
+            {/* Gaze Tracking Toggle */}
+            <div className="flex items-center justify-between py-3 px-1">
+                <div>
+                    <label className={labelClasses}>{t("settings.model.gaze_tracking.label")}</label>
+                    <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
+                        {t("settings.model.gaze_tracking.desc")}
+                    </p>
+                </div>
+                <button
+                    onClick={() => onGazeTrackingChange?.(!gazeTracking)}
+                    className={clsx(
+                        "relative w-10 h-5 rounded-full transition-colors flex-shrink-0 ml-4",
+                        gazeTracking
+                            ? "bg-[var(--color-accent)]"
+                            : "bg-[var(--color-border)]"
+                    )}
+                    role="switch"
+                    aria-checked={gazeTracking}
+                    aria-label={t("settings.model.gaze_tracking.label")}
+                >
+                    <span className={clsx(
+                        "absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform",
+                        gazeTracking && "translate-x-5"
+                    )} />
+                </button>
             </div>
 
             {/* Model List Section */}

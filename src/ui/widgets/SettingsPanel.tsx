@@ -43,6 +43,8 @@ interface SettingsPanelProps {
     onDisplayModeChange: (mode: Live2DDisplayMode) => void;
     customModelPath: string | null;
     onCustomModelChange: (path: string | null) => void;
+    gazeTracking?: boolean;
+    onGazeTrackingChange?: (enabled: boolean) => void;
     // Optional props for external state management (Mod support)
     availableModels?: any[]; // Live2dModelInfo[]
     persona?: string;
@@ -96,7 +98,7 @@ const tabs: { id: TabId; label: string; icon: typeof Key }[] = [
     { id: "backup", label: "settings.tabs.backup", icon: HardDrive },
 ];
 
-export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, sttConfig: sttConfigProp, voiceInterrupt: voiceInterruptProp }: SettingsPanelProps) {
+export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, sttConfig: sttConfigProp, voiceInterrupt: voiceInterruptProp }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [activeTab, setActiveTab] = useState<TabId>("bg");
     const bg = backgroundControls;
@@ -108,6 +110,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
     // Display & Model
     const [localDisplayMode, setLocalDisplayMode] = useState(displayMode);
     const [localCustomModelPath, setLocalCustomModelPath] = useState(customModelPath);
+    const [localGazeTracking, setLocalGazeTracking] = useState(gazeTrackingProp ?? true);
 
     // Background Config
     const [localBgConfig, setLocalBgConfig] = useState<BackgroundConfig>({ ...bg.config });
@@ -117,6 +120,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
         if (isOpen) {
             setLocalDisplayMode(displayMode);
             setLocalCustomModelPath(customModelPath);
+            setLocalGazeTracking(gazeTrackingProp ?? true);
             setLocalBgConfig({ ...bg.config });
             setPersonaText(localStorage.getItem("kokoro_persona") || "You are a friendly, warm companion character. Respond with personality and emotion.");
             setTtsVoice(localStorage.getItem("kokoro_tts_voice") || "alloy");
@@ -243,6 +247,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
         // Commit core settings
         onDisplayModeChange(localDisplayMode);
         onCustomModelChange(localCustomModelPath);
+        onGazeTrackingChange?.(localGazeTracking);
 
         // Commit background config
         bg.setConfig(localBgConfig);
@@ -444,6 +449,8 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                                     onDisplayModeChange={setLocalDisplayMode}
                                     customModelPath={localCustomModelPath}
                                     onCustomModelPathChange={setLocalCustomModelPath}
+                                    gazeTracking={localGazeTracking}
+                                    onGazeTrackingChange={setLocalGazeTracking}
                                 />
                             )}
 

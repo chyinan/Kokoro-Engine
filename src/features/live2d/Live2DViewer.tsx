@@ -49,15 +49,18 @@ export interface Live2DViewerProps {
     backgroundAlpha?: number;
     /** Display mode: full body, upper body, upper body + thighs */
     displayMode?: Live2DDisplayMode;
+    /** Whether the model's eyes follow the mouse cursor (default true) */
+    gazeTracking?: boolean;
 }
 
 // ── Component ──────────────────────────────────────
 
 const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
-    ({ modelUrl, controller, onHitAreaTap, className, backgroundAlpha = 0, displayMode = "full" }, ref) => {
+    ({ modelUrl, controller, onHitAreaTap, className, backgroundAlpha = 0, displayMode = "full", gazeTracking = true }, ref) => {
         const containerRef = useRef<HTMLDivElement>(null);
         const appRef = useRef<PIXI.Application | null>(null);
         const modelRef = useRef<Live2DModel | null>(null);
+        const gazeTrackingRef = useRef(gazeTracking);
 
         // Internal controller if none provided
         const internalControllerRef = useRef<Live2DController | null>(null);
@@ -144,10 +147,15 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
             return () => { unlisten?.(); };
         }, [getActiveController]);
 
+        // Sync gazeTracking prop to ref (avoids recreating handlePointerMove)
+        useEffect(() => {
+            gazeTrackingRef.current = gazeTracking;
+        }, [gazeTracking]);
+
         // Gaze tracking: model eyes follow cursor
         const handlePointerMove = useCallback((e: PIXI.InteractionEvent) => {
             const model = modelRef.current;
-            if (!model) return;
+            if (!model || !gazeTrackingRef.current) return;
             model.focus(e.data.global.x, e.data.global.y);
         }, []);
 

@@ -268,6 +268,10 @@
                 "button": "Live2D 가져오기",
                 "loading": "가져오는 중...",
                 "hint": ".zip 패키지 또는 .model3.json 파일을 선택하세요."
+            },
+            "gaze_tracking": {
+                "label": "시선 추적",
+                "desc": "모델의 눈이 마우스 커서를 따라갑니다"
             }
         },
         "image_gen": {
