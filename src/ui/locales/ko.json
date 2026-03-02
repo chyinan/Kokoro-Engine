@@ -220,13 +220,15 @@
             },
             "providers": {
                 "openai": "OpenAI Whisper (클라우드)",
+                "openai_whisper": "OpenAI Whisper (클라우드)",
                 "whisper_cpp": "Whisper.cpp (로컬)",
                 "faster_whisper": "Faster Whisper (로컬)",
                 "local_whisper": "Local Whisper (일반)"
             },
             "fields": {
                 "server_url": "서버 URL",
-                "api_key_hint": "API 키 (환경 변수 사용 시 비워둠)"
+                "api_key_hint": "API 키 (환경 변수 사용 시 비워둠)",
+                "model": "모델"
             },
             "auto_send": {
                 "title": "자동 전송",

@@ -220,13 +220,15 @@
             },
             "providers": {
                 "openai": "OpenAI Whisper (クラウド)",
+                "openai_whisper": "OpenAI Whisper (クラウド)",
                 "whisper_cpp": "Whisper.cpp (ローカル)",
                 "faster_whisper": "Faster Whisper (ローカル)",
                 "local_whisper": "Local Whisper (汎用)"
             },
             "fields": {
                 "server_url": "サーバーURL",
-                "api_key_hint": "APIキー (環境変数を使用する場合は空のまま)"
+                "api_key_hint": "APIキー (環境変数を使用する場合は空のまま)",
+                "model": "モデル"
             },
             "auto_send": {
                 "title": "自動送信",

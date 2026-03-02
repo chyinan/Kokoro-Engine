@@ -220,13 +220,15 @@
             },
             "providers": {
                 "openai": "OpenAI Whisper (Cloud)",
+                "openai_whisper": "OpenAI Whisper (Cloud)",
                 "whisper_cpp": "Whisper.cpp (Local)",
                 "faster_whisper": "Faster Whisper (Local)",
                 "local_whisper": "Local Whisper (Generic)"
             },
             "fields": {
                 "server_url": "Server URL",
-                "api_key_hint": "API Key (Leave empty to use env var)"
+                "api_key_hint": "API Key (Leave empty to use env var)",
+                "model": "Model"
             },
             "auto_send": {
                 "title": "Auto-send",

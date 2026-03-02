@@ -220,13 +220,15 @@
             },
             "providers": {
                 "openai": "OpenAI Whisper (云端)",
+                "openai_whisper": "OpenAI Whisper (云端)",
                 "whisper_cpp": "Whisper.cpp (本地)",
                 "faster_whisper": "Faster Whisper (本地)",
                 "local_whisper": "Local Whisper (通用)"
             },
             "fields": {
                 "server_url": "服务器地址",
-                "api_key_hint": "API Key (留空以使用环境变量)"
+                "api_key_hint": "API Key (留空以使用环境变量)",
+                "model": "模型"
             },
             "auto_send": {
                 "title": "自动发送",
