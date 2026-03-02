@@ -162,6 +162,20 @@ export default function SttTab({
                                         </div>
                                     )}
 
+                                    {/* Model (faster_whisper and openai_whisper) */}
+                                    {(activeProvider.provider_type === 'faster_whisper' || activeProvider.provider_type === 'openai_whisper') && (
+                                        <div className="space-y-1">
+                                            <div className="text-xs text-[var(--color-text-secondary)]">{t("settings.stt.fields.model")}</div>
+                                            <input
+                                                type="text"
+                                                value={activeProvider.model || ""}
+                                                onChange={(e) => updateProvider(activeProvider.id, { model: e.target.value })}
+                                                placeholder={activeProvider.provider_type === 'openai_whisper' ? "whisper-1" : "base"}
+                                                className="w-full px-3 py-1.5 rounded-md text-sm bg-[var(--color-bg-elevated)] border border-[var(--color-border)] focus:border-[var(--color-accent)] outline-none"
+                                            />
+                                        </div>
+                                    )}
+
                                     {/* API Key (OpenAI mainly) */}
                                     {activeProvider.provider_type === 'openai_whisper' && (
                                         <div className="space-y-1">
