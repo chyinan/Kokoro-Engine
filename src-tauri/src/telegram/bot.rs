@@ -284,6 +284,8 @@ async fn handle_text(
     let cleaned = strip_leaked_tags(&cleaned);
     // Strip remaining control tags that shouldn't appear in Telegram
     let cleaned = strip_control_tags(&cleaned);
+    let cleaned = compact_newlines(&cleaned);
+    let translation = translation.map(|t| compact_newlines(&t));
 
     // 5. Persist assistant message
     let metadata = translation
@@ -501,6 +503,8 @@ async fn handle_photo(
     let (cleaned, translation) = extract_translate_tags(&cleaned);
     let cleaned = strip_leaked_tags(&cleaned);
     let cleaned = strip_control_tags(&cleaned);
+    let cleaned = compact_newlines(&cleaned);
+    let translation = translation.map(|t| compact_newlines(&t));
 
     // 5. Persist
     let metadata = translation
@@ -725,6 +729,29 @@ fn strip_control_tags(text: &str) -> String {
         } else {
             break;
         }
+    }
+    result.trim().to_string()
+}
+
+/// Collapse 3+ consecutive newlines into 2 for cleaner Telegram output.
+fn compact_newlines(text: &str) -> String {
+    let mut result = String::new();
+    let mut newline_count = 0u32;
+    for ch in text.chars() {
+        if ch == '\n' {
+            newline_count += 1;
+        } else {
+            if newline_count > 0 {
+                for _ in 0..newline_count.min(2) {
+                    result.push('\n');
+                }
+                newline_count = 0;
+            }
+            result.push(ch);
+        }
+    }
+    for _ in 0..newline_count.min(2) {
+        result.push('\n');
     }
     result.trim().to_string()
 }
