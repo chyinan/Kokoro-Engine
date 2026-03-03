@@ -87,13 +87,24 @@ export function drawableHitTest(
     const parts = rawModel.parts;
     if (!drawables || !parts) return null;
 
-    // Convert PIXI global coordinates → model canvas space
-    const modelPos = model.toModelPosition(new PIXI.Point(globalX, globalY));
-    const mx = modelPos.x;
-    const my = modelPos.y;
-
     // Build render-order sorted index list (descending = front-most first)
     const count = drawables.count;
+
+    // Convert PIXI global coordinates → Cubism unit space.
+    // toModelPosition returns canvas pixel coords; drawable vertices are in
+    // unit space (pixels / PixelsPerUnit, centered at canvas origin).
+    const modelPos = model.toModelPosition(new PIXI.Point(globalX, globalY));
+    const ci = (coreModel as any)._model?.canvasinfo;
+    const ppu: number = ci?.PixelsPerUnit ?? 1;
+    const originX: number = ci?.CanvasOriginX ?? 0;
+    const originY: number = ci?.CanvasOriginY ?? 0;
+    const mx = (modelPos.x - originX) / ppu;
+    const my = -(modelPos.y - originY) / ppu;
+
+    if (debug) {
+        console.log(`[HitTest] global=(${globalX.toFixed(1)}, ${globalY.toFixed(1)}) → model=(${mx.toFixed(3)}, ${my.toFixed(3)}) drawables=${count}`);
+    }
+
     const sortedIndices = new Array<number>(count);
     for (let i = 0; i < count; i++) sortedIndices[i] = i;
     sortedIndices.sort((a, b) => drawables.renderOrders[b] - drawables.renderOrders[a]);
@@ -105,6 +116,11 @@ export function drawableHitTest(
         // Skip invisible or nearly transparent drawables
         if (drawables.opacities[i] < 0.01) continue;
         if (!coreModel.getDrawableDynamicFlagIsVisible(i)) continue;
+
+        // Skip Cubism built-in HitArea overlay meshes — they are transparent
+        // collision regions that would block all real drawable hits.
+        const id = drawables.ids[i] ?? "";
+        if (/^HitArea/i.test(id)) continue;
 
         const verts = drawables.vertexPositions[i] as Float32Array;
         const indices = drawables.indices[i] as Uint16Array;
@@ -129,19 +145,28 @@ export function drawableHitTest(
 
         const region = resolveBodyRegion(partName, drawableId);
 
+        // Refine "body" hits using Y position — lower portion is likely legs.
+        // Threshold is auto-computed from PartBody drawable Y distribution.
+        const refined = (region === "body")
+            ? refineBodyRegion(my, drawables, parts, debug)
+            : region;
+
         if (debug) {
             console.log(
                 `[HitTest] renderOrder=${drawables.renderOrders[i]}` +
                 ` | part="${partName}" | drawable="${drawableId}"` +
-                ` → region="${region}"`
+                ` → region="${region}"${refined !== region ? ` → refined="${refined}"` : ""}`
             );
         }
 
         // Returns "unknown" if the name doesn't match any region rule.
         // Caller can distinguish "unknown hit" from "no hit at all" (null).
-        return region;
+        return refined;
     }
 
+    if (debug) {
+        console.log(`[HitTest] No mesh hit at model=(${mx.toFixed(1)}, ${my.toFixed(1)})`);
+    }
     return null;
 }
 
@@ -248,4 +273,50 @@ function pointInTriangle(
     const v = (dot00 * dot12 - dot01 * dot02) * invDenom;
 
     return u >= 0 && v >= 0 && u + v <= 1;
+}
+
+/**
+ * Refine a "body" region hit using Y position.
+ * Scans all PartBody drawables to find the median Y center, then uses
+ * the lower 40% of that range as the leg threshold — adapts to each model.
+ */
+function refineBodyRegion(my: number, drawables: any, parts: any, debug = false): BodyRegion {
+    const parentPartIndices: Int32Array | undefined = drawables.parentPartIndices;
+    if (!parentPartIndices) return "body";
+
+    const yCenters: number[] = [];
+    for (let i = 0; i < drawables.count; i++) {
+        if (drawables.opacities[i] < 0.01) continue;
+        const partIdx = parentPartIndices[i];
+        if (partIdx < 0) continue;
+        const partName: string = parts.ids[partIdx] ?? "";
+        if (!/body|胴|からだ/i.test(partName)) continue;
+
+        const verts = drawables.vertexPositions[i] as Float32Array;
+        if (!verts || verts.length < 4) continue;
+        let minY = Infinity, maxY = -Infinity;
+        for (let j = 1; j < verts.length; j += 2) {
+            if (verts[j] < minY) minY = verts[j];
+            if (verts[j] > maxY) maxY = verts[j];
+        }
+        yCenters.push((minY + maxY) / 2);
+    }
+
+    if (debug) {
+        console.log(`[HitTest] refineBodyRegion: my=${my.toFixed(3)} yCenters(${yCenters.length})`);
+    }
+
+    if (yCenters.length === 0) return "body";
+
+    yCenters.sort((a, b) => a - b);
+    const mid = Math.floor(yCenters.length / 2);
+    const legThreshold = yCenters.length % 2 === 0
+        ? (yCenters[mid - 1] + yCenters[mid]) / 2
+        : yCenters[mid];
+
+    if (debug) {
+        console.log(`[HitTest] bodyY range=[${yCenters[0].toFixed(3)}, ${yCenters[yCenters.length-1].toFixed(3)}] median(legThreshold)=${legThreshold.toFixed(3)}`);
+    }
+
+    return my < legThreshold ? "leg" : "body";
 }
