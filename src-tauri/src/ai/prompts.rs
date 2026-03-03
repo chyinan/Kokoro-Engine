@@ -8,7 +8,12 @@ Schema:
   "emotion_target": null | "happy" | "sad" | "angry" | "shy" | "calm" | "surprised" | "thinking" | "neutral" | "excited" | "smug" | "worried",
   "need_translation": true | false,
   "extra_info": string | null
-}"#;
+}
+
+Rules:
+- "emotion_target" MUST be null unless the user is explicitly asking the character to change their expression (e.g. "be happy", "look sad", "smile for me"). Do NOT infer emotion from message tone or content.
+- "action_request" is for explicit commands only.
+- "need_translation" is true only if the user is asking for a translation."#;
 
 pub const BG_IMAGE_ANALYZER_PROMPT: &str = r#"You are a background scene analyzer for a virtual character chat application.
 Given a character's reply, decide if generating a background image would enhance the atmosphere.
