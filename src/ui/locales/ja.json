@@ -95,6 +95,16 @@
             "saving": "保存中...",
             "vision_mode": "ビジョンモード",
             "vision_desc": "マルチモーダルモデルでの画像アップロードを有効にする",
+            "context": {
+                "title": "コンテキスト管理",
+                "desc": "会話履歴の保持方法を制御します",
+                "strategy_window": "ローリングウィンドウ",
+                "strategy_window_desc": "最新30件のメッセージを保持",
+                "strategy_summary": "要約圧縮",
+                "strategy_summary_desc": "古いメッセージを要約に圧縮",
+                "max_chars_label": "メッセージ最大文字数",
+                "max_chars_hint": "この長さを超えるメッセージは切り捨てられます。両方の戦略に適用されます。"
+            },
             "system_llm": {
                 "title": "システム LLM (意図解釈)",
                 "desc": "アクションや表情の制御に使用する独立したモデルです。コストや遅延を抑えるため、より小型で高速なモデル（例：gpt-4o-mini, llama3:8b）を推奨します。",

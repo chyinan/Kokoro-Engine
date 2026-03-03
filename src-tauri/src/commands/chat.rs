@@ -4,10 +4,57 @@ use crate::commands::system::WindowSizeState;
 use crate::imagegen::ImageGenService;
 use crate::llm::service::LlmService;
 use futures::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::{Emitter, Manager, State, Window};
 use tokio::sync::RwLock;
+
+#[derive(Serialize, Deserialize)]
+pub struct ContextSettings {
+    pub strategy: String,
+    pub max_message_chars: usize,
+}
+
+#[tauri::command]
+pub async fn get_context_settings(
+    state: State<'_, AIOrchestrator>,
+) -> Result<ContextSettings, String> {
+    let (strategy, max_message_chars) = state.get_context_settings().await;
+    Ok(ContextSettings { strategy, max_message_chars })
+}
+
+#[tauri::command]
+pub async fn set_context_settings(
+    state: State<'_, AIOrchestrator>,
+    settings: ContextSettings,
+) -> Result<(), String> {
+    // Validate strategy
+    let strategy = if settings.strategy == "summary" {
+        "summary".to_string()
+    } else {
+        "window".to_string()
+    };
+    // Clamp max_message_chars to safe range
+    let max_chars = settings.max_message_chars.clamp(100, 50_000);
+
+    state.set_context_settings(strategy.clone(), max_chars).await;
+
+    // Persist to disk
+    let app_data = dirs_next::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("com.chyin.kokoro");
+    let _ = std::fs::create_dir_all(&app_data);
+    let path = app_data.join("context_settings.json");
+    let json = serde_json::json!({
+        "strategy": strategy,
+        "max_message_chars": max_chars,
+    });
+    if let Err(e) = std::fs::write(&path, json.to_string()) {
+        eprintln!("[Context] Failed to persist context_settings: {}", e);
+    }
+
+    Ok(())
+}
 
 #[derive(serde::Deserialize)]
 pub struct ChatRequest {
@@ -454,6 +501,7 @@ pub async fn stream_chat(
     let mut all_cleaned_text = String::new();
     let mut all_translations = Vec::new();
     let mut bg_generated_by_tool = false;
+    let mut draft_row_id: Option<i64> = None;
 
     for round in 0..MAX_TOOL_ROUNDS {
         println!("[Chat] Tool loop round {}", round + 1);
@@ -519,6 +567,28 @@ pub async fn stream_chat(
                 all_cleaned_text.push(' ');
             }
             all_cleaned_text.push_str(&cleaned_text);
+        }
+
+        // Persist assistant draft incrementally (skip for hidden interactions)
+        if !request.hidden && !all_cleaned_text.is_empty() {
+            let draft_content = strip_leaked_tags(&all_cleaned_text);
+            if !draft_content.is_empty() {
+                match draft_row_id {
+                    None => {
+                        // First round: insert draft row
+                        match state.persist_streaming_draft(&draft_content).await {
+                            Ok(id) => { draft_row_id = Some(id); }
+                            Err(e) => { eprintln!("[Chat] Failed to persist streaming draft: {}", e); }
+                        }
+                    }
+                    Some(id) => {
+                        // Subsequent rounds: update draft row
+                        if let Err(e) = state.update_streaming_draft(id, &draft_content, None).await {
+                            eprintln!("[Chat] Failed to update streaming draft: {}", e);
+                        }
+                    }
+                }
+            }
         }
 
         // No tool calls → final round
@@ -613,9 +683,33 @@ pub async fn stream_chat(
         } else {
             None
         };
-        state
-            .add_message_with_metadata("assistant".to_string(), full_response.clone(), metadata)
-            .await;
+
+        // Update the draft row with final content + metadata (DB already has the row)
+        if let Some(row_id) = draft_row_id {
+            if let Err(e) = state.update_streaming_draft(row_id, &full_response, metadata.as_deref()).await {
+                eprintln!("[Chat] Failed to finalize streaming draft: {}", e);
+            }
+        }
+
+        // Add to in-memory history only (DB already persisted)
+        {
+            let max_chars = *state.max_message_chars.lock().await;
+            let content = if full_response.chars().count() > max_chars {
+                let truncated: String = full_response.chars().take(max_chars).collect();
+                format!("{}…[truncated]", truncated)
+            } else {
+                full_response.clone()
+            };
+            let mut history = state.history.lock().await;
+            history.push_back(crate::ai::context::Message {
+                role: "assistant".to_string(),
+                content,
+                metadata: None,
+            });
+            if history.len() > 30 {
+                history.pop_front();
+            }
+        }
     }
 
     // Periodic memory extraction

@@ -131,6 +131,21 @@ export async function clearHistory(): Promise<void> {
     return invoke("clear_history");
 }
 
+// ── Context Settings ───────────────────────────────
+
+export interface ContextSettings {
+    strategy: "window" | "summary";
+    max_message_chars: number;
+}
+
+export async function getContextSettings(): Promise<ContextSettings> {
+    return invoke<ContextSettings>("get_context_settings");
+}
+
+export async function setContextSettings(settings: ContextSettings): Promise<void> {
+    return invoke("set_context_settings", { settings });
+}
+
 export async function deleteLastMessages(count: number): Promise<void> {
     return invoke("delete_last_messages", { count });
 }

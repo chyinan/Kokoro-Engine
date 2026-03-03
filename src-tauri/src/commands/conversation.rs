@@ -83,7 +83,8 @@ pub async fn load_conversation(
     // 设置当前对话 ID
     {
         let mut conv_id = state.current_conversation_id.lock().await;
-        *conv_id = Some(request.id);
+        *conv_id = Some(request.id.clone());
+        crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&request.id));
     }
 
     Ok(rows

@@ -95,6 +95,16 @@
             "saving": "Saving...",
             "vision_mode": "Vision Mode",
             "vision_desc": "Enable image upload in chat for multimodal models",
+            "context": {
+                "title": "Context Management",
+                "desc": "Controls how conversation history is retained",
+                "strategy_window": "Rolling Window",
+                "strategy_window_desc": "Keep last 30 messages",
+                "strategy_summary": "Summary Compression",
+                "strategy_summary_desc": "Compress old messages into summaries",
+                "max_chars_label": "Max chars per message",
+                "max_chars_hint": "Messages exceeding this length will be truncated. Applies to both strategies."
+            },
             "system_llm": {
                 "title": "System LLM (Intent Parsing)",
                 "desc": "Separate model for controlling actions/emotions. A smaller/faster model (e.g. gpt-4o-mini, llama3:8b) is recommended to save costs/latency.",

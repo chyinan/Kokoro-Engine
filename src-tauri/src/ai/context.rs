@@ -68,6 +68,10 @@ pub struct AIOrchestrator {
     pub proactive_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// 当前活跃对话 ID
     pub current_conversation_id: Arc<Mutex<Option<String>>>,
+    /// Context management strategy: "window" | "summary"
+    pub context_strategy: Arc<Mutex<String>>,
+    /// Max characters per message before truncation
+    pub max_message_chars: Arc<Mutex<usize>>,
 }
 
 impl AIOrchestrator {
@@ -204,6 +208,8 @@ impl AIOrchestrator {
             idle_behaviors: Arc::new(Mutex::new(IdleBehaviorSystem::new())),
             proactive_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             current_conversation_id: Arc::new(Mutex::new(None)),
+            context_strategy: Arc::new(Mutex::new("window".to_string())),
+            max_message_chars: Arc::new(Mutex::new(2000)),
         })
     }
 
@@ -370,6 +376,18 @@ impl AIOrchestrator {
             *count += 1;
         }
 
+        // Truncate single message if too long
+        let max_chars = *self.max_message_chars.lock().await;
+        let content = if content.chars().count() > max_chars {
+            let truncated: String = content.chars().take(max_chars).collect();
+            format!("{}…[truncated]", truncated)
+        } else {
+            content
+        };
+
+        // Persist to database FIRST so no code path can skip it
+        let _ = self.persist_message(&role, &content, metadata.as_deref()).await;
+
         let mut history = self.history.lock().await;
         history.push_back(Message {
             role: role.clone(),
@@ -377,14 +395,41 @@ impl AIOrchestrator {
             metadata: None,
         });
 
-        // Basic rolling window by count for now, implementation should be token-based primarily
-        if history.len() > 30 {
+        // Rolling window: keep at most 30 messages
+        // If summary strategy, compress oldest 10 when exceeding 20
+        let strategy = self.context_strategy.lock().await.clone();
+        if history.len() > 20 && strategy == "summary" {
+            // Take oldest 10 for summarization
+            let to_summarize: Vec<Message> = history.iter().take(10).cloned().collect();
+            for _ in 0..10 {
+                history.pop_front();
+            }
+            drop(history);
+
+            // Spawn async summarization task (non-blocking)
+            let memory_manager = self.memory_manager.clone();
+            let cid = self.character_id.lock().await.clone();
+            tauri::async_runtime::spawn(async move {
+                let formatted = to_summarize
+                    .iter()
+                    .map(|m| format!("{}: {}", m.role, m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                let summary = format!(
+                    "[Auto-summary of {} messages]: {}",
+                    to_summarize.len(),
+                    formatted.chars().take(500).collect::<String>()
+                );
+
+                println!("[Context] Summary compression: storing {} msg summary for '{}'", to_summarize.len(), cid);
+                if let Err(e) = memory_manager.save_session_summary(&cid, &summary).await {
+                    eprintln!("[Context] Failed to save summary: {}", e);
+                }
+            });
+        } else if history.len() > 30 {
             history.pop_front();
         }
-        drop(history);
-
-        // 持久化到数据库
-        let _ = self.persist_message(&role, &content, metadata.as_deref()).await;
     }
 
     /// 将消息持久化到 SQLite，如果没有活跃对话则自动创建
@@ -421,6 +466,8 @@ impl AIOrchestrator {
             .await?;
 
             *conv_id_lock = Some(new_id.clone());
+            // Persist conversation_id to disk for hot-reload recovery
+            Self::persist_conversation_id(Some(&new_id));
             new_id
         };
         drop(conv_id_lock);
@@ -444,6 +491,81 @@ impl AIOrchestrator {
             .execute(&self.db)
             .await?;
 
+        Ok(())
+    }
+
+    /// Persist current_conversation_id to disk for hot-reload recovery.
+    pub fn persist_conversation_id(id: Option<&str>) {
+        let app_data = dirs_next::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("com.chyin.kokoro");
+        let _ = std::fs::create_dir_all(&app_data);
+        let path = app_data.join("current_conversation_id.json");
+        let json = serde_json::json!({ "conversation_id": id });
+        if let Err(e) = std::fs::write(&path, json.to_string()) {
+            eprintln!("[Context] Failed to persist conversation_id: {}", e);
+        }
+    }
+
+    /// Insert a streaming assistant draft into the DB. Returns the row id for later update.
+    pub async fn persist_streaming_draft(&self, content: &str) -> Result<i64> {
+        let cid = self.character_id.lock().await.clone();
+        let mut conv_id_lock = self.current_conversation_id.lock().await;
+
+        // Ensure conversation exists
+        let conv_id = if let Some(ref id) = *conv_id_lock {
+            id.clone()
+        } else {
+            let new_id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+            )
+            .bind(&new_id)
+            .bind(&cid)
+            .bind("新对话")
+            .bind(&now)
+            .bind(&now)
+            .execute(&self.db)
+            .await?;
+            *conv_id_lock = Some(new_id.clone());
+            Self::persist_conversation_id(Some(&new_id));
+            new_id
+        };
+        drop(conv_id_lock);
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, 'assistant', ?, NULL, ?)"
+        )
+        .bind(&conv_id)
+        .bind(content)
+        .bind(&now)
+        .execute(&self.db)
+        .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    /// Update a streaming draft row with final content and metadata.
+    pub async fn update_streaming_draft(&self, row_id: i64, content: &str, metadata: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE conversation_messages SET content = ?, metadata = ? WHERE id = ?")
+            .bind(content)
+            .bind(metadata)
+            .bind(row_id)
+            .execute(&self.db)
+            .await?;
+
+        // Update conversation updated_at
+        let conv_id = self.current_conversation_id.lock().await.clone();
+        if let Some(ref id) = conv_id {
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
+                .bind(&now)
+                .bind(id)
+                .execute(&self.db)
+                .await?;
+        }
         Ok(())
     }
 
@@ -723,11 +845,23 @@ impl AIOrchestrator {
         Ok(final_messages)
     }
 
+    pub async fn get_context_settings(&self) -> (String, usize) {
+        let strategy = self.context_strategy.lock().await.clone();
+        let max_chars = *self.max_message_chars.lock().await;
+        (strategy, max_chars)
+    }
+
+    pub async fn set_context_settings(&self, strategy: String, max_chars: usize) {
+        *self.context_strategy.lock().await = strategy;
+        *self.max_message_chars.lock().await = max_chars;
+    }
+
     pub async fn clear_history(&self) {
         let mut history = self.history.lock().await;
         history.clear();
         // 清空当前对话 ID，下次发消息时会创建新对话
         let mut conv_id = self.current_conversation_id.lock().await;
         *conv_id = None;
+        Self::persist_conversation_id(None);
     }
 }

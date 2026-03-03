@@ -4,7 +4,7 @@
  * Manages OpenAI and Ollama providers through backend `LlmConfig`.
  * Provider-specific fields shown/hidden based on active provider type.
  */
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { clsx } from "clsx";
 import { RefreshCw, Check, AlertCircle, Save, Trash2 } from "lucide-react";
 import { motion } from "framer-motion";
@@ -15,9 +15,12 @@ import {
     getLlmConfig,
     saveLlmConfig,
     listOllamaModels,
+    getContextSettings,
+    setContextSettings as saveContextSettings,
     type LlmConfig,
     type LlmProviderConfig,
     type LlmPreset,
+    type ContextSettings,
 } from "../../../lib/kokoro-bridge";
 
 export interface ApiTabProps {
@@ -35,6 +38,10 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
     const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [isLoadingModels, setIsLoadingModels] = useState(false);
     const [selectedPresetId, setSelectedPresetId] = useState<string>("");
+    const [contextSettings, setContextSettings] = useState<ContextSettings>({
+        strategy: "window",
+        max_message_chars: 2000,
+    });
 
     // Load config from backend on mount
     useEffect(() => {
@@ -48,6 +55,9 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
                 setError(String(e));
                 setLoading(false);
             });
+        getContextSettings()
+            .then(setContextSettings)
+            .catch((e) => console.error("Failed to load context settings:", e));
     }, []);
 
     const activeProvider = config
@@ -85,6 +95,21 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
             });
         },
         [config, activeProvider]
+    );
+
+    const saveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const handleContextSettingsChange = useCallback(
+        (updates: Partial<ContextSettings>) => {
+            const updated = { ...contextSettings, ...updates };
+            setContextSettings(updated);
+            // Debounce IPC save to avoid firing on every keystroke
+            if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
+            saveDebounceRef.current = setTimeout(() => {
+                saveContextSettings(updated).catch((e) => console.error("Failed to save context settings:", e));
+            }, 400);
+        },
+        [contextSettings]
     );
 
     const handleSavePreset = useCallback(() => {
@@ -519,6 +544,55 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
                     {error}
                 </div>
             )}
+
+            {/* Context Management */}
+            <div className="pt-4 border-t border-[var(--color-border)]">
+                <div className="mb-3">
+                    <label className="text-xs font-medium text-[var(--color-text-main)] block mb-1">
+                        {t("settings.api.context.title")}
+                    </label>
+                    <p className="text-[10px] text-[var(--color-text-muted)]">
+                        {t("settings.api.context.desc")}
+                    </p>
+                </div>
+                <div className="flex gap-2 mb-3">
+                    {(["window", "summary"] as const).map((s) => (
+                        <button
+                            key={s}
+                            onClick={() => handleContextSettingsChange({ strategy: s })}
+                            className={clsx(
+                                "flex-1 px-3 py-2 text-xs rounded-lg border transition-all",
+                                contextSettings.strategy === s
+                                    ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+                                    : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]"
+                            )}
+                        >
+                            <div className="font-medium">
+                                {t(`settings.api.context.strategy_${s}`)}
+                            </div>
+                            <div className="text-[9px] opacity-70 mt-0.5">
+                                {t(`settings.api.context.strategy_${s}_desc`)}
+                            </div>
+                        </button>
+                    ))}
+                </div>
+                <div>
+                    <label className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] font-semibold mb-1 block">
+                        {t("settings.api.context.max_chars_label")}
+                    </label>
+                    <input
+                        type="number"
+                        min={100}
+                        max={20000}
+                        value={contextSettings.max_message_chars}
+                        onChange={(e) => handleContextSettingsChange({ max_message_chars: Number(e.target.value) })}
+                        className={clsx(inputClasses, "font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none")}
+                    />
+                    <p className="text-[9px] text-[var(--color-text-muted)] mt-1">
+                        {t("settings.api.context.max_chars_hint")}
+                    </p>
+                </div>
+            </div>
 
             {/* Vision Mode Toggle */}
             <div className="pt-2 border-t border-[var(--color-border)]">

@@ -95,6 +95,16 @@
             "saving": "保存中...",
             "vision_mode": "视觉模式",
             "vision_desc": "允许在对话中发送图片 (需要多模态模型)",
+            "context": {
+                "title": "上下文管理",
+                "desc": "控制对话历史的保留方式",
+                "strategy_window": "滚动窗口",
+                "strategy_window_desc": "保留最近 30 条消息",
+                "strategy_summary": "摘要压缩",
+                "strategy_summary_desc": "压缩旧消息为摘要",
+                "max_chars_label": "单条消息最大字符数",
+                "max_chars_hint": "超出长度的消息将被截断，两种策略均生效"
+            },
             "system_llm": {
                 "title": "系统 LLM (意图解析)",
                 "desc": "用于控制动作和表情的独立模型。建议使用体积更小/速度更快的模型（如 gpt-4o-mini, llama3:8b）以节省成本并降低延迟。",

@@ -95,6 +95,16 @@
             "saving": "저장 중...",
             "vision_mode": "비전 모드",
             "vision_desc": "멀티모달 모델을 위한 이미지 업로드 활성화",
+            "context": {
+                "title": "컨텍스트 관리",
+                "desc": "대화 기록 보존 방식을 제어합니다",
+                "strategy_window": "롤링 윈도우",
+                "strategy_window_desc": "최근 30개 메시지 유지",
+                "strategy_summary": "요약 압축",
+                "strategy_summary_desc": "오래된 메시지를 요약으로 압축",
+                "max_chars_label": "메시지당 최대 글자 수",
+                "max_chars_hint": "이 길이를 초과하는 메시지는 잘립니다. 두 전략 모두에 적용됩니다."
+            },
             "system_llm": {
                 "title": "시스템 LLM (의도 파악)",
                 "desc": "동작과 표정을 제어하는 독립 모델입니다. 비용과 지연을 줄이기 위해 더 작고 빠른 모델(예: gpt-4o-mini, llama3:8b)을 권장합니다.",

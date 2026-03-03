@@ -39,6 +39,8 @@ pub fn run() {
             commands::database::init_db,
             commands::database::test_vector_store,
             commands::chat::stream_chat,
+            commands::chat::get_context_settings,
+            commands::chat::set_context_settings,
             commands::context::set_persona,
             commands::context::set_character_name,
             commands::context::set_user_name,
@@ -152,6 +154,34 @@ pub fn run() {
                                 if let Some(prompt) = val.get("prompt").and_then(|v| v.as_str()) {
                                     orchestrator.set_jailbreak_prompt(prompt.to_string()).await;
                                     println!("[AI] Restored jailbreak_prompt ({} chars)", prompt.len());
+                                }
+                            }
+                        }
+
+                        // Restore context_settings from disk
+                        let ctx_settings_path = app_data_dir.join("context_settings.json");
+                        if let Ok(content) = std::fs::read_to_string(&ctx_settings_path) {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                                let strategy = val.get("strategy")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("window")
+                                    .to_string();
+                                let max_chars = val.get("max_message_chars")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(2000) as usize;
+                                orchestrator.set_context_settings(strategy.clone(), max_chars).await;
+                                println!("[AI] Restored context_settings: strategy={}, max_chars={}", strategy, max_chars);
+                            }
+                        }
+
+                        // Restore current_conversation_id from disk
+                        let conv_id_path = app_data_dir.join("current_conversation_id.json");
+                        if let Ok(content) = std::fs::read_to_string(&conv_id_path) {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                                if let Some(id) = val.get("conversation_id").and_then(|v| v.as_str()) {
+                                    let mut conv_id = orchestrator.current_conversation_id.lock().await;
+                                    *conv_id = Some(id.to_string());
+                                    println!("[AI] Restored current_conversation_id: {}", id);
                                 }
                             }
                         }
