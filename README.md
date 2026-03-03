@@ -64,7 +64,7 @@
     - **ElevenLabs**: 高质量 AI 语音合成，支持语音克隆。
     - **Browser TTS**: 浏览器原生轻量级 TTS。
 - **声音转换 (RVC)**: 支持 RVC (Retrieval-based Voice Conversion) 变声器接口，用于实现角色演唱歌曲。
-- **语音交互 (STT)**: 支持 Whisper/faster-whisper/whisper.cpp/SenseVoice 多引擎，内置唤醒词检测与 VAD 自动停止。
+- **语音交互 (STT)**: 支持 OpenAI Whisper/faster-whisper/whisper.cpp/SenseVoice 多引擎，内置唤醒词检测与 VAD 自动停止。
 
 ### 🔌 扩展能力
 - **MOD 系统**: 内置模块化 MOD 框架，支持通过 HTML/CSS/JS 替换聊天面板、设置面板等核心 UI 组件，支持自定义主题和 QuickJS 脚本沙箱。

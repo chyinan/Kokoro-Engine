@@ -64,7 +64,7 @@ Live2D, LLM, TTS 및 STT와 같은 기술을 통합하여 고도로 모듈화되
     - **ElevenLabs**: 고품질 AI 음성 합성, 음성 클로닝 지원.
     - **Browser TTS**: 브라우저 네이티브 경량 TTS.
 - **음성 변환 (RVC)**: 캐릭터 노래 등을 구현하기 위한 RVC(Retrieval-based Voice Conversion) 인터페이스를 지원합니다.
-- **음성 인식 (STT)**: Whisper/faster-whisper/whisper.cpp 모델의 초기 지원.
+- **음성 인식 (STT)**: OpenAI Whisper/faster-whisper/whisper.cpp/SenseVoice 멀티 엔진 지원, 웨이크 워드 감지 및 VAD 자동 중지 내장.
 
 ### 🔌 확장 능력
 - **MOD 시스템**: 내장 모듈식 MOD 프레임워크로 채팅 패널, 설정 패널 등 핵심 UI 컴포넌트를 HTML/CSS/JS로 커스텀 교체 가능. 커스텀 테마와 QuickJS 스크립트 샌드박스를 지원합니다.

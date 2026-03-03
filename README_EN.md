@@ -64,7 +64,7 @@ Features currently verified mainly in a local environment (RTX 4060 Laptop):
     - **ElevenLabs**: High-quality AI speech synthesis with voice cloning support.
     - **Browser TTS**: Lightweight browser-native TTS.
 - **Voice Conversion (RVC)**: Supports RVC (Retrieval-based Voice Conversion) interface for implementing character singing.
-- **Voice Interaction (STT)**: Initial support for Whisper/faster-whisper/whisper.cpp models.
+- **Voice Interaction (STT)**: Multi-engine support for OpenAI Whisper/faster-whisper/whisper.cpp/SenseVoice, with built-in wake word detection and VAD auto-stop.
 
 ### 🔌 Extended Capabilities
 - **MOD System**: Built-in modular MOD framework that allows replacing core UI components (chat panel, settings panel, etc.) with custom HTML/CSS/JS, with support for custom themes and a QuickJS script sandbox.
