@@ -67,18 +67,17 @@ impl SttEngine for SenseVoiceProvider {
         let start_time = std::time::Instant::now();
 
         // Build WAV bytes
-        let (file_bytes, file_name) = match audio {
-            AudioSource::Chunk(chunk) => (chunk.to_wav_bytes(), "audio.wav".to_string()),
+        let (file_bytes, file_name, mime) = match audio {
+            AudioSource::Chunk(chunk) => (chunk.to_wav_bytes(), "audio.wav".to_string(), "audio/wav"),
             AudioSource::Encoded { data, format } => {
-                let ext = match format.to_lowercase().as_str() {
-                    "wav" => "wav",
-                    "mp3" | "mpeg" => "mp3",
-                    "m4a" | "mp4" => "m4a",
-                    "flac" => "flac",
-                    "ogg" | "oga" => "ogg",
-                    _ => "wav",
+                let (ext, mime) = match format.to_lowercase().as_str() {
+                    "mp3" | "mpeg" => ("mp3", "audio/mpeg"),
+                    "m4a" | "mp4" => ("m4a", "audio/mp4"),
+                    "flac" => ("flac", "audio/flac"),
+                    "ogg" | "oga" => ("ogg", "audio/ogg"),
+                    _ => ("wav", "audio/wav"),
                 };
-                (data.clone(), format!("audio.{}", ext))
+                (data.clone(), format!("audio.{}", ext), mime)
             }
         };
 
@@ -87,7 +86,7 @@ impl SttEngine for SenseVoiceProvider {
 
         let part = multipart::Part::bytes(file_bytes)
             .file_name(file_name)
-            .mime_str("audio/wav")
+            .mime_str(mime)
             .map_err(|e| SttError::IOError(e.to_string()))?;
 
         let form = multipart::Form::new()

@@ -26,10 +26,31 @@ export function useWakeWord({ wakeWord, enabled, onWakeWordDetected }: WakeWordO
     const isRunningRef = useRef(false);
 
     // VAD state
-    const speechFramesRef = useRef(0);    // consecutive frames above threshold
-    const silenceFramesRef = useRef(0);   // consecutive frames below threshold
-    const isRecordingRef = useRef(false); // currently capturing a clip
+    const speechFramesRef = useRef(0);
+    const silenceFramesRef = useRef(0);
+    const isRecordingRef = useRef(false);
     const clipBufferRef = useRef<number[]>([]);
+
+    // Refs to avoid stale closures in processFrame
+    const wakeWordRef = useRef(wakeWord);
+    const onWakeWordDetectedRef = useRef(onWakeWordDetected);
+    useEffect(() => { wakeWordRef.current = wakeWord; }, [wakeWord]);
+    useEffect(() => { onWakeWordDetectedRef.current = onWakeWordDetected; }, [onWakeWordDetected]);
+
+    const checkWakeWord = useCallback(async (samples: number[]) => {
+        try {
+            const text: string = await invoke("transcribe_wake_word_audio", { samples });
+            if (!text) return;
+            const normalized = text.toLowerCase().replace(/\s+/g, "");
+            const keyword = wakeWordRef.current.toLowerCase().replace(/\s+/g, "");
+            if (!keyword) return; // guard against whitespace-only wake word
+            if (normalized.includes(keyword)) {
+                onWakeWordDetectedRef.current();
+            }
+        } catch (e) {
+            console.warn("[WakeWord] Transcription failed:", e);
+        }
+    }, []);
 
     const processFrame = useCallback((frame: Float32Array) => {
         // RMS energy
@@ -44,7 +65,6 @@ export function useWakeWord({ wakeWord, enabled, onWakeWordDetected }: WakeWordO
             if (rms > SPEECH_RMS_THRESHOLD) {
                 speechFramesRef.current++;
                 if (speechFramesRef.current >= SPEECH_ONSET_FRAMES) {
-                    // Speech started — begin clip
                     isRecordingRef.current = true;
                     silenceFramesRef.current = 0;
                     clipBufferRef.current = Array.from(frame);
@@ -53,8 +73,9 @@ export function useWakeWord({ wakeWord, enabled, onWakeWordDetected }: WakeWordO
                 speechFramesRef.current = 0;
             }
         } else {
-            // Recording clip
-            clipBufferRef.current.push(...Array.from(frame));
+            // Recording clip — use concat to avoid spread of 1024 args
+            const arr = Array.from(frame);
+            clipBufferRef.current = clipBufferRef.current.concat(arr);
 
             if (rms < SILENCE_RMS_THRESHOLD) {
                 silenceFramesRef.current++;
@@ -70,7 +91,6 @@ export function useWakeWord({ wakeWord, enabled, onWakeWordDetected }: WakeWordO
 
             if (shouldEnd) {
                 const clip = clipBufferRef.current.slice();
-                // Reset VAD state
                 isRecordingRef.current = false;
                 speechFramesRef.current = 0;
                 silenceFramesRef.current = 0;
@@ -81,21 +101,7 @@ export function useWakeWord({ wakeWord, enabled, onWakeWordDetected }: WakeWordO
                 }
             }
         }
-    }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-    const checkWakeWord = useCallback(async (samples: number[]) => {
-        try {
-            const text: string = await invoke("transcribe_wake_word_audio", { samples });
-            if (!text) return;
-            const normalized = text.toLowerCase().replace(/\s+/g, "");
-            const keyword = wakeWord.toLowerCase().replace(/\s+/g, "");
-            if (normalized.includes(keyword)) {
-                onWakeWordDetected();
-            }
-        } catch (e) {
-            console.warn("[WakeWord] Transcription failed:", e);
-        }
-    }, [wakeWord, onWakeWordDetected]);
+    }, [checkWakeWord]);
 
     const start = useCallback(async () => {
         if (isRunningRef.current) return;
@@ -122,11 +128,11 @@ export function useWakeWord({ wakeWord, enabled, onWakeWordDetected }: WakeWordO
             proc.connect(ctx.destination);
             processorRef.current = proc;
             isRunningRef.current = true;
-            console.log("[WakeWord] Listening for:", wakeWord);
+            console.log("[WakeWord] Listening for:", wakeWordRef.current);
         } catch (e) {
             console.error("[WakeWord] Failed to start mic:", e);
         }
-    }, [wakeWord, processFrame]);
+    }, [processFrame]);
 
     const stop = useCallback(() => {
         isRunningRef.current = false;
@@ -145,7 +151,7 @@ export function useWakeWord({ wakeWord, enabled, onWakeWordDetected }: WakeWordO
     }, []);
 
     useEffect(() => {
-        if (enabled && wakeWord) {
+        if (enabled && wakeWord.trim()) {
             start();
         } else {
             stop();

@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import { clsx } from "clsx";
 import { useTranslation } from "react-i18next";
+import { useEffect } from "react";
 import { Mic, Languages, Send, HandMetal, Server, Wand2 } from "lucide-react";
 import type { SttConfig, SttProviderConfig } from "../../../lib/kokoro-bridge";
 
@@ -34,9 +35,11 @@ export default function SttTab({
         ?? sttConfig?.providers?.[0];
 
     // If active_provider doesn't match any provider, fix it
-    if (sttConfig && activeProvider && sttConfig.active_provider !== activeProvider.id) {
-        onSttConfigChange({ ...sttConfig, active_provider: activeProvider.id });
-    }
+    useEffect(() => {
+        if (sttConfig && activeProvider && sttConfig.active_provider !== activeProvider.id) {
+            onSttConfigChange({ ...sttConfig, active_provider: activeProvider.id });
+        }
+    }, [sttConfig?.active_provider, activeProvider?.id]);
 
     if (!sttConfig || !sttConfig.providers) {
         return <div className="p-4 text-sm text-red-400">{t("settings.stt.error_invalid_config")}</div>;

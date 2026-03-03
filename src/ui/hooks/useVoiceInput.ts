@@ -208,6 +208,7 @@ export function useVoiceInput(
     }, [state, performSnapshot, processAudioChunk]);
 
     const stop = useCallback(async () => {
+        if (!isRunning.current) return; // Guard against double-stop
         isRunning.current = false;
 
         // cleanup timers
@@ -265,7 +266,7 @@ export function useVoiceInput(
     useEffect(() => {
         return () => {
             if (isRunning.current) {
-                stop();
+                stopRef.current?.();
             }
         };
     }, []);

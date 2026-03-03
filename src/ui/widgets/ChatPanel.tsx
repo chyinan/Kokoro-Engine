@@ -161,6 +161,8 @@ export default function ChatPanel() {
         const syncSttSettings = () => {
             setSttEnabled(localStorage.getItem("kokoro_stt_enabled") === "true");
             setSttAutoSend(localStorage.getItem("kokoro_stt_auto_send") === "true");
+            setWakeWordEnabled(localStorage.getItem("kokoro_wake_word_enabled") === "true");
+            setWakeWord(localStorage.getItem("kokoro_wake_word") || "");
         };
         window.addEventListener("storage", syncSttSettings);
         window.addEventListener("focus", syncSttSettings);
@@ -207,8 +209,8 @@ export default function ChatPanel() {
     const { state: voiceState, volume: micVolume, partialText: sttPartialText, start: startVoice, stop: stopVoice } = useVoiceInput(handleTranscription);
 
     // Wake word detection — starts main STT when keyword is heard
-    const wakeWordEnabled = localStorage.getItem("kokoro_wake_word_enabled") === "true";
-    const wakeWord = localStorage.getItem("kokoro_wake_word") || "";
+    const [wakeWordEnabled, setWakeWordEnabled] = useState(() => localStorage.getItem("kokoro_wake_word_enabled") === "true");
+    const [wakeWord, setWakeWord] = useState(() => localStorage.getItem("kokoro_wake_word") || "");
     useWakeWord({
         enabled: wakeWordEnabled && sttEnabled && !!wakeWord && voiceState === VoiceState.Idle,
         wakeWord,
