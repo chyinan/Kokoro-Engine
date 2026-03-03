@@ -497,6 +497,7 @@ pub async fn stream_chat(
     let mut all_cleaned_text = String::new();
     let mut all_translations = Vec::new();
     let mut bg_generated_by_tool = false;
+    let mut expression_set_by_tool = false;
     let mut draft_row_id: Option<i64> = None;
 
     for round in 0..MAX_TOOL_ROUNDS {
@@ -602,6 +603,9 @@ pub async fn stream_chat(
             if tc.name == "set_background" {
                 bg_generated_by_tool = true;
             }
+            if tc.name == "change_expression" {
+                expression_set_by_tool = true;
+            }
             if registry.needs_feedback(&tc.name) {
                 any_needs_feedback = true;
             }
@@ -695,6 +699,37 @@ pub async fn stream_chat(
                 Err(e) => {
                     eprintln!("[Chat] Fallback translation failed: {}", e);
                 }
+            }
+        }
+    }
+
+    // Fallback emotion: if main LLM never called change_expression, infer via system LLM
+    if !expression_set_by_tool && !full_response.is_empty() {
+        println!("[Chat] Expression not set by tool, triggering fallback emotion analysis");
+        let emotion_messages = vec![
+            crate::llm::openai::Message {
+                role: "system".to_string(),
+                content: crate::llm::openai::MessageContent::Text(
+                    crate::ai::prompts::EMOTION_ANALYZER_PROMPT.to_string(),
+                ),
+            },
+            crate::llm::openai::Message {
+                role: "user".to_string(),
+                content: crate::llm::openai::MessageContent::Text(full_response.clone()),
+            },
+        ];
+        match system_provider.chat(emotion_messages, None).await {
+            Ok(json_str) => {
+                let clean = json_str.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```");
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(clean) {
+                    if let Some(expr) = val.get("expression").and_then(|v| v.as_str()) {
+                        println!("[Chat] Fallback expression: {}", expr);
+                        let _ = window.emit("chat-expression", serde_json::json!({ "expression": expr, "mood": 0.5 }));
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[Chat] Fallback emotion analysis failed: {}", e);
             }
         }
     }
