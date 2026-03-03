@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useDeferredValue } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
@@ -64,6 +64,7 @@ export default function ChatPanel() {
     const { t } = useTranslation();
     const [collapsed, setCollapsed] = useState(false);
     const [messages, setMessages] = useState<ChatMessage[]>([]);
+    const deferredMessages = useDeferredValue(messages);
     const [input, setInput] = useState("");
     const [isStreaming, setIsStreaming] = useState(false);
     const isStreamingRef = useRef(false);
@@ -761,7 +762,7 @@ export default function ChatPanel() {
                 className="flex-1 overflow-y-auto p-4 space-y-3 scrollable"
             >
                 <AnimatePresence initial={false}>
-                    {messages.map((msg, i) => (
+                    {deferredMessages.map((msg, i) => (
                         <ChatMessage
                             key={`${i}-${msg.role}`}
                             message={msg}

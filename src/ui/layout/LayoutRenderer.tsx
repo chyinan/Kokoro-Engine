@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useSyncExternalStore, memo } from "react";
 import { LayoutConfig, LayoutNode } from "./types";
 import { registry } from "../registry/ComponentRegistry";
 import { IframeSandbox } from "../mods/IframeSandbox";
@@ -16,7 +16,7 @@ const subscribeRegistry = (onStoreChange: () => void) => {
 };
 const getRegistrySnapshot = () => registrySnapshot;
 
-const LayoutNodeRenderer = ({ node }: { node: LayoutNode }) => {
+const LayoutNodeRenderer = memo(({ node }: { node: LayoutNode }) => {
     const { activeTheme } = useTheme();
     // Re-render when registry changes (mod component registered / unregistered)
     useSyncExternalStore(subscribeRegistry, getRegistrySnapshot);
@@ -41,7 +41,6 @@ const LayoutNodeRenderer = ({ node }: { node: LayoutNode }) => {
     if (node.type === "component" && node.component) {
         const Component = registry.get(node.component);
         const isMod = registry.isModComponent(node.component);
-        console.log(`[LayoutRenderer] Lookup '${node.component}' → ${Component?.displayName || Component?.name || (Component ? 'found' : 'NOT FOUND')}  isMod=${isMod}`);
 
         // Get animation preset from theme or default
         const animation = node.motion && activeTheme?.animations?.[node.motion]
@@ -132,7 +131,7 @@ const LayoutNodeRenderer = ({ node }: { node: LayoutNode }) => {
     }
 
     return null;
-};
+});
 
 export const LayoutRenderer = ({ config, transparent, backgroundLayer }: { config: LayoutConfig; transparent?: boolean; backgroundLayer?: React.ReactNode }) => {
     return (
