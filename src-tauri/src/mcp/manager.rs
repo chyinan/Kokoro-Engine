@@ -172,16 +172,30 @@ impl McpManager {
                 Arc::new(transport)
             }
             _ => {
-                // Default: stdio
+                // Default: stdio, but auto-detect from url if command is missing
                 if config.command.is_empty() {
-                    return Err(format!(
-                        "Server '{}' has stdio transport but no 'command' configured",
-                        config.name
-                    ));
+                    if let Some(ref url) = config.url {
+                        // Auto-detect: url-only config (Cursor-compatible)
+                        if url.trim_end_matches('/').ends_with("/sse") {
+                            println!("[MCP] Auto-detected SSE transport for '{}'", config.name);
+                            let transport = SseTransport::new(url);
+                            transport.connect().await?;
+                            Arc::new(transport)
+                        } else {
+                            println!("[MCP] Auto-detected Streamable HTTP transport for '{}'", config.name);
+                            Arc::new(StreamableHttpTransport::new(url))
+                        }
+                    } else {
+                        return Err(format!(
+                            "Server '{}' has no 'command' or 'url' configured",
+                            config.name
+                        ));
+                    }
+                } else {
+                    Arc::new(
+                        StdioTransport::spawn(&config.command, &config.args, Some(&config.env)).await?,
+                    )
                 }
-                Arc::new(
-                    StdioTransport::spawn(&config.command, &config.args, Some(&config.env)).await?,
-                )
             }
         };
 

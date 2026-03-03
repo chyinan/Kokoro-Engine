@@ -45,7 +45,11 @@ function parseMcpJson(raw: string): McpServerConfig[] {
     const configs: McpServerConfig[] = [];
     for (const [name, entry] of Object.entries(servers)) {
         const e = entry as any;
-        const transportType = e.type || e.transportType || "stdio";
+        let transportType = e.type || e.transportType || "stdio";
+        // Auto-detect: url-only config without explicit type (Cursor-compatible)
+        if (transportType === "stdio" && !e.command && e.url) {
+            transportType = e.url.replace(/\/+$/, '').endsWith('/sse') ? 'sse' : 'streamable_http';
+        }
         configs.push({
             name,
             type: transportType,
@@ -66,10 +70,9 @@ const EXAMPLE_JSON = `"my-server": {
   "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
 }
 
-or for HTTP-based servers:
+or just a URL (type is auto-detected):
 
 "remote-server": {
-  "type": "streamable_http",
   "url": "https://example.com/mcp"
 }`;
 
