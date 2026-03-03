@@ -99,7 +99,7 @@ const tabs: { id: TabId; label: string; icon: typeof Key }[] = [
     { id: "backup", label: "settings.tabs.backup", icon: HardDrive },
 ];
 
-export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, sttConfig: sttConfigProp, voiceInterrupt: voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: _telegramConfigProp }: SettingsPanelProps) {
+export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: _telegramConfigProp }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [activeTab, setActiveTab] = useState<TabId>("bg");
     const bg = backgroundControls;
@@ -130,7 +130,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
             setTtsProviderId(localStorage.getItem("kokoro_tts_provider") || "browser");
             setTtsEnabled(localStorage.getItem("kokoro_tts_enabled") === "true");
             setVisionEnabled(localStorage.getItem("kokoro_vision_enabled") === "true");
-            setVoiceInterrupt(voiceInterruptProp ?? localStorage.getItem("kokoro_voice_interrupt") === "true");
+            setVoiceInterrupt(localStorage.getItem("kokoro_voice_interrupt") === "true");
             setResponseLang(localStorage.getItem("kokoro_response_language") || "");
             setUserLang(localStorage.getItem("kokoro_user_language") || "");
             // Fetch backend data (TTS, ImageGen only — STT uses prop)
