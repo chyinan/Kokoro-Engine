@@ -805,9 +805,9 @@
             // ── Load conversation history on init ──
             try {
                 const characterId = localStorage.getItem('kokoro_active_character_id') || 'default';
-                const convs = await Kokoro.invoke('list_conversations', { character_id: characterId });
+                const convs = await Kokoro.invoke('list_conversations', { request: { character_id: characterId } });
                 if (convs && convs.length > 0) {
-                    const msgs = await Kokoro.invoke('load_conversation', { conversation_id: convs[0].id });
+                    const msgs = await Kokoro.invoke('load_conversation', { request: { id: convs[0].id } });
                     if (msgs && msgs.length > 0) {
                         messages = msgs.map(m => ({
                             role: m.role === 'user' ? 'user' : 'assistant',
