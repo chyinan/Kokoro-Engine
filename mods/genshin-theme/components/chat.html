@@ -586,6 +586,278 @@
                 '谢谢你！',
             ];
 
+            // ── Tag stripping (mirrors commands/chat.rs logic) ──
+            function stripControlTags(text) {
+                return text
+                    .replace(/\[ACTION:[^\]]*\]\s*/g, '')
+                    .replace(/\[EMOTION:[^\]]*\]\s*/g, '')
+                    .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, '')
+                    .replace(/\[TRANSLATE:[^\]]*\]\s*/g, '')
+                    .replace(/\[IMAGE_PROMPT:[^\]]*\]\s*/g, '')
+                    .replace(/<tool_result>[\s\S]*?<\/tool_result>/g, '')
+                    .trim();
+            }
+
+            // ── Render Functions ──
+
+            function showDialogue(text, showCursor = false) {
+                charNameRow.style.display = 'flex';
+                charTitleEl.style.display = 'block';
+                charNameEl.textContent = charName;
+                charTitleEl.textContent = charTitle;
+                dialogueText.innerHTML = text +
+                    (showCursor ? '<span class="typing-cursor"></span>' : '');
+            }
+
+            function hideDialogue() {
+                charNameRow.style.display = 'none';
+                charTitleEl.style.display = 'none';
+                dialogueText.textContent = '';
+            }
+
+            function showThinking() {
+                thinkingDots.style.display = 'flex';
+                hideDialogue();
+            }
+
+            function hideThinking() {
+                thinkingDots.style.display = 'none';
+            }
+
+            function renderOptions() {
+                optionsArea.innerHTML = '';
+
+                // Show quick replies when not streaming and dialogue is visible
+                if (!isStreaming && messages.length > 0) {
+                    quickReplies.forEach(text => {
+                        const btn = document.createElement('button');
+                        btn.className = 'option-btn';
+                        btn.innerHTML = `
+                            <span class="option-dots">
+                                <span class="dot"></span>
+                                <span class="dot"></span>
+                                <span class="dot"></span>
+                            </span>
+                            <span class="option-text">${text}</span>
+                        `;
+                        btn.addEventListener('click', () => sendMessage(text));
+                        optionsArea.appendChild(btn);
+                    });
+
+                    // Custom input option
+                    const customBtn = document.createElement('button');
+                    customBtn.className = 'option-btn custom-input';
+                    customBtn.innerHTML = `
+                        <span class="option-dots">
+                            <span class="dot"></span>
+                            <span class="dot"></span>
+                            <span class="dot"></span>
+                        </span>
+                        <span class="option-text">自定义输入</span>
+                    `;
+                    customBtn.addEventListener('click', () => {
+                        inputField.focus();
+                    });
+                    optionsArea.appendChild(customBtn);
+                }
+            }
+
+            function renderHistory() {
+                historyScroll.innerHTML = '';
+                messages.forEach(msg => {
+                    const div = document.createElement('div');
+                    // normalize role: 'kokoro' → 'assistant' for CSS class
+                    const roleClass = (msg.role === 'kokoro' || msg.role === 'assistant') ? 'assistant' : 'user';
+                    div.className = `history-msg ${roleClass}`;
+                    div.textContent = msg.content;
+                    historyScroll.appendChild(div);
+                });
+                historyScroll.scrollTop = historyScroll.scrollHeight;
+            }
+
+            function toggleHistory() {
+                showHistory = !showHistory;
+                if (showHistory) {
+                    historyPanel.classList.remove('hidden');
+                    renderHistory();
+                } else {
+                    historyPanel.classList.add('hidden');
+                }
+            }
+
+            // ── Send Message ──
+            function sendMessage(text) {
+                if (!text || !text.trim()) return;
+
+                const userMsg = { role: 'user', content: text.trim() };
+                messages.push(userMsg);
+                inputField.value = '';
+
+                // Clear options
+                optionsArea.innerHTML = '';
+
+                // Show thinking
+                showThinking();
+                isStreaming = true;
+                currentText = '';
+
+                // Send to host via mod SDK
+                Kokoro.action('send_message', { message: text.trim() });
+            }
+
+            // ── Event: Input ──
+            inputField.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.isComposing) {
+                    e.preventDefault();
+                    sendMessage(inputField.value);
+                }
+            });
+
+            sendBtn.addEventListener('click', () => {
+                sendMessage(inputField.value);
+            });
+
+            // ── Event: History ──
+            historyToggle.addEventListener('click', toggleHistory);
+            historyClose.addEventListener('click', toggleHistory);
+
+            // ── Event: Continue ──
+            continueIndicator.addEventListener('click', () => {
+                inputField.focus();
+            });
+
+            // ── Mod SDK Events ──
+
+            // Streaming delta
+            Kokoro.on('chat-delta', (data) => {
+                hideThinking();
+                isStreaming = true;
+
+                if (data && data.delta) {
+                    currentText += data.delta;
+                    showDialogue(stripControlTags(currentText), true);
+                }
+            });
+
+            // Stream complete
+            Kokoro.on('chat-done', () => {
+                isStreaming = false;
+
+                if (currentText) {
+                    const cleaned = stripControlTags(currentText);
+                    showDialogue(cleaned, false);
+                    messages.push({ role: 'assistant', content: cleaned });
+                    currentText = '';
+
+                    // Show continue indicator briefly
+                    continueIndicator.classList.add('visible');
+                    setTimeout(() => {
+                        continueIndicator.classList.remove('visible');
+                    }, 3000);
+                }
+
+                hideThinking();
+                renderOptions();
+
+                if (showHistory) {
+                    renderHistory();
+                }
+            });
+
+            // Stream error
+            Kokoro.on('chat-error', (data) => {
+                isStreaming = false;
+                hideThinking();
+                const errText = (data && data.error) ? data.error : '连接出现问题，请检查 API 设置。';
+                showDialogue(`⚠️ ${errText}`, false);
+                renderOptions();
+            });
+
+            // Telegram sync — show messages sent/received via Telegram
+            Kokoro.on('telegram:chat-sync', (data) => {
+                if (!data) return;
+                if (data.role === 'user') {
+                    messages.push({ role: 'user', content: data.text });
+                    showThinking();
+                    isStreaming = true;
+                    currentText = '';
+                } else if (data.role === 'assistant') {
+                    isStreaming = false;
+                    hideThinking();
+                    const cleaned = stripControlTags(data.text);
+                    showDialogue(cleaned, false);
+                    messages.push({ role: 'assistant', content: cleaned });
+                    renderOptions();
+                    if (showHistory) renderHistory();
+                }
+            });
+
+            // Prop updates from host
+            Kokoro.on('update', (props) => {
+                if (props && props.characterName) {
+                    charName = props.characterName;
+                    charNameEl.textContent = charName;
+                }
+                if (props && props.characterTitle) {
+                    charTitle = props.characterTitle;
+                    charTitleEl.textContent = charTitle;
+                }
+            });
+
+            // ── Load conversation history on init ──
+            try {
+                const characterId = localStorage.getItem('kokoro_active_character_id') || 'default';
+                const convs = await Kokoro.invoke('list_conversations', { character_id: characterId });
+                if (convs && convs.length > 0) {
+                    const msgs = await Kokoro.invoke('load_conversation', { conversation_id: convs[0].id });
+                    if (msgs && msgs.length > 0) {
+                        messages = msgs.map(m => ({
+                            role: m.role === 'user' ? 'user' : 'assistant',
+                            content: m.role === 'user' ? m.content : stripControlTags(m.content),
+                        }));
+                        // Show last assistant message
+                        const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
+                        if (lastAssistant) {
+                            showDialogue(lastAssistant.content, false);
+                        }
+                        renderOptions();
+                    }
+                }
+            } catch (e) {
+                Kokoro.log('Failed to load history: ' + e);
+            }
+
+            // ── Initial State ──
+            charNameRow.style.display = 'flex';
+            charNameEl.textContent = charName;
+            charNameEl.style.color = 'rgb(244, 197, 68)';
+
+            Kokoro.log('Genshin dialogue UI loaded');
+        })();
+
+            // ── DOM Elements ──
+            const root = document.getElementById('root');
+            const dialogueText = document.getElementById('dialogueText');
+            const charNameEl = document.getElementById('charName');
+            const charTitleEl = document.getElementById('charTitle');
+            const charNameRow = document.getElementById('charNameRow');
+            const inputField = document.getElementById('inputField');
+            const sendBtn = document.getElementById('sendBtn');
+            const optionsArea = document.getElementById('optionsArea');
+            const thinkingDots = document.getElementById('thinkingDots');
+            const historyToggle = document.getElementById('historyToggle');
+            const historyPanel = document.getElementById('historyPanel');
+            const historyClose = document.getElementById('historyClose');
+            const historyScroll = document.getElementById('historyScroll');
+            const continueIndicator = document.getElementById('continueIndicator');
+
+            // ── Quick reply patterns ──
+            const quickReplies = [
+                '继续说下去。',
+                '有什么建议吗？',
+                '谢谢你！',
+            ];
+
             // ── Render Functions ──
 
             function showDialogue(text, showCursor = false) {
