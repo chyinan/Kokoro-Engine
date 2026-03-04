@@ -254,6 +254,71 @@
             max-width: 85%;
         }
 
+        .history-new-btn {
+            background: none;
+            border: 1px solid var(--gi-border-gold-dim);
+            color: var(--gi-text-gold);
+            cursor: pointer;
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: var(--gi-radius-sm);
+            letter-spacing: 0.5px;
+        }
+        .history-new-btn:hover { background: rgba(198,169,99,0.15); }
+
+        .history-back-btn {
+            background: none;
+            border: none;
+            color: var(--gi-text-dim);
+            cursor: pointer;
+            font-size: 13px;
+            padding: 2px 6px;
+        }
+        .history-back-btn:hover { color: var(--gi-text-gold); }
+
+        .conv-list { display: flex; flex-direction: column; gap: 4px; }
+
+        .conv-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 7px 10px;
+            border-radius: var(--gi-radius-sm);
+            cursor: pointer;
+            border: 1px solid transparent;
+            transition: background 0.15s;
+        }
+        .conv-item:hover { background: rgba(198,169,99,0.1); border-color: var(--gi-border-gold-dim); }
+        .conv-item.active { background: rgba(198,169,99,0.18); border-color: var(--gi-border-gold-dim); }
+
+        .conv-item-title {
+            font-size: 12px;
+            color: var(--gi-text-light);
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .conv-item-date {
+            font-size: 10px;
+            color: var(--gi-text-dim);
+            margin-left: 8px;
+            flex-shrink: 0;
+        }
+        .conv-item-del {
+            background: none;
+            border: none;
+            color: var(--gi-text-dim);
+            cursor: pointer;
+            font-size: 12px;
+            padding: 0 4px;
+            margin-left: 4px;
+            opacity: 0;
+            transition: opacity 0.15s;
+        }
+        .conv-item:hover .conv-item-del { opacity: 1; }
+        .conv-item-del:hover { color: #e05; }
+
         /* ── Bottom Dialogue Area ─────────────────────── */
         .dialogue-bottom {
             position: absolute;
@@ -508,11 +573,26 @@
 
         <!-- History Panel (hidden by default) -->
         <div class="history-panel hidden gi-scrollbar-dark" id="historyPanel">
-            <div class="history-header">
-                <span>◆ 对话记录</span>
-                <button class="history-close" id="historyClose">✕</button>
+            <!-- View: Conversation List -->
+            <div id="convListView">
+                <div class="history-header">
+                    <span>◆ 对话列表</span>
+                    <div style="display:flex;gap:6px;align-items:center">
+                        <button class="history-new-btn" id="newConvBtn">＋ 新建</button>
+                        <button class="history-close" id="historyClose">✕</button>
+                    </div>
+                </div>
+                <div class="history-scroll gi-scrollbar-dark" id="convListScroll"></div>
             </div>
-            <div class="history-scroll gi-scrollbar-dark" id="historyScroll"></div>
+            <!-- View: Message Detail -->
+            <div id="convDetailView" style="display:none;flex-direction:column;height:100%">
+                <div class="history-header">
+                    <button class="history-back-btn" id="convBackBtn">← 返回</button>
+                    <span id="convDetailTitle" style="font-size:11px;color:var(--gi-text-gold);flex:1;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+                    <button class="history-close" id="convDetailClose">✕</button>
+                </div>
+                <div class="history-scroll gi-scrollbar-dark" id="historyScroll"></div>
+            </div>
         </div>
 
         <!-- Right-side Options -->
@@ -560,6 +640,8 @@
             let showHistory = false;
             let charName = 'Kokoro';
             let charTitle = 'AI 助理';
+            let activeConvId = null;  // Currently loaded conversation ID
+            let allConvs = [];        // Cached conversation list
 
             // ── DOM Elements ──
             const root = document.getElementById('root');
@@ -575,6 +657,13 @@
             const historyPanel = document.getElementById('historyPanel');
             const historyClose = document.getElementById('historyClose');
             const historyScroll = document.getElementById('historyScroll');
+            const convListView = document.getElementById('convListView');
+            const convDetailView = document.getElementById('convDetailView');
+            const convListScroll = document.getElementById('convListScroll');
+            const convDetailTitle = document.getElementById('convDetailTitle');
+            const convBackBtn = document.getElementById('convBackBtn');
+            const convDetailClose = document.getElementById('convDetailClose');
+            const newConvBtn = document.getElementById('newConvBtn');
             const continueIndicator = document.getElementById('continueIndicator');
 
             // ── Quick reply patterns ──
@@ -660,11 +749,10 @@
                 }
             }
 
-            function renderHistory() {
+            function renderMsgDetail(msgs) {
                 historyScroll.innerHTML = '';
-                messages.forEach(msg => {
+                msgs.forEach(msg => {
                     const div = document.createElement('div');
-                    // normalize role: 'kokoro' → 'assistant' for CSS class
                     const roleClass = (msg.role === 'kokoro' || msg.role === 'assistant') ? 'assistant' : 'user';
                     div.className = `history-msg ${roleClass}`;
                     div.textContent = msg.content;
@@ -673,11 +761,110 @@
                 historyScroll.scrollTop = historyScroll.scrollHeight;
             }
 
+            function showConvList() {
+                convListView.style.display = 'flex';
+                convListView.style.flexDirection = 'column';
+                convListView.style.height = '100%';
+                convDetailView.style.display = 'none';
+                renderConvList();
+            }
+
+            function showConvDetail(conv, msgs) {
+                convListView.style.display = 'none';
+                convDetailView.style.display = 'flex';
+                convDetailTitle.textContent = conv.title || '对话';
+                renderMsgDetail(msgs);
+            }
+
+            async function renderConvList() {
+                const characterId = localStorage.getItem('kokoro_active_character_id') || 'default';
+                try {
+                    allConvs = await Kokoro.invoke('list_conversations', { request: { character_id: characterId } }) || [];
+                } catch(e) {
+                    allConvs = [];
+                }
+                convListScroll.innerHTML = '';
+                if (allConvs.length === 0) {
+                    const empty = document.createElement('div');
+                    empty.style.cssText = 'color:var(--gi-text-dim);font-size:12px;text-align:center;padding:20px 0';
+                    empty.textContent = '暂无对话记录';
+                    convListScroll.appendChild(empty);
+                    return;
+                }
+                const list = document.createElement('div');
+                list.className = 'conv-list';
+                allConvs.forEach(conv => {
+                    const item = document.createElement('div');
+                    item.className = 'conv-item' + (conv.id === activeConvId ? ' active' : '');
+
+                    const title = document.createElement('span');
+                    title.className = 'conv-item-title';
+                    title.textContent = conv.title || '新对话';
+
+                    const date = document.createElement('span');
+                    date.className = 'conv-item-date';
+                    date.textContent = conv.updated_at ? conv.updated_at.slice(0, 10) : '';
+
+                    const delBtn = document.createElement('button');
+                    delBtn.className = 'conv-item-del';
+                    delBtn.textContent = '✕';
+                    delBtn.title = '删除';
+                    delBtn.addEventListener('click', async (e) => {
+                        e.stopPropagation();
+                        if (!confirm(`删除对话「${conv.title || '新对话'}」？`)) return;
+                        try {
+                            await Kokoro.invoke('delete_conversation', { request: { id: conv.id } });
+                            if (conv.id === activeConvId) {
+                                await startNewConversation();
+                            }
+                            renderConvList();
+                        } catch(err) {
+                            Kokoro.log('Delete failed: ' + err);
+                        }
+                    });
+
+                    item.appendChild(title);
+                    item.appendChild(date);
+                    item.appendChild(delBtn);
+                    item.addEventListener('click', async () => {
+                        try {
+                            const msgs = await Kokoro.invoke('load_conversation', { request: { id: conv.id } });
+                            activeConvId = conv.id;
+                            const mapped = (msgs || []).map(m => ({
+                                role: m.role === 'user' ? 'user' : 'assistant',
+                                content: m.role === 'user' ? m.content : stripControlTags(m.content),
+                            }));
+                            messages = mapped;
+                            const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
+                            if (lastAssistant) showDialogue(lastAssistant.content, false);
+                            renderOptions();
+                            showConvDetail(conv, mapped);
+                        } catch(err) {
+                            Kokoro.log('Load conv failed: ' + err);
+                        }
+                    });
+                    list.appendChild(item);
+                });
+                convListScroll.appendChild(list);
+            }
+
+            async function startNewConversation() {
+                try {
+                    await Kokoro.invoke('create_conversation', {});
+                } catch(e) { /* ignore */ }
+                activeConvId = null;
+                messages = [];
+                currentText = '';
+                isStreaming = false;
+                hideDialogue();
+                renderOptions();
+            }
+
             function toggleHistory() {
                 showHistory = !showHistory;
                 if (showHistory) {
                     historyPanel.classList.remove('hidden');
-                    renderHistory();
+                    showConvList();
                 } else {
                     historyPanel.classList.add('hidden');
                 }
@@ -718,6 +905,12 @@
             // ── Event: History ──
             historyToggle.addEventListener('click', toggleHistory);
             historyClose.addEventListener('click', toggleHistory);
+            convDetailClose.addEventListener('click', toggleHistory);
+            convBackBtn.addEventListener('click', showConvList);
+            newConvBtn.addEventListener('click', async () => {
+                await startNewConversation();
+                toggleHistory();
+            });
 
             // ── Event: Continue ──
             continueIndicator.addEventListener('click', () => {
@@ -756,10 +949,6 @@
 
                 hideThinking();
                 renderOptions();
-
-                if (showHistory) {
-                    renderHistory();
-                }
             });
 
             // Stream error
@@ -808,6 +997,7 @@
                 const convs = await Kokoro.invoke('list_conversations', { request: { character_id: characterId } });
                 if (convs && convs.length > 0) {
                     const msgs = await Kokoro.invoke('load_conversation', { request: { id: convs[0].id } });
+                    activeConvId = convs[0].id;
                     if (msgs && msgs.length > 0) {
                         messages = msgs.map(m => ({
                             role: m.role === 'user' ? 'user' : 'assistant',
