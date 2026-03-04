@@ -228,3 +228,52 @@ impl ActionRegistry {
         lines.join("\n")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ActionResult constructors ─────────────────────────
+
+    #[test]
+    fn test_action_result_ok() {
+        let r = ActionResult::ok("success");
+        assert!(r.success);
+        assert_eq!(r.message, "success");
+        assert!(r.data.is_none());
+    }
+
+    #[test]
+    fn test_action_result_ok_with_data() {
+        let r = ActionResult::ok_with_data("done", serde_json::json!({"x": 1}));
+        assert!(r.success);
+        assert!(r.data.is_some());
+    }
+
+    #[test]
+    fn test_action_result_err() {
+        let r = ActionResult::err("oops");
+        assert!(!r.success);
+        assert_eq!(r.message, "oops");
+    }
+
+    // ── Registry without handlers ─────────────────────────
+
+    #[test]
+    fn test_registry_empty_list() {
+        let reg = ActionRegistry::new();
+        assert!(reg.list_actions().is_empty());
+    }
+
+    #[test]
+    fn test_registry_generate_tool_prompt_empty() {
+        let reg = ActionRegistry::new();
+        assert_eq!(reg.generate_tool_prompt(), "");
+    }
+
+    #[test]
+    fn test_registry_needs_feedback_unknown_defaults_true() {
+        let reg = ActionRegistry::new();
+        assert!(reg.needs_feedback("nonexistent"));
+    }
+}

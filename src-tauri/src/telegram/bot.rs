@@ -746,3 +746,100 @@ fn compact_newlines(text: &str) -> String {
         .collect();
     filtered.join("\n").trim().to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── compact_newlines ──────────────────────────────────
+
+    #[test]
+    fn test_compact_newlines_removes_ellipsis_only_lines() {
+        let input = "Hello\n…\nWorld";
+        assert_eq!(compact_newlines(input), "Hello\nWorld");
+    }
+
+    #[test]
+    fn test_compact_newlines_removes_dot_only_lines() {
+        let input = "Hello\n...\nWorld";
+        assert_eq!(compact_newlines(input), "Hello\nWorld");
+    }
+
+    #[test]
+    fn test_compact_newlines_no_change_needed() {
+        let input = "Hello\nWorld";
+        assert_eq!(compact_newlines(input), "Hello\nWorld");
+    }
+
+    #[test]
+    fn test_compact_newlines_empty_string() {
+        assert_eq!(compact_newlines(""), "");
+    }
+
+    // ── strip_control_tags ────────────────────────────────
+
+    #[test]
+    fn test_strip_control_tags_removes_action_tag() {
+        // trim_end/trim_start collapses surrounding spaces
+        let input = "Hello [ACTION:wave] world";
+        assert_eq!(strip_control_tags(input), "Helloworld");
+    }
+
+    #[test]
+    fn test_strip_control_tags_removes_emotion_tag() {
+        let input = "[EMOTION:happy] Nice to meet you";
+        assert_eq!(strip_control_tags(input), "Nice to meet you");
+    }
+
+    #[test]
+    fn test_strip_control_tags_no_tags_unchanged() {
+        let input = "Just a normal message";
+        assert_eq!(strip_control_tags(input), "Just a normal message");
+    }
+
+    #[test]
+    fn test_strip_control_tags_multiple_tags() {
+        let input = "[ACTION:nod] Hello [EMOTION:curious] there";
+        let result = strip_control_tags(input);
+        assert!(!result.contains("[ACTION:"));
+        assert!(!result.contains("[EMOTION:"));
+        assert!(result.contains("Hello"));
+        assert!(result.contains("there"));
+    }
+
+    // ── extract_translate_tags ────────────────────────────
+
+    #[test]
+    fn test_extract_translate_tags_basic() {
+        let input = "こんにちは [TRANSLATE:Hello]";
+        let (text, translation) = extract_translate_tags(input);
+        assert_eq!(text, "こんにちは");
+        assert_eq!(translation, Some("Hello".to_string()));
+    }
+
+    #[test]
+    fn test_extract_translate_tags_none() {
+        let input = "Hello world";
+        let (text, translation) = extract_translate_tags(input);
+        assert_eq!(text, "Hello world");
+        assert!(translation.is_none());
+    }
+
+    // ── parse_tool_call_tags ──────────────────────────────
+
+    #[test]
+    fn test_parse_tool_call_tags_no_tags() {
+        let input = "Just a response";
+        let (text, calls) = parse_tool_call_tags(input);
+        assert_eq!(text, "Just a response");
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_tool_call_tags_with_params() {
+        let input = "Sure! [TOOL_CALL:get_time|tz=UTC]";
+        let (text, calls) = parse_tool_call_tags(input);
+        assert_eq!(calls, vec!["get_time|tz=UTC"]);
+        assert!(!text.contains("[TOOL_CALL:"));
+    }
+}

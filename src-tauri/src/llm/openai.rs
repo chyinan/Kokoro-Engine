@@ -285,3 +285,83 @@ impl OpenAIClient {
         Ok(Box::pin(stream))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_text_variant_returns_string() {
+        let c = MessageContent::Text("hello".to_string());
+        assert_eq!(c.text(), "hello");
+    }
+
+    #[test]
+    fn test_parts_variant_concatenates_text_parts() {
+        let c = MessageContent::Parts(vec![
+            ContentPart::Text { text: "foo".to_string() },
+            ContentPart::Text { text: "bar".to_string() },
+        ]);
+        assert_eq!(c.text(), "foobar");
+    }
+
+    #[test]
+    fn test_parts_variant_ignores_image_parts() {
+        let c = MessageContent::Parts(vec![
+            ContentPart::Text { text: "hello".to_string() },
+            ContentPart::ImageUrl {
+                image_url: ImageUrlDetail { url: "http://example.com/img.png".to_string() },
+            },
+        ]);
+        assert_eq!(c.text(), "hello");
+    }
+
+    #[test]
+    fn test_parts_variant_empty_returns_empty_string() {
+        let c = MessageContent::Parts(vec![]);
+        assert_eq!(c.text(), "");
+    }
+
+    #[test]
+    fn test_with_images_creates_parts_variant() {
+        let c = MessageContent::with_images("desc".to_string(), vec!["http://img".to_string()]);
+        assert!(matches!(c, MessageContent::Parts(_)));
+    }
+
+    #[test]
+    fn test_with_images_no_urls_only_text_part() {
+        let c = MessageContent::with_images("only text".to_string(), vec![]);
+        assert_eq!(c.text(), "only text");
+        if let MessageContent::Parts(parts) = &c {
+            assert_eq!(parts.len(), 1);
+        } else {
+            panic!("expected Parts variant");
+        }
+    }
+
+    #[test]
+    fn test_with_images_multiple_urls() {
+        let c = MessageContent::with_images(
+            "caption".to_string(),
+            vec!["url1".to_string(), "url2".to_string()],
+        );
+        if let MessageContent::Parts(parts) = &c {
+            assert_eq!(parts.len(), 3); // 1 text + 2 images
+        } else {
+            panic!("expected Parts variant");
+        }
+    }
+
+    #[test]
+    fn test_text_variant_serializes_as_string() {
+        let c = MessageContent::Text("hi".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(json, "\"hi\"");
+    }
+
+    #[test]
+    fn test_text_variant_deserializes_from_string() {
+        let c: MessageContent = serde_json::from_str("\"world\"").unwrap();
+        assert_eq!(c.text(), "world");
+    }
+}

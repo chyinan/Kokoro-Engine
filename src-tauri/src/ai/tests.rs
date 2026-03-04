@@ -578,3 +578,25 @@ async fn escape_fts5_query_handles_empty_and_quotes() {
     assert_eq!(escape_fts5_query("hello\"world"), "\"helloworld\"");
     assert_eq!(escape_fts5_query("  spaced  "), "\"spaced\"");
 }
+
+#[test]
+fn cosine_similarity_known_value() {
+    // [1,1] vs [1,0]: cos = 1/sqrt(2) ≈ 0.7071
+    let a = vec![1.0_f32, 1.0];
+    let b = vec![1.0_f32, 0.0];
+    let sim = cosine_similarity(&a, &b);
+    let expected = 1.0_f32 / 2.0_f32.sqrt();
+    assert!(
+        (sim - expected).abs() < 1e-5,
+        "Expected ≈ {}, got {}",
+        expected,
+        sim
+    );
+}
+
+#[test]
+fn escape_fts5_whitespace_only_returns_empty() {
+    use super::memory::escape_fts5_query;
+    assert_eq!(escape_fts5_query("   "), "");
+    assert_eq!(escape_fts5_query("\t\n"), "");
+}
