@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useDeferredValue, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
+import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
 import { streamChat, onChatDelta, onChatDone, onChatError, onChatTranslation, clearHistory, uploadVisionImage, synthesize, onToolCallResult, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal, useWakeWord } from "../hooks";
@@ -97,6 +97,8 @@ export default function ChatPanel() {
     const deferredMessages = useDeferredValue(messages);
     const [visibleCount, setVisibleCount] = useState(20);
     const [input, setInput] = useState("");
+    const [expandedInput, setExpandedInput] = useState(false);
+    const expandedTextareaRef = useRef<HTMLTextAreaElement>(null);
     const [isStreaming, setIsStreaming] = useState(false);
     const isStreamingRef = useRef(false);
     const messagesRef = useRef<ChatMessage[]>([]);
@@ -1051,6 +1053,24 @@ export default function ChatPanel() {
                             isStreaming && "opacity-50 cursor-not-allowed"
                         )}
                     />
+                    {/* Expand input button */}
+                    <motion.button
+                        type="button"
+                        whileHover={{ scale: 1.1 }}
+                        whileTap={{ scale: 0.9 }}
+                        onClick={() => {
+                            setExpandedInput(true);
+                            setTimeout(() => {
+                                const ta = expandedTextareaRef.current;
+                                if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+                            }, 50);
+                        }}
+                        className="p-2.5 rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
+                        aria-label={t("chat.input.expand")}
+                        title={t("chat.input.expand")}
+                    >
+                        <Maximize2 size={14} strokeWidth={1.5} />
+                    </motion.button>
                     <motion.button
                         whileHover={{ scale: 1.1 }}
                         whileTap={{ scale: 0.9 }}
@@ -1067,6 +1087,72 @@ export default function ChatPanel() {
                     </motion.button>
                 </div>
             </form>
+
+            {/* Expanded input overlay */}
+            <AnimatePresence>
+                {expandedInput && (
+                    <motion.div
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: 10 }}
+                        className="absolute inset-x-0 bottom-0 z-20 p-3 bg-[var(--color-bg-surface)] border-t border-[var(--color-border)] backdrop-blur-[var(--glass-blur)]"
+                    >
+                        <textarea
+                            ref={expandedTextareaRef}
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                                    e.preventDefault();
+                                    setExpandedInput(false);
+                                    handleSend();
+                                }
+                                if (e.key === "Escape") setExpandedInput(false);
+                            }}
+                            placeholder={t("chat.input.placeholder")}
+                            disabled={isStreaming}
+                            rows={6}
+                            className={clsx(
+                                "w-full bg-black/40 border border-[var(--color-border)] rounded-lg",
+                                "text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)]",
+                                "text-sm px-4 py-3 font-body resize-none",
+                                "focus:outline-none focus:border-[var(--color-accent)] focus:shadow-[var(--glow-accent)]",
+                                "transition-all"
+                            )}
+                        />
+                        <div className="flex items-center justify-between mt-2">
+                            <span className="text-xs text-[var(--color-text-muted)]">Ctrl+Enter 发送 · Esc 收起</span>
+                            <div className="flex gap-2">
+                                <motion.button
+                                    type="button"
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.95 }}
+                                    onClick={() => setExpandedInput(false)}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)] transition-colors"
+                                >
+                                    <Minimize2 size={12} strokeWidth={1.5} />
+                                    收起
+                                </motion.button>
+                                <motion.button
+                                    type="button"
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.95 }}
+                                    onClick={() => { setExpandedInput(false); handleSend(); }}
+                                    disabled={isStreaming || !input.trim()}
+                                    className={clsx(
+                                        "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
+                                        "bg-[var(--color-accent)] text-black hover:bg-white",
+                                        (isStreaming || !input.trim()) && "opacity-50 cursor-not-allowed"
+                                    )}
+                                >
+                                    <Send size={12} strokeWidth={1.5} />
+                                    发送
+                                </motion.button>
+                            </div>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
         </motion.div >
     );
 }
