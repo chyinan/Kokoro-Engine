@@ -182,14 +182,14 @@ export function useBackgroundSlideshow() {
             timerRef.current = null;
         }
 
-        if (config.enabled && images.length > 1 && config.interval > 0) {
+        if (config.enabled && config.mode === "slideshow" && images.length > 1 && config.interval > 0) {
             timerRef.current = setInterval(nextImage, config.interval * 1000);
         }
 
         return () => {
             if (timerRef.current) clearInterval(timerRef.current);
         };
-    }, [config.enabled, config.interval, images.length, nextImage]);
+    }, [config.enabled, config.mode, config.interval, images.length, nextImage]);
 
     return {
         config,
