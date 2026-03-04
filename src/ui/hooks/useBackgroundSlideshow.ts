@@ -84,11 +84,18 @@ export function useBackgroundSlideshow() {
     // Import files from <input type="file">
     const importFiles = useCallback(async (fileList: FileList) => {
         const validTypes = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"];
+        const validExts = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"];
+        const isValidImage = (file: File) => {
+            if (validTypes.includes(file.type)) return true;
+            const ext = file.name.toLowerCase().match(/\.[^.]+$/)?.[0];
+            return ext ? validExts.includes(ext) : false;
+        };
+        // 在第一个 await 前先复制，防止 WebView2 重置 input 后 FileList 失效
+        const files = Array.from(fileList);
         const newItems: { id: number, url: string }[] = [];
 
-        for (let i = 0; i < fileList.length; i++) {
-            const file = fileList[i];
-            if (validTypes.includes(file.type)) {
+        for (const file of files) {
+            if (isValidImage(file)) {
                 try {
                     const id = await db.addImage(file);
                     const url = URL.createObjectURL(file);

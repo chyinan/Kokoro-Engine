@@ -29,7 +29,7 @@ export default function BackgroundTab({
                 multiple
                 accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
                 className="hidden"
-                onChange={e => { if (e.target.files) bg.importFiles(e.target.files); e.target.value = ""; }}
+                onChange={async e => { if (e.target.files) await bg.importFiles(e.target.files); e.target.value = ""; }}
             />
             <input
                 ref={folderInputRef}
@@ -37,9 +37,8 @@ export default function BackgroundTab({
                 // @ts-expect-error webkitdirectory is non-standard but widely supported
                 webkitdirectory=""
                 multiple
-                accept="image/*"
                 className="hidden"
-                onChange={e => { if (e.target.files) bg.importFiles(e.target.files); e.target.value = ""; }}
+                onChange={async e => { if (e.target.files) await bg.importFiles(e.target.files); e.target.value = ""; }}
             />
 
             {/* Import buttons */}
