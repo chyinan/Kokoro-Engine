@@ -296,14 +296,17 @@ export default function ChatPanel() {
     // ── Auto-scroll ────────────────────────────────────────
     const scrollToBottom = useCallback(() => {
         if (!userScrolledRef.current) {
+            const container = messagesContainerRef.current;
+            if (!container) return;
             isProgrammaticScrollRef.current = true;
-            messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
-            // Release flag after scroll event fires
+            container.scrollTop = container.scrollHeight;
             setTimeout(() => { isProgrammaticScrollRef.current = false; }, 50);
         }
     }, []);
 
+    // Fire on both messages (immediate) and deferredMessages (after DOM update)
     useEffect(scrollToBottom, [messages, scrollToBottom]);
+    useEffect(scrollToBottom, [deferredMessages, scrollToBottom]);
 
     const handleScroll = useCallback(() => {
         // Ignore scroll events triggered by our own scrollToBottom
