@@ -1038,39 +1038,38 @@ export default function ChatPanel() {
                         </div>
                     )}
 
-                    <input
-                        type="text"
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        placeholder={t("chat.input.placeholder")}
-                        disabled={isStreaming}
-                        className={clsx(
-                            "flex-1 bg-black/40 border border-[var(--color-border)]",
-                            "text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)]",
-                            "text-sm rounded-lg px-4 py-2.5 font-body",
-                            "focus:outline-none focus:border-[var(--color-accent)] focus:shadow-[var(--glow-accent)]",
-                            "transition-all",
-                            isStreaming && "opacity-50 cursor-not-allowed"
-                        )}
-                    />
-                    {/* Expand input button */}
-                    <motion.button
-                        type="button"
-                        whileHover={{ scale: 1.1 }}
-                        whileTap={{ scale: 0.9 }}
-                        onClick={() => {
-                            setExpandedInput(true);
-                            setTimeout(() => {
-                                const ta = expandedTextareaRef.current;
-                                if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
-                            }, 50);
-                        }}
-                        className="p-2.5 rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
-                        aria-label={t("chat.input.expand")}
-                        title={t("chat.input.expand")}
-                    >
-                        <Maximize2 size={14} strokeWidth={1.5} />
-                    </motion.button>
+                    <div className="relative flex-1">
+                        <input
+                            type="text"
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            placeholder={t("chat.input.placeholder")}
+                            disabled={isStreaming}
+                            className={clsx(
+                                "w-full bg-black/40 border border-[var(--color-border)]",
+                                "text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)]",
+                                "text-sm rounded-lg pl-4 pr-8 py-2.5 font-body",
+                                "focus:outline-none focus:border-[var(--color-accent)] focus:shadow-[var(--glow-accent)]",
+                                "transition-all",
+                                isStreaming && "opacity-50 cursor-not-allowed"
+                            )}
+                        />
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setExpandedInput(true);
+                                setTimeout(() => {
+                                    const ta = expandedTextareaRef.current;
+                                    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+                                }, 50);
+                            }}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
+                            aria-label={t("chat.input.expand")}
+                            title={t("chat.input.expand")}
+                        >
+                            <Maximize2 size={13} strokeWidth={1.5} />
+                        </button>
+                    </div>
                     <motion.button
                         whileHover={{ scale: 1.1 }}
                         whileTap={{ scale: 0.9 }}
