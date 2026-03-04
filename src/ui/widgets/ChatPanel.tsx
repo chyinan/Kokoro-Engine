@@ -299,7 +299,7 @@ export default function ChatPanel() {
         }
     }, []);
 
-    useEffect(scrollToBottom, [messages, scrollToBottom]);
+    useEffect(scrollToBottom, [deferredMessages, scrollToBottom]);
 
     const handleScroll = useCallback(() => {
         const container = messagesContainerRef.current;
