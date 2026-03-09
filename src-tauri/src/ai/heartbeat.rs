@@ -51,6 +51,7 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
     let config = HeartbeatConfig::default();
     let mut last_proactive_ts = std::time::Instant::now();
     let _last_time_period = current_time_period(); // Tracked for time-change triggers (future)
+    let mut last_prune_ts = std::time::Instant::now();
 
     loop {
         // Heartbeat tick rate: 5s when active, 30s when idle?
@@ -127,7 +128,17 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
             }
         }
 
-        // 4. Initiative System (Proactive Messaging)
+        // 4. Memory Decay Pruning (once per hour)
+        if last_prune_ts.elapsed().as_secs() >= 3600 {
+            last_prune_ts = std::time::Instant::now();
+            let memory_mgr = orchestrator.memory_manager.clone();
+            let char_id = orchestrator.get_character_id().await;
+            tauri::async_runtime::spawn(async move {
+                let _ = memory_mgr.prune_decayed_memories(&char_id, 0.05).await;
+            });
+        }
+
+        // 5. Initiative System (Proactive Messaging)
         // Only run initiative check if proactive is enabled and cooldown has passed
         if !orchestrator.is_proactive_enabled() {
             continue;

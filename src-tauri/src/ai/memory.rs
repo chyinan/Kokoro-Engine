@@ -577,14 +577,24 @@ impl MemoryManager {
         .fetch_all(&self.db)
         .await?;
 
+        let now = chrono::Utc::now().timestamp();
         Ok(rows
             .into_iter()
-            .map(|r| MemoryRecord {
-                id: r.rowid,
-                content: r.content,
-                created_at: r.created_at,
-                importance: r.importance,
-                tier: r.tier,
+            .map(|r| {
+                let effective_importance = if r.tier == "core" {
+                    r.importance
+                } else {
+                    let age_days = (now - r.created_at) as f64 / 86400.0;
+                    let decay = (0.5_f64).powf(age_days / MEMORY_HALF_LIFE_DAYS);
+                    r.importance * decay
+                };
+                MemoryRecord {
+                    id: r.rowid,
+                    content: r.content,
+                    created_at: r.created_at,
+                    importance: effective_importance,
+                    tier: r.tier,
+                }
             })
             .collect())
     }
@@ -637,6 +647,59 @@ impl MemoryManager {
             .execute(&self.db)
             .await?;
         Ok(())
+    }
+
+    /// Delete ephemeral memories whose effective importance (original × decay) has fallen
+    /// below `threshold`. Core memories are never pruned.
+    /// Returns the number of deleted rows.
+    pub async fn prune_decayed_memories(
+        &self,
+        character_id: &str,
+        threshold: f64,
+    ) -> Result<u64> {
+        let now = chrono::Utc::now().timestamp();
+        // Compute the minimum age (in seconds) at which a memory with max importance (1.0)
+        // would decay below the threshold:
+        //   threshold = importance * 0.5^(age_days / half_life)
+        // Worst case importance = 1.0, so:
+        //   age_days > half_life * log2(1 / threshold)
+        let min_age_days = MEMORY_HALF_LIFE_DAYS * (1.0_f64 / threshold).log2();
+        let cutoff_ts = now - (min_age_days * 86400.0) as i64;
+
+        // Among records old enough to potentially be below threshold, check each one.
+        // We do the exact per-row check in Rust to handle varying importance values.
+        let rows = sqlx::query(
+            "SELECT rowid, created_at, importance FROM memories \
+             WHERE character_id = ? AND tier = 'ephemeral' AND created_at < ?",
+        )
+        .bind(character_id)
+        .bind(cutoff_ts)
+        .fetch_all(&self.db)
+        .await?;
+
+        let mut deleted = 0u64;
+        for row in rows {
+            let id: i64 = row.get("rowid");
+            let created_at: i64 = row.get("created_at");
+            let importance: f64 = row.get("importance");
+            let age_days = (now - created_at) as f64 / 86400.0;
+            let decay = (0.5_f64).powf(age_days / MEMORY_HALF_LIFE_DAYS);
+            if importance * decay < threshold {
+                sqlx::query("DELETE FROM memories WHERE rowid = ?")
+                    .bind(id)
+                    .execute(&self.db)
+                    .await?;
+                deleted += 1;
+            }
+        }
+
+        if deleted > 0 {
+            println!(
+                "[Memory] Pruned {} decayed ephemeral memories for '{}'",
+                deleted, character_id
+            );
+        }
+        Ok(deleted)
     }
 }
 
