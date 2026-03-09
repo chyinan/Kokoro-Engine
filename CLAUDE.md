@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Commit 信息必须使用英文，便于国际开发者协作
 - Commit 格式遵循 Conventional Commits：`type: description`（如 `feat: add voice interrupt support`、`fix: resolve TTS cache invalidation`）
+- Commit之后请自动推送到GitHub
 
 ## 项目概述
 
