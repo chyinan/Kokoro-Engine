@@ -55,14 +55,25 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
             const msgs: ConversationMessage[] = await loadConversation(id);
             const chatMsgs: ChatMessage[] = msgs.map(m => {
                 if (m.role !== "user") {
-                    const translateMatch = m.content.match(/\[TRANSLATE:\s*([\s\S]*?)\](?=\s*(?:\[(?:ACTION|EMOTION|IMAGE_PROMPT))[:|]|\s*$)/i);
-                    const translation = translateMatch ? translateMatch[1].trim() : undefined;
+                    // 优先从 metadata 读取翻译（后端保存时翻译存在 metadata，content 已清除标签）
+                    let translation: string | undefined;
+                    if (m.metadata) {
+                        try {
+                            const meta = JSON.parse(m.metadata);
+                            if (meta.translation) translation = meta.translation;
+                        } catch { /* ignore malformed metadata */ }
+                    }
+                    // 兜底：兼容旧格式，尝试从 content 中提取 [TRANSLATE:...] 标签
+                    if (!translation) {
+                        const translateMatch = m.content.match(/\[TRANSLATE:\s*([\s\S]*?)\]/i);
+                        if (translateMatch) translation = translateMatch[1].trim();
+                    }
                     const text = m.content
                         .replace(/\[ACTION:\w+\]\s*/g, "")
                         .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
                         .replace(/\[EMOTION:[^\]]*\]/g, "")
                         .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-                        .replace(/\[TRANSLATE:[\s\S]*?\](?=\s*(?:\[(?:ACTION|EMOTION|IMAGE_PROMPT))[:|]|\s*$)/gi, "")
+                        .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "")
                         .trim();
                     return { role: "kokoro" as const, text, translation };
                 }
