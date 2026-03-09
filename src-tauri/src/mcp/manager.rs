@@ -152,56 +152,15 @@ impl McpManager {
         configs
     }
 
+    /// Insert a pre-built client (used after lock-free connection).
+    pub fn insert_client(&mut self, name: String, client: McpClient) {
+        self.clients
+            .insert(name, Arc::new(Mutex::new(client)));
+    }
+
     /// Connect to a single server.
     pub async fn connect_server(&mut self, config: &McpServerConfig) -> Result<(), String> {
-        println!("[MCP] Connecting to '{}' (transport: {})...", config.name, config.transport_type);
-
-        let transport: Arc<dyn super::transport::McpTransport> = match config.transport_type.as_str() {
-            "streamable_http" | "streamable-http" => {
-                let url = config.url.as_deref().ok_or_else(|| {
-                    format!("Server '{}' has type '{}' but no 'url' configured", config.name, config.transport_type)
-                })?;
-                Arc::new(StreamableHttpTransport::new(url))
-            }
-            "sse" => {
-                let url = config.url.as_deref().ok_or_else(|| {
-                    format!("Server '{}' has type 'sse' but no 'url' configured", config.name)
-                })?;
-                let transport = SseTransport::new(url);
-                transport.connect().await?;
-                Arc::new(transport)
-            }
-            _ => {
-                // Default: stdio, but auto-detect from url if command is missing
-                if config.command.is_empty() {
-                    if let Some(ref url) = config.url {
-                        // Auto-detect: url-only config (Cursor-compatible)
-                        if url.trim_end_matches('/').ends_with("/sse") {
-                            println!("[MCP] Auto-detected SSE transport for '{}'", config.name);
-                            let transport = SseTransport::new(url);
-                            transport.connect().await?;
-                            Arc::new(transport)
-                        } else {
-                            println!("[MCP] Auto-detected Streamable HTTP transport for '{}'", config.name);
-                            Arc::new(StreamableHttpTransport::new(url))
-                        }
-                    } else {
-                        return Err(format!(
-                            "Server '{}' has no 'command' or 'url' configured",
-                            config.name
-                        ));
-                    }
-                } else {
-                    Arc::new(
-                        StdioTransport::spawn(&config.command, &config.args, Some(&config.env)).await?,
-                    )
-                }
-            }
-        };
-
-        let mut client = McpClient::new(transport);
-        client.connect().await?;
-
+        let client = build_connected_client(config).await?;
         self.clients
             .insert(config.name.clone(), Arc::new(Mutex::new(client)));
         Ok(())
@@ -348,4 +307,69 @@ impl McpManager {
     pub fn get_config(&self, name: &str) -> Option<McpServerConfig> {
         self.configs.iter().find(|c| c.name == name).cloned()
     }
+}
+
+/// Build and fully initialize an MCP client for the given config **without holding
+/// any manager lock**. All slow I/O (process spawn, TCP handshake, MCP initialize)
+/// happens here so callers can insert the result with only a brief lock.
+pub async fn build_connected_client(config: &McpServerConfig) -> Result<McpClient, String> {
+    println!(
+        "[MCP] Connecting to '{}' (transport: {})...",
+        config.name, config.transport_type
+    );
+
+    let transport: Arc<dyn super::transport::McpTransport> = match config.transport_type.as_str() {
+        "streamable_http" | "streamable-http" => {
+            let url = config.url.as_deref().ok_or_else(|| {
+                format!(
+                    "Server '{}' has type '{}' but no 'url' configured",
+                    config.name, config.transport_type
+                )
+            })?;
+            Arc::new(StreamableHttpTransport::new(url))
+        }
+        "sse" => {
+            let url = config.url.as_deref().ok_or_else(|| {
+                format!(
+                    "Server '{}' has type 'sse' but no 'url' configured",
+                    config.name
+                )
+            })?;
+            let transport = SseTransport::new(url);
+            transport.connect().await?;
+            Arc::new(transport)
+        }
+        _ => {
+            if config.command.is_empty() {
+                if let Some(ref url) = config.url {
+                    if url.trim_end_matches('/').ends_with("/sse") {
+                        println!("[MCP] Auto-detected SSE transport for '{}'", config.name);
+                        let transport = SseTransport::new(url);
+                        transport.connect().await?;
+                        Arc::new(transport)
+                    } else {
+                        println!(
+                            "[MCP] Auto-detected Streamable HTTP transport for '{}'",
+                            config.name
+                        );
+                        Arc::new(StreamableHttpTransport::new(url))
+                    }
+                } else {
+                    return Err(format!(
+                        "Server '{}' has no 'command' or 'url' configured",
+                        config.name
+                    ));
+                }
+            } else {
+                Arc::new(
+                    StdioTransport::spawn(&config.command, &config.args, Some(&config.env))
+                        .await?,
+                )
+            }
+        }
+    };
+
+    let mut client = McpClient::new(transport);
+    client.connect().await?;
+    Ok(client)
 }

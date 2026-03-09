@@ -40,24 +40,21 @@ pub async fn add_mcp_server(
         let cfg = config.clone();
         tauri::async_runtime::spawn(async move {
             println!("[MCP] Background connecting to '{}'...", cfg.name);
+            let build_result = crate::mcp::manager::build_connected_client(&cfg).await;
             let connect_result = {
                 let mut mgr = mgr_arc.lock().await;
-                let result = mgr.connect_server(&cfg).await;
                 mgr.clear_connecting(&cfg.name);
-                if let Err(ref e) = result {
-                    mgr.set_connection_error(&cfg.name, e.to_string());
+                match build_result {
+                    Ok(client) => { mgr.insert_client(cfg.name.clone(), client); Ok(()) }
+                    Err(e) => { mgr.set_connection_error(&cfg.name, e.clone()); Err(e) }
                 }
-                result
             };
-
             match connect_result {
                 Ok(()) => {
                     println!("[MCP] Connected '{}', refreshing tools...", cfg.name);
                     crate::mcp::bridge::register_mcp_tools(&mgr_arc, &reg_arc).await;
                 }
-                Err(e) => {
-                    eprintln!("[MCP] Connection failed for '{}': {}", cfg.name, e);
-                }
+                Err(e) => eprintln!("[MCP] Connection failed for '{}': {}", cfg.name, e),
             }
         });
     }
@@ -109,24 +106,21 @@ pub async fn reconnect_mcp_server(
 
     tauri::async_runtime::spawn(async move {
         println!("[MCP] Retrying connection to '{}'...", cfg.name);
+        let build_result = crate::mcp::manager::build_connected_client(&cfg).await;
         let connect_result = {
             let mut mgr = mgr_arc.lock().await;
-            let result = mgr.connect_server(&cfg).await;
             mgr.clear_connecting(&cfg.name);
-            if let Err(ref e) = result {
-                mgr.set_connection_error(&cfg.name, e.to_string());
+            match build_result {
+                Ok(client) => { mgr.insert_client(cfg.name.clone(), client); Ok(()) }
+                Err(e) => { mgr.set_connection_error(&cfg.name, e.clone()); Err(e) }
             }
-            result
         };
-
         match connect_result {
             Ok(()) => {
                 println!("[MCP] Reconnected '{}', refreshing tools...", cfg.name);
                 crate::mcp::bridge::register_mcp_tools(&mgr_arc, &reg_arc).await;
             }
-            Err(e) => {
-                eprintln!("[MCP] Reconnection failed for '{}': {}", cfg.name, e);
-            }
+            Err(e) => eprintln!("[MCP] Reconnection failed for '{}': {}", cfg.name, e),
         }
     });
 
@@ -163,24 +157,21 @@ pub async fn toggle_mcp_server(
         // Enable: spawn background connection
         tauri::async_runtime::spawn(async move {
             println!("[MCP] Enabling and connecting '{}'...", cfg.name);
+            let build_result = crate::mcp::manager::build_connected_client(&cfg).await;
             let connect_result = {
                 let mut mgr = mgr_arc.lock().await;
-                let result = mgr.connect_server(&cfg).await;
                 mgr.clear_connecting(&cfg.name);
-                if let Err(ref e) = result {
-                    mgr.set_connection_error(&cfg.name, e.to_string());
+                match build_result {
+                    Ok(client) => { mgr.insert_client(cfg.name.clone(), client); Ok(()) }
+                    Err(e) => { mgr.set_connection_error(&cfg.name, e.clone()); Err(e) }
                 }
-                result
             };
-
             match connect_result {
                 Ok(()) => {
                     println!("[MCP] Connected '{}', refreshing tools...", cfg.name);
                     crate::mcp::bridge::register_mcp_tools(&mgr_arc, &reg_arc).await;
                 }
-                Err(e) => {
-                    eprintln!("[MCP] Connection failed for '{}': {}", cfg.name, e);
-                }
+                Err(e) => eprintln!("[MCP] Connection failed for '{}': {}", cfg.name, e),
             }
         });
     } else {

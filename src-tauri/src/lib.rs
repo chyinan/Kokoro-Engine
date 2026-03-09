@@ -283,15 +283,27 @@ pub fn run() {
                     let mgr_arc = mcp_mgr_clone.clone();
                     let app_handle = mcp_app.clone();
                     handles.push(tauri::async_runtime::spawn(async move {
+                        // Slow I/O (process spawn / TCP / MCP handshake) happens
+                        // outside the lock so list_mcp_servers stays responsive.
+                        let build_result =
+                            crate::mcp::manager::build_connected_client(&cfg).await;
+
+                        // Brief lock only to insert the result.
                         let connect_result = {
                             let mut mgr = mgr_arc.lock().await;
-                            let result = mgr.connect_server(&cfg).await;
                             mgr.clear_connecting(&cfg.name);
-                            if let Err(ref e) = result {
-                                mgr.set_connection_error(&cfg.name, e.to_string());
+                            match build_result {
+                                Ok(client) => {
+                                    mgr.insert_client(cfg.name.clone(), client);
+                                    Ok(())
+                                }
+                                Err(e) => {
+                                    mgr.set_connection_error(&cfg.name, e.clone());
+                                    Err(e)
+                                }
                             }
-                            result
                         };
+
                         if let Ok(()) = connect_result {
                             println!("[MCP] Connected '{}', registering tools...", cfg.name);
                             if let Some(registry) =
