@@ -27,6 +27,9 @@ export default function ModelTab({
     const [isImporting, setIsImporting] = useState(false);
     const [models, setModels] = useState<Live2dModelInfo[]>([]);
     const [isLoadingModels, setIsLoadingModels] = useState(false);
+    const [showBuiltin, setShowBuiltin] = useState(
+        () => localStorage.getItem("modelTab.showBuiltin") !== "false"
+    );
 
     // Fetch available models on mount
     useEffect(() => {
@@ -190,9 +193,8 @@ export default function ModelTab({
                     </motion.button>
                 </div>
                 <div className="space-y-2 max-h-[220px] overflow-y-auto scrollable pr-1">
-                    {/* Default Model (always present) */}
-
-                    <div
+                    {/* Default Model (hideable) */}
+                    {showBuiltin && <div
                         className={clsx(
                             "flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all",
                             isSelected(null)
@@ -225,7 +227,21 @@ export default function ModelTab({
                                 <span className="text-[10px] text-[var(--color-text-muted)]">{t("settings.model.list.builtin")}</span>
                             </div>
                         </motion.button>
-                    </div>
+                        {/* Delete button — hides the builtin card (persisted) */}
+                        <motion.button
+                            whileHover={{ scale: 1.1 }}
+                            whileTap={{ scale: 0.9 }}
+                            onClick={() => {
+                                localStorage.setItem("modelTab.showBuiltin", "false");
+                                setShowBuiltin(false);
+                                if (isSelected(null)) onCustomModelPathChange(models[0]?.path ?? null);
+                            }}
+                            className="p-1.5 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-error)] hover:bg-[var(--color-error)]/10 transition-colors flex-shrink-0"
+                            title={t("common.actions.delete")}
+                        >
+                            <Trash2 size={14} strokeWidth={1.5} />
+                        </motion.button>
+                    </div>}
 
                     {/* Imported Models */}
                     <AnimatePresence>
