@@ -351,7 +351,9 @@ pub fn run() {
             // Vision Watcher
             let vision_config_path = app_data.join("vision_config.json");
             let vision_config = crate::vision::config::load_config(&vision_config_path);
-            let vision_watcher = crate::vision::watcher::VisionWatcher::new(vision_config.clone());
+            let llm_svc_for_vision = app.state::<crate::llm::service::LlmService>().inner().clone();
+            let vision_watcher = crate::vision::watcher::VisionWatcher::new(vision_config.clone())
+                .with_llm_service(llm_svc_for_vision);
             app.manage(vision_watcher.clone());
 
             // Auto-start vision watcher if previously enabled

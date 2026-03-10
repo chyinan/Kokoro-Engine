@@ -411,7 +411,9 @@
             "provider": {
                 "label": "VLM 공급자",
                 "ollama": "Ollama (로컬 — 권장)",
-                "openai": "OpenAI"
+                "openai": "OpenAI",
+                "llm": "현재 LLM 사용 (멀티모달)",
+                "llm_note": "「API」탭에서 설정한 LLM 공급자에 직접 스크린샷을 전송합니다. 별도의 VLM 설정이 필요 없습니다. 사용 중인 모델이 이미지 입력을 지원하는지 확인하세요 (예: GPT-4o, Claude 3, Gemini 등)."
             },
             "ollama": {
                 "warning": "Ollama에 연결할 수 없습니다. Ollama가 설치되어 있고 다음 주소에서 실행 중인지 확인하세요:"
@@ -453,7 +455,8 @@
             "save": "변경 사항 적용",
             "test": {
                 "button": "캡처 테스트",
-                "capturing": "캡처 중..."
+                "capturing": "캡처 중...",
+                "save_first": "테스트 전에 설정을 저장하세요"
             },
             "privacy_note": "🔒 스크린샷은 로컬에서 처리되며 구성된 VLM 공급자로 직접 전송됩니다. 영구적으로 저장되지 않으며 텍스트 설명만 메모리에 유지됩니다.",
             "loading": "비전 구성 로딩 중..."

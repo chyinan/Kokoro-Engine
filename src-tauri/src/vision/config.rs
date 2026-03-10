@@ -13,7 +13,7 @@ pub struct VisionConfig {
     pub change_threshold: f64,
 
     // ── Independent VLM Provider ──────────────────────────
-    /// Provider type: "ollama" or "openai"
+    /// Provider type: "ollama", "openai", or "llm" (use active LLM)
     pub vlm_provider: String,
     /// Base URL for the VLM API (e.g. "http://localhost:11434/v1")
     pub vlm_base_url: Option<String>,
@@ -40,7 +40,18 @@ impl Default for VisionConfig {
 /// Load config from disk, falling back to defaults.
 pub fn load_config(path: &Path) -> VisionConfig {
     match std::fs::read_to_string(path) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        Ok(json) => {
+            let mut cfg: VisionConfig = serde_json::from_str(&json).unwrap_or_default();
+            // Heal empty model name that can occur when switching from "llm" provider
+            // without saving a new model name first.
+            if cfg.vlm_model.is_empty() && cfg.vlm_provider != "llm" {
+                cfg.vlm_model = match cfg.vlm_provider.as_str() {
+                    "ollama" => "minicpm-v".to_string(),
+                    _ => "gpt-4o".to_string(),
+                };
+            }
+            cfg
+        }
         Err(_) => VisionConfig::default(),
     }
 }

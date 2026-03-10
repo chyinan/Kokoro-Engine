@@ -71,13 +71,21 @@ pub async fn stop_vision_watcher(state: State<'_, VisionWatcher>) -> Result<(), 
 // ── One-shot Capture (for testing) ────────────────────
 
 #[tauri::command]
-pub async fn capture_screen_now(state: State<'_, VisionWatcher>) -> Result<String, String> {
+pub async fn capture_screen_now(
+    state: State<'_, VisionWatcher>,
+    llm_service: State<'_, crate::llm::service::LlmService>,
+) -> Result<String, String> {
     let screenshot = capture_screen()?;
     let config = state.config.read().await.clone();
+    let client = state.client.clone();
 
-    let client = reqwest::Client::new();
-    let description =
-        crate::vision::watcher::analyze_screenshot(&client, &config, &screenshot).await?;
+    let description = crate::vision::watcher::analyze_screenshot(
+        &client,
+        &config,
+        &screenshot,
+        Some(&llm_service),
+    )
+    .await?;
 
     state.context.update(description.clone()).await;
     Ok(description)

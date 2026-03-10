@@ -412,7 +412,9 @@
             "provider": {
                 "label": "VLM Provider",
                 "ollama": "Ollama (Local — Recommended)",
-                "openai": "OpenAI"
+                "openai": "OpenAI",
+                "llm": "Use Active LLM (Multimodal)",
+                "llm_note": "Screenshots will be sent directly to the LLM provider configured in the API tab — no separate VLM setup needed. Make sure your active model supports image input (e.g. GPT-4o, Claude 3, Gemini)."
             },
             "ollama": {
                 "warning": "Cannot connect to Ollama. Make sure Ollama is installed and running at"
@@ -454,7 +456,8 @@
             "save": "Apply Changes",
             "test": {
                 "button": "Test Capture",
-                "capturing": "Capturing..."
+                "capturing": "Capturing...",
+                "save_first": "Please save config before testing"
             },
             "privacy_note": "🔒 Screenshots are captured locally and sent directly to your configured VLM provider. They are never stored permanently — only the text description is kept in memory.",
             "loading": "Loading vision config..."

@@ -412,7 +412,9 @@
             "provider": {
                 "label": "VLM 提供商",
                 "ollama": "Ollama (本地 - 推荐)",
-                "openai": "OpenAI"
+                "openai": "OpenAI",
+                "llm": "使用当前大模型 (多模态)",
+                "llm_note": "将直接使用「API」页面配置的大模型服务商处理截图，无需单独配置 VLM。请确保所选模型支持图像输入（如 GPT-4o、Claude 3、Gemini 等）。"
             },
             "ollama": {
                 "warning": "无法连接到 Ollama。请确保 Ollama 已安装并运行在"
@@ -454,7 +456,8 @@
             "save": "应用更改",
             "test": {
                 "button": "测试捕获",
-                "capturing": "捕获中..."
+                "capturing": "捕获中...",
+                "save_first": "请先保存配置再测试"
             },
             "privacy_note": "🔒 屏幕截图仅在本地处理并直接发送给您配置的 VLM 提供商。截图永远不会被永久保存——仅保留文本描述。",
             "loading": "正在加载视觉配置..."
