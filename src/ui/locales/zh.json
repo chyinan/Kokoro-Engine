@@ -538,6 +538,19 @@
             "conflict_label": "冲突策略",
             "conflict_overwrite": "覆盖",
             "conflict_skip": "跳过已有"
+        },
+        "pet": {
+            "title": "桌面悬浮模式",
+            "description": "在桌面显示透明悬浮 Live2D 模型",
+            "shortcut_label": "全局快捷键",
+            "shortcut_hint": "修改后需重启应用生效",
+            "record": "录制",
+            "recording": "录制中...",
+            "record_prompt": "请按下快捷键...",
+            "position_label": "窗口位置",
+            "reset_position": "重置到屏幕左上角",
+            "save": "保存设置",
+            "saved": "已保存"
         }
     },
     "chat": {

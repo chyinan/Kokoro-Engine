@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { useTranslation } from "react-i18next";
 
 interface PetConfig {
     enabled: boolean;
@@ -55,10 +56,11 @@ export default function PetTab() {
     const [saved, setSaved] = useState(false);
     const [recording, setRecording] = useState(false);
     const [recordingDisplay, setRecordingDisplay] = useState("");
+    const { t } = useTranslation();
 
     const startRecording = useCallback(() => {
         setRecording(true);
-        setRecordingDisplay("请按下快捷键...");
+        setRecordingDisplay(t("settings.pet.record_prompt"));
 
         const pressedKeys = new Set<string>();
 
@@ -160,10 +162,10 @@ export default function PetTab() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <div>
                     <div style={{ fontSize: "14px", fontWeight: 600, color: "var(--color-text-primary)" }}>
-                        桌面悬浮模式
+                        {t("settings.pet.title")}
                     </div>
                     <div style={{ fontSize: "12px", color: "var(--color-text-muted)", marginTop: "2px" }}>
-                        在桌面显示透明悬浮 Live2D 模型
+                        {t("settings.pet.description")}
                     </div>
                 </div>
                 <button
@@ -185,7 +187,7 @@ export default function PetTab() {
 
             {/* Shortcut */}
             <div>
-                <div style={labelStyle}>全局快捷键</div>
+                <div style={labelStyle}>{t("settings.pet.shortcut_label")}</div>
                 <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
                     <div style={{
                         flex: 1, ...inputStyle,
@@ -208,17 +210,17 @@ export default function PetTab() {
                             whiteSpace: "nowrap",
                         }}
                     >
-                        {recording ? "录制中..." : "录制"}
+                        {recording ? t("settings.pet.recording") : t("settings.pet.record")}
                     </button>
                 </div>
                 <div style={{ fontSize: "11px", color: "var(--color-text-muted)", marginTop: "4px" }}>
-                    修改后需重启应用生效
+                    {t("settings.pet.shortcut_hint")}
                 </div>
             </div>
 
             {/* Reset position */}
             <div>
-                <div style={labelStyle}>窗口位置</div>
+                <div style={labelStyle}>{t("settings.pet.position_label")}</div>
                 <button
                     onClick={handleResetPosition}
                     style={{
@@ -227,7 +229,7 @@ export default function PetTab() {
                         fontSize: "13px", cursor: "pointer",
                     }}
                 >
-                    重置到屏幕左上角
+                    {t("settings.pet.reset_position")}
                 </button>
             </div>
 
@@ -241,7 +243,7 @@ export default function PetTab() {
                     transition: "background 0.2s",
                 }}
             >
-                {saved ? "已保存" : "保存设置"}
+                {saved ? t("settings.pet.saved") : t("settings.pet.save")}
             </button>
         </div>
     );

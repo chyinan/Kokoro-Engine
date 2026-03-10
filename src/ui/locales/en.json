@@ -538,6 +538,19 @@
             "conflict_label": "Conflict Strategy",
             "conflict_overwrite": "Overwrite",
             "conflict_skip": "Skip Existing"
+        },
+        "pet": {
+            "title": "Desktop Float Mode",
+            "description": "Display a transparent floating Live2D model on your desktop",
+            "shortcut_label": "Global Shortcut",
+            "shortcut_hint": "Restart the app for changes to take effect",
+            "record": "Record",
+            "recording": "Recording...",
+            "record_prompt": "Press a shortcut key...",
+            "position_label": "Window Position",
+            "reset_position": "Reset to Top-Left",
+            "save": "Save Settings",
+            "saved": "Saved"
         }
     },
     "chat": {

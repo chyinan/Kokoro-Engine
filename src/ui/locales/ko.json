@@ -537,6 +537,19 @@
             "conflict_label": "충돌 처리",
             "conflict_overwrite": "덮어쓰기",
             "conflict_skip": "기존 건너뛰기"
+        },
+        "pet": {
+            "title": "데스크탑 플로팅 모드",
+            "description": "투명한 플로팅 창으로 Live2D 모델을 데스크탑에 표시",
+            "shortcut_label": "글로벌 단축키",
+            "shortcut_hint": "변경 사항을 적용하려면 앱을 재시작하세요",
+            "record": "녹화",
+            "recording": "녹화 중...",
+            "record_prompt": "단축키를 눌러주세요...",
+            "position_label": "창 위치",
+            "reset_position": "왼쪽 상단으로 초기화",
+            "save": "설정 저장",
+            "saved": "저장됨"
         }
     },
     "chat": {

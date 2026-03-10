@@ -537,6 +537,19 @@
             "conflict_label": "競合時の処理",
             "conflict_overwrite": "上書き",
             "conflict_skip": "既存をスキップ"
+        },
+        "pet": {
+            "title": "デスクトップ浮動モード",
+            "description": "透明な浮動ウィンドウで Live2D モデルをデスクトップに表示",
+            "shortcut_label": "グローバルショートカット",
+            "shortcut_hint": "変更を反映するにはアプリを再起動してください",
+            "record": "録音",
+            "recording": "録音中...",
+            "record_prompt": "ショートカットキーを押してください...",
+            "position_label": "ウィンドウ位置",
+            "reset_position": "左上にリセット",
+            "save": "設定を保存",
+            "saved": "保存済み"
         }
     },
     "chat": {
