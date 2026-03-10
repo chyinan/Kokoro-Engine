@@ -76,7 +76,8 @@
             "mcp": "MCP",
             "telegram": "Telegram",
             "jailbreak": "破限提示词",
-            "backup": "备份"
+            "backup": "备份",
+            "pet": "桌面悬浮"
         },
         "app_language": {
             "label": "应用语言",

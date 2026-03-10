@@ -252,6 +252,7 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
 #[tauri::command]
 pub async fn stream_chat(
     window: Window,
+    app: tauri::AppHandle,
     request: ChatRequest,
     state: State<'_, AIOrchestrator>,
     imagegen_state: State<'_, ImageGenService>,
@@ -292,7 +293,7 @@ pub async fn stream_chat(
             request.message.chars().count(),
             is_question,
         );
-        let _ = window.emit("chat-typing", &typing_params);
+        let _ = app.emit("chat-typing", &typing_params);
     }
 
     // 1. Update History with User Message (skip for hidden/touch interactions)
@@ -522,13 +523,13 @@ pub async fn stream_chat(
                     if safe > 0 {
                         let to_emit = emit_buffer[..safe].to_string();
                         emit_buffer = emit_buffer[safe..].to_string();
-                        window
+                        app
                             .emit("chat-delta", &to_emit)
                             .map_err(|e| e.to_string())?;
                     }
                 }
                 Err(e) => {
-                    window.emit("chat-error", e).map_err(|e| e.to_string())?;
+                    app.emit("chat-error", e).map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -538,7 +539,7 @@ pub async fn stream_chat(
             let (cleaned_remainder, _) = parse_tool_call_tags(&emit_buffer);
             let cleaned_remainder = strip_translate_tags(&cleaned_remainder);
             if !cleaned_remainder.is_empty() {
-                window
+                app
                     .emit("chat-delta", &cleaned_remainder)
                     .map_err(|e| e.to_string())?;
             }
@@ -617,7 +618,7 @@ pub async fn stream_chat(
             match registry.execute(&tc.name, tc.args.clone(), ctx).await {
                 Ok(result) => {
                     println!("[ToolCall] {} => {}", tc.name, result.message);
-                    let _ = window.emit(
+                    let _ = app.emit(
                         "chat-tool-result",
                         serde_json::json!({
                             "tool": tc.name,
@@ -628,7 +629,7 @@ pub async fn stream_chat(
                 }
                 Err(e) => {
                     eprintln!("[ToolCall] {} failed: {}", tc.name, e.0);
-                    let _ = window.emit(
+                    let _ = app.emit(
                         "chat-tool-result",
                         serde_json::json!({
                             "tool": tc.name,
@@ -725,7 +726,7 @@ pub async fn stream_chat(
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(clean) {
                     if let Some(expr) = val.get("expression").and_then(|v| v.as_str()) {
                         println!("[Chat] Fallback expression: {}", expr);
-                        let _ = window.emit("chat-expression", serde_json::json!({ "expression": expr, "mood": 0.5 }));
+                        let _ = app.emit("chat-expression", serde_json::json!({ "expression": expr, "mood": 0.5 }));
                     }
                 }
             }
@@ -738,7 +739,7 @@ pub async fn stream_chat(
     // Emit combined translation from all rounds
     if !all_translations.is_empty() {
         let combined_translation = all_translations.join(" ");
-        let _ = window.emit("chat-translation", &combined_translation);
+        let _ = app.emit("chat-translation", &combined_translation);
     }
 
     // 8. Update History with final response
@@ -898,7 +899,7 @@ pub async fn stream_chat(
         });
     }
 
-    window.emit("chat-done", ()).map_err(|e| e.to_string())?;
+    app.emit("chat-done", ()).map_err(|e| e.to_string())?;
 
     Ok(())
 }

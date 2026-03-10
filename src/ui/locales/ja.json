@@ -76,7 +76,8 @@
             "mcp": "MCP",
             "telegram": "Telegram",
             "jailbreak": "ジェイルブレイク",
-            "backup": "バックアップ"
+            "backup": "バックアップ",
+            "pet": "デスクトップ浮動"
         },
         "app_language": {
             "label": "アプリケーション言語",

@@ -261,6 +261,20 @@ function App() {
     return () => window.removeEventListener('resize', sync);
   }, []);
 
+  // Listen for pet window requesting main window to show
+  useEffect(() => {
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+        const unlisten = listen("show-main-window", async () => {
+          const win = getCurrentWindow();
+          await win.unminimize().catch(console.error);
+          await win.setFocus().catch(console.error);
+        });
+        return unlisten;
+      });
+    });
+  }, []);
+
   useEffect(() => {
     ttsService.init();
 

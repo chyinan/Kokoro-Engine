@@ -21,6 +21,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .register_uri_scheme_protocol("mod", crate::mods::protocol::handle_mod_request)
         .register_uri_scheme_protocol("live2d", {
             // Compute models dir eagerly — protocol handler runs before .setup()
@@ -121,6 +122,16 @@ pub fn run() {
             commands::backup::export_data,
             commands::backup::preview_import,
             commands::backup::import_data,
+            commands::pet::show_pet_window,
+            commands::pet::hide_pet_window,
+            commands::pet::set_pet_drag_mode,
+            commands::pet::get_pet_config,
+            commands::pet::save_pet_config,
+            commands::pet::move_pet_window,
+            commands::pet::resize_pet_window,
+            commands::pet::show_bubble_window,
+            commands::pet::update_bubble_text,
+            commands::pet::hide_bubble_window,
             stt::stream::process_audio_chunk,
             stt::stream::complete_audio_stream,
             stt::stream::discard_audio_stream,
@@ -386,6 +397,38 @@ pub fn run() {
                         eprintln!("[Telegram] Auto-start failed: {}", e);
                     }
                 });
+            }
+
+            // Global shortcut + Pet window auto-start
+            {
+                use tauri::Emitter;
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+                let pet_cfg = crate::commands::pet::load_pet_config();
+                let shortcut_str = pet_cfg.shortcut.clone();
+                let pet_enabled = pet_cfg.enabled;
+
+                if let Ok(shortcut) = shortcut_str.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+                    let shortcut_app = app.handle().clone();
+                    let _ = app.handle().global_shortcut().on_shortcut(shortcut, move |_app, _sc, event| {
+                        if event.state() == ShortcutState::Pressed {
+                            if let Some(pet_win) = shortcut_app.get_webview_window("pet") {
+                                let _ = pet_win.emit("toggle-chat-input", ());
+                            }
+                        }
+                    });
+                }
+
+                if pet_enabled {
+                    let pet_app = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        if let Some(win) = pet_app.get_webview_window("pet") {
+                            let cfg = crate::commands::pet::load_pet_config();
+                            let _ = win.set_position(tauri::PhysicalPosition::new(cfg.position_x, cfg.position_y));
+                            let _ = win.show();
+                        }
+                    });
+                }
             }
 
             Ok(())

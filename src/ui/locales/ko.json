@@ -76,7 +76,8 @@
             "mcp": "MCP",
             "telegram": "Telegram",
             "jailbreak": "제한 해제",
-            "backup": "백업"
+            "backup": "백업",
+            "pet": "데스크탑 플로팅"
         },
         "app_language": {
             "label": "애플리케이션 언어",

@@ -48,6 +48,11 @@ Features currently verified mainly in a local environment (RTX 4060 Laptop):
 - **Live2D Models**: Full support for Live2D Cubism SDK, supporting eye tracking and motion triggering.
 - **Model Hot-Switching**: Supports real-time import and switching of different Live2D models and viewing angles within the app.
 - **Multi-language Interface**: Full Internationalization (I18n) support, currently supporting **Simplified Chinese**, **English**, **Japanese**, and **Korean**.
+- **Desktop Float Mode**: Display the Live2D model as a transparent floating window on your desktop — always on top, borderless, and fully transparent.
+  - Right-click drag to move the window; right-click menu to enter resize mode and drag edges to resize freely.
+  - Ctrl + scroll wheel to fine-tune model scale.
+  - Global shortcut (customizable via key recording) to summon the chat input; AI replies appear in a separate bubble window above the model.
+  - Position, window size, and model scale are automatically restored after restart.
 
 ### 🧠 AI Brain
 - **Multimodal Conversation**: Supports **Ollama** (Local) and **OpenAI Compatible Interfaces** (Cloud) as the conversation core.

@@ -12,6 +12,12 @@
     "fs:default",
     "fs:allow-read-text-file",
     "fs:allow-exists",
-    "process:allow-restart"
+    "process:allow-restart",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "global-shortcut:allow-is-registered",
+    "core:window:allow-unminimize",
+    "core:window:allow-set-focus",
+    "core:event:allow-listen"
   ]
 }

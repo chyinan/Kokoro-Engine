@@ -1,0 +1,633 @@
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
+import Live2DViewer from "../features/live2d/Live2DViewer";
+import { Live2DController } from "../features/live2d/Live2DController";
+import PetContextMenu from "../features/pet/PetContextMenu";
+import { usePetChat } from "../features/pet/usePetChat";
+import type { Live2DViewerHandle } from "../features/live2d/Live2DViewer";
+import type { EmotionState, ActionIntent } from "../features/live2d/Live2DController";
+import "../ui/i18n";
+
+interface PetConfig {
+    enabled: boolean;
+    position_x: number;
+    position_y: number;
+    shortcut: string;
+    model_url: string | null;
+    window_width: number;
+    window_height: number;
+    model_scale: number;
+}
+
+export default function PetWindow() {
+    // Read model from localStorage (same key as main window)
+    const modelUrl = useMemo(() => {
+        const saved = localStorage.getItem("kokoro_custom_model_path");
+        if (saved) return `http://live2d.localhost/${saved}`;
+        return "https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display/test/assets/haru/haru_greeter_t03.model3.json";
+    }, []);
+    const [isDragMode, setIsDragMode] = useState(false);
+    const [isResizeMode, setIsResizeMode] = useState(false);
+    const [contextMenu, setContextMenu] = useState<{ visible: boolean; x: number; y: number }>({
+        visible: false, x: 0, y: 0,
+    });
+    const [chatInputVisible, setChatInputVisible] = useState(false);
+    const [chatInput, setChatInput] = useState("");
+    const [canvasSize, setCanvasSize] = useState<{ width: number; height: number } | null>(null);
+    const viewerRef = useRef<Live2DViewerHandle>(null);
+    const controllerRef = useRef<Live2DController>(new Live2DController());
+    const inputRef = useRef<HTMLInputElement>(null);
+    const isDragModeRef = useRef(false);
+    const isResizeModeRef = useRef(false);
+    const rightClickStartRef = useRef<{ x: number; y: number } | null>(null);
+    const savedScaleRef = useRef<number>(0); // restored scale to apply after model loads
+    const { isStreaming, sendMessage } = usePetChat();
+
+    // On mount: restore saved window size and model scale from config
+    useEffect(() => {
+        invoke<PetConfig>("get_pet_config").then(cfg => {
+            if (cfg.window_width > 0 && cfg.window_height > 0) {
+                setCanvasSize({ width: cfg.window_width, height: cfg.window_height });
+                invoke("resize_pet_window", { width: cfg.window_width, height: cfg.window_height }).catch(console.error);
+            }
+            if (cfg.model_scale > 0) {
+                savedScaleRef.current = cfg.model_scale;
+            }
+        }).catch(console.error);
+    }, []);
+
+    // Handle model loaded - restore saved size/scale or auto-fit
+    const handleModelLoaded = useCallback(async (bounds: { width: number; height: number }) => {
+        console.log("[PetWindow] Model loaded with natural bounds:", bounds);
+
+        // If we have a saved scale, apply it and skip auto-resize
+        if (savedScaleRef.current > 0) {
+            const model = viewerRef.current?.getModel();
+            if (model) {
+                model.scale.set(savedScaleRef.current);
+                const canvas = document.querySelector('canvas');
+                if (canvas) {
+                    model.x = (canvas.width - model.width) / 2;
+                    model.y = (canvas.height - model.height) / 2;
+                }
+            }
+            return;
+        }
+
+        // First launch: auto-fit to model bounds
+        const padding = 30;
+        const newWidth = Math.ceil(bounds.width + padding);
+        const newHeight = Math.ceil(bounds.height + padding);
+
+        console.log("[PetWindow] Setting canvas size to:", newWidth, "x", newHeight);
+        setCanvasSize({ width: newWidth, height: newHeight });
+
+        try {
+            await invoke("resize_pet_window", { width: newWidth, height: newHeight });
+            // Save initial size
+            invoke<PetConfig>("get_pet_config").then(cfg => {
+                invoke("save_pet_config", { config: { ...cfg, window_width: newWidth, window_height: newHeight } }).catch(console.error);
+            }).catch(console.error);
+        } catch (e) {
+            console.error("[PetWindow] Failed to resize window:", e);
+        }
+    }, []);
+
+    // Debug: log component mount + test right-click detection
+    useEffect(() => {
+        console.log("[PetWindow] Component mounted");
+
+        // Test: simple click detection
+        const testClick = (e: MouseEvent) => {
+            console.log("[PetWindow] Click detected:", e.button, "at", e.clientX, e.clientY);
+        };
+        document.addEventListener("click", testClick);
+
+        return () => {
+            console.log("[PetWindow] Component unmounted");
+            document.removeEventListener("click", testClick);
+        };
+    }, []);
+
+    // Keep ref in sync for use in native event listeners
+    useEffect(() => {
+        isDragModeRef.current = isDragMode;
+        isResizeModeRef.current = isResizeMode;
+    }, [isDragMode, isResizeMode]);
+
+    // Resize mode: drag edges to resize window + Ctrl+Wheel to scale model
+    useEffect(() => {
+        if (!isResizeMode) return;
+
+        let resizeEdge: 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw' | null = null;
+        let resizeStartPos: { x: number; y: number } | null = null;
+        let windowStartSize: { width: number; height: number } | null = null;
+        let windowStartPos: { x: number; y: number } | null = null;
+
+        const EDGE_SIZE = 10; // px from edge to detect resize
+
+        const detectEdge = (e: MouseEvent): typeof resizeEdge => {
+            const rect = document.body.getBoundingClientRect();
+            const x = e.clientX;
+            const y = e.clientY;
+
+            const nearTop = y < EDGE_SIZE;
+            const nearBottom = y > rect.height - EDGE_SIZE;
+            const nearLeft = x < EDGE_SIZE;
+            const nearRight = x > rect.width - EDGE_SIZE;
+
+            if (nearTop && nearLeft) return 'nw';
+            if (nearTop && nearRight) return 'ne';
+            if (nearBottom && nearLeft) return 'sw';
+            if (nearBottom && nearRight) return 'se';
+            if (nearTop) return 'n';
+            if (nearBottom) return 's';
+            if (nearLeft) return 'w';
+            if (nearRight) return 'e';
+            return null;
+        };
+
+        const getCursor = (edge: typeof resizeEdge): string => {
+            if (!edge) return 'default';
+            const cursors = {
+                n: 'ns-resize',
+                s: 'ns-resize',
+                e: 'ew-resize',
+                w: 'ew-resize',
+                ne: 'nesw-resize',
+                nw: 'nwse-resize',
+                se: 'nwse-resize',
+                sw: 'nesw-resize',
+            };
+            return cursors[edge];
+        };
+
+        const recenterModel = () => {
+            const model = viewerRef.current?.getModel();
+            if (model) {
+                const canvas = document.querySelector('canvas');
+                if (canvas) {
+                    model.x = (canvas.width - model.width) / 2;
+                    model.y = (canvas.height - model.height) / 2;
+                }
+            }
+        };
+
+        // Ctrl + Wheel to scale model
+        const handleWheel = (e: WheelEvent) => {
+            if (e.ctrlKey) {
+                e.preventDefault();
+
+                const model = viewerRef.current?.getModel();
+                if (!model) return;
+
+                const delta = e.deltaY > 0 ? -0.02 : 0.02;
+                const currentScale = model.scale.x;
+                const newScale = Math.max(0.1, Math.min(3.0, currentScale + delta));
+
+                model.scale.set(newScale);
+                recenterModel();
+
+                // Persist scale
+                invoke<PetConfig>("get_pet_config").then(cfg => {
+                    invoke("save_pet_config", { config: { ...cfg, model_scale: newScale } }).catch(console.error);
+                }).catch(console.error);
+            }
+        };
+
+        const handleMouseMove = async (e: MouseEvent) => {
+            if (resizeEdge && resizeStartPos && windowStartSize && windowStartPos) {
+                // Resizing
+                const dx = e.screenX - resizeStartPos.x;
+                const dy = e.screenY - resizeStartPos.y;
+
+                let newWidth = windowStartSize.width;
+                let newHeight = windowStartSize.height;
+                let newX = windowStartPos.x;
+                let newY = windowStartPos.y;
+
+                if (resizeEdge.includes('e')) newWidth = Math.max(200, windowStartSize.width + dx);
+                if (resizeEdge.includes('w')) {
+                    newWidth = Math.max(200, windowStartSize.width - dx);
+                    newX = windowStartPos.x + dx;
+                }
+                if (resizeEdge.includes('s')) newHeight = Math.max(200, windowStartSize.height + dy);
+                if (resizeEdge.includes('n')) {
+                    newHeight = Math.max(200, windowStartSize.height - dy);
+                    newY = windowStartPos.y + dy;
+                }
+
+                try {
+                    await invoke("resize_pet_window", { width: newWidth, height: newHeight });
+                    if (newX !== windowStartPos.x || newY !== windowStartPos.y) {
+                        await getCurrentWindow().setPosition(new PhysicalPosition(newX, newY));
+                    }
+                    setCanvasSize({ width: newWidth, height: newHeight });
+
+                    // Re-center model after resize
+                    setTimeout(recenterModel, 50);
+                } catch (e) {
+                    console.error("[PetWindow] Failed to resize:", e);
+                }
+            } else {
+                // Hovering - update cursor
+                const edge = detectEdge(e);
+                document.body.style.cursor = getCursor(edge);
+            }
+        };
+
+        const handleMouseDown = async (e: MouseEvent) => {
+            const edge = detectEdge(e);
+            if (edge) {
+                e.preventDefault();
+                resizeEdge = edge;
+                resizeStartPos = { x: e.screenX, y: e.screenY };
+
+                try {
+                    const size = await getCurrentWindow().innerSize();
+                    const pos = await getCurrentWindow().outerPosition();
+                    windowStartSize = { width: size.width, height: size.height };
+                    windowStartPos = { x: pos.x, y: pos.y };
+                } catch (e) {
+                    console.error("[PetWindow] Failed to get window info:", e);
+                }
+            }
+        };
+
+        const handleMouseUp = () => {
+            if (resizeEdge && windowStartSize) {
+                // Save window size after resize
+                getCurrentWindow().innerSize().then(size => {
+                    invoke<PetConfig>("get_pet_config").then(cfg => {
+                        invoke("save_pet_config", {
+                            config: { ...cfg, window_width: size.width, window_height: size.height }
+                        }).catch(console.error);
+                    }).catch(console.error);
+                }).catch(console.error);
+            }
+            resizeEdge = null;
+            resizeStartPos = null;
+            windowStartSize = null;
+            windowStartPos = null;
+            document.body.style.cursor = 'default';
+        };
+
+        document.addEventListener('mousemove', handleMouseMove);
+        document.addEventListener('mousedown', handleMouseDown);
+        document.addEventListener('mouseup', handleMouseUp);
+        document.addEventListener('wheel', handleWheel, { passive: false });
+
+        return () => {
+            document.removeEventListener('mousemove', handleMouseMove);
+            document.removeEventListener('mousedown', handleMouseDown);
+            document.removeEventListener('mouseup', handleMouseUp);
+            document.removeEventListener('wheel', handleWheel);
+            document.body.style.cursor = 'default';
+        };
+    }, [isResizeMode]);
+
+    // Right-click: short click for menu, drag for window move
+    useEffect(() => {
+        let dragStartPos: { x: number; y: number } | null = null;
+        let windowStartPos: { x: number; y: number } | null = null;
+        let hasMoved = false;
+
+        const handleMouseDown = async (e: MouseEvent) => {
+            if (e.button === 2) { // Right button
+                e.preventDefault();
+                e.stopPropagation();
+                dragStartPos = { x: e.screenX, y: e.screenY };
+                hasMoved = false;
+                rightClickStartRef.current = { x: e.clientX, y: e.clientY };
+
+                console.log("[PetWindow] Right mousedown at", e.clientX, e.clientY);
+
+                // Get current window position
+                try {
+                    const pos = await getCurrentWindow().outerPosition();
+                    windowStartPos = { x: pos.x, y: pos.y };
+                    console.log("[PetWindow] Window start position:", windowStartPos);
+                } catch (e) {
+                    console.error("[PetWindow] Failed to get window position:", e);
+                }
+
+                // Enter drag mode
+                setIsDragMode(true);
+                isDragModeRef.current = true;
+            }
+        };
+
+        const handleMouseMove = async (e: MouseEvent) => {
+            if (dragStartPos && windowStartPos && isDragModeRef.current) {
+                const dx = e.screenX - dragStartPos.x;
+                const dy = e.screenY - dragStartPos.y;
+
+                // If moved more than 5px, consider it a drag
+                if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+                    hasMoved = true;
+
+                    // Move window
+                    const newX = windowStartPos.x + dx;
+                    const newY = windowStartPos.y + dy;
+
+                    try {
+                        await getCurrentWindow().setPosition(new PhysicalPosition(newX, newY));
+                    } catch (e) {
+                        console.error("[PetWindow] Failed to set position:", e);
+                    }
+                }
+            }
+        };
+
+        const handleMouseUp = (e: MouseEvent) => {
+            if (e.button === 2) {
+                e.preventDefault();
+                e.stopPropagation();
+
+                console.log("[PetWindow] Right mouseup, hasMoved:", hasMoved);
+
+                if (!hasMoved && rightClickStartRef.current) {
+                    // No movement — show menu
+                    const pos = rightClickStartRef.current;
+                    console.log("[PetWindow] Showing menu at", pos.x, pos.y);
+                    setContextMenu({ visible: true, x: pos.x, y: pos.y });
+                } else if (hasMoved && windowStartPos) {
+                    // Drag completed — save position
+                    console.log("[PetWindow] Drag completed, saving position");
+                    getCurrentWindow().outerPosition().then(pos => {
+                        invoke<PetConfig>("get_pet_config").then(cfg => {
+                            invoke("save_pet_config", {
+                                config: { ...cfg, position_x: pos.x, position_y: pos.y }
+                            }).catch(console.error);
+                        }).catch(console.error);
+                    }).catch(console.error);
+                }
+
+                // Exit drag mode
+                setIsDragMode(false);
+                isDragModeRef.current = false;
+                dragStartPos = null;
+                windowStartPos = null;
+                rightClickStartRef.current = null;
+            }
+        };
+
+        const handleContextMenu = (e: MouseEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+        };
+
+        // Use capture phase to intercept before canvas
+        document.addEventListener("mousedown", handleMouseDown, true);
+        document.addEventListener("mousemove", handleMouseMove, true);
+        document.addEventListener("mouseup", handleMouseUp, true);
+        document.addEventListener("contextmenu", handleContextMenu, true);
+
+        return () => {
+            document.removeEventListener("mousedown", handleMouseDown, true);
+            document.removeEventListener("mousemove", handleMouseMove, true);
+            document.removeEventListener("mouseup", handleMouseUp, true);
+            document.removeEventListener("contextmenu", handleContextMenu, true);
+        };
+    }, []);
+
+    // Native pointerup for drag exit — removed, now handled in enterDragMode
+    // useEffect(() => {
+    //     const handler = () => {
+    //         if (isDragModeRef.current) {
+    //             setTimeout(exitDragMode, 100);
+    //         }
+    //     };
+    //     document.addEventListener("pointerup", handler);
+    //     return () => document.removeEventListener("pointerup", handler);
+    // }, []);
+
+    // Make PIXI canvas transparent via CSS injection + disable canvas pointer events for right-click
+    useEffect(() => {
+        const style = document.createElement("style");
+        style.textContent = `
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            html, body, #root {
+                width: 100%;
+                height: 100%;
+                background: transparent !important;
+                overflow: hidden;
+            }
+            canvas {
+                background: transparent !important;
+                display: block;
+            }
+        `;
+        document.head.appendChild(style);
+
+        // Disable pointer events on canvas after it's created
+        const checkCanvas = setInterval(() => {
+            const canvas = document.querySelector("canvas");
+            if (canvas) {
+                (canvas as HTMLCanvasElement).style.pointerEvents = "none";
+                console.log("[PetWindow] Canvas pointer events disabled");
+                clearInterval(checkCanvas);
+            }
+        }, 100);
+
+        return () => {
+            document.head.removeChild(style);
+            clearInterval(checkCanvas);
+        };
+    }, []);
+
+    // Listen for toggle-chat-input from global shortcut
+    useEffect(() => {
+        const unlisten = listen("toggle-chat-input", () => {
+            setChatInputVisible(v => !v);
+            setTimeout(() => inputRef.current?.focus(), 50);
+        });
+        return () => { unlisten.then(fn => fn()); };
+    }, []);
+
+    // Listen for chat-expression events
+    useEffect(() => {
+        const unlisten = listen<{ expression: string }>("chat-expression", (event) => {
+            controllerRef.current?.setEmotion(event.payload.expression as EmotionState);
+        });
+        return () => { unlisten.then(fn => fn()); };
+    }, []);
+
+    // Listen for chat-action events
+    useEffect(() => {
+        const unlisten = listen<{ action: string }>("chat-action", (event) => {
+            controllerRef.current?.playActionMotion(event.payload.action as ActionIntent);
+        });
+        return () => { unlisten.then(fn => fn()); };
+    }, []);
+
+    // exitDragMode removed — now handled inline in long press handler
+
+    const handleSendChat = useCallback(async () => {
+        const text = chatInput.trim();
+        if (!text) return;
+        setChatInput("");
+        setChatInputVisible(false);
+        await sendMessage(text);
+    }, [chatInput, sendMessage]);
+
+    const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+        if (e.key === "Enter") handleSendChat();
+        if (e.key === "Escape") setChatInputVisible(false);
+    }, [handleSendChat]);
+
+    const contextMenuItems = useMemo(() => [
+        {
+            label: isResizeMode ? "退出调整大小模式" : "调整窗口大小",
+            onClick: () => {
+                setIsResizeMode(!isResizeMode);
+                setContextMenu(m => ({ ...m, visible: false }));
+            }
+        },
+        { label: "隐藏悬浮模型", onClick: () => invoke("hide_pet_window").catch(console.error) },
+        {
+            label: "打开主界面",
+            onClick: () => getCurrentWindow().emit("show-main-window", {}).catch(console.error),
+        },
+    ], [isResizeMode]);
+
+    return (
+        <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "transparent" }}>
+            {/* Drag overlay — always present but only visible in drag mode */}
+            <div
+                data-tauri-drag-region
+                style={{
+                    position: "absolute",
+                    inset: 0,
+                    zIndex: isDragMode ? 100 : -1,
+                    pointerEvents: isDragMode ? "auto" : "none",
+                    cursor: isDragMode ? "grab" : "default",
+                    background: "transparent",
+                }}
+            >
+                {isDragMode && (
+                    <div style={{
+                        position: "absolute",
+                        bottom: "16px",
+                        left: "50%",
+                        transform: "translateX(-50%)",
+                        background: "rgba(0,0,0,0.6)",
+                        color: "#fff",
+                        borderRadius: "8px",
+                        padding: "6px 14px",
+                        fontSize: "12px",
+                        backdropFilter: "blur(8px)",
+                        pointerEvents: "none",
+                    }}>
+                        拖动中 · 松手退出
+                    </div>
+                )}
+            </div>
+
+            {/* Resize mode indicator and border */}
+            {isResizeMode && (
+                <>
+                    {/* Red border overlay */}
+                    <div style={{
+                        position: "absolute",
+                        inset: 0,
+                        border: "2px solid rgba(255, 0, 0, 0.6)",
+                        pointerEvents: "none",
+                        zIndex: 150,
+                    }} />
+
+                    {/* Instruction tooltip */}
+                    <div style={{
+                        position: "absolute",
+                        top: "16px",
+                        left: "50%",
+                        transform: "translateX(-50%)",
+                        background: "rgba(0,0,0,0.7)",
+                        color: "#fff",
+                        borderRadius: "8px",
+                        padding: "8px 16px",
+                        fontSize: "12px",
+                        backdropFilter: "blur(8px)",
+                        pointerEvents: "none",
+                        zIndex: 200,
+                        textAlign: "center",
+                    }}>
+                        <div>调整大小模式</div>
+                        <div style={{ fontSize: "11px", marginTop: "4px", opacity: 0.8 }}>
+                            拖动边缘调整窗口 · Ctrl+滚轮缩放模型
+                        </div>
+                    </div>
+                </>
+            )}
+
+            {/* Live2D layer */}
+            <div style={{ position: "absolute", inset: 0, pointerEvents: isDragMode ? "none" : "auto" }}>
+                <Live2DViewer
+                    ref={viewerRef}
+                    modelUrl={modelUrl}
+                    controller={controllerRef.current}
+                    backgroundAlpha={0}
+                    displayMode="full"
+                    gazeTracking={true}
+                    fixedSize={canvasSize || undefined}
+                    onModelLoaded={handleModelLoaded}
+                />
+            </div>
+
+            {/* Chat input overlay */}
+            {chatInputVisible && (
+                <div
+                    style={{
+                        position: "fixed", inset: 0, zIndex: 60,
+                        display: "flex", alignItems: "flex-end",
+                        justifyContent: "center", paddingBottom: "20px",
+                    }}
+                    onClick={(e) => { if (e.target === e.currentTarget) setChatInputVisible(false); }}
+                >
+                    <div style={{
+                        display: "flex", gap: "8px",
+                        width: "calc(100% - 24px)",
+                        background: "rgba(20,20,30,0.92)", borderRadius: "12px",
+                        padding: "10px", border: "1px solid rgba(255,255,255,0.12)",
+                        backdropFilter: "blur(12px)", boxSizing: "border-box",
+                    }}>
+                        <input
+                            ref={inputRef}
+                            value={chatInput}
+                            onChange={e => setChatInput(e.target.value)}
+                            onKeyDown={handleKeyDown}
+                            placeholder="说点什么..."
+                            disabled={isStreaming}
+                            style={{
+                                flex: 1, minWidth: 0, background: "transparent", border: "none", outline: "none",
+                                color: "#fff", fontSize: "13px",
+                            }}
+                        />
+                        <button
+                            onClick={handleSendChat}
+                            disabled={isStreaming || !chatInput.trim()}
+                            style={{
+                                flexShrink: 0,
+                                background: "rgba(255,255,255,0.15)", border: "none", borderRadius: "8px",
+                                color: "#fff", padding: "4px 12px", cursor: "pointer", fontSize: "12px",
+                            }}
+                        >
+                            发送
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Context menu */}
+            <PetContextMenu
+                visible={contextMenu.visible}
+                x={contextMenu.x}
+                y={contextMenu.y}
+                onClose={() => setContextMenu(m => ({ ...m, visible: false }))}
+                items={contextMenuItems}
+            />
+        </div>
+    );
+}

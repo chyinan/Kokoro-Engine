@@ -15,6 +15,20 @@
         "title": "Kokoro Engine",
         "width": 800,
         "height": 600
+      },
+      {
+        "label": "pet",
+        "title": "Kokoro Pet",
+        "width": 400,
+        "height": 600,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "url": "http://localhost:1420/src/windows/pet.html",
+        "shadow": false
       }
     ],
     "security": {

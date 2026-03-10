@@ -51,12 +51,16 @@ export interface Live2DViewerProps {
     displayMode?: Live2DDisplayMode;
     /** Whether the model's eyes follow the mouse cursor (default true) */
     gazeTracking?: boolean;
+    /** Fixed canvas size (disables auto-resize), useful for pet window */
+    fixedSize?: { width: number; height: number };
+    /** Callback when model is loaded and sized */
+    onModelLoaded?: (bounds: { width: number; height: number }) => void;
 }
 
 // ── Component ──────────────────────────────────────
 
 const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
-    ({ modelUrl, controller, onHitAreaTap, className, backgroundAlpha = 0, displayMode = "full", gazeTracking = true }, ref) => {
+    ({ modelUrl, controller, onHitAreaTap, className, backgroundAlpha = 0, displayMode = "full", gazeTracking = true, fixedSize, onModelLoaded }, ref) => {
         const containerRef = useRef<HTMLDivElement>(null);
         const appRef = useRef<PIXI.Application | null>(null);
         const modelRef = useRef<Live2DModel | null>(null);
@@ -166,7 +170,9 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
             // Create PixiJS application
             const app = new PIXI.Application({
                 backgroundAlpha: backgroundAlpha,
-                resizeTo: container,
+                resizeTo: fixedSize ? undefined : container,
+                width: fixedSize?.width,
+                height: fixedSize?.height,
                 antialias: true,
                 autoStart: true,
             });
@@ -205,8 +211,33 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                     const originalWidth = model.width;
                     const originalHeight = model.height;
 
+                    // Calculate initial scale based on fixedSize or container
+                    let initialScale: number;
+                    if (fixedSize) {
+                        // Calculate scale to fit the fixed size
+                        const scaleX = fixedSize.width / originalWidth;
+                        const scaleY = fixedSize.height / originalHeight;
+                        initialScale = Math.min(scaleX, scaleY) * 0.9; // 0.9 for some padding
+                    } else {
+                        // Use container size
+                        const scaleX = app.screen.width / originalWidth;
+                        const scaleY = app.screen.height / originalHeight;
+                        initialScale = Math.min(scaleX, scaleY);
+                    }
+
+                    // Apply initial scale
+                    model.scale.set(initialScale);
+
                     // Scale model to fit container based on display mode
                     const fitModel = () => {
+                        // If fixedSize is provided, keep the initial scale and just center
+                        if (fixedSize) {
+                            // Model scale is already set, just center it
+                            model.x = (app.screen.width - model.width) / 2;
+                            model.y = (app.screen.height - model.height) / 2;
+                            return;
+                        }
+
                         const scaleX = app.screen.width / originalWidth;
                         const scaleY = app.screen.height / originalHeight;
 
@@ -239,8 +270,34 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                     };
                     fitModel();
 
-                    // Handle resize
-                    app.renderer.on('resize', fitModel);
+                    // Notify parent of model size (for pet window auto-sizing)
+                    if (onModelLoaded) {
+                        // Use the model's internal dimensions instead of getBounds()
+                        // which includes extra space for animations
+                        const modelWidth = model.width;
+                        const modelHeight = model.height;
+
+                        console.log("[Live2DViewer] Model dimensions:", {
+                            width: modelWidth,
+                            height: modelHeight,
+                            scale: model.scale.x,
+                            position: { x: model.x, y: model.y },
+                            bounds: model.getBounds()
+                        });
+
+                        onModelLoaded({ width: modelWidth, height: modelHeight });
+                    }
+
+                    // Handle resize (only if not fixed size)
+                    if (!fixedSize) {
+                        app.renderer.on('resize', fitModel);
+                    } else {
+                        // For fixed size mode, still listen to resize to re-center the model
+                        app.renderer.on('resize', () => {
+                            model.x = (app.screen.width - model.width) / 2;
+                            model.y = (app.screen.height - model.height) / 2;
+                        });
+                    }
 
                     // Ensure model is interactive
                     model.interactive = true;

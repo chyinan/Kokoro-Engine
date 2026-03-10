@@ -35,4 +35,16 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  build: {
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, "index.html"),
+        pet: path.resolve(__dirname, "src/windows/pet.html"),
+        bubble: path.resolve(__dirname, "src/windows/bubble.html"),
+      },
+      output: {
+        entryFileNames: 'assets/[name]-[hash].js',
+      },
+    },
+  },
 }));

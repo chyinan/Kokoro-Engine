@@ -346,6 +346,22 @@ export default function ChatPanel() {
         const cleanups: (() => void)[] = [];
 
         const setup = async () => {
+            // Listen for pet window sending a message — start streaming in main window too
+            const unPetChat = await listen<{ message: string }>("pet-chat-start", (event) => {
+                if (aborted) return;
+                const text = event.payload.message;
+                rawResponseRef.current = "";
+                translationRef.current = undefined;
+                resetReveal();
+                forceNewBubbleRef.current = false;
+                setMessages(prev => [...prev, { role: "user", text }]);
+                startStreaming();
+                setIsThinking(true);
+                userScrolledRef.current = false;
+            });
+            if (aborted) { unPetChat(); return; }
+            cleanups.push(unPetChat);
+
             const unDelta = await onChatDelta((rawDelta: string) => {
                 if (aborted || !isStreamingRef.current) return;
                 // Strip [ACTION:xxx], [TOOL_CALL:...], and [TRANSLATE:...] tags — these are control signals, not dialogue

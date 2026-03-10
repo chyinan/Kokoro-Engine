@@ -76,7 +76,8 @@
             "mcp": "MCP",
             "telegram": "TELEGRAM",
             "jailbreak": "JAILBREAK",
-            "backup": "BACKUP"
+            "backup": "BACKUP",
+            "pet": "FLOAT"
         },
         "app_language": {
             "label": "Application Language",
