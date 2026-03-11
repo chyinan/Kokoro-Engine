@@ -22,11 +22,22 @@ interface PetConfig {
 }
 
 export default function PetWindow() {
-    // Read model from localStorage (same key as main window)
-    const modelUrl = useMemo(() => {
+    // Read model from localStorage and sync when main window changes it
+    const getModelUrl = () => {
         const saved = localStorage.getItem("kokoro_custom_model_path");
         if (saved) return `http://live2d.localhost/${saved}`;
         return "https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display/test/assets/haru/haru_greeter_t03.model3.json";
+    };
+    const [modelUrl, setModelUrl] = useState(getModelUrl);
+
+    useEffect(() => {
+        const onStorage = (e: StorageEvent) => {
+            if (e.key === "kokoro_custom_model_path") {
+                setModelUrl(getModelUrl());
+            }
+        };
+        window.addEventListener("storage", onStorage);
+        return () => window.removeEventListener("storage", onStorage);
     }, []);
     const [isDragMode, setIsDragMode] = useState(false);
     const [isResizeMode, setIsResizeMode] = useState(false);
