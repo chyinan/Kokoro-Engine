@@ -243,8 +243,55 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
         }
     }
 
+    // 额外支持简化格式: [action_name|key=val|key=val]
+    // 例: [change_expression|expression=shy]
+    let mut extra_calls = Vec::new();
+    let mut cleaned = result.clone();
+    let mut offset = 0;
+    while offset < cleaned.len() {
+        let Some(rel_start) = cleaned[offset..].find('[') else { break };
+        let start = offset + rel_start;
+        let rest = &cleaned[start..];
+        let Some(end) = rest.find(']') else { break };
+        let inner = &rest[1..end];
+
+        let mut matched = false;
+        if let Some(pipe_pos) = inner.find('|') {
+            let name_part = &inner[..pipe_pos];
+            let is_identifier = !name_part.is_empty()
+                && name_part.chars().all(|c| c.is_alphanumeric() || c == '_');
+            let has_kv = inner[pipe_pos + 1..].contains('=');
+
+            if is_identifier && has_kv {
+                let parts: Vec<&str> = inner.split('|').collect();
+                let name = parts[0].trim().to_string();
+                let mut args = HashMap::new();
+                for part in parts.iter().skip(1) {
+                    if let Some(eq_pos) = part.find('=') {
+                        let key = part[..eq_pos].trim().to_string();
+                        let val = part[eq_pos + 1..].trim().to_string();
+                        args.insert(key, val);
+                    }
+                }
+                extra_calls.push(ToolCall { name, args });
+                let tag_end = start + end + 1;
+                cleaned = format!(
+                    "{}{}",
+                    cleaned[..start].trim_end(),
+                    if tag_end < cleaned.len() { &cleaned[tag_end..] } else { "" }
+                );
+                // offset 不变，继续从同一位置扫描（内容已缩短）
+                matched = true;
+            }
+        }
+        if !matched {
+            // 跳过这个 [ 继续往后找
+            offset = start + 1;
+        }
+    }
+    calls.extend(extra_calls);
     calls.reverse();
-    (result.trim().to_string(), calls)
+    (cleaned.trim().to_string(), calls)
 }
 
 // ── Stream Chat Command ────────────────────────────────────
@@ -1039,5 +1086,32 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].args.get("prompt"), Some(&"beach".to_string()));
         assert_eq!(calls[0].args.get("style"), Some(&"anime".to_string()));
+    }
+
+    #[test]
+    fn test_parse_tool_call_simplified_format() {
+        let input = "text[change_expression|expression=shy]more";
+        let (cleaned, calls) = parse_tool_call_tags(input);
+        assert_eq!(cleaned.trim(), "textmore");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "change_expression");
+        assert_eq!(calls[0].args.get("expression"), Some(&"shy".to_string()));
+    }
+
+    #[test]
+    fn test_parse_tool_call_simplified_multiple() {
+        let input = "hello[change_expression|expression=happy]world[change_expression|expression=sad]end";
+        let (cleaned, calls) = parse_tool_call_tags(input);
+        assert_eq!(cleaned.trim(), "helloworldend");
+        assert_eq!(calls.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_tool_call_simplified_no_false_positive() {
+        // 普通方括号内容不应被误识别
+        let input = "text [some words] more";
+        let (cleaned, calls) = parse_tool_call_tags(input);
+        assert_eq!(cleaned, "text [some words] more");
+        assert!(calls.is_empty());
     }
 }
