@@ -254,8 +254,9 @@ async fn handle_text(
         .ok_or("LlmService not available")?;
 
     // 1. Record user message
+    let char_id = orchestrator.get_character_id().await;
     orchestrator
-        .add_message("user".to_string(), text.to_string())
+        .add_message("user".to_string(), text.to_string(), &char_id)
         .await;
 
     // Sync user message to desktop UI
@@ -267,7 +268,7 @@ async fn handle_text(
 
     // 2. Compose prompt context
     let prompt_messages = orchestrator
-        .compose_prompt(text, false, None)
+        .compose_prompt(text, false, None, &char_id)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -330,12 +331,11 @@ async fn handle_text(
         .as_ref()
         .map(|t| serde_json::json!({ "translation": t }).to_string());
     orchestrator
-        .add_message_with_metadata("assistant".to_string(), cleaned.clone(), metadata)
+        .add_message_with_metadata("assistant".to_string(), cleaned.clone(), metadata, &char_id)
         .await;
 
     // Trigger periodic memory extraction (every 5 user messages)
     let msg_count = orchestrator.get_message_count().await;
-    let char_id = orchestrator.get_character_id().await;
     println!("[Telegram/Memory] User message count: {}, char_id: {}", msg_count, char_id);
     if msg_count > 0 && msg_count % 5 == 0 {
         println!("[Telegram/Memory] Triggering memory extraction (count={})", msg_count);
@@ -504,8 +504,9 @@ async fn handle_photo(
     println!("[Telegram] Photo received, caption: {}", caption);
 
     // 1. Record user message
+    let char_id = orchestrator.get_character_id().await;
     orchestrator
-        .add_message("user".to_string(), caption.clone())
+        .add_message("user".to_string(), caption.clone(), &char_id)
         .await;
 
     // Sync user message to desktop UI
@@ -517,7 +518,7 @@ async fn handle_photo(
 
     // 2. Compose prompt context
     let prompt_messages = orchestrator
-        .compose_prompt(&caption, false, None)
+        .compose_prompt(&caption, false, None, &char_id)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -589,12 +590,11 @@ async fn handle_photo(
         .as_ref()
         .map(|t| serde_json::json!({ "translation": t }).to_string());
     orchestrator
-        .add_message_with_metadata("assistant".to_string(), cleaned.clone(), metadata)
+        .add_message_with_metadata("assistant".to_string(), cleaned.clone(), metadata, &char_id)
         .await;
 
     // Trigger periodic memory extraction (every 5 user messages)
     let msg_count = orchestrator.get_message_count().await;
-    let char_id = orchestrator.get_character_id().await;
     println!("[Telegram/Memory] User message count: {}, char_id: {}", msg_count, char_id);
     if msg_count > 0 && msg_count % 5 == 0 {
         println!("[Telegram/Memory] Triggering memory extraction (count={})", msg_count);

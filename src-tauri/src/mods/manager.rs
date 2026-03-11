@@ -8,6 +8,28 @@ use std::path::{Path, PathBuf};
 use tauri::Emitter;
 use tokio::sync::{mpsc, oneshot};
 
+/// 验证 `file_path` 在规范化后仍位于 `base_dir` 内，防止路径遍历攻击。
+/// 返回规范化后的绝对路径，若路径逃出 base_dir 则返回 Err。
+fn safe_join(base_dir: &Path, file_path: &str) -> Result<PathBuf, String> {
+    let joined = base_dir.join(file_path);
+    // canonicalize 会解析 .. 和符号链接；文件必须已存在
+    let canonical = joined.canonicalize().map_err(|e| {
+        format!("Invalid path '{}': {}", file_path, e)
+    })?;
+    let canonical_base = base_dir.canonicalize().map_err(|e| {
+        format!("Cannot canonicalize mod dir: {}", e)
+    })?;
+    if canonical.starts_with(&canonical_base) {
+        Ok(canonical)
+    } else {
+        Err(format!(
+            "Path '{}' escapes mod directory (resolved to '{}')",
+            file_path,
+            canonical.display()
+        ))
+    }
+}
+
 // Messages sent to the dedicated QuickJS script thread
 pub enum ScriptCommand {
     Eval {
@@ -228,7 +250,13 @@ impl ModManager {
 
         // ── 1. Load theme.json ──
         if let Some(theme_path) = &manifest.theme {
-            let full_path = mod_dir.join(theme_path);
+            let full_path = match safe_join(&mod_dir, theme_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[ModManager] Rejected theme path '{}': {}", theme_path, e);
+                    return Err(e);
+                }
+            };
             match fs::read_to_string(&full_path) {
                 Ok(content) => match serde_json::from_str::<ModThemeJson>(&content) {
                     Ok(mut theme) => {
@@ -260,7 +288,13 @@ impl ModManager {
 
         // ── 2. Load layout.json ──
         if let Some(layout_path) = &manifest.layout {
-            let full_path = mod_dir.join(layout_path);
+            let full_path = match safe_join(&mod_dir, layout_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[ModManager] Rejected layout path '{}': {}", layout_path, e);
+                    return Err(e);
+                }
+            };
             match fs::read_to_string(&full_path) {
                 Ok(content) => match serde_json::from_str::<JsonValue>(&content) {
                     Ok(layout) => {
@@ -299,7 +333,13 @@ impl ModManager {
         };
 
         for script_path in &scripts_to_run {
-            let full_path = mod_dir.join(script_path);
+            let full_path = match safe_join(&mod_dir, script_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[ModManager] Rejected script path '{}': {}", script_path, e);
+                    continue;
+                }
+            };
             match fs::read_to_string(&full_path) {
                 Ok(code) => {
                     if let Some(tx) = &self.script_tx {

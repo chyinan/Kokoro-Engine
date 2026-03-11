@@ -365,11 +365,11 @@ impl AIOrchestrator {
         self.character_id.lock().await.clone()
     }
 
-    pub async fn add_message(&self, role: String, content: String) {
-        self.add_message_with_metadata(role, content, None).await;
+    pub async fn add_message(&self, role: String, content: String, character_id: &str) {
+        self.add_message_with_metadata(role, content, None, character_id).await;
     }
 
-    pub async fn add_message_with_metadata(&self, role: String, content: String, metadata: Option<String>) {
+    pub async fn add_message_with_metadata(&self, role: String, content: String, metadata: Option<String>, character_id: &str) {
         // Track user message count for memory extraction triggers
         if role == "user" {
             let mut count = self.message_count.lock().await;
@@ -386,7 +386,7 @@ impl AIOrchestrator {
         };
 
         // Persist to database FIRST so no code path can skip it
-        let _ = self.persist_message(&role, &content, metadata.as_deref()).await;
+        let _ = self.persist_message(&role, &content, metadata.as_deref(), character_id).await;
 
         let mut history = self.history.lock().await;
         history.push_back(Message {
@@ -408,7 +408,7 @@ impl AIOrchestrator {
 
             // Spawn async summarization task (non-blocking)
             let memory_manager = self.memory_manager.clone();
-            let cid = self.character_id.lock().await.clone();
+            let cid = character_id.to_string();
             tauri::async_runtime::spawn(async move {
                 let formatted = to_summarize
                     .iter()
@@ -433,8 +433,8 @@ impl AIOrchestrator {
     }
 
     /// 将消息持久化到 SQLite，如果没有活跃对话则自动创建
-    async fn persist_message(&self, role: &str, content: &str, metadata: Option<&str>) -> Result<()> {
-        let cid = self.character_id.lock().await.clone();
+    async fn persist_message(&self, role: &str, content: &str, metadata: Option<&str>, character_id: &str) -> Result<()> {
+        let cid = character_id;
         let mut conv_id_lock = self.current_conversation_id.lock().await;
 
         let conv_id = if let Some(ref id) = *conv_id_lock {
@@ -508,8 +508,8 @@ impl AIOrchestrator {
     }
 
     /// Insert a streaming assistant draft into the DB. Returns the row id for later update.
-    pub async fn persist_streaming_draft(&self, content: &str) -> Result<i64> {
-        let cid = self.character_id.lock().await.clone();
+    pub async fn persist_streaming_draft(&self, content: &str, character_id: &str) -> Result<i64> {
+        let cid = character_id;
         let mut conv_id_lock = self.current_conversation_id.lock().await;
 
         // Ensure conversation exists
@@ -522,7 +522,7 @@ impl AIOrchestrator {
                 "INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
             )
             .bind(&new_id)
-            .bind(&cid)
+            .bind(cid)
             .bind("新对话")
             .bind(&now)
             .bind(&now)
@@ -591,6 +591,7 @@ impl AIOrchestrator {
         query: &str,
         _allow_image_gen: bool,
         tool_prompt: Option<String>,
+        character_id: &str,
     ) -> Result<Vec<Message>> {
         // 1. Determine Model logic
         let model_type = self.router.route(query);
@@ -603,10 +604,10 @@ impl AIOrchestrator {
         // 2. Retrieval (RAG)
         // Only if query looks like it needs context or every N turns
         // For now, always try to fetch relevant memories (scoped to current character)
-        let cid = self.character_id.lock().await.clone();
+        let cid = character_id;
         let memories = self
             .memory_manager
-            .search_memories(query, 5, &cid)
+            .search_memories(query, 5, cid)
             .await
             .ok();
 

@@ -312,11 +312,12 @@ pub async fn stream_chat(
         std::sync::Arc<tokio::sync::Mutex<crate::vision::server::VisionServer>>,
     >,
 ) -> Result<(), String> {
-    // 0. Set character ID for memory isolation
+    // 0. Resolve character ID for this request (not stored in shared state)
     let char_id = request
         .character_id
         .clone()
         .unwrap_or_else(|| "default".to_string());
+    // Keep shared character_id in sync for modules that still read it (emotion snapshot, heartbeat)
     state.set_character_id(char_id.clone()).await;
 
     // Record user activity
@@ -346,7 +347,7 @@ pub async fn stream_chat(
     // 1. Update History with User Message (skip for hidden/touch interactions)
     if !request.hidden {
         state
-            .add_message("user".to_string(), request.message.clone())
+            .add_message("user".to_string(), request.message.clone(), &char_id)
             .await;
     }
 
@@ -468,6 +469,7 @@ pub async fn stream_chat(
             &request.message,
             request.allow_image_gen.unwrap_or(false),
             tool_prompt,
+            &char_id,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -622,7 +624,7 @@ pub async fn stream_chat(
                 match draft_row_id {
                     None => {
                         // First round: insert draft row
-                        match state.persist_streaming_draft(&draft_content).await {
+                        match state.persist_streaming_draft(&draft_content, &char_id).await {
                             Ok(id) => { draft_row_id = Some(id); }
                             Err(e) => { eprintln!("[Chat] Failed to persist streaming draft: {}", e); }
                         }
