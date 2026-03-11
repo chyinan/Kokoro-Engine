@@ -335,18 +335,41 @@ async fn handle_text(
 
     // Trigger periodic memory extraction (every 5 user messages)
     let msg_count = orchestrator.get_message_count().await;
+    let char_id = orchestrator.get_character_id().await;
+    println!("[Telegram/Memory] User message count: {}, char_id: {}", msg_count, char_id);
     if msg_count > 0 && msg_count % 5 == 0 {
+        println!("[Telegram/Memory] Triggering memory extraction (count={})", msg_count);
         let history = orchestrator.get_recent_history(10).await;
         let memory_mgr = orchestrator.memory_manager.clone();
         let provider_for_mem = llm_service.provider().await;
+        let char_id_for_mem = char_id.clone();
         tauri::async_runtime::spawn(async move {
             memory_extractor::extract_and_store_memories(
                 &history,
                 &memory_mgr,
                 provider_for_mem,
-                "default".to_string(),
+                char_id_for_mem,
             )
             .await;
+        });
+    }
+    if msg_count > 0 && msg_count % 20 == 0 {
+        let memory_mgr = orchestrator.memory_manager.clone();
+        let char_id_for_consolidation = char_id.clone();
+        let provider_for_consolidation = llm_service.provider().await;
+        tauri::async_runtime::spawn(async move {
+            match memory_mgr
+                .consolidate_memories(&char_id_for_consolidation, provider_for_consolidation)
+                .await
+            {
+                Ok(count) if count > 0 => {
+                    println!("[Telegram/Memory] Consolidated {} memory clusters", count);
+                }
+                Err(e) => {
+                    eprintln!("[Telegram/Memory] Consolidation failed: {}", e);
+                }
+                _ => {}
+            }
         });
     }
 
@@ -571,18 +594,41 @@ async fn handle_photo(
 
     // Trigger periodic memory extraction (every 5 user messages)
     let msg_count = orchestrator.get_message_count().await;
+    let char_id = orchestrator.get_character_id().await;
+    println!("[Telegram/Memory] User message count: {}, char_id: {}", msg_count, char_id);
     if msg_count > 0 && msg_count % 5 == 0 {
+        println!("[Telegram/Memory] Triggering memory extraction (count={})", msg_count);
         let history = orchestrator.get_recent_history(10).await;
         let memory_mgr = orchestrator.memory_manager.clone();
         let provider_for_mem = llm_service.provider().await;
+        let char_id_for_mem = char_id.clone();
         tauri::async_runtime::spawn(async move {
             memory_extractor::extract_and_store_memories(
                 &history,
                 &memory_mgr,
                 provider_for_mem,
-                "default".to_string(),
+                char_id_for_mem,
             )
             .await;
+        });
+    }
+    if msg_count > 0 && msg_count % 20 == 0 {
+        let memory_mgr = orchestrator.memory_manager.clone();
+        let char_id_for_consolidation = char_id.clone();
+        let provider_for_consolidation = llm_service.provider().await;
+        tauri::async_runtime::spawn(async move {
+            match memory_mgr
+                .consolidate_memories(&char_id_for_consolidation, provider_for_consolidation)
+                .await
+            {
+                Ok(count) if count > 0 => {
+                    println!("[Telegram/Memory] Consolidated {} memory clusters", count);
+                }
+                Err(e) => {
+                    eprintln!("[Telegram/Memory] Consolidation failed: {}", e);
+                }
+                _ => {}
+            }
         });
     }
 
