@@ -127,6 +127,10 @@ pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(
 
     // Get pet window position and size
     let (bx, by) = if let Some(pet) = app.get_webview_window("pet") {
+        // 如果 pet 窗口不可见，不显示气泡
+        if !pet.is_visible().unwrap_or(false) {
+            return Ok(());
+        }
         let pos = pet.outer_position().map_err(|e| e.to_string())?;
         let size = pet.inner_size().map_err(|e| e.to_string())?;
         let x = pos.x + (size.width as i32 - bubble_w) / 2;
