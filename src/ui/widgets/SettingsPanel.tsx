@@ -314,6 +314,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
         // Commit Telegram Config
         if (localTelegramConfig) {
             try {
+                console.log("[SettingsPanel] Saving telegram config:", JSON.stringify(localTelegramConfig));
                 await saveTelegramConfig(localTelegramConfig);
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Telegram config:", e);
