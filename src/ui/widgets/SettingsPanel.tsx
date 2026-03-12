@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Sparkles, Brain, Mic, Music, Eye, Server, Bot, Shield, HardDrive, Ghost } from "lucide-react";
 import { ModList } from "../mods/ModList";
+import { Select } from "@/components/ui/select";
 import CharacterManager from "./CharacterManager";
 import ImageGenSettings from "./ImageGenSettings";
 import MemoryPanel from "./MemoryPanel";
@@ -525,19 +526,19 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                                 <div className="text-xs text-[var(--color-text-secondary)] uppercase tracking-wider font-heading font-semibold">
                                     {t("settings.app_language.label")}
                                 </div>
-                                <select
+                                <Select
                                     value={i18n.language}
-                                    onChange={(e) => {
-                                        i18n.changeLanguage(e.target.value);
-                                        localStorage.setItem("kokoro_app_language", e.target.value);
+                                    onChange={(v) => {
+                                        i18n.changeLanguage(v);
+                                        localStorage.setItem("kokoro_app_language", v);
                                     }}
-                                    className="bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] text-xs rounded px-2 py-1 focus:outline-none focus:border-[var(--color-accent)]"
-                                >
-                                    <option value="en">English</option>
-                                    <option value="zh">中文</option>
-                                    <option value="ja">日本語</option>
-                                    <option value="ko">한국어</option>
-                                </select>
+                                    options={[
+                                        { value: "en", label: "English" },
+                                        { value: "zh", label: "中文" },
+                                        { value: "ja", label: "日本語" },
+                                        { value: "ko", label: "한국어" },
+                                    ]}
+                                />
                             </div>
 
                             <div className="flex items-center gap-3">

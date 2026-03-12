@@ -12,6 +12,7 @@ import { characterDb, type CharacterProfile } from "../../lib/db";
 import { parseCharacterCard } from "../../lib/character-card-parser";
 import { setPersona, setCharacterName, setUserName, setProactiveEnabled, getProactiveEnabled, setActiveCharacterId } from "../../lib/kokoro-bridge";
 import { Languages, MessageCircle } from "lucide-react";
+import { Select } from "@/components/ui/select";
 import { useTranslation, Trans } from "react-i18next";
 
 // ── Shared style tokens (matching SettingsPanel) ───
@@ -373,23 +374,22 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                 <p className="text-[10px] text-[var(--color-text-muted)] mb-3 -mt-1">
                     {t("settings.persona.response_lang.desc")}
                 </p>
-                <select
+                <Select
                     value={["auto", "日本語", "English", "中文", "한국어"].includes(responseLanguage || "auto") ? (responseLanguage || "auto") : "__custom__"}
-                    onChange={e => {
-                        const v = e.target.value;
+                    onChange={v => {
                         if (v === "auto") onResponseLanguageChange("");
                         else if (v === "__custom__") onResponseLanguageChange("");
                         else onResponseLanguageChange(v);
                     }}
-                    className={inputClasses}
-                >
-                    <option value="auto">{t("settings.persona.response_lang.auto")}</option>
-                    <option value="日本語">日本語 (Japanese)</option>
-                    <option value="English">English</option>
-                    <option value="中文">中文 (Chinese)</option>
-                    <option value="한국어">한국어 (Korean)</option>
-                    <option value="__custom__">{t("settings.persona.response_lang.custom")}</option>
-                </select>
+                    options={[
+                        { value: "auto", label: t("settings.persona.response_lang.auto") },
+                        { value: "日本語", label: "日本語 (Japanese)" },
+                        { value: "English", label: "English" },
+                        { value: "中文", label: "中文 (Chinese)" },
+                        { value: "한국어", label: "한국어 (Korean)" },
+                        { value: "__custom__", label: t("settings.persona.response_lang.custom") },
+                    ]}
+                />
                 {/* Show custom input when language is not in presets */}
                 {responseLanguage && !["日本語", "English", "中文", "한국어"].includes(responseLanguage) && (
                     <input
@@ -411,23 +411,22 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                 <p className="text-[10px] text-[var(--color-text-muted)] mb-3 -mt-1">
                     {t("settings.persona.user_lang.desc")}
                 </p>
-                <select
+                <Select
                     value={["auto", "中文", "English", "日本語", "한국어"].includes(userLanguage || "auto") ? (userLanguage || "auto") : "__custom__"}
-                    onChange={e => {
-                        const v = e.target.value;
+                    onChange={v => {
                         if (v === "auto") onUserLanguageChange("");
                         else if (v === "__custom__") onUserLanguageChange("");
                         else onUserLanguageChange(v);
                     }}
-                    className={inputClasses}
-                >
-                    <option value="auto">{t("settings.persona.user_lang.auto")}</option>
-                    <option value="中文">中文 (Chinese)</option>
-                    <option value="English">English</option>
-                    <option value="日本語">日本語 (Japanese)</option>
-                    <option value="한국어">한국어 (Korean)</option>
-                    <option value="__custom__">{t("settings.persona.response_lang.custom")}</option>
-                </select>
+                    options={[
+                        { value: "auto", label: t("settings.persona.user_lang.auto") },
+                        { value: "中文", label: "中文 (Chinese)" },
+                        { value: "English", label: "English" },
+                        { value: "日本語", label: "日本語 (Japanese)" },
+                        { value: "한국어", label: "한국어 (Korean)" },
+                        { value: "__custom__", label: t("settings.persona.response_lang.custom") },
+                    ]}
+                />
                 {userLanguage && !["中文", "English", "日本語", "한국어"].includes(userLanguage) && (
                     <input
                         type="text"

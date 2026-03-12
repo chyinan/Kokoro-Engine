@@ -9,6 +9,7 @@ import { clsx } from "clsx";
 import { RefreshCw, Check, AlertCircle, Save, Trash2 } from "lucide-react";
 import { motion } from "framer-motion";
 import { inputClasses, labelClasses } from "../../styles/settings-primitives";
+import { Select } from "@/components/ui/select";
 import { useTranslation } from "react-i18next";
 import {
     fetchModels,
@@ -321,18 +322,15 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
             <div>
                 <label className={labelClasses}>{t("settings.api.preset.label")}</label>
                 <div className="flex gap-2">
-                    <select
+                    <Select
                         value={selectedPresetId}
-                        onChange={(e) => handleLoadPreset(e.target.value)}
-                        className={clsx(inputClasses, "flex-1 py-1.5 px-2")}
-                    >
-                        <option value="">
-                            {matchingPreset ? matchingPreset.name : t("settings.api.preset.current")}
-                        </option>
-                        {(config.presets || []).map((p) => (
-                            <option key={p.id} value={p.id}>{p.name}</option>
-                        ))}
-                    </select>
+                        onChange={handleLoadPreset}
+                        options={[
+                            { value: "", label: matchingPreset ? matchingPreset.name : t("settings.api.preset.current") },
+                            ...(config.presets || []).map(p => ({ value: p.id, label: p.name })),
+                        ]}
+                        className="flex-1"
+                    />
                     <button
                         onClick={handleSavePreset}
                         className="px-3 py-1.5 text-xs rounded-lg border border-[var(--color-accent)] text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 transition-all flex items-center gap-1"
@@ -502,18 +500,17 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
                         <label className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] font-semibold mb-1 block">
                             {t("settings.api.system_llm.provider")}
                         </label>
-                        <select
+                        <Select
                             value={config.system_provider || ""}
-                            onChange={(e) => setConfig({ ...config, system_provider: e.target.value || undefined })}
-                            className={clsx(inputClasses, "py-1.5 px-2")}
-                        >
-                            <option value="">{t("settings.api.system_llm.same_as_active", { provider: config.active_provider })}</option>
-                            {allAvailableProviders.map(p => (
-                                <option key={p.id} value={p.id}>
-                                    {p.id} ({p.provider_type})
-                                </option>
-                            ))}
-                        </select>
+                            onChange={(v) => setConfig({ ...config, system_provider: v || undefined })}
+                            options={[
+                                { value: "", label: t("settings.api.system_llm.same_as_active", { provider: config.active_provider }) },
+                                ...allAvailableProviders.map(p => ({
+                                    value: p.id,
+                                    label: `${p.id} (${p.provider_type})`,
+                                })),
+                            ]}
+                        />
                     </div>
 
                     {/* System Model Override */}

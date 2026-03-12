@@ -11,6 +11,7 @@ import type { TelegramConfig, TelegramStatus } from "../../../lib/kokoro-bridge"
 import { characterDb } from "../../../lib/db";
 import type { CharacterProfile } from "../../../lib/db";
 import { inputClasses, labelClasses } from "../../styles/settings-primitives";
+import { Select } from "@/components/ui/select";
 
 interface TelegramTabProps {
     config: TelegramConfig | null;
@@ -243,18 +244,17 @@ export default function TelegramTab({ config, onUpdate }: TelegramTabProps) {
             {/* Character ID */}
             <div>
                 <label className={labelClasses}>{t("telegram.character_id.label")}</label>
-                <select
+                <Select
                     value={config.character_id ?? ""}
-                    onChange={e => update({ character_id: e.target.value || undefined })}
-                    className={inputClasses}
-                >
-                    <option value="">{t("telegram.character_id.auto")}</option>
-                    {characters.map(char => (
-                        <option key={char.id} value={String(char.id)}>
-                            {char.name}
-                        </option>
-                    ))}
-                </select>
+                    onChange={v => update({ character_id: v || undefined })}
+                    options={[
+                        { value: "", label: t("telegram.character_id.auto") },
+                        ...characters.map(char => ({
+                            value: String(char.id),
+                            label: char.name,
+                        })),
+                    ]}
+                />
                 <div className="text-xs text-[var(--color-text-muted)] mt-1">
                     {t("telegram.character_id.hint")}
                 </div>

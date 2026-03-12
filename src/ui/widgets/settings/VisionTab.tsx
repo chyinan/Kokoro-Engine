@@ -11,6 +11,7 @@ import {
     listOllamaModels, pullOllamaModel, onOllamaPullProgress,
 } from "../../../lib/kokoro-bridge";
 import type { VisionConfig, OllamaModelInfo, OllamaPullProgress } from "../../../lib/kokoro-bridge";
+import { Select } from "@/components/ui/select";
 
 export default function VisionTab() {
     const { t } = useTranslation();
@@ -224,31 +225,24 @@ export default function VisionTab() {
                         <Cpu size={14} strokeWidth={1.5} className="text-[var(--color-text-muted)]" />
                         <label className="text-sm text-[var(--color-text-primary)]">{t("settings.vision.provider.label")}</label>
                     </div>
-                    <select
+                    <Select
                         value={config.vlm_provider}
-                        onChange={(e) => {
-                            const prov = e.target.value;
+                        onChange={(prov) => {
                             update({
                                 vlm_provider: prov,
                                 vlm_base_url: prov === "ollama" ? "http://localhost:11434/v1" : prov === "llm" ? null : "https://api.openai.com/v1",
                                 vlm_model: prov === "ollama" ? "minicpm-v" : prov === "llm" ? "" : "gpt-4o",
                                 vlm_api_key: prov === "ollama" || prov === "llm" ? null : config.vlm_api_key,
                             });
-                            // Reset install state
                             setPullDone(false);
                             setPullError(null);
                         }}
-                        className={clsx(
-                            "w-full px-3 py-2 rounded-lg text-sm",
-                            "bg-[var(--color-bg-surface)] border border-[var(--color-border)]",
-                            "text-[var(--color-text-primary)]",
-                            "focus:outline-none focus:border-[var(--color-accent)] transition-colors"
-                        )}
-                    >
-                        <option value="ollama">{t("settings.vision.provider.ollama")}</option>
-                        <option value="openai">{t("settings.vision.provider.openai")}</option>
-                        <option value="llm">{t("settings.vision.provider.llm")}</option>
-                    </select>
+                        options={[
+                            { value: "ollama", label: t("settings.vision.provider.ollama") },
+                            { value: "openai", label: t("settings.vision.provider.openai") },
+                            { value: "llm", label: t("settings.vision.provider.llm") },
+                        ]}
+                    />
                 </div>
 
                 {/* Ollama not reachable warning */}
@@ -310,27 +304,20 @@ export default function VisionTab() {
                         <label className="text-sm text-[var(--color-text-primary)]">{t("settings.vision.model.label")}</label>
                     </div>
                     {config.vlm_provider === "ollama" && ollamaModels.length > 0 ? (
-                        <select
+                        <Select
                             value={config.vlm_model}
-                            onChange={(e) => {
-                                update({ vlm_model: e.target.value });
+                            onChange={(v) => {
+                                update({ vlm_model: v });
                                 setPullDone(false);
                                 setPullError(null);
                             }}
-                            className={clsx(
-                                "w-full px-3 py-2 rounded-lg text-sm",
-                                "bg-[var(--color-bg-surface)] border border-[var(--color-border)]",
-                                "text-[var(--color-text-primary)]",
-                                "focus:outline-none focus:border-[var(--color-accent)] transition-colors"
-                            )}
-                        >
-                            {ollamaModels.map(m => (
-                                <option key={m.name} value={m.name}>{m.name}</option>
-                            ))}
-                            {!ollamaModels.some(m => m.name.split(":")[0].toLowerCase() === config.vlm_model.split(":")[0].toLowerCase()) && (
-                                <option value={config.vlm_model}>{config.vlm_model} {t("settings.vision.model.not_installed_prefix")}</option>
-                            )}
-                        </select>
+                            options={[
+                                ...ollamaModels.map(m => ({ value: m.name, label: m.name })),
+                                ...(!ollamaModels.some(m => m.name.split(":")[0].toLowerCase() === config.vlm_model.split(":")[0].toLowerCase())
+                                    ? [{ value: config.vlm_model, label: `${config.vlm_model} ${t("settings.vision.model.not_installed_prefix")}` }]
+                                    : []),
+                            ]}
+                        />
                     ) : (
                         <input
                             type="text"

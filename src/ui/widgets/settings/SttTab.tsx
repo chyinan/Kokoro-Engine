@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { useEffect } from "react";
 import { Mic, Languages, Send, HandMetal, Server, Wand2 } from "lucide-react";
 import type { SttConfig, SttProviderConfig } from "../../../lib/kokoro-bridge";
+import { Select } from "@/components/ui/select";
 
 interface SttTabProps {
     sttConfig: SttConfig;
@@ -123,29 +124,20 @@ export default function SttTab({
                             </label>
                         </div>
 
-                        <select
+                        <Select
                             value={sttConfig.active_provider}
-                            onChange={(e) => {
-                                const newId = e.target.value;
+                            onChange={(newId) => {
                                 const newProviders = sttConfig.providers.map(p => ({
                                     ...p,
                                     enabled: p.id === newId ? true : p.enabled
                                 }));
                                 onSttConfigChange({ ...sttConfig, active_provider: newId, providers: newProviders });
                             }}
-                            className={clsx(
-                                "w-full px-3 py-2 rounded-lg text-sm",
-                                "bg-[var(--color-bg-elevated)] border border-[var(--color-border)]",
-                                "text-[var(--color-text-primary)]",
-                                "focus:outline-none focus:border-[var(--color-accent)] transition-colors"
-                            )}
-                        >
-                            {sttConfig.providers.map(p => (
-                                <option key={p.id} value={p.id}>
-                                    {getProviderLabel(p.provider_type)}
-                                </option>
-                            ))}
-                        </select>
+                            options={sttConfig.providers.map(p => ({
+                                value: p.id,
+                                label: getProviderLabel(p.provider_type),
+                            }))}
+                        />
 
                         {/* Active Provider Config Fields */}
                         {activeProvider && (
@@ -240,22 +232,14 @@ export default function SttTab({
                                     {t("settings.stt.language.label")}
                                 </label>
                             </div>
-                            <select
+                            <Select
                                 value={sttConfig.language || ""}
-                                onChange={(e) => updateConfig({ language: e.target.value || undefined })}
-                                className={clsx(
-                                    "w-full px-3 py-2 rounded-lg text-sm",
-                                    "bg-[var(--color-bg-surface)] border border-[var(--color-border)]",
-                                    "text-[var(--color-text-primary)]",
-                                    "focus:outline-none focus:border-[var(--color-accent)] transition-colors"
-                                )}
-                            >
-                                {LANG_OPTIONS.map(opt => (
-                                    <option key={opt.value} value={opt.value}>
-                                        {opt.value === "" ? t(opt.label) : opt.label}
-                                    </option>
-                                ))}
-                            </select>
+                                onChange={(v) => updateConfig({ language: v || undefined })}
+                                options={LANG_OPTIONS.map(opt => ({
+                                    value: opt.value,
+                                    label: opt.value === "" ? t(opt.label) : opt.label,
+                                }))}
+                            />
                             <p className="text-xs text-[var(--color-text-muted)]">
                                 {t("settings.stt.language.hint")}
                             </p>

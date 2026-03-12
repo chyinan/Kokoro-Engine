@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { Trash2, Plus, Wifi, RefreshCw, CheckCircle, XCircle, Image as ImageIcon, Loader2 } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { inputClasses, labelClasses } from "../styles/settings-primitives";
+import { Select } from "@/components/ui/select";
 import { testSdConnection, generateImage } from "../../lib/kokoro-bridge";
 import type { ImageGenSystemConfig, ImageGenProviderConfig } from "../../lib/kokoro-bridge";
 
@@ -256,16 +257,14 @@ export default function ImageGenSettings({ config, onChange }: ImageGenSettingsP
                                                 )}
                                             </div>
                                             {provider.provider_type === "stable_diffusion" && (testState[provider.id]?.models?.length ?? 0) > 0 ? (
-                                                <select
+                                                <Select
                                                     value={provider.model || ""}
-                                                    onChange={e => updateProvider(index, { model: e.target.value })}
-                                                    className={clsx(inputClasses, "font-mono text-xs appearance-none cursor-pointer")}
-                                                >
-                                                    <option value="">{t("settings.image_gen.fields.select_checkpoint")}</option>
-                                                    {testState[provider.id].models!.map(m => (
-                                                        <option key={m} value={m}>{m}</option>
-                                                    ))}
-                                                </select>
+                                                    onChange={v => updateProvider(index, { model: v })}
+                                                    options={[
+                                                        { value: "", label: t("settings.image_gen.fields.select_checkpoint") },
+                                                        ...testState[provider.id].models!.map(m => ({ value: m, label: m })),
+                                                    ]}
+                                                />
                                             ) : (
                                                 <input
                                                     type="text"
@@ -288,22 +287,21 @@ export default function ImageGenSettings({ config, onChange }: ImageGenSettingsP
                                                 const selectValue = isCustom ? "custom" : (provider.size || "auto");
                                                 return (
                                                     <div className="space-y-2">
-                                                        <select
+                                                        <Select
                                                             value={selectValue}
-                                                            onChange={e => {
-                                                                if (e.target.value !== "custom") {
-                                                                    updateProvider(index, { size: e.target.value });
+                                                            onChange={v => {
+                                                                if (v !== "custom") {
+                                                                    updateProvider(index, { size: v });
                                                                 }
                                                             }}
-                                                            className={clsx(inputClasses, "font-mono text-xs appearance-none cursor-pointer")}
-                                                        >
-                                                            {presets.map(p => (
-                                                                <option key={p} value={p}>
-                                                                    {p === "auto" ? t("settings.image_gen.fields.size_auto") : p}
-                                                                </option>
-                                                            ))}
-                                                            <option value="custom">{t("settings.image_gen.fields.size_custom")}</option>
-                                                        </select>
+                                                            options={[
+                                                                ...presets.map(p => ({
+                                                                    value: p,
+                                                                    label: p === "auto" ? t("settings.image_gen.fields.size_auto") : p,
+                                                                })),
+                                                                { value: "custom", label: t("settings.image_gen.fields.size_custom") },
+                                                            ]}
+                                                        />
                                                         {isCustom && (
                                                             <input
                                                                 type="text"

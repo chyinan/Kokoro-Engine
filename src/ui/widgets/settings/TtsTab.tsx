@@ -10,6 +10,7 @@ import { clsx } from "clsx";
 import { Trash2, RefreshCw } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { inputClasses, labelClasses, sectionHeadingClasses } from "../../styles/settings-primitives";
+import { Select } from "@/components/ui/select";
 import { synthesize, listGptSovitsModels } from "../../../lib/kokoro-bridge";
 import type { GptSovitsModels } from "../../../lib/kokoro-bridge";
 import type { ProviderStatus, VoiceProfile, TtsSystemConfig } from "../../../lib/kokoro-bridge";
@@ -149,41 +150,38 @@ export default function TtsTab({
                 {/* Active Provider Selector */}
                 <div>
                     <label className={labelClasses}>{t("settings.tts.active_settings.provider")}</label>
-                    <select
+                    <Select
                         value={ttsProviderId}
-                        onChange={e => onTtsProviderIdChange(e.target.value)}
-                        className={inputClasses}
-                    >
-                        {providers.map(p => (
-                            <option key={p.id} value={p.id}>
-                                {p.id.toUpperCase()} {p.available ? "" : t("settings.tts.active_settings.unavailable")}
-                            </option>
-                        ))}
-                        {providers.length === 0 && <option value="browser">{t("settings.tts.active_settings.browser")}</option>}
-                    </select>
+                        onChange={onTtsProviderIdChange}
+                        options={
+                            providers.length === 0
+                                ? [{ value: "browser", label: t("settings.tts.active_settings.browser") }]
+                                : providers.map(p => ({
+                                    value: p.id,
+                                    label: `${p.id.toUpperCase()}${p.available ? "" : " " + t("settings.tts.active_settings.unavailable")}`,
+                                }))
+                        }
+                    />
                 </div>
 
                 {/* Voice Selector — hidden for GPT-SoVITS (voice is determined by model + ref audio) */}
                 {!ttsConfig?.providers.find(p => p.id === ttsProviderId && p.provider_type === "gpt_sovits") && (
                     <div>
                         <label className={labelClasses}>{t("settings.tts.active_settings.voice")}</label>
-                        <select
+                        <Select
                             value={ttsVoice}
-                            onChange={e => onTtsVoiceChange(e.target.value)}
-                            className={inputClasses}
-                        >
-                            {(() => {
+                            onChange={onTtsVoiceChange}
+                            options={(() => {
                                 const filtered = voices.filter(v => v.provider_id === ttsProviderId);
                                 if (filtered.length === 0) {
-                                    return <option value="">{t("settings.tts.active_settings.no_voices")}</option>;
+                                    return [{ value: "", label: t("settings.tts.active_settings.no_voices") }];
                                 }
-                                return filtered.map(v => (
-                                    <option key={v.voice_id} value={v.voice_id}>
-                                        {v.name} ({v.gender} · {v.language})
-                                    </option>
-                                ));
+                                return filtered.map(v => ({
+                                    value: v.voice_id,
+                                    label: `${v.name} (${v.gender} · ${v.language})`,
+                                }));
                             })()}
-                        </select>
+                        />
                     </div>
                 )}
 
@@ -405,37 +403,37 @@ export default function TtsTab({
                                                 <div className="grid grid-cols-2 gap-3">
                                                     <div>
                                                         <label className={labelClasses}>{t("settings.tts.fields.prompt_lang")}</label>
-                                                        <select
+                                                        <Select
                                                             value={(provider.extra?.prompt_lang as string) || "zh"}
-                                                            onChange={e => updateProviderConfig(index, {
-                                                                extra: { ...provider.extra, prompt_lang: e.target.value }
+                                                            onChange={v => updateProviderConfig(index, {
+                                                                extra: { ...provider.extra, prompt_lang: v }
                                                             })}
-                                                            className={inputClasses}
-                                                        >
-                                                            <option value="zh">中文</option>
-                                                            <option value="en">English</option>
-                                                            <option value="ja">日本語</option>
-                                                            <option value="ko">한국어</option>
-                                                            <option value="yue">粵語</option>
-                                                            <option value="auto">Auto</option>
-                                                        </select>
+                                                            options={[
+                                                                { value: "zh", label: "中文" },
+                                                                { value: "en", label: "English" },
+                                                                { value: "ja", label: "日本語" },
+                                                                { value: "ko", label: "한국어" },
+                                                                { value: "yue", label: "粵語" },
+                                                                { value: "auto", label: "Auto" },
+                                                            ]}
+                                                        />
                                                     </div>
                                                     <div>
                                                         <label className={labelClasses}>{t("settings.tts.fields.text_lang")}</label>
-                                                        <select
+                                                        <Select
                                                             value={(provider.extra?.text_lang as string) || "zh"}
-                                                            onChange={e => updateProviderConfig(index, {
-                                                                extra: { ...provider.extra, text_lang: e.target.value }
+                                                            onChange={v => updateProviderConfig(index, {
+                                                                extra: { ...provider.extra, text_lang: v }
                                                             })}
-                                                            className={inputClasses}
-                                                        >
-                                                            <option value="zh">中文</option>
-                                                            <option value="en">English</option>
-                                                            <option value="ja">日本語</option>
-                                                            <option value="ko">한국어</option>
-                                                            <option value="yue">粵語</option>
-                                                            <option value="auto">Auto</option>
-                                                        </select>
+                                                            options={[
+                                                                { value: "zh", label: "中文" },
+                                                                { value: "en", label: "English" },
+                                                                { value: "ja", label: "日本語" },
+                                                                { value: "ko", label: "한국어" },
+                                                                { value: "yue", label: "粵語" },
+                                                                { value: "auto", label: "Auto" },
+                                                            ]}
+                                                        />
                                                     </div>
                                                 </div>
                                                 <div>

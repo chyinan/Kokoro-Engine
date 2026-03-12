@@ -4,6 +4,7 @@ import { clsx } from "clsx";
 import { useTranslation } from "react-i18next";
 import { Trash2, Pencil, Check, X, Search, Brain, ChevronDown, List, Calendar, Share2, UserCircle } from "lucide-react";
 import { inputClasses } from "../styles/settings-primitives";
+import { Select } from "@/components/ui/select";
 import { listMemories, updateMemory, deleteMemory } from "../../lib/kokoro-bridge";
 import type { MemoryRecord } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
@@ -170,23 +171,16 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                     <div className="relative">
                         <UserCircle
                             size={14}
-                            className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]"
+                            className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] z-10 pointer-events-none"
                         />
-                        <select
+                        <Select
                             value={selectedCharId}
-                            onChange={(e) => setSelectedCharId(e.target.value)}
-                            className={clsx(inputClasses, "pl-9 py-2 appearance-none cursor-pointer")}
-                        >
-                            {characters.map((char) => (
-                                <option key={char.id} value={String(char.id)}>
-                                    {char.name}
-                                    {String(char.id) === characterId ? ` ${t("settings.memory.active_char")}` : ""}
-                                </option>
-                            ))}
-                        </select>
-                        <ChevronDown
-                            size={14}
-                            className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] pointer-events-none"
+                            onChange={setSelectedCharId}
+                            options={characters.map(char => ({
+                                value: String(char.id),
+                                label: `${char.name}${String(char.id) === characterId ? ` ${t("settings.memory.active_char")}` : ""}`,
+                            }))}
+                            className="[&>button]:pl-9"
                         />
                     </div>
                 )}

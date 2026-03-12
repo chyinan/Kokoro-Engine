@@ -13,6 +13,7 @@ import {
 } from "../../../lib/kokoro-bridge";
 import { useTranslation } from "react-i18next";
 import { inputClasses, labelClasses } from "../../styles/settings-primitives";
+import { Select } from "@/components/ui/select";
 
 export default function SingTab() {
     const { t } = useTranslation();
@@ -184,16 +185,14 @@ export default function SingTab() {
                 {models.length > 0 && (
                     <div>
                         <label className={labelClasses}>{t("sing.settings.model_label")}</label>
-                        <select
+                        <Select
                             value={selectedModel}
-                            onChange={(e) => setSelectedModel(e.target.value)}
-                            className={clsx(inputClasses, "appearance-none cursor-pointer")}
-                        >
-                            <option value="">{t("sing.settings.default_model")}</option>
-                            {models.map(m => (
-                                <option key={m.name} value={m.name}>{m.name}</option>
-                            ))}
-                        </select>
+                            onChange={setSelectedModel}
+                            options={[
+                                { value: "", label: t("sing.settings.default_model") },
+                                ...models.map(m => ({ value: m.name, label: m.name })),
+                            ]}
+                        />
                     </div>
                 )}
 
@@ -262,16 +261,16 @@ export default function SingTab() {
                         >
                             <div>
                                 <label className={labelClasses}>{t("sing.settings.advanced.f0_method.label")}</label>
-                                <select
+                                <Select
                                     value={f0Method}
-                                    onChange={(e) => setF0Method(e.target.value)}
-                                    className={clsx(inputClasses, "appearance-none cursor-pointer")}
-                                >
-                                    <option value="rmvpe">{t("sing.settings.advanced.f0_method.rmvpe")}</option>
-                                    <option value="pm">{t("sing.settings.advanced.f0_method.pm")}</option>
-                                    <option value="harvest">{t("sing.settings.advanced.f0_method.harvest")}</option>
-                                    <option value="crepe">{t("sing.settings.advanced.f0_method.crepe")}</option>
-                                </select>
+                                    onChange={setF0Method}
+                                    options={[
+                                        { value: "rmvpe", label: t("sing.settings.advanced.f0_method.rmvpe") },
+                                        { value: "pm", label: t("sing.settings.advanced.f0_method.pm") },
+                                        { value: "harvest", label: t("sing.settings.advanced.f0_method.harvest") },
+                                        { value: "crepe", label: t("sing.settings.advanced.f0_method.crepe") },
+                                    ]}
+                                />
                             </div>
 
                             <div>
