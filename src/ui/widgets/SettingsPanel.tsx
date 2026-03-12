@@ -219,6 +219,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
             setTtsVoices(voices);
             setLocalTtsConfig(ttsConfig);
             setLocalTelegramConfig(telegramConfig);
+            console.log("[SettingsPanel] Loaded telegram config:", JSON.stringify(telegramConfig));
             // STT config: always fetch fresh from backend to reflect saved state
             const sttConfig = await getSttConfig();
             setLocalSttConfig(sttConfig);
@@ -314,6 +315,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
         }
 
         // Commit Telegram Config
+        console.log("[SettingsPanel] localTelegramConfig at save time:", JSON.stringify(localTelegramConfig));
         if (localTelegramConfig) {
             try {
                 await saveTelegramConfig(localTelegramConfig);
@@ -492,7 +494,10 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                             {activeTab === "telegram" && (
                                 <TelegramTab
                                     config={localTelegramConfig}
-                                    onUpdate={(patch) => setLocalTelegramConfig(prev => prev ? { ...prev, ...patch } : prev)}
+                                    onUpdate={(patch) => {
+                                        console.log("[SettingsPanel] TelegramTab onUpdate patch:", JSON.stringify(patch));
+                                        setLocalTelegramConfig(prev => prev ? { ...prev, ...patch } : prev);
+                                    }}
                                 />
                             )}
                             {activeTab === "jailbreak" && (
