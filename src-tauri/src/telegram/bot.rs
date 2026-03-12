@@ -53,12 +53,11 @@ struct TelegramChatSync {
 /// Run the long-polling loop. Blocks until `shutdown_rx` fires or an error occurs.
 pub async fn run_polling(
     token: String,
-    config: TelegramConfig,
+    config: Arc<RwLock<TelegramConfig>>,
     app: tauri::AppHandle,
     shutdown_rx: oneshot::Receiver<()>,
 ) {
     let bot = Bot::new(&token);
-    let config = Arc::new(config);
     let sessions: Sessions = Arc::new(RwLock::new(HashMap::new()));
     let rate_limiter: RateLimiter = Arc::new(RwLock::new(HashMap::new()));
 
@@ -87,7 +86,7 @@ pub async fn run_polling(
 async fn handle_message(
     bot: Bot,
     msg: Message,
-    config: Arc<TelegramConfig>,
+    config: Arc<RwLock<TelegramConfig>>,
     sessions: Sessions,
     app: tauri::AppHandle,
     rate_limiter: RateLimiter,
@@ -95,6 +94,9 @@ async fn handle_message(
     let chat_id = msg.chat.id;
     // 不记录消息内容，避免敏感信息泄露到日志
     println!("[Telegram] Received message from chat_id={}", chat_id.0);
+
+    // Snapshot config for this request
+    let config = Arc::new(config.read().await.clone());
 
     // Access control: check whitelist
     if !config.allowed_chat_ids.is_empty()

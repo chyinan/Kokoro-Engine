@@ -58,10 +58,12 @@ impl TelegramService {
         }
 
         let shutdown_flag = self.shutdown_tx.clone();
+        // Pass the shared Arc so config changes take effect without restart
+        let shared_config = self.config.clone();
 
         tauri::async_runtime::spawn(async move {
             println!("[Telegram] Bot polling started");
-            bot::run_polling(token, config, app, rx).await;
+            bot::run_polling(token, shared_config, app, rx).await;
             println!("[Telegram] Bot polling stopped");
             // Clear the shutdown sender so is_running() returns false
             let mut guard = shutdown_flag.write().await;
