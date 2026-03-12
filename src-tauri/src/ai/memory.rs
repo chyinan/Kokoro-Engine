@@ -166,10 +166,11 @@ impl MemoryManager {
         }
 
         sqlx::query(
-            "INSERT INTO memories (content, embedding, created_at, importance, character_id, tier) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memories (content, embedding, created_at, updated_at, importance, character_id, tier) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(content)
         .bind(embedding_bytes)
+        .bind(now)
         .bind(now)
         .bind(0.5) // Default importance
         .bind(character_id)
@@ -549,10 +550,11 @@ impl MemoryManager {
         let tier = if importance >= 0.8 { "core" } else { "ephemeral" };
 
         sqlx::query(
-            "INSERT INTO memories (content, embedding, created_at, importance, character_id, tier) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memories (content, embedding, created_at, updated_at, importance, character_id, tier) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(content)
         .bind(embedding_bytes)
+        .bind(now)
         .bind(now)
         .bind(importance.clamp(0.0, 1.0))
         .bind(character_id)
@@ -819,11 +821,12 @@ impl MemoryManager {
             let consolidated_from_json = serde_json::to_string(&source_ids)?;
 
             sqlx::query(
-                "INSERT INTO memories (content, embedding, created_at, importance, character_id, tier, consolidated_from) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO memories (content, embedding, created_at, updated_at, importance, character_id, tier, consolidated_from) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&merged)
             .bind(&embedding_bytes)
+            .bind(now)
             .bind(now)
             .bind(max_importance)
             .bind(character_id)

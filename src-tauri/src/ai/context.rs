@@ -117,6 +117,13 @@ impl AIOrchestrator {
         .execute(&pool)
         .await;
 
+        // Migration: add updated_at column (tracks last dedup refresh time)
+        let _ = sqlx::query(
+            "ALTER TABLE memories ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await;
+
         // FTS5 virtual table for hybrid retrieval (Phase 2)
         sqlx::query(
             "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, content='memories', content_rowid='id');",
