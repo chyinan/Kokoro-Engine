@@ -179,8 +179,10 @@ pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(
 pub async fn update_bubble_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("bubble") {
         win.emit("bubble-text-update", &text).map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        Err("bubble window not found".to_string())
     }
-    Ok(())
 }
 
 #[tauri::command]

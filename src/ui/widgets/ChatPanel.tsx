@@ -4,7 +4,6 @@ import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
 import { streamChat, onChatDelta, onChatDone, onChatError, onChatTranslation, clearHistory, uploadVisionImage, synthesize, onToolCallResult, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
 import { useVoiceInput, VoiceState, useTypingReveal, useWakeWord } from "../hooks";
 import { useTranslation } from "react-i18next";
 import ConversationSidebar from "./ConversationSidebar";
@@ -123,9 +122,6 @@ export default function ChatPanel() {
     const translationRef = useRef<string | undefined>(undefined);
     // When true, the next delta must create a new kokoro bubble (even if the last message is already kokoro)
     const forceNewBubbleRef = useRef(false);
-    // When true, current streaming is from a proactive/vision trigger — show floating bubble
-    const isProactiveTriggerRef = useRef(false);
-    const proactiveBubbleTextRef = useRef("");
 
     // Typing reveal: per-character animation
     const { pushDelta, flush: flushReveal, reset: resetReveal } = useTypingReveal({
@@ -394,15 +390,6 @@ export default function ChatPanel() {
 
                 // Push to typing reveal buffer
                 pushDelta(delta);
-
-                // 主动触发时同步更新悬浮气泡
-                if (isProactiveTriggerRef.current) {
-                    proactiveBubbleTextRef.current += delta;
-                    const text = proactiveBubbleTextRef.current;
-                    invoke("update_bubble_text", { text }).catch(() => {
-                        invoke("show_bubble_window", { text }).catch(() => {});
-                    });
-                }
             });
             if (aborted) { unDelta(); return; }
             cleanups.push(unDelta);
@@ -454,15 +441,6 @@ export default function ChatPanel() {
                         }
                         return prev;
                     });
-                }
-
-                // 主动触发结束后延迟隐藏悬浮气泡
-                if (isProactiveTriggerRef.current) {
-                    isProactiveTriggerRef.current = false;
-                    proactiveBubbleTextRef.current = "";
-                    setTimeout(() => {
-                        invoke("hide_bubble_window").catch(() => {});
-                    }, 5000);
                 }
 
                 // ── Auto-TTS: speak the completed response ──
@@ -551,8 +529,6 @@ export default function ChatPanel() {
                 // Mark that the next delta should create a new bubble
                 // (don't push an empty message now — avoids blank bubble + double bubble)
                 forceNewBubbleRef.current = true;
-                isProactiveTriggerRef.current = true;
-                proactiveBubbleTextRef.current = "";
 
                 // Start streaming — compose_prompt() handles full context (system prompt, memory, emotion, history, language)
                 startStreaming();
