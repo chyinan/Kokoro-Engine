@@ -19,7 +19,7 @@ import { JailbreakTab } from "./settings/JailbreakTab";
 import { BackupTab } from "./settings/BackupTab";
 import PetTab from "./settings/PetTab";
 import { useTranslation } from "react-i18next";
-import { setPersona, setResponseLanguage, setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig } from "../../lib/kokoro-bridge";
+import { setPersona, setResponseLanguage, setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, saveTelegramConfig } from "../../lib/kokoro-bridge";
 import type { ProviderStatus, VoiceProfile, TtsSystemConfig, ImageGenSystemConfig, SttConfig, TelegramConfig } from "../../lib/kokoro-bridge";
 import type { BackgroundConfig } from "../hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "../../features/live2d/Live2DViewer";
@@ -173,6 +173,9 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
     const [localSttConfig, setLocalSttConfig] = useState<SttConfig | null>(sttConfigProp ?? null);
     const [voiceInterrupt, setVoiceInterrupt] = useState(() => localStorage.getItem("kokoro_voice_interrupt") === "true");
 
+    // Telegram config state
+    const [localTelegramConfig, setLocalTelegramConfig] = useState<TelegramConfig | null>(null);
+
     // Response Language
     const [responseLang, setResponseLang] = useState(() => localStorage.getItem("kokoro_response_language") || "");
 
@@ -301,17 +304,19 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
 
         // Commit STT Config
         if (localSttConfig) {
-            // Sync local storage states into config before saving if needed,
-            // or assume SttTab writes directly to localSttConfig.
-            // Let's ensure top-level toggles are synced if we are still using them.
-            // But SttTab will likely modify localSttConfig directly now.
-            // For now, let's just save what's in localSttConfig.
             try {
                 await saveSttConfig(localSttConfig);
-                // Also update local storage for any non-config legacy uses if any?
-                // The implementation plan says migrate. So we should rely on config.
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save STT config:", e);
+            }
+        }
+
+        // Commit Telegram Config
+        if (localTelegramConfig) {
+            try {
+                await saveTelegramConfig(localTelegramConfig);
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to save Telegram config:", e);
             }
         }
 
@@ -483,7 +488,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                                 <McpTab />
                             )}
                             {activeTab === "telegram" && (
-                                <TelegramTab />
+                                <TelegramTab onConfigChange={setLocalTelegramConfig} />
                             )}
                             {activeTab === "jailbreak" && (
                                 <JailbreakTab />

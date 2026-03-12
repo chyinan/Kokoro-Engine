@@ -12,7 +12,7 @@ import { characterDb } from "../../../lib/db";
 import type { CharacterProfile } from "../../../lib/db";
 import { inputClasses, labelClasses } from "../../styles/settings-primitives";
 
-export default function TelegramTab() {
+export default function TelegramTab({ onConfigChange }: { onConfigChange?: (config: TelegramConfig) => void }) {
     const { t } = useTranslation();
     const [config, setConfig] = useState<TelegramConfig | null>(null);
     const [status, setStatus] = useState<TelegramStatus | null>(null);
@@ -51,18 +51,10 @@ export default function TelegramTab() {
 
     const update = (patch: Partial<TelegramConfig>) => {
         if (!config) return;
-        setConfig({ ...config, ...patch });
+        const updated = { ...config, ...patch };
+        setConfig(updated);
         setDirty(true);
-    };
-
-    const handleSave = async () => {
-        if (!config) return;
-        try {
-            await saveTelegramConfig(config);
-            setDirty(false);
-        } catch (e) {
-            console.error("[TelegramTab] Failed to save:", e);
-        }
+        onConfigChange?.(updated);
     };
 
     const handleStart = async () => {
@@ -296,20 +288,6 @@ export default function TelegramTab() {
                     />
                 </motion.button>
             </div>
-
-            {/* Save Button */}
-            {dirty && (
-                <motion.button
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    whileTap={{ scale: 0.97 }}
-                    onClick={handleSave}
-                    className="w-full py-2.5 rounded-md text-sm font-heading font-semibold
-                        bg-[var(--color-accent)] text-black hover:brightness-110 transition-all"
-                >
-                    {t("telegram.save")}
-                </motion.button>
-            )}
         </div>
     );
 }
