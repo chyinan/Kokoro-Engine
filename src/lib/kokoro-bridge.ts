@@ -794,6 +794,7 @@ export interface TelegramConfig {
     bot_token_env?: string;
     allowed_chat_ids: number[];
     send_voice_reply: boolean;
+    character_id?: string;
 }
 
 export interface TelegramStatus {

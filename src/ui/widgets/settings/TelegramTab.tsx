@@ -242,6 +242,21 @@ export default function TelegramTab() {
                 )}
             </div>
 
+            {/* Character ID */}
+            <div>
+                <label className={labelClasses}>{t("telegram.character_id.label")}</label>
+                <input
+                    type="text"
+                    value={config.character_id ?? ""}
+                    onChange={e => update({ character_id: e.target.value || undefined })}
+                    placeholder={t("telegram.character_id.placeholder")}
+                    className={inputClasses}
+                />
+                <div className="text-xs text-[var(--color-text-muted)] mt-1">
+                    {t("telegram.character_id.hint")}
+                </div>
+            </div>
+
             {/* Voice Reply */}
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">

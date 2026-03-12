@@ -254,7 +254,10 @@ async fn handle_text(
         .ok_or("LlmService not available")?;
 
     // 1. Record user message
-    let char_id = orchestrator.get_character_id().await;
+    let char_id = match config.character_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => orchestrator.get_character_id().await,
+    };
     orchestrator
         .add_message("user".to_string(), text.to_string(), &char_id)
         .await;
@@ -572,7 +575,10 @@ async fn handle_photo(
     println!("[Telegram] Photo received, caption: {}", caption);
 
     // 1. Record user message
-    let char_id = orchestrator.get_character_id().await;
+    let char_id = match config.character_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => orchestrator.get_character_id().await,
+    };
     orchestrator
         .add_message("user".to_string(), caption.clone(), &char_id)
         .await;

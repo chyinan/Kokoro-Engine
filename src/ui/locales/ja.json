@@ -683,6 +683,11 @@
             "add": "追加"
         },
         "voice_reply": "音声返信を送信（TTS）",
+        "character_id": {
+            "label": "キャラクター ID",
+            "placeholder": "空欄の場合は現在のアクティブキャラクターを使用",
+            "hint": "Telegram の会話を特定のキャラクター ID に紐付けます（メモリページに表示される character_id と同じ）"
+        },
         "save": "保存",
         "start": "開始",
         "stop": "停止"

@@ -683,6 +683,11 @@
             "add": "추가"
         },
         "voice_reply": "음성 답장 보내기 (TTS)",
+        "character_id": {
+            "label": "캐릭터 ID",
+            "placeholder": "비워두면 현재 활성 캐릭터 사용",
+            "hint": "Telegram 대화를 특정 캐릭터 ID에 연결합니다 (메모리 페이지에 표시된 character_id와 동일)"
+        },
         "save": "저장",
         "start": "시작",
         "stop": "중지"

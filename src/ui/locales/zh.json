@@ -684,6 +684,11 @@
             "add": "添加"
         },
         "voice_reply": "发送语音回复（TTS）",
+        "character_id": {
+            "label": "角色 ID",
+            "placeholder": "留空则使用当前活跃角色",
+            "hint": "指定 Telegram 对话绑定的角色 ID，与记忆页面显示的 character_id 一致"
+        },
         "save": "保存",
         "start": "启动",
         "stop": "停止"

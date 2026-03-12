@@ -21,6 +21,10 @@ pub struct TelegramConfig {
     /// Whether to also send a voice message alongside text replies (requires TTS).
     #[serde(default)]
     pub send_voice_reply: bool,
+    /// Character ID to use for Telegram conversations.
+    /// If empty, falls back to the currently active character in the desktop app.
+    #[serde(default)]
+    pub character_id: Option<String>,
 }
 
 impl Default for TelegramConfig {
@@ -31,6 +35,7 @@ impl Default for TelegramConfig {
             bot_token_env: Some("TELEGRAM_BOT_TOKEN".to_string()),
             allowed_chat_ids: Vec::new(),
             send_voice_reply: false,
+            character_id: None,
         }
     }
 }
