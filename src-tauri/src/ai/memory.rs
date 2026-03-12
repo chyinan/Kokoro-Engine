@@ -206,8 +206,8 @@ impl MemoryManager {
             let sim = cosine_similarity(new_embedding, &existing);
             if sim > DEDUP_THRESHOLD {
                 let id: i64 = row.get("id");
-                // Refresh the timestamp ("re-remember" this fact)
-                sqlx::query("UPDATE memories SET created_at = ? WHERE id = ?")
+                // Refresh updated_at only — created_at must remain immutable
+                sqlx::query("UPDATE memories SET updated_at = ? WHERE id = ?")
                     .bind(now)
                     .bind(id)
                     .execute(&self.db)
@@ -247,7 +247,7 @@ impl MemoryManager {
                     "ephemeral"
                 };
                 sqlx::query(
-                    "UPDATE memories SET created_at = ?, importance = ?, tier = ? WHERE id = ?",
+                    "UPDATE memories SET updated_at = ?, importance = ?, tier = ? WHERE id = ?",
                 )
                 .bind(now)
                 .bind(best_importance)
