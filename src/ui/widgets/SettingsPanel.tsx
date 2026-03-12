@@ -19,7 +19,7 @@ import { JailbreakTab } from "./settings/JailbreakTab";
 import { BackupTab } from "./settings/BackupTab";
 import PetTab from "./settings/PetTab";
 import { useTranslation } from "react-i18next";
-import { setPersona, setResponseLanguage, setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, saveTelegramConfig } from "../../lib/kokoro-bridge";
+import { setPersona, setResponseLanguage, setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, saveTelegramConfig, getTelegramConfig } from "../../lib/kokoro-bridge";
 import type { ProviderStatus, VoiceProfile, TtsSystemConfig, ImageGenSystemConfig, SttConfig, TelegramConfig } from "../../lib/kokoro-bridge";
 import type { BackgroundConfig } from "../hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "../../features/live2d/Live2DViewer";
@@ -209,14 +209,16 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
     const fetchData = async () => {
         setIsTtsLoading(true);
         try {
-            const [providers, voices, ttsConfig] = await Promise.all([
+            const [providers, voices, ttsConfig, telegramConfig] = await Promise.all([
                 listTtsProviders(),
                 listTtsVoices(),
                 getTtsConfig(),
+                getTelegramConfig(),
             ]);
             setTtsProviders(providers);
             setTtsVoices(voices);
             setLocalTtsConfig(ttsConfig);
+            setLocalTelegramConfig(telegramConfig);
             // STT config: always fetch fresh from backend to reflect saved state
             const sttConfig = await getSttConfig();
             setLocalSttConfig(sttConfig);
@@ -314,7 +316,6 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
         // Commit Telegram Config
         if (localTelegramConfig) {
             try {
-                console.log("[SettingsPanel] Saving telegram config:", JSON.stringify(localTelegramConfig));
                 await saveTelegramConfig(localTelegramConfig);
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Telegram config:", e);
