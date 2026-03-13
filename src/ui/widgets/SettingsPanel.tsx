@@ -84,22 +84,26 @@ interface SettingsPanelProps {
 }
 
 const tabs: { id: TabId; label: string; icon: typeof Key }[] = [
-    { id: "bg", label: "settings.tabs.bg", icon: Image },
-    { id: "model", label: "settings.tabs.model", icon: PersonStanding },
-    { id: "imagegen", label: "settings.tabs.imagegen", icon: Sparkles },
-    { id: "api", label: "settings.tabs.api", icon: Key },
+    // 核心体验
     { id: "persona", label: "settings.tabs.persona", icon: User },
+    { id: "model", label: "settings.tabs.model", icon: PersonStanding },
     { id: "tts", label: "settings.tabs.tts", icon: Volume2 },
     { id: "stt", label: "settings.tabs.stt", icon: Mic },
-    { id: "sing", label: "settings.tabs.sing", icon: Music },
-    { id: "memory", label: "settings.tabs.memory", icon: Brain },
+    { id: "bg", label: "settings.tabs.bg", icon: Image },
+    { id: "imagegen", label: "settings.tabs.imagegen", icon: Sparkles },
+    // AI 能力扩展
     { id: "vision", label: "settings.tabs.vision", icon: Eye },
-    { id: "mods", label: "settings.tabs.mods", icon: Package },
+    { id: "memory", label: "settings.tabs.memory", icon: Brain },
     { id: "mcp", label: "settings.tabs.mcp", icon: Server },
+    // 外部集成
+    { id: "mods", label: "settings.tabs.mods", icon: Package },
+    { id: "sing", label: "settings.tabs.sing", icon: Music },
     { id: "telegram", label: "settings.tabs.telegram", icon: Bot },
+    // 系统 / 高级
+    { id: "api", label: "settings.tabs.api", icon: Key },
     { id: "jailbreak", label: "settings.tabs.jailbreak", icon: Shield },
-    { id: "backup", label: "settings.tabs.backup", icon: HardDrive },
     { id: "pet", label: "settings.tabs.pet", icon: Ghost },
+    { id: "backup", label: "settings.tabs.backup", icon: HardDrive },
 ];
 
 export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: _telegramConfigProp }: SettingsPanelProps) {
