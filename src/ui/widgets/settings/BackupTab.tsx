@@ -1,12 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { clsx } from 'clsx';
-import { Download, Upload, Loader2, Check, AlertTriangle, Database, FileJson } from 'lucide-react';
+import { Download, Upload, Loader2, Check, AlertTriangle, Database, FileJson, Clock, FolderOpen, Trash2, Play } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { save, open } from '@tauri-apps/plugin-dialog';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { relaunch } from '@tauri-apps/plugin-process';
-import { exportData, previewImport, importData } from '../../../lib/kokoro-bridge';
-import type { ImportPreview } from '../../../lib/kokoro-bridge';
+import { exportData, previewImport, importData, getAutoBackupConfig, saveAutoBackupConfig, runAutoBackupNow } from '../../../lib/kokoro-bridge';
+import type { ImportPreview, AutoBackupConfig } from '../../../lib/kokoro-bridge';
 import { characterDb } from '../../../lib/db';
 import type { CharacterProfile } from '../../../lib/db';
 import { sectionHeadingClasses } from '../../styles/settings-primitives';
@@ -36,6 +37,56 @@ export const BackupTab: React.FC = () => {
     const [importDb, setImportDb] = useState(true);
     const [importConfigs, setImportConfigs] = useState(true);
     const [conflictStrategy, setConflictStrategy] = useState<"skip" | "overwrite">("overwrite");
+
+    // Auto backup state
+    const [autoBackup, setAutoBackup] = useState<AutoBackupConfig>({
+        enabled: false,
+        backup_dir: '',
+        interval_days: 1,
+        auto_cleanup: false,
+        keep_days: 30,
+    });
+    const [autoBackupSaved, setAutoBackupSaved] = useState(false);
+    const [autoBackupError, setAutoBackupError] = useState<string | null>(null);
+    const [runningNow, setRunningNow] = useState(false);
+    const [runNowResult, setRunNowResult] = useState<string | null>(null);
+
+    useEffect(() => {
+        getAutoBackupConfig().then(setAutoBackup).catch(() => {});
+    }, []);
+
+    const handleSaveAutoBackup = async () => {
+        setAutoBackupError(null);
+        setAutoBackupSaved(false);
+        try {
+            await saveAutoBackupConfig(autoBackup);
+            setAutoBackupSaved(true);
+            setTimeout(() => setAutoBackupSaved(false), 2000);
+        } catch (e: any) {
+            setAutoBackupError(String(e));
+        }
+    };
+
+    const handlePickDir = async () => {
+        const dir = await openDialog({ directory: true, multiple: false });
+        if (dir && typeof dir === 'string') {
+            setAutoBackup(prev => ({ ...prev, backup_dir: dir }));
+        }
+    };
+
+    const handleRunNow = async () => {
+        setRunningNow(true);
+        setRunNowResult(null);
+        setAutoBackupError(null);
+        try {
+            const path = await runAutoBackupNow();
+            setRunNowResult(path);
+        } catch (e: any) {
+            setAutoBackupError(String(e));
+        } finally {
+            setRunningNow(false);
+        }
+    };
 
     const handleExport = async () => {
         setExporting(true);
@@ -198,6 +249,133 @@ export const BackupTab: React.FC = () => {
 
     return (
         <div className="space-y-6">
+            {/* Auto Backup Section */}
+            <div>
+                <div className={clsx(sectionHeadingClasses, "mb-3")}>{t('settings.backup.auto_title')}</div>
+                <p className="text-xs text-[var(--color-text-muted)] mb-4">{t('settings.backup.auto_desc')}</p>
+
+                <div className="space-y-3">
+                    {/* Enable toggle */}
+                    <label className="flex items-center gap-2 text-xs text-[var(--color-text-primary)] cursor-pointer">
+                        <input type="checkbox" checked={autoBackup.enabled}
+                            onChange={e => setAutoBackup(prev => ({ ...prev, enabled: e.target.checked }))}
+                            className={clsx(toggleClasses, autoBackup.enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]")}
+                            style={{ appearance: 'none' }}
+                        />
+                        {t('settings.backup.auto_enable')}
+                    </label>
+
+                    {autoBackup.enabled && (
+                        <div className="space-y-3 pl-1">
+                            {/* Backup dir */}
+                            <div>
+                                <div className="text-xs text-[var(--color-text-muted)] mb-1">{t('settings.backup.auto_dir')}</div>
+                                <div className="flex gap-2 items-center">
+                                    <input
+                                        type="text"
+                                        readOnly
+                                        value={autoBackup.backup_dir}
+                                        placeholder={t('settings.backup.auto_dir_placeholder')}
+                                        className="flex-1 px-3 py-1.5 rounded text-xs bg-black/30 border border-[var(--color-border)] text-[var(--color-text-secondary)] cursor-default"
+                                    />
+                                    <button onClick={handlePickDir}
+                                        className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs border border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-accent)] hover:border-[var(--color-accent)] transition-colors">
+                                        <FolderOpen size={12} />
+                                        {t('settings.backup.auto_dir_pick')}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Interval */}
+                            <div>
+                                <div className="text-xs text-[var(--color-text-muted)] mb-1">{t('settings.backup.auto_interval')}</div>
+                                <div className="flex gap-1.5">
+                                    {[1, 2, 3, 7].map(d => (
+                                        <button key={d} onClick={() => setAutoBackup(prev => ({ ...prev, interval_days: d }))}
+                                            className={clsx(
+                                                "px-3 py-1.5 rounded text-xs font-heading transition-colors",
+                                                autoBackup.interval_days === d
+                                                    ? "bg-[var(--color-accent)] text-black"
+                                                    : "bg-black/30 text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]"
+                                            )}>
+                                            {t('settings.backup.auto_interval_days', { count: d })}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Auto cleanup */}
+                            <label className="flex items-center gap-2 text-xs text-[var(--color-text-primary)] cursor-pointer">
+                                <input type="checkbox" checked={autoBackup.auto_cleanup}
+                                    onChange={e => setAutoBackup(prev => ({ ...prev, auto_cleanup: e.target.checked }))}
+                                    className={clsx(toggleClasses, autoBackup.auto_cleanup ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]")}
+                                    style={{ appearance: 'none' }}
+                                />
+                                {t('settings.backup.auto_cleanup')}
+                            </label>
+
+                            {autoBackup.auto_cleanup && (
+                                <div className="flex items-center gap-2 pl-1">
+                                    <Trash2 size={12} className="text-[var(--color-text-muted)]" />
+                                    <span className="text-xs text-[var(--color-text-muted)]">{t('settings.backup.auto_keep_prefix')}</span>
+                                    <input
+                                        type="number"
+                                        min={1} max={365}
+                                        value={autoBackup.keep_days}
+                                        onChange={e => setAutoBackup(prev => ({ ...prev, keep_days: Math.max(1, parseInt(e.target.value) || 1) }))}
+                                        className="w-16 px-2 py-1 rounded text-xs bg-black/30 border border-[var(--color-border)] text-[var(--color-text-primary)] text-center"
+                                    />
+                                    <span className="text-xs text-[var(--color-text-muted)]">{t('settings.backup.auto_keep_suffix')}</span>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Save + Run Now */}
+                    <div className="flex gap-2 pt-1">
+                        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                            onClick={handleSaveAutoBackup}
+                            className={clsx(
+                                "flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-heading font-semibold tracking-wider",
+                                "bg-[var(--color-accent)] text-black hover:bg-white transition-colors"
+                            )}>
+                            {autoBackupSaved ? <Check size={14} /> : <Clock size={14} />}
+                            {autoBackupSaved ? t('common.actions.saved') : t('common.actions.save')}
+                        </motion.button>
+
+                        {autoBackup.enabled && autoBackup.backup_dir && (
+                            <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                                onClick={handleRunNow}
+                                disabled={runningNow}
+                                className={clsx(
+                                    "flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-heading font-semibold tracking-wider",
+                                    "border border-[var(--color-border)] text-[var(--color-text-secondary)]",
+                                    "hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-colors",
+                                    "disabled:opacity-50 disabled:cursor-not-allowed"
+                                )}>
+                                {runningNow ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                                {t('settings.backup.auto_run_now')}
+                            </motion.button>
+                        )}
+                    </div>
+
+                    {runNowResult && (
+                        <div className="flex items-start gap-2 text-xs text-green-400">
+                            <Check size={14} className="mt-0.5 shrink-0" />
+                            <span>{t('settings.backup.auto_run_success', { path: runNowResult })}</span>
+                        </div>
+                    )}
+                    {autoBackupError && (
+                        <div className="flex items-start gap-2 text-xs text-red-400">
+                            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                            <span>{autoBackupError}</span>
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            <div className="border-t border-[var(--color-border)]" />
+
             {/* Export Section */}
             <div>
                 <div className={clsx(sectionHeadingClasses, "mb-3")}>{t('settings.backup.export_title')}</div>

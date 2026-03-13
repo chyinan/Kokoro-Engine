@@ -129,7 +129,10 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
             }
         }
 
-        // 4. Memory Decay Pruning (once per hour)
+        // 4. Auto Backup Check (interval configured by user)
+        crate::commands::auto_backup::check_and_run(&app_handle).await;
+
+        // 5. Memory Decay Pruning (once per hour)
         if last_prune_ts.elapsed().as_secs() >= 3600 {
             last_prune_ts = std::time::Instant::now();
             let memory_mgr = orchestrator.memory_manager.clone();

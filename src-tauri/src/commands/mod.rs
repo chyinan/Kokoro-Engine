@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod auto_backup;
 pub mod backup;
 pub mod character;
 pub mod chat;

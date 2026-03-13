@@ -92,6 +92,10 @@ fn db_path(_app_data: &Path) -> PathBuf {
         .join("kokoro.db")
 }
 
+pub fn db_path_pub(app_data: &Path) -> PathBuf {
+    db_path(app_data)
+}
+
 /// Validate that a filename from a ZIP entry is safe (no path traversal).
 /// RAII 临时目录守卫：离开作用域时自动删除目录，确保错误路径也能清理
 struct TempDirGuard(std::path::PathBuf);
@@ -279,6 +283,97 @@ pub async fn export_data(app: AppHandle, export_path: String, characters_json: O
 
     Ok(ExportResult {
         path: export_path,
+        size_bytes,
+        stats,
+    })
+}
+
+/// 核心导出逻辑，供自动备份模块复用（不需要 AppHandle）
+pub async fn export_data_to_path(
+    app_data: &Path,
+    out_path: &Path,
+    characters_json: Option<String>,
+) -> Result<ExportResult, String> {
+    let db = db_path(app_data);
+
+    let file = fs::File::create(out_path)
+        .map_err(|e| format!("Failed to create export file: {}", e))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    let mut stats = gather_stats(&db).await;
+    let mut config_count: usize = 0;
+
+    let manifest = BackupManifest {
+        version: "1".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let manifest_json =
+        serde_json::to_string_pretty(&manifest).map_err(|e| format!("Serialize error: {}", e))?;
+    zip.start_file("manifest.json", options)
+        .map_err(|e| format!("ZIP error: {}", e))?;
+    zip.write_all(manifest_json.as_bytes())
+        .map_err(|e| format!("ZIP write error: {}", e))?;
+
+    if db.exists() {
+        let tmp_db = app_data.join("kokoro_autobackup_tmp.db");
+        fs::copy(&db, &tmp_db).map_err(|e| format!("Failed to copy DB: {}", e))?;
+        let wal = db.with_extension("db-wal");
+        let shm = db.with_extension("db-shm");
+        if wal.exists() { let _ = fs::copy(&wal, tmp_db.with_extension("db-wal")); }
+        if shm.exists() { let _ = fs::copy(&shm, tmp_db.with_extension("db-shm")); }
+        {
+            let url = format!("sqlite://{}", tmp_db.to_string_lossy().replace('\\', "/"));
+            if let Ok(opts) = SqliteConnectOptions::from_str(&url) {
+                if let Ok(pool) = SqlitePool::connect_with(opts).await {
+                    let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(&pool).await;
+                    pool.close().await;
+                }
+            }
+        }
+        let mut db_bytes = Vec::new();
+        fs::File::open(&tmp_db)
+            .map_err(|e| format!("Failed to open tmp DB: {}", e))?
+            .read_to_end(&mut db_bytes)
+            .map_err(|e| format!("Failed to read tmp DB: {}", e))?;
+        let _ = fs::remove_file(&tmp_db);
+        let _ = fs::remove_file(tmp_db.with_extension("db-wal"));
+        let _ = fs::remove_file(tmp_db.with_extension("db-shm"));
+        zip.start_file("kokoro.db", options)
+            .map_err(|e| format!("ZIP error: {}", e))?;
+        zip.write_all(&db_bytes)
+            .map_err(|e| format!("ZIP write error: {}", e))?;
+    }
+
+    if let Some(ref chars) = characters_json {
+        zip.start_file("characters.json", options)
+            .map_err(|e| format!("ZIP error: {}", e))?;
+        zip.write_all(chars.as_bytes())
+            .map_err(|e| format!("ZIP write error: {}", e))?;
+    }
+
+    for name in CONFIG_FILES {
+        let cfg_path = app_data.join(name);
+        if cfg_path.exists() {
+            if let Ok(content) = fs::read_to_string(&cfg_path) {
+                let entry = format!("configs/{}", name);
+                zip.start_file(&entry, options)
+                    .map_err(|e| format!("ZIP error: {}", e))?;
+                zip.write_all(content.as_bytes())
+                    .map_err(|e| format!("ZIP write error: {}", e))?;
+                config_count += 1;
+            }
+        }
+    }
+
+    zip.finish().map_err(|e| format!("ZIP finish error: {}", e))?;
+
+    let size_bytes = fs::metadata(out_path).map(|m| m.len()).unwrap_or(0);
+    stats.configs = config_count;
+
+    Ok(ExportResult {
+        path: out_path.to_string_lossy().to_string(),
         size_bytes,
         stats,
     })

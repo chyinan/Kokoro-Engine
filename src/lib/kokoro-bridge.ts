@@ -895,3 +895,25 @@ export async function previewImport(filePath: string): Promise<ImportPreview> {
 export async function importData(filePath: string, options: ImportOptions): Promise<ImportResult> {
     return invoke<ImportResult>("import_data", { filePath, options });
 }
+
+// ── Auto Backup ────────────────────────────────────
+
+export interface AutoBackupConfig {
+    enabled: boolean;
+    backup_dir: string;
+    interval_days: number;
+    auto_cleanup: boolean;
+    keep_days: number;
+}
+
+export async function getAutoBackupConfig(): Promise<AutoBackupConfig> {
+    return invoke<AutoBackupConfig>("get_auto_backup_config");
+}
+
+export async function saveAutoBackupConfig(config: AutoBackupConfig): Promise<void> {
+    return invoke("save_auto_backup_config", { config });
+}
+
+export async function runAutoBackupNow(): Promise<string> {
+    return invoke<string>("run_auto_backup_now");
+}
