@@ -72,7 +72,23 @@ function extractKeywords(text: string): string[] {
 
 export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
     const [hoveredNode, setHoveredNode] = useState<Node | null>(null);
+    const [canvasSize, setCanvasSize] = useState({ width: 600, height: 400 });
+
+    // 响应式 canvas 尺寸
+    useEffect(() => {
+        const container = containerRef.current;
+        if (!container) return;
+        const ro = new ResizeObserver(entries => {
+            const { width, height } = entries[0].contentRect;
+            if (width > 0 && height > 0) {
+                setCanvasSize({ width: Math.floor(width), height: Math.floor(height) });
+            }
+        });
+        ro.observe(container);
+        return () => ro.disconnect();
+    }, []);
 
     // Process data into graph
     const { nodes, links } = useMemo(() => {
@@ -137,8 +153,8 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
         if (!ctx) return;
 
         let animationId: number;
-        const width = canvas.width;
-        const height = canvas.height;
+        const width = canvasSize.width;
+        const height = canvasSize.height;
         const center = { x: width / 2, y: height / 2 };
 
         const tick = () => {
@@ -196,9 +212,10 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
                 node.x += node.vx;
                 node.y += node.vy;
 
-                // Bounds
+                // Bounds — 底部留出文字标签空间 (radius + 16)
+                const labelPad = 16;
                 node.x = Math.max(node.radius, Math.min(width - node.radius, node.x));
-                node.y = Math.max(node.radius, Math.min(height - node.radius, node.y));
+                node.y = Math.max(node.radius, Math.min(height - node.radius - labelPad, node.y));
             });
 
             // Render
@@ -238,7 +255,7 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
         tick();
 
         return () => cancelAnimationFrame(animationId);
-    }, [nodes, links, hoveredNode]);
+    }, [nodes, links, hoveredNode, canvasSize]);
 
     // Interaction handlers
     const handleMouseMove = (e: ReactMouseEvent) => {
@@ -265,11 +282,11 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
     };
 
     return (
-        <div className="w-full h-[400px] bg-slate-900/50 rounded-lg overflow-hidden border border-slate-800">
+        <div ref={containerRef} className="w-full h-[400px] bg-slate-900/50 rounded-lg overflow-hidden border border-slate-800 relative">
             <canvas
                 ref={canvasRef}
-                width={600}
-                height={400}
+                width={canvasSize.width}
+                height={canvasSize.height}
                 className="w-full h-full"
                 onMouseMove={handleMouseMove}
                 onClick={handleClick}
