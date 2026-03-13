@@ -30,9 +30,18 @@ const STOPWORDS = new Set([
     "just", "know", "take", "people", "into", "year", "your", "good", "some", "could", "them", "see", "other", "than", "then", "now",
     "look", "only", "come", "its", "over", "think", "also", "back", "after", "use", "two", "how", "our", "work", "first", "well", "way",
     "even", "new", "want", "because", "any", "these", "give", "day", "most", "us", "is", "am", "are", "was", "were",
-    // CJK stopwords
-    "の", "は", "が", "を", "に", "で", "と", "も", "な", "だ", "です", "ます", "する", "した", "して", "から", "まで", "より", "ない", "ある", "いる", "れる", "られる", "こと", "もの", "ため", "よう", "など", "それ", "これ", "あの", "その",
-    "的", "了", "是", "在", "我", "有", "和", "就", "不", "人", "都", "一", "个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好", "自己", "这", "他", "她", "吗", "什么", "那", "里", "吧", "啊", "呢", "哦", "嗯",
+    // 日语助词、助动词、接续词、无实意词
+    "の", "は", "が", "を", "に", "で", "と", "も", "な", "だ", "です", "ます", "する", "した", "して", "から", "まで", "より",
+    "ない", "ある", "いる", "れる", "られる", "こと", "もの", "ため", "よう", "など", "それ", "これ", "あの", "その",
+    "って", "てる", "てた", "てて", "ても", "ては", "たら", "たり", "ので", "のに", "けど", "けれど", "でも", "しか",
+    "だけ", "ほど", "くらい", "ぐらい", "さえ", "すら", "こそ", "でも", "しも", "ばかり", "だって", "って", "かな",
+    "ね", "よ", "わ", "ぞ", "ぜ", "か", "な", "さ", "や", "ぬ", "ん", "っ", "て", "で", "に", "を", "は", "が",
+    "いう", "なる", "くる", "いく", "みる", "おく", "しまう", "あげる", "くれる", "もらう",
+    // 中文停用词
+    "的", "了", "是", "在", "我", "有", "和", "就", "不", "人", "都", "一", "个", "上", "也", "很", "到", "说", "要",
+    "去", "你", "会", "着", "没有", "看", "好", "自己", "这", "他", "她", "吗", "什么", "那", "里", "吧", "啊", "呢",
+    "哦", "嗯", "嘿", "哈", "呀", "哇", "唉", "哎", "喔", "嗨", "哟", "咦", "嗯嗯", "嘿嘿",
+    "因为", "所以", "但是", "然后", "如果", "虽然", "已经", "可以", "这个", "那个", "一个", "没有", "知道",
 ]);
 
 /** Check if a string contains CJK characters */
@@ -139,17 +148,24 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
                 node.vx += (center.x - node.x) * 0.005;
                 node.vy += (center.y - node.y) * 0.005;
 
-                // 2. Repulsion
+                // 2. Repulsion — 考虑节点半径，防止重叠
                 nodes.forEach(other => {
                     if (node === other) return;
                     const dx = node.x - other.x;
                     const dy = node.y - other.y;
-                    const distSq = dx * dx + dy * dy;
-                    if (distSq < 100) return; // avoid singularity
-                    const force = 500 / distSq;
-                    const dist = Math.sqrt(distSq);
-                    node.vx += (dx / dist) * force;
-                    node.vy += (dy / dist) * force;
+                    const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+                    const minDist = node.radius + other.radius + 20;
+                    if (dist < minDist) {
+                        // 在最小距离内施加强排斥
+                        const force = (minDist - dist) * 0.3;
+                        node.vx += (dx / dist) * force;
+                        node.vy += (dy / dist) * force;
+                    } else {
+                        // 远距离弱排斥
+                        const force = 800 / (dist * dist);
+                        node.vx += (dx / dist) * force;
+                        node.vy += (dy / dist) * force;
+                    }
                 });
             });
 
@@ -162,7 +178,7 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
                 const dx = t.x - s.x;
                 const dy = t.y - s.y;
                 const dist = Math.sqrt(dx * dx + dy * dy);
-                const force = (dist - 100) * 0.01; // Rest length 100
+                const force = (dist - 150) * 0.008; // Rest length 150
 
                 const fx = (dx / dist) * force;
                 const fy = (dy / dist) * force;
