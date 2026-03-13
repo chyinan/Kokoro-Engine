@@ -64,7 +64,10 @@ function hasCJK(text: string): boolean {
 
 /** Extract keywords from text, supporting both CJK and Latin scripts */
 function extractKeywords(text: string): string[] {
-    const cleaned = text.toLowerCase().replace(/[.,/#!$%^&*;:{}=\-_`~()[\]"'?!？！。、，…～☺️]/g, "");
+    // 先把分隔符（/、|、·等）替换成空格，再清除其他标点
+    const cleaned = text.toLowerCase()
+        .replace(/[/|·•–—]/g, " ")
+        .replace(/[.,#!$%^&*;:{}=\-_`~()[\]"'?!？！。、，…～☺️]/g, "");
 
     if (hasCJK(cleaned) && typeof Intl !== "undefined" && "Segmenter" in Intl) {
         // Use Intl.Segmenter for CJK-aware word segmentation
