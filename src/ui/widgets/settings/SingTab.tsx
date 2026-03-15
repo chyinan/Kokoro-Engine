@@ -123,12 +123,12 @@ export default function SingTab() {
                 rvcOnline === null
                     ? "border-[var(--color-border)] bg-[var(--color-bg-elevated)]"
                     : rvcOnline
-                        ? "border-emerald-500/30 bg-emerald-500/5"
+                        ? "border-[var(--color-accent)]/30 bg-[var(--color-accent)]/5"
                         : "border-red-500/30 bg-red-500/5"
             )}>
                 <div className="flex items-center gap-3">
                     {rvcOnline
-                        ? <Wifi size={16} className="text-emerald-400" />
+                        ? <Wifi size={16} className="text-[var(--color-accent)]" />
                         : <WifiOff size={16} className={rvcOnline === null ? "text-[var(--color-text-muted)]" : "text-red-400"} />
                     }
                     <div>

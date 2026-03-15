@@ -537,7 +537,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
                     className={clsx(
                         "w-full py-2 text-xs rounded-lg border transition-all",
                         saved
-                            ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400"
+                            ? "border-[var(--color-accent)]/50 bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
                             : "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20"
                     )}
                 >
@@ -624,7 +624,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
                         onClick={() => onVisionEnabledChange(!visionEnabled)}
                         className={clsx(
                             "w-10 h-5 rounded-full transition-colors relative",
-                            visionEnabled ? "bg-emerald-500/50" : "bg-[var(--color-border)]"
+                            visionEnabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
                         )}
                     >
                         <motion.div

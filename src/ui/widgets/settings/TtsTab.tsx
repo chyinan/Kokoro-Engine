@@ -133,7 +133,7 @@ export default function TtsTab({
                     onClick={() => onTtsEnabledChange(!ttsEnabled)}
                     className={clsx(
                         "w-10 h-5 rounded-full transition-colors relative",
-                        ttsEnabled ? "bg-emerald-500/50" : "bg-[var(--color-border)]"
+                        ttsEnabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
                     )}
                 >
                     <motion.div
@@ -283,7 +283,7 @@ export default function TtsTab({
                                         onClick={() => updateProviderConfig(index, { enabled: !provider.enabled })}
                                         className={clsx(
                                             "w-8 h-4 rounded-full transition-colors relative",
-                                            provider.enabled ? "bg-emerald-500/50" : "bg-[var(--color-border)]"
+                                            provider.enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
                                         )}
                                     >
                                         <motion.div

@@ -119,7 +119,7 @@ export default function TelegramTab({ config, onUpdate }: TelegramTabProps) {
                     </div>
                     <div className={clsx(
                         "w-2 h-2 rounded-full",
-                        isRunning ? "bg-green-400" : "bg-[var(--color-text-muted)]"
+                        isRunning ? "bg-[var(--color-accent)]" : "bg-[var(--color-text-muted)]"
                     )} />
                 </div>
                 <div className="flex items-center gap-2">

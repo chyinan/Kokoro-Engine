@@ -854,7 +854,7 @@ export default function ChatPanel() {
                         "w-2 h-2 rounded-full",
                         isStreaming
                             ? "bg-amber-500 animate-pulse"
-                            : "bg-emerald-500 shadow-[var(--glow-success)]"
+                            : "bg-[var(--color-accent)] shadow-[var(--glow-success)]"
                     )} />
                     <span className="font-heading text-sm font-semibold tracking-wider uppercase text-[var(--color-text-secondary)]">
                         {isStreaming ? t("chat.status.streaming") : t("chat.status.chat")}
@@ -1021,7 +1021,7 @@ export default function ChatPanel() {
                                     voiceState === VoiceState.Idle
                                         ? "text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
                                         : voiceState === VoiceState.Listening
-                                            ? "text-emerald-400 bg-emerald-500/15 border border-emerald-500/30"
+                                            ? "text-[var(--color-accent)] bg-[var(--color-accent)]/15 border border-[var(--color-accent)]/30"
                                             : voiceState === VoiceState.Speaking
                                                 ? "text-red-400 bg-red-500/20 border border-red-500/40 shadow-[0_0_12px_rgba(239,68,68,0.3)]"
                                                 : "text-amber-400 bg-amber-500/15 border border-amber-500/30",

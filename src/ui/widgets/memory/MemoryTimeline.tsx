@@ -41,7 +41,7 @@ export function MemoryTimeline({ memories, onSelect }: MemoryTimelineProps) {
 
     const importanceColor = (v: number) => {
         if (v >= 8) return "bg-amber-500 shadow-amber-500/50";
-        if (v >= 5) return "bg-emerald-500 shadow-emerald-500/50";
+        if (v >= 5) return "bg-[var(--color-accent)] shadow-[var(--color-accent)]/50";
         return "bg-slate-500";
     };
 

@@ -20,7 +20,7 @@ interface EmotionDef {
 
 const emotions: EmotionDef[] = [
     { id: "calm", icon: Meh, color: "text-gray-400" },
-    { id: "happy", icon: Smile, color: "text-emerald-400" },
+    { id: "happy", icon: Smile, color: "text-[var(--color-accent)]" },
     { id: "excited", icon: PartyPopper, color: "text-yellow-400" },
     { id: "smug", icon: Sparkles, color: "text-amber-400" },
     { id: "shy", icon: Heart, color: "text-pink-400" },

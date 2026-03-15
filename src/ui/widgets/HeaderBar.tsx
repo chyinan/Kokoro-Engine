@@ -100,7 +100,7 @@ export default function HeaderBar({ onSettingsClick }: HeaderBarProps) {
                     <div className={clsx(
                         "w-2 h-2 rounded-full",
                         online
-                            ? "bg-emerald-500 shadow-[var(--glow-success)]"
+                            ? "bg-[var(--color-accent)] shadow-[var(--glow-success)]"
                             : "bg-amber-500"
                     )} />
                     <span className="font-heading text-xs font-semibold tracking-wider uppercase text-[var(--color-text-muted)]">

@@ -144,7 +144,7 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
     const getImportanceColor = (v: number) => {
         if (v >= 0.7) return "text-red-400 bg-red-500/15 border-red-500/30";
         if (v >= 0.4) return "text-amber-400 bg-amber-500/15 border-amber-500/30";
-        return "text-emerald-400 bg-emerald-500/15 border-emerald-500/30";
+        return "text-[var(--color-accent)] bg-[var(--color-accent)]/15 border-[var(--color-accent)]/30";
     };
 
     return (
@@ -329,7 +329,7 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                                                 </button>
                                                 <button
                                                     onClick={saveEdit}
-                                                    className="p-1.5 rounded hover:bg-emerald-500/20 text-emerald-400"
+                                                    className="p-1.5 rounded hover:bg-[var(--color-accent)]/20 text-[var(--color-accent)]"
                                                 >
                                                     <Check size={14} />
                                                 </button>

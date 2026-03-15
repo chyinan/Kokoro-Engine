@@ -360,7 +360,7 @@ export const BackupTab: React.FC = () => {
                     </div>
 
                     {runNowResult && (
-                        <div className="flex items-start gap-2 text-xs text-green-400">
+                        <div className="flex items-start gap-2 text-xs text-[var(--color-accent)]">
                             <Check size={14} className="mt-0.5 shrink-0" />
                             <span>{t('settings.backup.auto_run_success', { path: runNowResult })}</span>
                         </div>
@@ -395,7 +395,7 @@ export const BackupTab: React.FC = () => {
                     {exporting ? t('settings.backup.exporting') : t('settings.backup.export_button')}
                 </motion.button>
                 {exportResult && (
-                    <div className="mt-3 flex items-start gap-2 text-xs text-green-400">
+                    <div className="mt-3 flex items-start gap-2 text-xs text-[var(--color-accent)]">
                         <Check size={14} className="mt-0.5 shrink-0" />
                         <span>{t('settings.backup.export_success', { size: exportResult.size })} — {exportResult.stats}</span>
                     </div>
@@ -512,7 +512,7 @@ export const BackupTab: React.FC = () => {
                 )}
 
                 {importDone && (
-                    <div className="mt-3 flex items-start gap-2 text-xs text-green-400">
+                    <div className="mt-3 flex items-start gap-2 text-xs text-[var(--color-accent)]">
                         <Check size={14} className="mt-0.5 shrink-0" />
                         <span>{importDone}</span>
                     </div>

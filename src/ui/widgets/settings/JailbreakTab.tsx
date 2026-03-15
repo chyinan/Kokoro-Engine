@@ -135,7 +135,7 @@ export const JailbreakTab: React.FC = () => {
                     className={clsx(
                         'flex items-center gap-2 px-4 py-2 rounded-lg font-heading font-semibold text-xs uppercase tracking-wider transition-all',
                         saved
-                            ? 'bg-green-500/20 text-green-400 border border-green-500/30'
+                            ? 'bg-[var(--color-accent)]/20 text-[var(--color-accent)] border border-[var(--color-accent)]/30'
                             : 'bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent-hover)]',
                         saving && 'opacity-50 cursor-not-allowed'
                     )}

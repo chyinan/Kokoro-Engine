@@ -261,7 +261,7 @@ export default function McpTab() {
                         initial={{ opacity: 0, y: -5 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0 }}
-                        className="flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-900/30 border border-emerald-500/30 text-emerald-300 text-xs"
+                        className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30 text-[var(--color-accent)] text-xs"
                     >
                         <CheckCircle2 size={14} /> {successMsg}
                     </motion.div>
@@ -294,7 +294,7 @@ export default function McpTab() {
                                 !srv.enabled
                                     ? "border-[var(--color-border)] opacity-50"
                                     : srv.status === "connected"
-                                        ? "border-emerald-500/30"
+                                        ? "border-[var(--color-accent)]/30"
                                         : srv.status === "connecting"
                                             ? "border-amber-500/30"
                                             : "border-red-500/30"
@@ -303,7 +303,7 @@ export default function McpTab() {
                             <div className="flex items-center gap-3 min-w-0">
                                 {/* Status indicator */}
                                 {srv.status === "connected" ? (
-                                    <CheckCircle2 size={16} className="text-emerald-400 flex-shrink-0" />
+                                    <CheckCircle2 size={16} className="text-[var(--color-accent)] flex-shrink-0" />
                                 ) : srv.status === "connecting" ? (
                                     <Loader2 size={16} className="text-amber-400 animate-spin flex-shrink-0" />
                                 ) : (
@@ -341,7 +341,7 @@ export default function McpTab() {
                                     className={clsx(
                                         "p-2 rounded-md transition-colors",
                                         srv.enabled
-                                            ? "text-[var(--color-accent)] hover:text-emerald-400"
+                                            ? "text-[var(--color-accent)] hover:text-[var(--color-accent)]"
                                             : "text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
                                     )}
                                     title={srv.enabled ? t("settings.mcp.status.toggle_off") : t("settings.mcp.status.toggle_on")}

@@ -131,7 +131,7 @@ export default function ImageGenSettings({ config, onChange }: ImageGenSettingsP
                     onClick={() => onChange({ ...config, enabled: !config.enabled })}
                     className={clsx(
                         "w-10 h-6 rounded-full transition-colors relative",
-                        config.enabled ? "bg-emerald-500" : "bg-[var(--color-border)]"
+                        config.enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
                     )}
                 >
                     <motion.div
@@ -166,7 +166,7 @@ export default function ImageGenSettings({ config, onChange }: ImageGenSettingsP
                                         onClick={() => updateProvider(index, { enabled: !provider.enabled })}
                                         className={clsx(
                                             "w-8 h-4 rounded-full transition-colors relative",
-                                            provider.enabled ? "bg-emerald-500/50" : "bg-[var(--color-border)]"
+                                            provider.enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
                                         )}
                                     >
                                         <motion.div
@@ -333,7 +333,7 @@ export default function ImageGenSettings({ config, onChange }: ImageGenSettingsP
                                                     className={clsx(
                                                         "w-full py-2 text-xs rounded-lg border transition-all flex items-center justify-center gap-2",
                                                         testState[provider.id]?.result
-                                                            ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400"
+                                                            ? "border-[var(--color-accent)]/50 bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
                                                             : testState[provider.id]?.error
                                                                 ? "border-red-500/50 bg-red-500/10 text-red-400"
                                                                 : "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20"

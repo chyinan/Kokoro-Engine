@@ -232,7 +232,7 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
                                                 />
                                                 <button
                                                     onClick={(e) => { e.stopPropagation(); handleRenameConfirm(conv.id); }}
-                                                    className="p-0.5 text-emerald-400 hover:text-emerald-300"
+                                                    className="p-0.5 text-[var(--color-accent)] hover:text-[var(--color-accent)]"
                                                 >
                                                     <Check size={12} strokeWidth={2} />
                                                 </button>
