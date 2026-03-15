@@ -3,7 +3,7 @@
 use crate::commands::backup::export_data_to_path;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 const CONFIG_FILE: &str = "auto_backup_config.json";
@@ -40,11 +40,11 @@ fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("Failed to resolve app data dir: {}", e))
 }
 
-fn config_path(app_data: &PathBuf) -> PathBuf {
+fn config_path(app_data: &Path) -> PathBuf {
     app_data.join(CONFIG_FILE)
 }
 
-fn load_config(app_data: &PathBuf) -> AutoBackupConfig {
+fn load_config(app_data: &Path) -> AutoBackupConfig {
     let path = config_path(app_data);
     if let Ok(content) = fs::read_to_string(&path) {
         serde_json::from_str(&content).unwrap_or_default()
@@ -53,7 +53,7 @@ fn load_config(app_data: &PathBuf) -> AutoBackupConfig {
     }
 }
 
-fn save_config_to_disk(app_data: &PathBuf, config: &AutoBackupConfig) -> Result<(), String> {
+fn save_config_to_disk(app_data: &Path, config: &AutoBackupConfig) -> Result<(), String> {
     let path = config_path(app_data);
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Serialize error: {}", e))?;
@@ -90,7 +90,7 @@ pub async fn run_auto_backup_now(app: AppHandle) -> Result<String, String> {
 // ── Core Logic ────────────────────────────────────
 
 /// 执行一次备份，返回生成的文件路径
-pub async fn do_backup(app_data: &PathBuf, config: &AutoBackupConfig) -> Result<String, String> {
+pub async fn do_backup(app_data: &Path, config: &AutoBackupConfig) -> Result<String, String> {
     let dir = PathBuf::from(&config.backup_dir);
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create backup dir: {}", e))?;
 
