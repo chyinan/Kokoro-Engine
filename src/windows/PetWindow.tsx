@@ -54,9 +54,11 @@ export default function PetWindow() {
     const isResizeModeRef = useRef(false);
     const rightClickStartRef = useRef<{ x: number; y: number } | null>(null);
     const savedScaleRef = useRef<number>(0); // restored scale to apply after model loads
+    const [configLoaded, setConfigLoaded] = useState(false);
     const { isStreaming, sendMessage } = usePetChat();
 
     // On mount: restore saved window size and model scale from config
+    // Must complete before Live2DViewer renders to avoid race condition with handleModelLoaded
     useEffect(() => {
         invoke<PetConfig>("get_pet_config").then(cfg => {
             if (cfg.window_width > 0 && cfg.window_height > 0) {
@@ -66,7 +68,10 @@ export default function PetWindow() {
             if (cfg.model_scale > 0) {
                 savedScaleRef.current = cfg.model_scale;
             }
-        }).catch(console.error);
+            setConfigLoaded(true);
+        }).catch(() => {
+            setConfigLoaded(true); // 即使失败也要允许渲染
+        });
     }, []);
 
     // Handle model loaded - restore saved size/scale or auto-fit
@@ -573,9 +578,9 @@ export default function PetWindow() {
                 </>
             )}
 
-            {/* Live2D layer */}
+            {/* Live2D layer — only render after config is loaded to avoid scale race condition */}
             <div style={{ position: "absolute", inset: 0, pointerEvents: isDragMode ? "none" : "auto" }}>
-                <Live2DViewer
+                {configLoaded && <Live2DViewer
                     ref={viewerRef}
                     modelUrl={modelUrl}
                     controller={controllerRef.current}
@@ -584,7 +589,7 @@ export default function PetWindow() {
                     gazeTracking={true}
                     fixedSize={canvasSize || undefined}
                     onModelLoaded={handleModelLoaded}
-                />
+                />}
             </div>
 
             {/* Chat input overlay */}
