@@ -19,6 +19,12 @@ pub struct CuriosityModule {
     queue: VecDeque<CuriosityItem>,
 }
 
+impl Default for CuriosityModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CuriosityModule {
     pub fn new() -> Self {
         Self {

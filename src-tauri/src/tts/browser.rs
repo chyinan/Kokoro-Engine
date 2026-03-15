@@ -11,6 +11,12 @@ use async_trait::async_trait;
 /// `TtsError::BrowserDelegate` to signal the frontend service to handle it.
 pub struct BrowserTTSProvider;
 
+impl Default for BrowserTTSProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BrowserTTSProvider {
     pub fn new() -> Self {
         Self

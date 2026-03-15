@@ -482,7 +482,7 @@ pub async fn import_data(
             let mut entry = archive
                 .by_name("kokoro.db")
                 .map_err(|e| format!("Failed to read DB: {}", e))?;
-            let mut out = fs::File::create(&tmp_dir.join("import.db"))
+            let mut out = fs::File::create(tmp_dir.join("import.db"))
                 .map_err(|e| format!("Failed to write DB: {}", e))?;
             std::io::copy(&mut entry, &mut out)
                 .map_err(|e| format!("Failed to extract DB: {}", e))?;

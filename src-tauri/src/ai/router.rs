@@ -28,6 +28,12 @@ pub struct ModelRouter {
     // strict rules or heuristics could be added here
 }
 
+impl Default for ModelRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModelRouter {
     pub fn new() -> Self {
         Self {}

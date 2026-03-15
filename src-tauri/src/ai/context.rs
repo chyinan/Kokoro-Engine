@@ -465,7 +465,7 @@ impl AIOrchestrator {
                 "INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
             )
             .bind(&new_id)
-            .bind(&cid)
+            .bind(cid)
             .bind(&title)
             .bind(&now)
             .bind(&now)
@@ -767,7 +767,7 @@ impl AIOrchestrator {
 
         // -- Session Summaries (P1.5) --
         // Inject recent session summaries so the character remembers past conversations
-        if let Ok(summaries) = self.memory_manager.get_recent_summaries(&cid, 2).await {
+        if let Ok(summaries) = self.memory_manager.get_recent_summaries(cid, 2).await {
             if !summaries.is_empty() {
                 let summary_block = summaries
                     .iter()

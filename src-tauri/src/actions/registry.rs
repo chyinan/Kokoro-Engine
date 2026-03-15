@@ -112,6 +112,12 @@ pub struct ActionRegistry {
     mcp_tool_names: std::collections::HashSet<String>,
 }
 
+impl Default for ActionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ActionRegistry {
     pub fn new() -> Self {
         Self {

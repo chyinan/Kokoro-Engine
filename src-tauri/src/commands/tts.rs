@@ -102,7 +102,7 @@ pub async fn list_gpt_sovits_models(install_path: String) -> Result<GptSovitsMod
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+            if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
                 continue;
             }
 

@@ -33,6 +33,12 @@ pub struct AudioBuffer {
     pub state: Mutex<AudioStreamState>,
 }
 
+impl Default for AudioBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AudioBuffer {
     pub fn new() -> Self {
         Self {

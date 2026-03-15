@@ -9,6 +9,12 @@ pub struct WindowSizeState {
     pub height: Arc<RwLock<u32>>,
 }
 
+impl Default for WindowSizeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WindowSizeState {
     pub fn new() -> Self {
         Self {

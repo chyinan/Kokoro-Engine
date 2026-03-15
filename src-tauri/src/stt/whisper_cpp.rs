@@ -90,11 +90,7 @@ impl SttEngine for WhisperCppProvider {
             ),
             AudioSource::Encoded { data, format } => {
                 let fmt_lower = format.to_lowercase();
-                let ext = match fmt_lower.as_str() {
-                    "wav" => "wav",
-                    // whisper.cpp usually demands wav, but let's try passing others if server supports
-                    other => other,
-                };
+                let ext = fmt_lower.as_str();
                 (
                     format!("audio.{}", ext),
                     format!("audio/{}", ext),

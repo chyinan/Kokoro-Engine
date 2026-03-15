@@ -18,6 +18,12 @@ struct VisionContextInner {
     updated_at: Option<Instant>,
 }
 
+impl Default for VisionContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VisionContext {
     pub fn new() -> Self {
         Self {

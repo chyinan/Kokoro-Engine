@@ -57,7 +57,7 @@ pub async fn install_mod(
     }
 
     // Open zip
-    let file = fs::File::open(&archive_path).map_err(|e| e.to_string())?;
+    let file = fs::File::open(archive_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
 
     // Find mod.json

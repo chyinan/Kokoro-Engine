@@ -18,6 +18,12 @@ pub struct InitiativeSystem {
     last_action_ts: std::time::Instant,
 }
 
+impl Default for InitiativeSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InitiativeSystem {
     pub fn new() -> Self {
         Self {

@@ -22,6 +22,12 @@ pub struct IdleBehaviorSystem {
     last_behavior_ts: std::time::Instant,
 }
 
+impl Default for IdleBehaviorSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IdleBehaviorSystem {
     pub fn new() -> Self {
         Self {

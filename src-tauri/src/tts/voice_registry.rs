@@ -6,6 +6,12 @@ pub struct VoiceRegistry {
     voices: HashMap<String, VoiceProfile>,
 }
 
+impl Default for VoiceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VoiceRegistry {
     pub fn new() -> Self {
         Self {

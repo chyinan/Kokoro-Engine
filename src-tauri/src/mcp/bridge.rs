@@ -105,7 +105,7 @@ impl ActionHandler for McpToolHandler {
         let result = manager
             .call_tool(&self.server_name, &self.tool_name, arguments)
             .await
-            .map_err(|e| ActionError(e))?;
+            .map_err(ActionError)?;
 
         // Convert MCP result to ActionResult
         if result.is_error {

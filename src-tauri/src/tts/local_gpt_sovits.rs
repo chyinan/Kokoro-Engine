@@ -169,16 +169,12 @@ impl TtsProvider for LocalGPTSoVITSProvider {
         // Ping /tts endpoint — a running api_v2.py will respond (even 400 for missing params).
         // Any HTTP response means the server is reachable.
         let url = format!("{}/tts", self.base_url.trim_end_matches('/'));
-        match self
+        (self
             .client
             .get(&url)
             .timeout(std::time::Duration::from_secs(3))
             .send()
-            .await
-        {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+            .await).is_ok()
     }
 
     async fn synthesize(&self, text: &str, params: TtsParams) -> Result<Vec<u8>, TtsError> {

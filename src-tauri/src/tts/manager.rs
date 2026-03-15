@@ -65,6 +65,12 @@ pub struct TtsService {
     cache_enabled: bool,
 }
 
+impl Default for TtsService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TtsService {
     pub fn new() -> Self {
         Self {

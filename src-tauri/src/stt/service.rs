@@ -14,6 +14,12 @@ pub struct SttService {
     config: Arc<RwLock<SttConfig>>,
 }
 
+impl Default for SttService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SttService {
     pub fn new() -> Self {
         Self {
