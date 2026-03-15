@@ -29,6 +29,7 @@ pub async fn list_rvc_models(app: AppHandle) -> Result<Vec<RvcModelInfo>, String
 ///
 /// Reads the source audio file, sends it to the RVC server for voice conversion,
 /// saves the result to a temporary file, and emits progress events.
+#[allow(clippy::too_many_arguments)]
 #[command]
 pub async fn convert_singing(
     app: AppHandle,

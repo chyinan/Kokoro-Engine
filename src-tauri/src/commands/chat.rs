@@ -296,6 +296,7 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
 
 // ── Stream Chat Command ────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn stream_chat(
     window: Window,

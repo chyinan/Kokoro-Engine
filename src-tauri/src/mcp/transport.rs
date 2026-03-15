@@ -14,6 +14,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+type MessageSender = mpsc::Sender<(Value, Option<oneshot::Sender<Result<Value, String>>>)>;
+
 // ── JSON-RPC 2.0 Types ─────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,7 +75,7 @@ pub struct StdioTransport {
     /// Channel carries (raw JSON body, optional responder).
     /// Requests include Some(responder) and have an "id" field.
     /// Notifications include None and have no "id" field.
-    sender: mpsc::Sender<(Value, Option<oneshot::Sender<Result<Value, String>>>)>,
+    sender: MessageSender,
     next_id: AtomicU64,
     connected: Arc<std::sync::atomic::AtomicBool>,
     child: Arc<Mutex<Option<Child>>>,
@@ -131,7 +134,7 @@ impl StdioTransport {
             mpsc::channel::<(Value, Option<oneshot::Sender<Result<Value, String>>>)>(64);
 
         // Pending response map — shared between writer and reader
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>> =
+        let pending: PendingMap =
             Arc::new(Mutex::new(HashMap::new()));
         let pending_writer = pending.clone();
         let pending_reader = pending.clone();
@@ -508,7 +511,7 @@ pub struct SseTransport {
     /// POST endpoint path received from the SSE stream (e.g. "/messages?sessionId=xxx").
     post_endpoint: Arc<Mutex<Option<String>>>,
     /// Pending request map: request ID → oneshot sender for the response.
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+    pending: PendingMap,
 }
 
 impl SseTransport {
