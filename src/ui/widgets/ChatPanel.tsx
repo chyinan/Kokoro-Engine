@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
 import { streamChat, onChatDelta, onChatDone, onChatError, onChatTranslation, clearHistory, uploadVisionImage, synthesize, onToolCallResult, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages } from "../../lib/kokoro-bridge";
+import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal, useWakeWord } from "../hooks";
 import { useTranslation } from "react-i18next";
@@ -600,7 +601,8 @@ export default function ChatPanel() {
         if ((!trimmed && pendingImages.length === 0) || isStreaming) return;
 
         setMessages(prev => [...prev, { role: "user", text: trimmed, images: pendingImages.length > 0 ? [...pendingImages] : undefined }]);
-        const imagesToSend = [...pendingImages];
+        const cameraFrame = getLatestCameraFrame();
+        const imagesToSend = cameraFrame ? [...pendingImages, cameraFrame] : [...pendingImages];
         setInput("");
         setPendingImages([]);
         startStreaming();

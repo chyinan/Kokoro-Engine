@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import {
     Eye, MonitorSmartphone, Timer, Gauge, Server, KeyRound, Cpu,
-    Camera, Loader2, AlertTriangle, Download, CheckCircle2, XCircle
+    Camera, Loader2, AlertTriangle, Download, CheckCircle2, XCircle, Video
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
@@ -13,7 +13,7 @@ import {
 import type { VisionConfig, OllamaModelInfo, OllamaPullProgress } from "../../../lib/kokoro-bridge";
 import { Select } from "@/components/ui/select";
 
-export default function VisionTab() {
+export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: VisionConfig) => void } = {}) {
     const { t } = useTranslation();
     const [config, setConfig] = useState<VisionConfig | null>(null);
     const [loading, setLoading] = useState(true);
@@ -31,6 +31,64 @@ export default function VisionTab() {
     const [pullError, setPullError] = useState<string | null>(null);
     const [pullDone, setPullDone] = useState(false);
     const unlistenRef = useRef<(() => void) | null>(null);
+
+    // ── Camera device picker + preview ──
+    const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
+    const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
+    const previewVideoRef = useRef<HTMLVideoElement>(null);
+    const previewStreamRef = useRef<MediaStream | null>(null);
+
+    useEffect(() => {
+        if (!config?.camera_enabled) {
+            stopPreview();
+            return;
+        }
+        enumerateDevices(config.camera_device_id ?? "");
+    }, [config?.camera_enabled]);
+
+    useEffect(() => {
+        if (!config?.camera_enabled) return;
+        startPreview(selectedDeviceId);
+    }, [selectedDeviceId, config?.camera_enabled]);
+
+    async function enumerateDevices(preferredId: string = "") {
+        try {
+            // Request permission first so labels are populated
+            await navigator.mediaDevices.getUserMedia({ video: true }).then(s => s.getTracks().forEach(t => t.stop()));
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoDevices = devices.filter(d => d.kind === "videoinput");
+            setCameraDevices(videoDevices);
+            const initial = preferredId && videoDevices.some(d => d.deviceId === preferredId)
+                ? preferredId
+                : videoDevices[0]?.deviceId ?? "";
+            setSelectedDeviceId(initial);
+        } catch (err) {
+            console.error("[VisionTab] enumerateDevices failed:", err);
+        }
+    }
+
+    async function startPreview(deviceId: string) {
+        stopPreview();
+        try {
+            const constraints = deviceId
+                ? { video: { deviceId: { exact: deviceId } } }
+                : { video: true };
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            previewStreamRef.current = stream;
+            if (previewVideoRef.current) {
+                previewVideoRef.current.srcObject = stream;
+                await previewVideoRef.current.play();
+            }
+        } catch (err) {
+            console.error("[VisionTab] preview failed:", err);
+        }
+    }
+
+    function stopPreview() {
+        previewStreamRef.current?.getTracks().forEach(t => t.stop());
+        previewStreamRef.current = null;
+        if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
+    }
 
     // Load config on mount
     useEffect(() => {
@@ -73,6 +131,7 @@ export default function VisionTab() {
         try {
             await saveVisionConfig(config);
             setDirty(false);
+            onConfigChange?.(config);
         } catch (e) {
             console.error("[VisionTab] Failed to save config:", e);
         }
@@ -196,7 +255,12 @@ export default function VisionTab() {
                 </div>
                 <motion.button
                     whileTap={{ scale: 0.95 }}
-                    onClick={() => update({ enabled: !config.enabled })}
+                    onClick={async () => {
+                        const next = { ...config, enabled: !config.enabled };
+                        setConfig(next);
+                        setDirty(false);
+                        try { await saveVisionConfig(next); onConfigChange?.(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                    }}
                     className={clsx(
                         "w-12 h-6 rounded-full relative transition-colors duration-200",
                         config.enabled
@@ -648,6 +712,90 @@ export default function VisionTab() {
                     )}
                 </div>
 
+                {/* Camera section */}
+                <div className="pt-2 border-t border-[var(--color-border)] space-y-4">
+                    {/* Camera enable toggle */}
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                            <Video size={16} strokeWidth={1.5} className="text-[var(--color-accent)]" />
+                            <div>
+                                <div className="text-sm font-heading font-semibold text-[var(--color-text-primary)]">
+                                    {t("settings.vision.camera.enable.label")}
+                                </div>
+                                <div className="text-xs text-[var(--color-text-muted)]">
+                                    {t("settings.vision.camera.enable.desc")}
+                                </div>
+                            </div>
+                        </div>
+                        <motion.button
+                            whileTap={{ scale: 0.95 }}
+                            onClick={async () => {
+                                const next = { ...config, camera_enabled: !config.camera_enabled };
+                                setConfig(next);
+                                setDirty(false);
+                                try { await saveVisionConfig(next); onConfigChange?.(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                            }}
+                            className={clsx(
+                                "w-12 h-6 rounded-full relative transition-colors duration-200",
+                                config.camera_enabled
+                                    ? "bg-[var(--color-accent)]"
+                                    : "bg-[var(--color-bg-surface)] border border-[var(--color-border)]"
+                            )}
+                        >
+                            <motion.div
+                                animate={{ x: config.camera_enabled ? 24 : 2 }}
+                                transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                                className={clsx(
+                                    "w-5 h-5 rounded-full absolute top-0.5",
+                                    config.camera_enabled ? "bg-black" : "bg-[var(--color-text-muted)]"
+                                )}
+                            />
+                        </motion.button>
+                    </div>
+
+                    {/* Camera device picker + preview */}
+                    <AnimatePresence>
+                        {config.camera_enabled && (
+                            <motion.div
+                                initial={{ opacity: 0, height: 0 }}
+                                animate={{ opacity: 1, height: "auto" }}
+                                exit={{ opacity: 0, height: 0 }}
+                                className="space-y-2"
+                            >
+                                {/* Device picker */}
+                                {cameraDevices.length > 1 && (
+                                    <div className="space-y-1 pt-1">
+                                        <div className="flex items-center gap-2">
+                                            <Video size={14} strokeWidth={1.5} className="text-[var(--color-text-muted)]" />
+                                            <label className="text-sm text-[var(--color-text-primary)]">
+                                                {t("settings.vision.camera.device.label")}
+                                            </label>
+                                        </div>
+                                        <Select
+                                            value={selectedDeviceId}
+                                            onChange={v => { setSelectedDeviceId(v); update({ camera_device_id: v || null }); }}
+                                            options={cameraDevices.map(d => ({
+                                                value: d.deviceId,
+                                                label: d.label || `Camera ${cameraDevices.indexOf(d) + 1}`,
+                                            }))}
+                                        />
+                                    </div>
+                                )}
+
+                                {/* Live preview */}
+                                <div className="rounded-lg overflow-hidden border border-[var(--color-border)] bg-black aspect-video w-full mt-2">
+                                    <video
+                                        ref={previewVideoRef}
+                                        className="w-full h-full object-cover"
+                                        muted
+                                        playsInline
+                                    />
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+                </div>
+
                 {/* Privacy note */}
                 <div className="rounded-lg bg-[var(--color-bg-surface)] border border-[var(--color-border)] p-3">
                     <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
@@ -655,6 +803,8 @@ export default function VisionTab() {
                     </p>
                 </div>
             </motion.div>
+
+
         </div>
     );
 }

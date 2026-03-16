@@ -3,7 +3,7 @@ use crate::vision::config::VisionConfig;
 use crate::vision::server::VisionServer;
 use crate::vision::watcher::VisionWatcher;
 use std::sync::Arc;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
 #[tauri::command]

@@ -462,6 +462,19 @@
                 "capturing": "Capturing...",
                 "save_first": "Please save config before testing"
             },
+            "camera": {
+                "enable": {
+                    "label": "Camera Vision",
+                    "desc": "Character can see through your webcam in real-time"
+                },
+                "interval": {
+                    "label": "Camera Capture Interval",
+                    "desc": "How often to capture a frame from the webcam"
+                },
+                "device": {
+                    "label": "Camera Device"
+                }
+            },
             "privacy_note": "🔒 Screenshots are captured locally and sent directly to your configured VLM provider. They are never stored permanently — only the text description is kept in memory.",
             "loading": "Loading vision config..."
         },

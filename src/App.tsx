@@ -158,6 +158,7 @@ import {
 } from "./lib/kokoro-bridge";
 import type { ThemeConfig } from "./ui/layout/types";
 import { modMessageBus } from "./ui/mods/ModMessageBus";
+import { CameraWatcher } from "./features/camera/CameraWatcher";
 
 let _regSnap = 0;
 const _subscribeFn = (cb: () => void) => {
@@ -921,6 +922,7 @@ function App() {
             llmConfig={llmConfig}
             sttConfig={sttConfig}
             visionConfig={visionConfig}
+            onVisionConfigChange={setVisionConfig}
             imageGenConfig={imageGenConfig}
             telegramConfig={telegramConfig}
             mcpServers={mcpServers}
@@ -968,6 +970,12 @@ function App() {
 
         return component;
       })()}
+
+      {/* Camera watcher — lives at app root so it persists when settings panel closes */}
+      <CameraWatcher
+        enabled={visionConfig?.camera_enabled ?? false}
+        deviceId={visionConfig?.camera_device_id ?? undefined}
+      />
     </ThemeProvider>
   );
 }

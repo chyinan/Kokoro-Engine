@@ -21,6 +21,14 @@ pub struct VisionConfig {
     pub vlm_model: String,
     /// API key (only needed for online services)
     pub vlm_api_key: Option<String>,
+
+    // ── Camera (Webcam) ───────────────────────────────
+    /// Whether webcam capture is enabled.
+    #[serde(default)]
+    pub camera_enabled: bool,
+    /// Preferred camera device ID (browser MediaDeviceInfo.deviceId).
+    #[serde(default)]
+    pub camera_device_id: Option<String>,
 }
 
 impl Default for VisionConfig {
@@ -33,6 +41,8 @@ impl Default for VisionConfig {
             vlm_base_url: Some("http://localhost:11434/v1".to_string()),
             vlm_model: "minicpm-v".to_string(),
             vlm_api_key: None,
+            camera_enabled: false,
+            camera_device_id: None,
         }
     }
 }

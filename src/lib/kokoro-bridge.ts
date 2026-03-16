@@ -520,6 +520,8 @@ export interface VisionConfig {
     vlm_base_url: string | null;
     vlm_model: string;
     vlm_api_key: string | null;
+    camera_enabled: boolean;
+    camera_device_id: string | null;
 }
 
 export async function getVisionConfig(): Promise<VisionConfig> {
@@ -536,6 +538,10 @@ export async function captureScreenNow(): Promise<string> {
 
 export async function onVisionObservation(callback: (desc: string) => void): Promise<UnlistenFn> {
     return listen<string>("vision-observation", (event) => callback(event.payload));
+}
+
+export async function onCameraObservation(callback: (desc: string) => void): Promise<UnlistenFn> {
+    return listen<string>("camera-observation", (event) => callback(event.payload));
 }
 
 // ── Memory Management ──────────────────────────────

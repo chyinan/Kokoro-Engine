@@ -55,6 +55,7 @@ interface SettingsPanelProps {
     llmConfig?: any; // LlmConfig
     sttConfig?: SttConfig;
     visionConfig?: any; // VisionConfig
+    onVisionConfigChange?: (cfg: any) => void;
     imageGenConfig?: ImageGenSystemConfig;
     telegramConfig?: TelegramConfig;
     mcpServers?: any[]; // McpServerStatus[]
@@ -106,7 +107,7 @@ const tabs: { id: TabId; label: string; icon: typeof Key }[] = [
     { id: "backup", label: "settings.tabs.backup", icon: HardDrive },
 ];
 
-export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: _telegramConfigProp }: SettingsPanelProps) {
+export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: _telegramConfigProp, onVisionConfigChange }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [activeTab, setActiveTab] = useState<TabId>("bg");
     const bg = backgroundControls;
@@ -502,7 +503,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                             )}
 
                             {activeTab === "vision" && (
-                                <VisionTab />
+                                <VisionTab onConfigChange={onVisionConfigChange} />
                             )}
                             {activeTab === "mcp" && (
                                 <McpTab />
