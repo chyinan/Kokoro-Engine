@@ -111,6 +111,74 @@ MOD JS API：`Kokoro.on()`、`Kokoro.emit()`、`Kokoro.ui.send()`、`Kokoro.char
 SQLite，主要表：`memories`（嵌入向量 + 重要性评分）、`conversations`（聊天历史）、`characters`（角色元数据）。
 本地嵌入使用 FastEmbed（all-MiniLM-L6-v2，ONNX 离线推理）。
 
+## 版本管理规范
+
+### 版本号规则（语义化版本 SemVer）
+
+格式：`vMAJOR.MINOR.PATCH[-stage]`
+
+| 版本段 | 何时递增 | 示例 |
+|--------|----------|------|
+| MAJOR | 破坏性变更（配置格式不兼容、API 重构） | v1.0.0 → v2.0.0 |
+| MINOR | 新增功能，向后兼容 | v0.1.0 → v0.2.0 |
+| PATCH | Bug 修复、性能优化、小改动 | v0.1.0 → v0.1.1 |
+
+阶段标签：
+- `-alpha`：功能未完整，内部测试
+- `-beta`：功能完整，公开测试
+- 无标签：稳定正式版
+
+### 发布流程（由 Claude 执行）
+
+用户说"发布 vX.Y.Z"时，按以下步骤操作：
+
+**1. 更新版本号**
+```bash
+# 前端版本（package.json）
+# src-tauri/tauri.conf.json 中的 version 字段
+# src-tauri/Cargo.toml 中的 version 字段
+# 三处必须保持一致
+```
+
+**2. 提交版本变更**
+```
+chore(release): bump version to vX.Y.Z
+```
+
+**3. 打 Git Tag**
+```bash
+git tag -a vX.Y.Z -m "Release vX.Y.Z"
+git push && git push --tags
+```
+
+**4. 创建 GitHub Release**
+```bash
+gh release create vX.Y.Z \
+  --title "Kokoro Engine vX.Y.Z" \
+  --notes "..." \
+  --prerelease  # 仅 alpha/beta 加此标志
+```
+
+### Release Notes 模板
+
+```
+## 新功能
+- ...
+
+## 修复
+- ...
+
+## 已知限制
+- ...
+
+## 安装
+下载对应平台安装包，解压后直接运行。
+```
+
+### 当前版本历史参考
+
+- `v0.1.0-beta`：首个公开测试版，核心功能完整，部分商业 API 未经完整测试
+
 ## 文档
 
 - `docs/architecture.md` — 系统架构设计
