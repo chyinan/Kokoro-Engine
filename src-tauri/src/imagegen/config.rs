@@ -17,9 +17,10 @@ pub struct ImageGenProviderConfig {
     pub api_key_env: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,   // e.g. "dall-e-3", "sd_xl"
-    pub size: Option<String>,    // e.g. "1024x1024"
-    pub quality: Option<String>, // e.g. "standard", "hd"
-    pub style: Option<String>,   // e.g. "vivid", "natural"
+    pub size: Option<String>,            // e.g. "1024x1024"
+    pub quality: Option<String>,         // e.g. "standard", "hd"
+    pub style: Option<String>,           // e.g. "vivid", "natural"
+    pub negative_prompt: Option<String>, // SD: negative prompt
 
     /// Catch-all for provider-specific config
     #[serde(default)]
@@ -66,6 +67,7 @@ impl Default for ImageGenSystemConfig {
                     size: Some("1024x1024".to_string()),
                     quality: Some("standard".to_string()),
                     style: Some("vivid".to_string()),
+                    negative_prompt: None,
                     extra: HashMap::new(),
                 },
                 // Default Stable Diffusion WebUI entry
@@ -80,6 +82,7 @@ impl Default for ImageGenSystemConfig {
                     size: Some("512x512".to_string()), // SD v1.5 default
                     quality: None,
                     style: None,
+                    negative_prompt: None,
                     extra: HashMap::new(),
                 },
             ],

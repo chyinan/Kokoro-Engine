@@ -20,6 +20,7 @@ pub struct ImageGenResult {
 #[derive(Clone)]
 pub struct ImageGenService {
     providers: Arc<RwLock<HashMap<String, Box<dyn ImageGenProvider>>>>,
+    provider_configs: Arc<RwLock<HashMap<String, ImageGenProviderConfig>>>,
     default_provider: Arc<RwLock<Option<String>>>,
     output_dir: PathBuf,
 }
@@ -38,6 +39,7 @@ impl ImageGenService {
 
         let service = Self {
             providers: Arc::new(RwLock::new(HashMap::new())),
+            provider_configs: Arc::new(RwLock::new(HashMap::new())),
             default_provider: Arc::new(RwLock::new(config.default_provider.clone())),
             output_dir,
         };
@@ -55,7 +57,7 @@ impl ImageGenService {
             match Self::build_provider(provider_config) {
                 Some(provider) => {
                     println!("[ImageGen] Registering provider: {}", provider.id());
-                    service.register_provider(provider).await;
+                    service.register_provider(provider, provider_config.clone()).await;
                 }
                 None => {
                     eprintln!(
@@ -93,10 +95,12 @@ impl ImageGenService {
         }
     }
 
-    pub async fn register_provider(&self, provider: Box<dyn ImageGenProvider>) {
+    pub async fn register_provider(&self, provider: Box<dyn ImageGenProvider>, config: ImageGenProviderConfig) {
         let id = provider.id();
         let mut providers = self.providers.write().await;
-        providers.insert(id, provider);
+        providers.insert(id.clone(), provider);
+        let mut configs = self.provider_configs.write().await;
+        configs.insert(id, config);
     }
 
     pub async fn generate(
@@ -112,7 +116,15 @@ impl ImageGenService {
             id
         } else {
             let default = self.default_provider.read().await;
-            default.clone().ok_or(ImageGenError::ConfigError("No default provider configured".to_string()))?
+            let preferred = default.clone().ok_or(ImageGenError::ConfigError("No default provider configured".to_string()))?;
+            // Fall back to first registered provider if the configured default isn't available
+            if providers.contains_key(&preferred) {
+                preferred
+            } else {
+                providers.keys().next()
+                    .cloned()
+                    .ok_or(ImageGenError::ConfigError("No providers registered".to_string()))?
+            }
         };
 
         let provider = providers.get(&target_id).ok_or(ImageGenError::ProviderNotFound(target_id.clone()))?;
@@ -124,6 +136,12 @@ impl ImageGenService {
         let mut gen_params = params.unwrap_or_default();
         if gen_params.prompt.is_empty() {
             gen_params.prompt = prompt.clone();
+        }
+        if gen_params.negative_prompt.is_none() {
+            let configs = self.provider_configs.read().await;
+            if let Some(cfg) = configs.get(&target_id) {
+                gen_params.negative_prompt = cfg.negative_prompt.clone();
+            }
         }
 
         if gen_params.size.as_deref() == Some("auto") {
@@ -177,17 +195,21 @@ impl ImageGenService {
     pub async fn reload_from_config(&self, config: &ImageGenSystemConfig) {
         let mut providers = self.providers.write().await;
         providers.clear();
-        
+        let mut configs = self.provider_configs.write().await;
+        configs.clear();
+
         let mut default = self.default_provider.write().await;
         *default = config.default_provider.clone();
-        
+
         if config.enabled {
-             for provider_config in &config.providers {
+            for provider_config in &config.providers {
                 if !provider_config.enabled { continue; }
                 if let Some(provider) = Self::build_provider(provider_config) {
-                     providers.insert(provider.id(), provider);
+                    let id = provider.id();
+                    providers.insert(id.clone(), provider);
+                    configs.insert(id, provider_config.clone());
                 }
-             }
+            }
         }
         println!("[ImageGen] Reloaded {} providers", providers.len());
     }
