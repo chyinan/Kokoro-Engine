@@ -56,7 +56,7 @@ Features currently verified mainly in a local environment (RTX 4060 Laptop):
 
 ### 🧠 AI Brain
 - **Multimodal Conversation**: Supports **Ollama** (Local) and **OpenAI Compatible Interfaces** (Cloud) as the conversation core.
-- **Multimodal Capabilities**: Can integrate Vision models, supporting **screen capture** or **image upload**, allowing the character to "see" and describe the content.
+- **Multimodal Capabilities**: Can integrate Vision models, supporting **screen capture**, **image upload**, or **real-time webcam vision**, allowing the character to "see" and describe the content. Webcam vision supports multi-device selection with a live preview, and automatically attaches the latest camera frame to every chat message.
 - **Text-to-Image**: Can integrate Stable Diffusion WebUI or online API interfaces, supporting image generation via dialogue or generating real-time background images based on conversation context.
 - **Tiered Memory System**: Features a three-layer memory architecture — tiered memory (core facts never forgotten, ephemeral memories naturally decay), hybrid semantic + keyword retrieval (embedding cosine similarity + FTS5 BM25 with RRF rank fusion), and LLM-driven automatic memory consolidation (similar fragmented memories are clustered and merged). Automatically extracts key facts from conversations for long-term storage (SQLite), with real-time context recall and emotion persistence.
 
