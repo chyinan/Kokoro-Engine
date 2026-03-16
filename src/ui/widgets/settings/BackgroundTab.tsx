@@ -42,7 +42,7 @@ export default function BackgroundTab({
             />
 
             {/* Import buttons */}
-            <div>
+            {bgConfig.mode !== "generated" && <div>
                 <label className={labelClasses}>{t("settings.background.import.label")}</label>
                 <div className="flex gap-2">
                     <motion.button
@@ -86,7 +86,7 @@ export default function BackgroundTab({
                 <p className="text-xs text-[var(--color-text-muted)] mt-2">
                     {t("settings.background.import.count", { count: bg.imageCount })}
                 </p>
-            </div>
+            </div>}
 
             {/* Enable toggle */}
             <div className="flex items-center justify-between">
@@ -223,7 +223,7 @@ export default function BackgroundTab({
             <div className="border-t border-[var(--color-border)] pt-4" />
 
             {/* Image preview grid */}
-            {bg.imageCount > 0 && (
+            {bg.imageCount > 0 && bgConfig.mode !== "generated" && (
                 <div>
                     <label className={labelClasses}>{t("settings.background.preview.label")}</label>
                     <div className="grid grid-cols-4 gap-2">

@@ -312,7 +312,9 @@
                 "checkpoint_placeholder": "チェックポイント (任意)",
                 "size": "画像サイズ",
                 "size_auto": "自動 (ウィンドウ)",
-                "size_custom": "カスタム..."
+                "size_custom": "カスタム...",
+                "negative_prompt": "ネガティブプロンプト",
+                "negative_prompt_placeholder": "例：ぼやけ、低品質、透かし、nsfw"
             },
             "test": {
                 "button": "接続テスト",
@@ -609,6 +611,7 @@
         "input": {
             "placeholder": "話しかけてください...",
             "attach_image": "画像を添付",
+            "camera_frame_attached": "カメラフレームが添付されます",
             "expand": "入力欄を展開",
             "mic": {
                 "start": "音声入力を開始",

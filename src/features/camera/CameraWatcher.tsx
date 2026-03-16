@@ -18,26 +18,35 @@ export function CameraWatcher({ enabled, deviceId }: Props) {
             stopCamera();
             return;
         }
-        startCamera();
-        return () => stopCamera();
-    }, [enabled, deviceId]);
+        let cancelled = false;
 
-    async function startCamera() {
-        try {
-            const constraints = deviceId
-                ? { video: { deviceId: { exact: deviceId } } }
-                : { video: true };
-            const stream = await navigator.mediaDevices.getUserMedia(constraints);
-            streamRef.current = stream;
-            if (videoRef.current) {
-                videoRef.current.srcObject = stream;
-                await videoRef.current.play();
+        async function startCamera() {
+            try {
+                const constraints = deviceId
+                    ? { video: { deviceId: { exact: deviceId } } }
+                    : { video: true };
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                if (cancelled) {
+                    stream.getTracks().forEach((t) => t.stop());
+                    return;
+                }
+                streamRef.current = stream;
+                if (videoRef.current) {
+                    videoRef.current.srcObject = stream;
+                    await videoRef.current.play();
+                }
+                timerRef.current = setInterval(cacheFrame, CAPTURE_INTERVAL_MS);
+            } catch (err) {
+                console.error("[CameraWatcher] getUserMedia failed:", err);
             }
-            timerRef.current = setInterval(cacheFrame, CAPTURE_INTERVAL_MS);
-        } catch (err) {
-            console.error("[CameraWatcher] getUserMedia failed:", err);
         }
-    }
+
+        startCamera();
+        return () => {
+            cancelled = true;
+            stopCamera();
+        };
+    }, [enabled, deviceId]);
 
     function stopCamera() {
         if (timerRef.current) {
@@ -56,7 +65,9 @@ export function CameraWatcher({ enabled, deviceId }: Props) {
         const canvas = document.createElement("canvas");
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
-        canvas.getContext("2d")!.drawImage(video, 0, 0);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.drawImage(video, 0, 0);
         const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
         setLatestCameraFrame(dataUrl);
     }

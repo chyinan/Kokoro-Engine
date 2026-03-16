@@ -313,7 +313,9 @@
                 "checkpoint_placeholder": "可选 checkpoint",
                 "size": "图片尺寸",
                 "size_auto": "自动 (跟随窗口)",
-                "size_custom": "自定义..."
+                "size_custom": "自定义...",
+                "negative_prompt": "负面提示词",
+                "negative_prompt_placeholder": "例如：模糊、低质量、水印、nsfw"
             },
             "test": {
                 "button": "测试连接",
@@ -610,6 +612,7 @@
         "input": {
             "placeholder": "与你的同伴对话...",
             "attach_image": "发送图片",
+            "camera_frame_attached": "将附加摄像头画面",
                 "expand": "展开输入框",
             "mic": {
                 "start": "开始语音输入",

@@ -312,7 +312,9 @@
                 "checkpoint_placeholder": "체크포인트 (선택사항)",
                 "size": "이미지 크기",
                 "size_auto": "자동 (창 크기)",
-                "size_custom": "사용자 정의..."
+                "size_custom": "사용자 정의...",
+                "negative_prompt": "네거티브 프롬프트",
+                "negative_prompt_placeholder": "예: 흐릿함, 저화질, 워터마크, nsfw"
             },
             "test": {
                 "button": "연결 테스트",
@@ -609,6 +611,7 @@
         "input": {
             "placeholder": "대화를 시작하세요...",
             "attach_image": "이미지 첨부",
+            "camera_frame_attached": "카메라 프레임이 첨부됩니다",
             "expand": "입력창 확장",
             "mic": {
                 "start": "음성 입력 시작",

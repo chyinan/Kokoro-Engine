@@ -149,6 +149,9 @@ export default function ChatPanel() {
 
     // Vision Mode
     const [visionEnabled, setVisionEnabled] = useState(() => localStorage.getItem("kokoro_vision_enabled") === "true");
+    const [cameraEnabled, setCameraEnabled] = useState(() => {
+        try { return JSON.parse(localStorage.getItem("kokoro_vision_config") || "{}").camera_enabled === true; } catch { return false; }
+    });
     const [pendingImages, setPendingImages] = useState<string[]>([]);
     const [isUploading, setIsUploading] = useState(false);
 
@@ -287,6 +290,10 @@ export default function ChatPanel() {
     useEffect(() => {
         const checkVision = () => {
             setVisionEnabled(localStorage.getItem("kokoro_vision_enabled") === "true");
+            try {
+                const cfg = JSON.parse(localStorage.getItem("kokoro_vision_config") || "{}");
+                setCameraEnabled(cfg.camera_enabled === true);
+            } catch { /* ignore */ }
         };
         window.addEventListener("storage", checkVision);
         // Also poll on focus since Tauri doesn't fire storage events within same webview
@@ -995,7 +1002,18 @@ export default function ChatPanel() {
                         </motion.button>
                     )}
 
-                    {/* Microphone button �?Advanced VAD Mode */}
+                    {/* Camera frame indicator — visible when vision + camera both enabled */}
+                    {visionEnabled && cameraEnabled && (
+                        <div
+                            className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[10px] text-[var(--color-accent)] opacity-70 select-none"
+                            title={t("chat.input.camera_frame_attached")}
+                        >
+                            <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
+                            CAM
+                        </div>
+                    )}
+
+                    {/* Microphone button�?Advanced VAD Mode */}
                     {sttEnabled && (
                         <div className="relative flex items-center justify-center">
                             {/* Volume ring �?visible when listening/speaking */}

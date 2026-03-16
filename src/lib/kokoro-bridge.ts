@@ -461,6 +461,7 @@ export interface ImageGenProviderConfig {
     size?: string;
     quality?: string;
     style?: string;
+    negative_prompt?: string;
     extra?: Record<string, any>;
 }
 

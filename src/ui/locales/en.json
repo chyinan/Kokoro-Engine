@@ -313,7 +313,9 @@
                 "checkpoint_placeholder": "Optional checkpoint",
                 "size": "Image Size",
                 "size_auto": "Auto (window size)",
-                "size_custom": "Custom..."
+                "size_custom": "Custom...",
+                "negative_prompt": "Negative Prompt",
+                "negative_prompt_placeholder": "e.g. blurry, low quality, watermark, nsfw"
             },
             "test": {
                 "button": "Test Connection",
@@ -610,6 +612,7 @@
         "input": {
             "placeholder": "Speak to your companion...",
             "attach_image": "Attach image",
+            "camera_frame_attached": "Camera frame will be attached",
             "expand": "Expand input",
             "mic": {
                 "start": "Start voice input",

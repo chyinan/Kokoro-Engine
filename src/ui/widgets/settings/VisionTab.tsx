@@ -69,11 +69,17 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
 
     async function startPreview(deviceId: string) {
         stopPreview();
+        let cancelled = false;
+        const cleanup = () => { cancelled = true; };
         try {
             const constraints = deviceId
                 ? { video: { deviceId: { exact: deviceId } } }
                 : { video: true };
             const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            if (cancelled) {
+                stream.getTracks().forEach(t => t.stop());
+                return;
+            }
             previewStreamRef.current = stream;
             if (previewVideoRef.current) {
                 previewVideoRef.current.srcObject = stream;
@@ -82,6 +88,7 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
         } catch (err) {
             console.error("[VisionTab] preview failed:", err);
         }
+        return cleanup;
     }
 
     function stopPreview() {
@@ -95,6 +102,7 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
         loadConfig();
         return () => {
             unlistenRef.current?.();
+            stopPreview();
         };
     }, []);
 
@@ -126,12 +134,17 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
         setDirty(true);
     };
 
+    const persistVisionConfig = async (cfg: VisionConfig) => {
+        await saveVisionConfig(cfg);
+        localStorage.setItem("kokoro_vision_config", JSON.stringify(cfg));
+        onConfigChange?.(cfg);
+    };
+
     const handleSave = async () => {
         if (!config) return;
         try {
-            await saveVisionConfig(config);
+            await persistVisionConfig(config);
             setDirty(false);
-            onConfigChange?.(config);
         } catch (e) {
             console.error("[VisionTab] Failed to save config:", e);
         }
@@ -259,7 +272,7 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
                         const next = { ...config, enabled: !config.enabled };
                         setConfig(next);
                         setDirty(false);
-                        try { await saveVisionConfig(next); onConfigChange?.(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                        try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
                     }}
                     className={clsx(
                         "w-12 h-6 rounded-full relative transition-colors duration-200",
@@ -733,7 +746,7 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
                                 const next = { ...config, camera_enabled: !config.camera_enabled };
                                 setConfig(next);
                                 setDirty(false);
-                                try { await saveVisionConfig(next); onConfigChange?.(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                                try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
                             }}
                             className={clsx(
                                 "w-12 h-6 rounded-full relative transition-colors duration-200",
@@ -773,7 +786,13 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
                                         </div>
                                         <Select
                                             value={selectedDeviceId}
-                                            onChange={v => { setSelectedDeviceId(v); update({ camera_device_id: v || null }); }}
+                                            onChange={async v => {
+                                                setSelectedDeviceId(v);
+                                                const next = { ...config, camera_device_id: v || null };
+                                                setConfig(next);
+                                                setDirty(false);
+                                                try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                                            }}
                                             options={cameraDevices.map(d => ({
                                                 value: d.deviceId,
                                                 label: d.label || `Camera ${cameraDevices.indexOf(d) + 1}`,
