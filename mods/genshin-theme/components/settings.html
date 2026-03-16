@@ -989,6 +989,26 @@
 
                 body.appendChild(sysSec);
 
+                // Context settings
+                const ctxSec = createSection("上下文设置");
+                ctxSec.appendChild(createSlider("最大上下文轮数", 1, 100, 1, config.max_context_turns || 20, (v) => {
+                    config.max_context_turns = parseInt(v);
+                    Kokoro.action('save_llm_config', { config });
+                }));
+                ctxSec.appendChild(createSlider("Temperature", 0, 2, 0.1, config.temperature !== undefined ? config.temperature : 0.7, (v) => {
+                    config.temperature = parseFloat(v);
+                    Kokoro.action('save_llm_config', { config });
+                }));
+                ctxSec.appendChild(createSlider("Max Tokens", 256, 8192, 256, config.max_tokens || 2048, (v) => {
+                    config.max_tokens = parseInt(v);
+                    Kokoro.action('save_llm_config', { config });
+                }));
+                ctxSec.appendChild(createToggle("流式输出", "逐字流式返回 AI 回复", config.stream !== false, (v) => {
+                    config.stream = v;
+                    Kokoro.action('save_llm_config', { config });
+                }));
+                body.appendChild(ctxSec);
+
                 // Save button
                 const saveRow = document.createElement('div');
                 saveRow.style.marginTop = '16px';
@@ -1511,6 +1531,39 @@
                     sec.appendChild(provCfgSec);
                 }
 
+                // Wake word settings
+                const wakeSec = createSection("唤醒词");
+                wakeSec.appendChild(createToggle("启用唤醒词", "说出唤醒词后才开始识别", config.wake_word_enabled, (v) => {
+                    config.wake_word_enabled = v;
+                    Kokoro.action('save_stt_config', { config });
+                }));
+                const wakeWordId = 'stt_wake_word';
+                wakeSec.appendChild(createRow("唤醒词", `
+                    <input class="gi-input" type="text" value="${escapeHtml(config.wake_word || '')}" id="${wakeWordId}" placeholder="例如：你好可可">
+                `));
+                setTimeout(() => {
+                    const el = document.getElementById(wakeWordId);
+                    if (el) el.onchange = function () {
+                        config.wake_word = this.value;
+                        Kokoro.action('save_stt_config', { config });
+                    };
+                }, 0);
+                sec.appendChild(wakeSec);
+
+                // SenseVoice settings
+                if (activeProv.provider_type === 'sense_voice') {
+                    const svSec = createSection("SenseVoice");
+                    svSec.appendChild(createToggle("情感识别", "识别说话者情感", activeProv.emotion, (v) => {
+                        config.providers = sttProviders.map(p => p.id === activeProv.id ? { ...p, emotion: v } : p);
+                        Kokoro.action('save_stt_config', { config });
+                    }));
+                    svSec.appendChild(createToggle("事件检测", "检测笑声、掌声等音频事件", activeProv.event_detection, (v) => {
+                        config.providers = sttProviders.map(p => p.id === activeProv.id ? { ...p, event_detection: v } : p);
+                        Kokoro.action('save_stt_config', { config });
+                    }));
+                    sec.appendChild(svSec);
+                }
+
                 // Save
                 const saveRow = document.createElement('div');
                 saveRow.style.marginTop = '12px';
@@ -1708,6 +1761,7 @@
             let _memoryEditId = null;
             let _memoryEditContent = '';
             let _memoryEditImportance = 0.5;
+            let _memoryEditTier = 'normal';
             const _memoryPageSize = 50;
 
             function renderMemory() {
@@ -1784,6 +1838,14 @@
                                         <div class="gi-slider-val" id="mem_edit_imp_val">${_memoryEditImportance}</div>
                                     </div>
                                 </div>
+                                <div class="setting-row" style="padding:4px 0">
+                                    <div class="setting-info"><div class="setting-label">层级</div></div>
+                                    <select class="gi-select" id="mem_edit_tier">
+                                        <option value="core" ${_memoryEditTier === 'core' ? 'selected' : ''}>核心 (core)</option>
+                                        <option value="normal" ${_memoryEditTier === 'normal' ? 'selected' : ''}>普通 (normal)</option>
+                                        <option value="archival" ${_memoryEditTier === 'archival' ? 'selected' : ''}>归档 (archival)</option>
+                                    </select>
+                                </div>
                                 <div style="display:flex;gap:6px;margin-top:6px">
                                     <button class="gi-btn primary" id="mem_save_btn" style="padding:4px 12px;font-size:11px">保存</button>
                                     <button class="gi-btn" id="mem_cancel_btn" style="padding:4px 12px;font-size:11px">取消</button>
@@ -1798,9 +1860,11 @@
                                     _memoryEditImportance = parseFloat(this.value);
                                     if (impVal) impVal.textContent = this.value;
                                 };
+                                const tierEl = document.getElementById('mem_edit_tier');
+                                if (tierEl) tierEl.onchange = function () { _memoryEditTier = this.value; };
                                 const saveBtn = document.getElementById('mem_save_btn');
                                 if (saveBtn) saveBtn.onclick = () => {
-                                    Kokoro.action('update_memory', { id: mem.id, content: _memoryEditContent, importance: _memoryEditImportance });
+                                    Kokoro.action('update_memory', { id: mem.id, content: _memoryEditContent, importance: _memoryEditImportance, tier: _memoryEditTier });
                                     _memoryEditId = null;
                                     _memoryFetched = false;
                                     render();
@@ -1831,6 +1895,7 @@
                                 _memoryEditId = mem.id;
                                 _memoryEditContent = mem.content || '';
                                 _memoryEditImportance = mem.importance || 0.5;
+                                _memoryEditTier = mem.tier || 'normal';
                                 render();
                             };
                             btnGroup.appendChild(editBtn);
@@ -1854,7 +1919,7 @@
 
                             const descDiv = document.createElement('div');
                             descDiv.className = 'list-item-desc';
-                            descDiv.textContent = `重要度: ${mem.importance || 0}${timeStr ? '  ·  ' + timeStr : ''}`;
+                            descDiv.textContent = `重要度: ${mem.importance || 0}  ·  层级: ${mem.tier || 'normal'}${timeStr ? '  ·  ' + timeStr : ''}`;
                             item.appendChild(descDiv);
                         }
 
@@ -1938,7 +2003,8 @@
 
                 const provOpts = [
                     { value: 'ollama', label: 'Ollama' },
-                    { value: 'openai', label: 'OpenAI' }
+                    { value: 'openai', label: 'OpenAI' },
+                    { value: 'llm', label: '复用主 LLM' }
                 ];
                 sec.appendChild(createSelect("服务商", "Vision 模型后端", provOpts, config.vlm_provider, (v) => {
                     config.vlm_provider = v;
@@ -2015,6 +2081,25 @@
                     resultDiv.textContent = '👁️ ' + state.capturedScreenUrl;
                     sec.appendChild(resultDiv);
                 }
+
+                // Camera settings
+                const camSec = createSection("摄像头");
+                camSec.appendChild(createToggle("启用摄像头", "使用摄像头画面代替截图", config.camera_enabled, (v) => {
+                    config.camera_enabled = v;
+                    Kokoro.action('save_vision_config', { config });
+                }));
+
+                camSec.appendChild(createRow("摄像头设备 ID", `
+                    <input class="gi-input" type="text" placeholder="留空使用默认摄像头" value="${escapeHtml(config.camera_device_id || '')}" id="vision_camera_device_id">
+                `));
+                setTimeout(() => {
+                    const el = document.getElementById('vision_camera_device_id');
+                    if (el) el.onchange = function () {
+                        config.camera_device_id = this.value;
+                        Kokoro.action('save_vision_config', { config });
+                    };
+                }, 0);
+                sec.appendChild(camSec);
 
                 // Privacy note
                 const privacyNote = document.createElement('div');
@@ -2176,6 +2261,51 @@
                         }, 0);
                     }
 
+
+                    // Negative prompt (SD and OpenAI)
+                    const negId = `imggen_neg_${idx}`;
+                    sub.appendChild(createRow("负面提示词", `
+                        <input class="gi-input" type="text" value="${escapeHtml(p.negative_prompt || '')}" id="${negId}" placeholder="nsfw, blurry, ...">
+                    `));
+                    setTimeout(() => {
+                        const el = document.getElementById(negId);
+                        if (el) el.onchange = function () {
+                            config.providers[idx].negative_prompt = this.value;
+                            Kokoro.action('save_image_gen_config', { config });
+                        };
+                    }, 0);
+
+                    // Style (OpenAI dall-e-3: vivid/natural; Google: various)
+                    if (provType === 'openai') {
+                        const styleOpts = [
+                            { value: 'vivid', label: 'Vivid' },
+                            { value: 'natural', label: 'Natural' }
+                        ];
+                        sub.appendChild(createSelect("风格", "图片生成风格", styleOpts, p.style || 'vivid', (v) => {
+                            config.providers[idx].style = v;
+                            Kokoro.action('save_image_gen_config', { config });
+                        }));
+
+                        const qualityOpts = [
+                            { value: 'standard', label: 'Standard' },
+                            { value: 'hd', label: 'HD' }
+                        ];
+                        sub.appendChild(createSelect("质量", "图片生成质量", qualityOpts, p.quality || 'standard', (v) => {
+                            config.providers[idx].quality = v;
+                            Kokoro.action('save_image_gen_config', { config });
+                        }));
+                    }
+
+                    if (provType === 'stable_diffusion') {
+                        sub.appendChild(createSlider("采样步数 (Steps)", 1, 150, 1, p.steps || 20, (v) => {
+                            config.providers[idx].steps = parseInt(v);
+                            Kokoro.action('save_image_gen_config', { config });
+                        }));
+                        sub.appendChild(createSlider("CFG Scale", 1, 30, 0.5, p.cfg_scale || 7, (v) => {
+                            config.providers[idx].cfg_scale = parseFloat(v);
+                            Kokoro.action('save_image_gen_config', { config });
+                        }));
+                    }
 
                     // Test + Generate Test + Delete buttons
                     const btnRow = document.createElement('div');
@@ -2349,6 +2479,16 @@
                         statusSpan.textContent = srv.status || 'unknown';
                         btnGroup.appendChild(statusSpan);
 
+                        // Enable/disable toggle
+                        const toggleBtn = document.createElement('button');
+                        toggleBtn.className = 'gi-btn';
+                        toggleBtn.style.padding = '2px 8px';
+                        toggleBtn.style.fontSize = '10px';
+                        const isEnabled = srv.enabled !== false;
+                        toggleBtn.textContent = isEnabled ? '禁用' : '启用';
+                        toggleBtn.onclick = () => Kokoro.action('toggle_mcp_server', { name: srv.name, enabled: !isEnabled });
+                        btnGroup.appendChild(toggleBtn);
+
                         // Reconnect button (for disconnected)
                         if (srv.status === 'disconnected') {
                             const reconBtn = document.createElement('button');
@@ -2503,13 +2643,8 @@
                     };
                 }, 0);
 
-                sec.appendChild(createToggle("允许语音消息", "接收并识别语音消息", cfg.allow_voice, (v) => {
-                    cfg.allow_voice = v;
-                    Kokoro.action('save_telegram_config', { config: cfg });
-                }));
-
-                sec.appendChild(createToggle("允许图片消息", "接收并分析图片", cfg.allow_image, (v) => {
-                    cfg.allow_image = v;
+                sec.appendChild(createToggle("允许语音消息", "接收并识别语音消息", cfg.send_voice_reply, (v) => {
+                    cfg.send_voice_reply = v;
                     Kokoro.action('save_telegram_config', { config: cfg });
                 }));
 
@@ -2622,6 +2757,42 @@
                 };
                 importSec.appendChild(importBtn);
                 sec.appendChild(importSec);
+
+                // Auto-backup settings
+                const autoSec = createSection("自动备份");
+                const backupCfg = state.backupConfig || {};
+                autoSec.appendChild(createToggle("启用自动备份", "定期自动导出备份文件", backupCfg.auto_enabled, (v) => {
+                    backupCfg.auto_enabled = v;
+                    Kokoro.action('save_backup_config', { config: backupCfg });
+                }));
+
+                const intervalOpts = [
+                    { value: 'daily', label: '每天' },
+                    { value: 'weekly', label: '每周' },
+                    { value: 'monthly', label: '每月' }
+                ];
+                autoSec.appendChild(createSelect("备份频率", "自动备份的时间间隔", intervalOpts, backupCfg.interval || 'daily', (v) => {
+                    backupCfg.interval = v;
+                    Kokoro.action('save_backup_config', { config: backupCfg });
+                }));
+
+                autoSec.appendChild(createSlider("保留份数", 1, 20, 1, backupCfg.keep_count || 5, (v) => {
+                    backupCfg.keep_count = parseInt(v);
+                    Kokoro.action('save_backup_config', { config: backupCfg });
+                }));
+
+                const backupDirId = 'backup_dir';
+                autoSec.appendChild(createRow("备份目录", `
+                    <input class="gi-input" type="text" value="${escapeHtml(backupCfg.backup_dir || '')}" id="${backupDirId}" placeholder="留空使用默认目录">
+                `));
+                setTimeout(() => {
+                    const el = document.getElementById(backupDirId);
+                    if (el) el.onchange = function () {
+                        backupCfg.backup_dir = this.value;
+                        Kokoro.action('save_backup_config', { config: backupCfg });
+                    };
+                }, 0);
+                sec.appendChild(autoSec);
 
                 body.appendChild(sec);
             }
