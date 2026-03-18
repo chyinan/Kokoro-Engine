@@ -193,19 +193,45 @@ pub fn run() {
                             }
                         }
 
-                        // Restore current_conversation_id from disk
+                        // Restore current_conversation_id from disk and reload history
                         let conv_id_path = app_data_dir.join("current_conversation_id.json");
                         if let Ok(content) = std::fs::read_to_string(&conv_id_path) {
                             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                                 if let Some(id) = val.get("conversation_id").and_then(|v| v.as_str()) {
-                                    let mut conv_id = orchestrator.current_conversation_id.lock().await;
-                                    *conv_id = Some(id.to_string());
-                                    println!("[AI] Restored current_conversation_id: {}", id);
+                                    {
+                                        let mut conv_id = orchestrator.current_conversation_id.lock().await;
+                                        *conv_id = Some(id.to_string());
+                                    }
+                                    // Reload messages into in-memory history so LLM has conversation context
+                                    if let Ok(rows) = sqlx::query_as::<_, (String, String)>(
+                                        "SELECT role, content FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC"
+                                    )
+                                    .bind(id)
+                                    .fetch_all(&orchestrator.db)
+                                    .await {
+                                        let mut history = orchestrator.history.lock().await;
+                                        history.clear();
+                                        for (role, content) in &rows {
+                                            history.push_back(crate::ai::context::Message {
+                                                role: role.clone(),
+                                                content: content.clone(),
+                                                metadata: None,
+                                            });
+                                        }
+                                        println!("[AI] Restored current_conversation_id: {} ({} messages)", id, rows.len());
+                                    }
                                 }
                             }
                         }
 
                         app_handle.manage(orchestrator);
+
+                        // Restore active_character_id from disk
+                        if let Some(char_id) = crate::ai::context::AIOrchestrator::load_active_character_id() {
+                            let orch = app_handle.state::<crate::ai::context::AIOrchestrator>();
+                            orch.set_character_id(char_id.clone()).await;
+                            println!("[AI] Restored active_character_id: {}", char_id);
+                        }
 
                         // Restore emotion state from disk (delayed to allow persona to load first)
                         let emotion_app = app_handle.clone();

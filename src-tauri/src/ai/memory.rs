@@ -64,7 +64,14 @@ impl MemoryManager {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
                 candidates.push(exe_dir.to_path_buf());
+                // 4. Resources dir bundled alongside the exe (Tauri build layout)
+                candidates.push(exe_dir.join("_up_").join(".."));
             }
+        }
+
+        // 5. App data dir (com.chyin.kokoro) — models copied here on first run
+        if let Some(app_data) = dirs_next::data_dir() {
+            candidates.push(app_data.join("com.chyin.kokoro"));
         }
 
         for base in &candidates {
@@ -129,11 +136,15 @@ impl MemoryManager {
                     return Ok(Mutex::new(model));
                 }
 
-                // 2. Fall back to HF download
+                // 2. Fall back to HF download — cache into app data so build can find it next time
                 println!("[Memory] Local model not found, downloading from HuggingFace...");
+                let cache_dir = dirs_next::data_dir()
+                    .map(|d| d.join("com.chyin.kokoro").join("models"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("models"));
+                let _ = std::fs::create_dir_all(&cache_dir);
                 let model = TextEmbedding::try_new(
                     InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-                        .with_cache_dir(std::path::PathBuf::from("models")),
+                        .with_cache_dir(cache_dir),
                 )?;
                 println!("[Memory] Embedding model downloaded and loaded successfully.");
                 Ok(Mutex::new(model))

@@ -90,6 +90,7 @@ import {
   listLive2dModels,
   getTtsConfig,
   setPersona,
+  setActiveCharacterId,
   setResponseLanguage,
   getProactiveEnabled,
   // Config Getters
@@ -335,6 +336,9 @@ function App() {
           localStorage.setItem("kokoro_persona", prompt);
           setPersonaState(prompt);
           await setPersona(prompt);
+          if (char.id !== undefined) {
+            await setActiveCharacterId(String(char.id));
+          }
           console.log("[App] Synced persona on startup:", char.name);
         }
       } catch (e) {

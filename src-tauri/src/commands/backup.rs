@@ -645,6 +645,12 @@ pub async fn import_data(
             result.debug_log.push("no target_character_id — remap skipped".to_string());
         }
 
+        // 持久化 target_character_id，确保重启后后端能正确恢复
+        if let Some(ref target_id) = options.target_character_id {
+            crate::ai::context::AIOrchestrator::persist_active_character_id(target_id);
+            result.debug_log.push(format!("persisted active_character_id: {}", target_id));
+        }
+
         drop(conn);
         // tmp_db 由 _tmp_guard 在函数结束时自动清理，无需手动删除
     }

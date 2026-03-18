@@ -112,6 +112,19 @@ export const ChatMessage = memo(function ChatMessage({
                 <>
                     {msg.text}
 
+                    {/* 错误消息的重试按钮 */}
+                    {!isStreaming && msg.isError && (
+                        <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                                onClick={onRegenerate}
+                                className="p-1.5 rounded-md bg-slate-800/90 backdrop-blur-sm text-red-400 hover:text-red-300 hover:bg-slate-700/90 transition-colors shadow-lg"
+                                title={t("chat.actions.retry")}
+                            >
+                                <RefreshCw size={12} strokeWidth={1.5} />
+                            </button>
+                        </div>
+                    )}
+
                     {/* 悬停显示的操作按钮 */}
                     {!isStreaming && !msg.isError && (
                         <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
