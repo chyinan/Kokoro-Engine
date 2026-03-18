@@ -158,7 +158,7 @@ pub fn run() {
                     .join("com.chyin.kokoro");
                 let _ = std::fs::create_dir_all(&app_data_dir);
                 let db_path = app_data_dir.join("kokoro.db");
-                let db_url = format!("sqlite://{}", db_path.to_string_lossy().replace('\\', "/"));
+                let db_url = format!("sqlite:///{}", db_path.to_string_lossy().replace('\\', "/"));
                 match crate::ai::context::AIOrchestrator::new(&db_url).await {
                     Ok(orchestrator) => {
 
