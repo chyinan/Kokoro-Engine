@@ -27,7 +27,7 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false,
-        "url": "http://localhost:1420/src/windows/pet.html",
+        "url": "src/windows/pet.html",
         "shadow": false
       }
     ],
