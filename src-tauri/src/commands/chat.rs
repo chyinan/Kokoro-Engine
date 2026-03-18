@@ -290,8 +290,54 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
         }
     }
     calls.extend(extra_calls);
+
+    // 支持冒号格式: [action_name:value]
+    // 例: [change_expression:happy]、[set_background:beach]
+    // 将 value 映射到该 action 的主参数名
+    let primary_arg_map: &[(&str, &str)] = &[
+        ("change_expression", "expression"),
+        ("set_background", "prompt"),
+    ];
+    let mut colon_calls = Vec::new();
+    let mut cleaned2 = cleaned.clone();
+    let mut offset2 = 0;
+    while offset2 < cleaned2.len() {
+        let Some(rel_start) = cleaned2[offset2..].find('[') else { break };
+        let start = offset2 + rel_start;
+        let rest = &cleaned2[start..];
+        let Some(end) = rest.find(']') else { break };
+        let inner = &rest[1..end];
+
+        let mut matched = false;
+        if let Some(colon_pos) = inner.find(':') {
+            let name_part = inner[..colon_pos].trim();
+            let val_part = inner[colon_pos + 1..].trim();
+            let is_identifier = !name_part.is_empty()
+                && name_part.chars().all(|c| c.is_alphanumeric() || c == '_');
+
+            if is_identifier && !val_part.is_empty() {
+                if let Some(&(_, arg_key)) = primary_arg_map.iter().find(|&&(n, _)| n == name_part) {
+                    let mut args = HashMap::new();
+                    args.insert(arg_key.to_string(), val_part.to_string());
+                    colon_calls.push(ToolCall { name: name_part.to_string(), args });
+                    let tag_end = start + end + 1;
+                    cleaned2 = format!(
+                        "{}{}",
+                        cleaned2[..start].trim_end(),
+                        if tag_end < cleaned2.len() { &cleaned2[tag_end..] } else { "" }
+                    );
+                    matched = true;
+                }
+            }
+        }
+        if !matched {
+            offset2 = start + 1;
+        }
+    }
+    calls.extend(colon_calls);
+
     calls.reverse();
-    (cleaned.trim().to_string(), calls)
+    (cleaned2.trim().to_string(), calls)
 }
 
 // ── Stream Chat Command ────────────────────────────────────
@@ -709,22 +755,13 @@ pub async fn stream_chat(
             break;
         }
 
-        // Append assistant message + tool results to context for next round
-        client_messages.push(crate::llm::openai::Message {
-            role: "assistant".to_string(),
-            content: crate::llm::openai::MessageContent::Text(round_response),
-        });
+        // Only inject tool results — no need to replay the assistant's previous output
         client_messages.push(crate::llm::openai::Message {
             role: "system".to_string(),
             content: crate::llm::openai::MessageContent::Text(format!(
-                "[Internal tool callback — NOT a user message]\n\
-                The assistant message above is YOUR own previous output. You called some tools, and here are the results:\n\
+                "[Tool results]\n\
                 {}\n\n\
-                Instructions:\n\
-                - Incorporate these results naturally into your dialogue.\n\
-                - Do NOT echo raw data, JSON, or any <tool_result> tags.\n\
-                - Do NOT say the message was repeated or sent again — it was not.\n\
-                - Simply continue talking to the user as if you just learned this information.",
+                Incorporate these results naturally into your dialogue. Do NOT echo raw data or JSON.",
                 tool_results.join("\n")
             )),
         });
@@ -1126,6 +1163,25 @@ mod tests {
         let input = "text [some words] more";
         let (cleaned, calls) = parse_tool_call_tags(input);
         assert_eq!(cleaned, "text [some words] more");
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_tool_call_colon_format() {
+        let input = "text[change_expression:happy]more";
+        let (cleaned, calls) = parse_tool_call_tags(input);
+        assert_eq!(cleaned.trim(), "textmore");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "change_expression");
+        assert_eq!(calls[0].args.get("expression"), Some(&"happy".to_string()));
+    }
+
+    #[test]
+    fn test_parse_tool_call_colon_unknown_action_no_match() {
+        // 未在映射表中的 action 不应被识别为工具调用
+        let input = "text[unknown_action:value]more";
+        let (cleaned, calls) = parse_tool_call_tags(input);
+        assert_eq!(cleaned, "text[unknown_action:value]more");
         assert!(calls.is_empty());
     }
 }

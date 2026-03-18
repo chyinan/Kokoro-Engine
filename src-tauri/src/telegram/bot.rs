@@ -1196,7 +1196,9 @@ mod tests {
     fn test_parse_tool_call_tags_with_params() {
         let input = "Sure! [TOOL_CALL:get_time|tz=UTC]";
         let (text, calls) = parse_tool_call_tags(input);
-        assert_eq!(calls, vec!["get_time|tz=UTC"]);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_time");
+        assert_eq!(calls[0].args.get("tz"), Some(&"UTC".to_string()));
         assert!(!text.contains("[TOOL_CALL:"));
     }
 }
