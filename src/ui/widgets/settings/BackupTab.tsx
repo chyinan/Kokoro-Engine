@@ -188,35 +188,32 @@ export const BackupTab: React.FC = () => {
                     if (payload.voiceInterrupt != null) localStorage.setItem('kokoro_voice_interrupt', payload.voiceInterrupt);
 
                     // 先写入所有备份角色，全部成功后再删旧角色，避免中途失败导致数据损坏
-                    const idMap = new Map<string, string>();
-                    const newIds: string[] = [];
+                    const newIds: number[] = [];
                     for (const c of chars) {
                         let avatarBlob: Blob | undefined;
                         if (c.avatarB64) {
                             const bytes = Uint8Array.from(atob(c.avatarB64), ch => ch.charCodeAt(0));
                             avatarBlob = new Blob([bytes]);
                         }
-                        const { avatarB64, id: oldId, ...rest } = c;
+                        const { avatarB64, id: _oldId, ...rest } = c;
                         const newId = await characterDb.add({ ...rest, avatarBlob });
-                        newIds.push(String(newId));
-                        if (oldId !== undefined) {
-                            idMap.set(String(oldId), String(newId));
-                        }
+                        newIds.push(newId);
                     }
                     // 所有新角色写入成功，再清空旧角色
                     const existing = await characterDb.getAll();
                     for (const c of existing) {
-                        if (c.id !== undefined && !newIds.includes(String(c.id))) {
+                        if (c.id !== undefined && !newIds.includes(c.id)) {
                             await characterDb.remove(c.id);
                         }
                     }
-                    // 用备份里的 activeCharacterId 找到对应的新 ID
+                    // stableId is preserved in rest, so use it directly
                     const oldActiveId = payload.activeCharacterId;
-                    console.log('[Backup] oldActiveId:', oldActiveId, 'idMap:', [...idMap.entries()]);
-                    targetCharacterId = oldActiveId ? idMap.get(String(oldActiveId)) : undefined;
-                    // 找不到则回退到第一个角色
-                    if (!targetCharacterId && idMap.size > 0) {
-                        targetCharacterId = [...idMap.values()][0];
+                    console.log('[Backup] oldActiveId (stableId):', oldActiveId);
+                    targetCharacterId = oldActiveId || undefined;
+                    // Fall back to first restored character's stableId
+                    if (!targetCharacterId) {
+                        const allRestored = await characterDb.getAll();
+                        targetCharacterId = allRestored[0]?.stableId;
                     }
                     console.log('[Backup] targetCharacterId resolved to:', targetCharacterId);
                     if (targetCharacterId) {

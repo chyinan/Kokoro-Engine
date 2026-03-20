@@ -8,9 +8,10 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Plus, Upload, Trash2, UserCircle, Check, X, User } from "lucide-react";
-import { characterDb, type CharacterProfile } from "../../lib/db";
+import { characterDb } from "../../lib/db";
 import { parseCharacterCard } from "../../lib/character-card-parser";
-import { setPersona, setCharacterName, setUserName, setProactiveEnabled, getProactiveEnabled, setActiveCharacterId } from "../../lib/kokoro-bridge";
+import { setPersona, setCharacterName, setUserName, setProactiveEnabled, getProactiveEnabled, setActiveCharacterId, listCharacters, createCharacter, updateCharacter, deleteCharacter } from "../../lib/kokoro-bridge";
+import type { CharacterRecord } from "../../lib/kokoro-bridge";
 import { Languages, MessageCircle } from "lucide-react";
 import { Select } from "@/components/ui/select";
 import { useTranslation, Trans } from "react-i18next";
@@ -31,14 +32,15 @@ const labelClasses = "block text-xs font-heading font-semibold tracking-wider up
 
 const DEFAULT_PERSONA = "You are a friendly, warm companion character. Respond with personality and emotion.";
 
-function makeDefaultCharacter(): Omit<CharacterProfile, "id"> {
+function makeDefaultCharacter(): CharacterRecord {
     return {
+        id: crypto.randomUUID(),
         name: "Kokoro",
         persona: DEFAULT_PERSONA,
-        userNickname: "User",
-        sourceFormat: "manual",
-        createdAt: 0,
-        updatedAt: 0,
+        user_nickname: "User",
+        source_format: "manual",
+        created_at: 0,
+        updated_at: 0,
     };
 }
 
@@ -67,21 +69,19 @@ function saveUserProfile(profile: UserProfile) {
 // ── Compose system prompt from a character ─────────
 
 export function composeSystemPrompt(
-    char: CharacterProfile | Omit<CharacterProfile, "id">,
+    char: CharacterRecord,
     userProfile: UserProfile = loadUserProfile()
 ): string {
     const parts: string[] = [];
     parts.push(`Your name is ${char.name}.`);
 
-    // Inject character persona with {{user}} replacement
     if (char.persona) {
         parts.push(char.persona.split("{{user}}").join(userProfile.name));
     }
-    if (char.userNickname && char.userNickname !== "{{user}}") {
-        parts.push(`Address the user as "${char.userNickname}".`);
+    if (char.user_nickname && char.user_nickname !== "{{user}}") {
+        parts.push(`Address the user as "${char.user_nickname}".`);
     }
 
-    // Inject user profile
     parts.push(`The user's name is ${userProfile.name}.`);
     if (userProfile.persona) {
         parts.push(`About the user: ${userProfile.persona}`);
@@ -113,70 +113,63 @@ interface CharacterManagerProps {
 
 export default function CharacterManager({ onPersonaChange, responseLanguage, onResponseLanguageChange, userLanguage, onUserLanguageChange }: CharacterManagerProps) {
     const { t } = useTranslation();
-    const [characters, setCharacters] = useState<CharacterProfile[]>([]);
-    const [activeId, setActiveId] = useState<number | null>(null);
-    const [editChar, setEditChar] = useState<CharacterProfile | null>(null);
+    const [characters, setCharacters] = useState<CharacterRecord[]>([]);
+    const [activeId, setActiveId] = useState<string | null>(null);
+    const [editChar, setEditChar] = useState<CharacterRecord | null>(null);
     const [isLoading, setIsLoading] = useState(true);
-    const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+    const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
     const [importFeedback, setImportFeedback] = useState<string | null>(null);
     const [userProfile, setUserProfile] = useState<UserProfile>(loadUserProfile);
     const [proactiveEnabled, setProactiveEnabledState] = useState(true);
 
-    // Stable ref for the callback to avoid re-triggering loadCharacters
     const onPersonaChangeRef = useRef(onPersonaChange);
     onPersonaChangeRef.current = onPersonaChange;
 
-    // Fetch proactive setting from backend on mount
     useEffect(() => {
         getProactiveEnabled().then(setProactiveEnabledState).catch(() => {});
     }, []);
 
-    // ── Load characters on mount ───────────────────
-
     const loadCharacters = useCallback(async () => {
         setIsLoading(true);
         try {
-            const all = await characterDb.getAll();
+            // One-time migration: copy IndexedDB characters to SQLite
+            const idbChars = await characterDb.getAll();
+            for (const c of idbChars) {
+                if (!c.stableId) continue;
+                await createCharacter({
+                    id: c.stableId,
+                    name: c.name,
+                    persona: c.persona,
+                    user_nickname: c.userNickname,
+                    source_format: c.sourceFormat ?? "manual",
+                    created_at: c.createdAt ?? 0,
+                    updated_at: c.updatedAt ?? 0,
+                }).catch(() => {}); // INSERT OR IGNORE — safe to call repeatedly
+            }
+
+            let all = await listCharacters();
+
+            const currentUserProfile = loadUserProfile();
+            setUserName(currentUserProfile.name).catch(() => {});
+
+            if (all.length === 0) {
+                const defaultChar = makeDefaultCharacter();
+                await createCharacter(defaultChar);
+                all = [defaultChar];
+            }
+
             setCharacters(all);
 
-            // Initialize user name on backend
-            const currentUserProfile = loadUserProfile();
-            setUserName(currentUserProfile.name).catch(e => console.error("[CharacterManager] Failed to set user name:", e));
-
-            // Restore active selection
             const savedId = localStorage.getItem(ACTIVE_CHAR_KEY);
-            if (savedId && all.find(c => c.id === Number(savedId))) {
-                const id = Number(savedId);
-                setActiveId(id);
-                const char = all.find(c => c.id === id)!;
-                setEditChar(char);
-                const prompt = composeSystemPrompt(char);
-                onPersonaChangeRef.current(prompt);
-                setPersona(prompt).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
-                setCharacterName(char.name).catch(e => console.error("[CharacterManager] Failed to set character name:", e));
-                setActiveCharacterId(String(id)).catch(e => console.error("[CharacterManager] Failed to set active character id:", e));
-            } else if (all.length > 0) {
-                setActiveId(all[0].id!);
-                setEditChar(all[0]);
-                const prompt = composeSystemPrompt(all[0]);
-                onPersonaChangeRef.current(prompt);
-                setPersona(prompt).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
-                setCharacterName(all[0].name).catch(e => console.error("[CharacterManager] Failed to set character name:", e));
-                setActiveCharacterId(String(all[0].id!)).catch(e => console.error("[CharacterManager] Failed to set active character id:", e));
-            } else {
-                // No characters yet — insert default
-                const defaultChar = makeDefaultCharacter();
-                const newId = await characterDb.add(defaultChar);
-                const created = { ...defaultChar, id: newId };
-                setCharacters([created]);
-                setActiveId(newId);
-                setEditChar(created);
-                const prompt = composeSystemPrompt(created);
-                onPersonaChangeRef.current(prompt);
-                setPersona(prompt).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
-                setCharacterName(created.name).catch(e => console.error("[CharacterManager] Failed to set character name:", e));
-                localStorage.setItem(ACTIVE_CHAR_KEY, String(newId));
-            }
+            const active = (savedId && all.find(c => c.id === savedId)) ? all.find(c => c.id === savedId)! : all[0];
+            setActiveId(active.id);
+            setEditChar(active);
+            const prompt = composeSystemPrompt(active);
+            onPersonaChangeRef.current(prompt);
+            setPersona(prompt).catch(() => {});
+            setCharacterName(active.name).catch(() => {});
+            setActiveCharacterId(active.id).catch(() => {});
+            localStorage.setItem(ACTIVE_CHAR_KEY, active.id);
         } catch (err) {
             console.error("[CharacterManager] Failed to load characters:", err);
         } finally {
@@ -188,85 +181,73 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
         loadCharacters();
     }, [loadCharacters]);
 
-    // ── Select a character ─────────────────────────
-
-    const selectCharacter = (char: CharacterProfile) => {
-        setActiveId(char.id!);
+    const selectCharacter = (char: CharacterRecord) => {
+        setActiveId(char.id);
         setEditChar({ ...char });
         setConfirmDeleteId(null);
-        localStorage.setItem(ACTIVE_CHAR_KEY, String(char.id));
+        localStorage.setItem(ACTIVE_CHAR_KEY, char.id);
         const prompt = composeSystemPrompt(char);
         onPersonaChangeRef.current(prompt);
-        // Immediately push to backend so LLM uses the new persona
-        setPersona(prompt).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
-        setCharacterName(char.name).catch(e => console.error("[CharacterManager] Failed to set character name:", e));
-        setActiveCharacterId(String(char.id!)).catch(e => console.error("[CharacterManager] Failed to set active character id:", e));
+        setPersona(prompt).catch(() => {});
+        setCharacterName(char.name).catch(() => {});
+        setActiveCharacterId(char.id).catch(() => {});
     };
-
-    // ── Create new character ───────────────────────
 
     const handleCreate = async () => {
         const now = Date.now();
-        const newChar: Omit<CharacterProfile, "id"> = {
+        const newChar: CharacterRecord = {
+            id: crypto.randomUUID(),
             name: "New Character",
             persona: "",
-            userNickname: "User",
-            sourceFormat: "manual",
-            createdAt: now,
-            updatedAt: now,
+            user_nickname: "User",
+            source_format: "manual",
+            created_at: now,
+            updated_at: now,
         };
         try {
-            const newId = await characterDb.add(newChar);
-            const created = { ...newChar, id: newId };
-            setCharacters(prev => [...prev, created]);
-            selectCharacter(created);
+            await createCharacter(newChar);
+            setCharacters(prev => [...prev, newChar]);
+            selectCharacter(newChar);
         } catch (err) {
             console.error("[CharacterManager] Failed to create character:", err);
         }
     };
 
-    // ── Update current character ───────────────────
-
-    const handleFieldChange = (field: keyof CharacterProfile, value: string) => {
+    const handleFieldChange = (field: keyof CharacterRecord, value: string) => {
         if (!editChar) return;
         setEditChar(prev => prev ? { ...prev, [field]: value } : null);
     };
 
     const handleSaveEdit = async () => {
-        if (!editChar || !editChar.id) return;
+        if (!editChar) return;
         try {
-            await characterDb.update(editChar);
-            setCharacters(prev => prev.map(c => c.id === editChar.id ? { ...editChar } : c));
-            const prompt = composeSystemPrompt(editChar);
+            const updated = { ...editChar, updated_at: Date.now() };
+            await updateCharacter(updated);
+            setCharacters(prev => prev.map(c => c.id === updated.id ? updated : c));
+            const prompt = composeSystemPrompt(updated);
             onPersonaChangeRef.current(prompt);
-            // Push updated persona to backend immediately
-            setPersona(prompt).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
-            setCharacterName(editChar.name).catch(e => console.error("[CharacterManager] Failed to set character name:", e));
+            setPersona(prompt).catch(() => {});
+            setCharacterName(updated.name).catch(() => {});
         } catch (err) {
             console.error("[CharacterManager] Failed to update character:", err);
         }
     };
 
-    // ── Delete character ───────────────────────────
-
-    const handleDelete = async (charId: number) => {
+    const handleDelete = async (charId: string) => {
         try {
-            await characterDb.remove(charId);
+            await deleteCharacter(charId);
             const remaining = characters.filter(c => c.id !== charId);
             setCharacters(remaining);
             setConfirmDeleteId(null);
 
-            // If we deleted the active/editing character, switch
             if (activeId === charId || editChar?.id === charId) {
                 if (remaining.length > 0) {
                     selectCharacter(remaining[0]);
                 } else {
-                    // Re-create default
                     const defaultChar = makeDefaultCharacter();
-                    const newId = await characterDb.add(defaultChar);
-                    const created = { ...defaultChar, id: newId };
-                    setCharacters([created]);
-                    selectCharacter(created);
+                    await createCharacter(defaultChar);
+                    setCharacters([defaultChar]);
+                    selectCharacter(defaultChar);
                 }
             }
         } catch (err) {
@@ -274,28 +255,28 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
         }
     };
 
-    // ── Import character card ──────────────────────
-
     const handleImport = async () => {
-        // Create a hidden file input and click it
         const input = document.createElement("input");
         input.type = "file";
         input.accept = ".json,.png";
         input.onchange = async (e) => {
             const file = (e.target as HTMLInputElement).files?.[0];
             if (!file) return;
-
             try {
                 const profile = await parseCharacterCard(file);
                 const now = Date.now();
-                const newId = await characterDb.add({
-                    ...profile,
-                    createdAt: now,
-                    updatedAt: now,
-                });
-                const created: CharacterProfile = { ...profile, id: newId, createdAt: now, updatedAt: now };
-                setCharacters(prev => [...prev, created]);
-                selectCharacter(created);
+                const newChar: CharacterRecord = {
+                    id: crypto.randomUUID(),
+                    name: profile.name,
+                    persona: profile.persona,
+                    user_nickname: profile.user_nickname,
+                    source_format: profile.source_format ?? "manual",
+                    created_at: now,
+                    updated_at: now,
+                };
+                await createCharacter(newChar);
+                setCharacters(prev => [...prev, newChar]);
+                selectCharacter(newChar);
                 setImportFeedback(t("settings.persona.status.imported", { name: profile.name }));
                 setTimeout(() => setImportFeedback(null), 3000);
             } catch (err) {
@@ -534,7 +515,7 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                                         <motion.button
                                             whileHover={{ scale: 1.1 }}
                                             whileTap={{ scale: 0.9 }}
-                                            onClick={() => handleDelete(char.id!)}
+                                            onClick={() => handleDelete(char.id)}
                                             className="px-2.5 py-1 rounded text-[10px] font-heading font-semibold uppercase bg-[var(--color-error)]/20 text-[var(--color-error)] hover:bg-[var(--color-error)]/30 transition-colors"
                                         >
                                             {t("settings.persona.list.delete")}
@@ -562,22 +543,21 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                                 <span className="text-sm font-heading font-semibold tracking-wide truncate block">
                                     {char.name}
                                 </span>
-                                {char.sourceFormat && char.sourceFormat !== "manual" && (
+                                {char.source_format && char.source_format !== "manual" && (
                                     <span className="text-[10px] text-[var(--color-text-muted)] uppercase tracking-wider">
-                                        {char.sourceFormat}
+                                        {char.source_format}
                                     </span>
                                 )}
                             </div>
                             {activeId === char.id && (
                                 <Check size={14} strokeWidth={2} className="text-[var(--color-accent)] shrink-0" />
                             )}
-                            {/* Delete icon — visible on hover */}
                             <motion.div
                                 whileHover={{ scale: 1.15 }}
                                 whileTap={{ scale: 0.9 }}
                                 onClick={(e) => {
                                     e.stopPropagation();
-                                    setConfirmDeleteId(char.id!);
+                                    setConfirmDeleteId(char.id);
                                 }}
                                 className="shrink-0 p-1 rounded opacity-0 group-hover:opacity-100 text-[var(--color-text-muted)] hover:text-[var(--color-error)] transition-all cursor-pointer"
                             >
@@ -617,8 +597,8 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                         </label>
                         <input
                             type="text"
-                            value={editChar.userNickname}
-                            onChange={e => handleFieldChange("userNickname", e.target.value)}
+                            value={editChar.user_nickname}
+                            onChange={e => handleFieldChange("user_nickname", e.target.value)}
                             onBlur={handleSaveEdit}
                             placeholder={t("settings.persona.edit.nickname_placeholder")}
                             className={inputClasses}

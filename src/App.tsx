@@ -90,7 +90,6 @@ import {
   listLive2dModels,
   getTtsConfig,
   setPersona,
-  setActiveCharacterId,
   setResponseLanguage,
   getProactiveEnabled,
   // Config Getters
@@ -325,20 +324,18 @@ function App() {
 
     // Sync the active character's persona to the backend on startup
     import("./ui/widgets/CharacterManager").then(async ({ composeSystemPrompt }) => {
-      const { characterDb } = await import("./lib/db");
+      const { listCharacters, setPersona, setActiveCharacterId } = await import("./lib/kokoro-bridge");
       try {
-        const all = await characterDb.getAll();
-        setCharacters(all); // Populate character list for mod settings
+        const all = await listCharacters();
+        setCharacters(all);
         const savedId = localStorage.getItem("kokoro_active_character_id");
-        const char = savedId ? all.find(c => c.id === Number(savedId)) : all[0];
+        const char = savedId ? all.find(c => c.id === savedId) ?? all[0] : all[0];
         if (char) {
           const prompt = composeSystemPrompt(char);
           localStorage.setItem("kokoro_persona", prompt);
           setPersonaState(prompt);
           await setPersona(prompt);
-          if (char.id !== undefined) {
-            await setActiveCharacterId(String(char.id));
-          }
+          await setActiveCharacterId(char.id);
           console.log("[App] Synced persona on startup:", char.name);
         }
       } catch (e) {
@@ -775,11 +772,11 @@ function App() {
     }
     if (detail.action === 'select_character' && detail.data?.id != null) {
       import('./ui/widgets/CharacterManager').then(async ({ composeSystemPrompt }) => {
-        const { characterDb } = await import('./lib/db');
-        const all = await characterDb.getAll();
-        const char = all.find(c => c.id === Number(detail.data.id));
+        const { listCharacters } = await import('./lib/kokoro-bridge');
+        const all = await listCharacters();
+        const char = all.find(c => c.id === detail.data.id);
         if (char) {
-          localStorage.setItem('kokoro_active_character_id', String(char.id));
+          localStorage.setItem('kokoro_active_character_id', char.id);
           const prompt = composeSystemPrompt(char);
           setPersonaState(prompt);
           setPersona(prompt).catch(console.error);
@@ -788,22 +785,15 @@ function App() {
       }).catch(console.error);
     }
     if (detail.action === 'create_character') {
-      import('./lib/db').then(async ({ characterDb }) => {
+      import('./lib/kokoro-bridge').then(async ({ createCharacter, listCharacters }) => {
+        const id = crypto.randomUUID();
         const now = Date.now();
-        const newId = await characterDb.add({
-          name: 'New Character',
-          persona: '',
-          userNickname: 'User',
-          sourceFormat: 'manual',
-          createdAt: now,
-          updatedAt: now,
-        });
-        const all = await characterDb.getAll();
+        await createCharacter({ id, name: 'New Character', persona: '', user_nickname: 'User', source_format: 'manual', created_at: now, updated_at: now });
+        const all = await listCharacters();
         setCharacters(all);
-        // Auto-select the new character
-        const newChar = all.find(c => c.id === newId);
+        const newChar = all.find(c => c.id === id);
         if (newChar) {
-          localStorage.setItem('kokoro_active_character_id', String(newId));
+          localStorage.setItem('kokoro_active_character_id', newChar.id);
           const { composeSystemPrompt } = await import('./ui/widgets/CharacterManager');
           const prompt = composeSystemPrompt(newChar);
           setPersonaState(prompt);
@@ -821,18 +811,20 @@ function App() {
         if (!file) return;
         try {
           const { parseCharacterCard } = await import('./lib/character-card-parser');
-          const { characterDb } = await import('./lib/db');
+          const { createCharacter, listCharacters } = await import('./lib/kokoro-bridge');
           const profile = await parseCharacterCard(file);
+          const id = crypto.randomUUID();
           const now = Date.now();
-          const newId = await characterDb.add({ ...profile, createdAt: now, updatedAt: now });
-          const all = await characterDb.getAll();
+          await createCharacter({ id, ...profile, created_at: now, updated_at: now });
+          const all = await listCharacters();
           setCharacters(all);
-          localStorage.setItem('kokoro_active_character_id', String(newId));
-          const { composeSystemPrompt } = await import('./ui/widgets/CharacterManager');
-          const char = all.find(c => c.id === newId);
+          const char = all.find(c => c.id === id);
           if (char) {
-            setPersonaState(composeSystemPrompt(char));
-            setPersona(composeSystemPrompt(char)).catch(console.error);
+            localStorage.setItem('kokoro_active_character_id', char.id);
+            const { composeSystemPrompt } = await import('./ui/widgets/CharacterManager');
+            const prompt = composeSystemPrompt(char);
+            setPersonaState(prompt);
+            setPersona(prompt).catch(console.error);
           }
         } catch (err) {
           console.error('[App] import character failed:', err);

@@ -5,12 +5,11 @@ import { useTranslation } from "react-i18next";
 import { Trash2, Pencil, Check, X, Search, Brain, ChevronDown, List, Calendar, Share2, UserCircle } from "lucide-react";
 import { inputClasses } from "../styles/settings-primitives";
 import { Select } from "@/components/ui/select";
-import { listMemories, updateMemory, deleteMemory } from "../../lib/kokoro-bridge";
-import type { MemoryRecord } from "../../lib/kokoro-bridge";
+import { listMemories, updateMemory, deleteMemory, listCharacters } from "../../lib/kokoro-bridge";
+import type { MemoryRecord, CharacterRecord } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { MemoryTimeline } from "./memory/MemoryTimeline";
 import { MemoryGraph } from "./memory/MemoryGraph";
-import { characterDb, type CharacterProfile } from "../../lib/db";
 
 interface MemoryPanelProps {
     characterId: string;
@@ -33,19 +32,15 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
     const pageSize = 50; // Load more for graph/timeline
 
     // ── Character selector state ──
-    const [characters, setCharacters] = useState<CharacterProfile[]>([]);
+    const [characters, setCharacters] = useState<CharacterRecord[]>([]);
     const [selectedCharId, setSelectedCharId] = useState<string>(characterId);
 
     // Load character list for the dropdown
     useEffect(() => {
-        characterDb.getAll().then((all) => {
+        listCharacters().then((all) => {
             setCharacters(all);
-            console.log("[MemoryPanel] Characters loaded:", all.map(c => ({ id: c.id, name: c.name })));
-            console.log("[MemoryPanel] Prop characterId:", characterId);
-            // If the provided characterId matches an existing character, keep it
-            // Otherwise default to the first character
-            if (!all.find((c) => String(c.id) === characterId) && all.length > 0) {
-                setSelectedCharId(String(all[0].id));
+            if (!all.find((c) => c.id === characterId) && all.length > 0) {
+                setSelectedCharId(all[0].id);
             }
         }).catch((e) => console.error("[MemoryPanel] Failed to load characters:", e));
     }, [characterId]);
@@ -177,8 +172,8 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                             value={selectedCharId}
                             onChange={setSelectedCharId}
                             options={characters.map(char => ({
-                                value: String(char.id),
-                                label: `${char.name}${String(char.id) === characterId ? ` ${t("settings.memory.active_char")}` : ""}`,
+                                value: char.id,
+                                label: `${char.name}${char.id === characterId ? ` ${t("settings.memory.active_char")}` : ""}`,
                             }))}
                             className="[&>button]:pl-9"
                         />

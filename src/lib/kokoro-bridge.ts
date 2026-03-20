@@ -904,6 +904,34 @@ export async function importData(filePath: string, options: ImportOptions): Prom
     return invoke<ImportResult>("import_data", { filePath, options });
 }
 
+// ── Character CRUD (SQLite-backed) ────────────────
+
+export interface CharacterRecord {
+    id: string;
+    name: string;
+    persona: string;
+    user_nickname: string;
+    source_format: string;
+    created_at: number;
+    updated_at: number;
+}
+
+export async function listCharacters(): Promise<CharacterRecord[]> {
+    return invoke<CharacterRecord[]>("list_characters");
+}
+
+export async function createCharacter(record: CharacterRecord): Promise<void> {
+    return invoke("create_character", { request: record });
+}
+
+export async function updateCharacter(record: Omit<CharacterRecord, "created_at">): Promise<void> {
+    return invoke("update_character", { request: record });
+}
+
+export async function deleteCharacter(id: string): Promise<void> {
+    return invoke("delete_character", { id });
+}
+
 // ── Auto Backup ────────────────────────────────────
 
 export interface AutoBackupConfig {

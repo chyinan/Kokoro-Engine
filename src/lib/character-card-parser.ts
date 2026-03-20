@@ -5,7 +5,7 @@
  * character data in tEXt / iTXt chunks. Zero external dependencies —
  * uses native browser APIs (DataView, TextDecoder, atob).
  */
-import type { CharacterProfile } from "./db";
+import type { CharacterRecord } from "./kokoro-bridge";
 
 // ── PNG Chunk Parsing ──────────────────────────────
 
@@ -97,7 +97,7 @@ function extractPngTextChunks(buffer: ArrayBuffer): Map<string, string> {
  * Normalize a SillyTavern character card JSON (v1, v2, or v3) into
  * our internal CharacterProfile format.
  */
-function mapCardToProfile(card: any): Omit<CharacterProfile, "id" | "createdAt" | "updatedAt"> {
+function mapCardToProfile(card: any): Omit<CharacterRecord, "id" | "created_at" | "updated_at"> {
     // v2/v3 wraps fields inside `data`; v1 uses top-level fields
     const d = card.data ?? card;
 
@@ -145,8 +145,8 @@ function mapCardToProfile(card: any): Omit<CharacterProfile, "id" | "createdAt" 
     return {
         name,
         persona,
-        userNickname: "{{user}}",
-        sourceFormat,
+        user_nickname: "{{user}}",
+        source_format: sourceFormat,
     };
 }
 
@@ -157,7 +157,7 @@ function mapCardToProfile(card: any): Omit<CharacterProfile, "id" | "createdAt" 
 /**
  * Parse a raw JSON string containing a SillyTavern character card.
  */
-export function parseCharacterCardJSON(jsonStr: string): Omit<CharacterProfile, "id" | "createdAt" | "updatedAt"> {
+export function parseCharacterCardJSON(jsonStr: string): Omit<CharacterRecord, "id" | "created_at" | "updated_at"> {
     const card = JSON.parse(jsonStr);
     return mapCardToProfile(card);
 }
@@ -167,7 +167,7 @@ export function parseCharacterCardJSON(jsonStr: string): Omit<CharacterProfile, 
  * Looks for a `chara` keyword in tEXt or iTXt chunks, base64-decodes
  * the value, and parses it as JSON.
  */
-export async function parseCharacterCardPNG(file: File): Promise<Omit<CharacterProfile, "id" | "createdAt" | "updatedAt">> {
+export async function parseCharacterCardPNG(file: File): Promise<Omit<CharacterRecord, "id" | "created_at" | "updated_at">> {
     const buffer = await file.arrayBuffer();
 
     if (!isPng(buffer)) {
@@ -208,7 +208,7 @@ export async function parseCharacterCardPNG(file: File): Promise<Omit<CharacterP
 /**
  * Detect whether a File is a character card JSON or PNG, and parse accordingly.
  */
-export async function parseCharacterCard(file: File): Promise<Omit<CharacterProfile, "id" | "createdAt" | "updatedAt">> {
+export async function parseCharacterCard(file: File): Promise<Omit<CharacterRecord, "id" | "created_at" | "updated_at">> {
     const ext = file.name.toLowerCase().split(".").pop();
 
     if (ext === "json") {

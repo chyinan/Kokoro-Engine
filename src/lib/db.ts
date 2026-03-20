@@ -2,7 +2,7 @@
 const DB_NAME = "KokoroDB";
 const STORE_NAME = "background_images";
 const CHAR_STORE = "characters";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export interface StoredImage {
     id: number;
@@ -12,6 +12,7 @@ export interface StoredImage {
 
 export interface CharacterProfile {
     id?: number;
+    stableId: string;  // stable UUID — used as character_id in SQLite, survives IndexedDB resets
     name: string;
     persona: string;
     userNickname: string;
@@ -31,6 +32,7 @@ function openDB(): Promise<IDBDatabase> {
         request.onupgradeneeded = (event) => {
             const db = (event.target as IDBOpenDBRequest).result;
             const oldVersion = event.oldVersion;
+            const transaction = (event.target as IDBOpenDBRequest).transaction!;
 
             // v1: background_images
             if (oldVersion < 1) {
@@ -42,6 +44,23 @@ function openDB(): Promise<IDBDatabase> {
                 const charStore = db.createObjectStore(CHAR_STORE, { keyPath: "id", autoIncrement: true });
                 charStore.createIndex("name", "name", { unique: false });
                 charStore.createIndex("updatedAt", "updatedAt", { unique: false });
+            }
+
+            // v3: add stableId (UUID) to all existing character records
+            if (oldVersion < 3 && oldVersion >= 2) {
+                const charStore = transaction.objectStore(CHAR_STORE);
+                const req = charStore.openCursor();
+                req.onsuccess = (e) => {
+                    const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
+                    if (cursor) {
+                        const record = cursor.value;
+                        if (!record.stableId) {
+                            record.stableId = crypto.randomUUID();
+                            cursor.update(record);
+                        }
+                        cursor.continue();
+                    }
+                };
             }
         };
     });
@@ -107,7 +126,9 @@ export const characterDb = {
         return new Promise((resolve, reject) => {
             const tx = conn.transaction(CHAR_STORE, "readwrite");
             const store = tx.objectStore(CHAR_STORE);
-            const request = store.add(profile);
+            // Ensure stableId is always set
+            const record = { ...profile, stableId: profile.stableId || crypto.randomUUID() };
+            const request = store.add(record);
 
             request.onsuccess = () => resolve(request.result as number);
             request.onerror = () => reject(request.error);

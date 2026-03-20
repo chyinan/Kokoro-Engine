@@ -5,11 +5,9 @@ import { Bot, Shield, Volume2, Loader2, Play, Square, RefreshCw } from "lucide-r
 import { useTranslation } from "react-i18next";
 import {
     saveTelegramConfig,
-    startTelegramBot, stopTelegramBot, getTelegramStatus,
+    startTelegramBot, stopTelegramBot, getTelegramStatus, listCharacters,
 } from "../../../lib/kokoro-bridge";
-import type { TelegramConfig, TelegramStatus } from "../../../lib/kokoro-bridge";
-import { characterDb } from "../../../lib/db";
-import type { CharacterProfile } from "../../../lib/db";
+import type { TelegramConfig, TelegramStatus, CharacterRecord } from "../../../lib/kokoro-bridge";
 import { inputClasses, labelClasses } from "../../styles/settings-primitives";
 import { Select } from "@/components/ui/select";
 
@@ -24,7 +22,7 @@ export default function TelegramTab({ config, onUpdate }: TelegramTabProps) {
     const [loading, setLoading] = useState(true);
     const [dirty, setDirty] = useState(false);
     const [chatIdInput, setChatIdInput] = useState("");
-    const [characters, setCharacters] = useState<CharacterProfile[]>([]);
+    const [characters, setCharacters] = useState<CharacterRecord[]>([]);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     useEffect(() => {
@@ -41,7 +39,7 @@ export default function TelegramTab({ config, onUpdate }: TelegramTabProps) {
         try {
             const [st, chars] = await Promise.all([
                 getTelegramStatus(),
-                characterDb.getAll(),
+                listCharacters(),
             ]);
             setStatus(st);
             setCharacters(chars);
@@ -250,7 +248,7 @@ export default function TelegramTab({ config, onUpdate }: TelegramTabProps) {
                     options={[
                         { value: "", label: t("telegram.character_id.auto") },
                         ...characters.map(char => ({
-                            value: String(char.id),
+                            value: char.id,
                             label: char.name,
                         })),
                     ]}

@@ -96,7 +96,7 @@ impl AIOrchestrator {
         .execute(&pool)
         .await?;
 
-        // Migration: add character_id column to existing databases that lack it
+        // Migration: add character_id column to existing databases that lack it (test comment 2026-03-20)
         let _ = sqlx::query(
             "ALTER TABLE memories ADD COLUMN character_id TEXT NOT NULL DEFAULT 'default'",
         )
@@ -163,6 +163,21 @@ impl AIOrchestrator {
         )
         .execute(&pool)
         .await;
+
+        // Characters table — source of truth for character profiles
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS characters (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                persona TEXT NOT NULL DEFAULT '',
+                user_nickname TEXT NOT NULL DEFAULT 'User',
+                source_format TEXT NOT NULL DEFAULT 'manual',
+                created_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .execute(&pool)
+        .await?;
 
         // 对话记录持久化表
         sqlx::query(
