@@ -44,7 +44,7 @@ uuid = { version = "1.20.0", features = ["v4"] }
 base64 = "0.22.1"
 warp = "0.3"
 filetime = "0.2"
-xcap = "0.0.13"
+screenshots = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 teloxide = { version = "0.13", features = ["macros"] }
 

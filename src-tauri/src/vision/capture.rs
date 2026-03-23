@@ -2,17 +2,16 @@
 
 /// Capture the primary monitor as PNG bytes.
 pub fn capture_screen() -> Result<Vec<u8>, String> {
-    let monitors =
-        xcap::Monitor::all().map_err(|e| format!("Failed to enumerate monitors: {}", e))?;
+    let screens =
+        screenshots::Screen::all().map_err(|e| format!("Failed to enumerate screens: {}", e))?;
 
-    let monitor = monitors
+    let screen = screens
         .into_iter()
-        .find(|m| m.is_primary())
-        .or_else(|| xcap::Monitor::all().ok()?.into_iter().next())
-        .ok_or_else(|| "No monitors found".to_string())?;
+        .find(|s| s.display_info.is_primary)
+        .ok_or_else(|| "No primary screen found".to_string())?;
 
-    let img = monitor
-        .capture_image()
+    let img = screen
+        .capture()
         .map_err(|e| format!("Screen capture failed: {}", e))?;
 
     // Convert RGBA → RGB (JPEG doesn't support alpha channel)
