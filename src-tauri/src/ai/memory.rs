@@ -31,8 +31,15 @@ const MAX_CLUSTER_SIZE: usize = 5;
 
 /// Local model directory path (relative to working dir).
 #[allow(dead_code)]
-const LOCAL_MODEL_DIR: &str =
-    "models/models--Qdrant--all-MiniLM-L6-v2-onnx/snapshots/5f1b8cd78bc4fb444dd171e59b18f3a3af89a079";
+const LOCAL_MODEL_DIR: &str = "models/models--Qdrant--all-MiniLM-L6-v2-onnx";
+const MODEL_REPO: &str = "Qdrant/all-MiniLM-L6-v2-onnx";
+const MODEL_AUX_FILES: &[&str] = &[
+    "config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "vocab.txt",
+];
 
 impl MemoryManager {
     /// Creates a new MemoryManager without downloading any models.
@@ -44,14 +51,29 @@ impl MemoryManager {
         }
     }
 
-    /// Try to load the embedding model from local files (no network required).
-    fn try_load_local() -> Option<TextEmbedding> {
-        use fastembed::{InitOptionsUserDefined, TokenizerFiles, UserDefinedEmbeddingModel};
+    fn resolve_snapshot_dir(repo_dir: &std::path::Path) -> Option<std::path::PathBuf> {
         use std::fs;
-        use std::path::PathBuf;
+        let refs_main = repo_dir.join("refs").join("main");
+        if let Ok(rev) = fs::read_to_string(&refs_main) {
+            let rev = rev.trim();
+            if !rev.is_empty() {
+                let snapshot = repo_dir.join("snapshots").join(rev);
+                if snapshot.exists() {
+                    return Some(snapshot);
+                }
+            }
+        }
 
-        const SNAPSHOT: &str =
-            "models/models--Qdrant--all-MiniLM-L6-v2-onnx/snapshots/5f1b8cd78bc4fb444dd171e59b18f3a3af89a079";
+        let snapshots = repo_dir.join("snapshots");
+        fs::read_dir(&snapshots)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+    }
+
+    fn model_search_roots() -> Vec<std::path::PathBuf> {
+        use std::path::PathBuf;
 
         // Search multiple candidate base directories
         let mut candidates: Vec<PathBuf> = Vec::new();
@@ -79,8 +101,62 @@ impl MemoryManager {
             candidates.push(app_data.join("com.chyin.kokoro"));
         }
 
+        candidates
+    }
+
+    async fn hydrate_missing_local_files(snapshot_dir: &std::path::Path) -> Result<bool> {
+        let missing: Vec<&str> = MODEL_AUX_FILES
+            .iter()
+            .copied()
+            .filter(|name| !snapshot_dir.join(name).exists())
+            .collect();
+
+        if missing.is_empty() {
+            return Ok(false);
+        }
+
+        println!(
+            "[Memory] Hydrating missing tokenizer/config files in {}: {:?}",
+            snapshot_dir.display(),
+            missing
+        );
+
+        let client = reqwest::Client::builder()
+            .user_agent("kokoro-engine/0.1.4")
+            .build()?;
+
+        tokio::fs::create_dir_all(snapshot_dir).await?;
+
+        for file in &missing {
+            let url = format!(
+                "https://huggingface.co/{}/resolve/main/{}",
+                MODEL_REPO, file
+            );
+            let bytes = client
+                .get(&url)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?;
+            tokio::fs::write(snapshot_dir.join(file), &bytes).await?;
+        }
+
+        Ok(true)
+    }
+
+    /// Try to load the embedding model from local files (no network required).
+    fn try_load_local() -> Option<TextEmbedding> {
+        use fastembed::{InitOptionsUserDefined, TokenizerFiles, UserDefinedEmbeddingModel};
+        use std::fs;
+
+        let candidates = Self::model_search_roots();
+
         for base in &candidates {
-            let dir = base.join(SNAPSHOT);
+            let repo_dir = base.join(LOCAL_MODEL_DIR);
+            let Some(dir) = Self::resolve_snapshot_dir(&repo_dir) else {
+                continue;
+            };
             let onnx = dir.join("model.onnx");
 
             if onnx.exists() {
@@ -92,7 +168,10 @@ impl MemoryManager {
                 let tok_config = dir.join("tokenizer_config.json");
 
                 if !tokenizer.exists() || !config.exists() {
-                    eprintln!("[Memory] model.onnx found but tokenizer/config missing, skipping.");
+                    eprintln!(
+                        "[Memory] model.onnx found but tokenizer/config missing in {}, skipping.",
+                        dir.display()
+                    );
                     continue;
                 }
 
@@ -141,6 +220,23 @@ impl MemoryManager {
                     return Ok(Mutex::new(model));
                 }
 
+                // 1.5 If a partial local cache exists, fill in the small tokenizer/config files
+                // and retry local loading before falling back to fastembed's downloader again.
+                for base in Self::model_search_roots() {
+                    let repo_dir = base.join(LOCAL_MODEL_DIR);
+                    let Some(snapshot_dir) = Self::resolve_snapshot_dir(&repo_dir) else {
+                        continue;
+                    };
+                    if !snapshot_dir.join("model.onnx").exists() {
+                        continue;
+                    }
+                    if Self::hydrate_missing_local_files(&snapshot_dir).await? {
+                        if let Some(model) = Self::try_load_local() {
+                            return Ok(Mutex::new(model));
+                        }
+                    }
+                }
+
                 // 2. Fall back to HF download — cache into app data so build can find it next time
                 println!("[Memory] Local model not found, downloading from HuggingFace...");
                 let cache_dir = dirs_next::data_dir()
@@ -151,6 +247,16 @@ impl MemoryManager {
                     InitOptions::new(EmbeddingModel::AllMiniLML6V2)
                         .with_cache_dir(cache_dir),
                 )?;
+
+                // Persist any missing small files so the next startup can load locally
+                // instead of repeatedly treating the cache as incomplete.
+                let app_repo_dir = dirs_next::data_dir()
+                    .map(|d| d.join("com.chyin.kokoro").join(LOCAL_MODEL_DIR))
+                    .unwrap_or_else(|| std::path::PathBuf::from(LOCAL_MODEL_DIR));
+                if let Some(snapshot_dir) = Self::resolve_snapshot_dir(&app_repo_dir) {
+                    let _ = Self::hydrate_missing_local_files(&snapshot_dir).await;
+                }
+
                 println!("[Memory] Embedding model downloaded and loaded successfully.");
                 Ok(Mutex::new(model))
             })
