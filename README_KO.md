@@ -106,7 +106,7 @@ Live2D, LLM, TTS 및 STT와 같은 기술을 통합하여 고도로 모듈화되
 
 ### 방법 1: 미리 빌드된 버전 다운로드 (권장)
 
-[Releases 페이지](https://github.com/chyinan/Kokoro-Engine/releases)에서 최신 미리 빌드된 버전을 다운로드하세요. 압축을 해제한 후 바로 실행할 수 있습니다.
+[Releases 페이지](https://github.com/chyinan/Kokoro-Engine/releases)에서 해당 플랫폼의 설치 프로그램을 다운로드한 후 바로 실행하세요.
 
 ### 방법 2: 소스에서 빌드
 

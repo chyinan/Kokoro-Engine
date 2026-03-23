@@ -106,7 +106,7 @@
 
 ### 方式一：下载发行版（推荐）
 
-前往 [Releases 页面](https://github.com/chyinan/Kokoro-Engine/releases) 下载最新的预编译版本，解压后直接运行。
+前往 [Releases 页面](https://github.com/chyinan/Kokoro-Engine/releases) 下载对应平台的安装包后直接运行。
 
 ### 方式二：从源码构建
 

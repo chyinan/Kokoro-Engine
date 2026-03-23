@@ -106,7 +106,7 @@ The following features are planned, in development, or **not yet tested/verified
 
 ### Option 1: Download Pre-built Release (Recommended)
 
-Visit the [Releases page](https://github.com/chyinan/Kokoro-Engine/releases) to download the latest pre-compiled version. Simply extract and run.
+Visit the [Releases page](https://github.com/chyinan/Kokoro-Engine/releases) to download the installer for your platform and run it directly.
 
 ### Option 2: Build from Source
 
