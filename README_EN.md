@@ -12,19 +12,6 @@
 
 ---
 
-> [!CAUTION]
-> **⚠️ Early Access Notice**
->
-> **Kokoro Engine** is currently in **Alpha Development Stage**.
->
-> This is an open-source project built by a single developer with limited resources (primary development machine is just an RTX 4060 laptop).
->
-> - **🚧 Not Ready Out-of-the-Box**: Features are still iterating frequently and may require some technical background to configure.
-> - **💸 Funding & Testing Limitations**: Due to limited funds, **apart from LLM interfaces, other commercial APIs have not been fully tested**. Although the code is implemented, there is no guarantee that all commercial APIs will work perfectly.
-> - **🤝 Seeking Support**: If you find this project interesting or useful, please **Star** ⭐️ it! If you are a "generous donor" willing to sponsor API debugging funds or hardware upgrades, please check the [sponsorship methods](SPONSOR.md).
-
----
-
 ## ✨ Introduction
 
 **Kokoro Engine** is a cross-platform virtual character immersive interaction engine designed to let everyone have a "heartfelt" virtual companion on their desktop (inspired by Neuro-sama).
