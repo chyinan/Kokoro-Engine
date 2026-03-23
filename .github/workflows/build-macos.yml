@@ -37,6 +37,8 @@ jobs:
         run: npm run build
 
       - name: Build macOS app (arm64)
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
         run: npm run tauri build -- --target aarch64-apple-darwin
 
       - name: Upload DMG artifact
