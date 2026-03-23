@@ -30,6 +30,7 @@ export interface Live2DViewerHandle {
     playMotion: (group: string, index?: number) => void;
     getModel: () => Live2DModel | null;
     getController: () => Live2DController | undefined;
+    fitToView: () => void;
 }
 
 export type Live2DDisplayMode = "full" | "upper" | "upper-thigh";
@@ -51,6 +52,8 @@ export interface Live2DViewerProps {
     gazeTracking?: boolean;
     /** Fixed canvas size (disables auto-resize), useful for pet window */
     fixedSize?: { width: number; height: number };
+    /** Optional user scale multiplier applied on top of auto-fit */
+    scaleMultiplier?: number;
     /** Callback when model is loaded and sized */
     onModelLoaded?: (bounds: { width: number; height: number }) => void;
 }
@@ -58,11 +61,13 @@ export interface Live2DViewerProps {
 // ── Component ──────────────────────────────────────
 
 const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
-    ({ modelUrl, controller, onHitAreaTap, className, backgroundAlpha = 0, displayMode = "full", gazeTracking = true, fixedSize, onModelLoaded }, ref) => {
+    ({ modelUrl, controller, onHitAreaTap, className, backgroundAlpha = 0, displayMode = "full", gazeTracking = true, fixedSize, scaleMultiplier = 1, onModelLoaded }, ref) => {
         const containerRef = useRef<HTMLDivElement>(null);
         const appRef = useRef<PIXI.Application | null>(null);
         const modelRef = useRef<Live2DModel | null>(null);
         const gazeTrackingRef = useRef(gazeTracking);
+        const fitModelRef = useRef<(() => void) | null>(null);
+        const scaleMultiplierRef = useRef(scaleMultiplier);
 
         // Internal controller if none provided
         const internalControllerRef = useRef<Live2DController | null>(null);
@@ -103,6 +108,9 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                 },
                 getController() {
                     return ctrl || undefined;
+                },
+                fitToView() {
+                    fitModelRef.current?.();
                 }
             };
         });
@@ -153,6 +161,11 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
         useEffect(() => {
             gazeTrackingRef.current = gazeTracking;
         }, [gazeTracking]);
+
+        useEffect(() => {
+            scaleMultiplierRef.current = scaleMultiplier;
+            fitModelRef.current?.();
+        }, [scaleMultiplier]);
 
         // Gaze tracking: model eyes follow cursor
         const handlePointerMove = useCallback((e: PIXI.InteractionEvent) => {
@@ -209,63 +222,47 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                     const originalWidth = model.width;
                     const originalHeight = model.height;
 
-                    // Calculate initial scale based on fixedSize or container
-                    let initialScale: number;
-                    if (fixedSize) {
-                        // Calculate scale to fit the fixed size
-                        const scaleX = fixedSize.width / originalWidth;
-                        const scaleY = fixedSize.height / originalHeight;
-                        initialScale = Math.min(scaleX, scaleY) * 0.9; // 0.9 for some padding
-                    } else {
-                        // Use container size
-                        const scaleX = app.screen.width / originalWidth;
-                        const scaleY = app.screen.height / originalHeight;
-                        initialScale = Math.min(scaleX, scaleY);
-                    }
-
-                    // Apply initial scale
-                    model.scale.set(initialScale);
-
                     // Scale model to fit container based on display mode
                     const fitModel = () => {
-                        // If fixedSize is provided, keep the initial scale and just center
-                        if (fixedSize) {
-                            // Model scale is already set, just center it
-                            model.x = (app.screen.width - model.width) / 2;
-                            model.y = (app.screen.height - model.height) / 2;
-                            return;
-                        }
-
                         const scaleX = app.screen.width / originalWidth;
                         const scaleY = app.screen.height / originalHeight;
 
                         // Mode-specific scaling
                         let scale: number;
 
+                        if (fixedSize) {
+                            // Pet window uses a bottom-aligned, height-first fit.
+                            // Start by nearly filling the available height, then clamp to width if needed.
+                            const baseScale = Math.min(scaleY * 0.98, scaleX * 1.15);
+                            scale = baseScale * scaleMultiplierRef.current;
+                            model.scale.set(scale);
+                            model.x = (app.screen.width - model.width) / 2;
+                            model.y = app.screen.height - model.height;
+                            return;
+                        }
+
                         switch (displayMode) {
                             case "upper":
-                                // Modest zoom, anchor top of model near top of screen
-                                scale = Math.min(scaleX, scaleY) * 1.5;
+                                scale = Math.min(scaleX, scaleY) * 1.5 * scaleMultiplierRef.current;
                                 model.scale.set(scale);
                                 model.x = (app.screen.width - model.width) / 2;
-                                // Place model so head is visible: top-align with small margin
                                 model.y = app.screen.height * 0.05;
                                 break;
                             case "upper-thigh":
-                                // Slight zoom, show most of the body
-                                scale = Math.min(scaleX, scaleY) * 1.25;
+                                scale = Math.min(scaleX, scaleY) * 1.25 * scaleMultiplierRef.current;
                                 model.scale.set(scale);
                                 model.x = (app.screen.width - model.width) / 2;
                                 model.y = app.screen.height * 0.03;
                                 break;
-                            default: // "full"
-                                scale = Math.min(scaleX, scaleY);
+                            default:
+                                scale = Math.min(scaleX, scaleY) * scaleMultiplierRef.current;
                                 model.scale.set(scale);
                                 model.x = (app.screen.width - model.width) / 2;
                                 model.y = (app.screen.height - model.height) / 2;
                                 break;
                         }
                     };
+                    fitModelRef.current = fitModel;
                     fitModel();
 
                     // Notify parent of model size (for pet window auto-sizing)
@@ -287,15 +284,7 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                     }
 
                     // Handle resize (only if not fixed size)
-                    if (!fixedSize) {
-                        app.renderer.on('resize', fitModel);
-                    } else {
-                        // For fixed size mode, still listen to resize to re-center the model
-                        app.renderer.on('resize', () => {
-                            model.x = (app.screen.width - model.width) / 2;
-                            model.y = (app.screen.height - model.height) / 2;
-                        });
-                    }
+                    app.renderer.on('resize', fitModel);
 
                     // Ensure model is interactive
                     (model as any).interactive = true;
@@ -411,6 +400,7 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                     model.destroy();
                     modelRef.current = null;
                 }
+                fitModelRef.current = null;
 
                 app.stage.off("pointermove", handlePointerMove);
                 try {
@@ -421,6 +411,15 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                 appRef.current = null;
             };
         }, [modelUrl, backgroundAlpha, displayMode, handlePointerMove, onHitAreaTap, getActiveController]);
+
+        useEffect(() => {
+            if (!fixedSize) return;
+
+            const app = appRef.current;
+            if (!app) return;
+
+            app.renderer.resize(fixedSize.width, fixedSize.height);
+        }, [fixedSize?.height, fixedSize?.width]);
 
         return (
             <div

@@ -19,10 +19,13 @@ interface PetConfig {
     model_url: string | null;
     window_width: number;
     window_height: number;
-    model_scale: number;
+    model_scale?: number;
 }
 
+type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
+
 export default function PetWindow() {
+    const currentWindow = getCurrentWindow();
     // Read model from localStorage and sync when main window changes it
     const getModelUrl = () => {
         const saved = localStorage.getItem("kokoro_custom_model_path");
@@ -54,44 +57,30 @@ export default function PetWindow() {
     const isDragModeRef = useRef(false);
     const isResizeModeRef = useRef(false);
     const rightClickStartRef = useRef<{ x: number; y: number } | null>(null);
-    const savedScaleRef = useRef<number>(0); // restored scale to apply after model loads
+    const userScaleMultiplierRef = useRef(1);
     const [configLoaded, setConfigLoaded] = useState(false);
+    const [scaleMultiplier, setScaleMultiplier] = useState(1);
     const { isStreaming, sendMessage } = usePetChat();
 
-    // On mount: restore saved window size and model scale from config
-    // Must complete before Live2DViewer renders to avoid race condition with handleModelLoaded
+    // On mount: restore saved window size from config
     useEffect(() => {
         invoke<PetConfig>("get_pet_config").then(cfg => {
             if (cfg.window_width > 0 && cfg.window_height > 0) {
                 setCanvasSize({ width: cfg.window_width, height: cfg.window_height });
                 invoke("resize_pet_window", { width: cfg.window_width, height: cfg.window_height }).catch(console.error);
             }
-            if (cfg.model_scale > 0) {
-                savedScaleRef.current = cfg.model_scale;
-            }
+            const savedMultiplier = cfg.model_scale && cfg.model_scale > 0 ? cfg.model_scale : 1;
+            userScaleMultiplierRef.current = savedMultiplier;
+            setScaleMultiplier(savedMultiplier);
             setConfigLoaded(true);
         }).catch(() => {
             setConfigLoaded(true); // 即使失败也要允许渲染
         });
     }, []);
 
-    // Handle model loaded - restore saved size/scale or auto-fit
+    // Handle model loaded - auto-fit the first window size to model bounds
     const handleModelLoaded = useCallback(async (bounds: { width: number; height: number }) => {
         console.log("[PetWindow] Model loaded with natural bounds:", bounds);
-
-        // If we have a saved scale, apply it and skip auto-resize
-        if (savedScaleRef.current > 0) {
-            const model = viewerRef.current?.getModel();
-            if (model) {
-                model.scale.set(savedScaleRef.current);
-                const canvas = document.querySelector('canvas');
-                if (canvas) {
-                    model.x = (canvas.width - model.width) / 2;
-                    model.y = (canvas.height - model.height) / 2;
-                }
-            }
-            return;
-        }
 
         // First launch: auto-fit to model bounds
         const padding = 30;
@@ -134,18 +123,14 @@ export default function PetWindow() {
         isResizeModeRef.current = isResizeMode;
     }, [isDragMode, isResizeMode]);
 
-    // Resize mode: drag edges to resize window + Ctrl+Wheel to scale model
+    // Resize mode: drag edges to resize window + Ctrl+Wheel to fine-tune model scale
     useEffect(() => {
         if (!isResizeMode) return;
-
-        let resizeEdge: 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw' | null = null;
-        let resizeStartPos: { x: number; y: number } | null = null;
-        let windowStartSize: { width: number; height: number } | null = null;
-        let windowStartPos: { x: number; y: number } | null = null;
+        currentWindow.setResizable(true).catch(console.error);
 
         const EDGE_SIZE = 10; // px from edge to detect resize
 
-        const detectEdge = (e: MouseEvent): typeof resizeEdge => {
+        const detectEdge = (e: MouseEvent): 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw' | null => {
             const rect = document.body.getBoundingClientRect();
             const x = e.clientX;
             const y = e.clientY;
@@ -166,7 +151,7 @@ export default function PetWindow() {
             return null;
         };
 
-        const getCursor = (edge: typeof resizeEdge): string => {
+        const getCursor = (edge: ReturnType<typeof detectEdge>): string => {
             if (!edge) return 'default';
             const cursors = {
                 n: 'ns-resize',
@@ -181,114 +166,55 @@ export default function PetWindow() {
             return cursors[edge];
         };
 
-        const recenterModel = () => {
-            const model = viewerRef.current?.getModel();
-            if (model) {
-                const canvas = document.querySelector('canvas');
-                if (canvas) {
-                    model.x = (canvas.width - model.width) / 2;
-                    model.y = (canvas.height - model.height) / 2;
-                }
-            }
+        const getResizeDirection = (edge: NonNullable<ReturnType<typeof detectEdge>>): ResizeDirection => {
+            const directions: Record<NonNullable<ReturnType<typeof detectEdge>>, ResizeDirection> = {
+                n: "North",
+                s: "South",
+                e: "East",
+                w: "West",
+                ne: "NorthEast",
+                nw: "NorthWest",
+                se: "SouthEast",
+                sw: "SouthWest",
+            };
+            return directions[edge];
         };
 
-        // Ctrl + Wheel to scale model
-        const handleWheel = (e: WheelEvent) => {
-            if (e.ctrlKey) {
-                e.preventDefault();
-
-                const model = viewerRef.current?.getModel();
-                if (!model) return;
-
-                const delta = e.deltaY > 0 ? -0.02 : 0.02;
-                const currentScale = model.scale.x;
-                const newScale = Math.max(0.1, Math.min(3.0, currentScale + delta));
-
-                model.scale.set(newScale);
-                recenterModel();
-
-                // Persist scale
-                invoke<PetConfig>("get_pet_config").then(cfg => {
-                    invoke("save_pet_config", { config: { ...cfg, model_scale: newScale } }).catch(console.error);
-                }).catch(console.error);
-            }
-        };
-
-        const handleMouseMove = async (e: MouseEvent) => {
-            if (resizeEdge && resizeStartPos && windowStartSize && windowStartPos) {
-                // Resizing
-                const dx = e.screenX - resizeStartPos.x;
-                const dy = e.screenY - resizeStartPos.y;
-
-                let newWidth = windowStartSize.width;
-                let newHeight = windowStartSize.height;
-                let newX = windowStartPos.x;
-                let newY = windowStartPos.y;
-
-                if (resizeEdge.includes('e')) newWidth = Math.max(200, windowStartSize.width + dx);
-                if (resizeEdge.includes('w')) {
-                    newWidth = Math.max(200, windowStartSize.width - dx);
-                    newX = windowStartPos.x + dx;
-                }
-                if (resizeEdge.includes('s')) newHeight = Math.max(200, windowStartSize.height + dy);
-                if (resizeEdge.includes('n')) {
-                    newHeight = Math.max(200, windowStartSize.height - dy);
-                    newY = windowStartPos.y + dy;
-                }
-
-                try {
-                    await invoke("resize_pet_window", { width: newWidth, height: newHeight });
-                    if (newX !== windowStartPos.x || newY !== windowStartPos.y) {
-                        await getCurrentWindow().setPosition(new PhysicalPosition(newX, newY));
-                    }
-                    setCanvasSize({ width: newWidth, height: newHeight });
-
-                    // Re-center model after resize
-                    setTimeout(recenterModel, 50);
-                } catch (e) {
-                    console.error("[PetWindow] Failed to resize:", e);
-                }
-            } else {
-                // Hovering - update cursor
-                const edge = detectEdge(e);
-                document.body.style.cursor = getCursor(edge);
-            }
+        const handleMouseMove = (e: MouseEvent) => {
+            const edge = detectEdge(e);
+            document.body.style.cursor = getCursor(edge);
         };
 
         const handleMouseDown = async (e: MouseEvent) => {
             const edge = detectEdge(e);
             if (edge) {
                 e.preventDefault();
-                resizeEdge = edge;
-                resizeStartPos = { x: e.screenX, y: e.screenY };
-
                 try {
-                    const size = await getCurrentWindow().innerSize();
-                    const pos = await getCurrentWindow().outerPosition();
-                    windowStartSize = { width: size.width, height: size.height };
-                    windowStartPos = { x: pos.x, y: pos.y };
+                    await currentWindow.startResizeDragging(getResizeDirection(edge));
                 } catch (e) {
-                    console.error("[PetWindow] Failed to get window info:", e);
+                    console.error("[PetWindow] Failed to start resize drag:", e);
                 }
             }
         };
 
         const handleMouseUp = () => {
-            if (resizeEdge && windowStartSize) {
-                // Save window size after resize
-                getCurrentWindow().innerSize().then(size => {
-                    invoke<PetConfig>("get_pet_config").then(cfg => {
-                        invoke("save_pet_config", {
-                            config: { ...cfg, window_width: size.width, window_height: size.height }
-                        }).catch(console.error);
-                    }).catch(console.error);
-                }).catch(console.error);
-            }
-            resizeEdge = null;
-            resizeStartPos = null;
-            windowStartSize = null;
-            windowStartPos = null;
             document.body.style.cursor = 'default';
+        };
+
+        const handleWheel = (e: WheelEvent) => {
+            if (!e.ctrlKey) return;
+            e.preventDefault();
+
+            const delta = e.deltaY > 0 ? -0.05 : 0.05;
+            const nextMultiplier = Math.max(0.5, Math.min(2.5, userScaleMultiplierRef.current + delta));
+            userScaleMultiplierRef.current = nextMultiplier;
+            setScaleMultiplier(nextMultiplier);
+
+            invoke<PetConfig>("get_pet_config").then(cfg => {
+                invoke("save_pet_config", {
+                    config: { ...cfg, model_scale: nextMultiplier }
+                }).catch(console.error);
+            }).catch(console.error);
         };
 
         document.addEventListener('mousemove', handleMouseMove);
@@ -297,13 +223,44 @@ export default function PetWindow() {
         document.addEventListener('wheel', handleWheel, { passive: false });
 
         return () => {
+            currentWindow.setResizable(false).catch(console.error);
             document.removeEventListener('mousemove', handleMouseMove);
             document.removeEventListener('mousedown', handleMouseDown);
             document.removeEventListener('mouseup', handleMouseUp);
             document.removeEventListener('wheel', handleWheel);
             document.body.style.cursor = 'default';
         };
-    }, [isResizeMode]);
+    }, [currentWindow, isResizeMode]);
+
+    useEffect(() => {
+        if (!isResizeMode) return;
+
+        let saveTimer: ReturnType<typeof setTimeout> | null = null;
+        let unlistenResize: (() => void) | undefined;
+
+        currentWindow.onResized(({ payload: size }) => {
+            setCanvasSize({ width: size.width, height: size.height });
+            setTimeout(() => {
+                viewerRef.current?.fitToView();
+            }, 0);
+
+            if (saveTimer) clearTimeout(saveTimer);
+            saveTimer = setTimeout(() => {
+                invoke<PetConfig>("get_pet_config").then(cfg => {
+                    invoke("save_pet_config", {
+                        config: { ...cfg, window_width: size.width, window_height: size.height }
+                    }).catch(console.error);
+                }).catch(console.error);
+            }, 150);
+        }).then(fn => {
+            unlistenResize = fn;
+        }).catch(console.error);
+
+        return () => {
+            if (saveTimer) clearTimeout(saveTimer);
+            unlistenResize?.();
+        };
+    }, [currentWindow, isResizeMode]);
 
     // Right-click: short click for menu, drag for window move
     useEffect(() => {
@@ -573,7 +530,7 @@ export default function PetWindow() {
                     }}>
                         <div>调整大小模式</div>
                         <div style={{ fontSize: "11px", marginTop: "4px", opacity: 0.8 }}>
-                            拖动边缘调整窗口 · Ctrl+滚轮缩放模型
+                            拖动边缘调整窗口大小 · Ctrl+滚轮微调模型
                         </div>
                     </div>
                 </>
@@ -589,6 +546,7 @@ export default function PetWindow() {
                     displayMode="full"
                     gazeTracking={true}
                     fixedSize={canvasSize || undefined}
+                    scaleMultiplier={scaleMultiplier}
                     onModelLoaded={handleModelLoaded}
                 />}
             </div>

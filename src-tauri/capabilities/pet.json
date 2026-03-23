@@ -8,9 +8,11 @@
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
     "core:window:allow-outer-position",
     "core:window:allow-set-position",
     "core:window:allow-set-size",
+    "core:window:allow-set-resizable",
     "core:window:allow-inner-size",
     "core:event:allow-emit",
     "core:event:allow-emit-to",
