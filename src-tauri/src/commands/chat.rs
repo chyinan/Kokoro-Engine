@@ -637,7 +637,15 @@ pub async fn stream_chat(
                     }
                 }
                 Err(e) => {
-                    app.emit("chat-error", e).map_err(|e| e.to_string())?;
+                    if round_response.is_empty() && emit_buffer.is_empty() {
+                        app.emit("chat-error", e).map_err(|e| e.to_string())?;
+                    } else {
+                        eprintln!(
+                            "[Chat] Ignoring trailing stream error after partial response: {}",
+                            e
+                        );
+                    }
+                    break;
                 }
             }
         }
