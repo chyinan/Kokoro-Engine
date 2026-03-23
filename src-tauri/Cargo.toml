@@ -34,7 +34,7 @@ chrono = "0.4.43"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite"] }
 anyhow = "1.0.101"
 fastembed = "5.9.0"
-rquickjs = { version = "0.6", features = ["futures", "macro", "chrono", "loader"] }
+rquickjs = { version = "0.11", features = ["futures", "macro", "chrono", "loader"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-process = "2"
