@@ -104,12 +104,18 @@ Live2D, LLM, TTS 및 STT와 같은 기술을 통합하여 고도로 모듈화되
 
 ## 🚀 빠른 시작
 
-### 전제 조건
+### 방법 1: 미리 빌드된 버전 다운로드 (권장)
+
+[Releases 페이지](https://github.com/chyinan/Kokoro-Engine/releases)에서 최신 미리 빌드된 버전을 다운로드하세요. 압축을 해제한 후 바로 실행할 수 있습니다.
+
+### 방법 2: 소스에서 빌드
+
+#### 전제 조건
 
 - [Node.js](https://nodejs.org/) (v18+)
 - [Rust](https://www.rust-lang.org/tools/install) (stable)
 
-### 설치 및 실행
+#### 설치 및 실행
 
 ```bash
 # 저장소 복제
@@ -123,7 +129,7 @@ npm install
 npm run tauri dev
 ```
 
-### 배포용 빌드
+#### 배포용 빌드
 
 ```bash
 npm run tauri build

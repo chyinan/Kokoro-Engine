@@ -104,12 +104,18 @@ The following features are planned, in development, or **not yet tested/verified
 
 ## 🚀 Quick Start
 
-### Prerequisites
+### Option 1: Download Pre-built Release (Recommended)
+
+Visit the [Releases page](https://github.com/chyinan/Kokoro-Engine/releases) to download the latest pre-compiled version. Simply extract and run.
+
+### Option 2: Build from Source
+
+#### Prerequisites
 
 - [Node.js](https://nodejs.org/) (v18+)
 - [Rust](https://www.rust-lang.org/tools/install) (stable)
 
-### Installation & Running
+#### Installation & Running
 
 ```bash
 # Clone the repository
@@ -123,7 +129,7 @@ npm install
 npm run tauri dev
 ```
 
-### Build for Distribution
+#### Build for Distribution
 
 ```bash
 npm run tauri build

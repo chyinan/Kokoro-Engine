@@ -104,12 +104,18 @@
 
 ## 🚀 快速开始
 
-### 环境要求
+### 方式一：下载发行版（推荐）
+
+前往 [Releases 页面](https://github.com/chyinan/Kokoro-Engine/releases) 下载最新的预编译版本，解压后直接运行。
+
+### 方式二：从源码构建
+
+#### 环境要求
 
 - [Node.js](https://nodejs.org/) (v18+)
 - [Rust](https://www.rust-lang.org/tools/install) (stable)
 
-### 安装与运行
+#### 安装与运行
 
 ```bash
 # 克隆仓库
@@ -123,7 +129,7 @@ npm install
 npm run tauri dev
 ```
 
-### 构建发行版
+#### 构建发行版
 
 ```bash
 npm run tauri build
