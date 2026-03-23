@@ -235,12 +235,17 @@
                 "whisper_cpp": "Whisper.cpp (Local)",
                 "faster_whisper": "Faster Whisper (Local)",
                 "local_whisper": "Local Whisper (Generic)",
-                "sensevoice": "SenseVoice (Local)"
+                "sensevoice": "SenseVoice (Local Server)",
+                "sensevoice_local": "SenseVoice Local (Offline)"
             },
             "fields": {
                 "server_url": "Server URL",
                 "api_key_hint": "API Key (Leave empty to use env var)",
-                "model": "Model"
+                "model": "Model",
+                "model_path": "Model Path (ONNX)",
+                "tokens_path": "Tokens Path",
+                "num_threads": "Inference Threads",
+                "use_itn": "Inverse Text Normalization (ITN)"
             },
             "auto_send": {
                 "title": "Auto-send",
@@ -263,7 +268,19 @@
             "info": {
                 "openai": "Uses OpenAI Whisper API. Requires a valid API key.",
                 "whisper_cpp": "Connects to local whisper.cpp server at {{url}}.",
-                "generic": "Connects to a local OpenAI-compatible STT server."
+                "generic": "Connects to a local OpenAI-compatible STT server.",
+                "sensevoice_local": "Runs offline using sherpa-onnx. No internet required after model is installed."
+            },
+            "sensevoice_local": {
+                "install_title": "SenseVoice Model",
+                "installed": "✓ Installed",
+                "not_installed": "Not Installed",
+                "download": "Download Recommended Model",
+                "downloading": "Downloading… {{downloaded}} / {{total}}",
+                "extracting": "Extracting archive…",
+                "complete": "Model installed successfully",
+                "install_dir": "Install path",
+                "instructions": "Docs"
             }
         },
         "model": {

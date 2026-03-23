@@ -47,6 +47,10 @@ filetime = "0.2"
 screenshots = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 teloxide = { version = "0.13", features = ["macros"] }
+sherpa-onnx = "1"
+hound = "3"
+bzip2 = "0.4"
+tar = "0.4"
 
 [features]
 stress = []

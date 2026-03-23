@@ -594,6 +594,11 @@ export interface SttProviderConfig {
     api_key_env?: string;
     base_url?: string;
     model?: string;
+    // sensevoice_local fields
+    model_path?: string;
+    tokens_path?: string;
+    num_threads?: number;
+    use_itn?: boolean;
 }
 
 export interface SttConfig {
@@ -603,6 +608,23 @@ export interface SttConfig {
     wake_word_enabled: boolean;
     wake_word?: string;
     providers: SttProviderConfig[];
+}
+
+export interface SenseVoiceLocalModelStatus {
+    installed: boolean;
+    download_instructions_url: string;
+    recommended_model_id: string;
+    download_url: string;
+    install_dir: string;
+    model_path: string;
+    tokens_path: string;
+}
+
+export interface SenseVoiceLocalDownloadProgress {
+    stage: "downloading" | "extracting" | "complete" | "ready" | string;
+    message: string;
+    downloaded_bytes: number;
+    total_bytes: number | null;
 }
 
 export async function transcribeAudio(audioBytes: number[], format: string): Promise<string> {
@@ -615,6 +637,23 @@ export async function getSttConfig(): Promise<SttConfig> {
 
 export async function saveSttConfig(config: SttConfig): Promise<void> {
     return invoke("save_stt_config", { config });
+}
+
+export async function getSenseVoiceLocalStatus(): Promise<SenseVoiceLocalModelStatus> {
+    return invoke<SenseVoiceLocalModelStatus>("get_sensevoice_local_status");
+}
+
+export async function downloadSenseVoiceLocalModel(): Promise<SenseVoiceLocalModelStatus> {
+    return invoke<SenseVoiceLocalModelStatus>("download_sensevoice_local_model");
+}
+
+export async function onSenseVoiceLocalProgress(
+    callback: (progress: SenseVoiceLocalDownloadProgress) => void
+): Promise<UnlistenFn> {
+    return listen<SenseVoiceLocalDownloadProgress>(
+        "stt:sensevoice-local-progress",
+        (event) => callback(event.payload)
+    );
 }
 
 // ── Actions (Tool Calling) ─────────────────────────────

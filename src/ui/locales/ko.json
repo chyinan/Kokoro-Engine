@@ -232,14 +232,20 @@
             "providers": {
                 "openai": "OpenAI Whisper (클라우드)",
                 "openai_whisper": "OpenAI Whisper (클라우드)",
-                "whisper_cpp": "Whisper.cpp (로컬)",
-                "faster_whisper": "Faster Whisper (로컬)",
-                "local_whisper": "Local Whisper (일반)"
+                "whisper_cpp": "Whisper.cpp (로컈)",
+                "faster_whisper": "Faster Whisper (로컈)",
+                "local_whisper": "Local Whisper (일반)",
+                "sensevoice": "SenseVoice (원격 서버)",
+                "sensevoice_local": "SenseVoice 로컈 (오프라인)"
             },
             "fields": {
                 "server_url": "서버 URL",
-                "api_key_hint": "API 키 (환경 변수 사용 시 비워둠)",
-                "model": "모델"
+                "api_key_hint": "API 키 (환경 변수 사용 시 비워둘 것)",
+                "model": "모델",
+                "model_path": "모델 경로 (ONNX)",
+                "tokens_path": "토큰 경로",
+                "num_threads": "추론 쓰레드 수",
+                "use_itn": "역 텍스트 정규화 (ITN)"
             },
             "auto_send": {
                 "title": "자동 전송",
@@ -261,8 +267,20 @@
             },
             "info": {
                 "openai": "OpenAI Whisper API를 사용합니다. 유효한 API 키가 필요합니다.",
-                "whisper_cpp": "{{url}}의 로컬 whisper.cpp 서버에 연결합니다.",
-                "generic": "로컬 OpenAI 호환 STT 서버에 연결합니다."
+                "whisper_cpp": "{{url}}의 로컈 whisper.cpp 서버에 연결합니다.",
+                "generic": "로컈 OpenAI 호환 STT 서버에 연결합니다.",
+                "sensevoice_local": "sherpa-onnx를 사용하여 오프라인으로 실행됩니다. 모델 설치 후 인터넷이 필요하지 않습니다."
+            },
+            "sensevoice_local": {
+                "install_title": "SenseVoice 모델",
+                "installed": "✓ 설치됨",
+                "not_installed": "설치되지 않음",
+                "download": "권장 모델 다운로드",
+                "downloading": "다운로드 중… {{downloaded}} / {{total}}",
+                "extracting": "압축 해제 중...",
+                "complete": "모델 설치 완료",
+                "install_dir": "설치 경로",
+                "instructions": "문서"
             }
         },
         "model": {

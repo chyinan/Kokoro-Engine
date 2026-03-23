@@ -1,8 +1,12 @@
 use crate::stt::config::save_config;
-use crate::stt::{AudioChunk, AudioSource, SttConfig, SttService};
+use crate::stt::{
+    AudioChunk, AudioSource, SenseVoiceLocalModelStatus,
+    SttConfig, SttService,
+};
 use std::sync::Arc;
 use tauri::command;
 use tauri::State;
+
 
 /// Transcribe audio bytes to text using the active STT provider.
 #[command]
@@ -95,4 +99,24 @@ pub async fn transcribe_wake_word_audio(
         .map_err(|e| e.to_string())?;
 
     Ok(result.text)
+}
+
+/// Return the install status of the recommended SenseVoice local model.
+#[command]
+pub async fn get_sensevoice_local_status() -> Result<SenseVoiceLocalModelStatus, String> {
+    Ok(crate::stt::sensevoice_local::recommended_model_status())
+}
+
+/// Download and extract the recommended SenseVoice local model.
+/// Emits `stt:sensevoice-local-progress` events during the process.
+#[command]
+pub async fn download_sensevoice_local_model(
+    app: tauri::AppHandle,
+) -> Result<SenseVoiceLocalModelStatus, String> {
+    use tauri::Emitter;
+    crate::stt::sensevoice_local::download_recommended_model(|progress| {
+        app.emit("stt:sensevoice-local-progress", &progress)
+            .map_err(|e| e.to_string())
+    })
+    .await
 }

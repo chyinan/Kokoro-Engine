@@ -235,12 +235,17 @@
                 "whisper_cpp": "Whisper.cpp (本地)",
                 "faster_whisper": "Faster Whisper (本地)",
                 "local_whisper": "Local Whisper (通用)",
-                "sensevoice": "SenseVoice (本地)"
+                "sensevoice": "SenseVoice (本地服务器)",
+                "sensevoice_local": "SenseVoice 本地 (离线)"
             },
             "fields": {
                 "server_url": "服务器地址",
                 "api_key_hint": "API Key (留空以使用环境变量)",
-                "model": "模型"
+                "model": "模型",
+                "model_path": "模型路径 (ONNX)",
+                "tokens_path": "词表路径",
+                "num_threads": "推理线程数",
+                "use_itn": "反向文本规范化 (ITN)"
             },
             "auto_send": {
                 "title": "自动发送",
@@ -263,7 +268,19 @@
             "info": {
                 "openai": "使用 OpenAI Whisper API。需要有效的 API Key。",
                 "whisper_cpp": "连接到位于 {{url}} 的本地 whisper.cpp 服务器。",
-                "generic": "连接到本地 OpenAI 兼容的 STT 服务器。"
+                "generic": "连接到本地 OpenAI 兼容的 STT 服务器。",
+                "sensevoice_local": "使用 sherpa-onnx 离线运行。模型安装后无需联网。"
+            },
+            "sensevoice_local": {
+                "install_title": "SenseVoice 模型",
+                "installed": "✓ 已安装",
+                "not_installed": "未安装",
+                "download": "下载推荐模型",
+                "downloading": "下载中… {{downloaded}} / {{total}}",
+                "extracting": "正在解压...",
+                "complete": "模型安装成功",
+                "install_dir": "安装路径",
+                "instructions": "文档"
             }
         },
         "model": {
