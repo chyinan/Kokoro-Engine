@@ -234,12 +234,18 @@
                 "openai_whisper": "OpenAI Whisper (クラウド)",
                 "whisper_cpp": "Whisper.cpp (ローカル)",
                 "faster_whisper": "Faster Whisper (ローカル)",
-                "local_whisper": "Local Whisper (汎用)"
+                "local_whisper": "Local Whisper (汎用)",
+                "sensevoice": "SenseVoice (リモートサーバー)",
+                "sensevoice_local": "SenseVoice ローカル (オフライン)"
             },
             "fields": {
                 "server_url": "サーバーURL",
                 "api_key_hint": "APIキー (環境変数を使用する場合は空のまま)",
-                "model": "モデル"
+                "model": "モデル",
+                "model_path": "モデルパス (ONNX)",
+                "tokens_path": "トークンパス",
+                "num_threads": "推論スレッド数",
+                "use_itn": "逆テキスト正規化 (ITN)"
             },
             "auto_send": {
                 "title": "自動送信",
@@ -254,6 +260,10 @@
                 "title": "音声割り込み",
                 "desc": "発話中にTTS再生を中断する"
             },
+            "continuous_listening": {
+                "title": "常時リスニング",
+                "desc": "発話を検出したら自動で音声入力を開始する"
+            },
             "wake_word": {
                 "title": "ウェイクワード",
                 "desc": "キーワードを検出したときに自動的にリスニングを開始する",
@@ -262,7 +272,19 @@
             "info": {
                 "openai": "OpenAI Whisper APIを使用します。有効なAPIキーが必要です。",
                 "whisper_cpp": "{{url}} のローカルwhisper.cppサーバーに接続します。",
-                "generic": "ローカルのOpenAI互換STTサーバーに接続します。"
+                "generic": "ローカルのOpenAI互換STTサーバーに接続します。",
+                "sensevoice_local": "sherpa-onnxを使ってオフラインで動作します。モデルインストール後はインターネット不要。"
+            },
+            "sensevoice_local": {
+                "install_title": "SenseVoice モデル",
+                "installed": "✓ インストール済み",
+                "not_installed": "未インストール",
+                "download": "推奨モデルをダウンロード",
+                "downloading": "ダウンロード中… {{downloaded}} / {{total}}",
+                "extracting": "展開中...",
+                "complete": "モデルのインストール完了",
+                "install_dir": "インストール先",
+                "instructions": "ドキュメント"
             }
         },
         "model": {

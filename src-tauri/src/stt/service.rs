@@ -4,6 +4,7 @@ use super::config::{SttConfig, SttProviderConfig};
 use super::interface::{AudioSource, SttEngine, SttError, TranscriptionResult};
 use super::openai::OpenAIWhisperProvider;
 use super::sensevoice::SenseVoiceProvider;
+use super::sensevoice_local::SenseVoiceLocalProvider;
 use super::whisper_cpp::WhisperCppProvider;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -66,6 +67,7 @@ impl SttService {
                 config.id.clone(),
                 config.base_url.clone(),
             ))),
+            "sensevoice_local" => Some(Arc::new(SenseVoiceLocalProvider::new(config, None))),
             other => {
                 eprintln!("[STT] Unknown provider type: {}", other);
                 None

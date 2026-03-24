@@ -8,9 +8,9 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 
 // Limit buffer to 120 seconds to prevent OOM
-const SAMPLE_RATE: u32 = 16000;
+pub const SAMPLE_RATE: u32 = 16000;
 const MAX_BUFFER_SECONDS: usize = 120;
-const MAX_SAMPLES: usize = MAX_BUFFER_SECONDS * SAMPLE_RATE as usize;
+pub const MAX_SAMPLES: usize = MAX_BUFFER_SECONDS * SAMPLE_RATE as usize;
 
 #[derive(Debug)]
 pub struct AudioStreamState {
@@ -45,6 +45,37 @@ impl AudioBuffer {
             state: Mutex::new(AudioStreamState::new()),
         }
     }
+
+    pub fn append_samples<I>(&self, chunk: I) -> Result<(), String>
+    where
+        I: IntoIterator<Item = f32>,
+    {
+        let mut stream = self
+            .state
+            .lock()
+            .map_err(|_| "Failed to lock audio buffer")?;
+
+        let sanitized_chunk: Vec<f32> = chunk
+            .into_iter()
+            .map(|sample| {
+                if sample.is_nan() || sample.is_infinite() {
+                    0.0
+                } else {
+                    sample
+                }
+            })
+            .collect();
+
+        if stream.samples.len() + sanitized_chunk.len() > MAX_SAMPLES {
+            return Err(format!(
+                "Audio buffer limit exceeded (max {}s). Please keep recordings short.",
+                MAX_BUFFER_SECONDS
+            ));
+        }
+
+        stream.samples.extend(sanitized_chunk);
+        Ok(())
+    }
 }
 
 /// Append a chunk of audio data (float32 PCM, 16kHz mono).
@@ -53,29 +84,7 @@ pub async fn process_audio_chunk(
     state: State<'_, AudioBuffer>,
     chunk: Vec<f32>,
 ) -> Result<(), String> {
-    let mut stream = state
-        .state
-        .lock()
-        .map_err(|_| "Failed to lock audio buffer")?;
-
-    if stream.samples.len() + chunk.len() > MAX_SAMPLES {
-        return Err(format!(
-            "Audio buffer limit exceeded (max {}s). Please keep recordings short.",
-            MAX_BUFFER_SECONDS
-        ));
-    }
-
-    // Sanitize input: Replace NaN/Inf with 0.0 (silence) to prevent UB/Artifacts
-    let sanitized_chunk = chunk.into_iter().map(|s| {
-        if s.is_nan() || s.is_infinite() {
-            0.0
-        } else {
-            s
-        }
-    });
-
-    stream.samples.extend(sanitized_chunk);
-    Ok(())
+    state.append_samples(chunk)
 }
 
 /// Finalize the stream and transcribe. Clears the buffer.

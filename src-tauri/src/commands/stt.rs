@@ -1,8 +1,11 @@
 use crate::stt::config::save_config;
-use crate::stt::{AudioChunk, AudioSource, SttConfig, SttService};
+use crate::stt::{
+    AudioChunk, AudioSource, NativeMicState, NativeWakeWordState, SenseVoiceLocalModelStatus,
+    SttConfig, SttService,
+};
 use std::sync::Arc;
-use tauri::command;
 use tauri::State;
+use tauri::{command, AppHandle};
 
 /// Transcribe audio bytes to text using the active STT provider.
 #[command]
@@ -95,4 +98,68 @@ pub async fn transcribe_wake_word_audio(
         .map_err(|e| e.to_string())?;
 
     Ok(result.text)
+}
+
+#[command]
+pub async fn start_native_mic(
+    app: AppHandle,
+    mic_state: State<'_, NativeMicState>,
+    auto_stop_on_silence: Option<bool>,
+) -> Result<(), String> {
+    crate::stt::mic::start_native_mic_with_options(
+        &app,
+        mic_state.inner(),
+        auto_stop_on_silence.unwrap_or(false),
+    )
+}
+
+#[command]
+pub async fn stop_native_mic(
+    app: AppHandle,
+    mic_state: State<'_, NativeMicState>,
+) -> Result<(), String> {
+    crate::stt::mic::stop_native_mic(&app, mic_state.inner())
+}
+
+#[command]
+pub async fn start_native_wake_word(
+    app: AppHandle,
+    wake_word_state: State<'_, NativeWakeWordState>,
+    wake_word: String,
+    trigger_on_speech: Option<bool>,
+) -> Result<(), String> {
+    crate::stt::wake_word::start_native_wake_word(
+        &app,
+        wake_word_state.inner(),
+        wake_word,
+        trigger_on_speech.unwrap_or(false),
+    )
+}
+
+#[command]
+pub async fn stop_native_wake_word(
+    app: AppHandle,
+    wake_word_state: State<'_, NativeWakeWordState>,
+) -> Result<(), String> {
+    crate::stt::wake_word::stop_native_wake_word(&app, wake_word_state.inner())
+}
+
+/// Return the install status of the recommended SenseVoice local model.
+#[command]
+pub async fn get_sensevoice_local_status() -> Result<SenseVoiceLocalModelStatus, String> {
+    Ok(crate::stt::sensevoice_local::recommended_model_status())
+}
+
+/// Download and extract the recommended SenseVoice local model.
+/// Emits `stt:sensevoice-local-progress` events during the process.
+#[command]
+pub async fn download_sensevoice_local_model(
+    app: tauri::AppHandle,
+) -> Result<SenseVoiceLocalModelStatus, String> {
+    use tauri::Emitter;
+    crate::stt::sensevoice_local::download_recommended_model(|progress| {
+        app.emit("stt:sensevoice-local-progress", &progress)
+            .map_err(|e| e.to_string())
+    })
+    .await
 }

@@ -196,17 +196,23 @@ export default function ChatPanel() {
     // STT (Speech-to-Text) — Advanced VAD Mode
     const [sttEnabled, setSttEnabled] = useState(() => localStorage.getItem("kokoro_stt_enabled") === "true");
     const [sttAutoSend, setSttAutoSend] = useState(() => localStorage.getItem("kokoro_stt_auto_send") === "true");
+    const [continuousListening, setContinuousListening] = useState(
+        () => localStorage.getItem("kokoro_stt_continuous_listening") === "true"
+    );
 
     useEffect(() => {
         const syncSttSettings = () => {
             setSttEnabled(localStorage.getItem("kokoro_stt_enabled") === "true");
             setSttAutoSend(localStorage.getItem("kokoro_stt_auto_send") === "true");
+            setContinuousListening(localStorage.getItem("kokoro_stt_continuous_listening") === "true");
             setWakeWordEnabled(localStorage.getItem("kokoro_wake_word_enabled") === "true");
             setWakeWord(localStorage.getItem("kokoro_wake_word") || "");
         };
+        window.addEventListener("kokoro-stt-settings-changed", syncSttSettings);
         window.addEventListener("storage", syncSttSettings);
         window.addEventListener("focus", syncSttSettings);
         return () => {
+            window.removeEventListener("kokoro-stt-settings-changed", syncSttSettings);
             window.removeEventListener("storage", syncSttSettings);
             window.removeEventListener("focus", syncSttSettings);
         };
@@ -260,11 +266,21 @@ export default function ChatPanel() {
     const [wakeWordEnabled, setWakeWordEnabled] = useState(() => localStorage.getItem("kokoro_wake_word_enabled") === "true");
     const [wakeWord, setWakeWord] = useState(() => localStorage.getItem("kokoro_wake_word") || "");
     useWakeWord({
-        enabled: wakeWordEnabled && sttEnabled && !!wakeWord && voiceState === VoiceState.Idle,
-        wakeWord,
-        onWakeWordDetected: useCallback(() => {
+        enabled:
+            sttEnabled &&
+            voiceState === VoiceState.Idle &&
+            (continuousListening || (wakeWordEnabled && !!wakeWord)),
+        mode: continuousListening ? "speech" : "wake_word",
+        wakeWord: continuousListening ? "" : wakeWord,
+        onWakeWordDetected: useCallback((text?: string) => {
+            if (continuousListening) {
+                if (text?.trim()) {
+                    handleTranscription(text);
+                }
+                return;
+            }
             startVoice({ autoStopOnSilence: true });
-        }, [startVoice]),
+        }, [continuousListening, handleTranscription, startVoice]),
     });
 
     // Effect: Sync partial STT text to input box for real-time feedback
@@ -722,7 +738,7 @@ export default function ChatPanel() {
     // ── STT: Advanced VAD Microphone toggle ─────────────────
     const handleMicToggle = useCallback(() => {
         if (voiceState === VoiceState.Idle) {
-            startVoice();
+            startVoice({ autoStopOnSilence: true });
         } else {
             stopVoice();
         }

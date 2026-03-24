@@ -1,59 +1,157 @@
 import { useRef, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { isTauriEnvironment } from "../../utils/env";
 
 const SAMPLE_RATE = 16000;
-const FRAME_SIZE = 1024; // ~64ms per frame
+const FRAME_SIZE = 1024;
 
-// VAD thresholds
-const SPEECH_RMS_THRESHOLD = 0.01;   // above → speech
-const SILENCE_RMS_THRESHOLD = 0.005; // below → silence
-const SPEECH_ONSET_FRAMES = 3;       // frames above threshold to start recording (~192ms)
-const SILENCE_END_FRAMES = 24;       // frames below threshold to end recording (~1.5s)
-const MIN_SPEECH_FRAMES = 5;         // discard clips shorter than ~320ms
-const MAX_SPEECH_FRAMES = 125;       // max ~8s clip
+const SPEECH_RMS_THRESHOLD = 0.01;
+const SILENCE_RMS_THRESHOLD = 0.005;
+const SPEECH_ONSET_FRAMES = 3;
+const SILENCE_END_FRAMES = 24;
+const MIN_SPEECH_FRAMES = 5;
+const MAX_SPEECH_FRAMES = 125;
+
+type WakeWordTransport = "web" | "native";
+type DetectionMode = "wake_word" | "speech";
 
 export interface WakeWordOptions {
-    wakeWord: string;           // e.g. "你好心音"
+    wakeWord?: string;
     enabled: boolean;
-    onWakeWordDetected: () => void;
+    mode?: DetectionMode;
+    onWakeWordDetected: (text?: string) => void;
 }
 
-export function useWakeWord({ wakeWord, enabled, onWakeWordDetected }: WakeWordOptions) {
+export function useWakeWord({ wakeWord = "", enabled, mode = "wake_word", onWakeWordDetected }: WakeWordOptions) {
     const audioContextRef = useRef<AudioContext | null>(null);
     const mediaStreamRef = useRef<MediaStream | null>(null);
     const processorRef = useRef<ScriptProcessorNode | null>(null);
     const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+    const nativeDetectedUnlisten = useRef<UnlistenFn | null>(null);
+    const nativeErrorUnlisten = useRef<UnlistenFn | null>(null);
+    const transportRef = useRef<WakeWordTransport | null>(null);
     const isRunningRef = useRef(false);
+    const detectionInFlightRef = useRef(false);
+    const enabledRef = useRef(enabled);
+    const startRef = useRef<(() => Promise<void>) | null>(null);
+    const stopRef = useRef<(() => Promise<void>) | null>(null);
 
-    // VAD state
     const speechFramesRef = useRef(0);
     const silenceFramesRef = useRef(0);
     const isRecordingRef = useRef(false);
     const clipBufferRef = useRef<number[]>([]);
 
-    // Refs to avoid stale closures in processFrame
     const wakeWordRef = useRef(wakeWord);
+    const modeRef = useRef<DetectionMode>(mode);
     const onWakeWordDetectedRef = useRef(onWakeWordDetected);
-    useEffect(() => { wakeWordRef.current = wakeWord; }, [wakeWord]);
-    useEffect(() => { onWakeWordDetectedRef.current = onWakeWordDetected; }, [onWakeWordDetected]);
+    useEffect(() => {
+        wakeWordRef.current = wakeWord;
+    }, [wakeWord]);
+    useEffect(() => {
+        modeRef.current = mode;
+    }, [mode]);
+    useEffect(() => {
+        enabledRef.current = enabled;
+    }, [enabled]);
+    useEffect(() => {
+        onWakeWordDetectedRef.current = onWakeWordDetected;
+    }, [onWakeWordDetected]);
+
+    const cleanupWebCapture = useCallback(async () => {
+        mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+        sourceRef.current?.disconnect();
+        processorRef.current?.disconnect();
+        if (audioContextRef.current) {
+            await audioContextRef.current.close();
+        }
+
+        mediaStreamRef.current = null;
+        sourceRef.current = null;
+        processorRef.current = null;
+        audioContextRef.current = null;
+    }, []);
+
+    const cleanupNativeCapture = useCallback(async () => {
+        if (nativeDetectedUnlisten.current) {
+            nativeDetectedUnlisten.current();
+            nativeDetectedUnlisten.current = null;
+        }
+        if (nativeErrorUnlisten.current) {
+            nativeErrorUnlisten.current();
+            nativeErrorUnlisten.current = null;
+        }
+    }, []);
+
+    const stop = useCallback(async () => {
+        if (!isRunningRef.current && !transportRef.current) {
+            return;
+        }
+
+        isRunningRef.current = false;
+        isRecordingRef.current = false;
+        speechFramesRef.current = 0;
+        silenceFramesRef.current = 0;
+        clipBufferRef.current = [];
+
+        if (transportRef.current === "native") {
+            try {
+                await invoke("stop_native_wake_word");
+            } catch (error) {
+                console.warn("[WakeWord] Failed to stop native wake word:", error);
+            } finally {
+                await cleanupNativeCapture();
+            }
+        } else {
+            await cleanupWebCapture();
+        }
+
+        transportRef.current = null;
+    }, [cleanupNativeCapture, cleanupWebCapture]);
+
+    const triggerWakeWordDetected = useCallback(async (text?: string) => {
+        if (detectionInFlightRef.current) {
+            return;
+        }
+
+        detectionInFlightRef.current = true;
+        try {
+            await stopRef.current?.();
+            onWakeWordDetectedRef.current(text);
+        } finally {
+            detectionInFlightRef.current = false;
+            if (modeRef.current === "speech" && enabledRef.current) {
+                setTimeout(() => {
+                    void startRef.current?.();
+                }, 0);
+            }
+        }
+    }, []);
 
     const checkWakeWord = useCallback(async (samples: number[]) => {
         try {
+            if (modeRef.current === "speech") {
+                const text: string = await invoke("transcribe_wake_word_audio", { samples });
+                const trimmed = text.trim();
+                if (trimmed) {
+                    await triggerWakeWordDetected(trimmed);
+                }
+                return;
+            }
             const text: string = await invoke("transcribe_wake_word_audio", { samples });
             if (!text) return;
             const normalized = text.toLowerCase().replace(/\s+/g, "");
             const keyword = wakeWordRef.current.toLowerCase().replace(/\s+/g, "");
-            if (!keyword) return; // guard against whitespace-only wake word
+            if (!keyword) return;
             if (normalized.includes(keyword)) {
-                onWakeWordDetectedRef.current();
+                await triggerWakeWordDetected();
             }
-        } catch (e) {
-            console.warn("[WakeWord] Transcription failed:", e);
+        } catch (error) {
+            console.warn("[WakeWord] Transcription failed:", error);
         }
-    }, []);
+    }, [triggerWakeWordDetected]);
 
     const processFrame = useCallback((frame: Float32Array) => {
-        // RMS energy
         let sum = 0;
         for (let i = 0; i < frame.length; i++) {
             sum += frame[i] * frame[i];
@@ -61,7 +159,6 @@ export function useWakeWord({ wakeWord, enabled, onWakeWordDetected }: WakeWordO
         const rms = Math.sqrt(sum / frame.length);
 
         if (!isRecordingRef.current) {
-            // Waiting for speech onset
             if (rms > SPEECH_RMS_THRESHOLD) {
                 speechFramesRef.current++;
                 if (speechFramesRef.current >= SPEECH_ONSET_FRAMES) {
@@ -72,92 +169,125 @@ export function useWakeWord({ wakeWord, enabled, onWakeWordDetected }: WakeWordO
             } else {
                 speechFramesRef.current = 0;
             }
+            return;
+        }
+
+        clipBufferRef.current = clipBufferRef.current.concat(Array.from(frame));
+
+        if (rms < SILENCE_RMS_THRESHOLD) {
+            silenceFramesRef.current++;
         } else {
-            // Recording clip — use concat to avoid spread of 1024 args
-            const arr = Array.from(frame);
-            clipBufferRef.current = clipBufferRef.current.concat(arr);
-
-            if (rms < SILENCE_RMS_THRESHOLD) {
-                silenceFramesRef.current++;
-            } else {
-                silenceFramesRef.current = 0;
-            }
-
-            const totalFrames = clipBufferRef.current.length / FRAME_SIZE;
-
-            const shouldEnd =
-                silenceFramesRef.current >= SILENCE_END_FRAMES ||
-                totalFrames >= MAX_SPEECH_FRAMES;
-
-            if (shouldEnd) {
-                const clip = clipBufferRef.current.slice();
-                isRecordingRef.current = false;
-                speechFramesRef.current = 0;
-                silenceFramesRef.current = 0;
-                clipBufferRef.current = [];
-
-                if (totalFrames >= MIN_SPEECH_FRAMES) {
-                    checkWakeWord(clip);
-                }
-            }
+            silenceFramesRef.current = 0;
         }
-    }, [checkWakeWord]);
 
-    const start = useCallback(async () => {
-        if (isRunningRef.current) return;
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    channelCount: 1,
-                    sampleRate: SAMPLE_RATE,
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                }
-            });
-            mediaStreamRef.current = stream;
-            const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
-            audioContextRef.current = ctx;
-            const src = ctx.createMediaStreamSource(stream);
-            sourceRef.current = src;
-            const proc = ctx.createScriptProcessor(FRAME_SIZE, 1, 1);
-            proc.onaudioprocess = (e) => {
-                if (!isRunningRef.current) return;
-                processFrame(e.inputBuffer.getChannelData(0));
-            };
-            src.connect(proc);
-            proc.connect(ctx.destination);
-            processorRef.current = proc;
-            isRunningRef.current = true;
-            console.log("[WakeWord] Listening for:", wakeWordRef.current);
-        } catch (e) {
-            console.error("[WakeWord] Failed to start mic:", e);
+        const totalFrames = clipBufferRef.current.length / FRAME_SIZE;
+        const shouldEnd =
+            silenceFramesRef.current >= SILENCE_END_FRAMES ||
+            totalFrames >= MAX_SPEECH_FRAMES;
+
+        if (!shouldEnd) {
+            return;
         }
-    }, [processFrame]);
 
-    const stop = useCallback(() => {
-        isRunningRef.current = false;
+        const clip = clipBufferRef.current.slice();
         isRecordingRef.current = false;
         speechFramesRef.current = 0;
         silenceFramesRef.current = 0;
         clipBufferRef.current = [];
-        mediaStreamRef.current?.getTracks().forEach(t => t.stop());
-        sourceRef.current?.disconnect();
-        processorRef.current?.disconnect();
-        audioContextRef.current?.close();
-        mediaStreamRef.current = null;
-        sourceRef.current = null;
-        processorRef.current = null;
-        audioContextRef.current = null;
-    }, []);
+
+        if (totalFrames >= MIN_SPEECH_FRAMES) {
+            void checkWakeWord(clip);
+        }
+    }, [checkWakeWord]);
+
+    const startWebCapture = useCallback(async () => {
+        transportRef.current = "web";
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                channelCount: 1,
+                sampleRate: SAMPLE_RATE,
+                echoCancellation: true,
+                noiseSuppression: true,
+            },
+        });
+        mediaStreamRef.current = stream;
+
+        const context = new AudioContext({ sampleRate: SAMPLE_RATE });
+        audioContextRef.current = context;
+        const source = context.createMediaStreamSource(stream);
+        sourceRef.current = source;
+        const processor = context.createScriptProcessor(FRAME_SIZE, 1, 1);
+        processor.onaudioprocess = (event) => {
+            if (!isRunningRef.current) return;
+            processFrame(event.inputBuffer.getChannelData(0));
+        };
+
+        source.connect(processor);
+        processor.connect(context.destination);
+        processorRef.current = processor;
+    }, [processFrame]);
+
+    const startNativeCapture = useCallback(async () => {
+        transportRef.current = "native";
+        try {
+            nativeDetectedUnlisten.current = await listen<string>("stt:wake-word-detected", (event) => {
+                void triggerWakeWordDetected(event.payload);
+            });
+            nativeErrorUnlisten.current = await listen<string>("stt:wake-word-error", (event) => {
+                console.warn("[WakeWord] Native wake word error:", event.payload);
+            });
+            await invoke("start_native_wake_word", {
+                wakeWord: wakeWordRef.current,
+                triggerOnSpeech: modeRef.current === "speech",
+            });
+        } catch (error) {
+            await cleanupNativeCapture();
+            transportRef.current = null;
+            throw error;
+        }
+    }, [cleanupNativeCapture, triggerWakeWordDetected]);
+
+    const start = useCallback(async () => {
+        if (isRunningRef.current) return;
+
+        try {
+            if (isTauriEnvironment()) {
+                try {
+                    await startNativeCapture();
+                } catch (error) {
+                    console.warn("[WakeWord] Native wake word start failed, falling back to WebRTC:", error);
+                    await startWebCapture();
+                }
+            } else {
+                await startWebCapture();
+            }
+
+            isRunningRef.current = true;
+        } catch (error) {
+            transportRef.current = null;
+            console.error("[WakeWord] Failed to start microphone:", error);
+        }
+    }, [startNativeCapture, startWebCapture]);
 
     useEffect(() => {
-        if (enabled && wakeWord.trim()) {
-            start();
+        startRef.current = start;
+    }, [start]);
+
+    useEffect(() => {
+        stopRef.current = stop;
+    }, [stop]);
+
+    useEffect(() => {
+        if (enabled && (mode === "speech" || wakeWord.trim())) {
+            void start();
         } else {
-            stop();
+            void stop();
         }
-        return () => stop();
-    }, [enabled, wakeWord]); // eslint-disable-line react-hooks/exhaustive-deps
+
+        return () => {
+            void stop();
+        };
+    }, [enabled, start, stop, wakeWord]);
 
     return { stop };
 }

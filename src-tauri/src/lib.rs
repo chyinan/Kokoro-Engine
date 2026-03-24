@@ -110,6 +110,12 @@ pub fn run() {
             commands::stt::get_stt_config,
             commands::stt::save_stt_config,
             commands::stt::transcribe_wake_word_audio,
+            commands::stt::start_native_mic,
+            commands::stt::stop_native_mic,
+            commands::stt::start_native_wake_word,
+            commands::stt::stop_native_wake_word,
+            commands::stt::get_sensevoice_local_status,
+            commands::stt::download_sensevoice_local_model,
             commands::actions::list_actions,
             commands::actions::execute_action,
             commands::mcp::list_mcp_servers,
@@ -440,6 +446,8 @@ pub fn run() {
 
             // Audio Buffer for Streaming STT
             app.manage(crate::stt::stream::AudioBuffer::new());
+            app.manage(crate::stt::NativeMicState::new());
+            app.manage(crate::stt::NativeWakeWordState::new());
 
             // Telegram Bot
             let telegram_config_path = app_data.join("telegram_config.json");

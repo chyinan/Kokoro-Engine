@@ -124,7 +124,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
     // Background Config
     const [localBgConfig, setLocalBgConfig] = useState<BackgroundConfig>({ ...bg.config });
 
-    // Sync local state when panel opens or props change
+    // Sync local state only when the panel opens; while editing, keep local form state authoritative.
     useEffect(() => {
         if (isOpen) {
             setLocalDisplayMode(displayMode);
@@ -143,7 +143,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
             setUserLang(localStorage.getItem("kokoro_user_language") || "");
             fetchData();
         }
-    }, [isOpen, displayMode, customModelPath, bg.config]);
+    }, [isOpen]);
 
     // Load Telegram config only when panel first opens, not on every bg.config change
     useEffect(() => {
@@ -262,9 +262,11 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
             localStorage.setItem("kokoro_stt_enabled", activeSttProvider?.enabled ? "true" : "false");
             localStorage.setItem("kokoro_stt_auto_send", localSttConfig.auto_send ? "true" : "false");
             localStorage.setItem("kokoro_stt_language", localSttConfig.language || "");
+            localStorage.setItem("kokoro_stt_continuous_listening", localSttConfig.continuous_listening ? "true" : "false");
             localStorage.setItem("kokoro_wake_word_enabled", localSttConfig.wake_word_enabled ? "true" : "false");
             localStorage.setItem("kokoro_wake_word", localSttConfig.wake_word || "");
         }
+        window.dispatchEvent(new Event("kokoro-stt-settings-changed"));
         localStorage.setItem("kokoro_voice_interrupt", voiceInterrupt ? "true" : "false");
         localStorage.setItem("kokoro_response_language", responseLang);
         localStorage.setItem("kokoro_user_language", userLang);
