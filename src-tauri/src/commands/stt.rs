@@ -103,8 +103,13 @@ pub async fn transcribe_wake_word_audio(
 pub async fn start_native_mic(
     app: AppHandle,
     mic_state: State<'_, NativeMicState>,
+    auto_stop_on_silence: Option<bool>,
 ) -> Result<(), String> {
-    crate::stt::mic::start_native_mic(&app, mic_state.inner())
+    crate::stt::mic::start_native_mic_with_options(
+        &app,
+        mic_state.inner(),
+        auto_stop_on_silence.unwrap_or(false),
+    )
 }
 
 #[command]

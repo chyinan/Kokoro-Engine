@@ -722,7 +722,7 @@ export default function ChatPanel() {
     // ── STT: Advanced VAD Microphone toggle ─────────────────
     const handleMicToggle = useCallback(() => {
         if (voiceState === VoiceState.Idle) {
-            startVoice();
+            startVoice({ autoStopOnSilence: true });
         } else {
             stopVoice();
         }
