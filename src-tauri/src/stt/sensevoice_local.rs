@@ -12,9 +12,10 @@ use std::path::PathBuf;
 use tar::Archive;
 
 const APP_DIR_NAME: &str = "com.chyin.kokoro";
-const RECOMMENDED_MODEL_ID: &str = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17";
-const RECOMMENDED_ARCHIVE_NAME: &str = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2";
-const RECOMMENDED_DOWNLOAD_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2";
+const RECOMMENDED_MODEL_ID: &str = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09";
+const RECOMMENDED_ARCHIVE_NAME: &str =
+    "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2";
+const RECOMMENDED_DOWNLOAD_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SenseVoiceLocalModelStatus {
