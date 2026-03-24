@@ -136,6 +136,16 @@ npm run tauri dev
 npm run tauri build
 ```
 
+### 方式三：使用 Nix / Flakes
+
+如果你在 NixOS 或其他启用了 Flakes 的 Linux 环境中开发/运行，可以直接使用仓库内置的 flake。
+
+```bash
+nix develop
+```
+
+NixOS/Home Manager 中声明式安装，或 `nix build` / `nix run` 的用法见 [docs/nix.md](docs/nix.md)。
+
 ## 🤝 参与贡献 (Contributing)
  
 **Kokoro Engine** 极其欢迎社区的贡献！
