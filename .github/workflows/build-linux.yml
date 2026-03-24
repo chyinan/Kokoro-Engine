@@ -11,8 +11,6 @@ jobs:
   build-linux:
     name: Build Linux App
     runs-on: ubuntu-latest
-    env:
-      APPIMAGE_EXTRACT_AND_RUN: 1
     steps:
       - uses: actions/checkout@v4
 
@@ -28,12 +26,9 @@ jobs:
             libssl-dev \
             libwebkit2gtk-4.1-dev \
             pkg-config \
-            libfuse2 \
-            libfuse-dev \
             file \
             appstream \
             desktop-file-utils \
-            zsync \
             libxcb-render0-dev \
             libxcb-shape0-dev \
             libxcb-xfixes0-dev
@@ -60,30 +55,13 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      - name: Enable FUSE for AppImage
-        run: sudo modprobe fuse && sudo chmod 666 /dev/fuse
-
       - name: Build Linux app (x86_64)
-        run: npm run tauri build -- --target x86_64-unknown-linux-gnu
+        run: npm run tauri build -- --target x86_64-unknown-linux-gnu --bundles deb,rpm
         env:
           RUST_BACKTRACE: 1
 
-      - name: Verify linuxdeploy installation
-        if: failure()
-        run: |
-          which linuxdeploy || echo "linuxdeploy not found in PATH"
-          which linuxdeploy-plugin-appimage || echo "linuxdeploy-plugin-appimage not found"
-          ls -la ~/.cache/tauri/ 2>/dev/null || echo "No tauri cache found"
-
       - name: List bundle output
         run: find src-tauri/target/x86_64-unknown-linux-gnu/release/bundle -type f | sort
-
-      - name: Upload AppImage artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Kokoro-Engine-linux-appimage
-          path: src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
-          retention-days: 30
 
       - name: Upload DEB artifact
         uses: actions/upload-artifact@v4
@@ -92,16 +70,23 @@ jobs:
           path: src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
           retention-days: 30
 
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kokoro-Engine-linux-rpm
+          path: src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm
+          retention-days: 30
+
       - name: Rename files for release
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          cd src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage
-          for file in *.AppImage; do
-            mv "$file" "${file%.AppImage}-linux.AppImage"
-          done
-          cd ../deb
+          cd src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb
           for file in *.deb; do
             mv "$file" "${file%.deb}-linux.deb"
+          done
+          cd ../rpm
+          for file in *.rpm; do
+            mv "$file" "${file%.rpm}-linux.rpm"
           done
 
       - name: Upload to Release
@@ -109,7 +94,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*-linux.AppImage
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*-linux.deb
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*-linux.rpm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
