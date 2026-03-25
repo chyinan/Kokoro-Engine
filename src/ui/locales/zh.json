@@ -240,6 +240,7 @@
             },
             "fields": {
                 "server_url": "服务器地址",
+                "base_url": "API 地址 (可选)",
                 "api_key_hint": "API Key (留空以使用环境变量)",
                 "model": "模型",
                 "model_path": "模型路径 (ONNX)",

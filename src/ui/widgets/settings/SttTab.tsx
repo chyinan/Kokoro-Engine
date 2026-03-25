@@ -356,15 +356,21 @@ export default function SttTab({
                                     />
                                 ) : (
                                     <div className="grid grid-cols-1 gap-3">
-                                        {/* Base URL (for local providers) */}
-                                        {activeProvider.provider_type !== 'openai_whisper' && (
+                                        {/* Base URL */}
+                                        {(activeProvider.provider_type === 'openai_whisper' || activeProvider.provider_type === 'whisper_cpp' || activeProvider.provider_type === 'faster_whisper' || activeProvider.provider_type === 'sensevoice') && (
                                             <div className="space-y-1">
-                                                <div className="text-xs text-[var(--color-text-secondary)]">{t("settings.stt.fields.server_url")}</div>
+                                                <div className="text-xs text-[var(--color-text-secondary)]">
+                                                    {activeProvider.provider_type === 'openai_whisper'
+                                                        ? t("settings.stt.fields.base_url")
+                                                        : t("settings.stt.fields.server_url")}
+                                                </div>
                                                 <input
                                                     type="text"
                                                     value={activeProvider.base_url || ""}
                                                     onChange={(e) => updateProvider(activeProvider.id, { base_url: e.target.value })}
-                                                    placeholder="http://127.0.0.1:8080"
+                                                    placeholder={activeProvider.provider_type === 'openai_whisper'
+                                                        ? "https://api.openai.com/v1"
+                                                        : "http://127.0.0.1:8080"}
                                                     className="w-full px-3 py-1.5 rounded-md text-sm bg-[var(--color-bg-elevated)] border border-[var(--color-border)] focus:border-[var(--color-accent)] outline-none"
                                                 />
                                             </div>

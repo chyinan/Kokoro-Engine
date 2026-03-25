@@ -7,6 +7,7 @@ use super::interface::{
 };
 use async_trait::async_trait;
 use reqwest::multipart;
+use reqwest::Url;
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -36,6 +37,29 @@ impl OpenAIWhisperProvider {
                 .build()
                 .expect("HTTP client build should not fail"),
         }
+    }
+}
+
+fn transcription_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "https://api.openai.com/v1/audio/transcriptions".to_string();
+    }
+
+    if let Ok(mut url) = Url::parse(trimmed) {
+        let normalized_path = if url.path().trim_end_matches('/').ends_with("/audio/transcriptions") {
+            url.path().trim_end_matches('/').to_string()
+        } else {
+            format!("{}/audio/transcriptions", url.path().trim_end_matches('/'))
+        };
+        url.set_path(&normalized_path);
+        return url.to_string().trim_end_matches('/').to_string();
+    }
+
+    if trimmed.ends_with("/audio/transcriptions") {
+        trimmed.to_string()
+    } else {
+        format!("{}/audio/transcriptions", trimmed)
     }
 }
 
@@ -117,10 +141,7 @@ impl SttEngine for OpenAIWhisperProvider {
         let language = language.map(|s| s.to_string());
         let mime_type = mime_type.to_string();
         let file_name = file_name.to_string();
-        let url = format!(
-            "{}/audio/transcriptions",
-            self.base_url.trim_end_matches('/')
-        );
+        let url = transcription_url(&self.base_url);
         let url_arc = std::sync::Arc::new(url);
 
         let response = crate::utils::http::request_with_retry(
@@ -211,5 +232,58 @@ impl SttEngine for OpenAIWhisperProvider {
             segments,
             processing_time: start_time.elapsed(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transcription_url;
+
+    #[test]
+    fn appends_v1_for_root_base_url() {
+        assert_eq!(
+            transcription_url("https://example.com"),
+            "https://example.com/audio/transcriptions"
+        );
+    }
+
+    #[test]
+    fn appends_transcriptions_for_v1_base_url() {
+        assert_eq!(
+            transcription_url("https://example.com/v1"),
+            "https://example.com/v1/audio/transcriptions"
+        );
+    }
+
+    #[test]
+    fn preserves_existing_transcriptions_path() {
+        assert_eq!(
+            transcription_url("https://example.com/custom/audio/transcriptions"),
+            "https://example.com/custom/audio/transcriptions"
+        );
+    }
+
+    #[test]
+    fn trims_whitespace_and_trailing_slash() {
+        assert_eq!(
+            transcription_url(" https://example.com/v1/ "),
+            "https://example.com/v1/audio/transcriptions"
+        );
+    }
+
+    #[test]
+    fn preserves_query_parameters_on_full_endpoint() {
+        assert_eq!(
+            transcription_url("https://example.com/audio/transcriptions?api-version=2024-06-01"),
+            "https://example.com/audio/transcriptions?api-version=2024-06-01"
+        );
+    }
+
+    #[test]
+    fn preserves_custom_prefix_without_injecting_v1() {
+        assert_eq!(
+            transcription_url("https://example.com/openai"),
+            "https://example.com/openai/audio/transcriptions"
+        );
     }
 }
