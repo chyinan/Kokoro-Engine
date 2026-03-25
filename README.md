@@ -159,6 +159,12 @@ NixOS/Home Manager 中声明式安装，或 `nix build` / `nix run` 的用法见
  
 您的每一份贡献（哪怕只是修改一个错别字）都能让 Kokoro Engine 变得更好！让我们一起打造最棒的桌面虚拟伙伴。
 
+## 💬 社区交流
+
+欢迎加入官方 Telegram 讨论群，与其他用户交流使用心得、获取最新动态：
+
+👉 [**Kokoro Engine 官方讨论群**](https://t.me/+U39dgiUspCo2NDNh)
+
 ## ❤️ 赞助支持
 
 如果你觉得 Kokoro Engine 对你有帮助，欢迎通过赞助支持项目的持续开发。

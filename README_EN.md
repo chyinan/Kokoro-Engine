@@ -148,6 +148,12 @@ Due to the limited energy and resources of the author, the development of the pr
 
 Every contribution (even if it's just fixing a typo) makes Kokoro Engine better! Let's build the best desktop virtual companion together.
 
+## 💬 Community
+
+Join our official Telegram group to connect with other users, share tips, and stay up to date:
+
+👉 [**Kokoro Engine Official Discussion Group**](https://t.me/+U39dgiUspCo2NDNh)
+
 ## ❤️ Sponsor
 
 If you find Kokoro Engine helpful, consider sponsoring to support the ongoing development of the project.

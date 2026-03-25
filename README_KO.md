@@ -148,6 +148,12 @@ npm run tauri build
 
 모든 기여(오타 수정이라도)는 Kokoro Engine을 더 좋게 만듭니다! 최고의 데스크탑 가상 파트너를 함께 만들어 봅시다.
 
+## 💬 커뮤니티
+
+공식 Telegram 토론 그룹에 참여하여 다른 사용자들과 소통하고 최신 소식을 받아보세요:
+
+👉 [**Kokoro Engine 공식 토론 그룹**](https://t.me/+U39dgiUspCo2NDNh)
+
 ## ❤️ 후원
 
 Kokoro Engine이 도움이 된다고 느끼시면 프로젝트의 지속적인 개발을 지원하는 후원을 고려해 주세요.
