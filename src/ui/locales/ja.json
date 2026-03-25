@@ -240,6 +240,7 @@
             },
             "fields": {
                 "server_url": "サーバーURL",
+                "base_url": "ベースURL (オプション)",
                 "api_key_hint": "APIキー (環境変数を使用する場合は空のまま)",
                 "model": "モデル",
                 "model_path": "モデルパス (ONNX)",

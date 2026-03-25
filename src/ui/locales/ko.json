@@ -240,6 +240,7 @@
             },
             "fields": {
                 "server_url": "서버 URL",
+                "base_url": "기본 URL (선택사항)",
                 "api_key_hint": "API 키 (환경 변수 사용 시 비워둘 것)",
                 "model": "모델",
                 "model_path": "모델 경로 (ONNX)",

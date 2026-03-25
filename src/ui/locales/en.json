@@ -240,6 +240,7 @@
             },
             "fields": {
                 "server_url": "Server URL",
+                "base_url": "Base URL (Optional)",
                 "api_key_hint": "API Key (Leave empty to use env var)",
                 "model": "Model",
                 "model_path": "Model Path (ONNX)",
