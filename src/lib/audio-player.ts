@@ -8,10 +8,16 @@ export interface AudioAnalysis {
 }
 
 export class AudioStreamManager {
-    private currentSource: AudioBufferSourceNode | null = null;
     private audioContext: AudioContext;
     private analyser: AnalyserNode;
-    private queue: AudioBuffer[] = [];
+    private audioElement: HTMLAudioElement;
+    private mediaElementSource: MediaElementAudioSourceNode;
+    private appendQueue: Uint8Array[] = [];
+    private mediaSource: MediaSource | null = null;
+    private sourceBuffer: SourceBuffer | null = null;
+    private objectUrl: string | null = null;
+    private streamEnded = false;
+    private playbackStarted = false;
     private _isPlaying = false;
     private analysisListeners: ((data: AudioAnalysis) => void)[] = [];
     private playStateListeners: ((playing: boolean) => void)[] = [];
@@ -21,11 +27,39 @@ export class AudioStreamManager {
         this.audioContext = new AudioContext();
         this.analyser = this.audioContext.createAnalyser();
         this.analyser.fftSize = 256;
+
+        this.audioElement = new Audio();
+        this.audioElement.preload = "auto";
+        this.audioElement.autoplay = false;
+        this.audioElement.crossOrigin = "anonymous";
+
+        this.mediaElementSource = this.audioContext.createMediaElementSource(this.audioElement);
+        this.mediaElementSource.connect(this.analyser);
         this.analyser.connect(this.audioContext.destination);
+
+        this.audioElement.onplay = () => {
+            this._isPlaying = true;
+            this.broadcastPlayState(true);
+            if (!this.animationFrameId) {
+                this.startAnalysis();
+            }
+        };
+
+        this.audioElement.onpause = () => {
+            if (this.audioElement.ended) return;
+            this._isPlaying = false;
+            this.broadcastPlayState(false);
+        };
+
+        this.audioElement.onended = () => {
+            this._isPlaying = false;
+            this.broadcastAnalysis({ amplitude: 0, lowFreqEnergy: 0, highFreqEnergy: 0 });
+            this.broadcastPlayState(false);
+        };
     }
 
     public async resume() {
-        if (this.audioContext.state === 'suspended') {
+        if (this.audioContext.state === "suspended") {
             await this.audioContext.resume();
         }
     }
@@ -33,23 +67,19 @@ export class AudioStreamManager {
     public async queueAudio(data: Uint8Array | number[]) {
         await this.resume();
 
-        // Ensure we have an ArrayBuffer
-        let buffer: ArrayBuffer;
-        if (data instanceof Uint8Array) {
-            buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
-        } else {
-            buffer = new Uint8Array(data).buffer as ArrayBuffer;
+        const chunk = data instanceof Uint8Array ? data : new Uint8Array(data);
+        if (chunk.byteLength === 0) {
+            return;
         }
 
-        try {
-            const audioBuffer = await this.audioContext.decodeAudioData(buffer);
-            this.queue.push(audioBuffer);
-            if (!this._isPlaying) {
-                this.playNext();
-            }
-        } catch (e) {
-            console.error("Failed to decode audio:", e);
-        }
+        this.ensureStream();
+        this.appendQueue.push(chunk);
+        this.flushAppendQueue();
+    }
+
+    public finishStream() {
+        this.streamEnded = true;
+        this.tryEndStream();
     }
 
     public addAmplitudeListener(callback: (data: AudioAnalysis) => void) {
@@ -72,21 +102,31 @@ export class AudioStreamManager {
     }
 
     public stop() {
-        // Clear queue first
-        this.queue = [];
-
-        if (this.currentSource) {
-            try {
-                this.currentSource.stop();
-                this.currentSource.disconnect();
-            } catch (e) {
-                // Ignore errors if already stopped
-            }
-            this.currentSource = null;
+        this.audioElement.pause();
+        if (this.objectUrl) {
+            this.audioElement.removeAttribute("src");
+            this.audioElement.load();
+            URL.revokeObjectURL(this.objectUrl);
+            this.objectUrl = null;
         }
+
+        if (this.mediaSource) {
+            try {
+                if (this.mediaSource.readyState === "open") {
+                    this.mediaSource.endOfStream();
+                }
+            } catch {
+                // Ignore end-of-stream errors during teardown.
+            }
+        }
+
+        this.mediaSource = null;
+        this.sourceBuffer = null;
+        this.appendQueue = [];
+        this.streamEnded = false;
+        this.playbackStarted = false;
         this._isPlaying = false;
 
-        // Cancel the RAF loop to stop wasting CPU when nothing is playing
         if (this.animationFrameId !== undefined) {
             cancelAnimationFrame(this.animationFrameId);
             this.animationFrameId = undefined;
@@ -100,39 +140,85 @@ export class AudioStreamManager {
         this.stop();
     }
 
-    private playNext() {
-        if (this.queue.length === 0) {
-            this._isPlaying = false;
-            this.broadcastAnalysis({ amplitude: 0, lowFreqEnergy: 0, highFreqEnergy: 0 });
-            this.broadcastPlayState(false);
+    private ensureStream() {
+        if (this.mediaSource || !("MediaSource" in window)) {
             return;
         }
 
-        const buffer = this.queue.shift();
-        if (!buffer) return;
+        if (!MediaSource.isTypeSupported("audio/mpeg")) {
+            throw new Error("MediaSource audio/mpeg is not supported in this environment");
+        }
 
-        this._isPlaying = true;
-        const source = this.audioContext.createBufferSource();
-        source.buffer = buffer;
-        this.currentSource = source;
+        const mediaSource = new MediaSource();
+        this.mediaSource = mediaSource;
+        this.objectUrl = URL.createObjectURL(mediaSource);
+        this.audioElement.src = this.objectUrl;
 
-        // Notify listeners that playback started
-        this.broadcastPlayState(true);
+        mediaSource.addEventListener("sourceopen", () => {
+            if (!this.mediaSource || this.sourceBuffer) {
+                return;
+            }
 
-        // Connect source -> analyser
-        // Analyser is persistent and connected to destination
-        source.connect(this.analyser);
+            this.sourceBuffer = this.mediaSource.addSourceBuffer("audio/mpeg");
+            this.sourceBuffer.mode = "sequence";
+            this.sourceBuffer.addEventListener("updateend", () => {
+                this.flushAppendQueue();
+            });
+            this.flushAppendQueue();
+        }, { once: true });
+    }
 
-        source.onended = () => {
-            this.currentSource = null;
-            this.playNext();
-        };
+    private flushAppendQueue() {
+        if (!this.sourceBuffer || this.sourceBuffer.updating) {
+            return;
+        }
 
-        source.start();
+        if (!this.mediaSource || this.mediaSource.readyState !== "open") {
+            return;
+        }
 
-        // Ensure analysis is running
-        if (!this.animationFrameId) {
-            this.startAnalysis();
+        const chunk = this.appendQueue.shift();
+        if (!chunk) {
+            this.tryEndStream();
+            return;
+        }
+
+        try {
+            this.sourceBuffer.appendBuffer(chunk);
+            this.startPlaybackIfNeeded();
+        } catch (error) {
+            console.error("[Audio] Failed to append streaming chunk:", error);
+            this.stop();
+        }
+    }
+
+    private startPlaybackIfNeeded() {
+        if (this.playbackStarted) {
+            return;
+        }
+
+        this.playbackStarted = true;
+        this.audioElement.play().catch(error => {
+            console.warn("[Audio] Autoplay blocked or playback failed:", error);
+            this.playbackStarted = false;
+        });
+    }
+
+    private tryEndStream() {
+        if (!this.streamEnded || !this.mediaSource || !this.sourceBuffer) {
+            return;
+        }
+
+        if (this.appendQueue.length > 0 || this.sourceBuffer.updating) {
+            return;
+        }
+
+        try {
+            if (this.mediaSource.readyState === "open") {
+                this.mediaSource.endOfStream();
+            }
+        } catch (error) {
+            console.warn("[Audio] Failed to finalize media stream:", error);
         }
     }
 
@@ -141,21 +227,19 @@ export class AudioStreamManager {
         const freqDomain = new Uint8Array(this.analyser.frequencyBinCount);
         const sampleRate = this.audioContext.sampleRate;
         const binCount = this.analyser.frequencyBinCount;
-        const binHz = sampleRate / (binCount * 2); // Hz per FFT bin
+        const binHz = sampleRate / (binCount * 2);
 
-        // Precompute bin ranges for frequency bands
         const lowStart = Math.floor(200 / binHz);
         const lowEnd = Math.min(Math.ceil(800 / binHz), binCount - 1);
         const highStart = Math.floor(1500 / binHz);
         const highEnd = Math.min(Math.ceil(4000 / binHz), binCount - 1);
 
         const update = () => {
-            if (this.audioContext.state === 'suspended') {
+            if (this.audioContext.state === "suspended") {
                 this.animationFrameId = requestAnimationFrame(update);
                 return;
             }
 
-            // Time-domain: RMS amplitude
             this.analyser.getByteTimeDomainData(timeDomain);
             let sum = 0;
             for (let i = 0; i < timeDomain.length; i++) {
@@ -165,7 +249,6 @@ export class AudioStreamManager {
             const rms = Math.sqrt(sum / timeDomain.length);
             const amplitude = Math.min(rms * 4.0, 1.0);
 
-            // Frequency-domain: band energies
             this.analyser.getByteFrequencyData(freqDomain);
 
             let lowSum = 0;
@@ -186,9 +269,9 @@ export class AudioStreamManager {
             const highFreqEnergy = highCount > 0 ? Math.min((highSum / highCount) / 180, 1.0) : 0;
 
             this.broadcastAnalysis({ amplitude, lowFreqEnergy, highFreqEnergy });
-
             this.animationFrameId = requestAnimationFrame(update);
         };
+
         update();
     }
 

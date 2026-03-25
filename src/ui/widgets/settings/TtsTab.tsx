@@ -48,6 +48,16 @@ export default function TtsTab({
     const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
     const [scannedModels, setScannedModels] = useState<Record<string, GptSovitsModels>>({});
     const { t } = useTranslation();
+    const activeProvider = ttsConfig?.providers.find(p => p.id === ttsProviderId);
+    const isActiveGptSovits = activeProvider?.provider_type === "gpt_sovits";
+    const isActiveOpenAI = activeProvider?.provider_type === "openai";
+    const activeVoices = voices.filter(v => v.provider_id === ttsProviderId);
+    const activeVoiceOptions = activeVoices.length === 0
+        ? [{ value: "", label: t("settings.tts.active_settings.no_voices") }]
+        : activeVoices.map(v => ({
+            value: v.voice_id,
+            label: `${v.name} (${v.gender} · ${v.language})`,
+        }));
 
     // Scan for GPT-SoVITS models when install_path changes
     const scanModels = useCallback(async (providerId: string, installPath: string) => {
@@ -104,8 +114,17 @@ export default function TtsTab({
     const updateProviderConfig = (index: number, update: Partial<ProviderConfigData>) => {
         if (!ttsConfig) return;
         const newProviders = [...ttsConfig.providers];
-        newProviders[index] = { ...newProviders[index], ...update };
+        const previousProvider = newProviders[index];
+        newProviders[index] = { ...previousProvider, ...update };
         onTtsConfigChange({ ...ttsConfig, providers: newProviders });
+
+        if (
+            previousProvider.id === ttsProviderId &&
+            previousProvider.provider_type === "openai" &&
+            update.default_voice !== undefined
+        ) {
+            onTtsVoiceChange(update.default_voice || "");
+        }
     };
 
     const removeProvider = (index: number) => {
@@ -165,23 +184,24 @@ export default function TtsTab({
                 </div>
 
                 {/* Voice Selector — hidden for GPT-SoVITS (voice is determined by model + ref audio) */}
-                {!ttsConfig?.providers.find(p => p.id === ttsProviderId && p.provider_type === "gpt_sovits") && (
+                {!isActiveGptSovits && (
                     <div>
                         <label className={labelClasses}>{t("settings.tts.active_settings.voice")}</label>
-                        <Select
-                            value={ttsVoice}
-                            onChange={onTtsVoiceChange}
-                            options={(() => {
-                                const filtered = voices.filter(v => v.provider_id === ttsProviderId);
-                                if (filtered.length === 0) {
-                                    return [{ value: "", label: t("settings.tts.active_settings.no_voices") }];
-                                }
-                                return filtered.map(v => ({
-                                    value: v.voice_id,
-                                    label: `${v.name} (${v.gender} · ${v.language})`,
-                                }));
-                            })()}
-                        />
+                        {isActiveOpenAI ? (
+                            <input
+                                type="text"
+                                value={ttsVoice}
+                                onChange={e => onTtsVoiceChange(e.target.value)}
+                                placeholder="alloy"
+                                className={clsx(inputClasses, "font-mono text-xs")}
+                            />
+                        ) : (
+                            <Select
+                                value={ttsVoice}
+                                onChange={onTtsVoiceChange}
+                                options={activeVoiceOptions}
+                            />
+                        )}
                     </div>
                 )}
 
@@ -514,6 +534,19 @@ export default function TtsTab({
                                                     value={provider.model || ""}
                                                     onChange={e => updateProviderConfig(index, { model: e.target.value })}
                                                     placeholder="tts-1"
+                                                    className={clsx(inputClasses, "font-mono text-xs")}
+                                                />
+                                            </div>
+                                        )}
+
+                                        {provider.provider_type === "openai" && (
+                                            <div>
+                                                <label className={labelClasses}>{t("settings.tts.active_settings.voice")}</label>
+                                                <input
+                                                    type="text"
+                                                    value={provider.default_voice || ""}
+                                                    onChange={e => updateProviderConfig(index, { default_voice: e.target.value })}
+                                                    placeholder="alloy"
                                                     className={clsx(inputClasses, "font-mono text-xs")}
                                                 />
                                             </div>

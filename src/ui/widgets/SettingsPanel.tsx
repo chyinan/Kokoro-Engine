@@ -107,6 +107,48 @@ const tabs: { id: TabId; label: string; icon: typeof Key }[] = [
     { id: "backup", label: "settings.tabs.backup", icon: HardDrive },
 ];
 
+function getDefaultTtsVoice(providerId: string, voices: VoiceProfile[]): string {
+    if (providerId === "browser") {
+        return "";
+    }
+
+    if (providerId === "openai") {
+        return "alloy";
+    }
+
+    const providerVoice = voices.find(v => v.provider_id === providerId);
+    return providerVoice?.voice_id || "";
+}
+
+function normalizeTtsVoice(
+    providerId: string,
+    voice: string,
+    voices: VoiceProfile[],
+    ttsConfig?: TtsSystemConfig | null,
+): string {
+    if (!voice) {
+        if (providerId === "openai") {
+            const provider = ttsConfig?.providers.find(p => p.id === providerId);
+            return provider?.default_voice || "alloy";
+        }
+        return getDefaultTtsVoice(providerId, voices);
+    }
+
+    if (providerId === "browser") {
+        return voice === "browser_default" ? voice : "";
+    }
+
+    if (providerId === "openai") {
+        return voice;
+    }
+
+    const matchesProvider = voices.some(
+        v => v.provider_id === providerId && v.voice_id === voice
+    );
+
+    return matchesProvider ? voice : getDefaultTtsVoice(providerId, voices);
+}
+
 export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: _telegramConfigProp, onVisionConfigChange }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [activeTab, setActiveTab] = useState<TabId>("bg");
@@ -132,7 +174,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
             setLocalGazeTracking(gazeTrackingProp ?? true);
             setLocalBgConfig({ ...bg.config });
             setPersonaText(localStorage.getItem("kokoro_persona") || "You are a friendly, warm companion character. Respond with personality and emotion.");
-            setTtsVoice(localStorage.getItem("kokoro_tts_voice") || "alloy");
+            setTtsVoice(localStorage.getItem("kokoro_tts_voice") || "");
             setTtsSpeed(localStorage.getItem("kokoro_tts_speed") || "1.0");
             setTtsPitch(localStorage.getItem("kokoro_tts_pitch") || "1.0");
             setTtsProviderId(localStorage.getItem("kokoro_tts_provider") || "browser");
@@ -163,7 +205,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
     const [persona, setPersonaText] = useState(() => localStorage.getItem("kokoro_persona") || "You are a friendly, warm companion character. Respond with personality and emotion.");
 
     // TTS state
-    const [ttsVoice, setTtsVoice] = useState(() => localStorage.getItem("kokoro_tts_voice") || "alloy");
+    const [ttsVoice, setTtsVoice] = useState(() => localStorage.getItem("kokoro_tts_voice") || "");
     const [ttsSpeed, setTtsSpeed] = useState(() => localStorage.getItem("kokoro_tts_speed") || "1.0");
     const [ttsPitch, setTtsPitch] = useState(() => localStorage.getItem("kokoro_tts_pitch") || "1.0");
     const [ttsProviderId, setTtsProviderId] = useState(() => localStorage.getItem("kokoro_tts_provider") || "browser");
@@ -247,6 +289,11 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
             console.error("[SettingsPanel] Failed to fetch telegram config:", e);
         }
     };
+
+    useEffect(() => {
+        if (ttsVoices.length === 0) return;
+        setTtsVoice(prev => normalizeTtsVoice(ttsProviderId, prev, ttsVoices, localTtsConfig));
+    }, [ttsProviderId, ttsVoices, localTtsConfig]);
 
     const handleSave = async () => {
         // Persist to localStorage (non-LLM settings)

@@ -118,6 +118,7 @@ export class TtsService {
         const unlistenEnd = await listen<TtsEndEvent>("tts:end", (_event) => {
             if (this.generation !== gen) return;
             console.log("[TTS] Stream ended:", _event.payload.text);
+            audioPlayer.finishStream();
             this.stopVoiceInterrupt();
         });
         if (this.generation !== gen) { unlistenEnd(); return; }

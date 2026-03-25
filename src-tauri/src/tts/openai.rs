@@ -20,6 +20,7 @@ struct TtsRequest {
 
 pub struct OpenAITtsProvider {
     client: Client,
+    provider_id: String,
     api_key: String,
     base_url: String,
     model: String,
@@ -28,6 +29,7 @@ pub struct OpenAITtsProvider {
 
 impl OpenAITtsProvider {
     pub fn new(
+        provider_id: String,
         api_key: String,
         base_url: Option<String>,
         model: Option<String>,
@@ -38,6 +40,7 @@ impl OpenAITtsProvider {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("HTTP client build should not fail"),
+            provider_id,
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             model: model.unwrap_or_else(|| "tts-1".to_string()),
@@ -49,18 +52,26 @@ impl OpenAITtsProvider {
     pub fn from_config(config: &ProviderConfig) -> Option<Self> {
         let api_key = config.resolve_api_key()?;
         Some(Self::new(
+            config.id.clone(),
             api_key,
             config.base_url.clone(),
             config.model.clone(),
             config.default_voice.clone(),
         ))
     }
+
+    fn normalize_voice_id(&self, raw_voice: &str) -> String {
+        raw_voice
+            .strip_prefix(&format!("{}_", self.provider_id))
+            .unwrap_or(raw_voice)
+            .to_string()
+    }
 }
 
 #[async_trait]
 impl TtsProvider for OpenAITtsProvider {
     fn id(&self) -> String {
-        "openai".to_string()
+        self.provider_id.clone()
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -88,12 +99,12 @@ impl TtsProvider for OpenAITtsProvider {
         voices
             .into_iter()
             .map(|(name, gender)| VoiceProfile {
-                voice_id: format!("openai_{}", name),
+                voice_id: format!("{}_{}", self.provider_id, name),
                 name: name.to_string(),
                 gender,
                 language: "en".to_string(),
                 engine: TtsEngine::Cloud,
-                provider_id: "openai".to_string(),
+                provider_id: self.provider_id.clone(),
                 extra_params: Default::default(),
             })
             .collect()
@@ -109,7 +120,7 @@ impl TtsProvider for OpenAITtsProvider {
         let request_body = TtsRequest {
             model: self.model.clone(),
             input: text.to_string(),
-            voice: raw_voice.strip_prefix("openai_").unwrap_or(&raw_voice).to_string(),
+            voice: self.normalize_voice_id(&raw_voice),
             response_format: "mp3".to_string(),
             speed: params.speed,
         };
@@ -165,7 +176,7 @@ impl TtsProvider for OpenAITtsProvider {
         let request_body = TtsRequest {
             model: self.model.clone(),
             input: text.to_string(),
-            voice: raw_voice.strip_prefix("openai_").unwrap_or(&raw_voice).to_string(),
+            voice: self.normalize_voice_id(&raw_voice),
             response_format: "mp3".to_string(),
             speed: params.speed,
         };
