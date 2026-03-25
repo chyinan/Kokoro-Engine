@@ -11,6 +11,8 @@ import type { EmotionState, ActionIntent } from "../features/live2d/Live2DContro
 import "../ui/i18n";
 import { live2dUrl } from "../lib/utils";
 
+type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
+
 interface PetConfig {
     enabled: boolean;
     position_x: number;
@@ -133,6 +135,7 @@ export default function PetWindow() {
         if (!isResizeMode) return;
 
         const EDGE_SIZE = 10; // px from edge to detect resize
+        const isWindows = navigator.userAgent.includes('Windows');
         let resizeEdge: 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw' | null = null;
         let resizeStartPos: { x: number; y: number } | null = null;
         let windowStartSize: { width: number; height: number } | null = null;
@@ -186,8 +189,9 @@ export default function PetWindow() {
         };
 
         const handleMouseMove = async (e: MouseEvent) => {
+            if (!isWindows && resizeEdge) return; // native compositor 接管，不需要手动计算
             if (resizeEdge && resizeStartPos && windowStartSize && windowStartPos) {
-                // Resizing
+                // Resizing (Windows only)
                 const dx = e.screenX - resizeStartPos.x;
                 const dy = e.screenY - resizeStartPos.y;
 
@@ -228,26 +232,40 @@ export default function PetWindow() {
 
         const handleMouseDown = async (e: MouseEvent) => {
             const edge = detectEdge(e);
-            if (edge) {
-                e.preventDefault();
-                resizeEdge = edge;
-                resizeStartPos = { x: e.screenX, y: e.screenY };
+            if (!edge) return;
+            e.preventDefault();
+            resizeEdge = edge;
 
+            if (isWindows) {
+                // Windows: 手动追踪 screenX/screenY + set_size()
+                resizeStartPos = { x: e.screenX, y: e.screenY };
                 try {
                     const size = await currentWindow.innerSize();
                     const pos = await currentWindow.outerPosition();
                     windowStartSize = { width: size.width, height: size.height };
                     windowStartPos = { x: pos.x, y: pos.y };
-                } catch (e) {
-                    console.error("[PetWindow] Failed to get window info:", e);
+                } catch (err) {
+                    console.error("[PetWindow] Failed to get window info:", err);
+                }
+            } else {
+                // Linux/macOS: 委托给原生 compositor（Wayland xdg_toplevel.resize）
+                const dirMap: Record<string, ResizeDirection> = {
+                    n: "North", s: "South", e: "East", w: "West",
+                    ne: "NorthEast", nw: "NorthWest", se: "SouthEast", sw: "SouthWest",
+                };
+                try {
+                    await currentWindow.startResizeDragging(dirMap[edge]);
+                } catch (err) {
+                    console.error("[PetWindow] startResizeDragging failed:", err);
                 }
             }
         };
 
         const handleMouseUp = () => {
-            if (resizeEdge && windowStartSize) {
-                // Save window size after resize
+            if (resizeEdge) {
+                // 无论哪个平台，松手后都从 Tauri 读实际尺寸并保存
                 currentWindow.innerSize().then(size => {
+                    setCanvasSize({ width: size.width, height: size.height });
                     invoke<PetConfig>("get_pet_config").then(cfg => {
                         invoke("save_pet_config", {
                             config: { ...cfg, window_width: size.width, window_height: size.height }
