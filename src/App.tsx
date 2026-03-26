@@ -235,7 +235,7 @@ function App() {
     if (customModelPath) {
       return live2dUrl(customModelPath);
     }
-    return "https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display/test/assets/haru/haru_greeter_t03.model3.json";
+    return "/live2d/haru/haru_greeter_t03.model3.json";
   }, [customModelPath]);
 
   const layout = useMemo(() => createLayout({ mode: displayMode, modelUrl, gazeTracking }), [displayMode, modelUrl, gazeTracking]);

@@ -30,7 +30,7 @@ export default function PetWindow() {
     const getModelUrl = () => {
         const saved = localStorage.getItem("kokoro_custom_model_path");
         if (saved) return live2dUrl(saved);
-        return "https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display/test/assets/haru/haru_greeter_t03.model3.json";
+        return "/live2d/haru/haru_greeter_t03.model3.json";
     };
     const [modelUrl, setModelUrl] = useState(getModelUrl);
 
