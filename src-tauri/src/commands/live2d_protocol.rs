@@ -1,23 +1,35 @@
 use std::fs;
-use std::path::PathBuf;
+use tauri::Manager;
 
 /// Handler for the `live2d://` custom protocol.
 ///
 /// Serves files from `{app_data_dir}/live2d_models/` so pixi-live2d-display
 /// can resolve relative URLs (textures, moc3, motions) correctly.
 ///
-/// URL pattern: `http://live2d.localhost/{model_name}/runtime/file.ext`
-/// Maps to:     `{app_data_dir}/live2d_models/{model_name}/runtime/file.ext`
-pub fn handle_live2d_request(
-    models_dir: PathBuf,
-) -> impl Fn(
+/// URL pattern (Windows):      `http://live2d.localhost/{model_name}/runtime/file.ext`
+/// URL pattern (macOS/Linux):  `live2d://localhost/{model_name}/runtime/file.ext`
+/// Maps to: `{app_data_dir}/live2d_models/{model_name}/runtime/file.ext`
+///
+/// Uses `ctx.app_handle().path().app_data_dir()` at request time so the path
+/// is resolved correctly on macOS sandboxed apps (DMG installs).
+pub fn handle_live2d_request() -> impl Fn(
     tauri::UriSchemeContext<'_, tauri::Wry>,
     tauri::http::Request<Vec<u8>>,
 ) -> tauri::http::Response<Vec<u8>>
        + Send
        + Sync
        + 'static {
-    move |_ctx, request| {
+    move |ctx, request| {
+        let models_dir = match ctx.app_handle().path().app_data_dir() {
+            Ok(app_data) => app_data.join("live2d_models"),
+            Err(e) => {
+                eprintln!("[live2d protocol] Cannot resolve app data dir: {}", e);
+                return tauri::http::Response::builder()
+                    .status(500)
+                    .body(b"Internal Server Error".to_vec())
+                    .unwrap();
+            }
+        };
         let uri = request.uri();
         let path_str = percent_decode(uri.path());
 

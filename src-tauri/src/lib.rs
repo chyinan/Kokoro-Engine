@@ -23,14 +23,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .register_uri_scheme_protocol("mod", crate::mods::protocol::handle_mod_request)
-        .register_uri_scheme_protocol("live2d", {
-            // Compute models dir eagerly — protocol handler runs before .setup()
-            let app_data = dirs_next::data_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("com.chyin.kokoro");
-            let models_dir = app_data.join("live2d_models");
-            commands::live2d_protocol::handle_live2d_request(models_dir)
-        })
+        .register_uri_scheme_protocol("live2d", commands::live2d_protocol::handle_live2d_request())
         .invoke_handler(tauri::generate_handler![
             commands::system::get_engine_info,
             commands::system::get_system_status,
