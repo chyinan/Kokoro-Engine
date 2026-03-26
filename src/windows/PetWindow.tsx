@@ -129,22 +129,6 @@ export default function PetWindow() {
         }
     }, []);
 
-    // Debug: log component mount + test right-click detection
-    useEffect(() => {
-        console.log("[PetWindow] Component mounted");
-
-        // Test: simple click detection
-        const testClick = (e: MouseEvent) => {
-            console.log("[PetWindow] Click detected:", e.button, "at", e.clientX, e.clientY);
-        };
-        document.addEventListener("click", testClick);
-
-        return () => {
-            console.log("[PetWindow] Component unmounted");
-            document.removeEventListener("click", testClick);
-        };
-    }, []);
-
     // Keep ref in sync for use in native event listeners
     useEffect(() => {
         isDragModeRef.current = isDragMode;
@@ -285,6 +269,40 @@ export default function PetWindow() {
         let dragStartPos: { x: number; y: number } | null = null;
         let windowStartPos: { x: number; y: number } | null = null;
         let hasMoved = false;
+        let pendingWindowPos: { x: number; y: number } | null = null;
+        let moveRafId: number | null = null;
+        let moveInFlight = false;
+
+        const flushWindowMove = async () => {
+            moveRafId = null;
+            if (!pendingWindowPos || moveInFlight) return;
+
+            const nextPos = pendingWindowPos;
+            pendingWindowPos = null;
+            moveInFlight = true;
+
+            try {
+                await currentWindow.setPosition(new PhysicalPosition(nextPos.x, nextPos.y));
+            } catch (e) {
+                console.error("[PetWindow] Failed to set position:", e);
+            } finally {
+                moveInFlight = false;
+                if (pendingWindowPos && isDragModeRef.current && moveRafId === null) {
+                    moveRafId = requestAnimationFrame(() => {
+                        void flushWindowMove();
+                    });
+                }
+            }
+        };
+
+        const scheduleWindowMove = (x: number, y: number) => {
+            pendingWindowPos = { x, y };
+            if (moveRafId !== null || moveInFlight) return;
+
+            moveRafId = requestAnimationFrame(() => {
+                void flushWindowMove();
+            });
+        };
 
         const handleMouseDown = async (e: MouseEvent) => {
             if (e.button === 2) { // Right button
@@ -294,13 +312,10 @@ export default function PetWindow() {
                 hasMoved = false;
                 rightClickStartRef.current = { x: e.clientX, y: e.clientY };
 
-                console.log("[PetWindow] Right mousedown at", e.clientX, e.clientY);
-
                 // Get current window position
                 try {
-                    const pos = await getCurrentWindow().outerPosition();
+                    const pos = await currentWindow.outerPosition();
                     windowStartPos = { x: pos.x, y: pos.y };
-                    console.log("[PetWindow] Window start position:", windowStartPos);
                 } catch (e) {
                     console.error("[PetWindow] Failed to get window position:", e);
                 }
@@ -311,7 +326,7 @@ export default function PetWindow() {
             }
         };
 
-        const handleMouseMove = async (e: MouseEvent) => {
+        const handleMouseMove = (e: MouseEvent) => {
             if (dragStartPos && windowStartPos && isDragModeRef.current) {
                 const dx = e.screenX - dragStartPos.x;
                 const dy = e.screenY - dragStartPos.y;
@@ -323,12 +338,7 @@ export default function PetWindow() {
                     // Move window
                     const newX = windowStartPos.x + dx;
                     const newY = windowStartPos.y + dy;
-
-                    try {
-                        await getCurrentWindow().setPosition(new PhysicalPosition(newX, newY));
-                    } catch (e) {
-                        console.error("[PetWindow] Failed to set position:", e);
-                    }
+                    scheduleWindowMove(newX, newY);
                 }
             }
         };
@@ -338,17 +348,13 @@ export default function PetWindow() {
                 e.preventDefault();
                 e.stopPropagation();
 
-                console.log("[PetWindow] Right mouseup, hasMoved:", hasMoved);
-
                 if (!hasMoved && rightClickStartRef.current) {
                     // No movement — show menu
                     const pos = rightClickStartRef.current;
-                    console.log("[PetWindow] Showing menu at", pos.x, pos.y);
                     setContextMenu({ visible: true, x: pos.x, y: pos.y });
                 } else if (hasMoved && windowStartPos) {
                     // Drag completed — save position
-                    console.log("[PetWindow] Drag completed, saving position");
-                    getCurrentWindow().outerPosition().then(pos => {
+                    currentWindow.outerPosition().then(pos => {
                         invoke<PetConfig>("get_pet_config").then(cfg => {
                             invoke("save_pet_config", {
                                 config: { ...cfg, position_x: pos.x, position_y: pos.y }
@@ -362,6 +368,7 @@ export default function PetWindow() {
                 isDragModeRef.current = false;
                 dragStartPos = null;
                 windowStartPos = null;
+                pendingWindowPos = null;
                 rightClickStartRef.current = null;
             }
         };
@@ -378,12 +385,15 @@ export default function PetWindow() {
         document.addEventListener("contextmenu", handleContextMenu, true);
 
         return () => {
+            if (moveRafId !== null) {
+                cancelAnimationFrame(moveRafId);
+            }
             document.removeEventListener("mousedown", handleMouseDown, true);
             document.removeEventListener("mousemove", handleMouseMove, true);
             document.removeEventListener("mouseup", handleMouseUp, true);
             document.removeEventListener("contextmenu", handleContextMenu, true);
         };
-    }, []);
+    }, [currentWindow]);
 
     // Native pointerup for drag exit — removed, now handled in enterDragMode
     // useEffect(() => {
@@ -417,11 +427,10 @@ export default function PetWindow() {
         // Disable pointer events on canvas after it's created
         const checkCanvas = setInterval(() => {
             const canvas = document.querySelector("canvas");
-            if (canvas) {
-                (canvas as HTMLCanvasElement).style.pointerEvents = "none";
-                console.log("[PetWindow] Canvas pointer events disabled");
-                clearInterval(checkCanvas);
-            }
+                if (canvas) {
+                    (canvas as HTMLCanvasElement).style.pointerEvents = "none";
+                    clearInterval(checkCanvas);
+                }
         }, 100);
 
         return () => {
