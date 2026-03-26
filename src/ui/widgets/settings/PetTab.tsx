@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 
 interface PetConfig {
@@ -112,10 +112,20 @@ export default function PetTab() {
         };
     }, []);
 
+    const persistConfig = useCallback(async (nextConfig: PetConfig, showSavedState = false) => {
+        setConfig(nextConfig);
+        await invoke("save_pet_config", { config: nextConfig }).catch(console.error);
+        await emit("pet-config-updated", nextConfig).catch(console.error);
+
+        if (showSavedState) {
+            setSaved(true);
+            setTimeout(() => setSaved(false), 2000);
+        }
+    }, []);
+
     const handleToggle = async (enabled: boolean) => {
         const newCfg = { ...config, enabled };
-        setConfig(newCfg);
-        await invoke("save_pet_config", { config: newCfg }).catch(console.error);
+        await persistConfig(newCfg);
         if (enabled) {
             console.log("[PetTab] Calling show_pet_window...");
             try {
@@ -131,16 +141,13 @@ export default function PetTab() {
     };
 
     const handleSave = async () => {
-        await invoke("save_pet_config", { config }).catch(console.error);
-        setSaved(true);
-        setTimeout(() => setSaved(false), 2000);
+        await persistConfig(config, true);
     };
 
     const handleResetPosition = async () => {
         await invoke("move_pet_window", { x: 100, y: 100 }).catch(console.error);
         const newCfg = { ...config, position_x: 100, position_y: 100 };
-        setConfig(newCfg);
-        await invoke("save_pet_config", { config: newCfg }).catch(console.error);
+        await persistConfig(newCfg);
     };
 
     const labelStyle: React.CSSProperties = {

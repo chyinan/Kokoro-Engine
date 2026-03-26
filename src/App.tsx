@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useSyncExternalStore } from "react";
 import { motion } from "framer-motion";
 import { Settings } from "lucide-react";
+import { emit } from "@tauri-apps/api/event";
 import { LayoutRenderer } from "./ui/layout/LayoutRenderer";
 import { LayoutConfig } from "./ui/layout/types";
 import { ThemeProvider } from "./ui/theme/ThemeContext";
@@ -18,7 +19,7 @@ import { live2dUrl } from "./lib/utils";
 registerCoreComponents();
 
 // Build layout config as a function of displayMode
-function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; gazeTracking: boolean }): LayoutConfig {
+function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; gazeTracking: boolean; renderFps: number }): LayoutConfig {
   return {
     root: {
       id: "root-layer",
@@ -33,6 +34,7 @@ function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; 
             modelUrl: displayMode.modelUrl,
             displayMode: displayMode.mode,
             gazeTracking: displayMode.gazeTracking,
+            maxFps: displayMode.renderFps,
           }
         },
         {
@@ -73,7 +75,7 @@ function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; 
   };
 }
 
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import {
   onImageGenDone,
   onModThemeOverride,
@@ -167,6 +169,10 @@ const _subscribeFn = (cb: () => void) => {
 };
 const _getSnap = () => _regSnap;
 
+interface PetConfig {
+  render_fps?: number;
+}
+
 function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [displayMode, setDisplayMode] = useState<Live2DDisplayMode>(
@@ -185,6 +191,7 @@ function App() {
   const [gazeTracking, setGazeTracking] = useState<boolean>(
     () => localStorage.getItem("kokoro_gaze_tracking") !== "false"
   );
+  const [renderFps, setRenderFps] = useState<number>(60);
 
   const handleGazeTrackingChange = (enabled: boolean) => {
     setGazeTracking(enabled);
@@ -238,7 +245,10 @@ function App() {
     return "/live2d/haru/haru_greeter_t03.model3.json";
   }, [customModelPath]);
 
-  const layout = useMemo(() => createLayout({ mode: displayMode, modelUrl, gazeTracking }), [displayMode, modelUrl, gazeTracking]);
+  const layout = useMemo(
+    () => createLayout({ mode: displayMode, modelUrl, gazeTracking, renderFps }),
+    [displayMode, modelUrl, gazeTracking, renderFps]
+  );
 
   const handleDisplayModeChange = (mode: Live2DDisplayMode) => {
     setDisplayMode(mode);
@@ -251,6 +261,19 @@ function App() {
       localStorage.setItem("kokoro_custom_model_path", path);
     } else {
       localStorage.removeItem("kokoro_custom_model_path");
+    }
+  };
+
+  const handleRenderFpsChange = async (fps: number) => {
+    setRenderFps(fps);
+
+    try {
+      const cfg = await invoke<PetConfig>("get_pet_config");
+      const nextConfig = { ...cfg, render_fps: fps };
+      await invoke("save_pet_config", { config: nextConfig });
+      await emit("pet-config-updated", nextConfig);
+    } catch (e) {
+      console.error("[App] Failed to persist render FPS:", e);
     }
   };
 
@@ -279,6 +302,10 @@ function App() {
 
   useEffect(() => {
     ttsService.init();
+
+    invoke<PetConfig>("get_pet_config")
+      .then((cfg) => setRenderFps(typeof cfg.render_fps === "number" ? cfg.render_fps : 60))
+      .catch(err => console.error("[App] Failed to load pet config:", err));
 
     // Fetch initial data for settings
     // Fetch initial data — split into fast (configs) and slow (scans) batches
@@ -911,6 +938,8 @@ function App() {
             onCustomModelChange={handleCustomModelChange}
             gazeTracking={gazeTracking}
             onGazeTrackingChange={handleGazeTrackingChange}
+            renderFps={renderFps}
+            onRenderFpsChange={handleRenderFpsChange}
             // External state for Mod
             availableModels={availableModels}
             persona={persona}

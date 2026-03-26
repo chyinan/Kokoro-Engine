@@ -54,6 +54,8 @@ export interface Live2DViewerProps {
     fixedSize?: { width: number; height: number };
     /** Optional user scale multiplier applied on top of auto-fit */
     scaleMultiplier?: number;
+    /** Max render FPS. Use 0 for unlimited. */
+    maxFps?: number;
     /** Callback when model is loaded and sized */
     onModelLoaded?: (bounds: { width: number; height: number }) => void;
 }
@@ -61,7 +63,7 @@ export interface Live2DViewerProps {
 // ── Component ──────────────────────────────────────
 
 const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
-    ({ modelUrl, controller, onHitAreaTap, className, backgroundAlpha = 0, displayMode = "full", gazeTracking = true, fixedSize, scaleMultiplier = 1, onModelLoaded }, ref) => {
+    ({ modelUrl, controller, onHitAreaTap, className, backgroundAlpha = 0, displayMode = "full", gazeTracking = true, fixedSize, scaleMultiplier = 1, maxFps = 60, onModelLoaded }, ref) => {
         const containerRef = useRef<HTMLDivElement>(null);
         const appRef = useRef<PIXI.Application | null>(null);
         const modelRef = useRef<Live2DModel | null>(null);
@@ -186,7 +188,9 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                 height: fixedSize?.height,
                 antialias: true,
                 autoStart: true,
+                powerPreference: fixedSize ? "low-power" : "high-performance",
             });
+            app.ticker.maxFPS = maxFps > 0 ? maxFps : 0;
             appRef.current = app;
             container.appendChild(app.view as HTMLCanvasElement);
 
@@ -197,6 +201,8 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
 
             // Load the Live2D model
             let cancelled = false;
+            let tick: ((delta: number) => void) | null = null;
+            let syncTickerState: (() => void) | null = null;
 
             // Clear PIXI texture cache to avoid stale error results from previous loads
             PIXI.utils.clearTextureCache();
@@ -380,16 +386,24 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                     app.stage.addChild(model as unknown as PIXI.DisplayObject);
 
                     // Add update loop
-                    app.ticker.add((delta: number) => {
+                    tick = (delta: number) => {
                         const ctrl = getActiveController();
                         if (ctrl) {
-                            // Delta in Pixi is frame-dependent (1 = 60fps). 
-                            // Controller might expect seconds or ms?
-                            // let's assume controller.update expects delta 
-                            // We'll pass the raw delta for now (frames)
                             ctrl.update(delta);
                         }
-                    });
+                    };
+                    app.ticker.add(tick);
+
+                    syncTickerState = () => {
+                        if (document.hidden) {
+                            app.stop();
+                        } else {
+                            app.start();
+                        }
+                    };
+
+                    document.addEventListener("visibilitychange", syncTickerState);
+                    syncTickerState();
 
                 } catch (err) {
                     console.error("[Live2DViewer] Failed to load model:", err);
@@ -409,6 +423,12 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                 fitModelRef.current = null;
 
                 app.stage.off("pointermove", handlePointerMove);
+                if (syncTickerState) {
+                    document.removeEventListener("visibilitychange", syncTickerState);
+                }
+                if (tick) {
+                    app.ticker.remove(tick);
+                }
                 try {
                     app.destroy(true, { children: true, texture: true });
                 } catch (e) {
@@ -416,7 +436,7 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                 }
                 appRef.current = null;
             };
-        }, [modelUrl, backgroundAlpha, displayMode, handlePointerMove, onHitAreaTap, getActiveController]);
+        }, [modelUrl, backgroundAlpha, displayMode, handlePointerMove, onHitAreaTap, getActiveController, maxFps]);
 
         useEffect(() => {
             if (!fixedSize) return;

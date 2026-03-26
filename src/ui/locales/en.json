@@ -313,6 +313,15 @@
             "gaze_tracking": {
                 "label": "Gaze Tracking",
                 "desc": "Model eyes follow the mouse cursor"
+            },
+            "render_fps": {
+                "label": "Render FPS",
+                "options": {
+                    "fps_30": "30 FPS",
+                    "fps_60": "60 FPS",
+                    "unlimited": "Unlimited",
+                    "custom": "Custom"
+                }
             }
         },
         "image_gen": {

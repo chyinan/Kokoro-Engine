@@ -14,6 +14,12 @@ pub struct PetConfig {
     pub window_height: u32,
     #[serde(default)]
     pub model_scale: f32,
+    #[serde(default = "default_render_fps")]
+    pub render_fps: u32,
+}
+
+fn default_render_fps() -> u32 {
+    60
 }
 
 impl Default for PetConfig {
@@ -27,6 +33,7 @@ impl Default for PetConfig {
             window_width: 0,
             window_height: 0,
             model_scale: 0.0,
+            render_fps: default_render_fps(),
         }
     }
 }

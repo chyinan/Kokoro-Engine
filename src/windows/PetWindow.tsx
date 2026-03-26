@@ -7,7 +7,6 @@ import { Live2DController } from "../features/live2d/Live2DController";
 import PetContextMenu from "../features/pet/PetContextMenu";
 import { usePetChat } from "../features/pet/usePetChat";
 import type { Live2DViewerHandle } from "../features/live2d/Live2DViewer";
-import type { EmotionState, ActionIntent } from "../features/live2d/Live2DController";
 import "../ui/i18n";
 import { live2dUrl } from "../lib/utils";
 
@@ -22,6 +21,7 @@ interface PetConfig {
     window_width: number;
     window_height: number;
     model_scale?: number;
+    render_fps?: number;
 }
 
 export default function PetWindow() {
@@ -61,6 +61,7 @@ export default function PetWindow() {
     const hasSavedSizeRef = useRef(false);
     const [configLoaded, setConfigLoaded] = useState(false);
     const [scaleMultiplier, setScaleMultiplier] = useState(1);
+    const [renderFps, setRenderFps] = useState(60);
     const { isStreaming, sendMessage } = usePetChat();
 
     // On mount: restore saved window size from config
@@ -74,10 +75,30 @@ export default function PetWindow() {
             const savedMultiplier = cfg.model_scale && cfg.model_scale > 0 ? cfg.model_scale : 1;
             userScaleMultiplierRef.current = savedMultiplier;
             setScaleMultiplier(savedMultiplier);
+            setRenderFps(typeof cfg.render_fps === "number" ? cfg.render_fps : 60);
             setConfigLoaded(true);
         }).catch(() => {
             setConfigLoaded(true); // 即使失败也要允许渲染
         });
+    }, []);
+
+    useEffect(() => {
+        const unlisten = listen<PetConfig>("pet-config-updated", (event) => {
+            const cfg = event.payload;
+
+            if (typeof cfg.model_scale === "number" && cfg.model_scale > 0) {
+                userScaleMultiplierRef.current = cfg.model_scale;
+                setScaleMultiplier(cfg.model_scale);
+            }
+
+            if (typeof cfg.render_fps === "number") {
+                setRenderFps(cfg.render_fps);
+            }
+        });
+
+        return () => {
+            unlisten.then(fn => fn()).catch(console.error);
+        };
     }, []);
 
     // Handle model loaded - auto-fit only on first launch (no saved size)
@@ -418,22 +439,6 @@ export default function PetWindow() {
         return () => { unlisten.then(fn => fn()); };
     }, []);
 
-    // Listen for chat-expression events
-    useEffect(() => {
-        const unlisten = listen<{ expression: string }>("chat-expression", (event) => {
-            controllerRef.current?.setEmotion(event.payload.expression as EmotionState);
-        });
-        return () => { unlisten.then(fn => fn()); };
-    }, []);
-
-    // Listen for chat-action events
-    useEffect(() => {
-        const unlisten = listen<{ action: string }>("chat-action", (event) => {
-            controllerRef.current?.playActionMotion(event.payload.action as ActionIntent);
-        });
-        return () => { unlisten.then(fn => fn()); };
-    }, []);
-
     // exitDragMode removed — now handled inline in long press handler
 
     const handleSendChat = useCallback(async () => {
@@ -544,6 +549,7 @@ export default function PetWindow() {
                     gazeTracking={true}
                     fixedSize={canvasSize || undefined}
                     scaleMultiplier={scaleMultiplier}
+                    maxFps={renderFps}
                     onModelLoaded={handleModelLoaded}
                 />}
             </div>
