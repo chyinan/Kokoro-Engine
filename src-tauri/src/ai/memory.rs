@@ -541,24 +541,8 @@ impl MemoryManager {
 // ── Session Summaries ──────────────────────────────────────
 
 impl MemoryManager {
-    /// Ensure the session_summaries table exists.
-    pub async fn ensure_session_summaries_table(&self) -> Result<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS session_summaries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                character_id TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                created_at INTEGER NOT NULL
-            );",
-        )
-        .execute(&self.db)
-        .await?;
-        Ok(())
-    }
-
     /// Save a session summary for a character.
     pub async fn save_session_summary(&self, character_id: &str, summary: &str) -> Result<()> {
-        self.ensure_session_summaries_table().await?;
         sqlx::query(
             "INSERT INTO session_summaries (character_id, summary, created_at) VALUES (?, ?, ?)",
         )
@@ -576,7 +560,6 @@ impl MemoryManager {
         character_id: &str,
         limit: usize,
     ) -> Result<Vec<String>> {
-        self.ensure_session_summaries_table().await?;
         let rows = sqlx::query(
             "SELECT summary FROM session_summaries WHERE character_id = ? ORDER BY created_at DESC LIMIT ?",
         )
@@ -590,28 +573,12 @@ impl MemoryManager {
 
     // ── Emotion Persistence ────────────────────────────────
 
-    async fn ensure_emotion_snapshots_table(&self) -> Result<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS emotion_snapshots (
-                character_id TEXT PRIMARY KEY,
-                emotion TEXT NOT NULL,
-                mood REAL NOT NULL,
-                accumulated_inertia REAL NOT NULL,
-                updated_at INTEGER NOT NULL
-            );",
-        )
-        .execute(&self.db)
-        .await?;
-        Ok(())
-    }
-
     /// Save an emotion snapshot for a character (upsert).
     pub async fn save_emotion_snapshot(
         &self,
         character_id: &str,
         snap: &crate::ai::emotion::EmotionSnapshot,
     ) -> Result<()> {
-        self.ensure_emotion_snapshots_table().await?;
         sqlx::query(
             "INSERT OR REPLACE INTO emotion_snapshots \
              (character_id, emotion, mood, accumulated_inertia, updated_at) \
@@ -632,7 +599,6 @@ impl MemoryManager {
         &self,
         character_id: &str,
     ) -> Result<Option<crate::ai::emotion::EmotionSnapshot>> {
-        self.ensure_emotion_snapshots_table().await?;
         let row = sqlx::query(
             "SELECT emotion, mood, accumulated_inertia FROM emotion_snapshots WHERE character_id = ?",
         )
@@ -1225,30 +1191,20 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_memory_manager_add_and_retrieve() {
+    async fn setup_test_pool() -> sqlx::SqlitePool {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:")
             .await
             .expect("Failed to create in-memory database");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("Failed to run migrations");
+        pool
+    }
 
-        // Create the memories table
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS memories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content TEXT NOT NULL,
-                embedding BLOB NOT NULL,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                importance REAL DEFAULT 0.5,
-                character_id TEXT NOT NULL DEFAULT 'default',
-                tier TEXT NOT NULL DEFAULT 'ephemeral',
-                consolidated_from TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("Failed to create memories table");
-
+    #[tokio::test]
+    async fn test_memory_manager_add_and_retrieve() {
+        let pool = setup_test_pool().await;
         let manager = MemoryManager::new(pool);
 
         // Add a memory
@@ -1278,28 +1234,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_manager_character_isolation() {
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
-            .await
-            .expect("Failed to create in-memory database");
-
-        // Create the memories table
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS memories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content TEXT NOT NULL,
-                embedding BLOB NOT NULL,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                importance REAL DEFAULT 0.5,
-                character_id TEXT NOT NULL DEFAULT 'default',
-                tier TEXT NOT NULL DEFAULT 'ephemeral',
-                consolidated_from TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("Failed to create memories table");
-
+        let pool = setup_test_pool().await;
         let manager = MemoryManager::new(pool);
 
         // Add memories for different characters
@@ -1340,28 +1275,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_manager_empty_character() {
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
-            .await
-            .expect("Failed to create in-memory database");
-
-        // Create the memories table
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS memories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content TEXT NOT NULL,
-                embedding BLOB NOT NULL,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                importance REAL DEFAULT 0.5,
-                character_id TEXT NOT NULL DEFAULT 'default',
-                tier TEXT NOT NULL DEFAULT 'ephemeral',
-                consolidated_from TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("Failed to create memories table");
-
+        let pool = setup_test_pool().await;
         let manager = MemoryManager::new(pool);
 
         // Retrieve memories for a character with no memories
@@ -1379,28 +1293,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_manager_multiple_memories() {
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
-            .await
-            .expect("Failed to create in-memory database");
-
-        // Create the memories table
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS memories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content TEXT NOT NULL,
-                embedding BLOB NOT NULL,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                importance REAL DEFAULT 0.5,
-                character_id TEXT NOT NULL DEFAULT 'default',
-                tier TEXT NOT NULL DEFAULT 'ephemeral',
-                consolidated_from TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("Failed to create memories table");
-
+        let pool = setup_test_pool().await;
         let manager = MemoryManager::new(pool);
 
         let char_id = "test_char";
