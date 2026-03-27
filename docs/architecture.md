@@ -430,8 +430,8 @@ All frontend ↔ backend communication flows through **`kokoro-bridge.ts`** (fro
 | `set_character_name` | context.rs | Set character name for placeholder mapping |
 | `set_user_name` | context.rs | Set user name for placeholder mapping |
 | `get_emotion_state` | context.rs | Get current emotion and mood |
-| `get_character_state` | character.rs | Character name, expression |
-| `set_expression` | character.rs | Update character expression |
+| `get_character_state` | character.rs | Character name, current cue |
+| `play_cue` | character.rs | Trigger character cue |
 | `list_conversations` | conversation.rs | List conversation history |
 | `load_conversation` | conversation.rs | Load specific conversation |
 | `init_db` | database.rs | Initialize SQLite database |
@@ -460,7 +460,7 @@ All frontend ↔ backend communication flows through **`kokoro-bridge.ts`** (fro
 | `chat-error` | BE → FE | `string` — error message |
 | `chat-translation` | BE → FE | `string` — combined translation from all rounds |
 | `chat-tool-result` | BE → FE | `{tool, result}` — tool execution result |
-| `chat-expression` | BE → FE | `{expression, mood}` — emotion update |
+| `chat-cue` | BE → FE | `{cue, source}` — Live2D cue playback |
 | `chat-image-gen` | BE → FE | Image generation event |
 | `proactive-trigger` | BE → FE | Proactive message trigger |
 
@@ -511,7 +511,7 @@ User message
 2. Parse `[TOOL_CALL:name|args]` tags from response
 3. If no tool calls → break (final round)
 4. Execute tools via `ActionRegistry`
-5. Check `needs_feedback()` — info-retrieval tools (get_time, search_memory, MCP tools) return `true`; side-effect tools (change_expression, play_sound) return `false`
+5. Check `needs_feedback()` — info-retrieval tools (get_time, search_memory, MCP tools) return `true`; side-effect tools (play_cue, play_sound) return `false`
 6. If any tool needs feedback → inject assistant message + tool results into context → next round
 7. If no tool needs feedback → break
 
@@ -526,7 +526,7 @@ ActionRegistry
 │   ├── search_memory       (needs_feedback: true)
 │   ├── forget_memory       (needs_feedback: true)
 │   ├── store_memory        (needs_feedback: false)
-│   ├── change_expression   (needs_feedback: false)
+│   ├── play_cue            (needs_feedback: false)
 │   ├── set_background      (needs_feedback: false)
 │   ├── send_notification   (needs_feedback: false)
 │   └── play_sound          (needs_feedback: false)
@@ -617,7 +617,7 @@ mods/example-mod/
 ```
 
 - **UI Components**: HTML/CSS/JS in iframe sandbox, communicate via `ModMessageBus` (postMessage)
-- **Scripts**: QuickJS runtime with `Kokoro.*` API (`Kokoro.on()`, `Kokoro.emit()`, `Kokoro.ui.send()`, `Kokoro.character.setExpression()`)
+- **Scripts**: QuickJS runtime with `Kokoro.*` API (`Kokoro.on()`, `Kokoro.emit()`, `Kokoro.ui.send()`, `Kokoro.character.playCue()`)
 - **Themes**: CSS variable injection, font loading, animation definitions
 - **`mod://` protocol**: Custom URI scheme serving mod assets with path traversal protection
 

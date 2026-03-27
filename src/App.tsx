@@ -19,7 +19,7 @@ import { live2dUrl } from "./lib/utils";
 registerCoreComponents();
 
 // Build layout config as a function of displayMode
-function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; gazeTracking: boolean; renderFps: number }): LayoutConfig {
+function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; modelPath: string | null; gazeTracking: boolean; renderFps: number }): LayoutConfig {
   return {
     root: {
       id: "root-layer",
@@ -32,6 +32,7 @@ function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; 
           zIndex: 0,
           props: {
             modelUrl: displayMode.modelUrl,
+            modelPath: displayMode.modelPath,
             displayMode: displayMode.mode,
             gazeTracking: displayMode.gazeTracking,
             maxFps: displayMode.renderFps,
@@ -43,10 +44,9 @@ function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; 
           zIndex: 10,
           style: {
             gridTemplateColumns: "350px 1fr",
-            gridTemplateRows: "1fr 60px",
+            gridTemplateRows: "1fr",
             gridTemplateAreas: `
                         "highlight main"
-                        "footer footer"
                     `,
             pointerEvents: "none",
             position: "absolute",
@@ -60,13 +60,6 @@ function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; 
               area: "highlight",
               style: { pointerEvents: "auto", margin: "20px 0 20px 20px", padding: "0" },
               motion: "panelEntry"
-            },
-            {
-              id: "footer-bar",
-              type: "component",
-              component: "FooterBar",
-              area: "footer",
-              style: { pointerEvents: "auto" }
             }
           ]
         }
@@ -85,8 +78,7 @@ import {
   onModUnload,
   onChatDelta,
   onChatDone,
-  onChatExpression,
-  onChatAction,
+  onChatCue,
   streamChat,
   dispatchModEvent,
   unloadMod,
@@ -139,6 +131,7 @@ import {
   // New: Live2D
   deleteLive2dModel,
   importLive2dZip,
+  setActiveLive2dModel,
   // New: Context
   setUserLanguage,
   // Types
@@ -193,6 +186,12 @@ function App() {
   );
   const [renderFps, setRenderFps] = useState<number>(60);
 
+  useEffect(() => {
+    setActiveLive2dModel(customModelPath).catch((err) => {
+      console.error("[App] Failed to sync active Live2D model:", err);
+    });
+  }, [customModelPath]);
+
   const handleGazeTrackingChange = (enabled: boolean) => {
     setGazeTracking(enabled);
     localStorage.setItem("kokoro_gaze_tracking", enabled ? "true" : "false");
@@ -246,8 +245,8 @@ function App() {
   }, [customModelPath]);
 
   const layout = useMemo(
-    () => createLayout({ mode: displayMode, modelUrl, gazeTracking, renderFps }),
-    [displayMode, modelUrl, gazeTracking, renderFps]
+    () => createLayout({ mode: displayMode, modelUrl, modelPath: customModelPath, gazeTracking, renderFps }),
+    [displayMode, modelUrl, customModelPath, gazeTracking, renderFps]
   );
 
   const handleDisplayModeChange = (mode: Live2DDisplayMode) => {
@@ -440,20 +439,12 @@ function App() {
       dispatchModEvent('chat', { delta }).catch(() => { });
     });
 
-    const unlistenModExpression = onChatExpression((data) => {
+    const unlistenModCue = onChatCue((data) => {
       modMessageBus.broadcast({
         type: 'event',
-        payload: { name: 'chat-expression', ...data },
+        payload: { name: 'chat-cue', ...data },
       });
-      dispatchModEvent('expression', data).catch(() => { });
-    });
-
-    const unlistenModAction = onChatAction((data) => {
-      modMessageBus.broadcast({
-        type: 'event',
-        payload: { name: 'chat-action', ...data },
-      });
-      dispatchModEvent('action', data).catch(() => { });
+      dispatchModEvent('cue', data).catch(() => { });
     });
 
     const unlistenModChatDone = onChatDone(() => {
@@ -492,8 +483,7 @@ function App() {
       unlistenModComponents.then(unlisten => unlisten());
       unlistenModUiMessage.then(unlisten => unlisten());
       unlistenModChatDelta.then(unlisten => unlisten());
-      unlistenModExpression.then(unlisten => unlisten());
-      unlistenModAction.then(unlisten => unlisten());
+      unlistenModCue.then(unlisten => unlisten());
       unlistenModChatDone.then(unlisten => unlisten());
       unlistenModScriptEvent.then(unlisten => unlisten());
       unlistenModUnload.then(unlisten => unlisten());

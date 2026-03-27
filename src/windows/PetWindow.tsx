@@ -26,18 +26,19 @@ interface PetConfig {
 
 export default function PetWindow() {
     const currentWindow = getCurrentWindow();
-    // Read model from localStorage and sync when main window changes it
-    const getModelUrl = () => {
-        const saved = localStorage.getItem("kokoro_custom_model_path");
-        if (saved) return live2dUrl(saved);
-        return "/live2d/haru/haru_greeter_t03.model3.json";
+    const getModelSelection = () => {
+        const savedPath = localStorage.getItem("kokoro_custom_model_path");
+        return {
+            modelPath: savedPath,
+            modelUrl: savedPath ? live2dUrl(savedPath) : "/live2d/haru/haru_greeter_t03.model3.json",
+        };
     };
-    const [modelUrl, setModelUrl] = useState(getModelUrl);
+    const [{ modelUrl, modelPath }, setModelSelection] = useState(getModelSelection);
 
     useEffect(() => {
         const onStorage = (e: StorageEvent) => {
             if (e.key === "kokoro_custom_model_path") {
-                setModelUrl(getModelUrl());
+                setModelSelection(getModelSelection());
             }
         };
         window.addEventListener("storage", onStorage);
@@ -566,7 +567,8 @@ export default function PetWindow() {
                 {configLoaded && <Live2DViewer
                     ref={viewerRef}
                     modelUrl={modelUrl}
-                    // Live2DViewer owns the chat-expression/chat-action subscriptions
+                    modelPath={modelPath}
+                    // Live2DViewer owns the chat-cue subscriptions
                     // and drives this shared controller directly.
                     controller={controllerRef.current}
                     backgroundAlpha={0}

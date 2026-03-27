@@ -5,6 +5,7 @@
             "saved": "저장됨",
             "cancel": "취소",
             "edit": "편집",
+            "preview": "미리보기",
             "done": "완료",
             "delete": "삭제",
             "add": "추가"
@@ -321,6 +322,81 @@
                     "fps_60": "60 FPS",
                     "unlimited": "무제한",
                     "custom": "사용자 지정"
+                }
+            },
+            "mapping": {
+                "select_model": "매핑을 편집하려면 가져온 모델을 선택하세요.",
+                "loading_profile": "모델 프로필을 불러오는 중...",
+                "placeholders": {
+                    "cue_name": "cue 이름"
+                },
+                "options": {
+                    "select_cue": "Cue 선택",
+                    "no_expression": "표정 없음",
+                    "no_motion_group": "모션 그룹 없음"
+                },
+                "actions": {
+                    "save_cue": "Cue 저장",
+                    "save_interaction": "상호작용 매핑 저장",
+                    "save_semantic": "시맨틱 매핑 저장",
+                    "clear": "지우기"
+                },
+                "cues": {
+                    "title": "Cue 매핑",
+                    "desc": "가져온 모델은 모델별 cue 를 사용합니다. cue 이름을 모델 표정 또는 모션 그룹에 매핑하세요."
+                },
+                "available_expressions": "표정 ({{count}})",
+                "available_motion_groups": "모션 그룹 ({{count}})",
+                "configured_cues": "설정된 Cue ({{count}})",
+                "empty_cues": "아직 설정된 cue 가 없습니다.",
+                "interactions": {
+                    "title": "상호작용 매핑",
+                    "desc": "제스처와 신체 부위 시맨틱 이벤트를 cue 에 매핑합니다. 일치 순서는 정확 일치, 제스처 와일드카드, 부위 와일드카드, 전역 와일드카드입니다.",
+                    "configured": "설정된 상호작용 규칙 ({{count}})",
+                    "empty": "상호작용 cue 매핑이 아직 없습니다."
+                },
+                "semantic": {
+                    "title": "시맨틱 이벤트 매핑",
+                    "desc": "비상호작용 시맨틱 이벤트를 cue 에 매핑합니다. 이 매핑은 감정 이벤트와 기타 모델 비종속 로직에 사용됩니다.",
+                    "configured": "설정된 시맨틱 규칙 ({{count}})",
+                    "empty": "시맨틱 cue 매핑이 아직 없습니다."
+                },
+                "summary": {
+                    "expression": "표정: {{value}}",
+                    "expression_none": "표정: 없음",
+                    "motion": "모션: {{value}}",
+                    "motion_none": "모션: 없음",
+                    "cue": "cue: {{value}}"
+                },
+                "gestures": {
+                    "tap": "탭",
+                    "long_press": "길게 누르기",
+                    "rapid_tap": "빠른 연속 탭",
+                    "any": "모든 제스처"
+                },
+                "areas": {
+                    "eyes": "눈",
+                    "lips": "입술",
+                    "face": "얼굴",
+                    "head": "머리",
+                    "hair": "머리카락",
+                    "hand": "손",
+                    "arm": "팔",
+                    "chest": "가슴",
+                    "body": "몸",
+                    "leg": "다리",
+                    "skirt": "치마",
+                    "accessory": "장식품",
+                    "any": "모든 부위"
+                },
+                "semantic_keys": {
+                    "emotion": {
+                        "ecstatic": "감정: 황홀함",
+                        "very_happy": "감정: 매우 기쁨",
+                        "sulking": "감정: 토라짐",
+                        "very_sad": "감정: 매우 슬픔",
+                        "mood_swing": "감정: 기분 변화"
+                    }
                 }
             }
         },
@@ -698,8 +774,7 @@
             "manual": "수동",
             "auto_desc": "AI가 표정 제어",
             "manual_desc": "수동으로 표정 제어"
-        },
-        "set_expression": "표정 설정: "
+        }
     },
     "mods": {
         "title": "모드 관리자",

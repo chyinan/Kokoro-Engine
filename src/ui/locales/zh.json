@@ -5,6 +5,7 @@
             "saved": "已保存",
             "cancel": "取消",
             "edit": "编辑",
+            "preview": "预览",
             "done": "完成",
             "delete": "删除",
             "add": "添加"
@@ -321,6 +322,81 @@
                     "fps_60": "60 FPS",
                     "unlimited": "无限制",
                     "custom": "自定义"
+                }
+            },
+            "mapping": {
+                "select_model": "选择一个导入模型以编辑其映射。",
+                "loading_profile": "正在加载模型配置...",
+                "placeholders": {
+                    "cue_name": "cue 名称"
+                },
+                "options": {
+                    "select_cue": "选择 cue",
+                    "no_expression": "无表情",
+                    "no_motion_group": "无动作组"
+                },
+                "actions": {
+                    "save_cue": "保存 Cue",
+                    "save_interaction": "保存交互映射",
+                    "save_semantic": "保存语义映射",
+                    "clear": "清空"
+                },
+                "cues": {
+                    "title": "Cue 映射",
+                    "desc": "导入模型使用每模型独立的 cue。将你自己的 cue 名称映射到模型表情或动作组。"
+                },
+                "available_expressions": "表情 ({{count}})",
+                "available_motion_groups": "动作组 ({{count}})",
+                "configured_cues": "已配置 Cue ({{count}})",
+                "empty_cues": "还没有配置任何 cue。",
+                "interactions": {
+                    "title": "交互映射",
+                    "desc": "将手势和身体部位语义事件映射到 cue。匹配顺序为精确匹配、手势通配、部位通配、全局通配。",
+                    "configured": "已配置交互规则 ({{count}})",
+                    "empty": "还没有交互 cue 映射。"
+                },
+                "semantic": {
+                    "title": "语义事件映射",
+                    "desc": "将非交互语义事件映射到 cue。这些映射用于情绪事件以及其他与模型无关的逻辑。",
+                    "configured": "已配置语义规则 ({{count}})",
+                    "empty": "还没有语义 cue 映射。"
+                },
+                "summary": {
+                    "expression": "表情: {{value}}",
+                    "expression_none": "表情: 无",
+                    "motion": "动作: {{value}}",
+                    "motion_none": "动作: 无",
+                    "cue": "cue: {{value}}"
+                },
+                "gestures": {
+                    "tap": "轻点",
+                    "long_press": "长按",
+                    "rapid_tap": "快速连点",
+                    "any": "任意手势"
+                },
+                "areas": {
+                    "eyes": "眼睛",
+                    "lips": "嘴唇",
+                    "face": "脸部",
+                    "head": "头部",
+                    "hair": "头发",
+                    "hand": "手",
+                    "arm": "手臂",
+                    "chest": "胸部",
+                    "body": "身体",
+                    "leg": "腿",
+                    "skirt": "裙子",
+                    "accessory": "饰品",
+                    "any": "任意部位"
+                },
+                "semantic_keys": {
+                    "emotion": {
+                        "ecstatic": "情绪: 狂喜",
+                        "very_happy": "情绪: 非常开心",
+                        "sulking": "情绪: 闷闷不乐",
+                        "very_sad": "情绪: 非常难过",
+                        "mood_swing": "情绪: 情绪波动"
+                    }
                 }
             }
         },
@@ -698,8 +774,7 @@
             "manual": "手动",
             "auto_desc": "由 AI 控制表情",
             "manual_desc": "手动控制表情"
-        },
-        "set_expression": "设置表情: "
+        }
     },
     "mods": {
         "title": "模组管理器",

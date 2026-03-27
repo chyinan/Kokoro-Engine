@@ -5,6 +5,7 @@
             "saved": "SAVED",
             "cancel": "CANCEL",
             "edit": "Edit",
+            "preview": "Preview",
             "done": "Done",
             "delete": "Delete",
             "add": "Add"
@@ -321,6 +322,81 @@
                     "fps_60": "60 FPS",
                     "unlimited": "Unlimited",
                     "custom": "Custom"
+                }
+            },
+            "mapping": {
+                "select_model": "Select an imported model to edit its mappings.",
+                "loading_profile": "Loading model profile...",
+                "placeholders": {
+                    "cue_name": "cue name"
+                },
+                "options": {
+                    "select_cue": "Select cue",
+                    "no_expression": "No expression",
+                    "no_motion_group": "No motion group"
+                },
+                "actions": {
+                    "save_cue": "Save Cue",
+                    "save_interaction": "Save Interaction Mapping",
+                    "save_semantic": "Save Semantic Mapping",
+                    "clear": "Clear"
+                },
+                "cues": {
+                    "title": "Cue Mapping",
+                    "desc": "Imported models use per-model cues. Map your own cue names to model expressions or motion groups."
+                },
+                "available_expressions": "Expressions ({{count}})",
+                "available_motion_groups": "Motion Groups ({{count}})",
+                "configured_cues": "Configured Cues ({{count}})",
+                "empty_cues": "No cues configured yet.",
+                "interactions": {
+                    "title": "Interaction Mapping",
+                    "desc": "Map gesture and body area semantic events to a cue. Matching order is exact, then gesture wildcard, then area wildcard, then global wildcard.",
+                    "configured": "Configured Interaction Rules ({{count}})",
+                    "empty": "No interaction cue mappings yet."
+                },
+                "semantic": {
+                    "title": "Semantic Event Mapping",
+                    "desc": "Map non-interaction semantic events to cues. These mappings are used by emotion events and other model-agnostic logic.",
+                    "configured": "Configured Semantic Rules ({{count}})",
+                    "empty": "No semantic cue mappings yet."
+                },
+                "summary": {
+                    "expression": "expr: {{value}}",
+                    "expression_none": "expr: none",
+                    "motion": "motion: {{value}}",
+                    "motion_none": "motion: none",
+                    "cue": "cue: {{value}}"
+                },
+                "gestures": {
+                    "tap": "Tap",
+                    "long_press": "Long Press",
+                    "rapid_tap": "Rapid Tap",
+                    "any": "Any Gesture"
+                },
+                "areas": {
+                    "eyes": "Eyes",
+                    "lips": "Lips",
+                    "face": "Face",
+                    "head": "Head",
+                    "hair": "Hair",
+                    "hand": "Hand",
+                    "arm": "Arm",
+                    "chest": "Chest",
+                    "body": "Body",
+                    "leg": "Leg",
+                    "skirt": "Skirt",
+                    "accessory": "Accessory",
+                    "any": "Any Area"
+                },
+                "semantic_keys": {
+                    "emotion": {
+                        "ecstatic": "Emotion: Ecstatic",
+                        "very_happy": "Emotion: Very Happy",
+                        "sulking": "Emotion: Sulking",
+                        "very_sad": "Emotion: Very Sad",
+                        "mood_swing": "Emotion: Mood Swing"
+                    }
                 }
             }
         },
@@ -698,8 +774,7 @@
             "manual": "MANUAL",
             "auto_desc": "Expression controlled by AI",
             "manual_desc": "Expression controlled manually"
-        },
-        "set_expression": "Set expression: "
+        }
     },
     "mods": {
         "title": "MOD MANAGER",

@@ -1,17 +1,3 @@
-pub const INTENT_PARSER_SYSTEM_PROMPT: &str = r#"You are a command analyzer.
-Extract only structured intent from the user's message.
-Return JSON only. No explanation.
-
-Schema:
-{
-  "action_request": null | "move_model" | "play_animation" | "system_call" | "other",
-  "extra_info": string | null
-}
-
-Rules:
-- "action_request" is for explicit system commands only (move model, play animation, etc).
-- Character emotion is handled exclusively by the main LLM response. Do NOT infer or set emotion here."#;
-
 pub const BG_IMAGE_ANALYZER_PROMPT: &str = r#"You are a background scene analyzer for a virtual character chat application.
 Given a character's reply, decide if generating a background image would enhance the atmosphere.
 Return JSON only. No explanation.
@@ -30,17 +16,18 @@ Rules:
 - If should_generate=false, set image_prompt=null."#;
 
 pub const EMOTION_ANALYZER_PROMPT: &str = r#"You are an emotion analyzer for a virtual character.
-Given a character's dialogue response, infer the most fitting facial expression.
+Given a character's dialogue response, infer the most fitting visual cue.
 Return JSON only. No explanation.
 
 Schema:
 {
-  "expression": "calm" | "happy" | "sad" | "angry" | "surprised" | "thinking" | "shy" | "smug" | "worried" | "excited"
+  "cue": string | null
 }
 
 Rules:
-- Choose the single best expression that matches the overall emotional tone.
-- Default to "calm" if the tone is ambiguous or calm."#;
+- If the system provides available cue names, choose exactly one from that list.
+- If no provided cue is a good fit, return null.
+- Do not invent structured metadata or explanations."#;
 
 pub const CORE_PERSONA_PROMPT: &str = r#"Rules:
 - Always respond as this character, never as an AI.

@@ -92,7 +92,7 @@ pub trait ActionHandler: Send + Sync {
 
     /// Whether the LLM needs to see the result of this action to continue its response.
     /// Return `true` for information-retrieval tools (get_time, search_memory, etc.).
-    /// Return `false` (default) for side-effect tools (change_expression, play_sound, etc.).
+    /// Return `false` (default) for side-effect tools (play_cue, play_sound, etc.).
     fn needs_feedback(&self) -> bool {
         false
     }
@@ -214,7 +214,7 @@ impl ActionRegistry {
             String::new(),
             "When you use a tool, the system will execute it and return the result to you. You can then use the result to continue your response naturally.".to_string(),
             "For information-retrieval tools (e.g. get_time, search_memory), wait for the result before answering the user's question.".to_string(),
-            "For side-effect tools (e.g. change_expression), the system will confirm execution; you do not need to elaborate further.".to_string(),
+            "For side-effect tools (e.g. play_cue), the system will confirm execution; you do not need to elaborate further.".to_string(),
             String::new(),
             "Available tools:".to_string(),
         ];

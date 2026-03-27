@@ -75,36 +75,9 @@ pub struct ChatRequest {
 
 #[derive(Serialize, Clone)]
 #[allow(dead_code)]
-struct ExpressionEvent {
-    expression: String,
-    mood: f32,
-}
-
-#[derive(Serialize, Clone)]
-#[allow(dead_code)]
 struct ChatImageGenEvent {
     prompt: String,
 }
-
-#[derive(Serialize, Clone)]
-struct ActionEvent {
-    action: String,
-}
-
-#[derive(serde::Deserialize, Debug)]
-struct IntentResponse {
-    action_request: Option<String>,
-    extra_info: Option<String>,
-    // Optional: catch-all for system calls if we expand this
-    #[serde(default)]
-    #[allow(dead_code)]
-    system_call: Option<String>,
-}
-
-/// Valid action names for the intent parser
-const VALID_ACTIONS: &[&str] = &[
-    "idle", "nod", "shake", "wave", "dance", "shy", "think", "surprise", "cheer", "tap",
-];
 
 const TOOL_CALL_TAG_PREFIX: &str = "[TOOL_CALL:";
 const TRANSLATE_TAG_PREFIX: &str = "[TRANSLATE:";
@@ -246,7 +219,7 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
     }
 
     // 额外支持简化格式: [action_name|key=val|key=val]
-    // 例: [change_expression|expression=shy]
+    // 例: [play_cue|cue=shy]
     let mut extra_calls = Vec::new();
     let mut cleaned = result.clone();
     let mut offset = 0;
@@ -294,10 +267,10 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
     calls.extend(extra_calls);
 
     // 支持冒号格式: [action_name:value]
-    // 例: [change_expression:happy]、[set_background:beach]
+    // 例: [play_cue:happy]、[set_background:beach]
     // 将 value 映射到该 action 的主参数名
     let primary_arg_map: &[(&str, &str)] = &[
-        ("change_expression", "expression"),
+        ("play_cue", "cue"),
         ("set_background", "prompt"),
     ];
     let mut colon_calls = Vec::new();
@@ -400,107 +373,28 @@ pub async fn stream_chat(
             .await;
     }
 
-    // ── LAYER 1 & 2: INTENT PARSING ─────────────────────────────
+    // ── LAYER 1 & 2: SYSTEM SETUP ───────────────────────────────
 
-    // Get System Provider
     let system_provider = llm_state.system_provider().await;
-
-    // Construct Intent Prompt
-    // We strictly want JSON.
-    let intent_messages = vec![
-        crate::llm::openai::Message {
-            role: "system".to_string(),
-            content: crate::llm::openai::MessageContent::Text(
-                crate::ai::prompts::INTENT_PARSER_SYSTEM_PROMPT.to_string(),
-            ),
-        },
-        crate::llm::openai::Message {
-            role: "user".to_string(),
-            content: crate::llm::openai::MessageContent::Text(format!(
-                "Classify the following text and return JSON only.\nText: [{}]\nCharacter context: {}",
-                request.message, char_id
-            )),
-        },
-    ];
-
-    println!("[Chat] Running Intent Parser...");
-    let intent_json_str = system_provider
-        .chat(intent_messages, None)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("[Chat] Intent Parser failed: {}", e);
-            "{}".to_string() // Fallback to empty JSON object
-        });
-
-    // Clean JSON (remove markdown code blocks if any)
-    let clean_json = intent_json_str
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```");
-
-    let intent: IntentResponse = serde_json::from_str(clean_json).unwrap_or_else(|e| {
-        eprintln!(
-            "[Chat] Failed to parse Intent JSON: {} | Raw: {}",
-            e, intent_json_str
-        );
-        IntentResponse {
-            action_request: None,
-            extra_info: None,
-            system_call: None,
-        }
-    });
-
-    println!("[Chat] Parsed Intent: {:?}", intent);
 
     // ── EXECUTION & STATE UPDATE ────────────────────────────────
 
-    // 1. Get current emotion state (emotion is driven by change_expression tool call in main LLM response)
-    let (current_expression, _current_mood) = {
+    // 1. Get current high-level emotion state for dialogue context.
+    // Live2D playback itself is driven by cue events.
+    let (current_emotion, _current_mood) = {
         let emotion_state = state.emotion_state.lock().await;
         (emotion_state.current_emotion().to_string(), emotion_state.mood())
     };
 
-    // 2. Action Execution
-    if let Some(ref action) = intent.action_request {
-        if action == "play_animation" || VALID_ACTIONS.contains(&action.as_str()) {
-            // If valid action or generic play request with extra_info
-            let action_name = if VALID_ACTIONS.contains(&action.as_str()) {
-                action.clone()
-            } else if let Some(ref extra) = intent.extra_info {
-                if VALID_ACTIONS.contains(&extra.as_str()) {
-                    extra.clone()
-                } else {
-                    "idle".to_string()
-                }
-            } else {
-                "idle".to_string()
-            };
-
-            window
-                .emit(
-                    "chat-action",
-                    ActionEvent {
-                        action: action_name.clone(),
-                    },
-                )
-                .map_err(|e| KokoroError::Chat(e.to_string()))?;
-        }
-    }
-
-    // 3. System Calls / Tools (Simplified for now - can expand to full tool loop if needed)
-    // For this refactor, we are assuming 'system_call' might map to existing actions
-    // If we need the full while loop for tools, we can re-introduce it here, but driven by intent.
-    // user asked for strict 3-layer, so let's keep it clean.
+    // 2. Cue playback is driven by play_cue tool calls or fallback cue analysis below.
 
     // Prepare System Feedback for Persona
     let system_feedback = format!(
         "(Internal System Note)\n\
         - State Updated: Emotion is now '{}'.\n\
-        - Action Performed: {}.\n\
+        - Visual playback is cue-driven for the active model.\n\
         Continue the dialogue naturally based on this state. Do NOT explicitly mention the system update.",
-        current_expression,
-        intent.action_request.as_deref().unwrap_or("None"),
+        current_emotion,
     );
 
     // ── LAYER 3: PERSONA GENERATION ─────────────────────────────
@@ -608,7 +502,7 @@ pub async fn stream_chat(
     let mut all_cleaned_text = String::new();
     let mut all_translations = Vec::new();
     let mut bg_generated_by_tool = false;
-    let mut expression_set_by_tool = false;
+    let mut cue_set_by_tool = false;
     let mut draft_row_id: Option<i64> = None;
 
     for round in 0..MAX_TOOL_ROUNDS {
@@ -723,8 +617,8 @@ pub async fn stream_chat(
             if tc.name == "set_background" {
                 bg_generated_by_tool = true;
             }
-            if tc.name == "change_expression" {
-                expression_set_by_tool = true;
+            if tc.name == "play_cue" {
+                cue_set_by_tool = true;
             }
             if registry.needs_feedback(&tc.name) {
                 any_needs_feedback = true;
@@ -814,33 +708,62 @@ pub async fn stream_chat(
         }
     }
 
-    // Fallback emotion: if main LLM never called change_expression, infer via system LLM
-    if !expression_set_by_tool && !full_response.is_empty() {
-        println!("[Chat] Expression not set by tool, triggering fallback emotion analysis");
-        let emotion_messages = vec![
+    // Fallback cue: if main LLM never called play_cue, infer via system LLM
+    if !cue_set_by_tool && !full_response.is_empty() {
+        println!("[Chat] Cue not set by tool, triggering fallback cue analysis");
+        let mut emotion_messages = vec![
             crate::llm::openai::Message {
                 role: "system".to_string(),
                 content: crate::llm::openai::MessageContent::Text(
                     crate::ai::prompts::EMOTION_ANALYZER_PROMPT.to_string(),
                 ),
             },
-            crate::llm::openai::Message {
-                role: "user".to_string(),
-                content: crate::llm::openai::MessageContent::Text(full_response.clone()),
-            },
         ];
+        if let Some(profile) = crate::commands::live2d::load_active_live2d_profile() {
+            let available_cues = profile
+                .cue_map
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            emotion_messages.push(crate::llm::openai::Message {
+                role: "system".to_string(),
+                content: crate::llm::openai::MessageContent::Text(format!(
+                    "Available cues for the active model: {}.\nChoose exactly one from this list, or return null if none fit.",
+                    if available_cues.is_empty() { "(none)" } else { &available_cues }
+                )),
+            });
+        }
+        emotion_messages.push(crate::llm::openai::Message {
+            role: "user".to_string(),
+            content: crate::llm::openai::MessageContent::Text(full_response.clone()),
+        });
+        let valid_fallback_cues = crate::commands::live2d::load_active_live2d_profile()
+            .map(|profile| profile.cue_map.keys().cloned().collect::<std::collections::HashSet<_>>());
         match system_provider.chat(emotion_messages, None).await {
             Ok(json_str) => {
                 let clean = json_str.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```");
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(clean) {
-                    if let Some(expr) = val.get("expression").and_then(|v| v.as_str()) {
-                        println!("[Chat] Fallback expression: {}", expr);
-                        let _ = app.emit("chat-expression", serde_json::json!({ "expression": expr, "mood": 0.5 }));
+                    if let Some(cue) = val.get("cue").and_then(|v| v.as_str()) {
+                        let trimmed = cue.trim();
+                        let is_valid = valid_fallback_cues
+                            .as_ref()
+                            .map(|cues| cues.contains(trimmed))
+                            .unwrap_or(false);
+                        if is_valid {
+                            println!("[Chat] Fallback cue: {}", trimmed);
+                            let _ = app.emit(
+                                "chat-cue",
+                                serde_json::json!({ "cue": trimmed, "source": "fallback-cue" }),
+                            );
+                        } else {
+                            println!("[Chat] Ignoring invalid fallback cue: {}", trimmed);
+                        }
                     }
                 }
             }
             Err(e) => {
-                eprintln!("[Chat] Fallback emotion analysis failed: {}", e);
+                eprintln!("[Chat] Fallback cue analysis failed: {}", e);
             }
         }
     }
@@ -1130,12 +1053,12 @@ mod tests {
 
     #[test]
     fn test_parse_tool_call_basic() {
-        let input = "text[TOOL_CALL:change_expression|expression=happy]more";
+        let input = "text[TOOL_CALL:play_cue|cue=happy]more";
         let (cleaned, calls) = parse_tool_call_tags(input);
         assert_eq!(cleaned.trim(), "textmore");
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "change_expression");
-        assert_eq!(calls[0].args.get("expression"), Some(&"happy".to_string()));
+        assert_eq!(calls[0].name, "play_cue");
+        assert_eq!(calls[0].args.get("cue"), Some(&"happy".to_string()));
     }
 
     #[test]
@@ -1157,17 +1080,17 @@ mod tests {
 
     #[test]
     fn test_parse_tool_call_simplified_format() {
-        let input = "text[change_expression|expression=shy]more";
+        let input = "text[play_cue|cue=shy]more";
         let (cleaned, calls) = parse_tool_call_tags(input);
         assert_eq!(cleaned.trim(), "textmore");
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "change_expression");
-        assert_eq!(calls[0].args.get("expression"), Some(&"shy".to_string()));
+        assert_eq!(calls[0].name, "play_cue");
+        assert_eq!(calls[0].args.get("cue"), Some(&"shy".to_string()));
     }
 
     #[test]
     fn test_parse_tool_call_simplified_multiple() {
-        let input = "hello[change_expression|expression=happy]world[change_expression|expression=sad]end";
+        let input = "hello[play_cue|cue=happy]world[play_cue|cue=sad]end";
         let (cleaned, calls) = parse_tool_call_tags(input);
         assert_eq!(cleaned.trim(), "helloworldend");
         assert_eq!(calls.len(), 2);
@@ -1184,12 +1107,12 @@ mod tests {
 
     #[test]
     fn test_parse_tool_call_colon_format() {
-        let input = "text[change_expression:happy]more";
+        let input = "text[play_cue:happy]more";
         let (cleaned, calls) = parse_tool_call_tags(input);
         assert_eq!(cleaned.trim(), "textmore");
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "change_expression");
-        assert_eq!(calls[0].args.get("expression"), Some(&"happy".to_string()));
+        assert_eq!(calls[0].name, "play_cue");
+        assert_eq!(calls[0].args.get("cue"), Some(&"happy".to_string()));
     }
 
     #[test]

@@ -58,10 +58,10 @@ struct UiMessagePayload {
     payload: serde_json::Value,
 }
 
-/// Payload for character expression events
+/// Payload for character cue events
 #[derive(serde::Serialize, Clone)]
-struct ExpressionPayload {
-    expression: String,
+struct CuePayload {
+    cue: String,
 }
 
 /// ModManager handles mod discovery, metadata, theme/layout loading, and script execution.
@@ -171,14 +171,14 @@ impl ModManager {
                         );
                         println!("[ModManager] UI message sent to component '{}'", component);
                     }
-                    ScriptEvent::SetExpression { expression } => {
+                    ScriptEvent::PlayCue { cue } => {
                         let _ = handle.emit(
-                            "chat-expression",
-                            ExpressionPayload {
-                                expression: expression.clone(),
+                            "chat-cue",
+                            CuePayload {
+                                cue: cue.clone(),
                             },
                         );
-                        println!("[ModManager] Expression set to '{}'", expression);
+                        println!("[ModManager] Cue triggered '{}'", cue);
                     }
                 }
             }

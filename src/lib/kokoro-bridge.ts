@@ -25,14 +25,14 @@ export interface SystemStatus {
 
 export interface CharacterState {
     name: string;
-    current_expression: string;
+    current_cue: string;
     mood: number;
     is_speaking: boolean;
 }
 
 export interface ChatResponse {
     text: string;
-    expression: string;
+    cue: string;
     mood_delta: number;
 }
 
@@ -56,8 +56,8 @@ export async function getCharacterState(): Promise<CharacterState> {
     return invoke<CharacterState>("get_character_state");
 }
 
-export async function setExpression(expression: string): Promise<CharacterState> {
-    return invoke<CharacterState>("set_expression", { expression });
+export async function playCue(cue: string): Promise<CharacterState> {
+    return invoke<CharacterState>("play_cue", { cue });
 }
 
 // ── Database Commands ──────────────────────────────
@@ -255,29 +255,17 @@ export async function onChatTranslation(callback: (translation: string) => void)
     return listen<string>("chat-translation", (event) => callback(event.payload));
 }
 
-// ── Expression Events ──────────────────────────────
+// ── Cue Events ─────────────────────────────────────
 
-export interface ExpressionEvent {
-    expression: string;
-    mood: number;
+export interface CueEvent {
+    cue: string;
+    source?: string;
 }
 
-export async function onChatExpression(
-    callback: (data: ExpressionEvent) => void
+export async function onChatCue(
+    callback: (data: CueEvent) => void
 ): Promise<UnlistenFn> {
-    return listen<ExpressionEvent>("chat-expression", (event) => callback(event.payload));
-}
-
-// ── Action/Motion Events ───────────────────────────
-
-export interface ActionEvent {
-    action: string;
-}
-
-export async function onChatAction(
-    callback: (data: ActionEvent) => void
-): Promise<UnlistenFn> {
-    return listen<ActionEvent>("chat-action", (event) => callback(event.payload));
+    return listen<CueEvent>("chat-cue", (event) => callback(event.payload));
 }
 
 // ── LLM Management ──────────────────────────────────
@@ -395,6 +383,20 @@ export interface Live2dModelInfo {
     path: string;
 }
 
+export interface Live2dCueBinding {
+    expression?: string | null;
+    motion_group?: string | null;
+}
+
+export interface Live2dModelProfile {
+    version: number;
+    model_path: string;
+    available_expressions: string[];
+    available_motion_groups: Record<string, number>;
+    cue_map: Record<string, Live2dCueBinding>;
+    semantic_cue_map: Record<string, string>;
+}
+
 export async function importLive2dZip(zipPath: string): Promise<string> {
     return invoke<string>("import_live2d_zip", { zipPath });
 }
@@ -409,6 +411,18 @@ export async function listLive2dModels(): Promise<Live2dModelInfo[]> {
 
 export async function deleteLive2dModel(modelName: string): Promise<void> {
     return invoke("delete_live2d_model", { modelName });
+}
+
+export async function getLive2dModelProfile(modelPath: string): Promise<Live2dModelProfile> {
+    return invoke<Live2dModelProfile>("get_live2d_model_profile", { modelPath });
+}
+
+export async function saveLive2dModelProfile(profile: Live2dModelProfile): Promise<Live2dModelProfile> {
+    return invoke<Live2dModelProfile>("save_live2d_model_profile", { profile });
+}
+
+export async function setActiveLive2dModel(modelPath: string | null): Promise<void> {
+    return invoke("set_active_live2d_model", { modelPath });
 }
 
 // ── TTS ────────────────────────────────────────────

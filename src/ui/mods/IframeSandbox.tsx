@@ -84,8 +84,8 @@ const ALLOWED_MOD_COMMANDS = new Set([
     // Character state (read-only)
     'get_character_state',
     'get_engine_info',
-    // Expression / motion control
-    'set_expression',
+    // Cue / motion control
+    'play_cue',
     'play_motion',
     // Settings (scoped to MOD namespace)
     'get_mod_setting',

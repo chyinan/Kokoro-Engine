@@ -82,7 +82,7 @@ pub struct SystemStatus {
 ```rust
 pub struct CharacterState {
     pub name: String,                // "Kokoro"
-    pub current_expression: String,  // "neutral" | "happy" | "sad" | ...
+    pub current_cue: String,         // "neutral" | "happy" | "sad" | ...
     pub mood: f32,                   // 0.0 – 1.0
     pub is_speaking: bool,
 }
@@ -93,7 +93,7 @@ pub struct CharacterState {
 ```rust
 pub struct ChatResponse {
     pub text: String,           // AI reply text
-    pub expression: String,     // Suggested expression
+    pub cue: String,            // Suggested visual cue
     pub mood_delta: f32,        // Mood change (-1.0 to 1.0)
 }
 ```
@@ -163,8 +163,8 @@ Mirrored in [`kokoro-bridge.ts`](file:///d:/Program/Kokoro%20Engine/src/lib/koko
 ```typescript
 interface EngineInfo      { name: string; version: string; platform: string }
 interface SystemStatus    { engine_running: boolean; active_modules: string[]; memory_usage_mb: number }
-interface CharacterState  { name: string; current_expression: string; mood: number; is_speaking: boolean }
-interface ChatResponse    { text: string; expression: string; mood_delta: number }
+interface CharacterState  { name: string; current_cue: string; mood: number; is_speaking: boolean }
+interface ChatResponse    { text: string; cue: string; mood_delta: number }
 interface ChatRequest     { message: string; api_key?: string; endpoint?: string; model?: string }
 interface DbTestResult    { success: boolean; message: string; record_count: number }
 ```
@@ -244,19 +244,19 @@ Returns the current character state for Live2D synchronization.
 
 ```typescript
 const state = await getCharacterState();
-// { name: "Kokoro", current_expression: "neutral", mood: 0.5, is_speaking: false }
+// { name: "Kokoro", current_cue: "neutral", mood: 0.5, is_speaking: false }
 ```
 
 ---
 
-### `set_expression`
+### `play_cue`
 
-Sets the character's current expression and returns the updated state.
+Triggers the character's current cue and returns the updated state.
 
 | Property | Value |
 |---|---|
-| **Command** | `set_expression` |
-| **Parameters** | `expression: string` |
+| **Command** | `play_cue` |
+| **Parameters** | `cue: string` |
 | **Returns** | `CharacterState` |
 | **Errors** | *none* |
 | **Source** | [character.rs](file:///d:/Program/Kokoro%20Engine/src-tauri/src/commands/character.rs#L31-L40) |
@@ -264,8 +264,8 @@ Sets the character's current expression and returns the updated state.
 **Example:**
 
 ```typescript
-const state = await setExpression("happy");
-// { name: "Kokoro", current_expression: "happy", mood: 0.5, is_speaking: false }
+const state = await playCue("happy");
+// { name: "Kokoro", current_cue: "happy", mood: 0.5, is_speaking: false }
 ```
 
 ---
@@ -624,7 +624,7 @@ getSystemStatus():                           Promise<SystemStatus>
 
 // Character
 getCharacterState():                         Promise<CharacterState>
-setExpression(expression: string):           Promise<CharacterState>
+playCue(cue: string):                        Promise<CharacterState>
 sendMessage(message: string):                Promise<ChatResponse>
 
 // Chat (streaming)
@@ -633,7 +633,7 @@ onChatDelta(cb: (delta: string) => void):    Promise<UnlistenFn>
 onChatError(cb: (error: string) => void):    Promise<UnlistenFn>
 onChatDone(cb: () => void):                  Promise<UnlistenFn>
 onChatTranslation(cb):                       Promise<UnlistenFn>
-onChatExpression(cb):                        Promise<UnlistenFn>
+onChatCue(cb):                               Promise<UnlistenFn>
 
 // Context
 setPersona(prompt: string):                  Promise<void>

@@ -3,11 +3,9 @@
  *
  * Detects gesture types (tap / long_press / rapid_tap) and delegates
  * all personality-aware reactions to the backend LLM pipeline.
- * A lightweight "surprised" confirmation animation bridges the latency gap.
  *
- * Also provides preset action sequences (chained animations).
  */
-import type { EmotionState, ActionIntent } from "../../features/live2d/Live2DController";
+import type { CueName } from "../../features/live2d/Live2DController";
 import { streamChat, onChatDone } from "../../lib/kokoro-bridge";
 import { emit } from "@tauri-apps/api/event";
 
@@ -26,52 +24,6 @@ export interface InteractionEvent {
     gesture: GestureType;
     isCombo: boolean;
 }
-
-interface ActionStep {
-    emotion?: EmotionState;
-    action?: ActionIntent;
-    delayMs: number;
-}
-
-interface ActionSequence {
-    name: string;
-    steps: ActionStep[];
-}
-
-// ── Preset Sequences ───────────────────────────────
-
-const PRESET_SEQUENCES: ActionSequence[] = [
-    {
-        name: "greeting",
-        steps: [
-            { emotion: "happy", action: "wave", delayMs: 500 },
-            { emotion: "happy", action: "nod", delayMs: 800 },
-        ],
-    },
-    {
-        name: "tantrum",
-        steps: [
-            { emotion: "angry", action: "shake", delayMs: 300 },
-            { emotion: "angry", action: "shake", delayMs: 300 },
-            { emotion: "sad", delayMs: 500 },
-        ],
-    },
-    {
-        name: "celebrate",
-        steps: [
-            { emotion: "excited", action: "cheer", delayMs: 400 },
-            { emotion: "happy", action: "dance", delayMs: 600 },
-            { emotion: "happy", action: "wave", delayMs: 500 },
-        ],
-    },
-    {
-        name: "sleepy",
-        steps: [
-            { emotion: "thinking", action: "idle", delayMs: 800 },
-            { emotion: "calm", action: "nod", delayMs: 1000 },
-        ],
-    },
-];
 
 // ── Service ────────────────────────────────────────
 
@@ -94,8 +46,8 @@ function describeHitArea(hitArea: string): string {
 
 type ReactionCallback = (event: InteractionEvent) => void;
 type ControllerProxy = {
-    setEmotion: (emotion: EmotionState) => void;
-    playActionMotion: (action: ActionIntent) => void;
+    playCue: (cue: CueName) => void;
+    resolveInteractionSemanticCue: (gesture: GestureType, hitArea: string) => CueName | null;
 };
 
 export class InteractionService {
@@ -123,7 +75,8 @@ export class InteractionService {
 
     /**
      * Handle a gesture event from the Live2D viewer.
-     * Plays a brief confirmation animation, then sends to LLM.
+     * The frontend only reports the gesture; any visual reaction should come
+     * from configured cues or the backend response, not fixed cue names.
      */
     async handleGesture(gesture: GestureEvent, controller: ControllerProxy): Promise<InteractionEvent | null> {
         const now = Date.now();
@@ -157,8 +110,10 @@ export class InteractionService {
         this.lastTapTime = now;
         this.lastHitArea = gesture.hitArea;
 
-        // Play lightweight confirmation animation (expression only, no motion)
-        controller.setEmotion("surprised");
+        const mappedCue = controller.resolveInteractionSemanticCue(gesture.gesture, gesture.hitArea);
+        if (mappedCue) {
+            controller.playCue(mappedCue);
+        }
 
         // If LLM is busy, queue this gesture (keep only the latest)
         if (this.isChatBusy) {
@@ -234,36 +189,6 @@ export class InteractionService {
         const { gesture, controller } = this.pendingGesture;
         this.pendingGesture = null;
         this.sendGestureToLLM(gesture, controller);
-    }
-
-    /**
-     * Play a preset action sequence (chained motions + emotions).
-     */
-    async playSequence(name: string, controller: ControllerProxy): Promise<void> {
-        const sequence = PRESET_SEQUENCES.find(s => s.name === name);
-        if (!sequence) {
-            console.warn(`[Interaction] Unknown sequence: ${name}`);
-            return;
-        }
-
-        console.log(`[Interaction] Playing sequence: ${name}`);
-
-        for (const step of sequence.steps) {
-            if (step.emotion) {
-                controller.setEmotion(step.emotion);
-            }
-            if (step.action) {
-                controller.playActionMotion(step.action);
-            }
-            await new Promise(resolve => setTimeout(resolve, step.delayMs));
-        }
-    }
-
-    /**
-     * Get all available preset sequence names.
-     */
-    getSequenceNames(): string[] {
-        return PRESET_SEQUENCES.map(s => s.name);
     }
 
     /**

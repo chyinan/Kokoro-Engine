@@ -42,24 +42,24 @@ impl ActionHandler for GetTimeAction {
     }
 }
 
-// ── change_expression ──────────────────────────────────
+// ── play_cue ──────────────────────────────────
 
-pub struct ChangeExpressionAction;
+pub struct PlayCueAction;
 
 #[async_trait]
-impl ActionHandler for ChangeExpressionAction {
+impl ActionHandler for PlayCueAction {
     fn name(&self) -> &str {
-        "change_expression"
+        "play_cue"
     }
 
     fn description(&self) -> &str {
-        "Change the character's facial expression"
+        "Trigger a configured Live2D cue"
     }
 
     fn parameters(&self) -> Vec<ActionParam> {
         vec![ActionParam {
-            name: "expression".to_string(),
-            description: "One of: neutral, happy, sad, angry, surprised, thinking, shy, smug, worried, excited".to_string(),
+            name: "cue".to_string(),
+            description: "Configured Live2D cue name for the active model".to_string(),
             required: true,
         }]
     }
@@ -69,37 +69,35 @@ impl ActionHandler for ChangeExpressionAction {
         args: HashMap<String, String>,
         ctx: ActionContext,
     ) -> Result<ActionResult, ActionError> {
-        let expression = args
-            .get("expression")
-            .ok_or_else(|| ActionError("Missing 'expression' parameter".into()))?;
+        let cue = args
+            .get("cue")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| ActionError("Missing 'cue' parameter".into()))?;
 
-        let valid = [
-            "neutral",
-            "happy",
-            "sad",
-            "angry",
-            "surprised",
-            "thinking",
-            "shy",
-            "smug",
-            "worried",
-            "excited",
-        ];
-        let expr = expression.to_lowercase();
-        if !valid.contains(&expr.as_str()) {
-            return Ok(ActionResult::err(format!(
-                "Invalid expression: {}",
-                expression
+        let profile = crate::commands::live2d::load_active_live2d_profile()
+            .ok_or_else(|| ActionError("No active Live2D model profile loaded".into()))?;
+        if !profile.cue_map.contains_key(cue) {
+            let available_cues = profile
+                .cue_map
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(ActionError(format!(
+                "Unknown cue '{}'. Available configured cues: {}",
+                cue,
+                if available_cues.is_empty() { "(none)" } else { &available_cues }
             )));
         }
 
-        // Emit expression change event to frontend
+        // Emit cue event to frontend
         let _ = ctx.app.emit(
-            "chat-expression",
-            serde_json::json!({ "expression": expr, "mood": 0.5 }),
+            "chat-cue",
+            serde_json::json!({ "cue": cue, "source": "builtin-play-cue" }),
         );
 
-        Ok(ActionResult::ok(format!("Expression changed to: {}", expr)))
+        Ok(ActionResult::ok(format!("Cue triggered: {}", cue)))
     }
 }
 
@@ -449,7 +447,7 @@ impl ActionHandler for PlaySoundAction {
 /// Register all built-in action handlers into the given registry.
 pub fn register_builtins(registry: &mut super::registry::ActionRegistry) {
     registry.register(GetTimeAction);
-    registry.register(ChangeExpressionAction);
+    registry.register(PlayCueAction);
     registry.register(SetBackgroundAction);
     registry.register(SearchMemoryAction);
     registry.register(StoreMemoryAction);

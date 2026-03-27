@@ -1,10 +1,11 @@
 use crate::error::KokoroError;
 use serde::Serialize;
+use tauri::Emitter;
 
 #[derive(Serialize)]
 pub struct CharacterState {
     pub name: String,
-    pub current_expression: String,
+    pub current_cue: String,
     pub mood: f32,
     pub is_speaking: bool,
 }
@@ -12,7 +13,7 @@ pub struct CharacterState {
 #[derive(Serialize)]
 pub struct ChatResponse {
     pub text: String,
-    pub expression: String,
+    pub cue: String,
     pub mood_delta: f32,
 }
 
@@ -22,19 +23,28 @@ pub fn get_character_state() -> CharacterState {
     // TODO: Read from actual state manager
     CharacterState {
         name: "Kokoro".to_string(),
-        current_expression: "neutral".to_string(),
+        current_cue: "neutral".to_string(),
         mood: 0.5,
         is_speaking: false,
     }
 }
 
-/// Sets the character's expression (triggered by UI interaction).
 #[tauri::command]
-pub fn set_expression(expression: String) -> CharacterState {
-    // TODO: Update actual state and trigger Live2D animation
+pub fn play_cue(app: tauri::AppHandle, cue: String) -> CharacterState {
+    let trimmed = cue.trim();
+    if !trimmed.is_empty() {
+        let _ = app.emit(
+            "chat-cue",
+            serde_json::json!({
+                "cue": trimmed,
+                "source": "manual",
+            }),
+        );
+    }
+
     CharacterState {
         name: "Kokoro".to_string(),
-        current_expression: expression,
+        current_cue: cue,
         mood: 0.5,
         is_speaking: false,
     }
@@ -49,7 +59,7 @@ pub async fn send_message(message: String) -> Result<ChatResponse, KokoroError> 
     }
     Ok(ChatResponse {
         text: format!("Echo from Kokoro Engine: {}", message),
-        expression: "happy".to_string(),
+        cue: "happy".to_string(),
         mood_delta: 0.1,
     })
 }

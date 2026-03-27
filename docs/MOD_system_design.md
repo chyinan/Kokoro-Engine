@@ -161,7 +161,7 @@ Scripts run in a separate thread (Rust-side QuickJS runtime). They handle logic 
 
 **Capabilities:**
 -   Listen to engine events (`chat`, `interaction`)
--   Control engine state (`expression`, `tts`)
+-   Control engine state (`cue`, `tts`)
 -   Send data to UI components
 
 **Example Script:**
@@ -173,7 +173,7 @@ console.log("Neon Cyber loaded");
 Kokoro.on("chat", (msg) => {
   if (msg.text.includes("hack")) {
     Kokoro.ui.send("SystemMonitor", { status: "HACKING_DETECTED", color: "red" });
-    Kokoro.character.setExpression("smug");
+    Kokoro.character.playCue("smug");
   }
 });
 ```

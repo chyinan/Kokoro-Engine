@@ -5,6 +5,7 @@
             "saved": "保存完了",
             "cancel": "キャンセル",
             "edit": "編集",
+            "preview": "プレビュー",
             "done": "完了",
             "delete": "削除",
             "add": "追加"
@@ -321,6 +322,81 @@
                     "fps_60": "60 FPS",
                     "unlimited": "無制限",
                     "custom": "カスタム"
+                }
+            },
+            "mapping": {
+                "select_model": "マッピングを編集するにはインポート済みモデルを選択してください。",
+                "loading_profile": "モデルプロファイルを読み込み中...",
+                "placeholders": {
+                    "cue_name": "cue 名"
+                },
+                "options": {
+                    "select_cue": "Cue を選択",
+                    "no_expression": "表情なし",
+                    "no_motion_group": "モーショングループなし"
+                },
+                "actions": {
+                    "save_cue": "Cue を保存",
+                    "save_interaction": "インタラクションマッピングを保存",
+                    "save_semantic": "意味イベントマッピングを保存",
+                    "clear": "クリア"
+                },
+                "cues": {
+                    "title": "Cue マッピング",
+                    "desc": "インポートモデルはモデルごとの cue を使用します。cue 名をモデルの表情またはモーショングループに割り当てます。"
+                },
+                "available_expressions": "表情 ({{count}})",
+                "available_motion_groups": "モーショングループ ({{count}})",
+                "configured_cues": "設定済み Cue ({{count}})",
+                "empty_cues": "まだ cue は設定されていません。",
+                "interactions": {
+                    "title": "インタラクションマッピング",
+                    "desc": "ジェスチャーと部位の意味イベントを cue にマッピングします。優先順は完全一致、ジェスチャーワイルドカード、部位ワイルドカード、全体ワイルドカードです。",
+                    "configured": "設定済みインタラクションルール ({{count}})",
+                    "empty": "インタラクション cue マッピングはまだありません。"
+                },
+                "semantic": {
+                    "title": "意味イベントマッピング",
+                    "desc": "非インタラクションの意味イベントを cue にマッピングします。これらは感情イベントやその他のモデル非依存ロジックで使われます。",
+                    "configured": "設定済み意味ルール ({{count}})",
+                    "empty": "意味 cue マッピングはまだありません。"
+                },
+                "summary": {
+                    "expression": "表情: {{value}}",
+                    "expression_none": "表情: なし",
+                    "motion": "モーション: {{value}}",
+                    "motion_none": "モーション: なし",
+                    "cue": "cue: {{value}}"
+                },
+                "gestures": {
+                    "tap": "タップ",
+                    "long_press": "長押し",
+                    "rapid_tap": "連続タップ",
+                    "any": "任意のジェスチャー"
+                },
+                "areas": {
+                    "eyes": "目",
+                    "lips": "唇",
+                    "face": "顔",
+                    "head": "頭",
+                    "hair": "髪",
+                    "hand": "手",
+                    "arm": "腕",
+                    "chest": "胸",
+                    "body": "体",
+                    "leg": "脚",
+                    "skirt": "スカート",
+                    "accessory": "アクセサリー",
+                    "any": "任意の部位"
+                },
+                "semantic_keys": {
+                    "emotion": {
+                        "ecstatic": "感情: 有頂天",
+                        "very_happy": "感情: とても嬉しい",
+                        "sulking": "感情: すねている",
+                        "very_sad": "感情: とても悲しい",
+                        "mood_swing": "感情: 気分の揺れ"
+                    }
                 }
             }
         },
@@ -698,8 +774,7 @@
             "manual": "手動",
             "auto_desc": "AIが表情を制御",
             "manual_desc": "手動で表情を制御"
-        },
-        "set_expression": "表情を設定: "
+        }
     },
     "mods": {
         "title": "Mod マネージャー",

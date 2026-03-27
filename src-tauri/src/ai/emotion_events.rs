@@ -28,10 +28,8 @@ pub struct EmotionEvent {
     pub system_instruction: String,
     /// Hint for frontend (e.g., trigger particle effects, animations).
     pub frontend_hint: String,
-    /// Suggested Live2D expression override.
-    pub expression_override: Option<String>,
-    /// Suggested Live2D action override.
-    pub action_override: Option<String>,
+    /// Semantic key for cue mapping, resolved by the frontend/profile layer.
+    pub semantic_key: String,
 }
 
 /// Check if current emotion state triggers any special events.
@@ -52,8 +50,7 @@ pub fn check_emotion_triggers(mood: f32, mood_history: &[f32]) -> Vec<EmotionEve
             )
             .to_string(),
             frontend_hint: "play_celebration_effect".to_string(),
-            expression_override: Some("excited".to_string()),
-            action_override: Some("dance".to_string()),
+            semantic_key: "emotion:ecstatic".to_string(),
         });
     }
     // Very Happy (mood > 0.85, but not ecstatic)
@@ -66,8 +63,7 @@ pub fn check_emotion_triggers(mood: f32, mood_history: &[f32]) -> Vec<EmotionEve
             )
             .to_string(),
             frontend_hint: "sparkle_effect".to_string(),
-            expression_override: Some("happy".to_string()),
-            action_override: None,
+            semantic_key: "emotion:very_happy".to_string(),
         });
     }
 
@@ -82,8 +78,7 @@ pub fn check_emotion_triggers(mood: f32, mood_history: &[f32]) -> Vec<EmotionEve
             )
             .to_string(),
             frontend_hint: "dim_screen_effect".to_string(),
-            expression_override: Some("sad".to_string()),
-            action_override: None,
+            semantic_key: "emotion:sulking".to_string(),
         });
     }
     // Very Sad (mood < 0.25, but not sulking)
@@ -96,8 +91,7 @@ pub fn check_emotion_triggers(mood: f32, mood_history: &[f32]) -> Vec<EmotionEve
             )
             .to_string(),
             frontend_hint: "rain_effect".to_string(),
-            expression_override: Some("sad".to_string()),
-            action_override: None,
+            semantic_key: "emotion:very_sad".to_string(),
         });
     }
 
@@ -122,8 +116,7 @@ pub fn check_emotion_triggers(mood: f32, mood_history: &[f32]) -> Vec<EmotionEve
                 )
                 .to_string(),
                 frontend_hint: "mood_swing_effect".to_string(),
-                expression_override: None,
-                action_override: None,
+                semantic_key: "emotion:mood_swing".to_string(),
             });
         }
     }
@@ -222,13 +215,13 @@ mod tests {
     }
 
     #[test]
-    fn ecstatic_has_dance_action() {
+    fn ecstatic_uses_semantic_key() {
         let events = check_emotion_triggers(0.98, &[]);
         let ecstatic = events
             .iter()
             .find(|e| e.event_type == EmotionEventType::Ecstatic)
             .unwrap();
-        assert_eq!(ecstatic.action_override, Some("dance".to_string()));
+        assert_eq!(ecstatic.semantic_key, "emotion:ecstatic");
         assert!(ecstatic.frontend_hint.contains("celebration"));
     }
 }

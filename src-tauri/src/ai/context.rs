@@ -721,6 +721,44 @@ impl AIOrchestrator {
             });
         }
 
+        // -- Live2D Cue Context (P0.4) --
+        if let Some(profile) = crate::commands::live2d::load_active_live2d_profile() {
+            if !profile.cue_map.is_empty() {
+                let cue_lines = profile
+                    .cue_map
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                final_messages.push(Message {
+                    role: "system".to_string(),
+                    content: format!(
+                        "Live2D visual playback uses configured cues. Available cues for the active model: {}.\n\
+                         When you want a visual performance, prefer one of these cue names and call the play_cue tool.",
+                        cue_lines
+                    ),
+                    metadata: Some(serde_json::json!({"type": "live2d_cue_context"})),
+                });
+            }
+
+            if !profile.semantic_cue_map.is_empty() {
+                let semantic_lines = profile
+                    .semantic_cue_map
+                    .iter()
+                    .map(|(semantic_key, cue)| format!("- {} -> {}", semantic_key, cue))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                final_messages.push(Message {
+                    role: "system".to_string(),
+                    content: format!(
+                        "Configured semantic Live2D cue mappings for the active model:\n{}",
+                        semantic_lines
+                    ),
+                    metadata: Some(serde_json::json!({"type": "live2d_semantic_cue_context"})),
+                });
+            }
+        }
+
         // -- Relevant Memories (P1) --
         // Upgraded: instruct the LLM to naturally reference these in conversation
         if let Some(mems) = memories {
