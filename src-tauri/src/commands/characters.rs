@@ -1,4 +1,5 @@
 use crate::ai::context::AIOrchestrator;
+use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -37,13 +38,12 @@ pub struct UpdateCharacterRequest {
 #[tauri::command]
 pub async fn list_characters(
     orchestrator: State<'_, AIOrchestrator>,
-) -> Result<Vec<CharacterRecord>, String> {
+) -> Result<Vec<CharacterRecord>, KokoroError> {
     let rows = sqlx::query_as::<_, (String, String, String, String, String, i64, i64)>(
         "SELECT id, name, persona, user_nickname, source_format, created_at, updated_at FROM characters ORDER BY created_at ASC"
     )
     .fetch_all(&orchestrator.db)
-    .await
-    .map_err(|e| e.to_string())?;
+    .await?;
 
     Ok(rows.into_iter().map(|(id, name, persona, user_nickname, source_format, created_at, updated_at)| {
         CharacterRecord { id, name, persona, user_nickname, source_format, created_at, updated_at }
@@ -54,7 +54,7 @@ pub async fn list_characters(
 pub async fn create_character(
     request: CreateCharacterRequest,
     orchestrator: State<'_, AIOrchestrator>,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     sqlx::query(
         "INSERT OR IGNORE INTO characters (id, name, persona, user_nickname, source_format, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
@@ -66,8 +66,7 @@ pub async fn create_character(
     .bind(request.created_at)
     .bind(request.updated_at)
     .execute(&orchestrator.db)
-    .await
-    .map_err(|e| e.to_string())?;
+    .await?;
     Ok(())
 }
 
@@ -75,7 +74,7 @@ pub async fn create_character(
 pub async fn update_character(
     request: UpdateCharacterRequest,
     orchestrator: State<'_, AIOrchestrator>,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     sqlx::query(
         "UPDATE characters SET name = ?, persona = ?, user_nickname = ?, source_format = ?, updated_at = ? WHERE id = ?"
     )
@@ -86,8 +85,7 @@ pub async fn update_character(
     .bind(request.updated_at)
     .bind(&request.id)
     .execute(&orchestrator.db)
-    .await
-    .map_err(|e| e.to_string())?;
+    .await?;
     Ok(())
 }
 
@@ -95,11 +93,10 @@ pub async fn update_character(
 pub async fn delete_character(
     id: String,
     orchestrator: State<'_, AIOrchestrator>,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     sqlx::query("DELETE FROM characters WHERE id = ?")
         .bind(&id)
         .execute(&orchestrator.db)
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
     Ok(())
 }

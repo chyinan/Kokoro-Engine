@@ -1,3 +1,4 @@
+use crate::error::KokoroError;
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::{command, State};
@@ -36,7 +37,7 @@ pub async fn set_window_size(
     state: State<'_, WindowSizeState>,
     width: u32,
     height: u32,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     state.set(width, height).await;
     Ok(())
 }
