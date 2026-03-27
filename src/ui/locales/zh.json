@@ -353,7 +353,7 @@
                 "testing": "测试中...",
                 "success": "连接成功！发现 {{count}} 个 checkpoint。",
                 "failed": "连接失败",
-                "tip": "💡 提示：请确保 SD WebUI 启动时带上了 <code class=\"text-[var(--color-accent)]\">--api</code> 参数。"
+                "tip": "提示：请确保 SD WebUI 启动时带上了 <code class=\"text-[var(--color-accent)]\">--api</code> 参数。"
             },
             "test_gen": {
                 "label": "生成测试",
@@ -513,7 +513,7 @@
                     "label": "摄像头设备"
                 }
             },
-            "privacy_note": "🔒 屏幕截图仅在本地处理并直接发送给您配置的 VLM 提供商。截图永远不会被永久保存——仅保留文本描述。",
+            "privacy_note": "屏幕截图仅在本地处理并直接发送给您配置的 VLM 提供商。截图永远不会被永久保存——仅保留文本描述。",
             "loading": "正在加载视觉配置..."
         },
         "mcp": {
@@ -532,7 +532,7 @@
                 "adding": "添加中...",
                 "add_server": "添加服务器"
             },
-            "info_note": "🔧 MCP 服务器提供外部工具 (文件系统、网络搜索、数据库等)，角色可在对话中使用这些工具。<br/>已连接服务器的工具会自动显示在角色的工具列表中。",
+            "info_note": "MCP 服务器提供外部工具 (文件系统、网络搜索、数据库等)，角色可在对话中使用这些工具。<br/>已连接服务器的工具会自动显示在角色的工具列表中。",
             "empty": {
                 "title": "尚未配置 MCP 服务器",
                 "desc": "点击 <strong>添加</strong> 按钮连接工具服务器"
