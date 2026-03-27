@@ -1,3 +1,4 @@
+use crate::error::KokoroError;
 use crate::tts::config::{save_config, TtsSystemConfig};
 use crate::tts::{ProviderStatus, TtsParams, TtsService, VoiceProfile};
 use tauri::{command, AppHandle, State};
@@ -17,7 +18,7 @@ pub async fn synthesize(
     state: State<'_, TtsService>,
     text: String,
     config: TtsConfig,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     let params = TtsParams {
         voice: config.voice,
         speed: config.speed,
@@ -30,17 +31,18 @@ pub async fn synthesize(
     state
         .speak(app, text, config.provider_id, Some(params))
         .await
+        .map_err(KokoroError::Tts)
 }
 
 #[command]
 pub async fn list_tts_providers(
     state: State<'_, TtsService>,
-) -> Result<Vec<ProviderStatus>, String> {
+) -> Result<Vec<ProviderStatus>, KokoroError> {
     Ok(state.list_providers().await)
 }
 
 #[command]
-pub async fn list_tts_voices(state: State<'_, TtsService>) -> Result<Vec<VoiceProfile>, String> {
+pub async fn list_tts_voices(state: State<'_, TtsService>) -> Result<Vec<VoiceProfile>, KokoroError> {
     Ok(state.list_voices().await)
 }
 
@@ -48,19 +50,19 @@ pub async fn list_tts_voices(state: State<'_, TtsService>) -> Result<Vec<VoicePr
 pub async fn get_tts_provider_status(
     state: State<'_, TtsService>,
     provider_id: String,
-) -> Result<Option<ProviderStatus>, String> {
+) -> Result<Option<ProviderStatus>, KokoroError> {
     Ok(state.get_provider_status(&provider_id).await)
 }
 
 #[command]
-pub async fn clear_tts_cache(state: State<'_, TtsService>) -> Result<(), String> {
+pub async fn clear_tts_cache(state: State<'_, TtsService>) -> Result<(), KokoroError> {
     state.clear_cache().await;
     Ok(())
 }
 
 /// Return the current TTS config from disk.
 #[command]
-pub async fn get_tts_config() -> Result<TtsSystemConfig, String> {
+pub async fn get_tts_config() -> Result<TtsSystemConfig, KokoroError> {
     let app_data = dirs_next::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
@@ -73,14 +75,14 @@ pub async fn get_tts_config() -> Result<TtsSystemConfig, String> {
 pub async fn save_tts_config(
     state: State<'_, TtsService>,
     config: TtsSystemConfig,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     let app_data = dirs_next::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let config_path = app_data.join("tts_config.json");
 
     // Write to disk
-    save_config(&config_path, &config)?;
+    save_config(&config_path, &config).map_err(KokoroError::Tts)?;
 
     // Hot-reload providers
     state.reload_from_config(&config).await;
@@ -90,10 +92,13 @@ pub async fn save_tts_config(
 
 /// Scan a GPT-SoVITS install directory for available GPT and SoVITS model files.
 #[command]
-pub async fn list_gpt_sovits_models(install_path: String) -> Result<GptSovitsModels, String> {
+pub async fn list_gpt_sovits_models(install_path: String) -> Result<GptSovitsModels, KokoroError> {
     let root = std::path::Path::new(&install_path);
     if !root.is_dir() {
-        return Err(format!("Directory not found: {}", install_path));
+        return Err(KokoroError::NotFound(format!(
+            "Directory not found: {}",
+            install_path
+        )));
     }
 
     let mut gpt_models = Vec::new();
