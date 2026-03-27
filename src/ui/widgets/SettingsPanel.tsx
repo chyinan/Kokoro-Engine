@@ -47,6 +47,8 @@ interface SettingsPanelProps {
     onCustomModelChange: (path: string | null) => void;
     gazeTracking?: boolean;
     onGazeTrackingChange?: (enabled: boolean) => void;
+    renderFps: number;
+    onRenderFpsChange: (fps: number) => void;
     // Optional props for external state management (Mod support)
     availableModels?: any[]; // Live2dModelInfo[]
     persona?: string;
@@ -149,7 +151,7 @@ function normalizeTtsVoice(
     return matchesProvider ? voice : getDefaultTtsVoice(providerId, voices);
 }
 
-export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: _telegramConfigProp, onVisionConfigChange }: SettingsPanelProps) {
+export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: _telegramConfigProp, onVisionConfigChange }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [activeTab, setActiveTab] = useState<TabId>("bg");
     const bg = backgroundControls;
@@ -527,6 +529,8 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                                     onCustomModelPathChange={setLocalCustomModelPath}
                                     gazeTracking={localGazeTracking}
                                     onGazeTrackingChange={setLocalGazeTracking}
+                                    renderFps={renderFps}
+                                    onRenderFpsChange={onRenderFpsChange}
                                 />
                             )}
 

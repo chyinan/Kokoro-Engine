@@ -313,6 +313,15 @@
             "gaze_tracking": {
                 "label": "視線追従",
                 "desc": "モデルの目がマウスカーソルを追従します"
+            },
+            "render_fps": {
+                "label": "描画 FPS",
+                "options": {
+                    "fps_30": "30 FPS",
+                    "fps_60": "60 FPS",
+                    "unlimited": "無制限",
+                    "custom": "カスタム"
+                }
             }
         },
         "image_gen": {

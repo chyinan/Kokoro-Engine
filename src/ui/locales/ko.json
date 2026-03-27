@@ -313,6 +313,15 @@
             "gaze_tracking": {
                 "label": "시선 추적",
                 "desc": "모델의 눈이 마우스 커서를 따라갑니다"
+            },
+            "render_fps": {
+                "label": "렌더링 FPS",
+                "options": {
+                    "fps_30": "30 FPS",
+                    "fps_60": "60 FPS",
+                    "unlimited": "무제한",
+                    "custom": "사용자 지정"
+                }
             }
         },
         "image_gen": {

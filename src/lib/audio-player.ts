@@ -22,6 +22,7 @@ export class AudioStreamManager {
     private analysisListeners: ((data: AudioAnalysis) => void)[] = [];
     private playStateListeners: ((playing: boolean) => void)[] = [];
     private animationFrameId?: number;
+    private analysisActive = false;
 
     constructor() {
         this.audioContext = new AudioContext();
@@ -40,19 +41,19 @@ export class AudioStreamManager {
         this.audioElement.onplay = () => {
             this._isPlaying = true;
             this.broadcastPlayState(true);
-            if (!this.animationFrameId) {
-                this.startAnalysis();
-            }
+            this.startAnalysis();
         };
 
         this.audioElement.onpause = () => {
             if (this.audioElement.ended) return;
             this._isPlaying = false;
+            this.stopAnalysis();
             this.broadcastPlayState(false);
         };
 
         this.audioElement.onended = () => {
             this._isPlaying = false;
+            this.stopAnalysis();
             this.broadcastAnalysis({ amplitude: 0, lowFreqEnergy: 0, highFreqEnergy: 0 });
             this.broadcastPlayState(false);
         };
@@ -127,10 +128,7 @@ export class AudioStreamManager {
         this.playbackStarted = false;
         this._isPlaying = false;
 
-        if (this.animationFrameId !== undefined) {
-            cancelAnimationFrame(this.animationFrameId);
-            this.animationFrameId = undefined;
-        }
+        this.stopAnalysis();
 
         this.broadcastAnalysis({ amplitude: 0, lowFreqEnergy: 0, highFreqEnergy: 0 });
         this.broadcastPlayState(false);
@@ -223,6 +221,11 @@ export class AudioStreamManager {
     }
 
     private startAnalysis() {
+        if (this.analysisActive) {
+            return;
+        }
+
+        this.analysisActive = true;
         const timeDomain = new Uint8Array(this.analyser.frequencyBinCount);
         const freqDomain = new Uint8Array(this.analyser.frequencyBinCount);
         const sampleRate = this.audioContext.sampleRate;
@@ -235,6 +238,11 @@ export class AudioStreamManager {
         const highEnd = Math.min(Math.ceil(4000 / binHz), binCount - 1);
 
         const update = () => {
+            if (!this.analysisActive) {
+                this.animationFrameId = undefined;
+                return;
+            }
+
             if (this.audioContext.state === "suspended") {
                 this.animationFrameId = requestAnimationFrame(update);
                 return;
@@ -273,6 +281,15 @@ export class AudioStreamManager {
         };
 
         update();
+    }
+
+    private stopAnalysis() {
+        this.analysisActive = false;
+
+        if (this.animationFrameId !== undefined) {
+            cancelAnimationFrame(this.animationFrameId);
+            this.animationFrameId = undefined;
+        }
     }
 
     private broadcastAnalysis(data: AudioAnalysis) {

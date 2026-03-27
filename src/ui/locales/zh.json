@@ -313,6 +313,15 @@
             "gaze_tracking": {
                 "label": "视线跟随",
                 "desc": "模型眼球跟随鼠标光标移动"
+            },
+            "render_fps": {
+                "label": "渲染帧率",
+                "options": {
+                    "fps_30": "30 FPS",
+                    "fps_60": "60 FPS",
+                    "unlimited": "无限制",
+                    "custom": "自定义"
+                }
             }
         },
         "image_gen": {

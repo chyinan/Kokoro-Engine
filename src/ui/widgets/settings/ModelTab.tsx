@@ -16,12 +16,15 @@ export interface ModelTabProps {
     onCustomModelPathChange: (path: string | null) => void;
     gazeTracking?: boolean;
     onGazeTrackingChange?: (enabled: boolean) => void;
+    renderFps: number;
+    onRenderFpsChange: (fps: number) => void;
 }
 
 export default function ModelTab({
     displayMode, onDisplayModeChange,
     customModelPath, onCustomModelPathChange,
     gazeTracking = true, onGazeTrackingChange,
+    renderFps, onRenderFpsChange,
 }: ModelTabProps) {
     const { t } = useTranslation();
     const [isImporting, setIsImporting] = useState(false);
@@ -114,6 +117,24 @@ export default function ModelTab({
         { mode: "upper" as Live2DDisplayMode, label: t("settings.model.display_mode.upper"), desc: t("settings.model.display_mode.upper_desc") },
     ];
 
+    const renderFpsPreset = renderFps === 30 || renderFps === 60 || renderFps === 0
+        ? String(renderFps)
+        : "custom";
+
+    const handleRenderFpsPresetChange = (value: string) => {
+        if (value === "custom") {
+            onRenderFpsChange(renderFps > 0 && renderFps !== 30 && renderFps !== 60 ? renderFps : 45);
+            return;
+        }
+
+        onRenderFpsChange(Number(value));
+    };
+
+    const handleCustomRenderFpsChange = (value: string) => {
+        const parsed = Number.parseInt(value, 10);
+        onRenderFpsChange(Number.isFinite(parsed) && parsed > 0 ? parsed : 1);
+    };
+
     return (
         <div className="space-y-5">
             <div>
@@ -175,6 +196,32 @@ export default function ModelTab({
                         gazeTracking && "translate-x-5"
                     )} />
                 </button>
+            </div>
+
+            <div>
+                <label className={labelClasses}>{t("settings.model.render_fps.label")}</label>
+                <div className="mt-3 flex items-center gap-3">
+                    <select
+                        value={renderFpsPreset}
+                        onChange={(e) => handleRenderFpsPresetChange(e.target.value)}
+                        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
+                    >
+                        <option value="30">{t("settings.model.render_fps.options.fps_30")}</option>
+                        <option value="60">{t("settings.model.render_fps.options.fps_60")}</option>
+                        <option value="0">{t("settings.model.render_fps.options.unlimited")}</option>
+                        <option value="custom">{t("settings.model.render_fps.options.custom")}</option>
+                    </select>
+                    {renderFpsPreset === "custom" && (
+                        <input
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={renderFps}
+                            onChange={(e) => handleCustomRenderFpsChange(e.target.value)}
+                            className="w-28 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
+                        />
+                    )}
+                </div>
             </div>
 
             {/* Model List Section */}

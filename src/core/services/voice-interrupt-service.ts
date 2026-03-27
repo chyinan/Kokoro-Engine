@@ -24,6 +24,7 @@ export class VoiceInterruptService {
     private aboveThresholdSince: number | null = null;
     private lastInterruptTime = 0;
     private listeners: InterruptCallback[] = [];
+    private analysisBuffer: Uint8Array | null = null;
 
     /**
      * Start listening for voice activity on the microphone.
@@ -53,6 +54,7 @@ export class VoiceInterruptService {
         this.sourceNode = this.audioCtx.createMediaStreamSource(this.stream);
         this.sourceNode.connect(this.analyser);
         // Do NOT connect analyser to destination — we don't want to play mic audio
+        this.analysisBuffer = new Uint8Array(this.analyser.frequencyBinCount);
 
         this.active = true;
         this.aboveThresholdSince = null;
@@ -89,6 +91,7 @@ export class VoiceInterruptService {
         }
 
         this.analyser = null;
+        this.analysisBuffer = null;
         this.aboveThresholdSince = null;
 
         console.log("[VoiceInterrupt] Stopped");
@@ -120,7 +123,8 @@ export class VoiceInterruptService {
     private detectLoop = (): void => {
         if (!this.active || !this.analyser) return;
 
-        const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+        const dataArray = this.analysisBuffer;
+        if (!dataArray) return;
         this.analyser.getByteTimeDomainData(dataArray);
 
         // Calculate RMS
