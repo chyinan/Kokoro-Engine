@@ -1004,7 +1004,7 @@ async fn merge_facts_via_llm(
     facts: &[&str],
     provider: &std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
 ) -> Result<String> {
-    use crate::llm::openai::{Message, MessageContent};
+    use crate::llm::messages::user_text_message;
 
     let facts_list = facts
         .iter()
@@ -1021,10 +1021,7 @@ async fn merge_facts_via_llm(
         facts_list
     );
 
-    let messages = vec![Message {
-        role: "user".to_string(),
-        content: MessageContent::Text(prompt),
-    }];
+    let messages = vec![user_text_message(prompt)];
 
     let result = provider
         .chat(messages, None)

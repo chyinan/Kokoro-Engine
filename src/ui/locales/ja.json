@@ -93,6 +93,11 @@
             "model_label": "モデル名",
             "fetch_models": "モデル一覧を取得",
             "fetching": "取得中...",
+            "native_tools": {
+                "label": "ツール呼び出し",
+                "toggle": "ネイティブ tool calling を有効化",
+                "desc": "疑似的な [TOOL_CALL:...] タグではなく、現在の model/provider のネイティブ tool calling を使います。"
+            },
             "save_config": "LLM 設定を保存",
             "saving": "保存中...",
             "vision_mode": "ビジョンモード",
@@ -544,6 +549,7 @@
                 "not_installed_prefix": "(未インストール)",
                 "install_warning": "モデル \"{{model}}\" はインストールされていません",
                 "install_desc": "このビジョンモデルを使用するにはダウンロードが必要です。",
+                "install_desc_manual": "このモデルはまだ Ollama にインストールされていません。まず Ollama 側で手動で pull してから、ここでモデル一覧を更新してください。",
                 "install_btn": "{{model}} をインストール",
                 "installing": "{{model}} をインストール中...",
                 "success": "モデル \"{{model}}\" のインストールに成功しました！",

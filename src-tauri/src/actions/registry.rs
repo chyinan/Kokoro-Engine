@@ -4,6 +4,7 @@
 //! Actions are registered at startup and can be invoked by the chat pipeline.
 
 use async_trait::async_trait;
+use crate::llm::provider::{LlmToolDefinition, LlmToolParam};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -197,6 +198,25 @@ impl ActionRegistry {
             .collect()
     }
 
+    pub fn list_tools_for_llm(&self, memory_enabled: bool) -> Vec<LlmToolDefinition> {
+        self.list_actions_for_prompt(memory_enabled)
+            .into_iter()
+            .map(|action| LlmToolDefinition {
+                name: action.name,
+                description: action.description,
+                parameters: action
+                    .parameters
+                    .into_iter()
+                    .map(|param| LlmToolParam {
+                        name: param.name,
+                        description: param.description,
+                        required: param.required,
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// Generate the prompt instruction block describing available tools.
     pub fn generate_tool_prompt(&self) -> String {
         self.generate_tool_prompt_for_prompt(true)
@@ -248,6 +268,49 @@ impl ActionRegistry {
         lines.push(
             "Only use tools when they are genuinely helpful for the user's request.".to_string(),
         );
+
+        lines.join("\n")
+    }
+
+    pub fn generate_native_tool_prompt_for_prompt(&self, memory_enabled: bool) -> String {
+        let actions = self.list_actions_for_prompt(memory_enabled);
+        if actions.is_empty() {
+            return String::new();
+        }
+
+        let mut lines = vec![
+            "You have native tools available.".to_string(),
+            "Use the tool calling interface when a tool is genuinely helpful.".to_string(),
+            "Do not write pseudo tool tags like [TOOL_CALL:...]; call the tool directly.".to_string(),
+            "If the current reply clearly fits an existing cue, call play_cue at an appropriate moment.".to_string(),
+            "Do not merely describe an expression or animation in prose when play_cue is appropriate.".to_string(),
+            String::new(),
+            "Available tools:".to_string(),
+        ];
+
+        for action in &actions {
+            if action.parameters.is_empty() {
+                lines.push(format!(
+                    "- {}: {}. No parameters.",
+                    action.name, action.description
+                ));
+            } else {
+                let params: Vec<String> = action
+                    .parameters
+                    .iter()
+                    .map(|p| {
+                        let req = if p.required { "required" } else { "optional" };
+                        format!("{}({}, {})", p.name, p.description, req)
+                    })
+                    .collect();
+                lines.push(format!(
+                    "- {}: {}. Params: {}",
+                    action.name,
+                    action.description,
+                    params.join(", ")
+                ));
+            }
+        }
 
         lines.join("\n")
     }

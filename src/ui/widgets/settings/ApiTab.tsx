@@ -483,6 +483,21 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
                 </div>
             </div>
 
+            <div>
+                <label className={labelClasses}>{t("settings.api.native_tools.label")}</label>
+                <label className="flex items-center gap-2 text-sm text-[var(--color-text-main)]">
+                    <input
+                        type="checkbox"
+                        checked={activeProvider.supports_native_tools ?? true}
+                        onChange={(e) => updateActiveProvider({ supports_native_tools: e.target.checked })}
+                    />
+                    <span>{t("settings.api.native_tools.toggle")}</span>
+                </label>
+                <p className="text-[9px] text-[var(--color-text-muted)] mt-1">
+                    {t("settings.api.native_tools.desc")}
+                </p>
+            </div>
+
             {/* System LLM Config */}
             <div className="pt-4 border-t border-[var(--color-border)]">
                 <div className="mb-3">

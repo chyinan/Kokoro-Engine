@@ -601,6 +601,7 @@ impl AIOrchestrator {
         query: &str,
         _allow_image_gen: bool,
         tool_prompt: Option<String>,
+        native_tools_enabled: bool,
         character_id: &str,
     ) -> Result<Vec<Message>> {
         // 1. Determine Model logic
@@ -657,14 +658,14 @@ impl AIOrchestrator {
                 "{}\n\n{}\n\n{}{}",
                 processed_jailbreak,
                 sp.clone(),
-                crate::ai::prompts::CORE_PERSONA_PROMPT,
+                crate::ai::prompts::core_persona_prompt(native_tools_enabled),
                 lang_preamble
             )
         } else {
             format!(
                 "{}\n\n{}{}",
                 sp.clone(),
-                crate::ai::prompts::CORE_PERSONA_PROMPT,
+                crate::ai::prompts::core_persona_prompt(native_tools_enabled),
                 lang_preamble
             )
         };
@@ -734,7 +735,8 @@ impl AIOrchestrator {
                     role: "system".to_string(),
                     content: format!(
                         "Live2D visual playback uses configured cues. Available cues for the active model: {}.\n\
-                         When you want a visual performance, prefer one of these cue names and call the play_cue tool.",
+                         If the current reply clearly fits one of these existing cues, call the play_cue tool at an appropriate moment.\n\
+                         Do not rely only on text to describe expressions or actions when a matching cue should be used.",
                         cue_lines
                     ),
                     metadata: Some(serde_json::json!({"type": "live2d_cue_context"})),

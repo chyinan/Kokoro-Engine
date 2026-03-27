@@ -4,6 +4,11 @@ use crate::ai::memory_extractor;
 use crate::commands::system::WindowSizeState;
 use crate::error::KokoroError;
 use crate::imagegen::ImageGenService;
+use crate::llm::messages::{
+    assistant_tool_calls_message, extract_message_text, replace_user_message_with_images,
+    role_text_message, system_message, tool_result_message, user_text_message,
+};
+use crate::llm::provider::LlmStreamEvent;
 use crate::llm::service::LlmService;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -77,6 +82,29 @@ pub struct ChatRequest {
 #[allow(dead_code)]
 struct ChatImageGenEvent {
     prompt: String,
+}
+
+#[cfg(debug_assertions)]
+fn debug_log_llm_messages(label: &str, messages: &[async_openai::types::chat::ChatCompletionRequestMessage]) {
+    println!("[LLM/Debug] {} ({} messages)", label, messages.len());
+    for (index, message) in messages.iter().enumerate() {
+        let role = match message {
+            async_openai::types::chat::ChatCompletionRequestMessage::Developer(_) => "developer",
+            async_openai::types::chat::ChatCompletionRequestMessage::System(_) => "system",
+            async_openai::types::chat::ChatCompletionRequestMessage::User(_) => "user",
+            async_openai::types::chat::ChatCompletionRequestMessage::Assistant(_) => "assistant",
+            async_openai::types::chat::ChatCompletionRequestMessage::Tool(_) => "tool",
+            async_openai::types::chat::ChatCompletionRequestMessage::Function(_) => "function",
+        };
+        let text = extract_message_text(message);
+        let compact = text.replace('\n', "\\n");
+        let preview = if compact.len() > 300 {
+            format!("{}...", &compact[..300])
+        } else {
+            compact
+        };
+        println!("[LLM/Debug]   #{} role={} text={}", index, role, preview);
+    }
 }
 
 const TOOL_CALL_TAG_PREFIX: &str = "[TOOL_CALL:";
@@ -172,6 +200,7 @@ fn extract_translate_tags(text: &str) -> (String, Option<String>) {
 /// Parsed tool call from `[TOOL_CALL:name|key=val|key=val]`
 #[derive(Debug, Clone, Serialize)]
 struct ToolCall {
+    tool_call_id: Option<String>,
     name: String,
     args: HashMap<String, String>,
 }
@@ -200,7 +229,7 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
                     }
                 }
 
-                calls.push(ToolCall { name, args });
+                calls.push(ToolCall { tool_call_id: None, name, args });
             }
 
             let tag_end = start + end_bracket + 1;
@@ -248,7 +277,7 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
                         args.insert(key, val);
                     }
                 }
-                extra_calls.push(ToolCall { name, args });
+                extra_calls.push(ToolCall { tool_call_id: None, name, args });
                 let tag_end = start + end + 1;
                 cleaned = format!(
                     "{}{}",
@@ -294,7 +323,7 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
                 if let Some(&(_, arg_key)) = primary_arg_map.iter().find(|&&(n, _)| n == name_part) {
                     let mut args = HashMap::new();
                     args.insert(arg_key.to_string(), val_part.to_string());
-                    colon_calls.push(ToolCall { name: name_part.to_string(), args });
+                    colon_calls.push(ToolCall { tool_call_id: None, name: name_part.to_string(), args });
                     let tag_end = start + end + 1;
                     cleaned2 = format!(
                         "{}{}",
@@ -399,11 +428,33 @@ pub async fn stream_chat(
 
     // ── LAYER 3: PERSONA GENERATION ─────────────────────────────
 
+    let llm_config = llm_state.config().await;
+    let chat_provider = llm_state.provider().await;
+    let native_tools_enabled = llm_config
+        .providers
+        .iter()
+        .find(|provider| provider.id == llm_config.active_provider)
+        .map(|provider| provider.supports_native_tools)
+        .unwrap_or(true);
+    println!(
+        "[Chat] active_provider={}, native_tools_enabled={}",
+        llm_config.active_provider, native_tools_enabled
+    );
+
     // Generate tool prompt from action registry
     let tool_prompt = {
         let registry = _action_registry.read().await;
-        let prompt = registry.generate_tool_prompt_for_prompt(state.is_memory_enabled());
+        let prompt = if native_tools_enabled {
+            registry.generate_native_tool_prompt_for_prompt(state.is_memory_enabled())
+        } else {
+            registry.generate_tool_prompt_for_prompt(state.is_memory_enabled())
+        };
         if prompt.is_empty() { None } else { Some(prompt) }
+    };
+
+    let native_tools = {
+        let registry = _action_registry.read().await;
+        registry.list_tools_for_llm(state.is_memory_enabled())
     };
 
     // Compose Persona Prompt
@@ -412,36 +463,34 @@ pub async fn stream_chat(
             &request.message,
             request.allow_image_gen.unwrap_or(false),
             tool_prompt,
+            native_tools_enabled,
             &char_id,
         )
         .await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
-    let mut client_messages: Vec<crate::llm::openai::Message> = prompt_messages
+    let mut client_messages = prompt_messages
         .into_iter()
-        .map(|m| crate::llm::openai::Message {
-            role: m.role,
-            content: crate::llm::openai::MessageContent::Text(m.content),
-        })
-        .collect();
+        .map(|m| role_text_message(&m.role, m.content))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // 注入视觉上下文（如果有最近的屏幕观察）
     if let Some(vision_desc) = _vision_watcher.context.get_context_string().await {
-        client_messages.push(crate::llm::openai::Message {
-            role: "system".to_string(),
-            content: crate::llm::openai::MessageContent::Text(format!(
-                "[Vision] The user's screen currently shows: {}",
-                vision_desc
-            )),
-        });
+        client_messages.push(system_message(format!(
+            "[Vision] The user's screen currently shows: {}",
+            vision_desc
+        )));
     }
 
     // Attach images to the last user message if present
     if let Some(images) = &request.images {
         if !images.is_empty() {
             // Find the last message with role "user"
-            if let Some(last_user_msg) = client_messages.iter_mut().rfind(|m| m.role == "user") {
-                let text_content = last_user_msg.content.text();
+            if let Some(last_user_msg) = client_messages
+                .iter_mut()
+                .rfind(|m| crate::llm::messages::is_user_message(m))
+            {
+                let text_content = extract_message_text(last_user_msg);
 
                 // Process images: convert local URLs to base64
                 let mut processed_images = Vec::with_capacity(images.len());
@@ -473,8 +522,7 @@ pub async fn stream_chat(
                 }
 
                 // Create multimodal content
-                last_user_msg.content =
-                    crate::llm::openai::MessageContent::with_images(text_content, processed_images);
+                replace_user_message_with_images(last_user_msg, text_content, processed_images)?;
                 println!("[Chat] Attached {} images to user message", images.len());
             }
         }
@@ -483,53 +531,69 @@ pub async fn stream_chat(
     // For hidden messages (touch interactions), the user message wasn't added to
     // history, so we must explicitly include it in the context for the LLM to see.
     if request.hidden {
-        client_messages.push(crate::llm::openai::Message {
-            role: "user".to_string(),
-            content: crate::llm::openai::MessageContent::Text(request.message.clone()),
-        });
+        client_messages.push(user_text_message(request.message.clone()));
     }
 
     // Inject System Feedback (Before the last user message or as system at end)
     // Best practice: System instruction near end of context
-    client_messages.push(crate::llm::openai::Message {
-        role: "system".to_string(),
-        content: crate::llm::openai::MessageContent::Text(system_feedback),
-    });
+    client_messages.push(system_message(system_feedback));
+
+    #[cfg(debug_assertions)]
+    {
+        println!(
+            "[LLM/Debug] active_provider={} native_tools_enabled={} tool_count={}",
+            llm_config.active_provider,
+            native_tools_enabled,
+            native_tools.len()
+        );
+        debug_log_llm_messages("initial chat request", &client_messages);
+    }
 
     // Stream Response with Tool Call Feedback Loop
     const MAX_TOOL_ROUNDS: usize = 5;
-    let chat_provider = llm_state.provider().await;
     let mut all_cleaned_text = String::new();
     let mut all_translations = Vec::new();
     let mut bg_generated_by_tool = false;
     let mut cue_set_by_tool = false;
     let mut draft_row_id: Option<i64> = None;
+    let mut forced_text_after_side_effect = false;
 
     for round in 0..MAX_TOOL_ROUNDS {
         println!("[Chat] Tool loop round {}", round + 1);
 
         let mut stream = chat_provider
-            .chat_stream(client_messages.clone(), None)
-            .await
-            .map_err(KokoroError::Chat)?;
+            .chat_stream_with_tools(client_messages.clone(), None, native_tools.clone())
+            .await?;
 
         let mut round_response = String::new();
         let mut emit_buffer = String::new();
+        let mut native_tool_calls = Vec::new();
 
         while let Some(result) = stream.next().await {
             match result {
-                Ok(content) => {
-                    round_response.push_str(&content);
-                    emit_buffer.push_str(&content);
+                Ok(event) => {
+                    match event {
+                        LlmStreamEvent::Text(content) => {
+                            round_response.push_str(&content);
+                            emit_buffer.push_str(&content);
 
-                    // Only emit text up to the safe boundary (before any potential tag)
-                    let safe = find_safe_emit_boundary(&emit_buffer);
-                    if safe > 0 {
-                        let to_emit = emit_buffer[..safe].to_string();
-                        emit_buffer = emit_buffer[safe..].to_string();
-                        app
-                            .emit("chat-delta", &to_emit)
-                            .map_err(|e| KokoroError::Chat(e.to_string()))?;
+                            // Only emit text up to the safe boundary (before any potential tag)
+                            let safe = find_safe_emit_boundary(&emit_buffer);
+                            if safe > 0 {
+                                let to_emit = emit_buffer[..safe].to_string();
+                                emit_buffer = emit_buffer[safe..].to_string();
+                                app
+                                    .emit("chat-delta", &to_emit)
+                                    .map_err(|e| e.to_string())?;
+                            }
+                        }
+                        LlmStreamEvent::ToolCall(tool_call) => {
+                            native_tool_calls.push(ToolCall {
+                                tool_call_id: Some(tool_call.id),
+                                name: tool_call.name,
+                                args: tool_call.args,
+                            });
+                        }
                     }
                 }
                 Err(e) => {
@@ -557,8 +621,9 @@ pub async fn stream_chat(
             }
         }
 
-        let (cleaned_text, tool_calls) = parse_tool_call_tags(&round_response);
+        let (cleaned_text, mut tool_calls) = parse_tool_call_tags(&round_response);
         let (cleaned_text, round_translation) = extract_translate_tags(&cleaned_text);
+        tool_calls.extend(native_tool_calls);
 
         println!("[Chat] Round {} raw response ({} chars): ...{}",
             round + 1,
@@ -610,7 +675,10 @@ pub async fn stream_chat(
         // Execute tool calls and collect results
         let registry = _action_registry.read().await;
         let mut tool_results = Vec::new();
+        let mut tool_result_messages = Vec::new();
+        let mut continuation_tool_calls = Vec::new();
         let mut any_needs_feedback = false;
+        let has_native_tool_calls = tool_calls.iter().any(|tc| tc.tool_call_id.is_some());
 
         for tc in &tool_calls {
             println!("[ToolCall] Executing: {} with args {:?}", tc.name, tc.args);
@@ -634,10 +702,21 @@ pub async fn stream_chat(
                         "chat-tool-result",
                         serde_json::json!({
                             "tool": tc.name,
-                            "result": result.message,
+                            "result": result,
                         }),
                     );
                     tool_results.push(format!("- {}: {}", tc.name, result.message));
+                    if let Some(tool_call_id) = &tc.tool_call_id {
+                        continuation_tool_calls.push((
+                            tool_call_id.clone(),
+                            tc.name.clone(),
+                            serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
+                        ));
+                        tool_result_messages.push(tool_result_message(
+                            tool_call_id.clone(),
+                            result.message.clone(),
+                        ));
+                    }
                 }
                 Err(e) => {
                     eprintln!("[ToolCall] {} failed: {}", tc.name, e.0);
@@ -645,31 +724,82 @@ pub async fn stream_chat(
                         "chat-tool-result",
                         serde_json::json!({
                             "tool": tc.name,
-                            "result": format!("Error: {}", e.0),
+                            "error": e.0,
                         }),
                     );
                     tool_results.push(format!("- {}: Error: {}", tc.name, e.0));
+                    if let Some(tool_call_id) = &tc.tool_call_id {
+                        continuation_tool_calls.push((
+                            tool_call_id.clone(),
+                            tc.name.clone(),
+                            serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
+                        ));
+                        tool_result_messages.push(tool_result_message(
+                            tool_call_id.clone(),
+                            format!("Error: {}", e.0),
+                        ));
+                    }
                 }
             }
         }
         drop(registry);
 
+        if has_native_tool_calls {
+            client_messages.push(assistant_tool_calls_message(
+                if cleaned_text.is_empty() {
+                    None
+                } else {
+                    Some(cleaned_text.clone())
+                },
+                continuation_tool_calls,
+            ));
+            client_messages.extend(tool_result_messages);
+            println!("[Chat] Continuing after native tool calls with assistant/tool result messages");
+            #[cfg(debug_assertions)]
+            debug_log_llm_messages(
+                &format!("post-tool continuation round {}", round + 1),
+                &client_messages,
+            );
+            continue;
+        }
+
         // Only continue the loop if at least one tool needs its result fed back to the LLM
         if !any_needs_feedback {
+            if all_cleaned_text.trim().is_empty() && !forced_text_after_side_effect {
+                println!("[Chat] Side-effect tools ran without any text reply, forcing one follow-up text round");
+                forced_text_after_side_effect = true;
+                client_messages.push(system_message(format!(
+                    "[Tool results]\n\
+                    {}\n\n\
+                    The side-effect tool has already been executed successfully.\n\
+                    Now continue with a natural reply for the user in plain dialogue text.\n\
+                    Do not explain the tool call, do not output metadata, and do not repeat the same side-effect tool unless it is still necessary.",
+                    tool_results.join("\n")
+                )));
+                #[cfg(debug_assertions)]
+                debug_log_llm_messages(
+                    &format!("forced follow-up round {}", round + 1),
+                    &client_messages,
+                );
+                continue;
+            }
+
             println!("[Chat] No feedback-requiring tools, ending loop");
             break;
         }
 
         // Only inject tool results — no need to replay the assistant's previous output
-        client_messages.push(crate::llm::openai::Message {
-            role: "system".to_string(),
-            content: crate::llm::openai::MessageContent::Text(format!(
-                "[Tool results]\n\
-                {}\n\n\
-                Incorporate these results naturally into your dialogue. Do NOT echo raw data or JSON.",
-                tool_results.join("\n")
-            )),
-        });
+        client_messages.push(system_message(format!(
+            "[Tool results]\n\
+            {}\n\n\
+            Incorporate these results naturally into your dialogue. Do NOT echo raw data or JSON.",
+            tool_results.join("\n")
+        )));
+        #[cfg(debug_assertions)]
+        debug_log_llm_messages(
+            &format!("feedback continuation round {}", round + 1),
+            &client_messages,
+        );
     }
 
     let full_response = strip_leaked_tags(&all_cleaned_text);
@@ -682,16 +812,11 @@ pub async fn stream_chat(
         if !user_lang.is_empty() && !resp_lang.is_empty() && user_lang != resp_lang {
             println!("[Chat] Translation missing, triggering fallback translation into {}", user_lang);
             let fallback_messages = vec![
-                crate::llm::openai::Message {
-                    role: "system".to_string(),
-                    content: crate::llm::openai::MessageContent::Text(
-                        format!("You are a translator. Translate the following text into {}. Output only the translation, nothing else.", user_lang)
-                    ),
-                },
-                crate::llm::openai::Message {
-                    role: "user".to_string(),
-                    content: crate::llm::openai::MessageContent::Text(full_response.clone()),
-                },
+                system_message(format!(
+                    "You are a translator. Translate the following text into {}. Output only the translation, nothing else.",
+                    user_lang
+                )),
+                user_text_message(full_response.clone()),
             ];
             match system_provider.chat(fallback_messages, None).await {
                 Ok(translation) => {
@@ -712,12 +837,7 @@ pub async fn stream_chat(
     if !cue_set_by_tool && !full_response.is_empty() {
         println!("[Chat] Cue not set by tool, triggering fallback cue analysis");
         let mut emotion_messages = vec![
-            crate::llm::openai::Message {
-                role: "system".to_string(),
-                content: crate::llm::openai::MessageContent::Text(
-                    crate::ai::prompts::EMOTION_ANALYZER_PROMPT.to_string(),
-                ),
-            },
+            system_message(crate::ai::prompts::EMOTION_ANALYZER_PROMPT.to_string()),
         ];
         if let Some(profile) = crate::commands::live2d::load_active_live2d_profile() {
             let available_cues = profile
@@ -726,18 +846,12 @@ pub async fn stream_chat(
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ");
-            emotion_messages.push(crate::llm::openai::Message {
-                role: "system".to_string(),
-                content: crate::llm::openai::MessageContent::Text(format!(
-                    "Available cues for the active model: {}.\nChoose exactly one from this list, or return null if none fit.",
-                    if available_cues.is_empty() { "(none)" } else { &available_cues }
-                )),
-            });
+            emotion_messages.push(system_message(format!(
+                "Available cues for the active model: {}.\nChoose exactly one from this list, or return null if none fit.",
+                if available_cues.is_empty() { "(none)" } else { &available_cues }
+            )));
         }
-        emotion_messages.push(crate::llm::openai::Message {
-            role: "user".to_string(),
-            content: crate::llm::openai::MessageContent::Text(full_response.clone()),
-        });
+        emotion_messages.push(user_text_message(full_response.clone()));
         let valid_fallback_cues = crate::commands::live2d::load_active_live2d_profile()
             .map(|profile| profile.cue_map.keys().cloned().collect::<std::collections::HashSet<_>>());
         match system_provider.chat(emotion_messages, None).await {
@@ -869,18 +983,8 @@ pub async fn stream_chat(
 
         tauri::async_runtime::spawn(async move {
             let analyze_messages = vec![
-                crate::llm::openai::Message {
-                    role: "system".to_string(),
-                    content: crate::llm::openai::MessageContent::Text(
-                        crate::ai::prompts::BG_IMAGE_ANALYZER_PROMPT.to_string(),
-                    ),
-                },
-                crate::llm::openai::Message {
-                    role: "user".to_string(),
-                    content: crate::llm::openai::MessageContent::Text(
-                        format!("Character reply: {}", reply_for_analysis)
-                    ),
-                },
+                system_message(crate::ai::prompts::BG_IMAGE_ANALYZER_PROMPT.to_string()),
+                user_text_message(format!("Character reply: {}", reply_for_analysis)),
             ];
 
             let json_str = match system_provider.chat(analyze_messages, None).await {

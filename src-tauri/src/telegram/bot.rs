@@ -4,6 +4,10 @@ use super::config::TelegramConfig;
 use crate::ai::context::AIOrchestrator;
 use crate::ai::memory_extractor;
 use crate::imagegen::ImageGenService;
+use crate::llm::messages::{
+    assistant_text_message, is_user_message, replace_user_message_with_images, role_text_message,
+    system_message, user_message_with_images, user_text_message,
+};
 use crate::llm::service::LlmService;
 use crate::stt::{AudioSource, SttService};
 use crate::tts::TtsService;
@@ -292,28 +296,19 @@ async fn handle_text(
     };
 
     let prompt_messages = orchestrator
-        .compose_prompt(text, false, tool_prompt, &char_id)
+        .compose_prompt(text, false, tool_prompt, false, &char_id)
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut client_messages: Vec<crate::llm::openai::Message> = prompt_messages
+    let mut client_messages = prompt_messages
         .into_iter()
-        .map(|m| crate::llm::openai::Message {
-            role: m.role,
-            content: crate::llm::openai::MessageContent::Text(m.content),
-        })
-        .collect();
+        .map(|m| role_text_message(&m.role, m.content))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Ensure the latest user turn is in the messages
-    let already_has_user = client_messages
-        .last()
-        .map(|m| m.role == "user")
-        .unwrap_or(false);
+    let already_has_user = client_messages.last().map(is_user_message).unwrap_or(false);
     if !already_has_user {
-        client_messages.push(crate::llm::openai::Message {
-            role: "user".to_string(),
-            content: crate::llm::openai::MessageContent::Text(text.to_string()),
-        });
+        client_messages.push(user_text_message(text.to_string()));
     }
 
     // 3. LLM call with tool execution loop (max 5 rounds)
@@ -391,17 +386,11 @@ async fn handle_text(
             break;
         }
 
-        client_messages.push(crate::llm::openai::Message {
-            role: "assistant".to_string(),
-            content: crate::llm::openai::MessageContent::Text(response),
-        });
-        client_messages.push(crate::llm::openai::Message {
-            role: "system".to_string(),
-            content: crate::llm::openai::MessageContent::Text(format!(
-                "[Tool results]\n{}\nContinue your response naturally.",
-                tool_results.join("\n")
-            )),
-        });
+        client_messages.push(assistant_text_message(response));
+        client_messages.push(system_message(format!(
+            "[Tool results]\n{}\nContinue your response naturally.",
+            tool_results.join("\n")
+        )));
     }
 
     let response = strip_control_tags(&compact_newlines(&all_cleaned_text));
@@ -641,37 +630,22 @@ async fn handle_photo(
     };
 
     let prompt_messages = orchestrator
-        .compose_prompt(&caption, false, tool_prompt, &char_id)
+        .compose_prompt(&caption, false, tool_prompt, false, &char_id)
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut client_messages: Vec<crate::llm::openai::Message> = prompt_messages
+    let mut client_messages = prompt_messages
         .into_iter()
-        .map(|m| crate::llm::openai::Message {
-            role: m.role,
-            content: crate::llm::openai::MessageContent::Text(m.content),
-        })
-        .collect();
+        .map(|m| role_text_message(&m.role, m.content))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Replace or append the last user message with multimodal content (text + image)
-    let already_has_user = client_messages
-        .last()
-        .map(|m| m.role == "user")
-        .unwrap_or(false);
+    let already_has_user = client_messages.last().map(is_user_message).unwrap_or(false);
     if already_has_user {
         let last = client_messages.last_mut().unwrap();
-        last.content = crate::llm::openai::MessageContent::with_images(
-            caption.clone(),
-            vec![data_url],
-        );
+        replace_user_message_with_images(last, caption.clone(), vec![data_url])?;
     } else {
-        client_messages.push(crate::llm::openai::Message {
-            role: "user".to_string(),
-            content: crate::llm::openai::MessageContent::with_images(
-                caption.clone(),
-                vec![data_url],
-            ),
-        });
+        client_messages.push(user_message_with_images(caption.clone(), vec![data_url]));
     }
 
     // 3. LLM call with tool execution loop (max 5 rounds)
@@ -748,17 +722,11 @@ async fn handle_photo(
             break;
         }
 
-        client_messages.push(crate::llm::openai::Message {
-            role: "assistant".to_string(),
-            content: crate::llm::openai::MessageContent::Text(round_response),
-        });
-        client_messages.push(crate::llm::openai::Message {
-            role: "system".to_string(),
-            content: crate::llm::openai::MessageContent::Text(format!(
-                "[Tool results]\n{}\nContinue your response naturally.",
-                tool_results.join("\n")
-            )),
-        });
+        client_messages.push(assistant_text_message(round_response));
+        client_messages.push(system_message(format!(
+            "[Tool results]\n{}\nContinue your response naturally.",
+            tool_results.join("\n")
+        )));
     }
 
     let response = strip_control_tags(&compact_newlines(&all_cleaned_text));

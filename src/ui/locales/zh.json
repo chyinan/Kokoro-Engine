@@ -93,6 +93,11 @@
             "model_label": "模型名称",
             "fetch_models": "获取可用模型",
             "fetching": "获取中...",
+            "native_tools": {
+                "label": "工具调用",
+                "toggle": "启用原生工具调用",
+                "desc": "使用当前 model/provider 的原生 tool calling 接口，而不是伪造的 [TOOL_CALL:...] 标签。"
+            },
             "save_config": "保存 LLM 配置",
             "saving": "保存中...",
             "vision_mode": "视觉模式",
@@ -544,6 +549,7 @@
                 "not_installed_prefix": "(未安装)",
                 "install_warning": "模型 \"{{model}}\" 未安装",
                 "install_desc": "需要先下载此视觉模型才能使用。",
+                "install_desc_manual": "这个模型当前还没安装到 Ollama。请先在 Ollama 里手动 pull，然后回这里刷新模型列表。",
                 "install_btn": "安装 {{model}}",
                 "installing": "正在安装 {{model}}...",
                 "success": "模型 \"{{model}}\" 安装成功！",

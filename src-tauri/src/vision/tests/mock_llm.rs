@@ -1,4 +1,4 @@
-use crate::llm::openai::{Message, MessageContent};
+use crate::llm::messages::{assistant_text_message, extract_message_text, system_message, user_message_with_images};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -33,15 +33,10 @@ fn build_sse_body(tokens: &[&str]) -> String {
 
 #[tokio::test]
 async fn test_multimodal_payload_structure() {
-    let content = MessageContent::with_images(
+    let msg = user_message_with_images(
         "What is in this image?".to_string(),
         vec!["http://127.0.0.1:12345/vision/image_1_abc.png".to_string()],
     );
-
-    let msg = Message {
-        role: "user".to_string(),
-        content,
-    };
 
     let json = serde_json::to_value(&msg).unwrap();
     let content_arr = json["content"].as_array().unwrap();
@@ -58,7 +53,7 @@ async fn test_multimodal_payload_structure() {
 
 #[tokio::test]
 async fn test_multimodal_with_multiple_images() {
-    let content = MessageContent::with_images(
+    let message = user_message_with_images(
         "Compare these images".to_string(),
         vec![
             "http://127.0.0.1:9999/vision/img1.png".to_string(),
@@ -67,8 +62,8 @@ async fn test_multimodal_with_multiple_images() {
         ],
     );
 
-    let json = serde_json::to_value(&content).unwrap();
-    let parts = json.as_array().unwrap();
+    let json = serde_json::to_value(&message).unwrap();
+    let parts = json["content"].as_array().unwrap();
     assert_eq!(parts.len(), 4, "text + 3 images");
 
     for part in &parts[1..] {
@@ -79,11 +74,11 @@ async fn test_multimodal_with_multiple_images() {
 
 #[test]
 fn test_message_content_text_extraction() {
-    let content = MessageContent::with_images(
+    let message = user_message_with_images(
         "Describe this".to_string(),
         vec!["http://localhost/img.png".to_string()],
     );
-    assert_eq!(content.text(), "Describe this");
+    assert_eq!(extract_message_text(&message), "Describe this");
 }
 
 // ── SSE Parsing via Direct HTTP (avoids system proxy issues) ─
@@ -199,18 +194,11 @@ async fn test_full_vision_to_mock_llm_pipeline() {
     let image_url = server.upload(&png, "pipeline_test.png").unwrap();
 
     // 3. Build multimodal message
-    let content =
-        MessageContent::with_images("What do you see?".to_string(), vec![image_url.clone()]);
+    let content = user_message_with_images("What do you see?".to_string(), vec![image_url.clone()]);
 
     let messages = vec![
-        Message {
-            role: "system".to_string(),
-            content: MessageContent::Text("You are a helpful assistant.".to_string()),
-        },
-        Message {
-            role: "user".to_string(),
-            content,
-        },
+        system_message("You are a helpful assistant.".to_string()),
+        content,
     ];
 
     // 4. Verify JSON structure

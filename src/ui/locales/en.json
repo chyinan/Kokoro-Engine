@@ -93,6 +93,11 @@
             "model_label": "Model",
             "fetch_models": "Fetch Available",
             "fetching": "Fetching...",
+            "native_tools": {
+                "label": "Tool Calling",
+                "toggle": "Enable native tool calling",
+                "desc": "Use the model/provider's native tool calling interface instead of pseudo [TOOL_CALL:...] tags."
+            },
             "save_config": "Save LLM Config",
             "saving": "Saving...",
             "vision_mode": "Vision Mode",
@@ -544,6 +549,7 @@
                 "not_installed_prefix": "(not installed)",
                 "install_warning": "Model \"{{model}}\" is not installed",
                 "install_desc": "This vision model needs to be downloaded before it can be used.",
+                "install_desc_manual": "This model is not installed in Ollama yet. Pull it manually in Ollama, then refresh the model list here.",
                 "install_btn": "Install {{model}}",
                 "installing": "Installing {{model}}...",
                 "success": "Model \"{{model}}\" installed successfully!",

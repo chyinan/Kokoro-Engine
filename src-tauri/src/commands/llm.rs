@@ -4,7 +4,7 @@ use crate::error::KokoroError;
 use crate::llm::llm_config::LlmConfig;
 use crate::llm::ollama::{OllamaModelInfo, OllamaProvider};
 use crate::llm::service::LlmService;
-use tauri::{AppHandle, State};
+use tauri::State;
 
 #[tauri::command]
 pub async fn get_llm_config(state: State<'_, LlmService>) -> Result<LlmConfig, KokoroError> {
@@ -22,13 +22,4 @@ pub async fn save_llm_config(
 #[tauri::command]
 pub async fn list_ollama_models(base_url: String) -> Result<Vec<OllamaModelInfo>, KokoroError> {
     OllamaProvider::list_models(&base_url).await.map_err(KokoroError::Llm)
-}
-
-#[tauri::command]
-pub async fn pull_ollama_model(
-    app_handle: AppHandle,
-    base_url: String,
-    model: String,
-) -> Result<(), KokoroError> {
-    OllamaProvider::pull_model(&base_url, &model, app_handle).await.map_err(KokoroError::Llm)
 }

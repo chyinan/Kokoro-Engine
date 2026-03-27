@@ -1,6 +1,6 @@
 use crate::ai::context::AIOrchestrator;
-use crate::error::KokoroError;
-use crate::llm::openai::{Message as LLMMessage, MessageContent, OpenAIClient};
+use crate::llm::messages::{system_message, user_text_message};
+use crate::llm::provider::{build_openai_client, create_chat};
 use tauri::State;
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -232,31 +232,23 @@ pub async fn end_session(
                 .join("\n");
 
             let messages = vec![
-                LLMMessage {
-                    role: "system".to_string(),
-                    content: MessageContent::Text(
-                        concat!(
+                system_message(
+                    concat!(
                         "You are a conversation summarizer. Write a brief 2-3 sentence summary ",
                         "of this conversation in the language the users were speaking. ",
                         "Focus on key topics discussed, any emotional moments, and important ",
                         "information shared. Write from a third-person perspective.\n",
                         "Output ONLY the summary, no labels or formatting."
                     )
-                        .to_string(),
-                    ),
-                },
-                LLMMessage {
-                    role: "user".to_string(),
-                    content: MessageContent::Text(format!(
-                        "Summarize this conversation:\n\n{}",
-                        transcript
-                    )),
-                },
+                    .to_string(),
+                ),
+                user_text_message(format!("Summarize this conversation:\n\n{}", transcript)),
             ];
 
-            let client = OpenAIClient::new(request.api_key, request.endpoint, request.model);
+            let client = build_openai_client(request.api_key, request.endpoint);
+            let model = request.model.unwrap_or_else(|| "gpt-4".to_string());
 
-            match client.chat(messages, None).await {
+            match create_chat(&client, &model, messages, None).await {
                 Ok(summary) => {
                     let summary = summary.trim().to_string();
                     if !summary.is_empty() {

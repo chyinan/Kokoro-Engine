@@ -93,6 +93,11 @@
             "model_label": "모델 이름",
             "fetch_models": "사용 가능 모델 가져오기",
             "fetching": "가져오는 중...",
+            "native_tools": {
+                "label": "도구 호출",
+                "toggle": "네이티브 tool calling 사용",
+                "desc": "가짜 [TOOL_CALL:...] 태그 대신 현재 model/provider 의 네이티브 tool calling 인터페이스를 사용합니다."
+            },
             "save_config": "LLM 설정 저장",
             "saving": "저장 중...",
             "vision_mode": "비전 모드",
@@ -544,6 +549,7 @@
                 "not_installed_prefix": "(설치되지 않음)",
                 "install_warning": "모델 \"{{model}}\"이(가) 설치되지 않았습니다",
                 "install_desc": "이 비전 모델을 사용하려면 다운로드가 필요합니다.",
+                "install_desc_manual": "이 모델은 아직 Ollama에 설치되어 있지 않습니다. 먼저 Ollama에서 수동으로 pull 한 뒤 여기서 모델 목록을 새로고침하세요.",
                 "install_btn": "{{model}} 설치",
                 "installing": "{{model}} 설치 중...",
                 "success": "모델 \"{{model}}\" 설치 성공!",

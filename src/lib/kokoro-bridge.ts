@@ -164,6 +164,7 @@ export interface LlmProviderConfig {
     id: string;
     provider_type: string;
     enabled: boolean;
+    supports_native_tools: boolean;
     api_key?: string;
     api_key_env?: string;
     base_url?: string;
@@ -204,21 +205,6 @@ export async function saveLlmConfig(config: LlmConfig): Promise<void> {
 
 export async function listOllamaModels(baseUrl: string): Promise<OllamaModelInfo[]> {
     return invoke<OllamaModelInfo[]>("list_ollama_models", { baseUrl });
-}
-
-export interface OllamaPullProgress {
-    status: string;
-    digest?: string;
-    total?: number;
-    completed?: number;
-}
-
-export async function pullOllamaModel(baseUrl: string, model: string): Promise<void> {
-    return invoke("pull_ollama_model", { baseUrl, model });
-}
-
-export async function onOllamaPullProgress(callback: (p: OllamaPullProgress) => void): Promise<UnlistenFn> {
-    return listen<OllamaPullProgress>("ollama:pull-progress", (event) => callback(event.payload));
 }
 
 // ── LLM Streaming ──────────────────────────────────
