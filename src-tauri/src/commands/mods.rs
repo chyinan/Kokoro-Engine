@@ -5,6 +5,20 @@ use std::io;
 use tauri::{command, AppHandle, State};
 use tokio::sync::Mutex;
 
+/// Validate mod ID format: must be non-empty and contain only alphanumeric, underscore, or dash
+fn is_valid_mod_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Check if a file extension is allowed for MOD extraction
+fn is_allowed_mod_file(ext: &str) -> bool {
+    const ALLOWED_EXTENSIONS: &[&str] = &[
+        "html", "js", "css", "json", "png", "jpg", "jpeg", "webp",
+        "svg", "gif", "woff", "woff2", "ttf", "otf", "txt", "md",
+    ];
+    ALLOWED_EXTENSIONS.contains(&ext.to_lowercase().as_str())
+}
+
 #[command]
 pub async fn list_mods(
     mod_manager: State<'_, Mutex<ModManager>>,
@@ -75,12 +89,7 @@ pub async fn install_mod(
         serde_json::from_str(&manifest_content).map_err(|e| format!("Invalid mod.json: {}", e))?;
 
     // Validate ID
-    if manifest.id.is_empty()
-        || manifest
-            .id
-            .chars()
-            .any(|c| !c.is_alphanumeric() && c != '_' && c != '-')
-    {
+    if !is_valid_mod_id(&manifest.id) {
         return Err("Invalid mod ID. Must be alphanumeric, underscore or dash.".to_string());
     }
 
@@ -91,11 +100,6 @@ pub async fn install_mod(
     }
     fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
 
-    // 文件类型白名单，禁止提取可执行文件
-    const ALLOWED_EXTENSIONS: &[&str] = &[
-        "html", "js", "css", "json", "png", "jpg", "jpeg", "webp",
-        "svg", "gif", "woff", "woff2", "ttf", "otf", "txt", "md",
-    ];
     // 单文件最大 10MB，MOD 包总解压大小最大 50MB
     const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
     const MAX_TOTAL_SIZE: u64 = 50 * 1024 * 1024;
@@ -118,7 +122,7 @@ pub async fn install_mod(
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            if !ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
+            if !is_allowed_mod_file(&ext) {
                 continue; // 跳过不允许的文件类型
             }
 
@@ -167,4 +171,124 @@ pub async fn unload_mod(
     let mut manager = mod_manager.lock().await;
     manager.unload_mod(&app_handle);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_valid_mod_id_empty() {
+        assert!(!is_valid_mod_id(""), "Empty ID should be invalid");
+    }
+
+    #[test]
+    fn test_is_valid_mod_id_valid_alphanumeric() {
+        assert!(is_valid_mod_id("mymod"), "Alphanumeric ID should be valid");
+        assert!(is_valid_mod_id("MyMod123"), "Mixed case alphanumeric should be valid");
+    }
+
+    #[test]
+    fn test_is_valid_mod_id_valid_with_underscore() {
+        assert!(
+            is_valid_mod_id("my_mod"),
+            "ID with underscore should be valid"
+        );
+        assert!(
+            is_valid_mod_id("_private_mod"),
+            "ID starting with underscore should be valid"
+        );
+    }
+
+    #[test]
+    fn test_is_valid_mod_id_valid_with_dash() {
+        assert!(is_valid_mod_id("my-mod"), "ID with dash should be valid");
+        assert!(
+            is_valid_mod_id("my-mod-123"),
+            "ID with multiple dashes should be valid"
+        );
+    }
+
+    #[test]
+    fn test_is_valid_mod_id_invalid_special_chars() {
+        assert!(
+            !is_valid_mod_id("my.mod"),
+            "ID with dot should be invalid"
+        );
+        assert!(
+            !is_valid_mod_id("my@mod"),
+            "ID with @ should be invalid"
+        );
+        assert!(
+            !is_valid_mod_id("my mod"),
+            "ID with space should be invalid"
+        );
+        assert!(
+            !is_valid_mod_id("my/mod"),
+            "ID with slash should be invalid"
+        );
+    }
+
+    #[test]
+    fn test_is_allowed_mod_file_allowed_extensions() {
+        assert!(is_allowed_mod_file("html"), "html should be allowed");
+        assert!(is_allowed_mod_file("js"), "js should be allowed");
+        assert!(is_allowed_mod_file("css"), "css should be allowed");
+        assert!(is_allowed_mod_file("json"), "json should be allowed");
+        assert!(is_allowed_mod_file("png"), "png should be allowed");
+        assert!(is_allowed_mod_file("jpg"), "jpg should be allowed");
+        assert!(is_allowed_mod_file("jpeg"), "jpeg should be allowed");
+        assert!(is_allowed_mod_file("webp"), "webp should be allowed");
+        assert!(is_allowed_mod_file("svg"), "svg should be allowed");
+        assert!(is_allowed_mod_file("gif"), "gif should be allowed");
+        assert!(is_allowed_mod_file("woff"), "woff should be allowed");
+        assert!(is_allowed_mod_file("woff2"), "woff2 should be allowed");
+        assert!(is_allowed_mod_file("ttf"), "ttf should be allowed");
+        assert!(is_allowed_mod_file("otf"), "otf should be allowed");
+        assert!(is_allowed_mod_file("txt"), "txt should be allowed");
+        assert!(is_allowed_mod_file("md"), "md should be allowed");
+    }
+
+    #[test]
+    fn test_is_allowed_mod_file_case_insensitive() {
+        assert!(is_allowed_mod_file("HTML"), "HTML uppercase should be allowed");
+        assert!(is_allowed_mod_file("Js"), "Js mixed case should be allowed");
+        assert!(is_allowed_mod_file("JSON"), "JSON uppercase should be allowed");
+    }
+
+    #[test]
+    fn test_is_allowed_mod_file_disallowed_extensions() {
+        assert!(
+            !is_allowed_mod_file("exe"),
+            "exe should not be allowed"
+        );
+        assert!(
+            !is_allowed_mod_file("sh"),
+            "sh should not be allowed"
+        );
+        assert!(
+            !is_allowed_mod_file("bat"),
+            "bat should not be allowed"
+        );
+        assert!(
+            !is_allowed_mod_file("dll"),
+            "dll should not be allowed"
+        );
+        assert!(
+            !is_allowed_mod_file("so"),
+            "so should not be allowed"
+        );
+        assert!(
+            !is_allowed_mod_file("zip"),
+            "zip should not be allowed"
+        );
+    }
+
+    #[test]
+    fn test_is_allowed_mod_file_empty_extension() {
+        assert!(
+            !is_allowed_mod_file(""),
+            "empty extension should not be allowed"
+        );
+    }
 }

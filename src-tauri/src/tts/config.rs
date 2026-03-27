@@ -132,3 +132,117 @@ pub fn load_config(path: &Path) -> TtsSystemConfig {
 pub fn save_config(path: &Path, config: &TtsSystemConfig) -> Result<(), String> {
     crate::config::save_json_config(path, config, "TTS")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_config_defaults() {
+        let cache = CacheConfig::default();
+        assert_eq!(cache.enabled, true, "Cache should be enabled by default");
+        assert_eq!(cache.max_entries, 500, "Default max_entries should be 500");
+        assert_eq!(cache.ttl_secs, 3600, "Default TTL should be 3600 seconds (1 hour)");
+    }
+
+    #[test]
+    fn test_queue_config_defaults() {
+        let queue = QueueConfig::default();
+        assert_eq!(
+            queue.max_concurrent, 3,
+            "Default max_concurrent should be 3"
+        );
+    }
+
+    #[test]
+    fn test_tts_system_config_defaults() {
+        let config = TtsSystemConfig::default();
+        assert_eq!(
+            config.default_provider,
+            Some("browser".to_string()),
+            "Default provider should be 'browser'"
+        );
+        assert_eq!(
+            config.cache.enabled, true,
+            "Cache should be enabled in default config"
+        );
+        assert_eq!(
+            config.queue.max_concurrent, 3,
+            "Queue max_concurrent should be 3 in default config"
+        );
+        assert_eq!(
+            config.providers.len(),
+            1,
+            "Default config should have exactly one provider"
+        );
+        assert_eq!(
+            config.providers[0].id, "browser",
+            "Default provider should be browser"
+        );
+        assert_eq!(
+            config.providers[0].provider_type, "browser",
+            "Default provider type should be browser"
+        );
+        assert_eq!(
+            config.providers[0].enabled, true,
+            "Default browser provider should be enabled"
+        );
+    }
+
+    #[test]
+    fn test_tts_system_config_serde_roundtrip() {
+        let original = TtsSystemConfig::default();
+        let json = serde_json::to_string(&original)
+            .expect("Failed to serialize TtsSystemConfig");
+        let deserialized: TtsSystemConfig =
+            serde_json::from_str(&json).expect("Failed to deserialize TtsSystemConfig");
+
+        assert_eq!(
+            original.default_provider, deserialized.default_provider,
+            "default_provider should match after roundtrip"
+        );
+        assert_eq!(
+            original.cache.enabled, deserialized.cache.enabled,
+            "cache.enabled should match after roundtrip"
+        );
+        assert_eq!(
+            original.cache.max_entries, deserialized.cache.max_entries,
+            "cache.max_entries should match after roundtrip"
+        );
+        assert_eq!(
+            original.cache.ttl_secs, deserialized.cache.ttl_secs,
+            "cache.ttl_secs should match after roundtrip"
+        );
+        assert_eq!(
+            original.queue.max_concurrent, deserialized.queue.max_concurrent,
+            "queue.max_concurrent should match after roundtrip"
+        );
+        assert_eq!(
+            original.providers.len(),
+            deserialized.providers.len(),
+            "providers length should match after roundtrip"
+        );
+    }
+
+    #[test]
+    fn test_provider_config_defaults() {
+        let provider = ProviderConfig {
+            id: "test".to_string(),
+            provider_type: "openai".to_string(),
+            enabled: true,
+            api_key: None,
+            api_key_env: None,
+            base_url: None,
+            endpoint: None,
+            model: None,
+            default_voice: None,
+            model_path: None,
+            extra: HashMap::new(),
+        };
+
+        assert_eq!(provider.id, "test", "Provider ID should be set");
+        assert_eq!(provider.provider_type, "openai", "Provider type should be set");
+        assert_eq!(provider.enabled, true, "Provider should be enabled");
+        assert_eq!(provider.api_key, None, "API key should be None");
+    }
+}

@@ -556,4 +556,129 @@ mod tests {
         assert!(manager.active_theme.is_none());
         assert!(manager.active_layout.is_none());
     }
+
+    #[test]
+    fn safe_join_normal_relative_path() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create a file inside the base directory
+        let file_path = base.join("test.txt");
+        fs::write(&file_path, "test content").unwrap();
+
+        // safe_join with a normal relative path should succeed
+        let result = safe_join(base, "test.txt");
+        assert!(
+            result.is_ok(),
+            "safe_join should accept normal relative paths"
+        );
+        let resolved = result.unwrap();
+        // Compare canonical forms since macOS adds /private prefix
+        let expected_canonical = file_path.canonicalize().unwrap();
+        assert_eq!(
+            resolved, expected_canonical,
+            "safe_join should resolve to the correct absolute path"
+        );
+    }
+
+    #[test]
+    fn safe_join_single_level_traversal_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create a subdirectory
+        let subdir = base.join("subdir");
+        fs::create_dir_all(&subdir).unwrap();
+
+        // Create a file outside the base directory (in parent)
+        let parent_file = base.parent().unwrap().join("outside.txt");
+        fs::write(&parent_file, "outside").unwrap();
+
+        // safe_join with ../ should fail
+        let result = safe_join(&subdir, "../outside.txt");
+        assert!(
+            result.is_err(),
+            "safe_join should reject paths that escape the base directory"
+        );
+    }
+
+    #[test]
+    fn safe_join_deep_traversal_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create nested subdirectories
+        let nested = base.join("a").join("b").join("c");
+        fs::create_dir_all(&nested).unwrap();
+
+        // safe_join with deep traversal should fail
+        let result = safe_join(&nested, "../../../../etc/passwd");
+        assert!(
+            result.is_err(),
+            "safe_join should reject deep path traversal attempts"
+        );
+    }
+
+    #[test]
+    fn safe_join_nonexistent_file_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // safe_join with a nonexistent file should fail (canonicalize fails)
+        let result = safe_join(base, "nonexistent.txt");
+        assert!(
+            result.is_err(),
+            "safe_join should reject nonexistent files (canonicalize fails)"
+        );
+    }
+
+    #[test]
+    fn safe_join_nested_valid_path() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create nested directories and a file
+        let nested_dir = base.join("a").join("b");
+        fs::create_dir_all(&nested_dir).unwrap();
+        let nested_file = nested_dir.join("file.txt");
+        fs::write(&nested_file, "nested").unwrap();
+
+        // safe_join with a nested relative path should succeed
+        let result = safe_join(base, "a/b/file.txt");
+        assert!(
+            result.is_ok(),
+            "safe_join should accept nested relative paths"
+        );
+        let resolved = result.unwrap();
+        // Compare canonical forms since macOS adds /private prefix
+        let expected_canonical = nested_file.canonicalize().unwrap();
+        assert_eq!(
+            resolved, expected_canonical,
+            "safe_join should resolve nested paths correctly"
+        );
+    }
+
+    #[test]
+    fn safe_join_traversal_with_dot_dot_in_middle() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create structure: base/a/b and base/c
+        let a_dir = base.join("a");
+        let b_dir = a_dir.join("b");
+        fs::create_dir_all(&b_dir).unwrap();
+        let c_dir = base.join("c");
+        fs::create_dir_all(&c_dir).unwrap();
+
+        // Create a file in c
+        let c_file = c_dir.join("file.txt");
+        fs::write(&c_file, "content").unwrap();
+
+        // Try to access ../c/file.txt from b (should escape base)
+        let result = safe_join(&b_dir, "../../c/file.txt");
+        assert!(
+            result.is_err(),
+            "safe_join should reject paths that escape base even with valid target"
+        );
+    }
 }

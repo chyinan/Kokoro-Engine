@@ -119,4 +119,112 @@ mod tests {
         assert!((m.speed_factor - 1.0).abs() < 0.01);
         assert!(m.pitch_offset.abs() < 0.01);
     }
+
+    #[test]
+    fn apply_modifiers_lower_bound_clamping() {
+        let m = EmotionTtsModifiers {
+            speed_factor: 0.1, // Very low
+            pitch_offset: -5.0, // Very negative
+        };
+        let (speed, pitch) = apply_modifiers(1.0, 0.0, &m);
+        assert!(
+            speed >= 0.5,
+            "Speed should be clamped at 0.5 minimum, got {}",
+            speed
+        );
+        assert!(
+            pitch >= -1.0,
+            "Pitch should be clamped at -1.0 minimum, got {}",
+            pitch
+        );
+    }
+
+    #[test]
+    fn get_modifiers_with_out_of_range_mood_high() {
+        let m = get_modifiers("happy", 1.5); // mood > 1.0
+        assert!(
+            m.speed_factor > 1.0,
+            "Should handle mood > 1.0 without panic"
+        );
+        assert!(m.speed_factor <= 2.0, "Should still be within reasonable bounds");
+    }
+
+    #[test]
+    fn get_modifiers_with_out_of_range_mood_low() {
+        let m = get_modifiers("sad", -0.5); // mood < 0.0
+        assert!(
+            m.speed_factor < 1.0,
+            "Should handle mood < 0.0 without panic"
+        );
+        assert!(m.speed_factor >= 0.5, "Should still be within reasonable bounds");
+    }
+
+    #[test]
+    fn get_modifiers_mood_symmetry() {
+        let low_mood = get_modifiers("happy", 0.1); // 0.4 away from 0.5
+        let high_mood = get_modifiers("happy", 0.9); // 0.4 away from 0.5
+        assert!(
+            (low_mood.speed_factor - high_mood.speed_factor).abs() < 0.01,
+            "Symmetric moods should produce equal intensity"
+        );
+        assert!(
+            (low_mood.pitch_offset - high_mood.pitch_offset).abs() < 0.01,
+            "Symmetric moods should produce equal pitch offset"
+        );
+    }
+
+    #[test]
+    fn excited_emotion_spot_check() {
+        let m = get_modifiers("excited", 0.8);
+        assert!(m.speed_factor > 1.15, "Excited should have high speed factor");
+        assert!(m.pitch_offset > 0.05, "Excited should have positive pitch offset");
+    }
+
+    #[test]
+    fn angry_emotion_spot_check() {
+        let m = get_modifiers("angry", 0.7);
+        assert!(m.speed_factor > 1.0, "Angry should increase speed");
+        assert!(
+            m.pitch_offset < 0.0,
+            "Angry should have negative pitch offset"
+        );
+    }
+
+    #[test]
+    fn surprised_emotion_spot_check() {
+        let m = get_modifiers("surprised", 0.75);
+        assert!(m.speed_factor > 1.0, "Surprised should increase speed");
+        assert!(m.pitch_offset > 0.0, "Surprised should raise pitch");
+    }
+
+    #[test]
+    fn thinking_emotion_spot_check() {
+        let m = get_modifiers("thinking", 0.5);
+        assert!(m.speed_factor < 1.0, "Thinking should decrease speed");
+        assert!(
+            m.pitch_offset.abs() < 0.01,
+            "Thinking should have neutral pitch"
+        );
+    }
+
+    #[test]
+    fn shy_emotion_spot_check() {
+        let m = get_modifiers("shy", 0.6);
+        assert!(m.speed_factor < 1.0, "Shy should decrease speed");
+        assert!(m.pitch_offset > 0.0, "Shy should raise pitch slightly");
+    }
+
+    #[test]
+    fn smug_emotion_spot_check() {
+        let m = get_modifiers("smug", 0.5);
+        assert!(m.speed_factor < 1.0, "Smug should decrease speed");
+        assert!(m.pitch_offset < 0.0, "Smug should lower pitch");
+    }
+
+    #[test]
+    fn worried_emotion_spot_check() {
+        let m = get_modifiers("worried", 0.4);
+        assert!(m.speed_factor < 1.0, "Worried should decrease speed");
+        assert!(m.pitch_offset > 0.0, "Worried should raise pitch slightly");
+    }
 }

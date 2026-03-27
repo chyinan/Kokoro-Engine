@@ -1007,3 +1007,295 @@ impl AIOrchestrator {
         Self::persist_conversation_id(None);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn setup_test_orchestrator() -> AIOrchestrator {
+        AIOrchestrator::new("sqlite::memory:")
+            .await
+            .expect("Failed to create test orchestrator")
+    }
+
+    #[tokio::test]
+    async fn test_add_message_truncation() {
+        let orchestrator = setup_test_orchestrator().await;
+        orchestrator.set_character_name("TestChar".to_string()).await;
+
+        // Set max_message_chars to 50
+        *orchestrator.max_message_chars.lock().await = 50;
+
+        // Add a message longer than 50 chars
+        let long_message = "This is a very long message that exceeds the maximum character limit".to_string();
+        orchestrator
+            .add_message("user".to_string(), long_message, "test_char")
+            .await;
+
+        let history = orchestrator.history.lock().await;
+        assert_eq!(history.len(), 1, "History should contain one message");
+
+        let msg = &history[0];
+        assert!(
+            msg.content.ends_with("…[truncated]"),
+            "Message should end with truncation marker"
+        );
+        // Check character count, not byte length (ellipsis is multi-byte)
+        let char_count = msg.content.chars().count();
+        assert!(
+            char_count <= 63, // 50 chars + "…[truncated]" (13 chars)
+            "Truncated message should not exceed max + marker length, got {} chars",
+            char_count
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_message_rolling_window() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        // Add 35 messages (exceeds 30 limit)
+        for i in 0..35 {
+            orchestrator
+                .add_message(
+                    "user".to_string(),
+                    format!("Message {}", i),
+                    "test_char",
+                )
+                .await;
+        }
+
+        let history = orchestrator.history.lock().await;
+        assert!(
+            history.len() <= 30,
+            "History should not exceed 30 messages, got {}",
+            history.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_recent_history_fewer_than_n() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        // Add 5 messages
+        for i in 0..5 {
+            orchestrator
+                .add_message(
+                    "user".to_string(),
+                    format!("Message {}", i),
+                    "test_char",
+                )
+                .await;
+        }
+
+        // Request 10 messages (more than available)
+        let recent = orchestrator.get_recent_history(10).await;
+        assert_eq!(
+            recent.len(),
+            5,
+            "Should return all 5 messages when requesting more than available"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_recent_history_exact_n() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        // Add 10 messages
+        for i in 0..10 {
+            orchestrator
+                .add_message(
+                    "user".to_string(),
+                    format!("Message {}", i),
+                    "test_char",
+                )
+                .await;
+        }
+
+        // Request exactly 5 messages
+        let recent = orchestrator.get_recent_history(5).await;
+        assert_eq!(recent.len(), 5, "Should return exactly 5 messages");
+        assert_eq!(
+            recent[0].content, "Message 5",
+            "Should return the last 5 messages"
+        );
+        assert_eq!(recent[4].content, "Message 9", "Last message should be Message 9");
+    }
+
+    #[tokio::test]
+    async fn test_clear_history_resets_state() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        // Add some messages
+        for i in 0..5 {
+            orchestrator
+                .add_message(
+                    "user".to_string(),
+                    format!("Message {}", i),
+                    "test_char",
+                )
+                .await;
+        }
+
+        // Verify messages were added
+        {
+            let history = orchestrator.history.lock().await;
+            assert_eq!(history.len(), 5, "Should have 5 messages before clear");
+        }
+
+        // Clear history
+        orchestrator.clear_history().await;
+
+        // Verify all state is reset
+        {
+            let history = orchestrator.history.lock().await;
+            assert_eq!(history.len(), 0, "History should be empty after clear");
+        }
+
+        {
+            let boundary = *orchestrator.memory_history_boundary.lock().await;
+            assert_eq!(boundary, 0, "Memory boundary should be 0 after clear");
+        }
+
+        {
+            let trigger_count = *orchestrator.memory_trigger_count.lock().await;
+            assert_eq!(trigger_count, 0, "Memory trigger count should be 0 after clear");
+        }
+
+        {
+            let conv_id = orchestrator.current_conversation_id.lock().await;
+            assert_eq!(
+                *conv_id, None,
+                "Current conversation ID should be None after clear"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_memory_enabled_false_resets_trigger_count() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        // Add some user messages to increment trigger count
+        for i in 0..3 {
+            orchestrator
+                .add_message(
+                    "user".to_string(),
+                    format!("Message {}", i),
+                    "test_char",
+                )
+                .await;
+        }
+
+        // Verify trigger count was incremented
+        {
+            let trigger_count = *orchestrator.memory_trigger_count.lock().await;
+            assert_eq!(
+                trigger_count, 3,
+                "Trigger count should be 3 after 3 user messages"
+            );
+        }
+
+        // Disable memory
+        orchestrator.set_memory_enabled(false).await;
+
+        // Verify trigger count was reset
+        {
+            let trigger_count = *orchestrator.memory_trigger_count.lock().await;
+            assert_eq!(
+                trigger_count, 0,
+                "Trigger count should be 0 after disabling memory"
+            );
+        }
+
+        // Verify memory is disabled
+        assert!(
+            !orchestrator.is_memory_enabled(),
+            "Memory should be disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_memory_enabled_sets_boundary() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        // Add some messages
+        for i in 0..5 {
+            orchestrator
+                .add_message(
+                    "user".to_string(),
+                    format!("Message {}", i),
+                    "test_char",
+                )
+                .await;
+        }
+
+        // Disable memory (should set boundary to current history length)
+        orchestrator.set_memory_enabled(false).await;
+
+        let boundary = *orchestrator.memory_history_boundary.lock().await;
+        assert_eq!(
+            boundary, 5,
+            "Boundary should be set to history length (5) when disabling memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_push_history_message_respects_rolling_window() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        // Manually push 35 messages to exceed the 30 limit
+        for i in 0..35 {
+            orchestrator
+                .push_history_message(Message {
+                    role: "user".to_string(),
+                    content: format!("Message {}", i),
+                    metadata: None,
+                })
+                .await;
+        }
+
+        let history = orchestrator.history.lock().await;
+        assert!(
+            history.len() <= 30,
+            "History should not exceed 30 messages after push_history_message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_message_count_increments_on_user_message() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        // Add user messages
+        for i in 0..3 {
+            orchestrator
+                .add_message(
+                    "user".to_string(),
+                    format!("Message {}", i),
+                    "test_char",
+                )
+                .await;
+        }
+
+        let count = *orchestrator.message_count.lock().await;
+        assert_eq!(count, 3, "Message count should be 3 after 3 user messages");
+    }
+
+    #[tokio::test]
+    async fn test_message_count_not_incremented_on_assistant_message() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        // Add assistant message
+        orchestrator
+            .add_message(
+                "assistant".to_string(),
+                "Response".to_string(),
+                "test_char",
+            )
+            .await;
+
+        let count = *orchestrator.message_count.lock().await;
+        assert_eq!(
+            count, 0,
+            "Message count should remain 0 for non-user messages"
+        );
+    }
+}

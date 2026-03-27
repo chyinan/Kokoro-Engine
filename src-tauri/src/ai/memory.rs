@@ -1067,3 +1067,370 @@ async fn merge_facts_via_llm(
 
     Ok(result.trim().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cosine_similarity_identical_vectors() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![1.0, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(
+            (sim - 1.0).abs() < 0.0001,
+            "Identical vectors should have similarity 1.0, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal_vectors() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(
+            sim.abs() < 0.0001,
+            "Orthogonal vectors should have similarity ~0.0, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_opposite_vectors() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![-1.0, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(
+            (sim - (-1.0)).abs() < 0.0001,
+            "Opposite vectors should have similarity -1.0, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_vector_a() {
+        let a = vec![0.0, 0.0, 0.0];
+        let b = vec![1.0, 2.0, 3.0];
+        let sim = cosine_similarity(&a, &b);
+        assert_eq!(
+            sim, 0.0,
+            "Zero vector should produce similarity 0.0, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_vector_b() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![0.0, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert_eq!(
+            sim, 0.0,
+            "Zero vector should produce similarity 0.0, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_both_zero_vectors() {
+        let a = vec![0.0, 0.0, 0.0];
+        let b = vec![0.0, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert_eq!(
+            sim, 0.0,
+            "Both zero vectors should produce similarity 0.0, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_scaled_vectors() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![2.0, 4.0, 6.0]; // b = 2 * a
+        let sim = cosine_similarity(&a, &b);
+        assert!(
+            (sim - 1.0).abs() < 0.0001,
+            "Scaled vectors should have similarity 1.0, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_escape_fts5_query_empty_string() {
+        let result = escape_fts5_query("");
+        assert_eq!(result, "", "Empty string should produce empty result");
+    }
+
+    #[test]
+    fn test_escape_fts5_query_single_word() {
+        let result = escape_fts5_query("hello");
+        assert_eq!(
+            result, "\"hello\"",
+            "Single word should be wrapped in quotes"
+        );
+    }
+
+    #[test]
+    fn test_escape_fts5_query_multiple_words() {
+        let result = escape_fts5_query("hello world test");
+        assert_eq!(
+            result, "\"hello\" OR \"world\" OR \"test\"",
+            "Multiple words should be joined with OR"
+        );
+    }
+
+    #[test]
+    fn test_escape_fts5_query_with_embedded_quotes() {
+        let result = escape_fts5_query("hello \"world\" test");
+        assert_eq!(
+            result, "\"hello\" OR \"world\" OR \"test\"",
+            "Embedded quotes should be removed for injection prevention"
+        );
+    }
+
+    #[test]
+    fn test_escape_fts5_query_whitespace_only() {
+        let result = escape_fts5_query("   \t  \n  ");
+        assert_eq!(
+            result, "",
+            "Whitespace-only input should produce empty result"
+        );
+    }
+
+    #[test]
+    fn test_escape_fts5_query_mixed_whitespace() {
+        let result = escape_fts5_query("  hello   world  ");
+        assert_eq!(
+            result, "\"hello\" OR \"world\"",
+            "Extra whitespace should be normalized"
+        );
+    }
+
+    #[test]
+    fn test_escape_fts5_query_only_quotes() {
+        let result = escape_fts5_query("\"\"\"");
+        assert_eq!(
+            result, "",
+            "String with only quotes should produce empty result after filtering"
+        );
+    }
+
+    #[test]
+    fn test_escape_fts5_query_word_with_quotes() {
+        let result = escape_fts5_query("hel\"lo wor\"ld");
+        assert_eq!(
+            result, "\"hello\" OR \"world\"",
+            "Quotes within words should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_manager_add_and_retrieve() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("Failed to create in-memory database");
+
+        // Create the memories table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                importance REAL DEFAULT 0.5,
+                character_id TEXT NOT NULL DEFAULT 'default',
+                tier TEXT NOT NULL DEFAULT 'ephemeral',
+                consolidated_from TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create memories table");
+
+        let manager = MemoryManager::new(pool);
+
+        // Add a memory
+        let content = "Test memory content";
+        let char_id = "test_char";
+        manager
+            .add_memory(content, char_id)
+            .await
+            .expect("Failed to add memory");
+
+        // Retrieve all memories for this character
+        let memories = manager
+            .get_all_memory_contents(char_id)
+            .await
+            .expect("Failed to retrieve memories");
+
+        assert_eq!(
+            memories.len(),
+            1,
+            "Should have exactly one memory after adding one"
+        );
+        assert_eq!(
+            memories[0], content,
+            "Retrieved memory content should match what was added"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_manager_character_isolation() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("Failed to create in-memory database");
+
+        // Create the memories table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                importance REAL DEFAULT 0.5,
+                character_id TEXT NOT NULL DEFAULT 'default',
+                tier TEXT NOT NULL DEFAULT 'ephemeral',
+                consolidated_from TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create memories table");
+
+        let manager = MemoryManager::new(pool);
+
+        // Add memories for different characters
+        manager
+            .add_memory("Alice's memory", "alice")
+            .await
+            .expect("Failed to add Alice's memory");
+        manager
+            .add_memory("Bob's memory", "bob")
+            .await
+            .expect("Failed to add Bob's memory");
+
+        // Retrieve memories for Alice
+        let alice_memories = manager
+            .get_all_memory_contents("alice")
+            .await
+            .expect("Failed to retrieve Alice's memories");
+
+        // Retrieve memories for Bob
+        let bob_memories = manager
+            .get_all_memory_contents("bob")
+            .await
+            .expect("Failed to retrieve Bob's memories");
+
+        assert_eq!(
+            alice_memories.len(),
+            1,
+            "Alice should have exactly one memory"
+        );
+        assert_eq!(
+            bob_memories.len(),
+            1,
+            "Bob should have exactly one memory"
+        );
+        assert_eq!(alice_memories[0], "Alice's memory");
+        assert_eq!(bob_memories[0], "Bob's memory");
+    }
+
+    #[tokio::test]
+    async fn test_memory_manager_empty_character() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("Failed to create in-memory database");
+
+        // Create the memories table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                importance REAL DEFAULT 0.5,
+                character_id TEXT NOT NULL DEFAULT 'default',
+                tier TEXT NOT NULL DEFAULT 'ephemeral',
+                consolidated_from TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create memories table");
+
+        let manager = MemoryManager::new(pool);
+
+        // Retrieve memories for a character with no memories
+        let memories = manager
+            .get_all_memory_contents("nonexistent_char")
+            .await
+            .expect("Failed to retrieve memories");
+
+        assert_eq!(
+            memories.len(),
+            0,
+            "Should return empty list for character with no memories"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_manager_multiple_memories() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("Failed to create in-memory database");
+
+        // Create the memories table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                importance REAL DEFAULT 0.5,
+                character_id TEXT NOT NULL DEFAULT 'default',
+                tier TEXT NOT NULL DEFAULT 'ephemeral',
+                consolidated_from TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create memories table");
+
+        let manager = MemoryManager::new(pool);
+
+        let char_id = "test_char";
+
+        // Add multiple distinct memories (with unique content to avoid deduplication)
+        let memories_to_add = vec![
+            "The user likes to play chess on weekends",
+            "The user works as a software engineer in San Francisco",
+            "The user has a cat named Whiskers",
+            "The user enjoys reading science fiction novels",
+            "The user prefers coffee over tea in the morning",
+        ];
+
+        for content in &memories_to_add {
+            manager
+                .add_memory(content, char_id)
+                .await
+                .expect("Failed to add memory");
+        }
+
+        // Retrieve all memories
+        let memories = manager
+            .get_all_memory_contents(char_id)
+            .await
+            .expect("Failed to retrieve memories");
+
+        assert_eq!(
+            memories.len(),
+            5,
+            "Should have exactly 5 distinct memories after adding 5"
+        );
+    }
+}

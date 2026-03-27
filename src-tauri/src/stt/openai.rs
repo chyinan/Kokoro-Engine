@@ -286,4 +286,47 @@ mod tests {
             "https://example.com/openai/audio/transcriptions"
         );
     }
+
+    #[test]
+    fn empty_string_returns_default_url() {
+        assert_eq!(
+            transcription_url(""),
+            "https://api.openai.com/v1/audio/transcriptions"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_returns_default_url() {
+        assert_eq!(
+            transcription_url("   \t  \n  "),
+            "https://api.openai.com/v1/audio/transcriptions"
+        );
+    }
+
+    #[test]
+    fn unparseable_url_falls_back_to_string_concat() {
+        // Invalid URL scheme should fall through to string concatenation
+        let result = transcription_url("not-a-valid-url");
+        assert!(
+            result.ends_with("/audio/transcriptions"),
+            "Should append /audio/transcriptions even for unparseable URLs"
+        );
+    }
+
+    #[test]
+    fn url_with_port_number() {
+        assert_eq!(
+            transcription_url("https://example.com:8080/v1"),
+            "https://example.com:8080/v1/audio/transcriptions"
+        );
+    }
+
+    #[test]
+    fn url_with_auth_credentials() {
+        let result = transcription_url("https://user:pass@example.com/v1");
+        assert!(
+            result.contains("/audio/transcriptions"),
+            "Should handle URLs with auth credentials"
+        );
+    }
 }
