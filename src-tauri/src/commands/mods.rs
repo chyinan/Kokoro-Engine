@@ -1,3 +1,4 @@
+use crate::error::KokoroError;
 use crate::mods::{ModManager, ModManifest, ModThemeJson};
 use serde_json::Value as JsonValue;
 use std::fs;
@@ -22,7 +23,7 @@ fn is_allowed_mod_file(ext: &str) -> bool {
 #[command]
 pub async fn list_mods(
     mod_manager: State<'_, Mutex<ModManager>>,
-) -> Result<Vec<ModManifest>, String> {
+) -> Result<Vec<ModManifest>, KokoroError> {
     let mut manager = mod_manager.lock().await;
     Ok(manager.scan_mods())
 }
@@ -32,15 +33,15 @@ pub async fn load_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
     app_handle: AppHandle,
     mod_id: String,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     let mut manager = mod_manager.lock().await;
-    manager.load_mod(&mod_id, &app_handle).await
+    manager.load_mod(&mod_id, &app_handle).await.map_err(KokoroError::Mod)
 }
 
 #[command]
 pub async fn get_mod_theme(
     mod_manager: State<'_, Mutex<ModManager>>,
-) -> Result<Option<ModThemeJson>, String> {
+) -> Result<Option<ModThemeJson>, KokoroError> {
     let manager = mod_manager.lock().await;
     Ok(manager.get_active_theme().cloned())
 }
@@ -48,7 +49,7 @@ pub async fn get_mod_theme(
 #[command]
 pub async fn get_mod_layout(
     mod_manager: State<'_, Mutex<ModManager>>,
-) -> Result<Option<JsonValue>, String> {
+) -> Result<Option<JsonValue>, KokoroError> {
     let manager = mod_manager.lock().await;
     Ok(manager.get_active_layout().cloned())
 }
@@ -57,96 +58,74 @@ pub async fn get_mod_layout(
 pub async fn install_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
     file_path: String,
-) -> Result<ModManifest, String> {
-    // 先读取 mods_path，然后立即释放锁，避免在持锁状态下执行大量文件 I/O
+) -> Result<ModManifest, KokoroError> {
     let mods_dir = {
         let manager = mod_manager.lock().await;
         manager.mods_path.clone()
     };
 
-    // verify file exists
     let archive_path = std::path::Path::new(&file_path);
     if !archive_path.exists() {
-        return Err("File does not exist".to_string());
+        return Err(KokoroError::NotFound("File does not exist".to_string()));
     }
 
-    // Open zip
-    let file = fs::File::open(archive_path).map_err(|e| e.to_string())?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let file = fs::File::open(archive_path).map_err(KokoroError::from)?;
+    let mut archive = zip::ZipArchive::new(file).map_err(KokoroError::from)?;
 
-    // Find mod.json
     let mut manifest_content = String::new();
     {
         let mut manifest_file = archive
             .by_name("mod.json")
-            .map_err(|_| "mod.json not found in archive root".to_string())?;
+            .map_err(|_| KokoroError::Mod("mod.json not found in archive root".to_string()))?;
         std::io::Read::read_to_string(&mut manifest_file, &mut manifest_content)
-            .map_err(|e| e.to_string())?;
+            .map_err(KokoroError::from)?;
     }
 
-    // Parse manifest
-    let manifest: ModManifest =
-        serde_json::from_str(&manifest_content).map_err(|e| format!("Invalid mod.json: {}", e))?;
+    let manifest: ModManifest = serde_json::from_str(&manifest_content)
+        .map_err(|e| KokoroError::Mod(format!("Invalid mod.json: {}", e)))?;
 
-    // Validate ID
     if !is_valid_mod_id(&manifest.id) {
-        return Err("Invalid mod ID. Must be alphanumeric, underscore or dash.".to_string());
+        return Err(KokoroError::Validation("Invalid mod ID. Must be alphanumeric, underscore or dash.".to_string()));
     }
 
-    // Target directory
     let target_dir = mods_dir.join(&manifest.id);
     if target_dir.exists() {
-        fs::remove_dir_all(&target_dir).map_err(|e| format!("Failed to remove old mod: {}", e))?;
+        fs::remove_dir_all(&target_dir).map_err(|e| KokoroError::Mod(format!("Failed to remove old mod: {}", e)))?;
     }
-    fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&target_dir).map_err(KokoroError::from)?;
 
-    // 单文件最大 10MB，MOD 包总解压大小最大 50MB
     const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
     const MAX_TOTAL_SIZE: u64 = 50 * 1024 * 1024;
 
-    // Extract
     let mut total_size: u64 = 0;
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
+        let mut file = archive.by_index(i).map_err(|e| KokoroError::Mod(e.to_string()))?;
         let outpath = match file.enclosed_name() {
             Some(path) => target_dir.join(path),
             None => continue,
         };
 
         if file.name().ends_with('/') {
-            fs::create_dir_all(&outpath).map_err(|e| e.to_string())?;
+            fs::create_dir_all(&outpath).map_err(KokoroError::from)?;
         } else {
-            // 检查文件扩展名白名单
-            let ext = outpath
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
+            let ext = outpath.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
             if !is_allowed_mod_file(&ext) {
-                continue; // 跳过不允许的文件类型
+                continue;
             }
-
-            // 检查单文件大小
             if file.size() > MAX_FILE_SIZE {
-                return Err(format!(
-                    "File '{}' exceeds maximum size of 10MB",
-                    file.name()
-                ));
+                return Err(KokoroError::Mod(format!("File '{}' exceeds maximum size of 10MB", file.name())));
             }
-
-            // 检查总解压大小（防止 zip bomb）
             total_size += file.size();
             if total_size > MAX_TOTAL_SIZE {
-                return Err("MOD package total size exceeds 50MB limit".to_string());
+                return Err(KokoroError::Mod("MOD package total size exceeds 50MB limit".to_string()));
             }
-
             if let Some(p) = outpath.parent() {
                 if !p.exists() {
-                    fs::create_dir_all(p).map_err(|e| e.to_string())?;
+                    fs::create_dir_all(p).map_err(KokoroError::from)?;
                 }
             }
-            let mut outfile = fs::File::create(&outpath).map_err(|e| e.to_string())?;
-            io::copy(&mut file, &mut outfile).map_err(|e| e.to_string())?;
+            let mut outfile = fs::File::create(&outpath).map_err(KokoroError::from)?;
+            io::copy(&mut file, &mut outfile).map_err(KokoroError::from)?;
         }
     }
 
@@ -158,16 +137,16 @@ pub async fn dispatch_mod_event(
     mod_manager: State<'_, Mutex<ModManager>>,
     event: String,
     payload: JsonValue,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     let manager = mod_manager.lock().await;
-    manager.dispatch_event(&event, payload).await
+    manager.dispatch_event(&event, payload).await.map_err(KokoroError::Mod)
 }
 
 #[command]
 pub async fn unload_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
     app_handle: AppHandle,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     let mut manager = mod_manager.lock().await;
     manager.unload_mod(&app_handle);
     Ok(())

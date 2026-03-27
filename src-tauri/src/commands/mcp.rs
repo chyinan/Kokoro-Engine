@@ -1,4 +1,5 @@
 use crate::actions::ActionRegistry;
+use crate::error::KokoroError;
 use crate::mcp::manager::{McpManager, McpServerConfig, McpServerStatus};
 use std::sync::Arc;
 use tauri::State;
@@ -8,7 +9,7 @@ use tokio::sync::{Mutex, RwLock};
 #[tauri::command]
 pub async fn list_mcp_servers(
     manager: State<'_, Arc<Mutex<McpManager>>>,
-) -> Result<Vec<McpServerStatus>, String> {
+) -> Result<Vec<McpServerStatus>, KokoroError> {
     let mgr = manager.lock().await;
     Ok(mgr.list_status().await)
 }
@@ -20,20 +21,17 @@ pub async fn add_mcp_server(
     config: McpServerConfig,
     manager: State<'_, Arc<Mutex<McpManager>>>,
     registry: State<'_, Arc<RwLock<ActionRegistry>>>,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     let mgr_arc = manager.inner().clone();
     let reg_arc = registry.inner().clone();
 
     {
         let mut mgr = mgr_arc.lock().await;
-        // Add to config but don't connect yet
-        mgr.add_server(config.clone(), false).await?;
-
-        // Mark as "connecting" so the UI can poll and show spinner
+        mgr.add_server(config.clone(), false).await.map_err(KokoroError::ExternalService)?;
         if config.enabled {
             mgr.mark_connecting(&config.name);
         }
-    } // lock released
+    }
 
     // Spawn background task to connect
     if config.enabled {
@@ -67,18 +65,17 @@ pub async fn add_mcp_server(
 pub async fn remove_mcp_server(
     name: String,
     manager: State<'_, Arc<Mutex<McpManager>>>,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     let mut mgr = manager.lock().await;
-    mgr.remove_server(&name).await?;
+    mgr.remove_server(&name).await.map_err(KokoroError::ExternalService)?;
     Ok(())
 }
 
-/// Refresh tools from all connected MCP servers and re-register in ActionRegistry.
 #[tauri::command]
 pub async fn refresh_mcp_tools(
     manager: State<'_, Arc<Mutex<McpManager>>>,
     registry: State<'_, Arc<RwLock<ActionRegistry>>>,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     crate::mcp::bridge::register_mcp_tools(&manager.inner().clone(), registry.inner()).await;
     Ok(())
 }
@@ -89,7 +86,7 @@ pub async fn reconnect_mcp_server(
     name: String,
     manager: State<'_, Arc<Mutex<McpManager>>>,
     registry: State<'_, Arc<RwLock<ActionRegistry>>>,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     let mgr_arc = manager.inner().clone();
     let reg_arc = registry.inner().clone();
 
@@ -97,7 +94,7 @@ pub async fn reconnect_mcp_server(
         let mut mgr = mgr_arc.lock().await;
         let cfg = mgr
             .get_config(&name)
-            .ok_or_else(|| format!("Server '{}' not found", name))?;
+            .ok_or_else(|| KokoroError::NotFound(format!("Server '{}' not found", name)))?;
         // Disconnect existing (if any) before retrying
         let _ = mgr.disconnect_server(&name).await;
         mgr.mark_connecting(&name);
@@ -134,17 +131,17 @@ pub async fn toggle_mcp_server(
     enabled: bool,
     manager: State<'_, Arc<Mutex<McpManager>>>,
     registry: State<'_, Arc<RwLock<ActionRegistry>>>,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     let mgr_arc = manager.inner().clone();
     let reg_arc = registry.inner().clone();
 
     let cfg = {
         let mut mgr = mgr_arc.lock().await;
-        mgr.toggle_server(&name, enabled).await?;
+        mgr.toggle_server(&name, enabled).await.map_err(KokoroError::ExternalService)?;
 
         if enabled {
             let cfg = mgr.get_config(&name)
-                .ok_or_else(|| format!("Server '{}' not found", name))?;
+                .ok_or_else(|| KokoroError::NotFound(format!("Server '{}' not found", name)))?;
             mgr.mark_connecting(&name);
             Some(cfg)
         } else {

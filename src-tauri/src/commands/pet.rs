@@ -1,3 +1,4 @@
+use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, Emitter};
 
@@ -54,16 +55,16 @@ pub fn load_pet_config() -> PetConfig {
     PetConfig::default()
 }
 
-fn save_pet_config_to_disk(config: &PetConfig) -> Result<(), String> {
+fn save_pet_config_to_disk(config: &PetConfig) -> Result<(), KokoroError> {
     let dir = app_data_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(KokoroError::from)?;
     let path = dir.join("pet_config.json");
-    let content = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+    let content = serde_json::to_string_pretty(config).map_err(KokoroError::from)?;
+    std::fs::write(&path, content).map_err(KokoroError::from)
 }
 
 #[tauri::command]
-pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
     println!("[pet] show_pet_window called");
     let windows: Vec<String> = app.webview_windows().keys().cloned().collect();
     println!("[pet] available windows: {:?}", windows);
@@ -73,25 +74,25 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), String> {
         let x = if cfg.position_x != 0 { cfg.position_x } else { 100 };
         let y = if cfg.position_y != 0 { cfg.position_y } else { 100 };
         win.set_position(tauri::PhysicalPosition::new(x, y))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
         let w = if cfg.window_width >= 100 { cfg.window_width } else { 400 };
         let h = if cfg.window_height >= 100 { cfg.window_height } else { 600 };
         win.set_size(tauri::PhysicalSize::new(w, h))
-            .map_err(|e| e.to_string())?;
-        win.show().map_err(|e| e.to_string())?;
-        win.set_focus().map_err(|e| e.to_string())?;
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
+        win.show().map_err(|e| KokoroError::Internal(e.to_string()))?;
+        win.set_focus().map_err(|e| KokoroError::Internal(e.to_string()))?;
         println!("[pet] pet window shown successfully");
     } else {
         println!("[pet] ERROR: pet window not found!");
-        return Err("Pet window not found".to_string());
+        return Err(KokoroError::NotFound("Pet window not found".to_string()));
     }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn hide_pet_window(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn hide_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("pet") {
-        win.hide().map_err(|e| e.to_string())?;
+        win.hide().map_err(|e| KokoroError::Internal(e.to_string()))?;
 
         // Update config to reflect window is closed
         let mut cfg = load_pet_config();
@@ -99,75 +100,70 @@ pub async fn hide_pet_window(app: tauri::AppHandle) -> Result<(), String> {
         save_pet_config_to_disk(&cfg)?;
 
         // Emit event to notify main window
-        app.emit("pet-window-closed", ()).map_err(|e| e.to_string())?;
+        app.emit("pet-window-closed", ()).map_err(|e| KokoroError::Internal(e.to_string()))?;
     }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn set_pet_drag_mode(app: tauri::AppHandle, _enabled: bool) -> Result<(), String> {
+pub async fn set_pet_drag_mode(app: tauri::AppHandle, _enabled: bool) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("pet") {
-        // When drag mode is enabled, allow cursor events for dragging
-        // When disabled (interaction mode), also allow cursor events for clicks
-        // We never want to ignore cursor events in this implementation
-        win.set_ignore_cursor_events(false).map_err(|e| e.to_string())?;
+        win.set_ignore_cursor_events(false).map_err(|e| KokoroError::Internal(e.to_string()))?;
     }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn get_pet_config(_app: tauri::AppHandle) -> Result<PetConfig, String> {
+pub async fn get_pet_config(_app: tauri::AppHandle) -> Result<PetConfig, KokoroError> {
     Ok(load_pet_config())
 }
 
 #[tauri::command]
-pub async fn save_pet_config(_app: tauri::AppHandle, config: PetConfig) -> Result<(), String> {
+pub async fn save_pet_config(_app: tauri::AppHandle, config: PetConfig) -> Result<(), KokoroError> {
     save_pet_config_to_disk(&config)
 }
 
 #[tauri::command]
-pub async fn move_pet_window(app: tauri::AppHandle, x: i32, y: i32) -> Result<(), String> {
+pub async fn move_pet_window(app: tauri::AppHandle, x: i32, y: i32) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("pet") {
         win.set_position(tauri::PhysicalPosition::new(x, y))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
     }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn resize_pet_window(app: tauri::AppHandle, width: u32, height: u32) -> Result<(), String> {
+pub async fn resize_pet_window(app: tauri::AppHandle, width: u32, height: u32) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("pet") {
         win.set_size(tauri::PhysicalSize::new(width, height))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
     }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(), String> {
+pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(), KokoroError> {
     let bubble_w = 320i32;
     let bubble_h = 240i32;
     let gap = 8i32;
 
-    // Get pet window position and size
     let (bx, by) = if let Some(pet) = app.get_webview_window("pet") {
-        // 如果 pet 窗口不可见，不显示气泡
         if !pet.is_visible().unwrap_or(false) {
             return Ok(());
         }
-        let pos = pet.outer_position().map_err(|e| e.to_string())?;
-        let size = pet.inner_size().map_err(|e| e.to_string())?;
+        let pos = pet.outer_position().map_err(|e| KokoroError::Internal(e.to_string()))?;
+        let size = pet.inner_size().map_err(|e| KokoroError::Internal(e.to_string()))?;
         let x = pos.x + (size.width as i32 - bubble_w) / 2;
         let y = pos.y - bubble_h - gap;
         (x, y)
     } else {
-        return Err("Pet window not found".to_string());
+        return Err(KokoroError::NotFound("Pet window not found".to_string()));
     };
 
     if let Some(existing) = app.get_webview_window("bubble") {
-        existing.set_position(tauri::PhysicalPosition::new(bx, by)).map_err(|e| e.to_string())?;
-        existing.show().map_err(|e| e.to_string())?;
-        existing.emit("bubble-text-update", &text).map_err(|e| e.to_string())?;
+        existing.set_position(tauri::PhysicalPosition::new(bx, by)).map_err(|e| KokoroError::Internal(e.to_string()))?;
+        existing.show().map_err(|e| KokoroError::Internal(e.to_string()))?;
+        existing.emit("bubble-text-update", &text).map_err(|e| KokoroError::Internal(e.to_string()))?;
     } else {
         let url = if cfg!(debug_assertions) {
             tauri::WebviewUrl::External("http://localhost:1420/src/windows/bubble.html".parse().unwrap())
@@ -186,12 +182,10 @@ pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(
             .resizable(false)
             .shadow(false)
             .build()
-            .map_err(|e: tauri::Error| e.to_string())?;
+            .map_err(|e: tauri::Error| KokoroError::Internal(e.to_string()))?;
 
-        // 确保透明窗口能接收鼠标滚轮等事件
-        win.set_ignore_cursor_events(false).map_err(|e: tauri::Error| e.to_string())?;
+        win.set_ignore_cursor_events(false).map_err(|e: tauri::Error| KokoroError::Internal(e.to_string()))?;
 
-        // Wait for frontend to mount before sending text
         let win_clone = win.clone();
         let text_clone = text.clone();
         tauri::async_runtime::spawn(async move {
@@ -204,19 +198,19 @@ pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(
 }
 
 #[tauri::command]
-pub async fn update_bubble_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
+pub async fn update_bubble_text(app: tauri::AppHandle, text: String) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("bubble") {
-        win.emit("bubble-text-update", &text).map_err(|e| e.to_string())?;
+        win.emit("bubble-text-update", &text).map_err(|e| KokoroError::Internal(e.to_string()))?;
         Ok(())
     } else {
-        Err("bubble window not found".to_string())
+        Err(KokoroError::NotFound("bubble window not found".to_string()))
     }
 }
 
 #[tauri::command]
-pub async fn hide_bubble_window(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn hide_bubble_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("bubble") {
-        win.hide().map_err(|e| e.to_string())?;
+        win.hide().map_err(|e| KokoroError::Internal(e.to_string()))?;
     }
     Ok(())
 }

@@ -1,3 +1,4 @@
+use crate::error::KokoroError;
 use crate::tts::local_rvc::{LocalRVCProvider, RvcModelInfo, SingingConvertParams};
 use serde::Serialize;
 use tauri::{command, AppHandle, Emitter};
@@ -13,16 +14,15 @@ pub struct SingingResult {
 
 /// Check if the RVC server is online and reachable.
 #[command]
-pub async fn check_rvc_status(app: AppHandle) -> Result<bool, String> {
+pub async fn check_rvc_status(app: AppHandle) -> Result<bool, KokoroError> {
     let provider = get_rvc_provider(&app)?;
     Ok(provider.check_health().await)
 }
 
-/// List available voice models on the RVC server.
 #[command]
-pub async fn list_rvc_models(app: AppHandle) -> Result<Vec<RvcModelInfo>, String> {
+pub async fn list_rvc_models(app: AppHandle) -> Result<Vec<RvcModelInfo>, KokoroError> {
     let provider = get_rvc_provider(&app)?;
-    provider.list_models().await
+    provider.list_models().await.map_err(KokoroError::ExternalService)
 }
 
 /// Convert a song/audio file to the character's voice using RVC.
@@ -41,7 +41,7 @@ pub async fn convert_singing(
     f0_method: Option<String>,
     index_path: Option<String>,
     index_rate: Option<f32>,
-) -> Result<SingingResult, String> {
+) -> Result<SingingResult, KokoroError> {
     // Emit start event
     app.emit(
         "singing:progress",
@@ -55,7 +55,7 @@ pub async fn convert_singing(
     // Read the source audio file
     let audio_data = tokio::fs::read(&audio_path)
         .await
-        .map_err(|e| format!("Failed to read audio file: {}", e))?;
+        .map_err(KokoroError::from)?;
 
     let filename = std::path::Path::new(&audio_path)
         .file_name()
@@ -88,7 +88,8 @@ pub async fn convert_singing(
 
     let converted = provider
         .convert_audio(audio_data, &filename, params)
-        .await?;
+        .await
+        .map_err(KokoroError::ExternalService)?;
 
     // Save to temporary file
     let app_data = dirs_next::data_dir()
@@ -98,7 +99,7 @@ pub async fn convert_singing(
 
     tokio::fs::create_dir_all(&app_data)
         .await
-        .map_err(|e| format!("Failed to create singing dir: {}", e))?;
+        .map_err(KokoroError::from)?;
 
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let output_filename = format!("singing_{}.wav", timestamp);
@@ -106,7 +107,7 @@ pub async fn convert_singing(
 
     tokio::fs::write(&output_path, &converted)
         .await
-        .map_err(|e| format!("Failed to write output: {}", e))?;
+        .map_err(KokoroError::from)?;
 
     let output_path_str = output_path.to_string_lossy().to_string();
 
@@ -131,7 +132,7 @@ pub async fn convert_singing(
 }
 
 /// Helper: create an RVC provider from stored config or defaults.
-fn get_rvc_provider(_app: &AppHandle) -> Result<LocalRVCProvider, String> {
+fn get_rvc_provider(_app: &AppHandle) -> Result<LocalRVCProvider, KokoroError> {
     // Try to get endpoint from localStorage-stored config
     // For now, use sensible defaults. The user configures this in TTS provider settings.
     let app_data = dirs_next::data_dir()

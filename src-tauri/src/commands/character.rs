@@ -1,3 +1,4 @@
+use crate::error::KokoroError;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -42,12 +43,10 @@ pub fn set_expression(expression: String) -> CharacterState {
 /// Sends a user message and returns a placeholder AI response.
 /// In Phase 2, this will integrate with the LLM adapter.
 #[tauri::command]
-pub async fn send_message(message: String) -> Result<ChatResponse, String> {
+pub async fn send_message(message: String) -> Result<ChatResponse, KokoroError> {
     if message.trim().is_empty() {
-        return Err("Message cannot be empty".to_string());
+        return Err(KokoroError::Validation("Message cannot be empty".to_string()));
     }
-
-    // TODO: Phase 2 — route through Context Manager → LLM Adapter
     Ok(ChatResponse {
         text: format!("Echo from Kokoro Engine: {}", message),
         expression: "happy".to_string(),

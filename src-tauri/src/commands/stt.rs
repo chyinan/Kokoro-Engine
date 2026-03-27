@@ -1,3 +1,4 @@
+use crate::error::KokoroError;
 use crate::stt::config::save_config;
 use crate::stt::{
     AudioChunk, AudioSource, NativeMicState, NativeWakeWordState, SenseVoiceLocalModelStatus,
@@ -13,24 +14,16 @@ pub async fn transcribe_audio(
     state: State<'_, SttService>,
     audio_bytes: Vec<u8>,
     format: String,
-) -> Result<String, String> {
-    let source = AudioSource::Encoded {
-        data: audio_bytes,
-        format,
-    };
-
-    let result = state
-        .transcribe(&source, None)
-        .await
-        .map_err(|e| e.to_string())?;
-
+) -> Result<String, KokoroError> {
+    let source = AudioSource::Encoded { data: audio_bytes, format };
+    let result = state.transcribe(&source, None).await.map_err(|e| KokoroError::Stt(e.to_string()))?;
     Ok(result.text)
 }
 
 /// Return the current STT config from disk.
 /// Automatically merges any missing default providers so the UI always shows all options.
 #[command]
-pub async fn get_stt_config() -> Result<SttConfig, String> {
+pub async fn get_stt_config() -> Result<SttConfig, KokoroError> {
     let app_data = dirs_next::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
@@ -61,18 +54,13 @@ pub async fn get_stt_config() -> Result<SttConfig, String> {
 pub async fn save_stt_config(
     state: State<'_, SttService>,
     config: SttConfig,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     let app_data = dirs_next::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let config_path = app_data.join("stt_config.json");
-
-    // Write to disk
-    save_config(&config_path, &config)?;
-
-    // Hot-reload providers
+    save_config(&config_path, &config).map_err(KokoroError::Stt)?;
     state.reload_from_config(&config).await;
-
     Ok(())
 }
 
@@ -82,43 +70,30 @@ pub async fn save_stt_config(
 pub async fn transcribe_wake_word_audio(
     state: State<'_, SttService>,
     samples: Vec<f32>,
-) -> Result<String, String> {
+) -> Result<String, KokoroError> {
     if samples.is_empty() {
         return Ok(String::new());
     }
-
-    let chunk = AudioChunk {
-        samples: Arc::new(samples),
-        sample_rate: 16000,
-    };
-
-    let result = state
-        .transcribe(&AudioSource::Chunk(chunk), None)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(result.text)
-}
+    let chunk = AudioChunk { samples: Arc::new(samples), sample_rate: 16000 };
+    let result = state.transcribe(&AudioSource::Chunk(chunk), None).await.map_err(|e| KokoroError::Stt(e.to_string()))?;
+    Ok(result.text)}
 
 #[command]
 pub async fn start_native_mic(
     app: AppHandle,
     mic_state: State<'_, NativeMicState>,
     auto_stop_on_silence: Option<bool>,
-) -> Result<(), String> {
-    crate::stt::mic::start_native_mic_with_options(
-        &app,
-        mic_state.inner(),
-        auto_stop_on_silence.unwrap_or(false),
-    )
+) -> Result<(), KokoroError> {
+    crate::stt::mic::start_native_mic_with_options(&app, mic_state.inner(), auto_stop_on_silence.unwrap_or(false))
+        .map_err(KokoroError::Stt)
 }
 
 #[command]
 pub async fn stop_native_mic(
     app: AppHandle,
     mic_state: State<'_, NativeMicState>,
-) -> Result<(), String> {
-    crate::stt::mic::stop_native_mic(&app, mic_state.inner())
+) -> Result<(), KokoroError> {
+    crate::stt::mic::stop_native_mic(&app, mic_state.inner()).map_err(KokoroError::Stt)
 }
 
 #[command]
@@ -127,39 +102,33 @@ pub async fn start_native_wake_word(
     wake_word_state: State<'_, NativeWakeWordState>,
     wake_word: String,
     trigger_on_speech: Option<bool>,
-) -> Result<(), String> {
-    crate::stt::wake_word::start_native_wake_word(
-        &app,
-        wake_word_state.inner(),
-        wake_word,
-        trigger_on_speech.unwrap_or(false),
-    )
+) -> Result<(), KokoroError> {
+    crate::stt::wake_word::start_native_wake_word(&app, wake_word_state.inner(), wake_word, trigger_on_speech.unwrap_or(false))
+        .map_err(KokoroError::Stt)
 }
 
 #[command]
 pub async fn stop_native_wake_word(
     app: AppHandle,
     wake_word_state: State<'_, NativeWakeWordState>,
-) -> Result<(), String> {
-    crate::stt::wake_word::stop_native_wake_word(&app, wake_word_state.inner())
+) -> Result<(), KokoroError> {
+    crate::stt::wake_word::stop_native_wake_word(&app, wake_word_state.inner()).map_err(KokoroError::Stt)
 }
 
-/// Return the install status of the recommended SenseVoice local model.
 #[command]
-pub async fn get_sensevoice_local_status() -> Result<SenseVoiceLocalModelStatus, String> {
+pub async fn get_sensevoice_local_status() -> Result<SenseVoiceLocalModelStatus, KokoroError> {
     Ok(crate::stt::sensevoice_local::recommended_model_status())
 }
 
-/// Download and extract the recommended SenseVoice local model.
-/// Emits `stt:sensevoice-local-progress` events during the process.
 #[command]
 pub async fn download_sensevoice_local_model(
     app: tauri::AppHandle,
-) -> Result<SenseVoiceLocalModelStatus, String> {
+) -> Result<SenseVoiceLocalModelStatus, KokoroError> {
     use tauri::Emitter;
     crate::stt::sensevoice_local::download_recommended_model(|progress| {
         app.emit("stt:sensevoice-local-progress", &progress)
             .map_err(|e| e.to_string())
     })
     .await
+    .map_err(KokoroError::Stt)
 }

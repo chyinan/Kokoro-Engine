@@ -1,6 +1,7 @@
 //! Auto Backup — 定时自动备份记忆数据到指定目录
 
 use crate::commands::backup::export_data_to_path;
+use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,10 +35,10 @@ impl Default for AutoBackupConfig {
     }
 }
 
-fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+fn app_data_dir(app: &AppHandle) -> Result<PathBuf, KokoroError> {
     app.path()
         .app_data_dir()
-        .map_err(|e| format!("Failed to resolve app data dir: {}", e))
+        .map_err(|e| KokoroError::Internal(format!("Failed to resolve app data dir: {}", e)))
 }
 
 fn config_path(app_data: &Path) -> PathBuf {
@@ -53,17 +54,17 @@ fn load_config(app_data: &Path) -> AutoBackupConfig {
     }
 }
 
-fn save_config_to_disk(app_data: &Path, config: &AutoBackupConfig) -> Result<(), String> {
+fn save_config_to_disk(app_data: &Path, config: &AutoBackupConfig) -> Result<(), KokoroError> {
     let path = config_path(app_data);
     let json = serde_json::to_string_pretty(config)
-        .map_err(|e| format!("Serialize error: {}", e))?;
-    fs::write(&path, json).map_err(|e| format!("Write error: {}", e))
+        .map_err(|e| KokoroError::Config(format!("Serialize error: {}", e)))?;
+    fs::write(&path, json).map_err(KokoroError::from)
 }
 
 // ── IPC Commands ──────────────────────────────────
 
 #[tauri::command]
-pub async fn get_auto_backup_config(app: AppHandle) -> Result<AutoBackupConfig, String> {
+pub async fn get_auto_backup_config(app: AppHandle) -> Result<AutoBackupConfig, KokoroError> {
     let app_data = app_data_dir(&app)?;
     Ok(load_config(&app_data))
 }
@@ -72,40 +73,32 @@ pub async fn get_auto_backup_config(app: AppHandle) -> Result<AutoBackupConfig, 
 pub async fn save_auto_backup_config(
     app: AppHandle,
     config: AutoBackupConfig,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     let app_data = app_data_dir(&app)?;
     save_config_to_disk(&app_data, &config)
 }
 
 #[tauri::command]
-pub async fn run_auto_backup_now(app: AppHandle) -> Result<String, String> {
+pub async fn run_auto_backup_now(app: AppHandle) -> Result<String, KokoroError> {
     let app_data = app_data_dir(&app)?;
     let config = load_config(&app_data);
     if config.backup_dir.is_empty() {
-        return Err("Backup directory not set".to_string());
+        return Err(KokoroError::Validation("Backup directory not set".to_string()));
     }
     do_backup(&app_data, &config).await
 }
 
-// ── Core Logic ────────────────────────────────────
-
-/// 执行一次备份，返回生成的文件路径
-pub async fn do_backup(app_data: &Path, config: &AutoBackupConfig) -> Result<String, String> {
+pub async fn do_backup(app_data: &Path, config: &AutoBackupConfig) -> Result<String, KokoroError> {
     let dir = PathBuf::from(&config.backup_dir);
-    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create backup dir: {}", e))?;
-
+    fs::create_dir_all(&dir).map_err(KokoroError::from)?;
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
     let filename = format!("kokoro-auto-{}.kokoro", timestamp);
     let out_path = dir.join(&filename);
-
     export_data_to_path(app_data, &out_path, None).await?;
-
     println!("[AutoBackup] Backup saved to {}", out_path.display());
-
     if config.auto_cleanup && config.keep_days > 0 {
         cleanup_old_backups(&dir, config.keep_days);
     }
-
     Ok(out_path.to_string_lossy().to_string())
 }
 
