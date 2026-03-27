@@ -343,7 +343,7 @@ export default function PetWindow() {
             }
         };
 
-        const handleMouseUp = (e: MouseEvent) => {
+        const handleMouseUp = async (e: MouseEvent) => {
             if (e.button === 2) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -353,12 +353,26 @@ export default function PetWindow() {
                     const pos = rightClickStartRef.current;
                     setContextMenu({ visible: true, x: pos.x, y: pos.y });
                 } else if (hasMoved && windowStartPos) {
-                    // Drag completed — save position
-                    currentWindow.outerPosition().then(pos => {
-                        invoke<PetConfig>("get_pet_config").then(cfg => {
-                            invoke("save_pet_config", {
-                                config: { ...cfg, position_x: pos.x, position_y: pos.y }
-                            }).catch(console.error);
+                    const dx = e.screenX - dragStartPos!.x;
+                    const dy = e.screenY - dragStartPos!.y;
+                    const finalX = windowStartPos.x + dx;
+                    const finalY = windowStartPos.y + dy;
+
+                    if (moveRafId !== null) {
+                        cancelAnimationFrame(moveRafId);
+                        moveRafId = null;
+                    }
+                    pendingWindowPos = null;
+
+                    try {
+                        await currentWindow.setPosition(new PhysicalPosition(finalX, finalY));
+                    } catch (err) {
+                        console.error("[PetWindow] Failed to finalize position:", err);
+                    }
+
+                    invoke<PetConfig>("get_pet_config").then(cfg => {
+                        invoke("save_pet_config", {
+                            config: { ...cfg, position_x: finalX, position_y: finalY }
                         }).catch(console.error);
                     }).catch(console.error);
                 }
@@ -552,6 +566,8 @@ export default function PetWindow() {
                 {configLoaded && <Live2DViewer
                     ref={viewerRef}
                     modelUrl={modelUrl}
+                    // Live2DViewer owns the chat-expression/chat-action subscriptions
+                    // and drives this shared controller directly.
                     controller={controllerRef.current}
                     backgroundAlpha={0}
                     displayMode="full"

@@ -38,7 +38,8 @@ export type Live2DDisplayMode = "full" | "upper" | "upper-thigh";
 export interface Live2DViewerProps {
     /** URL to the .model3.json file */
     modelUrl: string;
-    /** Optional controller instance to manage the model state */
+    /** Optional controller instance to manage the model state.
+     * Chat expression/action events are routed through this controller when provided. */
     controller?: Live2DController;
     /** Called when a hit area on the model is tapped (legacy) */
     onHitAreaTap?: (hitArea: string) => void;
@@ -117,7 +118,8 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
             };
         });
 
-        // Listen for LLM expression events and apply to Live2D model
+        // Centralize chat-driven animation listeners here so both the main stage
+        // and the floating pet window react through the same controller instance.
         useEffect(() => {
             let unlisten: (() => void) | undefined;
 
@@ -131,7 +133,8 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
             return () => { unlisten?.(); };
         }, [getActiveController]);
 
-        // Listen for LLM action/motion events and apply to Live2D model
+        // Keep action/motion routing colocated with expression routing to avoid
+        // duplicate listeners in individual windows such as PetWindow.
         useEffect(() => {
             let unlisten: (() => void) | undefined;
 
@@ -168,6 +171,13 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
             scaleMultiplierRef.current = scaleMultiplier;
             fitModelRef.current?.();
         }, [scaleMultiplier]);
+
+        useEffect(() => {
+            const app = appRef.current;
+            if (!app) return;
+
+            app.ticker.maxFPS = maxFps > 0 ? maxFps : 0;
+        }, [maxFps]);
 
         // Gaze tracking: model eyes follow cursor
         const handlePointerMove = useCallback((e: PIXI.InteractionEvent) => {
@@ -436,7 +446,7 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                 }
                 appRef.current = null;
             };
-        }, [modelUrl, backgroundAlpha, displayMode, handlePointerMove, onHitAreaTap, getActiveController, maxFps]);
+        }, [modelUrl, backgroundAlpha, displayMode, handlePointerMove, onHitAreaTap, getActiveController]);
 
         useEffect(() => {
             if (!fixedSize) return;
