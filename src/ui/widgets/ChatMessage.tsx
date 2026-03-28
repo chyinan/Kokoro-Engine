@@ -1,16 +1,17 @@
 import { useState, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Edit2, RefreshCw, Check, X, Languages, CornerDownLeft } from "lucide-react";
+import { Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 interface ChatMessageProps {
     message: {
-        role: "user" | "kokoro";
+        role: "user" | "kokoro" | "tool";
         text: string;
         images?: string[];
         translation?: string;
         isError?: boolean;
+        tools?: { text: string; isError?: boolean }[];
     };
     index: number;
     isStreaming: boolean;
@@ -33,6 +34,7 @@ export const ChatMessage = memo(function ChatMessage({
     const { t } = useTranslation();
     const [isEditing, setIsEditing] = useState(false);
     const [editingText, setEditingText] = useState("");
+    const [toolsExpanded, setToolsExpanded] = useState(false);
 
     const handleStartEdit = () => {
         setIsEditing(true);
@@ -58,7 +60,9 @@ export const ChatMessage = memo(function ChatMessage({
                 "group relative max-w-[85%] p-3 rounded-lg text-sm leading-relaxed font-body",
                 msg.role === "user"
                     ? "ml-auto bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30 text-[var(--color-accent)] rounded-tr-none"
-                    : "mr-auto bg-slate-900/50 border border-slate-700/50 text-slate-300 rounded-tl-none"
+                    : msg.role === "tool"
+                        ? "mx-auto max-w-[92%] bg-slate-950/60 border border-slate-800/70 text-slate-400 rounded-md text-xs px-3 py-2"
+                        : "mr-auto bg-slate-900/50 border border-slate-700/50 text-slate-300 rounded-tl-none"
             )}
         >
             {msg.images && msg.images.length > 0 && (
@@ -126,7 +130,7 @@ export const ChatMessage = memo(function ChatMessage({
                     )}
 
                     {/* 悬停显示的操作按钮 */}
-                    {!isStreaming && !msg.isError && (
+                    {!isStreaming && !msg.isError && msg.role !== "tool" && (
                         <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                             {/* 从这里继续按钮 */}
                             <button
@@ -182,6 +186,45 @@ export const ChatMessage = memo(function ChatMessage({
                             >
                                 <div className="mt-1.5 pt-1.5 border-t border-slate-700/40 text-xs text-[var(--color-text-muted)] leading-relaxed">
                                     {msg.translation}
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+                </div>
+            )}
+
+            {!isEditing && msg.role === "kokoro" && msg.tools && msg.tools.length > 0 && (
+                <div className="mt-2">
+                    <button
+                        onClick={() => setToolsExpanded(prev => !prev)}
+                        className="flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
+                    >
+                        <Wrench size={11} strokeWidth={1.5} />
+                        {`Tools (${msg.tools.length})`}
+                        <ChevronDown
+                            size={11}
+                            strokeWidth={1.5}
+                            className={clsx("transition-transform", toolsExpanded && "rotate-180")}
+                        />
+                    </button>
+                    <AnimatePresence initial={false}>
+                        {toolsExpanded && (
+                            <motion.div
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: "auto", opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                transition={{ duration: 0.2 }}
+                                className="overflow-hidden"
+                            >
+                                <div className="mt-1.5 rounded-md border border-slate-700/40 bg-slate-950/40 px-2 py-2 text-[11px] text-slate-400 space-y-1">
+                                    {msg.tools.map((tool, idx) => (
+                                        <div
+                                            key={`${tool.text}-${idx}`}
+                                            className={clsx(tool.isError && "text-red-300")}
+                                        >
+                                            {tool.text}
+                                        </div>
+                                    ))}
                                 </div>
                             </motion.div>
                         )}

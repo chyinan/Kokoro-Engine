@@ -11,6 +11,7 @@ use crate::llm::messages::{
 use crate::llm::service::LlmService;
 use crate::stt::{AudioSource, SttService};
 use crate::tts::TtsService;
+use crate::actions::tool_settings::ToolSettings;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,6 +45,14 @@ enum SessionMode {
 }
 
 type Sessions = Arc<RwLock<HashMap<ChatId, SessionMode>>>;
+
+async fn max_tool_rounds(app: &tauri::AppHandle) -> usize {
+    if let Some(settings) = app.try_state::<Arc<RwLock<ToolSettings>>>() {
+        settings.read().await.max_tool_rounds.max(1)
+    } else {
+        10
+    }
+}
 
 /// Event payload for syncing Telegram messages to the desktop chat UI.
 #[derive(Clone, Serialize)]
@@ -289,9 +298,16 @@ async fn handle_text(
     let action_registry = app
         .try_state::<Arc<RwLock<crate::actions::ActionRegistry>>>()
         .ok_or("ActionRegistry not available")?;
+    let tool_settings = app
+        .try_state::<Arc<RwLock<ToolSettings>>>()
+        .ok_or("ToolSettings not available")?;
     let tool_prompt = {
         let registry = action_registry.read().await;
-        let p = registry.generate_tool_prompt_for_prompt(orchestrator.is_memory_enabled());
+        let settings = tool_settings.read().await;
+        let p = registry.generate_tool_prompt_for_prompt_with_settings(
+            orchestrator.is_memory_enabled(),
+            &settings,
+        );
         if p.is_empty() { None } else { Some(p) }
     };
 
@@ -311,13 +327,13 @@ async fn handle_text(
         client_messages.push(user_text_message(text.to_string()));
     }
 
-    // 3. LLM call with tool execution loop (max 5 rounds)
+    // 3. LLM call with tool execution loop
     let provider = llm_service.provider().await;
-    const MAX_TOOL_ROUNDS: usize = 5;
+    let max_rounds = max_tool_rounds(app).await;
     let mut all_cleaned_text = String::new();
     let mut all_translations: Vec<String> = Vec::new();
 
-    for _round in 0..MAX_TOOL_ROUNDS {
+    for _round in 0..max_rounds {
         let mut stream = provider
             .chat_stream(client_messages.clone(), None)
             .await
@@ -364,6 +380,14 @@ async fn handle_text(
             println!("[Telegram/ToolCall] Executing: {} with args {:?}", tc.name, tc.args);
             if registry.needs_feedback(&tc.name) {
                 any_needs_feedback = true;
+            }
+            let enabled = {
+                let settings = tool_settings.read().await;
+                settings.is_enabled(&tc.name)
+            };
+            if !enabled {
+                tool_results.push(format!("- {}: Error: Tool '{}' is disabled", tc.name, tc.name));
+                continue;
             }
             let ctx = crate::actions::registry::ActionContext {
                 app: app.clone(),
@@ -623,9 +647,16 @@ async fn handle_photo(
     let action_registry = app
         .try_state::<Arc<RwLock<crate::actions::ActionRegistry>>>()
         .ok_or("ActionRegistry not available")?;
+    let tool_settings = app
+        .try_state::<Arc<RwLock<ToolSettings>>>()
+        .ok_or("ToolSettings not available")?;
     let tool_prompt = {
         let registry = action_registry.read().await;
-        let p = registry.generate_tool_prompt_for_prompt(orchestrator.is_memory_enabled());
+        let settings = tool_settings.read().await;
+        let p = registry.generate_tool_prompt_for_prompt_with_settings(
+            orchestrator.is_memory_enabled(),
+            &settings,
+        );
         if p.is_empty() { None } else { Some(p) }
     };
 
@@ -648,13 +679,13 @@ async fn handle_photo(
         client_messages.push(user_message_with_images(caption.clone(), vec![data_url]));
     }
 
-    // 3. LLM call with tool execution loop (max 5 rounds)
+    // 3. LLM call with tool execution loop
     let provider = llm_service.provider().await;
-    const MAX_TOOL_ROUNDS: usize = 5;
+    let max_rounds = max_tool_rounds(app).await;
     let mut all_cleaned_text = String::new();
     let mut all_translations: Vec<String> = Vec::new();
 
-    for _round in 0..MAX_TOOL_ROUNDS {
+    for _round in 0..max_rounds {
         let mut stream = provider
             .chat_stream(client_messages.clone(), None)
             .await
@@ -700,6 +731,14 @@ async fn handle_photo(
             println!("[Telegram/ToolCall] Executing: {} with args {:?}", tc.name, tc.args);
             if registry.needs_feedback(&tc.name) {
                 any_needs_feedback = true;
+            }
+            let enabled = {
+                let settings = tool_settings.read().await;
+                settings.is_enabled(&tc.name)
+            };
+            if !enabled {
+                tool_results.push(format!("- {}: Error: Tool '{}' is disabled", tc.name, tc.name));
+                continue;
             }
             let ctx = crate::actions::registry::ActionContext {
                 app: app.clone(),

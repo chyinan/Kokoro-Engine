@@ -233,8 +233,12 @@ export async function onChatError(callback: (error: string) => void): Promise<Un
     return listen<string>("chat-error", (event) => callback(event.payload));
 }
 
-export async function onChatDone(callback: () => void): Promise<UnlistenFn> {
-    return listen<void>("chat-done", () => callback());
+export interface ChatDoneEvent {
+    text: string;
+}
+
+export async function onChatDone(callback: (payload?: ChatDoneEvent) => void): Promise<UnlistenFn> {
+    return listen<ChatDoneEvent>("chat-done", (event) => callback(event.payload));
 }
 
 export async function onChatTranslation(callback: (translation: string) => void): Promise<UnlistenFn> {
@@ -685,8 +689,17 @@ export interface ToolCallEvent {
     error?: string;
 }
 
+export interface ToolSettings {
+    max_tool_rounds: number;
+    enabled_tools: Record<string, boolean>;
+}
+
 export async function listActions(): Promise<ActionInfo[]> {
     return invoke<ActionInfo[]>("list_actions");
+}
+
+export async function listBuiltinTools(): Promise<ActionInfo[]> {
+    return invoke<ActionInfo[]>("list_builtin_tools");
 }
 
 export async function executeAction(name: string, args: Record<string, string>, characterId?: string): Promise<ActionResult> {
@@ -695,6 +708,14 @@ export async function executeAction(name: string, args: Record<string, string>, 
 
 export async function onToolCallResult(callback: (event: ToolCallEvent) => void): Promise<UnlistenFn> {
     return listen<ToolCallEvent>("chat-tool-result", (event) => callback(event.payload));
+}
+
+export async function getToolSettings(): Promise<ToolSettings> {
+    return invoke<ToolSettings>("get_tool_settings");
+}
+
+export async function saveToolSettings(settings: ToolSettings): Promise<void> {
+    return invoke("save_tool_settings", { settings });
 }
 
 // ── MCP (Model Context Protocol) ──────────────────────────

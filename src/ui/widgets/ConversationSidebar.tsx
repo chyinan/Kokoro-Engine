@@ -11,6 +11,68 @@ interface ChatMessage {
     text: string;
     images?: string[];
     translation?: string;
+    tools?: { text: string; isError?: boolean }[];
+}
+
+function buildChatMessagesFromConversation(msgs: ConversationMessage[]): ChatMessage[] {
+    const chatMsgs: ChatMessage[] = [];
+    const turnToAssistantIndex = new Map<string, number>();
+
+    for (const m of msgs) {
+        let meta: Record<string, unknown> | null = null;
+        if (m.metadata) {
+            try {
+                meta = JSON.parse(m.metadata) as Record<string, unknown>;
+            } catch {
+                meta = null;
+            }
+        }
+
+        const technicalType = typeof meta?.type === "string" ? meta.type : undefined;
+        const turnId = typeof meta?.turn_id === "string" ? meta.turn_id : undefined;
+
+        if (m.role === "tool" || technicalType === "tool_result") {
+            const toolName = typeof meta?.tool_name === "string" ? meta.tool_name : "tool";
+            const toolEntry = { text: `${toolName}: ${m.content}`, isError: m.content.startsWith("Error:") };
+            const targetIndex = turnId ? turnToAssistantIndex.get(turnId) : undefined;
+
+            if (targetIndex !== undefined) {
+                const target = chatMsgs[targetIndex];
+                chatMsgs[targetIndex] = {
+                    ...target,
+                    tools: [...(target.tools || []), toolEntry],
+                };
+            }
+            continue;
+        }
+
+        if (m.role !== "user") {
+            let translation: string | undefined;
+            if (typeof meta?.translation === "string") {
+                translation = meta.translation;
+            }
+            if (!translation) {
+                const translateMatch = m.content.match(/\[TRANSLATE:\s*([\s\S]*?)\]/i);
+                if (translateMatch) translation = translateMatch[1].trim();
+            }
+            const text = m.content
+                .replace(/\[ACTION:\w+\]\s*/g, "")
+                .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
+                .replace(/\[EMOTION:[^\]]*\]/g, "")
+                .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
+                .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "")
+                .trim();
+            chatMsgs.push({ role: "kokoro", text, translation });
+            if (turnId) {
+                turnToAssistantIndex.set(turnId, chatMsgs.length - 1);
+            }
+            continue;
+        }
+
+        chatMsgs.push({ role: "user", text: m.content });
+    }
+
+    return chatMsgs;
 }
 
 interface ConversationSidebarProps {
@@ -53,32 +115,7 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
         if (id === activeId) return;
         try {
             const msgs: ConversationMessage[] = await loadConversation(id);
-            const chatMsgs: ChatMessage[] = msgs.map(m => {
-                if (m.role !== "user") {
-                    // 优先从 metadata 读取翻译（后端保存时翻译存在 metadata，content 已清除标签）
-                    let translation: string | undefined;
-                    if (m.metadata) {
-                        try {
-                            const meta = JSON.parse(m.metadata);
-                            if (meta.translation) translation = meta.translation;
-                        } catch { /* ignore malformed metadata */ }
-                    }
-                    // 兜底：兼容旧格式，尝试从 content 中提取 [TRANSLATE:...] 标签
-                    if (!translation) {
-                        const translateMatch = m.content.match(/\[TRANSLATE:\s*([\s\S]*?)\]/i);
-                        if (translateMatch) translation = translateMatch[1].trim();
-                    }
-                    const text = m.content
-                        .replace(/\[ACTION:\w+\]\s*/g, "")
-                        .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
-                        .replace(/\[EMOTION:[^\]]*\]/g, "")
-                        .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-                        .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "")
-                        .trim();
-                    return { role: "kokoro" as const, text, translation };
-                }
-                return { role: "user" as const, text: m.content };
-            });
+            const chatMsgs: ChatMessage[] = buildChatMessagesFromConversation(msgs);
             setActiveId(id);
             onLoadMessages(chatMsgs);
         } catch (err) {

@@ -1,10 +1,11 @@
-//! Built-in action handlers for the Action Registry.
+//! Built-in tool handlers for the Tool Registry.
 
 use super::registry::{ActionContext, ActionError, ActionHandler, ActionParam, ActionResult};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use tauri::Emitter;
 use tauri::Manager;
+use tauri_plugin_notification::NotificationExt;
 
 // ── get_time ───────────────────────────────────────────
 
@@ -388,57 +389,15 @@ impl ActionHandler for SendNotificationAction {
             .get("message")
             .ok_or_else(|| ActionError("Missing 'message' parameter".into()))?;
 
-        let _ = ctx.app.emit(
-            "notification",
-            serde_json::json!({ "title": title, "message": message }),
-        );
+        ctx.app
+            .notification()
+            .builder()
+            .title(title)
+            .body(message)
+            .show()
+            .map_err(|e| ActionError(format!("Failed to show native notification: {}", e)))?;
 
-        Ok(ActionResult::ok(format!("Notification sent: {}", title)))
-    }
-}
-
-// ── play_sound ─────────────────────────────────────────
-
-pub struct PlaySoundAction;
-
-#[async_trait]
-impl ActionHandler for PlaySoundAction {
-    fn name(&self) -> &str {
-        "play_sound"
-    }
-
-    fn description(&self) -> &str {
-        "Play a sound effect"
-    }
-
-    fn parameters(&self) -> Vec<ActionParam> {
-        vec![ActionParam {
-            name: "sound".to_string(),
-            description: "One of: alert, chime, laugh, applause, ding".to_string(),
-            required: true,
-        }]
-    }
-
-    async fn execute(
-        &self,
-        args: HashMap<String, String>,
-        ctx: ActionContext,
-    ) -> Result<ActionResult, ActionError> {
-        let sound = args
-            .get("sound")
-            .ok_or_else(|| ActionError("Missing 'sound' parameter".into()))?;
-
-        let valid = ["alert", "chime", "laugh", "applause", "ding"];
-        let snd = sound.to_lowercase();
-        if !valid.contains(&snd.as_str()) {
-            return Ok(ActionResult::err(format!("Unknown sound: {}", sound)));
-        }
-
-        let _ = ctx
-            .app
-            .emit("play-sound", serde_json::json!({ "sound": snd }));
-
-        Ok(ActionResult::ok(format!("Playing sound: {}", snd)))
+        Ok(ActionResult::ok(format!("Notification shown: {}", title)))
     }
 }
 
@@ -453,5 +412,4 @@ pub fn register_builtins(registry: &mut super::registry::ActionRegistry) {
     registry.register(StoreMemoryAction);
     registry.register(ForgetMemoryAction);
     registry.register(SendNotificationAction);
-    registry.register(PlaySoundAction);
 }

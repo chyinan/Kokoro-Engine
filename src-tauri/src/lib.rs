@@ -35,6 +35,7 @@ macro_rules! grouped_handlers {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -128,7 +129,10 @@ pub fn run() {
             commands::stt::get_sensevoice_local_status,
             commands::stt::download_sensevoice_local_model,
             commands::actions::list_actions,
+            commands::actions::list_builtin_tools,
             commands::actions::execute_action,
+            commands::tool_settings::get_tool_settings,
+            commands::tool_settings::save_tool_settings,
             commands::mcp::list_mcp_servers,
             commands::mcp::add_mcp_server,
             commands::mcp::remove_mcp_server,
@@ -235,6 +239,10 @@ pub fn run() {
                                 println!("[AI] Restored context_settings: strategy={}, max_chars={}", strategy, max_chars);
                             }
                         }
+
+                        let tool_settings_path = app_data_dir.join("tool_settings.json");
+                        let tool_settings = crate::actions::tool_settings::load_config(&tool_settings_path);
+                        app_handle.manage(Arc::new(tokio::sync::RwLock::new(tool_settings)));
 
                         // Restore current_conversation_id from disk and reload history
                         let conv_id_path = app_data_dir.join("current_conversation_id.json");

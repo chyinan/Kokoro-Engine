@@ -19,5 +19,6 @@ pub mod singing;
 pub mod stt;
 pub mod system;
 pub mod telegram;
+pub mod tool_settings;
 pub mod tts;
 pub mod vision;

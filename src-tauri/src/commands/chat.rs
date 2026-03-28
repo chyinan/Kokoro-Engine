@@ -4,6 +4,7 @@ use crate::ai::memory_extractor;
 use crate::commands::system::WindowSizeState;
 use crate::error::KokoroError;
 use crate::imagegen::ImageGenService;
+use crate::actions::tool_settings::ToolSettings;
 use crate::llm::messages::{
     assistant_tool_calls_message, extract_message_text, replace_user_message_with_images,
     history_message_to_chat_message, system_message, tool_result_message,
@@ -395,6 +396,7 @@ pub async fn stream_chat(
     imagegen_state: State<'_, ImageGenService>,
     llm_state: State<'_, LlmService>,
     _action_registry: State<'_, std::sync::Arc<RwLock<crate::actions::ActionRegistry>>>,
+    tool_settings_state: State<'_, std::sync::Arc<RwLock<ToolSettings>>>,
     _vision_watcher: State<'_, crate::vision::watcher::VisionWatcher>,
     window_size_state: State<'_, WindowSizeState>,
     vision_server: State<
@@ -468,17 +470,22 @@ pub async fn stream_chat(
     // so avoid duplicating a long textual tool prompt there.
     let tool_prompt = {
         let registry = _action_registry.read().await;
+        let tool_settings = tool_settings_state.read().await;
         let prompt = if native_tools_enabled {
             String::new()
         } else {
-            registry.generate_tool_prompt_for_prompt(state.is_memory_enabled())
+            registry.generate_tool_prompt_for_prompt_with_settings(
+                state.is_memory_enabled(),
+                &tool_settings,
+            )
         };
         if prompt.is_empty() { None } else { Some(prompt) }
     };
 
     let native_tools = {
         let registry = _action_registry.read().await;
-        registry.list_tools_for_llm(state.is_memory_enabled())
+        let tool_settings = tool_settings_state.read().await;
+        registry.list_tools_for_llm_with_settings(state.is_memory_enabled(), &tool_settings)
     };
 
     // Compose Persona Prompt
@@ -497,6 +504,7 @@ pub async fn stream_chat(
         .into_iter()
         .map(|m| history_message_to_chat_message(&m.role, m.content, m.metadata.as_ref()))
         .collect::<Result<Vec<_>, _>>()?;
+    let assistant_turn_id = uuid::Uuid::new_v4().to_string();
 
     // 注入视觉上下文（如果有最近的屏幕观察）
     if let Some(vision_desc) = _vision_watcher.context.get_context_string().await {
@@ -570,7 +578,10 @@ pub async fn stream_chat(
     }
 
     // Stream Response with Tool Call Feedback Loop
-    const MAX_TOOL_ROUNDS: usize = 5;
+    let max_tool_rounds = {
+        let tool_settings = tool_settings_state.read().await;
+        tool_settings.max_tool_rounds.max(1)
+    };
     let mut all_cleaned_text = String::new();
     let mut all_translations = Vec::new();
     let mut bg_generated_by_tool = false;
@@ -578,7 +589,7 @@ pub async fn stream_chat(
     let mut draft_row_id: Option<i64> = None;
     let mut forced_text_after_side_effect = false;
 
-    for round in 0..MAX_TOOL_ROUNDS {
+    for round in 0..max_tool_rounds {
         println!("[Chat] Tool loop round {}", round + 1);
 
         let mut stream = chat_provider
@@ -706,6 +717,34 @@ pub async fn stream_chat(
             if registry.needs_feedback(&tc.name) {
                 any_needs_feedback = true;
             }
+            let tool_enabled = {
+                let tool_settings = tool_settings_state.read().await;
+                tool_settings.is_enabled(&tc.name)
+            };
+            if !tool_enabled {
+                let message = format!("Tool '{}' is disabled", tc.name);
+                eprintln!("[ToolCall] {}", message);
+                let _ = app.emit(
+                    "chat-tool-result",
+                    serde_json::json!({
+                        "tool": tc.name,
+                        "error": message,
+                    }),
+                );
+                tool_results.push(format!("- {}: Error: {}", tc.name, message));
+                if let Some(tool_call_id) = &tc.tool_call_id {
+                    continuation_tool_calls.push((
+                        tool_call_id.clone(),
+                        tc.name.clone(),
+                        serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
+                    ));
+                    tool_result_messages.push(tool_result_message(
+                        tool_call_id.clone(),
+                        format!("Error: {}", message),
+                    ));
+                }
+                continue;
+            }
             let ctx = crate::actions::registry::ActionContext {
                 app: window.app_handle().clone(),
                 character_id: char_id.clone(),
@@ -762,6 +801,7 @@ pub async fn stream_chat(
         if has_native_tool_calls {
             let assistant_tool_call_metadata = serde_json::json!({
                 "type": "assistant_tool_calls",
+                "turn_id": assistant_turn_id,
                 "tool_calls": continuation_tool_calls
                     .iter()
                     .map(|(id, name, arguments)| serde_json::json!({
@@ -785,6 +825,7 @@ pub async fn stream_chat(
                     let tool_content = extract_message_text(tool_message);
                     let tool_metadata = serde_json::json!({
                         "type": "tool_result",
+                        "turn_id": assistant_turn_id,
                         "tool_call_id": tool_call_id,
                         "tool_name": tool_calls[index].name,
                     })
@@ -947,9 +988,14 @@ pub async fn stream_chat(
     if !full_response.is_empty() {
         let metadata = if !all_translations.is_empty() {
             let combined = all_translations.join(" ");
-            Some(serde_json::json!({ "translation": combined }).to_string())
+            Some(serde_json::json!({
+                "translation": combined,
+                "turn_id": assistant_turn_id,
+            }).to_string())
         } else {
-            None
+            Some(serde_json::json!({
+                "turn_id": assistant_turn_id,
+            }).to_string())
         };
 
         // Update the draft row with final content + metadata (DB already has the row)
@@ -1094,7 +1140,13 @@ pub async fn stream_chat(
         });
     }
 
-    app.emit("chat-done", ()).map_err(|e| KokoroError::Chat(e.to_string()))?;
+    app.emit(
+        "chat-done",
+        serde_json::json!({
+            "text": full_response,
+        }),
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }

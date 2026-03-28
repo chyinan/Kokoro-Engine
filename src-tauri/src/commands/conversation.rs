@@ -100,7 +100,7 @@ pub async fn load_conversation(
                 .as_ref()
                 .and_then(|meta| meta.get("type"))
                 .and_then(|value| value.as_str());
-            if role == "tool" || technical_type == Some("assistant_tool_calls") {
+            if technical_type == Some("assistant_tool_calls") {
                 return None;
             }
             Some(ConversationMessage {

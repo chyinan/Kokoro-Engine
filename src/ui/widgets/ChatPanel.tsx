@@ -12,11 +12,76 @@ import { ChatMessage } from "./ChatMessage";
 
 // ── Types ──────────────────────────────────────────────────
 interface ChatMessage {
-    role: "user" | "kokoro";
+    role: "user" | "kokoro" | "tool";
     text: string;
     images?: string[];
     translation?: string;
     isError?: boolean;
+    tools?: { text: string; isError?: boolean }[];
+}
+
+function buildChatMessagesFromConversation(
+    msgs: Array<{ role: string; content: string; metadata?: string }>
+): ChatMessage[] {
+    const chatMsgs: ChatMessage[] = [];
+    const turnToAssistantIndex = new Map<string, number>();
+
+    for (const m of msgs) {
+        let meta: Record<string, unknown> | null = null;
+        if (m.metadata) {
+            try {
+                meta = JSON.parse(m.metadata) as Record<string, unknown>;
+            } catch {
+                meta = null;
+            }
+        }
+
+        const technicalType = typeof meta?.type === "string" ? meta.type : undefined;
+        const turnId = typeof meta?.turn_id === "string" ? meta.turn_id : undefined;
+
+        if (m.role === "tool" || technicalType === "tool_result") {
+            const toolName = typeof meta?.tool_name === "string" ? meta.tool_name : "tool";
+            const text = `${toolName}: ${m.content}`;
+            const targetIndex = turnId ? turnToAssistantIndex.get(turnId) : undefined;
+
+            if (targetIndex !== undefined) {
+                const target = chatMsgs[targetIndex];
+                chatMsgs[targetIndex] = {
+                    ...target,
+                    tools: [...(target.tools || []), { text, isError: m.content.startsWith("Error:") }],
+                };
+            }
+            continue;
+        }
+
+        if (m.role !== "user") {
+            let translation: string | undefined;
+            if (typeof meta?.translation === "string") {
+                translation = meta.translation;
+            }
+            if (!translation) {
+                const translateMatch = m.content.match(/\[TRANSLATE:\s*([\s\S]*?)\]/i);
+                if (translateMatch) translation = translateMatch[1].trim();
+            }
+            const text = m.content
+                .replace(/\[ACTION:\w+\]\s*/g, "")
+                .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
+                .replace(/\[EMOTION:[^\]]*\]/g, "")
+                .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
+                .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "")
+                .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "")
+                .trim();
+            chatMsgs.push({ role: "kokoro", text, translation });
+            if (turnId) {
+                turnToAssistantIndex.set(turnId, chatMsgs.length - 1);
+            }
+            continue;
+        }
+
+        chatMsgs.push({ role: "user", text: m.content });
+    }
+
+    return chatMsgs;
 }
 
 // ── Typing Indicator ───────────────────────────────────────
@@ -63,7 +128,7 @@ function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => 
 // ── Main Component ─────────────────────────────────────────
 // ── MemoizedChatMessage wrapper ───────────────────────────
 interface MemoizedChatMessageProps {
-    message: { role: "user" | "kokoro"; text: string; images?: string[]; translation?: string; isError?: boolean };
+    message: { role: "user" | "kokoro" | "tool"; text: string; images?: string[]; translation?: string; isError?: boolean; tools?: { text: string; isError?: boolean }[] };
     globalIndex: number;
     isStreaming: boolean;
     isTranslationExpanded: boolean;
@@ -123,15 +188,25 @@ export default function ChatPanel() {
     const translationRef = useRef<string | undefined>(undefined);
     // When true, the next delta must create a new kokoro bubble (even if the last message is already kokoro)
     const forceNewBubbleRef = useRef(false);
+    // Index of the active assistant bubble for the current streaming turn.
+    const activeAssistantIndexRef = useRef<number | null>(null);
 
     // Typing reveal: per-character animation
     const { pushDelta, flush: flushReveal, reset: resetReveal } = useTypingReveal({
         active: isStreaming,
         onReveal: (visibleText: string) => {
             setMessages(prev => {
-                const last = prev[prev.length - 1];
-                if (last && last.role === "kokoro" && isStreamingRef.current) {
-                    return [...prev.slice(0, -1), { ...last, text: visibleText }];
+                const activeIndex = activeAssistantIndexRef.current;
+                if (
+                    activeIndex !== null &&
+                    activeIndex >= 0 &&
+                    activeIndex < prev.length &&
+                    prev[activeIndex]?.role === "kokoro" &&
+                    isStreamingRef.current
+                ) {
+                    const next = [...prev];
+                    next[activeIndex] = { ...next[activeIndex], text: visibleText };
+                    return next;
                 }
                 return prev;
             });
@@ -164,28 +239,7 @@ export default function ChatPanel() {
         listConversations(characterId).then(convs => {
             if (convs.length > 0) {
                 loadConversation(convs[0].id).then(msgs => {
-                    const chatMsgs: ChatMessage[] = msgs.map(m => {
-                        if (m.role !== "user") {
-                            // Read translation from metadata (persisted as JSON)
-                            let translation: string | undefined;
-                            if (m.metadata) {
-                                try {
-                                    const meta = JSON.parse(m.metadata);
-                                    if (meta.translation) translation = meta.translation;
-                                } catch { /* ignore malformed metadata */ }
-                            }
-                            const text = m.content
-                                .replace(/\[ACTION:\w+\]\s*/g, "")
-                                .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
-                                .replace(/\[EMOTION:[^\]]*\]/g, "")
-                                .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-                                .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "")
-                                .trim();
-                            return { role: "kokoro" as const, text, translation };
-                        }
-                        return { role: "user" as const, text: m.content };
-                    });
-                    setMessages(chatMsgs);
+                    setMessages(buildChatMessagesFromConversation(msgs));
                     setExpandedTranslations(new Set()); // Reset translation expand state on conversation load
                 }).catch(err => console.error("[ChatPanel] Failed to restore conversation:", err));
             }
@@ -379,6 +433,7 @@ export default function ChatPanel() {
                 translationRef.current = undefined;
                 resetReveal();
                 forceNewBubbleRef.current = false;
+                activeAssistantIndexRef.current = null;
                 setMessages(prev => [...prev, { role: "user", text }]);
                 startStreaming();
                 setIsThinking(true);
@@ -405,11 +460,22 @@ export default function ChatPanel() {
                 const needsNewBubble = forceNewBubbleRef.current;
                 forceNewBubbleRef.current = false;
                 setMessages(prev => {
-                    const last = prev[prev.length - 1];
-                    if (last && last.role === "kokoro" && !needsNewBubble) {
-                        return prev; // message already exists — don't create a duplicate
+                    const next = [...prev];
+                    const activeIndex = activeAssistantIndexRef.current;
+                    const activeExists =
+                        !needsNewBubble &&
+                        activeIndex !== null &&
+                        activeIndex >= 0 &&
+                        activeIndex < next.length &&
+                        next[activeIndex]?.role === "kokoro";
+
+                    if (activeExists) {
+                        return next;
                     }
-                    return [...prev, { role: "kokoro", text: "" }];
+
+                    next.push({ role: "kokoro", text: "" });
+                    activeAssistantIndexRef.current = next.length - 1;
+                    return next;
                 });
 
                 // Push to typing reveal buffer
@@ -425,7 +491,7 @@ export default function ChatPanel() {
             if (aborted) { unTranslation(); return; }
             cleanups.push(unTranslation);
 
-            const unDone = await onChatDone(() => {
+            const unDone = await onChatDone((payload) => {
                 if (aborted) return;
                 // Flush any remaining buffered text immediately
                 flushReveal();
@@ -437,41 +503,72 @@ export default function ChatPanel() {
                 // flushReveal's setMessages may be discarded due to React batching
                 // (isStreamingRef becomes false before React processes the update).
                 // This explicit update bypasses that check.
-                const fullText = rawResponseRef.current;
+                const fullText = payload?.text || rawResponseRef.current;
+                rawResponseRef.current = fullText;
                 if (fullText) {
                     // Use translation from backend event (handles multi-round tool calls correctly)
                     const translationText = translationRef.current;
+                    const cleanText = fullText
+                        .replace(/\[ACTION:\w+\]\s*/g, "")
+                        .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
+                        .replace(/\[EMOTION:[^\]]*\]/g, "")
+                        .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
+                        .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "")
+                        .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "");
 
                     setMessages(prev => {
-                        const last = prev[prev.length - 1];
-                        if (last && last.role === "kokoro") {
-                            const cleanText = fullText
-                                .replace(/\[ACTION:\w+\]\s*/g, "")
-                                .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
-                                .replace(/\[EMOTION:[^\]]*\]/g, "")
-                                .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-                                .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "")
-                                .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "");
-                            return [...prev.slice(0, -1), { ...last, text: cleanText, translation: translationText }];
+                        const activeIndex = activeAssistantIndexRef.current;
+                        if (
+                            activeIndex !== null &&
+                            activeIndex >= 0 &&
+                            activeIndex < prev.length &&
+                            prev[activeIndex]?.role === "kokoro"
+                        ) {
+                            const next = [...prev];
+                            next[activeIndex] = { ...next[activeIndex], text: cleanText, translation: translationText };
+                            return next;
                         }
-                        return prev;
+
+                        const fallbackIndex = [...prev]
+                            .map((msg, index) => ({ msg, index }))
+                            .reverse()
+                            .find(({ msg }) => msg.role === "kokoro")?.index;
+
+                        if (fallbackIndex !== undefined) {
+                            const next = [...prev];
+                            next[fallbackIndex] = {
+                                ...next[fallbackIndex],
+                                text: cleanText,
+                                translation: translationText,
+                            };
+                            return next;
+                        }
+
+                        return [...prev, { role: "kokoro", text: cleanText, translation: translationText }];
                     });
                 } else {
                     // No content received (e.g. network error) — remove empty placeholder
                     setMessages(prev => {
-                        const last = prev[prev.length - 1];
-                        if (last && last.role === "kokoro" && !last.text) {
-                            return prev.slice(0, -1);
+                        const activeIndex = activeAssistantIndexRef.current;
+                        if (
+                            activeIndex !== null &&
+                            activeIndex >= 0 &&
+                            activeIndex < prev.length &&
+                            prev[activeIndex]?.role === "kokoro" &&
+                            !prev[activeIndex].text
+                        ) {
+                            return [...prev.slice(0, activeIndex), ...prev.slice(activeIndex + 1)];
                         }
                         return prev;
                     });
                 }
+                activeAssistantIndexRef.current = null;
 
                 // ── Auto-TTS: speak the completed response ──
                 if (localStorage.getItem("kokoro_tts_enabled") === "true") {
-                    // Read last message directly from state ref (avoids StrictMode accumulation bugs)
+                    // Read latest kokoro message directly from state ref (tool messages may be later)
                     const currentMessages = messagesRef.current;
-                    const lastMsg = currentMessages[currentMessages.length - 1];
+                    const lastMsg = [...currentMessages].reverse().find(msg => msg.role === "kokoro");
                     if (lastMsg && lastMsg.role === "kokoro") {
                         // Use raw accumulated text for TTS (not the partially-revealed text)
                         const fullText = rawResponseRef.current || lastMsg.text;
@@ -507,23 +604,54 @@ export default function ChatPanel() {
                 setError(err);
                 // Remove empty kokoro placeholder left by proactive or normal streaming
                 setMessages(prev => {
-                    const last = prev[prev.length - 1];
-                    if (last && last.role === "kokoro" && !last.text) {
-                        return prev.slice(0, -1);
+                    const activeIndex = activeAssistantIndexRef.current;
+                    if (
+                        activeIndex !== null &&
+                        activeIndex >= 0 &&
+                        activeIndex < prev.length &&
+                        prev[activeIndex]?.role === "kokoro" &&
+                        !prev[activeIndex].text
+                    ) {
+                        return [...prev.slice(0, activeIndex), ...prev.slice(activeIndex + 1)];
                     }
                     return prev;
                 });
+                activeAssistantIndexRef.current = null;
             });
             if (aborted) { unError(); return; }
             cleanups.push(unError);
 
             const unToolResult = await onToolCallResult((event) => {
                 if (aborted) return;
+                const toolEntry = event.result
+                    ? { text: `${event.tool}: ${event.result.message}` }
+                    : { text: `${event.tool} failed: ${event.error}`, isError: true };
                 if (event.result) {
                     console.log(`[ToolCall] ${event.tool}: ${event.result.message}`);
                 } else if (event.error) {
                     console.error(`[ToolCall] ${event.tool} failed: ${event.error}`);
                 }
+                setMessages(prev => {
+                    const next = [...prev];
+                    let targetIndex = activeAssistantIndexRef.current;
+                    if (
+                        targetIndex === null ||
+                        targetIndex < 0 ||
+                        targetIndex >= next.length ||
+                        next[targetIndex]?.role !== "kokoro"
+                    ) {
+                        next.push({ role: "kokoro", text: "", tools: [toolEntry] });
+                        activeAssistantIndexRef.current = next.length - 1;
+                        return next;
+                    }
+
+                    const current = next[targetIndex];
+                    next[targetIndex] = {
+                        ...current,
+                        tools: [...(current.tools || []), toolEntry],
+                    };
+                    return next;
+                });
             });
             if (aborted) { unToolResult(); return; }
             cleanups.push(unToolResult);
@@ -595,6 +723,7 @@ export default function ChatPanel() {
                 resetReveal();
                 rawResponseRef.current = "";
                 translationRef.current = undefined;
+                activeAssistantIndexRef.current = null;
             });
             cleanups.push(() => unInteraction());
 
@@ -637,6 +766,7 @@ export default function ChatPanel() {
         resetReveal();
         rawResponseRef.current = "";
         translationRef.current = undefined;
+        activeAssistantIndexRef.current = null;
 
         // Check if background mode is "generated"
         let allowImageGen = false;
