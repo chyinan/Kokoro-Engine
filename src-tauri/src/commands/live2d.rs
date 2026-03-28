@@ -622,8 +622,80 @@ fn builtin_haru_profile() -> Live2dModelProfile {
             ("Idle".to_string(), 3usize),
             ("Tap".to_string(), 2usize),
         ]),
-        cue_map: HashMap::new(),
-        semantic_cue_map: HashMap::new(),
+        cue_map: HashMap::from([
+            (
+                "惊讶".to_string(),
+                Live2dCueBinding {
+                    expression: Some("f05".to_string()),
+                    motion_group: None,
+                    exclude_from_prompt: false,
+                },
+            ),
+            (
+                "害羞".to_string(),
+                Live2dCueBinding {
+                    expression: Some("f06".to_string()),
+                    motion_group: None,
+                    exclude_from_prompt: false,
+                },
+            ),
+            (
+                "tap".to_string(),
+                Live2dCueBinding {
+                    expression: None,
+                    motion_group: Some("Tap".to_string()),
+                    exclude_from_prompt: true,
+                },
+            ),
+            (
+                "笑".to_string(),
+                Live2dCueBinding {
+                    expression: Some("f04".to_string()),
+                    motion_group: None,
+                    exclude_from_prompt: false,
+                },
+            ),
+            (
+                "微笑".to_string(),
+                Live2dCueBinding {
+                    expression: Some("f00".to_string()),
+                    motion_group: None,
+                    exclude_from_prompt: false,
+                },
+            ),
+            (
+                "平静".to_string(),
+                Live2dCueBinding {
+                    expression: Some("f07".to_string()),
+                    motion_group: None,
+                    exclude_from_prompt: false,
+                },
+            ),
+            (
+                "悲".to_string(),
+                Live2dCueBinding {
+                    expression: Some("f03".to_string()),
+                    motion_group: None,
+                    exclude_from_prompt: false,
+                },
+            ),
+            (
+                "疑惑".to_string(),
+                Live2dCueBinding {
+                    expression: Some("f02".to_string()),
+                    motion_group: None,
+                    exclude_from_prompt: false,
+                },
+            ),
+        ]),
+        semantic_cue_map: HashMap::from([
+            ("emotion:very_sad".to_string(), "悲".to_string()),
+            ("emotion:sulking".to_string(), "平静".to_string()),
+            ("interaction:*_*".to_string(), "tap".to_string()),
+            ("emotion:mood_swing".to_string(), "疑惑".to_string()),
+            ("emotion:ecstatic".to_string(), "笑".to_string()),
+            ("emotion:very_happy".to_string(), "微笑".to_string()),
+        ]),
     }
 }
 
