@@ -66,6 +66,8 @@ pub fn run() {
             commands::context::get_proactive_enabled,
             commands::context::set_memory_enabled,
             commands::context::get_memory_enabled,
+            commands::emotion_settings::get_emotion_settings,
+            commands::emotion_settings::save_emotion_settings,
             commands::context::clear_history,
             commands::context::delete_last_messages,
             commands::context::end_session,
@@ -243,6 +245,10 @@ pub fn run() {
                         let tool_settings_path = app_data_dir.join("tool_settings.json");
                         let tool_settings = crate::actions::tool_settings::load_config(&tool_settings_path);
                         app_handle.manage(Arc::new(tokio::sync::RwLock::new(tool_settings)));
+
+                        let emotion_settings_path = app_data_dir.join("emotion_settings.json");
+                        let emotion_settings = crate::ai::emotion_settings::load_config(&emotion_settings_path);
+                        app_handle.manage(Arc::new(tokio::sync::RwLock::new(emotion_settings)));
 
                         // Restore current_conversation_id from disk and reload history
                         let conv_id_path = app_data_dir.join("current_conversation_id.json");

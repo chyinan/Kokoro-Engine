@@ -5,6 +5,7 @@ use crate::commands::system::WindowSizeState;
 use crate::error::KokoroError;
 use crate::imagegen::ImageGenService;
 use crate::actions::tool_settings::ToolSettings;
+use crate::ai::emotion_settings::EmotionSettings;
 use crate::llm::messages::{
     assistant_tool_calls_message, extract_message_text, replace_user_message_with_images,
     history_message_to_chat_message, system_message, tool_result_message,
@@ -150,6 +151,29 @@ fn strip_leaked_tags(text: &str) -> String {
         }
     }
     result.trim().to_string()
+}
+
+fn build_emotion_input_from_response(text: &str) -> String {
+    let clean = strip_leaked_tags(text)
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let char_count = clean.chars().count();
+    if char_count <= 320 {
+        return clean;
+    }
+
+    let head: String = clean.chars().take(160).collect();
+    let tail: String = clean
+        .chars()
+        .rev()
+        .take(160)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{head} ... {tail}")
 }
 
 /// Strip `[TRANSLATE:...]` tags from text.
@@ -397,6 +421,7 @@ pub async fn stream_chat(
     llm_state: State<'_, LlmService>,
     _action_registry: State<'_, std::sync::Arc<RwLock<crate::actions::ActionRegistry>>>,
     tool_settings_state: State<'_, std::sync::Arc<RwLock<ToolSettings>>>,
+    emotion_settings_state: State<'_, std::sync::Arc<RwLock<EmotionSettings>>>,
     _vision_watcher: State<'_, crate::vision::watcher::VisionWatcher>,
     window_size_state: State<'_, WindowSizeState>,
     vision_server: State<
@@ -415,22 +440,22 @@ pub async fn stream_chat(
     // Record user activity
     state.touch_activity().await;
 
-    // Emotion update
-    let emotion_classification = crate::ai::emotion_classifier::classify_text(&request.message).await;
-    state
-        .update_emotion(
-            &emotion_classification.label,
-            emotion_classification.raw_mood,
-        )
-        .await;
+    let emotion_enabled = {
+        let settings = emotion_settings_state.read().await;
+        settings.enabled
+    };
 
     // Typing simulation
     {
         let emotion = state.emotion_state.lock().await;
         let is_question = request.message.contains('?') || request.message.contains('？');
         let typing_params = crate::ai::typing_sim::calculate_typing_delay(
-            emotion.current_emotion(),
-            emotion.mood(),
+            if emotion_enabled {
+                emotion.current_emotion()
+            } else {
+                "neutral"
+            },
+            if emotion_enabled { emotion.mood() } else { 0.5 },
             emotion.personality().expressiveness,
             request.message.chars().count(),
             is_question,
@@ -981,6 +1006,25 @@ pub async fn stream_chat(
     if !all_translations.is_empty() {
         let combined_translation = all_translations.join(" ");
         let _ = app.emit("chat-translation", &combined_translation);
+    }
+
+    // Update character emotion from the final assistant response, not from the user input.
+    if emotion_enabled && !full_response.is_empty() {
+        let emotion_input = build_emotion_input_from_response(&full_response);
+        if !emotion_input.is_empty() {
+            if let Some(emotion_classification) =
+                crate::ai::emotion_classifier::classify_text(&emotion_input).await
+            {
+                state
+                    .update_emotion(
+                        &emotion_classification.label,
+                        emotion_classification.raw_mood,
+                    )
+                    .await;
+            } else {
+                eprintln!("[EmotionClassifier] Emotion update skipped because classifier is unavailable.");
+            }
+        }
     }
 
     // 8. Update History with final response

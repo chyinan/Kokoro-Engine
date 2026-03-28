@@ -695,36 +695,8 @@ impl AIOrchestrator {
             metadata: None,
         });
 
-        // -- Emotion Context (P0.25) --
-        // Inject current emotional state so the LLM responds in character
-        let (emotion_desc, current_mood, _current_emotion, mood_hist, _expressiveness) = {
-            let emotion = self.emotion_state.lock().await;
-            (
-                emotion.describe(),
-                emotion.mood(),
-                emotion.current_emotion().to_string(),
-                emotion.mood_history(),
-                emotion.personality().expressiveness,
-            )
-        };
-        final_messages.push(Message {
-            role: "system".to_string(),
-            content: emotion_desc,
-            metadata: Some(serde_json::json!({"type": "emotion_context"})),
-        });
-
-        // -- Emotion Events (P0.3) --
-        // Inject special behavior instructions when mood is extreme
-        let emotion_events =
-            crate::ai::emotion_events::check_emotion_triggers(current_mood, &mood_hist);
-        for event in &emotion_events {
-            final_messages.push(Message {
-                role: "system".to_string(),
-                content: event.system_instruction.clone(),
-                metadata: Some(serde_json::json!({"type": "emotion_event", "event": format!("{:?}", event.event_type)})),
-            });
-        }
-
+        // Current emotion state is still used by background systems, but it is no longer
+        // injected into the chat prompt as a system message.
         // -- Live2D Cue Context (P0.35) --
         if let Some(profile) = crate::commands::live2d::load_active_live2d_profile() {
             if !profile.cue_map.is_empty() {

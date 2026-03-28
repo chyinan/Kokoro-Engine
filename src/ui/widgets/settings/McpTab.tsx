@@ -8,9 +8,9 @@ import {
 import { useTranslation } from "react-i18next";
 import {
     listMcpServers, addMcpServer, removeMcpServer, refreshMcpTools, reconnectMcpServer, toggleMcpServer,
-    listBuiltinTools, getToolSettings, saveToolSettings
+    listBuiltinTools, getToolSettings, saveToolSettings, getEmotionSettings, saveEmotionSettings
 } from "../../../lib/kokoro-bridge";
-import type { ActionInfo, McpServerConfig, McpServerStatus, ToolSettings } from "../../../lib/kokoro-bridge";
+import type { ActionInfo, EmotionSettings, McpServerConfig, McpServerStatus, ToolSettings } from "../../../lib/kokoro-bridge";
 
 // ── Helpers ─────────────────────────────────────────────
 
@@ -92,7 +92,9 @@ export default function McpTab() {
     const [successMsg, setSuccessMsg] = useState<string | null>(null);
     const [builtinTools, setBuiltinTools] = useState<ActionInfo[]>([]);
     const [toolSettings, setToolSettings] = useState<ToolSettings>({ max_tool_rounds: 10, enabled_tools: {} });
+    const [emotionSettings, setEmotionSettings] = useState<EmotionSettings>({ enabled: true });
     const [savingToolSettings, setSavingToolSettings] = useState(false);
+    const [savingEmotionSettings, setSavingEmotionSettings] = useState(false);
 
     const fetchServers = useCallback(async () => {
         try {
@@ -107,9 +109,14 @@ export default function McpTab() {
 
     const fetchBuiltinToolState = useCallback(async () => {
         try {
-            const [tools, settings] = await Promise.all([listBuiltinTools(), getToolSettings()]);
+            const [tools, settings, emotion] = await Promise.all([
+                listBuiltinTools(),
+                getToolSettings(),
+                getEmotionSettings(),
+            ]);
             setBuiltinTools(tools);
             setToolSettings(settings);
+            setEmotionSettings(emotion);
         } catch (e) {
             console.error("[McpTab] Failed to fetch builtin tool settings:", e);
         }
@@ -240,6 +247,19 @@ export default function McpTab() {
         await persistToolSettings(next);
     };
 
+    const handleEmotionToggle = useCallback(async (enabled: boolean) => {
+        const next: EmotionSettings = { enabled };
+        setSavingEmotionSettings(true);
+        try {
+            await saveEmotionSettings(next);
+            setEmotionSettings(next);
+        } catch (e) {
+            console.error("[McpTab] Failed to save emotion settings:", e);
+        } finally {
+            setSavingEmotionSettings(false);
+        }
+    }, []);
+
     // Dismiss success after 3s
     useEffect(() => {
         if (successMsg) {
@@ -259,6 +279,27 @@ export default function McpTab() {
     return (
         <div className="space-y-5">
             <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-2)]/80 p-4 space-y-4">
+                <div className="flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-1)]/80 px-3 py-3">
+                    <div className="min-w-0">
+                        <div className="text-sm font-heading font-semibold text-[var(--color-text-primary)]">
+                            Emotion System
+                        </div>
+                        <div className="mt-1 text-xs text-[var(--color-text-muted)]">
+                            Use the local ONNX model to update Kokoro&apos;s post-response emotion state. If the model is unavailable, emotion updates are skipped.
+                        </div>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
+                        <span>{emotionSettings.enabled ? "Enabled" : "Disabled"}</span>
+                        <input
+                            type="checkbox"
+                            checked={emotionSettings.enabled}
+                            disabled={savingEmotionSettings}
+                            onChange={(e) => { void handleEmotionToggle(e.target.checked); }}
+                            className="h-4 w-4 rounded border-[var(--color-border)] bg-[var(--color-surface-1)] text-[var(--color-accent)] focus:ring-[var(--color-accent)]"
+                        />
+                    </label>
+                </div>
+
                 <div className="flex items-center justify-between gap-4">
                     <div>
                         <div className="text-sm font-heading font-semibold text-[var(--color-text-primary)]">

@@ -139,6 +139,18 @@ export async function getMemoryEnabled(): Promise<boolean> {
     return invoke<boolean>("get_memory_enabled");
 }
 
+export interface EmotionSettings {
+    enabled: boolean;
+}
+
+export async function getEmotionSettings(): Promise<EmotionSettings> {
+    return invoke<EmotionSettings>("get_emotion_settings");
+}
+
+export async function saveEmotionSettings(settings: EmotionSettings): Promise<void> {
+    return invoke("save_emotion_settings", { settings });
+}
+
 // ── Context Settings ───────────────────────────────
 
 export interface ContextSettings {

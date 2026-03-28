@@ -8,7 +8,6 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tokio::sync::OnceCell;
 
-use crate::ai::sentiment::{SentimentTone, UserSentiment};
 
 const LOCAL_MODEL_DIR: &str = "models/models--AdamCodd--tinybert-emotion-balanced";
 const MODEL_REPO: &str = "AdamCodd/tinybert-emotion-balanced";
@@ -55,17 +54,17 @@ struct ModelConfig {
     label2id: std::collections::HashMap<String, usize>,
 }
 
-pub async fn classify_text(text: &str) -> EmotionClassification {
+pub async fn classify_text(text: &str) -> Option<EmotionClassification> {
     if let Some(classifier) = get_classifier().await {
         match classifier.classify(text) {
-            Ok(result) => return result,
+            Ok(result) => return Some(result),
             Err(error) => {
-                eprintln!("[EmotionClassifier] Inference failed, falling back to rules: {error}");
+                eprintln!("[EmotionClassifier] Inference failed: {error}");
             }
         }
     }
 
-    classify_with_rules(text)
+    None
 }
 
 async fn get_classifier() -> Option<&'static Arc<EmotionClassifier>> {
@@ -118,27 +117,6 @@ async fn ensure_local_model_available() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn classify_with_rules(text: &str) -> EmotionClassification {
-    let sentiment = crate::ai::sentiment::analyze(text);
-    let (label, score) = map_sentiment_to_label(&sentiment);
-    EmotionClassification {
-        label: label.to_string(),
-        score,
-        raw_mood: compute_raw_mood(label, score),
-    }
-}
-
-fn map_sentiment_to_label(sentiment: &UserSentiment) -> (&'static str, f32) {
-    let score = sentiment.confidence.max(0.2);
-    match sentiment.tone {
-        SentimentTone::Positive => ("joy", score),
-        SentimentTone::Negative => ("sadness", score),
-        SentimentTone::Frustrated => ("anger", score),
-        SentimentTone::Excited => ("surprise", score),
-        SentimentTone::Questioning | SentimentTone::Neutral => ("neutral", 0.0),
-    }
 }
 
 pub fn compute_raw_mood(label: &str, score: f32) -> f32 {
@@ -439,22 +417,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn positive_rule_maps_to_joy() {
-        let result = classify_with_rules("我很喜欢你");
+    fn positive_mood_maps_above_midpoint() {
+        let result = EmotionClassification {
+            label: "joy".to_string(),
+            score: 0.8,
+            raw_mood: compute_raw_mood("joy", 0.8),
+        };
         assert_eq!(result.label, "joy");
         assert!(result.raw_mood > 0.5);
     }
 
     #[test]
-    fn frustrated_rule_maps_to_anger() {
-        let result = classify_with_rules("又报错了，真烦");
+    fn negative_mood_maps_below_midpoint() {
+        let result = EmotionClassification {
+            label: "anger".to_string(),
+            score: 0.8,
+            raw_mood: compute_raw_mood("anger", 0.8),
+        };
         assert_eq!(result.label, "anger");
         assert!(result.raw_mood < 0.5);
     }
 
     #[test]
-    fn neutral_rule_stays_neutral() {
-        let result = classify_with_rules("今天天气不错");
+    fn neutral_mood_stays_neutral() {
+        let result = EmotionClassification {
+            label: "neutral".to_string(),
+            score: 0.0,
+            raw_mood: compute_raw_mood("neutral", 0.0),
+        };
         assert_eq!(result.label, "neutral");
         assert!((result.raw_mood - 0.5).abs() < 0.001);
     }
