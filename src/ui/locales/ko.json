@@ -8,7 +8,8 @@
             "preview": "미리보기",
             "done": "완료",
             "delete": "삭제",
-            "add": "추가"
+            "add": "추가",
+            "rename": "이름 변경"
         }
     },
     "sing": {
@@ -319,6 +320,14 @@
                 "button": "Live2D 가져오기",
                 "loading": "가져오는 중...",
                 "hint": ".zip 패키지 또는 .model3.json 파일을 선택하세요."
+            },
+            "rename": {
+                "prompt": "새 모델 이름을 입력하세요"
+            },
+            "export": {
+                "button": "Live2D 내보내기",
+                "loading": "내보내는 중...",
+                "hint": "내보낸 패키지에는 모델 파일과 Kokoro의 cue 매핑이 함께 포함됩니다."
             },
             "gaze_tracking": {
                 "label": "시선 추적",

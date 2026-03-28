@@ -8,7 +8,8 @@
             "preview": "Preview",
             "done": "Done",
             "delete": "Delete",
-            "add": "Add"
+            "add": "Add",
+            "rename": "Rename"
         }
     },
     "sing": {
@@ -319,6 +320,14 @@
                 "button": "Import Live2D",
                 "loading": "Importing...",
                 "hint": "Select a .zip package or a .model3.json file."
+            },
+            "rename": {
+                "prompt": "Enter a new model name"
+            },
+            "export": {
+                "button": "Export Live2D",
+                "loading": "Exporting...",
+                "hint": "Exported packages include the model files and Kokoro cue mappings."
             },
             "gaze_tracking": {
                 "label": "Gaze Tracking",

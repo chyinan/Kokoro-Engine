@@ -3,8 +3,10 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::PathBuf;
 use tauri::{Emitter, Manager};
+use zip::write::SimpleFileOptions;
 
 #[derive(Debug, Serialize)]
 pub struct Live2dModelInfo {
@@ -62,7 +64,22 @@ pub async fn import_live2d_zip(app: tauri::AppHandle, zip_path: String) -> Resul
     let app_data = app.path().app_data_dir()
         .map_err(|e| KokoroError::Internal(format!("Cannot resolve app data dir: {}", e)))?;
     let models_dir = app_data.join("live2d_models");
-    fs::create_dir_all(&models_dir).map_err(KokoroError::from)?;
+    fs::create_dir_all(&models_dir).map_err(|e| format!("Failed to create models dir: {}", e))?;
+    let import_tmp_dir = app_data.join(format!(
+        "live2d_import_tmp_{}",
+        chrono::Utc::now().timestamp_millis()
+    ));
+    if import_tmp_dir.exists() {
+        if import_tmp_dir.is_dir() {
+            fs::remove_dir_all(&import_tmp_dir)
+                .map_err(|e| format!("Failed to clear temp import dir: {}", e))?;
+        } else {
+            fs::remove_file(&import_tmp_dir)
+                .map_err(|e| format!("Failed to clear temp import file: {}", e))?;
+        }
+    }
+    fs::create_dir_all(&import_tmp_dir)
+        .map_err(|e| format!("Failed to create temp import dir: {}", e))?;
 
     let file = fs::File::open(archive_path).map_err(KokoroError::from)?;
     let mut archive = zip::ZipArchive::new(file).map_err(KokoroError::from)?;
@@ -70,7 +87,7 @@ pub async fn import_live2d_zip(app: tauri::AppHandle, zip_path: String) -> Resul
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(KokoroError::from)?;
         let outpath = match entry.enclosed_name() {
-            Some(path) => models_dir.join(path),
+            Some(path) => import_tmp_dir.join(path),
             None => continue,
         };
         if entry.name().ends_with('/') {
@@ -86,18 +103,50 @@ pub async fn import_live2d_zip(app: tauri::AppHandle, zip_path: String) -> Resul
         }
     }
 
-    let model_json = find_model3_json(&models_dir)
-        .ok_or_else(|| KokoroError::NotFound("No .model3.json file found in the zip archive".to_string()))?;
+    let result = (|| -> Result<String, String> {
+        let model_json = find_model3_json(&import_tmp_dir)
+        .ok_or_else(|| "No .model3.json file found in the zip archive".to_string())?;
+        let model_root = find_model_root(&model_json)
+            .ok_or_else(|| "Cannot find model root directory (no .moc3 file found near .model3.json)".to_string())?;
 
-    let relative = model_json.strip_prefix(&models_dir)
-        .map_err(|e| KokoroError::Internal(format!("Failed to compute relative path: {}", e)))?;
+        let folder_name = if model_root == import_tmp_dir {
+            model_folder_name_from_model_json(&model_json)?
+        } else {
+            model_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| "Invalid model folder name".to_string())?
+                .to_string()
+        };
+        let target_dir = models_dir.join(&folder_name);
 
-    // Use forward slashes for URL compatibility
-    let relative_str = relative.to_string_lossy().replace('\\', "/");
+        if target_dir.exists() {
+            if target_dir.is_dir() {
+                fs::remove_dir_all(&target_dir)
+                    .map_err(|e| format!("Failed to remove existing model folder: {}", e))?;
+            } else {
+                fs::remove_file(&target_dir)
+                    .map_err(|e| format!("Failed to remove existing model file: {}", e))?;
+            }
+        }
 
-    ensure_profile_for_model(&models_dir, &relative_str)?;
+        fs::rename(&model_root, &target_dir)
+            .map_err(|e| format!("Failed to move extracted model folder into place: {}", e))?;
 
-    Ok(relative_str)
+        let copied_model_json = find_model3_json(&target_dir)
+            .ok_or_else(|| "Copied model folder does not contain a .model3.json file".to_string())?;
+        let relative = copied_model_json
+            .strip_prefix(&models_dir)
+            .map_err(|e| format!("Failed to compute relative path: {}", e))?;
+        let relative_str = relative.to_string_lossy().replace('\\', "/");
+
+        ensure_profile_for_model(&models_dir, &relative_str)?;
+        Ok(relative_str)
+    })();
+
+    let _ = fs::remove_dir_all(&import_tmp_dir);
+    result
 }
 
 /// List all imported Live2D models found under `{app_data_dir}/live2d_models/`.
@@ -168,10 +217,81 @@ pub async fn delete_live2d_model(app: tauri::AppHandle, model_name: String) -> R
         return Err(KokoroError::NotFound(format!("Model '{}' not found", model_name)));
     }
 
-    fs::remove_dir_all(&model_path)
-        .map_err(|e| KokoroError::Internal(format!("Failed to delete model '{}': {}", model_name, e)))?;
+    if model_path.is_dir() {
+        fs::remove_dir_all(&model_path)
+            .map_err(|e| format!("Failed to delete model '{}': {}", model_name, e))?;
+    } else {
+        fs::remove_file(&model_path)
+            .map_err(|e| format!("Failed to delete model '{}': {}", model_name, e))?;
+    }
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn rename_live2d_model(
+    app: tauri::AppHandle,
+    model_path: String,
+    new_name: String,
+) -> Result<String, String> {
+    let models_dir = get_models_dir(&app)?;
+    let normalized = normalize_relative_model_path(&model_path)?;
+    let old_root = normalized
+        .split('/')
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .ok_or_else(|| "Invalid model path".to_string())?;
+    let new_root = normalize_model_folder_name(&new_name)?;
+
+    if old_root == new_root {
+        return Ok(normalized);
+    }
+
+    let old_path = models_dir.join(old_root);
+    if !old_path.exists() {
+        return Err(format!("Model '{}' not found", old_root));
+    }
+
+    let new_path = models_dir.join(&new_root);
+    if new_path.exists() {
+        return Err(format!("A model named '{}' already exists", new_root));
+    }
+
+    fs::rename(&old_path, &new_path)
+        .map_err(|e| format!("Failed to rename model folder: {}", e))?;
+
+    let rest = normalized
+        .strip_prefix(old_root)
+        .unwrap_or("")
+        .trim_start_matches('/');
+    let new_model_path = if rest.is_empty() {
+        new_root.clone()
+    } else {
+        format!("{}/{}", new_root, rest)
+    };
+
+    if let Ok(Some(mut saved_profile)) = load_saved_model_profile(&models_dir, &new_model_path) {
+        saved_profile.model_path = new_model_path.clone();
+        save_model_profile(&models_dir, &saved_profile)?;
+    }
+
+    if let Some(active_path) = load_active_live2d_model_path() {
+        let normalized_active = normalize_relative_model_path(&active_path)?;
+        if normalized_active == normalized || normalized_active.starts_with(&format!("{}/", old_root)) {
+            let active_rest = normalized_active
+                .strip_prefix(old_root)
+                .unwrap_or("")
+                .trim_start_matches('/');
+            let next_active = if active_rest.is_empty() {
+                new_root.clone()
+            } else {
+                format!("{}/{}", new_root, active_rest)
+            };
+            set_active_live2d_model(app.clone(), Some(next_active)).await?;
+        }
+    }
+
+    Ok(new_model_path)
 }
 
 /// Import a Live2D model from an extracted folder (by its .model3.json path).
@@ -193,11 +313,7 @@ pub async fn import_live2d_folder(
     let model_root = find_model_root(json_path)
         .ok_or_else(|| KokoroError::NotFound("Cannot find model root directory (no .moc3 file found in parent directories)".to_string()))?;
 
-    let folder_name = model_root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| KokoroError::Validation("Invalid folder name".to_string()))?
-        .to_string();
+    let folder_name = model_folder_name_from_model_json(json_path)?;
 
     // Determine target directory
     let app_data = app
@@ -209,8 +325,13 @@ pub async fn import_live2d_folder(
 
     // If target already exists, remove it first (re-import scenario)
     if target_dir.exists() {
-        fs::remove_dir_all(&target_dir)
-            .map_err(KokoroError::from)?;
+        if target_dir.is_dir() {
+            fs::remove_dir_all(&target_dir)
+                .map_err(|e| format!("Failed to remove existing model folder: {}", e))?;
+        } else {
+            fs::remove_file(&target_dir)
+                .map_err(|e| format!("Failed to remove existing model file: {}", e))?;
+        }
     }
 
     // Copy the entire model folder
@@ -230,6 +351,47 @@ pub async fn import_live2d_folder(
     ensure_profile_for_model(&models_dir, &relative_str)?;
 
     Ok(relative_str)
+}
+
+#[tauri::command]
+pub async fn export_live2d_model(
+    app: tauri::AppHandle,
+    model_path: String,
+    export_path: String,
+) -> Result<String, String> {
+    let models_dir = get_models_dir(&app)?;
+    let normalized = normalize_relative_model_path(&model_path)?;
+    let root = normalized
+        .split('/')
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .ok_or_else(|| "Invalid model path".to_string())?;
+    let model_dir = models_dir.join(root);
+
+    if !model_dir.exists() || !model_dir.is_dir() {
+        return Err(format!("Model '{}' not found", root));
+    }
+
+    let out_path = PathBuf::from(&export_path);
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create export directory '{}': {}", parent.display(), e))?;
+    }
+
+    let file = fs::File::create(&out_path)
+        .map_err(|e| format!("Failed to create export file '{}': {}", out_path.display(), e))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    let export_root = model_dir
+        .parent()
+        .ok_or_else(|| "Failed to resolve model export root".to_string())?;
+    add_dir_to_zip(&mut zip, export_root, &model_dir, options)?;
+
+    zip.finish()
+        .map_err(|e| format!("Failed to finish ZIP export: {}", e))?;
+
+    Ok(export_path)
 }
 
 #[tauri::command]
@@ -499,6 +661,30 @@ fn normalize_semantic_map(map: HashMap<String, String>) -> HashMap<String, Strin
         .collect()
 }
 
+fn model_folder_name_from_model_json(model_json: &std::path::Path) -> Result<String, String> {
+    let stem = model_json
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "Invalid model file name".to_string())?;
+    Ok(stem.strip_suffix(".model3").unwrap_or(stem).to_string())
+}
+
+fn normalize_model_folder_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Model name cannot be empty".to_string());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err("Invalid model name".to_string());
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err("Model name cannot contain path separators".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
 fn normalize_semantic_key(raw_key: &str) -> String {
     raw_key.trim().to_lowercase()
 }
@@ -542,6 +728,41 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> io::Resul
             fs::copy(&src_path, &dst_path)?;
         }
     }
+    Ok(())
+}
+
+fn add_dir_to_zip(
+    zip: &mut zip::ZipWriter<fs::File>,
+    base_dir: &std::path::Path,
+    current_dir: &std::path::Path,
+    options: SimpleFileOptions,
+) -> Result<(), String> {
+    let entries = fs::read_dir(current_dir)
+        .map_err(|e| format!("Failed to read directory '{}': {}", current_dir.display(), e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(base_dir)
+            .map_err(|e| format!("Failed to compute ZIP entry path: {}", e))?;
+        let name = relative.to_string_lossy().replace('\\', "/");
+
+        if path.is_dir() {
+            let dir_name = format!("{}/", name);
+            zip.add_directory(&dir_name, options)
+                .map_err(|e| format!("Failed to add directory '{}' to ZIP: {}", dir_name, e))?;
+            add_dir_to_zip(zip, base_dir, &path, options)?;
+        } else {
+            zip.start_file(&name, options)
+                .map_err(|e| format!("Failed to add file '{}' to ZIP: {}", name, e))?;
+            let bytes = fs::read(&path)
+                .map_err(|e| format!("Failed to read file '{}': {}", path.display(), e))?;
+            zip.write_all(&bytes)
+                .map_err(|e| format!("Failed to write file '{}' to ZIP: {}", name, e))?;
+        }
+    }
+
     Ok(())
 }
 

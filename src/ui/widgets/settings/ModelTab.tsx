@@ -1,15 +1,17 @@
 import { useState, useEffect } from "react";
 import { clsx } from "clsx";
 import { useTranslation } from "react-i18next";
-import { FolderOpen, RefreshCw, AlertCircle, Trash2, Check } from "lucide-react";
+import { FolderOpen, RefreshCw, Trash2, Check, Download, Pencil } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { labelClasses } from "../../styles/settings-primitives";
 import {
     importLive2dZip,
     importLive2dFolder,
+    exportLive2dModel,
     listLive2dModels,
     deleteLive2dModel,
+    renameLive2dModel,
     getLive2dModelProfile,
     saveLive2dModelProfile,
     playCue,
@@ -79,6 +81,7 @@ export default function ModelTab({
     const interactionAreaLabel = (value: string) => t(`settings.model.mapping.areas.${value === "*" ? "any" : value}`);
     const semanticKeyLabel = (value: string) => t(`settings.model.mapping.semantic_keys.${value.replace(":", ".")}`);
     const [isImporting, setIsImporting] = useState(false);
+    const [isExporting, setIsExporting] = useState(false);
     const [models, setModels] = useState<Live2dModelInfo[]>([]);
     const [isLoadingModels, setIsLoadingModels] = useState(false);
     const [showBuiltin, setShowBuiltin] = useState(
@@ -195,6 +198,40 @@ export default function ModelTab({
             await fetchModels();
         } catch (e) {
             console.error("Failed to delete model:", e);
+        }
+    };
+
+    const handleRenameModel = async (model: Live2dModelInfo) => {
+        const nextName = window.prompt(t("settings.model.rename.prompt"), model.name);
+        if (!nextName || nextName.trim() === model.name) return;
+        try {
+            const nextPath = await renameLive2dModel(model.path, nextName);
+            if (customModelPath === model.path) {
+                onCustomModelPathChange(nextPath);
+            }
+            await fetchModels();
+        } catch (e) {
+            console.error("Failed to rename model:", e);
+        }
+    };
+
+    const selectedImportedModel = models.find((model) => model.path === customModelPath) ?? null;
+
+    const handleExportModel = async () => {
+        if (!selectedImportedModel) return;
+        try {
+            const filePath = await save({
+                defaultPath: `${selectedImportedModel.name}.zip`,
+                filters: [{ name: "Live2D Package", extensions: ["zip"] }],
+            });
+            if (!filePath) return;
+
+            setIsExporting(true);
+            await exportLive2dModel(selectedImportedModel.path, filePath);
+        } catch (error) {
+            console.error("Failed to export Live2D model:", error);
+        } finally {
+            setIsExporting(false);
         }
     };
 
@@ -577,6 +614,15 @@ export default function ModelTab({
                                 <motion.button
                                     whileHover={{ scale: 1.1 }}
                                     whileTap={{ scale: 0.9 }}
+                                    onClick={() => handleRenameModel(model)}
+                                    className="p-1.5 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 transition-colors flex-shrink-0"
+                                    title={t("common.actions.rename")}
+                                >
+                                    <Pencil size={14} strokeWidth={1.5} />
+                                </motion.button>
+                                <motion.button
+                                    whileHover={{ scale: 1.1 }}
+                                    whileTap={{ scale: 0.9 }}
                                     onClick={() => handleDeleteModel(model.name, model.path)}
                                     className="p-1.5 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-error)] hover:bg-[var(--color-error)]/10 transition-colors flex-shrink-0"
                                     title={`Delete ${model.name}`}
@@ -615,12 +661,25 @@ export default function ModelTab({
                     {isImporting ? t("settings.model.import.loading") : t("settings.model.import.button")}
                 </motion.button>
 
-                <div className="mt-3 flex items-start gap-2 text-[10px] text-[var(--color-text-muted)] bg-[var(--color-accent-subtle)]/50 p-2 rounded">
-                    <AlertCircle size={12} className="mt-0.5 text-[var(--color-accent)]" />
-                    <p>
-                        {t("settings.model.import.hint")}
-                    </p>
-                </div>
+                <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={handleExportModel}
+                    disabled={!selectedImportedModel || isExporting}
+                    className={clsx(
+                        "w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-heading font-semibold tracking-wider uppercase mt-2",
+                        "bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-secondary)]",
+                        "hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-colors",
+                        (!selectedImportedModel || isExporting) && "opacity-60 cursor-not-allowed"
+                    )}
+                >
+                    {isExporting ? (
+                        <RefreshCw size={16} strokeWidth={1.5} className="animate-spin" />
+                    ) : (
+                        <Download size={16} strokeWidth={1.5} />
+                    )}
+                    {isExporting ? t("settings.model.export.loading") : t("settings.model.export.button")}
+                </motion.button>
             </div>
 
             <div className="space-y-3 rounded-xl border border-[var(--color-border)] bg-black/10 p-4">

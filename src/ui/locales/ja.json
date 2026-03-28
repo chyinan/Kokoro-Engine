@@ -8,7 +8,8 @@
             "preview": "プレビュー",
             "done": "完了",
             "delete": "削除",
-            "add": "追加"
+            "add": "追加",
+            "rename": "名前変更"
         }
     },
     "sing": {
@@ -319,6 +320,14 @@
                 "button": "Live2Dをインポート",
                 "loading": "インポート中...",
                 "hint": ".zipパッケージまたは.model3.jsonファイルを選択してください。"
+            },
+            "rename": {
+                "prompt": "新しいモデル名を入力してください"
+            },
+            "export": {
+                "button": "Live2Dをエクスポート",
+                "loading": "エクスポート中...",
+                "hint": "エクスポートされたパッケージにはモデルファイルと Kokoro の cue マッピングが含まれます。"
             },
             "gaze_tracking": {
                 "label": "視線追従",

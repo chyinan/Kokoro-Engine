@@ -407,12 +407,20 @@ export async function importLive2dFolder(modelJsonPath: string): Promise<string>
     return invoke<string>("import_live2d_folder", { modelJsonPath });
 }
 
+export async function exportLive2dModel(modelPath: string, exportPath: string): Promise<string> {
+    return invoke<string>("export_live2d_model", { modelPath, exportPath });
+}
+
 export async function listLive2dModels(): Promise<Live2dModelInfo[]> {
     return invoke<Live2dModelInfo[]>("list_live2d_models");
 }
 
 export async function deleteLive2dModel(modelName: string): Promise<void> {
     return invoke("delete_live2d_model", { modelName });
+}
+
+export async function renameLive2dModel(modelPath: string, newName: string): Promise<string> {
+    return invoke<string>("rename_live2d_model", { modelPath, newName });
 }
 
 export async function getLive2dModelProfile(modelPath: string): Promise<Live2dModelProfile> {
