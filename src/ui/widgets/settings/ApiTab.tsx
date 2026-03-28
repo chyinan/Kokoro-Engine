@@ -18,10 +18,13 @@ import {
     listOllamaModels,
     getContextSettings,
     setContextSettings as saveContextSettings,
+    getEmotionSettings,
+    saveEmotionSettings,
     type LlmConfig,
     type LlmProviderConfig,
     type LlmPreset,
     type ContextSettings,
+    type EmotionSettings,
 } from "../../../lib/kokoro-bridge";
 
 export interface ApiTabProps {
@@ -43,6 +46,8 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
         strategy: "window",
         max_message_chars: 2000,
     });
+    const [emotionSettings, setEmotionSettings] = useState<EmotionSettings>({ enabled: true });
+    const [savingEmotionSettings, setSavingEmotionSettings] = useState(false);
 
     // Load config from backend on mount
     useEffect(() => {
@@ -59,6 +64,9 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
         getContextSettings()
             .then(setContextSettings)
             .catch((e) => console.error("Failed to load context settings:", e));
+        getEmotionSettings()
+            .then(setEmotionSettings)
+            .catch((e) => console.error("Failed to load emotion settings:", e));
     }, []);
 
     const activeProvider = config
@@ -112,6 +120,19 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
         },
         [contextSettings]
     );
+
+    const handleEmotionToggle = useCallback(async (enabled: boolean) => {
+        const next: EmotionSettings = { enabled };
+        setSavingEmotionSettings(true);
+        try {
+            await saveEmotionSettings(next);
+            setEmotionSettings(next);
+        } catch (e) {
+            console.error("Failed to save emotion settings:", e);
+        } finally {
+            setSavingEmotionSettings(false);
+        }
+    }, []);
 
     const handleSavePreset = useCallback(() => {
         if (!config) return;
@@ -623,6 +644,32 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
                     <p className="text-[9px] text-[var(--color-text-muted)] mt-1">
                         {t("settings.api.context.max_chars_hint")}
                     </p>
+                </div>
+            </div>
+
+            <div className="pt-2 border-t border-[var(--color-border)]">
+                <div className="flex items-center justify-between">
+                    <div className="min-w-0">
+                        <label className={labelClasses.replace("mb-2", "mb-0")}>{t("settings.api.emotion.label")}</label>
+                        <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+                            {t("settings.api.emotion.desc")}
+                        </p>
+                    </div>
+                    <button
+                        onClick={() => { void handleEmotionToggle(!emotionSettings.enabled); }}
+                        disabled={savingEmotionSettings}
+                        aria-checked={emotionSettings.enabled}
+                        aria-label={t("settings.api.emotion.label")}
+                        className={clsx(
+                            "w-10 h-5 rounded-full transition-colors relative shrink-0 disabled:opacity-60",
+                            emotionSettings.enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
+                        )}
+                    >
+                        <motion.div
+                            animate={{ x: emotionSettings.enabled ? 20 : 2 }}
+                            className="absolute top-0.5 w-4 h-4 rounded-full bg-white"
+                        />
+                    </button>
                 </div>
             </div>
 

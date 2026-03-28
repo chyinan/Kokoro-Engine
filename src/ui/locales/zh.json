@@ -112,6 +112,10 @@
                 "max_chars_label": "单条消息最大字符数",
                 "max_chars_hint": "超出长度的消息将被截断，两种策略均生效"
             },
+            "emotion": {
+                "label": "情绪系统",
+                "desc": "使用本地 ONNX 模型从 Kokoro 的最终回复中识别回复后的情绪状态。"
+            },
             "system_llm": {
                 "title": "系统 LLM (意图解析)",
                 "desc": "用于控制动作和表情的独立模型。建议使用体积更小/速度更快的模型（如 gpt-4o-mini, llama3:8b）以节省成本并降低延迟。",
@@ -601,6 +605,40 @@
         "mcp": {
             "title": "MCP 工具服务器",
             "desc": "通过模型上下文协议 (MCP) 连接外部工具",
+            "native_loop": {
+                "title": "工具循环",
+                "desc": "限制 Kokoro 在单次回复中可进行的工具调用续写轮次。",
+                "max_rounds": "最大工具轮次"
+            },
+            "builtin_tools": {
+                "title": "内置工具",
+                "desc": "选择允许模型调用哪些内置工具。",
+                "saving": "保存中...",
+                "saved_auto": "已自动保存",
+                "items": {
+                    "get_time": {
+                        "description": "获取当前日期和时间。"
+                    },
+                    "play_cue": {
+                        "description": "触发当前模型已配置的 Live2D cue。"
+                    },
+                    "set_background": {
+                        "description": "根据场景描述生成并切换新的背景。"
+                    },
+                    "search_memory": {
+                        "description": "搜索关于用户的已存记忆。"
+                    },
+                    "store_memory": {
+                        "description": "为后续对话存储重要事实或细节。"
+                    },
+                    "forget_memory": {
+                        "description": "当用户要求遗忘时，查找并删除相关记忆。"
+                    },
+                    "send_notification": {
+                        "description": "向用户显示桌面通知。"
+                    }
+                }
+            },
             "refresh_tooltip": "刷新所有服务器的工具",
             "add_button": "添加",
             "add_modal": {

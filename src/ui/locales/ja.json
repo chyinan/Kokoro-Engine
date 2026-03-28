@@ -112,6 +112,10 @@
                 "max_chars_label": "メッセージ最大文字数",
                 "max_chars_hint": "この長さを超えるメッセージは切り捨てられます。両方の戦略に適用されます。"
             },
+            "emotion": {
+                "label": "感情システム",
+                "desc": "ローカル ONNX モデルを使って、Kokoro の最終応答から応答後の感情状態を推定します。"
+            },
             "system_llm": {
                 "title": "システム LLM (意図解釈)",
                 "desc": "アクションや表情の制御に使用する独立したモデルです。コストや遅延を抑えるため、より小型で高速なモデル（例：gpt-4o-mini, llama3:8b）を推奨します。",
@@ -601,6 +605,40 @@
         "mcp": {
             "title": "MCP ツールサーバー",
             "desc": "Model Context Protocol 経由で外部ツールを接続",
+            "native_loop": {
+                "title": "ツールループ",
+                "desc": "1 回の返信で Kokoro が継続できるツール呼び出しラウンド数を制限します。",
+                "max_rounds": "最大ツールラウンド"
+            },
+            "builtin_tools": {
+                "title": "内蔵ツール",
+                "desc": "モデルが呼び出せる内蔵ツールを選択します。",
+                "saving": "保存中...",
+                "saved_auto": "自動保存済み",
+                "items": {
+                    "get_time": {
+                        "description": "現在の日付と時刻を取得します。"
+                    },
+                    "play_cue": {
+                        "description": "現在のモデルで設定済みの Live2D cue を再生します。"
+                    },
+                    "set_background": {
+                        "description": "シーン説明から新しい背景を生成して切り替えます。"
+                    },
+                    "search_memory": {
+                        "description": "ユーザーに関する保存済みの記憶を検索します。"
+                    },
+                    "store_memory": {
+                        "description": "今後の会話のために重要な事実や詳細を保存します。"
+                    },
+                    "forget_memory": {
+                        "description": "忘れてほしいと言われた記憶を見つけて削除します。"
+                    },
+                    "send_notification": {
+                        "description": "ユーザーにデスクトップ通知を表示します。"
+                    }
+                }
+            },
             "refresh_tooltip": "全サーバーのツールを更新",
             "add_button": "追加",
             "add_modal": {

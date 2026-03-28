@@ -8,9 +8,9 @@ import {
 import { useTranslation } from "react-i18next";
 import {
     listMcpServers, addMcpServer, removeMcpServer, refreshMcpTools, reconnectMcpServer, toggleMcpServer,
-    listBuiltinTools, getToolSettings, saveToolSettings, getEmotionSettings, saveEmotionSettings
+    listBuiltinTools, getToolSettings, saveToolSettings
 } from "../../../lib/kokoro-bridge";
-import type { ActionInfo, EmotionSettings, McpServerConfig, McpServerStatus, ToolSettings } from "../../../lib/kokoro-bridge";
+import type { ActionInfo, McpServerConfig, McpServerStatus, ToolSettings } from "../../../lib/kokoro-bridge";
 
 // ── Helpers ─────────────────────────────────────────────
 
@@ -92,9 +92,7 @@ export default function McpTab() {
     const [successMsg, setSuccessMsg] = useState<string | null>(null);
     const [builtinTools, setBuiltinTools] = useState<ActionInfo[]>([]);
     const [toolSettings, setToolSettings] = useState<ToolSettings>({ max_tool_rounds: 10, enabled_tools: {} });
-    const [emotionSettings, setEmotionSettings] = useState<EmotionSettings>({ enabled: true });
     const [savingToolSettings, setSavingToolSettings] = useState(false);
-    const [savingEmotionSettings, setSavingEmotionSettings] = useState(false);
 
     const fetchServers = useCallback(async () => {
         try {
@@ -109,14 +107,12 @@ export default function McpTab() {
 
     const fetchBuiltinToolState = useCallback(async () => {
         try {
-            const [tools, settings, emotion] = await Promise.all([
+            const [tools, settings] = await Promise.all([
                 listBuiltinTools(),
                 getToolSettings(),
-                getEmotionSettings(),
             ]);
             setBuiltinTools(tools);
             setToolSettings(settings);
-            setEmotionSettings(emotion);
         } catch (e) {
             console.error("[McpTab] Failed to fetch builtin tool settings:", e);
         }
@@ -247,19 +243,6 @@ export default function McpTab() {
         await persistToolSettings(next);
     };
 
-    const handleEmotionToggle = useCallback(async (enabled: boolean) => {
-        const next: EmotionSettings = { enabled };
-        setSavingEmotionSettings(true);
-        try {
-            await saveEmotionSettings(next);
-            setEmotionSettings(next);
-        } catch (e) {
-            console.error("[McpTab] Failed to save emotion settings:", e);
-        } finally {
-            setSavingEmotionSettings(false);
-        }
-    }, []);
-
     // Dismiss success after 3s
     useEffect(() => {
         if (successMsg) {
@@ -282,50 +265,37 @@ export default function McpTab() {
                 <div className="flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-1)]/80 px-3 py-3">
                     <div className="min-w-0">
                         <div className="text-sm font-heading font-semibold text-[var(--color-text-primary)]">
-                            Emotion System
+                            {t("settings.mcp.native_loop.title")}
                         </div>
                         <div className="mt-1 text-xs text-[var(--color-text-muted)]">
-                            Use the local ONNX model to update Kokoro&apos;s post-response emotion state. If the model is unavailable, emotion updates are skipped.
+                            {t("settings.mcp.native_loop.desc")}
                         </div>
                     </div>
-                    <label className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
-                        <span>{emotionSettings.enabled ? "Enabled" : "Disabled"}</span>
+                    <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-xs text-[var(--color-text-secondary)]">{t("settings.mcp.native_loop.max_rounds")}</span>
                         <input
-                            type="checkbox"
-                            checked={emotionSettings.enabled}
-                            disabled={savingEmotionSettings}
-                            onChange={(e) => { void handleEmotionToggle(e.target.checked); }}
-                            className="h-4 w-4 rounded border-[var(--color-border)] bg-[var(--color-surface-1)] text-[var(--color-accent)] focus:ring-[var(--color-accent)]"
+                            type="number"
+                            min={1}
+                            max={20}
+                            value={toolSettings.max_tool_rounds}
+                            onChange={(e) => { void handleMaxToolRoundsChange(e.target.value); }}
+                            className="w-20 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
                         />
-                    </label>
+                    </div>
                 </div>
 
                 <div className="flex items-center justify-between gap-4">
                     <div>
                         <div className="text-sm font-heading font-semibold text-[var(--color-text-primary)]">
-                            Built-in Tools
+                            {t("settings.mcp.builtin_tools.title")}
                         </div>
                         <div className="text-xs text-[var(--color-text-muted)]">
-                            Control the native tool loop and choose which built-in tools the model may call.
+                            {t("settings.mcp.builtin_tools.desc")}
                         </div>
                     </div>
                     <div className="text-[11px] uppercase tracking-wider text-[var(--color-text-muted)]">
-                        {savingToolSettings ? "Saving..." : "Saved automatically"}
+                        {savingToolSettings ? t("settings.mcp.builtin_tools.saving") : t("settings.mcp.builtin_tools.saved_auto")}
                     </div>
-                </div>
-
-                <div className="grid grid-cols-[160px_1fr] items-center gap-3">
-                    <label className="text-xs font-heading font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
-                        Max Tool Rounds
-                    </label>
-                    <input
-                        type="number"
-                        min={1}
-                        max={20}
-                        value={toolSettings.max_tool_rounds}
-                        onChange={(e) => { void handleMaxToolRoundsChange(e.target.value); }}
-                        className="w-28 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
-                    />
                 </div>
 
                 <div className="space-y-2">
@@ -341,18 +311,23 @@ export default function McpTab() {
                                         {tool.name}
                                     </div>
                                     <div className="mt-1 text-xs text-[var(--color-text-muted)]">
-                                        {tool.description}
+                                        {t(`settings.mcp.builtin_tools.items.${tool.name}.description`, { defaultValue: tool.description })}
                                     </div>
                                 </div>
-                                <label className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
-                                    <span>{enabled ? "Enabled" : "Disabled"}</span>
-                                    <input
-                                        type="checkbox"
-                                        checked={enabled}
-                                        onChange={(e) => { void handleToolToggle(tool.name, e.target.checked); }}
-                                        className="h-4 w-4 rounded border-[var(--color-border)] bg-[var(--color-surface-1)] text-[var(--color-accent)] focus:ring-[var(--color-accent)]"
+                                <button
+                                    onClick={() => { void handleToolToggle(tool.name, !enabled); }}
+                                    aria-checked={enabled}
+                                    aria-label={tool.name}
+                                    className={clsx(
+                                        "w-10 h-5 rounded-full transition-colors relative shrink-0",
+                                        enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
+                                    )}
+                                >
+                                    <motion.div
+                                        animate={{ x: enabled ? 20 : 2 }}
+                                        className="absolute top-0.5 w-4 h-4 rounded-full bg-white"
                                     />
-                                </label>
+                                </button>
                             </div>
                         );
                     })}

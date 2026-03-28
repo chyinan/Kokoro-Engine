@@ -112,6 +112,10 @@
                 "max_chars_label": "Max chars per message",
                 "max_chars_hint": "Messages exceeding this length will be truncated. Applies to both strategies."
             },
+            "emotion": {
+                "label": "Emotion System",
+                "desc": "Detect Kokoro's post-response emotion from the final assistant output using the local ONNX model."
+            },
             "system_llm": {
                 "title": "System LLM (Intent Parsing)",
                 "desc": "Separate model for controlling actions/emotions. A smaller/faster model (e.g. gpt-4o-mini, llama3:8b) is recommended to save costs/latency.",
@@ -601,6 +605,40 @@
         "mcp": {
             "title": "MCP Tool Servers",
             "desc": "Connect external tools via Model Context Protocol",
+            "native_loop": {
+                "title": "Tool Loop",
+                "desc": "Limit how many tool-call continuation rounds Kokoro may run for one reply.",
+                "max_rounds": "Max Tool Rounds"
+            },
+            "builtin_tools": {
+                "title": "Built-in Tools",
+                "desc": "Choose which built-in tools the model may call.",
+                "saving": "Saving...",
+                "saved_auto": "Saved automatically",
+                "items": {
+                    "get_time": {
+                        "description": "Get the current date and time."
+                    },
+                    "play_cue": {
+                        "description": "Trigger a configured Live2D cue on the active model."
+                    },
+                    "set_background": {
+                        "description": "Generate and switch to a new background from a scene description."
+                    },
+                    "search_memory": {
+                        "description": "Search stored memories about the user."
+                    },
+                    "store_memory": {
+                        "description": "Store an important fact or detail for future conversations."
+                    },
+                    "forget_memory": {
+                        "description": "Find and remove a memory when the user asks you to forget something."
+                    },
+                    "send_notification": {
+                        "description": "Show a desktop notification to the user."
+                    }
+                }
+            },
             "refresh_tooltip": "Refresh tools from all servers",
             "add_button": "ADD",
             "add_modal": {

@@ -112,6 +112,10 @@
                 "max_chars_label": "메시지당 최대 글자 수",
                 "max_chars_hint": "이 길이를 초과하는 메시지는 잘립니다. 두 전략 모두에 적용됩니다."
             },
+            "emotion": {
+                "label": "감정 시스템",
+                "desc": "로컬 ONNX 모델을 사용해 Kokoro의 최종 응답에서 응답 후 감정 상태를 추정합니다."
+            },
             "system_llm": {
                 "title": "시스템 LLM (의도 파악)",
                 "desc": "동작과 표정을 제어하는 독립 모델입니다. 비용과 지연을 줄이기 위해 더 작고 빠른 모델(예: gpt-4o-mini, llama3:8b)을 권장합니다.",
@@ -601,6 +605,40 @@
         "mcp": {
             "title": "MCP 도구 서버",
             "desc": "Model Context Protocol을 통해 외부 도구 연결",
+            "native_loop": {
+                "title": "툴 루프",
+                "desc": "한 번의 답변에서 Kokoro가 이어서 수행할 수 있는 도구 호출 라운드 수를 제한합니다.",
+                "max_rounds": "최대 도구 라운드"
+            },
+            "builtin_tools": {
+                "title": "내장 도구",
+                "desc": "모델이 호출할 수 있는 내장 도구를 선택합니다.",
+                "saving": "저장 중...",
+                "saved_auto": "자동 저장됨",
+                "items": {
+                    "get_time": {
+                        "description": "현재 날짜와 시간을 가져옵니다."
+                    },
+                    "play_cue": {
+                        "description": "현재 모델에 설정된 Live2D cue를 실행합니다."
+                    },
+                    "set_background": {
+                        "description": "장면 설명을 바탕으로 새 배경을 생성하고 전환합니다."
+                    },
+                    "search_memory": {
+                        "description": "사용자에 대한 저장된 기억을 검색합니다."
+                    },
+                    "store_memory": {
+                        "description": "앞으로의 대화를 위해 중요한 사실이나 세부 정보를 저장합니다."
+                    },
+                    "forget_memory": {
+                        "description": "잊어달라는 요청이 있을 때 관련 기억을 찾아 삭제합니다."
+                    },
+                    "send_notification": {
+                        "description": "사용자에게 데스크톱 알림을 표시합니다."
+                    }
+                }
+            },
             "refresh_tooltip": "모든 서버의 도구 새로 고침",
             "add_button": "추가",
             "add_modal": {
