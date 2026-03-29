@@ -68,7 +68,6 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
         };
         let emotion_enabled = app_handle
             .try_state::<std::sync::Arc<tokio::sync::RwLock<EmotionSettings>>>()
-            .map(|settings| settings.clone())
             .map(|settings| async move { settings.read().await.enabled });
         let emotion_enabled = match emotion_enabled {
             Some(fut) => fut.await,

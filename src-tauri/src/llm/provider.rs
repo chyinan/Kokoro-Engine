@@ -190,10 +190,10 @@ pub async fn create_chat_stream_with_tools(
                             apply_tool_call_chunks(&mut pending_tool_calls, tool_calls);
                         }
 
-                        if matches!(choice.finish_reason, Some(FinishReason::ToolCalls)) {
-                            if emit_pending_tool_calls(&mut tx, &mut pending_tool_calls).is_err() {
-                                return;
-                            }
+                        if matches!(choice.finish_reason, Some(FinishReason::ToolCalls))
+                            && emit_pending_tool_calls(&mut tx, &mut pending_tool_calls).is_err()
+                        {
+                            return;
                         }
                     }
                 }

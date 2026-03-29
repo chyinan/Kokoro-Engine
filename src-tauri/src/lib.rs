@@ -16,21 +16,6 @@ use crate::mods::ModManager;
 use std::sync::Arc;
 use tauri::Manager;
 
-/// 命令注册分组宏，按功能域组织命令，编译展开后与 generate_handler! 等价
-///
-/// 使用示例：
-/// ```ignore
-/// grouped_handlers![
-///     [cmd1, cmd2, cmd3],
-///     [cmd4, cmd5],
-/// ]
-/// ```
-macro_rules! grouped_handlers {
-    ( $( [ $( $cmd:path ),* $(,)? ] ),* $(,)? ) => {
-        tauri::generate_handler![ $( $($cmd),* ),* ]
-    };
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
