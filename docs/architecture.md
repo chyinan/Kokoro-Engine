@@ -1,7 +1,7 @@
 # Kokoro Engine — Architecture
 
 > **Version:** 2.1
-> **Last Updated:** 2026-03-01
+> **Last Updated:** 2026-03-29
 > **Companion Document:** [PRD.md](PRD.md) · [API Specification](API%20specification.md) · [MOD System Design](MOD_system_design.md)
 
 ---
@@ -335,7 +335,7 @@ graph TD
 | **Component registry** | `ComponentRegistry` — register-by-name, resolve at render time, MOD override support |
 | **Theming** | `ThemeProvider` context with CSS variable injection, MOD theme override |
 | **Typed IPC** | `kokoro-bridge.ts` wraps every `invoke()` with TypeScript types |
-| **Event streaming** | `onChatDelta` / `onChatDone` / `onChatTranslation` / `onChatError` via Tauri events |
+| **Event streaming** | Turn-scoped chat events (`onChatTurnStart`, `onChatTurnDelta`, `onChatTurnFinish`, `onChatTurnTranslation`, `onChatTurnTool`) plus `onChatCue` / `onChatError` via Tauri events |
 | **i18n** | i18next with 5 languages (zh, en, ja, ko, ru) |
 
 ### 3.2 Backend Layer
@@ -430,8 +430,10 @@ All frontend ↔ backend communication flows through **`kokoro-bridge.ts`** (fro
 | `set_character_name` | context.rs | Set character name for placeholder mapping |
 | `set_user_name` | context.rs | Set user name for placeholder mapping |
 | `get_emotion_state` | context.rs | Get current emotion and mood |
+| `get_emotion_settings` / `save_emotion_settings` | emotion_settings.rs | Enable or disable emotion updates |
 | `get_character_state` | character.rs | Character name, current cue |
 | `play_cue` | character.rs | Trigger character cue |
+| `get_tool_settings` / `save_tool_settings` | tool_settings.rs | Tool enablement and max tool rounds |
 | `list_conversations` | conversation.rs | List conversation history |
 | `load_conversation` | conversation.rs | Load specific conversation |
 | `init_db` | database.rs | Initialize SQLite database |
@@ -455,11 +457,12 @@ All frontend ↔ backend communication flows through **`kokoro-bridge.ts`** (fro
 
 | Event | Direction | Payload |
 |---|---|---|
-| `chat-delta` | BE → FE | `string` — incremental text chunk (tags buffered) |
-| `chat-done` | BE → FE | `void` — stream complete signal |
+| `chat-turn-start` | BE → FE | `{turn_id}` — assistant turn started |
+| `chat-turn-delta` | BE → FE | `{turn_id, delta}` — incremental text chunk |
+| `chat-turn-finish` | BE → FE | `{turn_id, status}` — assistant turn completed or failed |
 | `chat-error` | BE → FE | `string` — error message |
-| `chat-translation` | BE → FE | `string` — combined translation from all rounds |
-| `chat-tool-result` | BE → FE | `{tool, result}` — tool execution result |
+| `chat-turn-translation` | BE → FE | `{turn_id, translation}` — combined translation for the turn |
+| `chat-turn-tool` | BE → FE | `{turn_id, tool, result|error}` — tool execution result |
 | `chat-cue` | BE → FE | `{cue, source}` — Live2D cue playback |
 | `chat-image-gen` | BE → FE | Image generation event |
 | `proactive-trigger` | BE → FE | Proactive message trigger |
@@ -482,17 +485,17 @@ User message
                               ┌─────────────────────┘
                               ▼
                      ┌─────────────────┐
-                     │  Tool Feedback  │ (max 5 rounds)
+                     │  Tool Feedback  │ (configurable, default 10 rounds)
                      │     Loop        │
                      └────────┬────────┘
                               │
               ┌───────────────┼───────────────┐
               ▼               ▼               ▼
         ┌──────────┐   ┌──────────┐   ┌──────────┐
-        │chat-delta│   │ Parse    │   │ Execute  │
-        │ events   │   │[TOOL_CALL│   │ Actions  │
-        │(buffered)│   │  tags]   │   │          │
-        └──────────┘   └──────────┘   └────┬─────┘
+        │chat-turn-│   │ Parse    │   │ Execute  │
+        │ delta    │   │[TOOL_CALL│   │ Actions  │
+        │ events   │   │  tags]   │   │          │
+        │(buffered)│   └──────────┘   └────┬─────┘
                                            │
                               ┌─────────────┘
                               ▼
@@ -507,15 +510,22 @@ User message
 ```
 
 **Tool Feedback Loop** (`commands/chat.rs`):
-1. LLM streams response → `chat-delta` events (with tag buffering)
-2. Parse `[TOOL_CALL:name|args]` tags from response
-3. If no tool calls → break (final round)
-4. Execute tools via `ActionRegistry`
-5. Check `needs_feedback()` — info-retrieval tools (get_time, search_memory, MCP tools) return `true`; side-effect tools (play_cue, play_sound) return `false`
-6. If any tool needs feedback → inject assistant message + tool results into context → next round
-7. If no tool needs feedback → break
+1. Emit `chat-turn-start` for the assistant turn
+2. LLM streams response → `chat-turn-delta` events (with tag buffering)
+3. Parse `[TOOL_CALL:name|args]` tags from response
+4. If no tool calls → break (final round)
+5. Execute tools via `ActionRegistry`
+6. Check `needs_feedback()` — info-retrieval tools (get_time, search_memory, MCP tools) return `true`; side-effect tools (play_cue, play_sound) return `false`
+7. If any tool needs feedback → inject assistant message + tool results into context → next round
+8. If no tool needs feedback → break
+9. Emit `chat-turn-finish`, plus `chat-turn-translation` / `chat-cue` when applicable
 
 **Stream Buffering**: `[TOOL_CALL:...]` and `[TRANSLATE:...]` tags are held in a buffer during streaming and never sent to the frontend raw.
+
+**Prompt Assembly Notes**:
+- current emotion state is not injected into the main chat prompt
+- active Live2D cue names are injected when a model profile exposes prompt-visible cues
+- cues marked `exclude_from_prompt` stay available at runtime but are hidden from prompt guidance
 
 ### 5.2 Action System
 
@@ -662,28 +672,29 @@ sequenceDiagram
     CP->>BR: streamChat(request)
     BR->>CMD: invoke("stream_chat")
     CMD->>AI: compose_prompt()
+    CMD-->>BR: emit("chat-turn-start", turn_id)
 
-    loop Tool Feedback Loop (max 5 rounds)
+    loop Tool Feedback Loop (configurable, default 10 rounds)
         AI->>LLM: POST /chat/completions (stream)
         loop SSE chunks
             LLM-->>CMD: data: {"delta": "..."}
-            CMD-->>BR: emit("chat-delta", buffered text)
-            BR-->>CP: onChatDelta callback
+            CMD-->>BR: emit("chat-turn-delta", {turn_id, delta})
+            BR-->>CP: onChatTurnDelta callback
         end
         CMD->>CMD: parse [TOOL_CALL:...] tags
         alt Has tool calls with needs_feedback
             CMD->>ACT: execute tools
             ACT-->>CMD: tool results
-            CMD-->>BR: emit("chat-tool-result")
+            CMD-->>BR: emit("chat-turn-tool")
             CMD->>CMD: inject results → next round
         else No tool calls or no feedback needed
             CMD->>CMD: break loop
         end
     end
 
-    CMD-->>BR: emit("chat-translation", combined)
-    CMD-->>BR: emit("chat-done")
-    BR-->>CP: onChatDone callback
+    CMD-->>BR: emit("chat-turn-translation", combined)
+    CMD-->>BR: emit("chat-turn-finish", status)
+    BR-->>CP: onChatTurnFinish callback
 ```
 
 ### 6.2 TTS Flow
