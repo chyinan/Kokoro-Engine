@@ -11,6 +11,7 @@ jobs:
       pull-requests: write
       issues: write
       contents: read
+    environment: production
 
     steps:
       - uses: actions/checkout@v4
@@ -70,9 +71,17 @@ jobs:
               return;
             }
 
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: review
-            });
+            try {
+              await github.rest.pulls.createReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.pull_request.number,
+                body: review,
+                event: 'COMMENT'
+              });
+              console.log('Review posted successfully');
+            } catch (error) {
+              console.error('Failed to post review:', error);
+              throw error;
+            }
+
