@@ -29,6 +29,53 @@ interface PendingTurnState {
     tools: { text: string; isError?: boolean }[];
 }
 
+const stripStreamingMarkup = (text: string) =>
+    text
+        .replace(/\[ACTION:\w+\]\s*/g, "")
+        .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
+        .replace(/\[TRANSLATE:[^\]]*\]\s*/g, "")
+        .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "");
+
+const stripStoredMarkup = (text: string) =>
+    stripStreamingMarkup(text)
+        .replace(/\[EMOTION:[^\]]*\]/g, "")
+        .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
+        .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "");
+
+const hasActiveKokoroBubble = (messages: ChatMessage[], index: number | null) =>
+    index !== null &&
+    index >= 0 &&
+    index < messages.length &&
+    messages[index]?.role === "kokoro";
+
+const ensureTurnMessage = (messages: ChatMessage[], turn: PendingTurnState) => {
+    if (hasActiveKokoroBubble(messages, turn.messageIndex)) {
+        return [...messages];
+    }
+
+    const next = [...messages, {
+        role: "kokoro" as const,
+        text: "",
+        tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
+    }];
+    turn.messageIndex = next.length - 1;
+    return next;
+};
+
+const updateTurnMessage = (
+    messages: ChatMessage[],
+    turn: PendingTurnState,
+    updater: (current: ChatMessage) => ChatMessage
+) => {
+    if (!hasActiveKokoroBubble(messages, turn.messageIndex)) {
+        return messages;
+    }
+
+    const next = [...messages];
+    next[turn.messageIndex!] = updater(next[turn.messageIndex!]);
+    return next;
+};
+
 // ── Typing Indicator ───────────────────────────────────────
 function TypingIndicator() {
     return (
@@ -137,14 +184,7 @@ export default function ChatPanel() {
         onReveal: (visibleText: string) => {
             setMessages(prev => {
                 const activeIndex = currentTurnRef.current?.messageIndex;
-                if (
-                    activeIndex !== null &&
-                    activeIndex !== undefined &&
-                    activeIndex >= 0 &&
-                    activeIndex < prev.length &&
-                    prev[activeIndex]?.role === "kokoro" &&
-                    isStreamingRef.current
-                ) {
+                if (activeIndex !== null && activeIndex !== undefined && hasActiveKokoroBubble(prev, activeIndex) && isStreamingRef.current) {
                     const next = [...prev];
                     next[activeIndex] = { ...next[activeIndex], text: visibleText };
                     return next;
@@ -400,34 +440,14 @@ export default function ChatPanel() {
                 const turn = currentTurnRef.current;
                 if (!turn || turn.turnId !== turn_id) return;
 
-                const delta = rawDelta
-                    .replace(/\[ACTION:\w+\]\s*/g, "")
-                    .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
-                    .replace(/\[TRANSLATE:[^\]]*\]\s*/g, "")
-                    .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "");
+                const delta = stripStreamingMarkup(rawDelta);
                 if (!delta) return;
 
                 setIsThinking(false);
                 turn.rawText += delta;
                 rawResponseRef.current = turn.rawText;
 
-                setMessages(prev => {
-                    const next = [...prev];
-                    if (
-                        turn.messageIndex === null ||
-                        turn.messageIndex < 0 ||
-                        turn.messageIndex >= next.length ||
-                        next[turn.messageIndex]?.role !== "kokoro"
-                    ) {
-                        next.push({
-                            role: "kokoro",
-                            text: "",
-                            tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
-                        });
-                        turn.messageIndex = next.length - 1;
-                    }
-                    return next;
-                });
+                setMessages(prev => ensureTurnMessage(prev, turn));
 
                 pushDelta(delta);
             });
@@ -455,47 +475,34 @@ export default function ChatPanel() {
 
                 const fullText = turn.rawText;
                 rawResponseRef.current = fullText;
-                const cleanText = fullText
-                    .replace(/\[ACTION:\w+\]\s*/g, "")
-                    .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
-                    .replace(/\[EMOTION:[^\]]*\]/g, "")
-                    .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-                    .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "")
-                    .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "");
+                const cleanText = stripStoredMarkup(fullText);
 
                 setMessages(prev => {
-                    const next = [...prev];
                     const hasContent = Boolean(cleanText) || turn.tools.length > 0;
 
-                    if (
-                        turn.messageIndex !== null &&
-                        turn.messageIndex >= 0 &&
-                        turn.messageIndex < next.length &&
-                        next[turn.messageIndex]?.role === "kokoro"
-                    ) {
+                    if (hasActiveKokoroBubble(prev, turn.messageIndex)) {
                         if (!hasContent && status === "error") {
-                            return [...next.slice(0, turn.messageIndex), ...next.slice(turn.messageIndex + 1)];
+                            return [...prev.slice(0, turn.messageIndex!), ...prev.slice(turn.messageIndex! + 1)];
                         }
 
-                        next[turn.messageIndex] = {
-                            ...next[turn.messageIndex],
+                        return updateTurnMessage(prev, turn, (current) => ({
+                            ...current,
                             text: cleanText,
                             translation: turn.translation,
                             tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
-                        };
-                        return next;
+                        }));
                     }
 
                     if (hasContent) {
-                        next.push({
+                        return [...prev, {
                             role: "kokoro",
                             text: cleanText,
                             translation: turn.translation,
                             tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
-                        });
+                        }];
                     }
 
-                    return next;
+                    return prev;
                 });
 
                 currentTurnRef.current = null;
@@ -538,22 +545,10 @@ export default function ChatPanel() {
 
                 turn.tools = [...turn.tools, toolEntry];
                 setMessages(prev => {
-                    const next = [...prev];
-                    if (
-                        turn.messageIndex === null ||
-                        turn.messageIndex < 0 ||
-                        turn.messageIndex >= next.length ||
-                        next[turn.messageIndex]?.role !== "kokoro"
-                    ) {
-                        return next;
-                    }
-
-                    const current = next[turn.messageIndex];
-                    next[turn.messageIndex] = {
+                    return updateTurnMessage(prev, turn, (current) => ({
                         ...current,
                         tools: [...(current.tools || []), toolEntry],
-                    };
-                    return next;
+                    }));
                 });
             });
             if (aborted) { unToolResult(); return; }
