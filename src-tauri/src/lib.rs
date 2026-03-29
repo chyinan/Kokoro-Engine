@@ -16,173 +16,148 @@ use crate::mods::ModManager;
 use std::sync::Arc;
 use tauri::Manager;
 
-/// 命令注册分组宏，按功能域组织命令，编译展开后与 generate_handler! 等价
-///
-/// 使用示例：
-/// ```ignore
-/// grouped_handlers![
-///     [cmd1, cmd2, cmd3],
-///     [cmd4, cmd5],
-/// ]
-/// ```
-macro_rules! grouped_handlers {
-    ( $( [ $( $cmd:path ),* $(,)? ] ),* $(,)? ) => {
-        tauri::generate_handler![ $( $($cmd),* ),* ]
-    };
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .register_uri_scheme_protocol("mod", crate::mods::protocol::handle_mod_request)
         .register_uri_scheme_protocol("live2d", commands::live2d_protocol::handle_live2d_request())
-        .invoke_handler(grouped_handlers![
-            // 系统/UI 域
-            [
-                commands::system::get_engine_info,
-                commands::system::get_system_status,
-                commands::system::set_window_size,
-                commands::character::get_character_state,
-                commands::character::set_expression,
-                commands::character::send_message,
-                commands::pet::show_pet_window,
-                commands::pet::hide_pet_window,
-                commands::pet::set_pet_drag_mode,
-                commands::pet::get_pet_config,
-                commands::pet::save_pet_config,
-                commands::pet::move_pet_window,
-                commands::pet::resize_pet_window,
-                commands::pet::show_bubble_window,
-                commands::pet::update_bubble_text,
-                commands::pet::hide_bubble_window,
-            ],
-            // 数据库/持久化 域
-            [
-                commands::database::init_db,
-                commands::database::test_vector_store,
-                commands::characters::list_characters,
-                commands::characters::create_character,
-                commands::characters::update_character,
-                commands::characters::delete_character,
-                commands::conversation::list_conversations,
-                commands::conversation::load_conversation,
-                commands::conversation::delete_conversation,
-                commands::conversation::create_conversation,
-                commands::conversation::rename_conversation,
-                commands::conversation::list_character_ids,
-                commands::memory::list_memories,
-                commands::memory::update_memory,
-                commands::memory::delete_memory,
-                commands::memory::update_memory_tier,
-            ],
-            // AI 核心 域
-            [
-                commands::chat::stream_chat,
-                commands::chat::get_context_settings,
-                commands::chat::set_context_settings,
-                commands::context::set_persona,
-                commands::context::set_character_name,
-                commands::context::set_active_character_id,
-                commands::context::set_user_name,
-                commands::context::get_emotion_state,
-                commands::context::set_response_language,
-                commands::context::set_user_language,
-                commands::context::set_jailbreak_prompt,
-                commands::context::get_jailbreak_prompt,
-                commands::context::set_proactive_enabled,
-                commands::context::get_proactive_enabled,
-                commands::context::set_memory_enabled,
-                commands::context::get_memory_enabled,
-                commands::context::clear_history,
-                commands::context::delete_last_messages,
-                commands::context::end_session,
-                commands::actions::list_actions,
-                commands::actions::execute_action,
-            ],
-            // 音频 域
-            [
-                commands::tts::synthesize,
-                commands::tts::list_tts_providers,
-                commands::tts::list_tts_voices,
-                commands::tts::get_tts_provider_status,
-                commands::tts::clear_tts_cache,
-                commands::tts::get_tts_config,
-                commands::tts::save_tts_config,
-                commands::tts::list_gpt_sovits_models,
-                commands::stt::transcribe_audio,
-                commands::stt::get_stt_config,
-                commands::stt::save_stt_config,
-                commands::stt::transcribe_wake_word_audio,
-                commands::stt::start_native_mic,
-                commands::stt::stop_native_mic,
-                commands::stt::start_native_wake_word,
-                commands::stt::stop_native_wake_word,
-                commands::stt::get_sensevoice_local_status,
-                commands::stt::download_sensevoice_local_model,
-                stt::stream::process_audio_chunk,
-                stt::stream::complete_audio_stream,
-                stt::stream::discard_audio_stream,
-                stt::stream::snapshot_audio_stream,
-                stt::stream::prune_audio_buffer,
-                commands::singing::check_rvc_status,
-                commands::singing::list_rvc_models,
-                commands::singing::convert_singing,
-            ],
-            // 视觉/图像 域
-            [
-                commands::vision::upload_vision_image,
-                commands::vision::get_vision_config,
-                commands::vision::save_vision_config,
-                commands::vision::start_vision_watcher,
-                commands::vision::stop_vision_watcher,
-                commands::vision::capture_screen_now,
-                commands::imagegen::generate_image,
-                commands::imagegen::get_imagegen_config,
-                commands::imagegen::save_imagegen_config,
-                commands::imagegen::test_sd_connection,
-            ],
-            // MOD/Live2D 域
-            [
-                commands::mods::list_mods,
-                commands::mods::load_mod,
-                commands::mods::install_mod,
-                commands::mods::get_mod_theme,
-                commands::mods::get_mod_layout,
-                commands::mods::dispatch_mod_event,
-                commands::mods::unload_mod,
-                commands::live2d::import_live2d_zip,
-                commands::live2d::import_live2d_folder,
-                commands::live2d::list_live2d_models,
-                commands::live2d::delete_live2d_model,
-            ],
-            // 外部集成/备份 域
-            [
-                commands::llm::get_llm_config,
-                commands::llm::save_llm_config,
-                commands::llm::list_ollama_models,
-                commands::llm::pull_ollama_model,
-                commands::mcp::list_mcp_servers,
-                commands::mcp::add_mcp_server,
-                commands::mcp::remove_mcp_server,
-                commands::mcp::refresh_mcp_tools,
-                commands::mcp::reconnect_mcp_server,
-                commands::mcp::toggle_mcp_server,
-                commands::telegram::get_telegram_config,
-                commands::telegram::save_telegram_config,
-                commands::telegram::start_telegram_bot,
-                commands::telegram::stop_telegram_bot,
-                commands::telegram::get_telegram_status,
-                commands::backup::export_data,
-                commands::backup::preview_import,
-                commands::backup::import_data,
-                commands::auto_backup::get_auto_backup_config,
-                commands::auto_backup::save_auto_backup_config,
-                commands::auto_backup::run_auto_backup_now,
-            ],
+        .invoke_handler(tauri::generate_handler![
+            commands::system::get_engine_info,
+            commands::system::get_system_status,
+            commands::system::set_window_size,
+            commands::character::get_character_state,
+            commands::character::play_cue,
+            commands::character::send_message,
+            commands::database::init_db,
+            commands::database::test_vector_store,
+            commands::chat::stream_chat,
+            commands::chat::get_context_settings,
+            commands::chat::set_context_settings,
+            commands::context::set_persona,
+            commands::context::set_character_name,
+            commands::context::set_active_character_id,
+            commands::context::set_user_name,
+            commands::context::get_emotion_state,
+            commands::context::set_response_language,
+            commands::context::set_user_language,
+            commands::context::set_jailbreak_prompt,
+            commands::context::get_jailbreak_prompt,
+            commands::context::set_proactive_enabled,
+            commands::context::get_proactive_enabled,
+            commands::context::set_memory_enabled,
+            commands::context::get_memory_enabled,
+            commands::emotion_settings::get_emotion_settings,
+            commands::emotion_settings::save_emotion_settings,
+            commands::context::clear_history,
+            commands::context::delete_last_messages,
+            commands::context::end_session,
+            commands::tts::synthesize,
+            commands::tts::list_tts_providers,
+            commands::tts::list_tts_voices,
+            commands::tts::get_tts_provider_status,
+            commands::tts::clear_tts_cache,
+            commands::tts::get_tts_config,
+            commands::tts::save_tts_config,
+            commands::tts::list_gpt_sovits_models,
+            commands::mods::list_mods,
+            commands::mods::load_mod,
+            commands::mods::install_mod,
+            commands::mods::get_mod_theme,
+            commands::mods::get_mod_layout,
+            commands::mods::dispatch_mod_event,
+            commands::mods::unload_mod,
+            commands::live2d::import_live2d_zip,
+            commands::live2d::import_live2d_folder,
+            commands::live2d::export_live2d_model,
+            commands::live2d::list_live2d_models,
+            commands::live2d::delete_live2d_model,
+            commands::live2d::rename_live2d_model,
+            commands::live2d::get_live2d_model_profile,
+            commands::live2d::save_live2d_model_profile,
+            commands::live2d::set_active_live2d_model,
+            commands::imagegen::generate_image,
+            commands::imagegen::get_imagegen_config,
+            commands::imagegen::save_imagegen_config,
+            commands::imagegen::test_sd_connection,
+            commands::vision::upload_vision_image,
+            commands::vision::get_vision_config,
+            commands::vision::save_vision_config,
+            commands::vision::start_vision_watcher,
+            commands::vision::stop_vision_watcher,
+            commands::vision::capture_screen_now,
+            commands::memory::list_memories,
+            commands::memory::update_memory,
+            commands::memory::delete_memory,
+            commands::memory::update_memory_tier,
+            commands::characters::list_characters,
+            commands::characters::create_character,
+            commands::characters::update_character,
+            commands::characters::delete_character,
+            commands::conversation::list_conversations,
+            commands::conversation::load_conversation,
+            commands::conversation::delete_conversation,
+            commands::conversation::create_conversation,
+            commands::conversation::rename_conversation,
+            commands::conversation::list_character_ids,
+            commands::llm::get_llm_config,
+            commands::llm::save_llm_config,
+            commands::llm::list_ollama_models,
+            commands::stt::transcribe_audio,
+            commands::stt::get_stt_config,
+            commands::stt::save_stt_config,
+            commands::stt::transcribe_wake_word_audio,
+            commands::stt::start_native_mic,
+            commands::stt::stop_native_mic,
+            commands::stt::start_native_wake_word,
+            commands::stt::stop_native_wake_word,
+            commands::stt::get_sensevoice_local_status,
+            commands::stt::download_sensevoice_local_model,
+            commands::actions::list_actions,
+            commands::actions::list_builtin_tools,
+            commands::actions::execute_action,
+            commands::tool_settings::get_tool_settings,
+            commands::tool_settings::save_tool_settings,
+            commands::mcp::list_mcp_servers,
+            commands::mcp::add_mcp_server,
+            commands::mcp::remove_mcp_server,
+            commands::mcp::refresh_mcp_tools,
+            commands::mcp::reconnect_mcp_server,
+            commands::mcp::toggle_mcp_server,
+            commands::singing::check_rvc_status,
+            commands::singing::list_rvc_models,
+            commands::singing::list_rvc_models,
+            commands::singing::convert_singing,
+            commands::telegram::get_telegram_config,
+            commands::telegram::save_telegram_config,
+            commands::telegram::start_telegram_bot,
+            commands::telegram::stop_telegram_bot,
+            commands::telegram::get_telegram_status,
+            commands::backup::export_data,
+            commands::backup::preview_import,
+            commands::backup::import_data,
+            commands::auto_backup::get_auto_backup_config,
+            commands::auto_backup::save_auto_backup_config,
+            commands::auto_backup::run_auto_backup_now,
+            commands::pet::show_pet_window,
+            commands::pet::hide_pet_window,
+            commands::pet::set_pet_drag_mode,
+            commands::pet::get_pet_config,
+            commands::pet::save_pet_config,
+            commands::pet::move_pet_window,
+            commands::pet::resize_pet_window,
+            commands::pet::show_bubble_window,
+            commands::pet::update_bubble_text,
+            commands::pet::hide_bubble_window,
+            stt::stream::process_audio_chunk,
+            stt::stream::complete_audio_stream,
+            stt::stream::discard_audio_stream,
+            stt::stream::snapshot_audio_stream,
+            stt::stream::prune_audio_buffer,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
@@ -254,6 +229,14 @@ pub fn run() {
                             }
                         }
 
+                        let tool_settings_path = app_data_dir.join("tool_settings.json");
+                        let tool_settings = crate::actions::tool_settings::load_config(&tool_settings_path);
+                        app_handle.manage(Arc::new(tokio::sync::RwLock::new(tool_settings)));
+
+                        let emotion_settings_path = app_data_dir.join("emotion_settings.json");
+                        let emotion_settings = crate::ai::emotion_settings::load_config(&emotion_settings_path);
+                        app_handle.manage(Arc::new(tokio::sync::RwLock::new(emotion_settings)));
+
                         // Restore current_conversation_id from disk and reload history
                         let conv_id_path = app_data_dir.join("current_conversation_id.json");
                         if let Ok(content) = std::fs::read_to_string(&conv_id_path) {
@@ -264,19 +247,21 @@ pub fn run() {
                                         *conv_id = Some(id.to_string());
                                     }
                                     // Reload messages into in-memory history so LLM has conversation context
-                                    if let Ok(rows) = sqlx::query_as::<_, (String, String)>(
-                                        "SELECT role, content FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC"
+                                    if let Ok(rows) = sqlx::query_as::<_, (String, String, Option<String>)>(
+                                        "SELECT role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC"
                                     )
                                     .bind(id)
                                     .fetch_all(&orchestrator.db)
                                     .await {
                                         let mut history = orchestrator.history.lock().await;
                                         history.clear();
-                                        for (role, content) in &rows {
+                                        for (role, content, metadata) in &rows {
                                             history.push_back(crate::ai::context::Message {
                                                 role: role.clone(),
                                                 content: content.clone(),
-                                                metadata: None,
+                                                metadata: metadata
+                                                    .as_deref()
+                                                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
                                             });
                                         }
                                         println!("[AI] Restored current_conversation_id: {} ({} messages)", id, rows.len());

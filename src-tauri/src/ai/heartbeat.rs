@@ -4,6 +4,8 @@
 //! and triggers proactive messages or idle animations.
 
 use crate::ai::context::AIOrchestrator;
+use crate::ai::emotion::EmotionState;
+use crate::ai::emotion_settings::EmotionSettings;
 use crate::ai::initiative::InitiativeDecision;
 use chrono::Timelike;
 use serde::Serialize;
@@ -64,6 +66,13 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
             Some(state) => state,
             None => continue,
         };
+        let emotion_enabled = app_handle
+            .try_state::<std::sync::Arc<tokio::sync::RwLock<EmotionSettings>>>()
+            .map(|settings| async move { settings.read().await.enabled });
+        let emotion_enabled = match emotion_enabled {
+            Some(fut) => fut.await,
+            None => true,
+        };
 
         // Gather metrics
         let idle_secs = orchestrator.idle_seconds().await;
@@ -81,14 +90,16 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
         // 2. Idle Behaviors (Animations)
         {
             let emotion = orchestrator.emotion_state.lock().await;
+            let neutral_emotion = EmotionState::new(emotion.personality().clone());
             let mut idle_sys = orchestrator.idle_behaviors.lock().await;
-            if let Some(behavior) = idle_sys.decide(&emotion, idle_secs) {
+            let emotion_ref = if emotion_enabled { &*emotion } else { &neutral_emotion };
+            if let Some(behavior) = idle_sys.decide(emotion_ref, idle_secs) {
                 let _ = app_handle.emit("idle-behavior", IdleBehaviorEvent { behavior });
             }
         }
 
         // 3. Emotion System (Decay, Snapshot, Expression Frame)
-        {
+        if emotion_enabled {
             let mut emotion = orchestrator.emotion_state.lock().await;
 
             // Decay
@@ -152,8 +163,10 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
                 let mut initiative = orchestrator.initiative.lock().await;
                 let mut curiosity = orchestrator.curiosity.lock().await;
                 let emotion = orchestrator.emotion_state.lock().await;
+                let neutral_emotion = EmotionState::new(emotion.personality().clone());
+                let emotion_ref = if emotion_enabled { &*emotion } else { &neutral_emotion };
 
-                initiative.decide(&mut curiosity, &emotion, conversation_count, idle_secs)
+                initiative.decide(&mut curiosity, emotion_ref, conversation_count, idle_secs)
             };
 
             match decision {

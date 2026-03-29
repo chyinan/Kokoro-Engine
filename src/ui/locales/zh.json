@@ -5,9 +5,11 @@
             "saved": "已保存",
             "cancel": "取消",
             "edit": "编辑",
+            "preview": "预览",
             "done": "完成",
             "delete": "删除",
-            "add": "添加"
+            "add": "添加",
+            "rename": "重命名"
         }
     },
     "sing": {
@@ -92,6 +94,11 @@
             "model_label": "模型名称",
             "fetch_models": "获取可用模型",
             "fetching": "获取中...",
+            "native_tools": {
+                "label": "工具调用",
+                "toggle": "启用原生工具调用",
+                "desc": "使用当前 model/provider 的原生 tool calling 接口，而不是伪造的 [TOOL_CALL:...] 标签。"
+            },
             "save_config": "保存 LLM 配置",
             "saving": "保存中...",
             "vision_mode": "视觉模式",
@@ -105,6 +112,10 @@
                 "strategy_summary_desc": "压缩旧消息为摘要",
                 "max_chars_label": "单条消息最大字符数",
                 "max_chars_hint": "超出长度的消息将被截断，两种策略均生效"
+            },
+            "emotion": {
+                "label": "情绪系统",
+                "desc": "使用本地 ONNX 模型从 Kokoro 的最终回复中识别回复后的情绪状态。"
             },
             "system_llm": {
                 "title": "系统 LLM (意图解析)",
@@ -310,6 +321,14 @@
                 "loading": "导入中...",
                 "hint": "选择 .zip 压缩包或 .model3.json 文件。"
             },
+            "rename": {
+                "prompt": "输入新的模型名称"
+            },
+            "export": {
+                "button": "导出 Live2D",
+                "loading": "导出中...",
+                "hint": "导出的压缩包会包含模型文件以及 Kokoro 的 cue 映射。"
+            },
             "gaze_tracking": {
                 "label": "视线跟随",
                 "desc": "模型眼球跟随鼠标光标移动"
@@ -321,6 +340,90 @@
                     "fps_60": "60 FPS",
                     "unlimited": "无限制",
                     "custom": "自定义"
+                }
+            },
+            "mapping": {
+                "select_model": "选择一个导入模型以编辑其映射。",
+                "loading_profile": "正在加载模型配置...",
+                "placeholders": {
+                    "cue_name": "cue 名称"
+                },
+                "options": {
+                    "select_cue": "选择 cue",
+                    "no_expression": "无表情",
+                    "no_motion_group": "无动作组"
+                },
+                "actions": {
+                    "save_cue": "保存 Cue",
+                    "save_interaction": "保存交互映射",
+                    "save_semantic": "保存语义映射",
+                    "clear": "清空",
+                    "exclude_from_prompt": "排除出提示词",
+                    "include_in_prompt": "加入提示词"
+                },
+                "cues": {
+                    "title": "Cue 映射",
+                    "desc": "导入模型使用每模型独立的 cue。将你自己的 cue 名称映射到模型表情或动作组。"
+                },
+                "available_expressions": "表情 ({{count}})",
+                "available_motion_groups": "动作组 ({{count}})",
+                "configured_cues": "已配置 Cue ({{count}})",
+                "empty_cues": "还没有配置任何 cue。",
+                "interactions": {
+                    "title": "交互映射",
+                    "desc": "将手势和身体部位语义事件映射到 cue。匹配顺序为精确匹配、手势通配、部位通配、全局通配。",
+                    "configured": "已配置交互规则 ({{count}})",
+                    "empty": "还没有交互 cue 映射。"
+                },
+                "semantic": {
+                    "title": "语义事件映射",
+                    "desc": "将非交互语义事件映射到 cue。这些映射用于情绪事件以及其他与模型无关的逻辑。",
+                    "configured": "已配置语义规则 ({{count}})",
+                    "empty": "还没有语义 cue 映射。"
+                },
+                "summary": {
+                    "expression": "表情: {{value}}",
+                    "expression_none": "表情: 无",
+                    "motion": "动作: {{value}}",
+                    "motion_none": "动作: 无",
+                    "cue": "cue: {{value}}",
+                    "prompt_hidden": "已从提示词排除"
+                },
+                "prompt_exclusions": {
+                    "title": "提示词排除",
+                    "desc": "默认所有 cue 都会暴露给聊天模型。这里只列出不希望进入模型提示词的 cue。",
+                    "select_cue": "选择要排除的 cue",
+                    "empty": "当前没有被排除的 cue。"
+                },
+                "gestures": {
+                    "tap": "轻点",
+                    "long_press": "长按",
+                    "rapid_tap": "快速连点",
+                    "any": "任意手势"
+                },
+                "areas": {
+                    "eyes": "眼睛",
+                    "lips": "嘴唇",
+                    "face": "脸部",
+                    "head": "头部",
+                    "hair": "头发",
+                    "hand": "手",
+                    "arm": "手臂",
+                    "chest": "胸部",
+                    "body": "身体",
+                    "leg": "腿",
+                    "skirt": "裙子",
+                    "accessory": "饰品",
+                    "any": "任意部位"
+                },
+                "semantic_keys": {
+                    "emotion": {
+                        "ecstatic": "情绪: 狂喜",
+                        "very_happy": "情绪: 非常开心",
+                        "sulking": "情绪: 闷闷不乐",
+                        "very_sad": "情绪: 非常难过",
+                        "mood_swing": "情绪: 情绪波动"
+                    }
                 }
             }
         },
@@ -468,6 +571,7 @@
                 "not_installed_prefix": "(未安装)",
                 "install_warning": "模型 \"{{model}}\" 未安装",
                 "install_desc": "需要先下载此视觉模型才能使用。",
+                "install_desc_manual": "这个模型当前还没安装到 Ollama。请先在 Ollama 里手动 pull，然后回这里刷新模型列表。",
                 "install_btn": "安装 {{model}}",
                 "installing": "正在安装 {{model}}...",
                 "success": "模型 \"{{model}}\" 安装成功！",
@@ -519,6 +623,40 @@
         "mcp": {
             "title": "MCP 工具服务器",
             "desc": "通过模型上下文协议 (MCP) 连接外部工具",
+            "native_loop": {
+                "title": "工具循环",
+                "desc": "限制 Kokoro 在单次回复中可进行的工具调用续写轮次。",
+                "max_rounds": "最大工具轮次"
+            },
+            "builtin_tools": {
+                "title": "内置工具",
+                "desc": "选择允许模型调用哪些内置工具。",
+                "saving": "保存中...",
+                "saved_auto": "已自动保存",
+                "items": {
+                    "get_time": {
+                        "description": "获取当前日期和时间。"
+                    },
+                    "play_cue": {
+                        "description": "触发当前模型已配置的 Live2D cue。"
+                    },
+                    "set_background": {
+                        "description": "根据场景描述生成并切换新的背景。"
+                    },
+                    "search_memory": {
+                        "description": "搜索关于用户的已存记忆。"
+                    },
+                    "store_memory": {
+                        "description": "为后续对话存储重要事实或细节。"
+                    },
+                    "forget_memory": {
+                        "description": "当用户要求遗忘时，查找并删除相关记忆。"
+                    },
+                    "send_notification": {
+                        "description": "向用户显示桌面通知。"
+                    }
+                }
+            },
             "refresh_tooltip": "刷新所有服务器的工具",
             "add_button": "添加",
             "add_modal": {
@@ -682,24 +820,20 @@
     },
     "footer": {
         "emotions": {
-            "calm": "平静",
-            "happy": "开心",
-            "excited": "兴奋",
-            "smug": "得意",
-            "shy": "害羞",
-            "thinking": "思考",
-            "surprised": "惊讶",
-            "worried": "担心",
-            "sad": "悲伤",
-            "angry": "生气"
+            "neutral": "中性",
+            "joy": "喜悦",
+            "love": "喜爱",
+            "sadness": "悲伤",
+            "anger": "愤怒",
+            "fear": "恐惧",
+            "surprise": "惊讶"
         },
         "mode": {
             "auto": "自动",
             "manual": "手动",
             "auto_desc": "由 AI 控制表情",
             "manual_desc": "手动控制表情"
-        },
-        "set_expression": "设置表情: "
+        }
     },
     "mods": {
         "title": "模组管理器",

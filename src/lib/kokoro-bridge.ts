@@ -25,14 +25,14 @@ export interface SystemStatus {
 
 export interface CharacterState {
     name: string;
-    current_expression: string;
+    current_cue: string;
     mood: number;
     is_speaking: boolean;
 }
 
 export interface ChatResponse {
     text: string;
-    expression: string;
+    cue: string;
     mood_delta: number;
 }
 
@@ -56,8 +56,8 @@ export async function getCharacterState(): Promise<CharacterState> {
     return invoke<CharacterState>("get_character_state");
 }
 
-export async function setExpression(expression: string): Promise<CharacterState> {
-    return invoke<CharacterState>("set_expression", { expression });
+export async function playCue(cue: string): Promise<CharacterState> {
+    return invoke<CharacterState>("play_cue", { cue });
 }
 
 // ── Database Commands ──────────────────────────────
@@ -139,6 +139,18 @@ export async function getMemoryEnabled(): Promise<boolean> {
     return invoke<boolean>("get_memory_enabled");
 }
 
+export interface EmotionSettings {
+    enabled: boolean;
+}
+
+export async function getEmotionSettings(): Promise<EmotionSettings> {
+    return invoke<EmotionSettings>("get_emotion_settings");
+}
+
+export async function saveEmotionSettings(settings: EmotionSettings): Promise<void> {
+    return invoke("save_emotion_settings", { settings });
+}
+
 // ── Context Settings ───────────────────────────────
 
 export interface ContextSettings {
@@ -164,6 +176,7 @@ export interface LlmProviderConfig {
     id: string;
     provider_type: string;
     enabled: boolean;
+    supports_native_tools: boolean;
     api_key?: string;
     api_key_env?: string;
     base_url?: string;
@@ -206,21 +219,6 @@ export async function listOllamaModels(baseUrl: string): Promise<OllamaModelInfo
     return invoke<OllamaModelInfo[]>("list_ollama_models", { baseUrl });
 }
 
-export interface OllamaPullProgress {
-    status: string;
-    digest?: string;
-    total?: number;
-    completed?: number;
-}
-
-export async function pullOllamaModel(baseUrl: string, model: string): Promise<void> {
-    return invoke("pull_ollama_model", { baseUrl, model });
-}
-
-export async function onOllamaPullProgress(callback: (p: OllamaPullProgress) => void): Promise<UnlistenFn> {
-    return listen<OllamaPullProgress>("ollama:pull-progress", (event) => callback(event.payload));
-}
-
 // ── LLM Streaming ──────────────────────────────────
 
 export interface ChatRequest {
@@ -239,45 +237,65 @@ export async function streamChat(request: ChatRequest): Promise<void> {
     return invoke("stream_chat", { request });
 }
 
-export async function onChatDelta(callback: (delta: string) => void): Promise<UnlistenFn> {
-    return listen<string>("chat-delta", (event) => callback(event.payload));
-}
-
 export async function onChatError(callback: (error: string) => void): Promise<UnlistenFn> {
     return listen<string>("chat-error", (event) => callback(event.payload));
 }
 
-export async function onChatDone(callback: () => void): Promise<UnlistenFn> {
-    return listen<void>("chat-done", () => callback());
+export interface ChatTurnStartEvent {
+    turn_id: string;
 }
 
-export async function onChatTranslation(callback: (translation: string) => void): Promise<UnlistenFn> {
-    return listen<string>("chat-translation", (event) => callback(event.payload));
+export interface ChatTurnDeltaEvent {
+    turn_id: string;
+    delta: string;
 }
 
-// ── Expression Events ──────────────────────────────
-
-export interface ExpressionEvent {
-    expression: string;
-    mood: number;
+export interface ChatTurnFinishEvent {
+    turn_id: string;
+    status: "completed" | "error";
 }
 
-export async function onChatExpression(
-    callback: (data: ExpressionEvent) => void
+export interface ChatTurnTranslationEvent {
+    turn_id: string;
+    translation: string;
+}
+
+export interface ChatTurnToolEvent {
+    turn_id: string;
+    tool: string;
+    result?: {
+        message: string;
+    };
+    error?: string;
+}
+
+export async function onChatTurnStart(callback: (event: ChatTurnStartEvent) => void): Promise<UnlistenFn> {
+    return listen<ChatTurnStartEvent>("chat-turn-start", (event) => callback(event.payload));
+}
+
+export async function onChatTurnDelta(callback: (event: ChatTurnDeltaEvent) => void): Promise<UnlistenFn> {
+    return listen<ChatTurnDeltaEvent>("chat-turn-delta", (event) => callback(event.payload));
+}
+
+export async function onChatTurnFinish(callback: (event: ChatTurnFinishEvent) => void): Promise<UnlistenFn> {
+    return listen<ChatTurnFinishEvent>("chat-turn-finish", (event) => callback(event.payload));
+}
+
+export async function onChatTurnTranslation(callback: (event: ChatTurnTranslationEvent) => void): Promise<UnlistenFn> {
+    return listen<ChatTurnTranslationEvent>("chat-turn-translation", (event) => callback(event.payload));
+}
+
+// ── Cue Events ─────────────────────────────────────
+
+export interface CueEvent {
+    cue: string;
+    source?: string;
+}
+
+export async function onChatCue(
+    callback: (data: CueEvent) => void
 ): Promise<UnlistenFn> {
-    return listen<ExpressionEvent>("chat-expression", (event) => callback(event.payload));
-}
-
-// ── Action/Motion Events ───────────────────────────
-
-export interface ActionEvent {
-    action: string;
-}
-
-export async function onChatAction(
-    callback: (data: ActionEvent) => void
-): Promise<UnlistenFn> {
-    return listen<ActionEvent>("chat-action", (event) => callback(event.payload));
+    return listen<CueEvent>("chat-cue", (event) => callback(event.payload));
 }
 
 // ── LLM Management ──────────────────────────────────
@@ -395,6 +413,24 @@ export interface Live2dModelInfo {
     path: string;
 }
 
+export interface Live2dCueBinding {
+    expression?: string | null;
+    motion_group?: string | null;
+    exclude_from_prompt?: boolean;
+}
+
+export const BUILTIN_LIVE2D_MODEL_PATH = "__builtin__/haru/haru_greeter_t03.model3.json";
+
+export interface Live2dModelProfile {
+    version: number;
+    model_path: string;
+    available_expressions: string[];
+    available_motion_groups: Record<string, number>;
+    available_hit_areas: string[];
+    cue_map: Record<string, Live2dCueBinding>;
+    semantic_cue_map: Record<string, string>;
+}
+
 export async function importLive2dZip(zipPath: string): Promise<string> {
     return invoke<string>("import_live2d_zip", { zipPath });
 }
@@ -403,12 +439,32 @@ export async function importLive2dFolder(modelJsonPath: string): Promise<string>
     return invoke<string>("import_live2d_folder", { modelJsonPath });
 }
 
+export async function exportLive2dModel(modelPath: string, exportPath: string): Promise<string> {
+    return invoke<string>("export_live2d_model", { modelPath, exportPath });
+}
+
 export async function listLive2dModels(): Promise<Live2dModelInfo[]> {
     return invoke<Live2dModelInfo[]>("list_live2d_models");
 }
 
 export async function deleteLive2dModel(modelName: string): Promise<void> {
     return invoke("delete_live2d_model", { modelName });
+}
+
+export async function renameLive2dModel(modelPath: string, newName: string): Promise<string> {
+    return invoke<string>("rename_live2d_model", { modelPath, newName });
+}
+
+export async function getLive2dModelProfile(modelPath: string): Promise<Live2dModelProfile> {
+    return invoke<Live2dModelProfile>("get_live2d_model_profile", { modelPath });
+}
+
+export async function saveLive2dModelProfile(profile: Live2dModelProfile): Promise<Live2dModelProfile> {
+    return invoke<Live2dModelProfile>("save_live2d_model_profile", { profile });
+}
+
+export async function setActiveLive2dModel(modelPath: string | null): Promise<void> {
+    return invoke("set_active_live2d_model", { modelPath });
 }
 
 // ── TTS ────────────────────────────────────────────
@@ -685,16 +741,33 @@ export interface ToolCallEvent {
     error?: string;
 }
 
+export interface ToolSettings {
+    max_tool_rounds: number;
+    enabled_tools: Record<string, boolean>;
+}
+
 export async function listActions(): Promise<ActionInfo[]> {
     return invoke<ActionInfo[]>("list_actions");
+}
+
+export async function listBuiltinTools(): Promise<ActionInfo[]> {
+    return invoke<ActionInfo[]>("list_builtin_tools");
 }
 
 export async function executeAction(name: string, args: Record<string, string>, characterId?: string): Promise<ActionResult> {
     return invoke<ActionResult>("execute_action", { name, args, characterId });
 }
 
-export async function onToolCallResult(callback: (event: ToolCallEvent) => void): Promise<UnlistenFn> {
-    return listen<ToolCallEvent>("chat-tool-result", (event) => callback(event.payload));
+export async function onChatTurnTool(callback: (event: ChatTurnToolEvent) => void): Promise<UnlistenFn> {
+    return listen<ChatTurnToolEvent>("chat-turn-tool", (event) => callback(event.payload));
+}
+
+export async function getToolSettings(): Promise<ToolSettings> {
+    return invoke<ToolSettings>("get_tool_settings");
+}
+
+export async function saveToolSettings(settings: ToolSettings): Promise<void> {
+    return invoke("save_tool_settings", { settings });
 }
 
 // ── MCP (Model Context Protocol) ──────────────────────────

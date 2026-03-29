@@ -32,7 +32,7 @@ const TYPO_NEIGHBORS: Record<string, string> = {
 };
 
 /** Emotions that can trigger correction behavior */
-const HESITANT_EMOTIONS = new Set(["shy", "worried", "nervous", "sad", "thinking"]);
+const HESITANT_EMOTIONS = new Set(["fear", "sadness", "love", "nervous"]);
 
 // ── Hook ──────────────────────────────────────────
 
@@ -75,11 +75,11 @@ export function useTypingReveal({ onReveal, active }: UseTypingRevealOptions) {
         return () => unlisten?.();
     }, []);
 
-    // Listen for expression events to track current emotion
+    // Listen for cue events to track current playback intent
     useEffect(() => {
         let unlisten: (() => void) | undefined;
-        listen<{ expression: string }>("chat-expression", (ev) => {
-            emotionRef.current = ev.payload.expression;
+        listen<{ cue: string }>("chat-cue", (ev) => {
+            emotionRef.current = ev.payload.cue;
         }).then(fn => { unlisten = fn; });
 
         return () => unlisten?.();

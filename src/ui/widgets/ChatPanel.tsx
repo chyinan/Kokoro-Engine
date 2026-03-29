@@ -2,22 +2,79 @@ import { useState, useRef, useEffect, useCallback, useDeferredValue, memo } from
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
-import { streamChat, onChatDelta, onChatDone, onChatError, onChatTranslation, clearHistory, uploadVisionImage, synthesize, onToolCallResult, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages } from "../../lib/kokoro-bridge";
+import { streamChat, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatError, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal, useWakeWord } from "../hooks";
 import { useTranslation } from "react-i18next";
 import ConversationSidebar from "./ConversationSidebar";
 import { ChatMessage } from "./ChatMessage";
+import { buildChatMessagesFromConversation } from "./chat-history";
 
 // ── Types ──────────────────────────────────────────────────
 interface ChatMessage {
-    role: "user" | "kokoro";
+    role: "user" | "kokoro" | "tool";
     text: string;
     images?: string[];
     translation?: string;
     isError?: boolean;
+    tools?: { text: string; isError?: boolean }[];
 }
+
+interface PendingTurnState {
+    turnId: string;
+    messageIndex: number | null;
+    rawText: string;
+    translation?: string;
+    tools: { text: string; isError?: boolean }[];
+}
+
+const stripStreamingMarkup = (text: string) =>
+    text
+        .replace(/\[ACTION:\w+\]\s*/g, "")
+        .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
+        .replace(/\[TRANSLATE:[^\]]*\]\s*/g, "")
+        .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "");
+
+const stripStoredMarkup = (text: string) =>
+    stripStreamingMarkup(text)
+        .replace(/\[EMOTION:[^\]]*\]/g, "")
+        .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
+        .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "");
+
+const hasActiveKokoroBubble = (messages: ChatMessage[], index: number | null) =>
+    index !== null &&
+    index >= 0 &&
+    index < messages.length &&
+    messages[index]?.role === "kokoro";
+
+const ensureTurnMessage = (messages: ChatMessage[], turn: PendingTurnState) => {
+    if (hasActiveKokoroBubble(messages, turn.messageIndex)) {
+        return [...messages];
+    }
+
+    const next = [...messages, {
+        role: "kokoro" as const,
+        text: "",
+        tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
+    }];
+    turn.messageIndex = next.length - 1;
+    return next;
+};
+
+const updateTurnMessage = (
+    messages: ChatMessage[],
+    turn: PendingTurnState,
+    updater: (current: ChatMessage) => ChatMessage
+) => {
+    if (!hasActiveKokoroBubble(messages, turn.messageIndex)) {
+        return messages;
+    }
+
+    const next = [...messages];
+    next[turn.messageIndex!] = updater(next[turn.messageIndex!]);
+    return next;
+};
 
 // ── Typing Indicator ───────────────────────────────────────
 function TypingIndicator() {
@@ -63,7 +120,7 @@ function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => 
 // ── Main Component ─────────────────────────────────────────
 // ── MemoizedChatMessage wrapper ───────────────────────────
 interface MemoizedChatMessageProps {
-    message: { role: "user" | "kokoro"; text: string; images?: string[]; translation?: string; isError?: boolean };
+    message: { role: "user" | "kokoro" | "tool"; text: string; images?: string[]; translation?: string; isError?: boolean; tools?: { text: string; isError?: boolean }[] };
     globalIndex: number;
     isStreaming: boolean;
     isTranslationExpanded: boolean;
@@ -119,19 +176,18 @@ export default function ChatPanel() {
 
     // Raw (unfiltered) full response text — accumulated from all deltas
     const rawResponseRef = useRef("");
-    // Translation received from backend chat-translation event
-    const translationRef = useRef<string | undefined>(undefined);
-    // When true, the next delta must create a new kokoro bubble (even if the last message is already kokoro)
-    const forceNewBubbleRef = useRef(false);
+    const currentTurnRef = useRef<PendingTurnState | null>(null);
 
     // Typing reveal: per-character animation
     const { pushDelta, flush: flushReveal, reset: resetReveal } = useTypingReveal({
         active: isStreaming,
         onReveal: (visibleText: string) => {
             setMessages(prev => {
-                const last = prev[prev.length - 1];
-                if (last && last.role === "kokoro" && isStreamingRef.current) {
-                    return [...prev.slice(0, -1), { ...last, text: visibleText }];
+                const activeIndex = currentTurnRef.current?.messageIndex;
+                if (activeIndex !== null && activeIndex !== undefined && hasActiveKokoroBubble(prev, activeIndex) && isStreamingRef.current) {
+                    const next = [...prev];
+                    next[activeIndex] = { ...next[activeIndex], text: visibleText };
+                    return next;
                 }
                 return prev;
             });
@@ -164,28 +220,7 @@ export default function ChatPanel() {
         listConversations(characterId).then(convs => {
             if (convs.length > 0) {
                 loadConversation(convs[0].id).then(msgs => {
-                    const chatMsgs: ChatMessage[] = msgs.map(m => {
-                        if (m.role !== "user") {
-                            // Read translation from metadata (persisted as JSON)
-                            let translation: string | undefined;
-                            if (m.metadata) {
-                                try {
-                                    const meta = JSON.parse(m.metadata);
-                                    if (meta.translation) translation = meta.translation;
-                                } catch { /* ignore malformed metadata */ }
-                            }
-                            const text = m.content
-                                .replace(/\[ACTION:\w+\]\s*/g, "")
-                                .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
-                                .replace(/\[EMOTION:[^\]]*\]/g, "")
-                                .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-                                .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "")
-                                .trim();
-                            return { role: "kokoro" as const, text, translation };
-                        }
-                        return { role: "user" as const, text: m.content };
-                    });
-                    setMessages(chatMsgs);
+                    setMessages(buildChatMessagesFromConversation(msgs));
                     setExpandedTranslations(new Set()); // Reset translation expand state on conversation load
                 }).catch(err => console.error("[ChatPanel] Failed to restore conversation:", err));
             }
@@ -376,9 +411,8 @@ export default function ChatPanel() {
                 if (aborted) return;
                 const text = event.payload.message;
                 rawResponseRef.current = "";
-                translationRef.current = undefined;
+                currentTurnRef.current = null;
                 resetReveal();
-                forceNewBubbleRef.current = false;
                 setMessages(prev => [...prev, { role: "user", text }]);
                 startStreaming();
                 setIsThinking(true);
@@ -387,114 +421,100 @@ export default function ChatPanel() {
             if (aborted) { unPetChat(); return; }
             cleanups.push(unPetChat);
 
-            const unDelta = await onChatDelta((rawDelta: string) => {
+            const unTurnStart = await onChatTurnStart(({ turn_id }) => {
+                if (aborted) return;
+                currentTurnRef.current = {
+                    turnId: turn_id,
+                    messageIndex: null,
+                    rawText: "",
+                    translation: undefined,
+                    tools: [],
+                };
+                rawResponseRef.current = "";
+            });
+            if (aborted) { unTurnStart(); return; }
+            cleanups.push(unTurnStart);
+
+            const unDelta = await onChatTurnDelta(({ turn_id, delta: rawDelta }) => {
                 if (aborted || !isStreamingRef.current) return;
-                // Strip [ACTION:xxx], [TOOL_CALL:...], and [TRANSLATE:...] tags — these are control signals, not dialogue
-                const delta = rawDelta
-                    .replace(/\[ACTION:\w+\]\s*/g, "")
-                    .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
-                    .replace(/\[TRANSLATE:[^\]]*\]\s*/g, "")
-                    .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "");
+                const turn = currentTurnRef.current;
+                if (!turn || turn.turnId !== turn_id) return;
+
+                const delta = stripStreamingMarkup(rawDelta);
                 if (!delta) return;
+
                 setIsThinking(false);
+                turn.rawText += delta;
+                rawResponseRef.current = turn.rawText;
 
-                // Accumulate raw text for TTS
-                rawResponseRef.current += delta;
+                setMessages(prev => ensureTurnMessage(prev, turn));
 
-                // Ensure a kokoro message exists for the reveal to update into
-                const needsNewBubble = forceNewBubbleRef.current;
-                forceNewBubbleRef.current = false;
-                setMessages(prev => {
-                    const last = prev[prev.length - 1];
-                    if (last && last.role === "kokoro" && !needsNewBubble) {
-                        return prev; // message already exists — don't create a duplicate
-                    }
-                    return [...prev, { role: "kokoro", text: "" }];
-                });
-
-                // Push to typing reveal buffer
                 pushDelta(delta);
             });
             if (aborted) { unDelta(); return; }
             cleanups.push(unDelta);
 
-            const unTranslation = await onChatTranslation((translation: string) => {
+            const unTranslation = await onChatTurnTranslation(({ turn_id, translation }) => {
                 if (aborted) return;
-                translationRef.current = translation;
+                const turn = currentTurnRef.current;
+                if (!turn || turn.turnId !== turn_id) return;
+                turn.translation = translation;
             });
             if (aborted) { unTranslation(); return; }
             cleanups.push(unTranslation);
 
-            const unDone = await onChatDone(() => {
+            const unDone = await onChatTurnFinish(({ turn_id, status }) => {
                 if (aborted) return;
-                // Flush any remaining buffered text immediately
+                const turn = currentTurnRef.current;
+                if (!turn || turn.turnId !== turn_id) return;
+
                 flushReveal();
                 stopStreaming();
                 setIsThinking(false);
                 userScrolledRef.current = false;
 
-                // Ensure the final message text is reliably set.
-                // flushReveal's setMessages may be discarded due to React batching
-                // (isStreamingRef becomes false before React processes the update).
-                // This explicit update bypasses that check.
-                const fullText = rawResponseRef.current;
-                if (fullText) {
-                    // Use translation from backend event (handles multi-round tool calls correctly)
-                    const translationText = translationRef.current;
+                const fullText = turn.rawText;
+                rawResponseRef.current = fullText;
+                const cleanText = stripStoredMarkup(fullText);
 
-                    setMessages(prev => {
-                        const last = prev[prev.length - 1];
-                        if (last && last.role === "kokoro") {
-                            const cleanText = fullText
-                                .replace(/\[ACTION:\w+\]\s*/g, "")
-                                .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
-                                .replace(/\[EMOTION:[^\]]*\]/g, "")
-                                .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-                                .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "")
-                                .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "");
-                            return [...prev.slice(0, -1), { ...last, text: cleanText, translation: translationText }];
-                        }
-                        return prev;
-                    });
-                } else {
-                    // No content received (e.g. network error) — remove empty placeholder
-                    setMessages(prev => {
-                        const last = prev[prev.length - 1];
-                        if (last && last.role === "kokoro" && !last.text) {
-                            return prev.slice(0, -1);
-                        }
-                        return prev;
-                    });
-                }
+                setMessages(prev => {
+                    const hasContent = Boolean(cleanText) || turn.tools.length > 0;
 
-                // ── Auto-TTS: speak the completed response ──
-                if (localStorage.getItem("kokoro_tts_enabled") === "true") {
-                    // Read last message directly from state ref (avoids StrictMode accumulation bugs)
-                    const currentMessages = messagesRef.current;
-                    const lastMsg = currentMessages[currentMessages.length - 1];
-                    if (lastMsg && lastMsg.role === "kokoro") {
-                        // Use raw accumulated text for TTS (not the partially-revealed text)
-                        const fullText = rawResponseRef.current || lastMsg.text;
-                        const cleanText = fullText
-                            .replace(/\[EMOTION:[^\]]*\]/g, "")
-                            .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-                            .replace(/\[ACTION:\w+\]/g, "")
-                            .replace(/\[TOOL_CALL:[^\]]*\]/g, "")
-                            .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "")
-                            .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "")
-                            .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{27BF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]/gu, "")
-                            .trim();
-
-                        if (cleanText) {
-                            console.log("[TTS] Auto-speak triggered, text length:", cleanText.length);
-                            synthesize(cleanText, {
-                                provider_id: localStorage.getItem("kokoro_tts_provider") || undefined,
-                                voice: localStorage.getItem("kokoro_tts_voice") || undefined,
-                                speed: parseFloat(localStorage.getItem("kokoro_tts_speed") || "1.0"),
-                                pitch: parseFloat(localStorage.getItem("kokoro_tts_pitch") || "1.0"),
-                            }).catch(err => console.error("[TTS] Auto-speak failed:", err));
+                    if (hasActiveKokoroBubble(prev, turn.messageIndex)) {
+                        if (!hasContent && status === "error") {
+                            return [...prev.slice(0, turn.messageIndex!), ...prev.slice(turn.messageIndex! + 1)];
                         }
+
+                        return updateTurnMessage(prev, turn, (current) => ({
+                            ...current,
+                            text: cleanText,
+                            translation: turn.translation,
+                            tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
+                        }));
                     }
+
+                    if (hasContent) {
+                        return [...prev, {
+                            role: "kokoro",
+                            text: cleanText,
+                            translation: turn.translation,
+                            tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
+                        }];
+                    }
+
+                    return prev;
+                });
+
+                currentTurnRef.current = null;
+
+                if (localStorage.getItem("kokoro_tts_enabled") === "true" && cleanText.trim()) {
+                    console.log("[TTS] Auto-speak triggered, text length:", cleanText.length);
+                    synthesize(cleanText.trim(), {
+                        provider_id: localStorage.getItem("kokoro_tts_provider") || undefined,
+                        voice: localStorage.getItem("kokoro_tts_voice") || undefined,
+                        speed: parseFloat(localStorage.getItem("kokoro_tts_speed") || "1.0"),
+                        pitch: parseFloat(localStorage.getItem("kokoro_tts_pitch") || "1.0"),
+                    }).catch(err => console.error("[TTS] Auto-speak failed:", err));
                 }
             });
             if (aborted) { unDone(); return; }
@@ -505,25 +525,31 @@ export default function ChatPanel() {
                 stopStreaming();
                 setIsThinking(false);
                 setError(err);
-                // Remove empty kokoro placeholder left by proactive or normal streaming
-                setMessages(prev => {
-                    const last = prev[prev.length - 1];
-                    if (last && last.role === "kokoro" && !last.text) {
-                        return prev.slice(0, -1);
-                    }
-                    return prev;
-                });
+                currentTurnRef.current = null;
             });
             if (aborted) { unError(); return; }
             cleanups.push(unError);
 
-            const unToolResult = await onToolCallResult((event) => {
+            const unToolResult = await onChatTurnTool((event) => {
                 if (aborted) return;
+                const turn = currentTurnRef.current;
+                if (!turn || turn.turnId !== event.turn_id) return;
+                const toolEntry = event.result
+                    ? { text: `${event.tool}: ${event.result.message}` }
+                    : { text: `${event.tool} failed: ${event.error}`, isError: true };
                 if (event.result) {
                     console.log(`[ToolCall] ${event.tool}: ${event.result.message}`);
                 } else if (event.error) {
                     console.error(`[ToolCall] ${event.tool} failed: ${event.error}`);
                 }
+
+                turn.tools = [...turn.tools, toolEntry];
+                setMessages(prev => {
+                    return updateTurnMessage(prev, turn, (current) => ({
+                        ...current,
+                        tools: [...(current.tools || []), toolEntry],
+                    }));
+                });
             });
             if (aborted) { unToolResult(); return; }
             cleanups.push(unToolResult);
@@ -550,17 +576,13 @@ export default function ChatPanel() {
 
                 const { instruction } = event.payload;
 
-                // Mark that the next delta should create a new bubble
-                // (don't push an empty message now — avoids blank bubble + double bubble)
-                forceNewBubbleRef.current = true;
-
                 // Start streaming — compose_prompt() handles full context (system prompt, memory, emotion, history, language)
                 startStreaming();
                 setIsThinking(true);
                 userScrolledRef.current = false;
                 resetReveal();
                 rawResponseRef.current = "";
-                translationRef.current = undefined;
+                currentTurnRef.current = null;
 
                 streamChat({
                     message: instruction,
@@ -570,7 +592,7 @@ export default function ChatPanel() {
                     stopStreaming();
                     setIsThinking(false);
                     setError(err instanceof Error ? err.message : String(err));
-                    forceNewBubbleRef.current = false;
+                    currentTurnRef.current = null;
                     // Remove the empty placeholder if one was created by delta handler
                     setMessages(prev => {
                         const last = prev[prev.length - 1];
@@ -588,13 +610,12 @@ export default function ChatPanel() {
             const unInteraction = await listen<any>("interaction-trigger", () => {
                 if (aborted || isStreamingRef.current) return;
 
-                forceNewBubbleRef.current = true;
                 startStreaming();
                 setIsThinking(true);
                 userScrolledRef.current = false;
                 resetReveal();
                 rawResponseRef.current = "";
-                translationRef.current = undefined;
+                currentTurnRef.current = null;
             });
             cleanups.push(() => unInteraction());
 
@@ -636,7 +657,7 @@ export default function ChatPanel() {
         setTimeout(() => { isProgrammaticScrollRef.current = false; }, 200);
         resetReveal();
         rawResponseRef.current = "";
-        translationRef.current = undefined;
+        currentTurnRef.current = null;
 
         // Check if background mode is "generated"
         let allowImageGen = false;
@@ -654,6 +675,7 @@ export default function ChatPanel() {
             });
         } catch (err) {
             stopStreaming();
+            currentTurnRef.current = null;
             setIsThinking(false);
             setError(err instanceof Error ? err.message : String(err));
 
@@ -793,7 +815,7 @@ export default function ChatPanel() {
         userScrolledRef.current = false;
         resetReveal();
         rawResponseRef.current = "";
-        translationRef.current = undefined;
+        currentTurnRef.current = null;
 
         const allowImageGen = (() => {
             try {

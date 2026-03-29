@@ -45,15 +45,12 @@ pub fn compute_expression_frame(
 ) -> ExpressionFrame {
     // Base micro-expressions from emotion
     let (blink, mouth, eyebrow, eye_open, tilt) = match emotion {
-        "happy" => (0.4, 0.7, 0.3, 0.6, 0.1),
-        "excited" => (0.6, 0.9, 0.5, 0.8, 0.2),
-        "sad" => (0.3, -0.5, -0.3, 0.3, -0.1),
-        "angry" => (0.2, -0.3, -0.7, 0.7, 0.0),
-        "surprised" => (0.1, 0.3, 0.8, 1.0, 0.0),
-        "thinking" => (0.3, 0.0, 0.4, 0.4, 0.3),
-        "shy" => (0.7, 0.2, -0.1, 0.3, -0.2),
-        "smug" => (0.3, 0.4, 0.2, 0.5, 0.15),
-        "worried" => (0.5, -0.2, 0.5, 0.5, -0.1),
+        "joy" => (0.4, 0.75, 0.3, 0.65, 0.1),
+        "love" => (0.55, 0.6, 0.1, 0.45, -0.15),
+        "sadness" => (0.3, -0.55, -0.35, 0.3, -0.1),
+        "anger" => (0.2, -0.35, -0.75, 0.7, 0.0),
+        "fear" => (0.55, -0.2, 0.45, 0.75, -0.12),
+        "surprise" => (0.1, 0.3, 0.8, 1.0, 0.0),
         "neutral" => (0.3, 0.0, 0.0, 0.5, 0.0),
         _ => (0.3, 0.0, 0.0, 0.5, 0.0),
     };
@@ -90,51 +87,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn happy_character_smiles() {
-        let frame = compute_expression_frame("happy", 0.8, "rising", 0.7);
+    fn joy_character_smiles() {
+        let frame = compute_expression_frame("joy", 0.8, "rising", 0.7);
         assert!(
             frame.micro.mouth_curve > 0.3,
-            "Happy should smile, got {}",
+            "Joy should smile, got {}",
             frame.micro.mouth_curve
         );
     }
 
     #[test]
-    fn sad_character_frowns() {
-        let frame = compute_expression_frame("sad", 0.2, "falling", 0.7);
+    fn sadness_character_frowns() {
+        let frame = compute_expression_frame("sadness", 0.2, "falling", 0.7);
         assert!(
             frame.micro.mouth_curve < 0.0,
-            "Sad should frown, got {}",
+            "Sadness should frown, got {}",
             frame.micro.mouth_curve
         );
     }
 
     #[test]
-    fn surprised_has_wide_eyes() {
-        let frame = compute_expression_frame("surprised", 0.6, "stable", 0.8);
+    fn surprise_has_wide_eyes() {
+        let frame = compute_expression_frame("surprise", 0.6, "stable", 0.8);
         assert!(
             frame.micro.eye_openness > 0.7,
-            "Surprised should have wide eyes, got {}",
+            "Surprise should have wide eyes, got {}",
             frame.micro.eye_openness
         );
     }
 
     #[test]
-    fn shy_blinks_more() {
-        let shy = compute_expression_frame("shy", 0.5, "stable", 0.7);
+    fn fear_blinks_more_than_neutral() {
+        let fear = compute_expression_frame("fear", 0.5, "stable", 0.7);
         let neutral = compute_expression_frame("neutral", 0.5, "stable", 0.7);
         assert!(
-            shy.micro.blink_rate > neutral.micro.blink_rate,
-            "Shy should blink more: {} vs {}",
-            shy.micro.blink_rate,
+            fear.micro.blink_rate > neutral.micro.blink_rate,
+            "Fear should blink more: {} vs {}",
+            fear.micro.blink_rate,
             neutral.micro.blink_rate
         );
     }
 
     #[test]
     fn expressive_has_higher_intensity() {
-        let low = compute_expression_frame("happy", 0.8, "stable", 0.2);
-        let high = compute_expression_frame("happy", 0.8, "stable", 0.9);
+        let low = compute_expression_frame("joy", 0.8, "stable", 0.2);
+        let high = compute_expression_frame("joy", 0.8, "stable", 0.9);
         assert!(
             high.intensity > low.intensity,
             "Higher expressiveness = higher intensity: {} vs {}",
@@ -146,7 +143,7 @@ mod tests {
     #[test]
     fn all_values_in_range() {
         // Test a variety of inputs
-        for emotion in &["happy", "sad", "angry", "excited", "shy", "neutral"] {
+        for emotion in &["joy", "love", "sadness", "anger", "fear", "surprise", "neutral"] {
             for mood in &[0.0, 0.5, 1.0] {
                 let frame = compute_expression_frame(emotion, *mood, "stable", 0.5);
                 assert!(frame.micro.blink_rate >= 0.0 && frame.micro.blink_rate <= 1.0);

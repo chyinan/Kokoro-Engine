@@ -1,11 +1,14 @@
 use anyhow::Result;
+#[cfg(not(test))]
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use sqlx::{Row, SqlitePool};
+#[cfg(not(test))]
 use tokio::sync::Mutex;
 
 use crate::ai::context::MemorySnippet;
 
 pub struct MemoryManager {
+    #[cfg(not(test))]
     embedder: tokio::sync::OnceCell<Mutex<TextEmbedding>>,
     db: SqlitePool,
 }
@@ -30,9 +33,11 @@ const CONSOLIDATION_TIME_WINDOW_SECS: i64 = 7 * 24 * 3600; // 7 days
 const MAX_CLUSTER_SIZE: usize = 5;
 
 /// Local model directory path (relative to working dir).
-#[allow(dead_code)]
+#[cfg(not(test))]
 const LOCAL_MODEL_DIR: &str = "models/models--Qdrant--all-MiniLM-L6-v2-onnx";
+#[cfg(not(test))]
 const MODEL_REPO: &str = "Qdrant/all-MiniLM-L6-v2-onnx";
+#[cfg(not(test))]
 const MODEL_AUX_FILES: &[&str] = &[
     "config.json",
     "tokenizer.json",
@@ -46,11 +51,13 @@ impl MemoryManager {
     /// The embedding model is lazy-loaded on first use.
     pub fn new(db: SqlitePool) -> Self {
         Self {
+            #[cfg(not(test))]
             embedder: tokio::sync::OnceCell::new(),
             db,
         }
     }
 
+    #[cfg(not(test))]
     fn resolve_snapshot_dir(repo_dir: &std::path::Path) -> Option<std::path::PathBuf> {
         use std::fs;
         let refs_main = repo_dir.join("refs").join("main");
@@ -72,6 +79,7 @@ impl MemoryManager {
             .find(|path| path.is_dir())
     }
 
+    #[cfg(not(test))]
     fn model_search_roots() -> Vec<std::path::PathBuf> {
         use std::path::PathBuf;
 
@@ -104,6 +112,7 @@ impl MemoryManager {
         candidates
     }
 
+    #[cfg(not(test))]
     async fn hydrate_missing_local_files(snapshot_dir: &std::path::Path) -> Result<bool> {
         let missing: Vec<&str> = MODEL_AUX_FILES
             .iter()
@@ -146,6 +155,7 @@ impl MemoryManager {
     }
 
     /// Try to load the embedding model from local files (no network required).
+    #[cfg(not(test))]
     fn try_load_local() -> Option<TextEmbedding> {
         use fastembed::{InitOptionsUserDefined, TokenizerFiles, UserDefinedEmbeddingModel};
         use std::fs;
@@ -212,6 +222,7 @@ impl MemoryManager {
 
     /// Lazily initializes the embedding model on first call.
     /// Tries local files first, then falls back to HuggingFace download.
+    #[cfg(not(test))]
     async fn get_embedder(&self) -> Result<&Mutex<TextEmbedding>> {
         self.embedder
             .get_or_try_init(|| async {
@@ -263,11 +274,17 @@ impl MemoryManager {
             .await
     }
 
+    #[cfg(not(test))]
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let embedder = self.get_embedder().await?;
         let mut guard = embedder.lock().await;
         let embeddings = guard.embed(vec![text], None)?;
         Ok(embeddings[0].clone())
+    }
+
+    #[cfg(test)]
+    pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        Ok(test_embedding(text))
     }
 
     pub async fn add_memory(&self, content: &str, character_id: &str) -> Result<()> {
@@ -536,6 +553,39 @@ impl MemoryManager {
             tier: r.get("tier"),
         }))
     }
+}
+
+#[cfg(test)]
+fn test_embedding(text: &str) -> Vec<f32> {
+    const DIM: usize = 64;
+
+    let normalized = text.to_lowercase();
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
+    let mut vector = vec![0.0_f32; DIM];
+
+    if tokens.is_empty() {
+        return vector;
+    }
+
+    for token in tokens {
+        let mut hash = 0xcbf29ce484222325_u64;
+        for byte in token.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+
+        let bucket = (hash as usize) % DIM;
+        vector[bucket] += 1.0;
+    }
+
+    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for value in &mut vector {
+            *value /= norm;
+        }
+    }
+
+    vector
 }
 
 // ── Session Summaries ──────────────────────────────────────
@@ -1004,7 +1054,7 @@ async fn merge_facts_via_llm(
     facts: &[&str],
     provider: &std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
 ) -> Result<String> {
-    use crate::llm::openai::{Message, MessageContent};
+    use crate::llm::messages::user_text_message;
 
     let facts_list = facts
         .iter()
@@ -1021,10 +1071,7 @@ async fn merge_facts_via_llm(
         facts_list
     );
 
-    let messages = vec![Message {
-        role: "user".to_string(),
-        content: MessageContent::Text(prompt),
-    }];
+    let messages = vec![user_text_message(prompt)];
 
     let result = provider
         .chat(messages, None)

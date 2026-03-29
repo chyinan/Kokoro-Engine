@@ -1,7 +1,4 @@
-#![cfg(feature = "stress")]
-
 use super::helpers::*;
-use crate::vision::server::VisionServer;
 use std::collections::HashSet;
 use std::sync::Arc;
 

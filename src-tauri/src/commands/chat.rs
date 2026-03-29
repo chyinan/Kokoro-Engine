@@ -4,6 +4,14 @@ use crate::ai::memory_extractor;
 use crate::commands::system::WindowSizeState;
 use crate::error::KokoroError;
 use crate::imagegen::ImageGenService;
+use crate::actions::tool_settings::ToolSettings;
+use crate::ai::emotion_settings::EmotionSettings;
+use crate::llm::messages::{
+    assistant_tool_calls_message, extract_message_text, replace_user_message_with_images,
+    history_message_to_chat_message, system_message, tool_result_message,
+    user_text_message,
+};
+use crate::llm::provider::LlmStreamEvent;
 use crate::llm::service::LlmService;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -75,36 +83,32 @@ pub struct ChatRequest {
 
 #[derive(Serialize, Clone)]
 #[allow(dead_code)]
-struct ExpressionEvent {
-    expression: String,
-    mood: f32,
-}
-
-#[derive(Serialize, Clone)]
-#[allow(dead_code)]
 struct ChatImageGenEvent {
     prompt: String,
 }
 
-#[derive(Serialize, Clone)]
-struct ActionEvent {
-    action: String,
+#[cfg(debug_assertions)]
+fn debug_log_llm_messages(label: &str, messages: &[async_openai::types::chat::ChatCompletionRequestMessage]) {
+    println!("[LLM/Debug] {} ({} messages)", label, messages.len());
+    for (index, message) in messages.iter().enumerate() {
+        let role = match message {
+            async_openai::types::chat::ChatCompletionRequestMessage::Developer(_) => "developer",
+            async_openai::types::chat::ChatCompletionRequestMessage::System(_) => "system",
+            async_openai::types::chat::ChatCompletionRequestMessage::User(_) => "user",
+            async_openai::types::chat::ChatCompletionRequestMessage::Assistant(_) => "assistant",
+            async_openai::types::chat::ChatCompletionRequestMessage::Tool(_) => "tool",
+            async_openai::types::chat::ChatCompletionRequestMessage::Function(_) => "function",
+        };
+        let text = extract_message_text(message);
+        let compact = text.replace('\n', "\\n");
+        let preview = if compact.chars().count() > 300 {
+            format!("{}...", compact.chars().take(300).collect::<String>())
+        } else {
+            compact
+        };
+        println!("[LLM/Debug]   #{} role={} text={}", index, role, preview);
+    }
 }
-
-#[derive(serde::Deserialize, Debug)]
-struct IntentResponse {
-    action_request: Option<String>,
-    extra_info: Option<String>,
-    // Optional: catch-all for system calls if we expand this
-    #[serde(default)]
-    #[allow(dead_code)]
-    system_call: Option<String>,
-}
-
-/// Valid action names for the intent parser
-const VALID_ACTIONS: &[&str] = &[
-    "idle", "nod", "shake", "wave", "dance", "shy", "think", "surprise", "cheer", "tap",
-];
 
 const TOOL_CALL_TAG_PREFIX: &str = "[TOOL_CALL:";
 const TRANSLATE_TAG_PREFIX: &str = "[TRANSLATE:";
@@ -149,6 +153,29 @@ fn strip_leaked_tags(text: &str) -> String {
     result.trim().to_string()
 }
 
+fn build_emotion_input_from_response(text: &str) -> String {
+    let clean = strip_leaked_tags(text)
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let char_count = clean.chars().count();
+    if char_count <= 320 {
+        return clean;
+    }
+
+    let head: String = clean.chars().take(160).collect();
+    let tail: String = clean
+        .chars()
+        .rev()
+        .take(160)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{head} ... {tail}")
+}
+
 /// Strip `[TRANSLATE:...]` tags from text.
 fn strip_translate_tags(text: &str) -> String {
     let mut result = text.to_string();
@@ -162,6 +189,44 @@ fn strip_translate_tags(text: &str) -> String {
         }
     }
     result.trim().to_string()
+}
+
+fn merge_continuation_text(accumulated: &mut String, next: &str) {
+    if next.is_empty() {
+        return;
+    }
+    if accumulated.is_empty() {
+        accumulated.push_str(next);
+        return;
+    }
+    if next.starts_with(accumulated.as_str()) {
+        *accumulated = next.to_string();
+        return;
+    }
+    if accumulated.ends_with(next) {
+        return;
+    }
+
+    let mut overlap = 0usize;
+    let max_overlap = accumulated.len().min(next.len());
+    for candidate in (1..=max_overlap).rev() {
+        if accumulated.is_char_boundary(accumulated.len() - candidate)
+            && next.is_char_boundary(candidate)
+            && accumulated[accumulated.len() - candidate..] == next[..candidate]
+        {
+            overlap = candidate;
+            break;
+        }
+    }
+
+    if overlap > 0 {
+        accumulated.push_str(&next[overlap..]);
+    } else {
+        if !accumulated.ends_with(char::is_whitespace) && !next.starts_with(char::is_whitespace) {
+            accumulated.push(' ');
+        }
+        accumulated.push_str(next);
+    }
 }
 
 /// Extract the content inside `[TRANSLATE:...]` tags, then strip them from text.
@@ -199,6 +264,7 @@ fn extract_translate_tags(text: &str) -> (String, Option<String>) {
 /// Parsed tool call from `[TOOL_CALL:name|key=val|key=val]`
 #[derive(Debug, Clone, Serialize)]
 struct ToolCall {
+    tool_call_id: Option<String>,
     name: String,
     args: HashMap<String, String>,
 }
@@ -227,7 +293,7 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
                     }
                 }
 
-                calls.push(ToolCall { name, args });
+                calls.push(ToolCall { tool_call_id: None, name, args });
             }
 
             let tag_end = start + end_bracket + 1;
@@ -246,7 +312,7 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
     }
 
     // 额外支持简化格式: [action_name|key=val|key=val]
-    // 例: [change_expression|expression=shy]
+    // 例: [play_cue|cue=shy]
     let mut extra_calls = Vec::new();
     let mut cleaned = result.clone();
     let mut offset = 0;
@@ -275,7 +341,7 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
                         args.insert(key, val);
                     }
                 }
-                extra_calls.push(ToolCall { name, args });
+                extra_calls.push(ToolCall { tool_call_id: None, name, args });
                 let tag_end = start + end + 1;
                 cleaned = format!(
                     "{}{}",
@@ -294,10 +360,10 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
     calls.extend(extra_calls);
 
     // 支持冒号格式: [action_name:value]
-    // 例: [change_expression:happy]、[set_background:beach]
+    // 例: [play_cue:happy]、[set_background:beach]
     // 将 value 映射到该 action 的主参数名
     let primary_arg_map: &[(&str, &str)] = &[
-        ("change_expression", "expression"),
+        ("play_cue", "cue"),
         ("set_background", "prompt"),
     ];
     let mut colon_calls = Vec::new();
@@ -321,7 +387,7 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
                 if let Some(&(_, arg_key)) = primary_arg_map.iter().find(|&&(n, _)| n == name_part) {
                     let mut args = HashMap::new();
                     args.insert(arg_key.to_string(), val_part.to_string());
-                    colon_calls.push(ToolCall { name: name_part.to_string(), args });
+                    colon_calls.push(ToolCall { tool_call_id: None, name: name_part.to_string(), args });
                     let tag_end = start + end + 1;
                     cleaned2 = format!(
                         "{}{}",
@@ -354,6 +420,8 @@ pub async fn stream_chat(
     imagegen_state: State<'_, ImageGenService>,
     llm_state: State<'_, LlmService>,
     _action_registry: State<'_, std::sync::Arc<RwLock<crate::actions::ActionRegistry>>>,
+    tool_settings_state: State<'_, std::sync::Arc<RwLock<ToolSettings>>>,
+    emotion_settings_state: State<'_, std::sync::Arc<RwLock<EmotionSettings>>>,
     _vision_watcher: State<'_, crate::vision::watcher::VisionWatcher>,
     window_size_state: State<'_, WindowSizeState>,
     vision_server: State<
@@ -372,20 +440,22 @@ pub async fn stream_chat(
     // Record user activity
     state.touch_activity().await;
 
-    // Sentiment analysis
-    let user_sentiment = crate::ai::sentiment::analyze(&request.message);
-    if user_sentiment.confidence > 0.2 {
-        let mut emotion = state.emotion_state.lock().await;
-        emotion.absorb_user_sentiment(user_sentiment.mood, user_sentiment.confidence);
-    }
+    let emotion_enabled = {
+        let settings = emotion_settings_state.read().await;
+        settings.enabled
+    };
 
     // Typing simulation
     {
         let emotion = state.emotion_state.lock().await;
         let is_question = request.message.contains('?') || request.message.contains('？');
         let typing_params = crate::ai::typing_sim::calculate_typing_delay(
-            emotion.current_emotion(),
-            emotion.mood(),
+            if emotion_enabled {
+                emotion.current_emotion()
+            } else {
+                "neutral"
+            },
+            if emotion_enabled { emotion.mood() } else { 0.5 },
             emotion.personality().expressiveness,
             request.message.chars().count(),
             is_question,
@@ -400,116 +470,47 @@ pub async fn stream_chat(
             .await;
     }
 
-    // ── LAYER 1 & 2: INTENT PARSING ─────────────────────────────
+    // ── LAYER 1 & 2: SYSTEM SETUP ───────────────────────────────
 
-    // Get System Provider
     let system_provider = llm_state.system_provider().await;
-
-    // Construct Intent Prompt
-    // We strictly want JSON.
-    let intent_messages = vec![
-        crate::llm::openai::Message {
-            role: "system".to_string(),
-            content: crate::llm::openai::MessageContent::Text(
-                crate::ai::prompts::INTENT_PARSER_SYSTEM_PROMPT.to_string(),
-            ),
-        },
-        crate::llm::openai::Message {
-            role: "user".to_string(),
-            content: crate::llm::openai::MessageContent::Text(format!(
-                "Classify the following text and return JSON only.\nText: [{}]\nCharacter context: {}",
-                request.message, char_id
-            )),
-        },
-    ];
-
-    println!("[Chat] Running Intent Parser...");
-    let intent_json_str = system_provider
-        .chat(intent_messages, None)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("[Chat] Intent Parser failed: {}", e);
-            "{}".to_string() // Fallback to empty JSON object
-        });
-
-    // Clean JSON (remove markdown code blocks if any)
-    let clean_json = intent_json_str
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```");
-
-    let intent: IntentResponse = serde_json::from_str(clean_json).unwrap_or_else(|e| {
-        eprintln!(
-            "[Chat] Failed to parse Intent JSON: {} | Raw: {}",
-            e, intent_json_str
-        );
-        IntentResponse {
-            action_request: None,
-            extra_info: None,
-            system_call: None,
-        }
-    });
-
-    println!("[Chat] Parsed Intent: {:?}", intent);
 
     // ── EXECUTION & STATE UPDATE ────────────────────────────────
 
-    // 1. Get current emotion state (emotion is driven by change_expression tool call in main LLM response)
-    let (current_expression, _current_mood) = {
-        let emotion_state = state.emotion_state.lock().await;
-        (emotion_state.current_emotion().to_string(), emotion_state.mood())
-    };
-
-    // 2. Action Execution
-    if let Some(ref action) = intent.action_request {
-        if action == "play_animation" || VALID_ACTIONS.contains(&action.as_str()) {
-            // If valid action or generic play request with extra_info
-            let action_name = if VALID_ACTIONS.contains(&action.as_str()) {
-                action.clone()
-            } else if let Some(ref extra) = intent.extra_info {
-                if VALID_ACTIONS.contains(&extra.as_str()) {
-                    extra.clone()
-                } else {
-                    "idle".to_string()
-                }
-            } else {
-                "idle".to_string()
-            };
-
-            window
-                .emit(
-                    "chat-action",
-                    ActionEvent {
-                        action: action_name.clone(),
-                    },
-                )
-                .map_err(|e| KokoroError::Chat(e.to_string()))?;
-        }
-    }
-
-    // 3. System Calls / Tools (Simplified for now - can expand to full tool loop if needed)
-    // For this refactor, we are assuming 'system_call' might map to existing actions
-    // If we need the full while loop for tools, we can re-introduce it here, but driven by intent.
-    // user asked for strict 3-layer, so let's keep it clean.
-
-    // Prepare System Feedback for Persona
-    let system_feedback = format!(
-        "(Internal System Note)\n\
-        - State Updated: Emotion is now '{}'.\n\
-        - Action Performed: {}.\n\
-        Continue the dialogue naturally based on this state. Do NOT explicitly mention the system update.",
-        current_expression,
-        intent.action_request.as_deref().unwrap_or("None"),
-    );
-
     // ── LAYER 3: PERSONA GENERATION ─────────────────────────────
 
-    // Generate tool prompt from action registry
+    let llm_config = llm_state.config().await;
+    let chat_provider = llm_state.provider().await;
+    let native_tools_enabled = llm_config
+        .providers
+        .iter()
+        .find(|provider| provider.id == llm_config.active_provider)
+        .map(|provider| provider.supports_native_tools)
+        .unwrap_or(true);
+    println!(
+        "[Chat] active_provider={}, native_tools_enabled={}",
+        llm_config.active_provider, native_tools_enabled
+    );
+
+    // Native tool-calling requests already carry structured tool definitions,
+    // so avoid duplicating a long textual tool prompt there.
     let tool_prompt = {
         let registry = _action_registry.read().await;
-        let prompt = registry.generate_tool_prompt_for_prompt(state.is_memory_enabled());
+        let tool_settings = tool_settings_state.read().await;
+        let prompt = if native_tools_enabled {
+            String::new()
+        } else {
+            registry.generate_tool_prompt_for_prompt_with_settings(
+                state.is_memory_enabled(),
+                &tool_settings,
+            )
+        };
         if prompt.is_empty() { None } else { Some(prompt) }
+    };
+
+    let native_tools = {
+        let registry = _action_registry.read().await;
+        let tool_settings = tool_settings_state.read().await;
+        registry.list_tools_for_llm_with_settings(state.is_memory_enabled(), &tool_settings)
     };
 
     // Compose Persona Prompt
@@ -518,36 +519,43 @@ pub async fn stream_chat(
             &request.message,
             request.allow_image_gen.unwrap_or(false),
             tool_prompt,
+            native_tools_enabled,
             &char_id,
         )
         .await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
-    let mut client_messages: Vec<crate::llm::openai::Message> = prompt_messages
+    let mut client_messages = prompt_messages
         .into_iter()
-        .map(|m| crate::llm::openai::Message {
-            role: m.role,
-            content: crate::llm::openai::MessageContent::Text(m.content),
-        })
-        .collect();
+        .map(|m| history_message_to_chat_message(&m.role, m.content, m.metadata.as_ref()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(KokoroError::Chat)?;
+    let assistant_turn_id = uuid::Uuid::new_v4().to_string();
+    app.emit(
+        "chat-turn-start",
+        serde_json::json!({
+            "turn_id": assistant_turn_id,
+        }),
+    )
+    .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
     // 注入视觉上下文（如果有最近的屏幕观察）
     if let Some(vision_desc) = _vision_watcher.context.get_context_string().await {
-        client_messages.push(crate::llm::openai::Message {
-            role: "system".to_string(),
-            content: crate::llm::openai::MessageContent::Text(format!(
-                "[Vision] The user's screen currently shows: {}",
-                vision_desc
-            )),
-        });
+        client_messages.push(system_message(format!(
+            "[Vision] The user's screen currently shows: {}",
+            vision_desc
+        )));
     }
 
     // Attach images to the last user message if present
     if let Some(images) = &request.images {
         if !images.is_empty() {
             // Find the last message with role "user"
-            if let Some(last_user_msg) = client_messages.iter_mut().rfind(|m| m.role == "user") {
-                let text_content = last_user_msg.content.text();
+            if let Some(last_user_msg) = client_messages
+                .iter_mut()
+                .rfind(|m| crate::llm::messages::is_user_message(m))
+            {
+                let text_content = extract_message_text(last_user_msg);
 
                 // Process images: convert local URLs to base64
                 let mut processed_images = Vec::with_capacity(images.len());
@@ -579,8 +587,8 @@ pub async fn stream_chat(
                 }
 
                 // Create multimodal content
-                last_user_msg.content =
-                    crate::llm::openai::MessageContent::with_images(text_content, processed_images);
+                replace_user_message_with_images(last_user_msg, text_content, processed_images)
+                    .map_err(KokoroError::Chat)?;
                 println!("[Chat] Attached {} images to user message", images.len());
             }
         }
@@ -589,57 +597,91 @@ pub async fn stream_chat(
     // For hidden messages (touch interactions), the user message wasn't added to
     // history, so we must explicitly include it in the context for the LLM to see.
     if request.hidden {
-        client_messages.push(crate::llm::openai::Message {
-            role: "user".to_string(),
-            content: crate::llm::openai::MessageContent::Text(request.message.clone()),
-        });
+        client_messages.push(user_text_message(request.message.clone()));
     }
 
-    // Inject System Feedback (Before the last user message or as system at end)
-    // Best practice: System instruction near end of context
-    client_messages.push(crate::llm::openai::Message {
-        role: "system".to_string(),
-        content: crate::llm::openai::MessageContent::Text(system_feedback),
-    });
+    #[cfg(debug_assertions)]
+    {
+        println!(
+            "[LLM/Debug] active_provider={} native_tools_enabled={} tool_count={}",
+            llm_config.active_provider,
+            native_tools_enabled,
+            native_tools.len()
+        );
+        debug_log_llm_messages("initial chat request", &client_messages);
+    }
 
     // Stream Response with Tool Call Feedback Loop
-    const MAX_TOOL_ROUNDS: usize = 5;
-    let chat_provider = llm_state.provider().await;
+    let max_tool_rounds = {
+        let tool_settings = tool_settings_state.read().await;
+        tool_settings.max_tool_rounds.max(1)
+    };
     let mut all_cleaned_text = String::new();
     let mut all_translations = Vec::new();
     let mut bg_generated_by_tool = false;
-    let mut expression_set_by_tool = false;
+    let mut cue_set_by_tool = false;
     let mut draft_row_id: Option<i64> = None;
+    let mut forced_text_after_side_effect = false;
+    let mut stream_failed = false;
 
-    for round in 0..MAX_TOOL_ROUNDS {
+    for round in 0..max_tool_rounds {
         println!("[Chat] Tool loop round {}", round + 1);
 
-        let mut stream = chat_provider
-            .chat_stream(client_messages.clone(), None)
-            .await
-            .map_err(KokoroError::Chat)?;
+        let mut stream: std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<LlmStreamEvent, String>> + Send>,
+        > = if native_tools_enabled {
+            chat_provider
+                .chat_stream_with_tools(client_messages.clone(), None, native_tools.clone())
+                .await
+                .map_err(KokoroError::Chat)?
+        } else {
+            let text_stream = chat_provider
+                .chat_stream(client_messages.clone(), None)
+                .await
+                .map_err(KokoroError::Chat)?;
+            Box::pin(text_stream.map(|item| item.map(LlmStreamEvent::Text)))
+        };
 
         let mut round_response = String::new();
         let mut emit_buffer = String::new();
+        let mut native_tool_calls = Vec::new();
 
         while let Some(result) = stream.next().await {
             match result {
-                Ok(content) => {
-                    round_response.push_str(&content);
-                    emit_buffer.push_str(&content);
+                Ok(event) => {
+                    match event {
+                        LlmStreamEvent::Text(content) => {
+                            round_response.push_str(&content);
+                            emit_buffer.push_str(&content);
 
-                    // Only emit text up to the safe boundary (before any potential tag)
-                    let safe = find_safe_emit_boundary(&emit_buffer);
-                    if safe > 0 {
-                        let to_emit = emit_buffer[..safe].to_string();
-                        emit_buffer = emit_buffer[safe..].to_string();
-                        app
-                            .emit("chat-delta", &to_emit)
-                            .map_err(|e| KokoroError::Chat(e.to_string()))?;
+                            // Only emit text up to the safe boundary (before any potential tag)
+                            let safe = find_safe_emit_boundary(&emit_buffer);
+                            if safe > 0 {
+                                let to_emit = emit_buffer[..safe].to_string();
+                                emit_buffer = emit_buffer[safe..].to_string();
+                                app
+                                    .emit(
+                                        "chat-turn-delta",
+                                        serde_json::json!({
+                                            "turn_id": assistant_turn_id,
+                                            "delta": to_emit,
+                                        }),
+                                    )
+                                    .map_err(|e| KokoroError::Chat(e.to_string()))?;
+                            }
+                        }
+                        LlmStreamEvent::ToolCall(tool_call) => {
+                            native_tool_calls.push(ToolCall {
+                                tool_call_id: Some(tool_call.id),
+                                name: tool_call.name,
+                                args: tool_call.args,
+                            });
+                        }
                     }
                 }
                 Err(e) => {
                     if round_response.is_empty() && emit_buffer.is_empty() {
+                        stream_failed = true;
                         app.emit("chat-error", e).map_err(|e| KokoroError::Chat(e.to_string()))?;
                     } else {
                         eprintln!(
@@ -658,13 +700,20 @@ pub async fn stream_chat(
             let cleaned_remainder = strip_translate_tags(&cleaned_remainder);
             if !cleaned_remainder.is_empty() {
                 app
-                    .emit("chat-delta", &cleaned_remainder)
+                    .emit(
+                        "chat-turn-delta",
+                        serde_json::json!({
+                            "turn_id": assistant_turn_id,
+                            "delta": cleaned_remainder,
+                        }),
+                    )
                     .map_err(|e| KokoroError::Chat(e.to_string()))?;
             }
         }
 
-        let (cleaned_text, tool_calls) = parse_tool_call_tags(&round_response);
+        let (cleaned_text, mut tool_calls) = parse_tool_call_tags(&round_response);
         let (cleaned_text, round_translation) = extract_translate_tags(&cleaned_text);
+        tool_calls.extend(native_tool_calls);
 
         println!("[Chat] Round {} raw response ({} chars): ...{}",
             round + 1,
@@ -679,12 +728,7 @@ pub async fn stream_chat(
         }
 
         // Accumulate cleaned text for history
-        if !cleaned_text.is_empty() {
-            if !all_cleaned_text.is_empty() {
-                all_cleaned_text.push(' ');
-            }
-            all_cleaned_text.push_str(&cleaned_text);
-        }
+        merge_continuation_text(&mut all_cleaned_text, &cleaned_text);
 
         // Persist assistant draft incrementally (hidden interactions still save the response, just not the user message)
         if !all_cleaned_text.is_empty() {
@@ -716,18 +760,57 @@ pub async fn stream_chat(
         // Execute tool calls and collect results
         let registry = _action_registry.read().await;
         let mut tool_results = Vec::new();
+        let mut tool_result_messages = Vec::new();
+        let mut continuation_tool_calls = Vec::new();
+        let mut persisted_native_tool_results = Vec::new();
         let mut any_needs_feedback = false;
+        let has_native_tool_calls = tool_calls.iter().any(|tc| tc.tool_call_id.is_some());
 
         for tc in &tool_calls {
             println!("[ToolCall] Executing: {} with args {:?}", tc.name, tc.args);
             if tc.name == "set_background" {
                 bg_generated_by_tool = true;
             }
-            if tc.name == "change_expression" {
-                expression_set_by_tool = true;
+            if tc.name == "play_cue" {
+                cue_set_by_tool = true;
             }
             if registry.needs_feedback(&tc.name) {
                 any_needs_feedback = true;
+            }
+            let tool_enabled = {
+                let tool_settings = tool_settings_state.read().await;
+                tool_settings.is_enabled(&tc.name)
+            };
+            if !tool_enabled {
+                let message = format!("Tool '{}' is disabled", tc.name);
+                eprintln!("[ToolCall] {}", message);
+                let _ = app.emit(
+                    "chat-turn-tool",
+                    serde_json::json!({
+                        "turn_id": assistant_turn_id,
+                        "tool": tc.name,
+                        "error": message,
+                    }),
+                );
+                tool_results.push(format!("- {}: Error: {}", tc.name, message));
+                if let Some(tool_call_id) = &tc.tool_call_id {
+                    continuation_tool_calls.push((
+                        tool_call_id.clone(),
+                        tc.name.clone(),
+                        serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
+                    ));
+                    let tool_result_message = tool_result_message(
+                        tool_call_id.clone(),
+                        format!("Error: {}", message),
+                    );
+                    tool_result_messages.push(tool_result_message.clone());
+                    persisted_native_tool_results.push((
+                        tool_call_id.clone(),
+                        tc.name.clone(),
+                        tool_result_message,
+                    ));
+                }
+                continue;
             }
             let ctx = crate::actions::registry::ActionContext {
                 app: window.app_handle().clone(),
@@ -737,45 +820,156 @@ pub async fn stream_chat(
                 Ok(result) => {
                     println!("[ToolCall] {} => {}", tc.name, result.message);
                     let _ = app.emit(
-                        "chat-tool-result",
+                        "chat-turn-tool",
                         serde_json::json!({
+                            "turn_id": assistant_turn_id,
                             "tool": tc.name,
-                            "result": result.message,
+                            "result": result,
                         }),
                     );
                     tool_results.push(format!("- {}: {}", tc.name, result.message));
+                    if let Some(tool_call_id) = &tc.tool_call_id {
+                        continuation_tool_calls.push((
+                            tool_call_id.clone(),
+                            tc.name.clone(),
+                            serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
+                        ));
+                        let tool_result_message =
+                            tool_result_message(tool_call_id.clone(), result.message.clone());
+                        tool_result_messages.push(tool_result_message.clone());
+                        persisted_native_tool_results.push((
+                            tool_call_id.clone(),
+                            tc.name.clone(),
+                            tool_result_message,
+                        ));
+                    }
                 }
                 Err(e) => {
                     eprintln!("[ToolCall] {} failed: {}", tc.name, e.0);
                     let _ = app.emit(
-                        "chat-tool-result",
+                        "chat-turn-tool",
                         serde_json::json!({
+                            "turn_id": assistant_turn_id,
                             "tool": tc.name,
-                            "result": format!("Error: {}", e.0),
+                            "error": e.0,
                         }),
                     );
                     tool_results.push(format!("- {}: Error: {}", tc.name, e.0));
+                    if let Some(tool_call_id) = &tc.tool_call_id {
+                        continuation_tool_calls.push((
+                            tool_call_id.clone(),
+                            tc.name.clone(),
+                            serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
+                        ));
+                        let tool_result_message =
+                            tool_result_message(tool_call_id.clone(), format!("Error: {}", e.0));
+                        tool_result_messages.push(tool_result_message.clone());
+                        persisted_native_tool_results.push((
+                            tool_call_id.clone(),
+                            tc.name.clone(),
+                            tool_result_message,
+                        ));
+                    }
                 }
             }
         }
         drop(registry);
 
+        if has_native_tool_calls {
+            let assistant_tool_call_metadata = serde_json::json!({
+                "type": "assistant_tool_calls",
+                "turn_id": assistant_turn_id,
+                "tool_calls": continuation_tool_calls
+                    .iter()
+                    .map(|(id, name, arguments)| serde_json::json!({
+                        "id": id,
+                        "name": name,
+                        "arguments": arguments,
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+            .to_string();
+            state
+                .add_message_with_metadata(
+                    "assistant".to_string(),
+                    cleaned_text.clone(),
+                    Some(assistant_tool_call_metadata),
+                    &char_id,
+                )
+                .await;
+            for (tool_call_id, tool_name, tool_message) in &persisted_native_tool_results {
+                let tool_content = extract_message_text(tool_message);
+                let tool_metadata = serde_json::json!({
+                    "type": "tool_result",
+                    "turn_id": assistant_turn_id,
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                })
+                .to_string();
+                state
+                    .add_message_with_metadata(
+                        "tool".to_string(),
+                        tool_content,
+                        Some(tool_metadata),
+                        &char_id,
+                    )
+                    .await;
+            }
+            client_messages.push(assistant_tool_calls_message(
+                if cleaned_text.is_empty() {
+                    None
+                } else {
+                    Some(cleaned_text.clone())
+                },
+                continuation_tool_calls,
+            ));
+            client_messages.extend(tool_result_messages);
+            println!("[Chat] Continuing after native tool calls with assistant/tool result messages");
+            #[cfg(debug_assertions)]
+            debug_log_llm_messages(
+                &format!("post-tool continuation round {}", round + 1),
+                &client_messages,
+            );
+            continue;
+        }
+
         // Only continue the loop if at least one tool needs its result fed back to the LLM
         if !any_needs_feedback {
+            if all_cleaned_text.trim().is_empty() && !forced_text_after_side_effect {
+                println!("[Chat] Side-effect tools ran without any text reply, forcing one follow-up text round");
+                forced_text_after_side_effect = true;
+                client_messages.push(system_message(format!(
+                    "[Tool results]\n\
+                    {}\n\n\
+                    The side-effect tool has already been executed successfully.\n\
+                    Now continue with a natural reply for the user in plain dialogue text.\n\
+                    Do not explain the tool call, do not output metadata, and do not repeat the same side-effect tool unless it is still necessary.",
+                    tool_results.join("\n")
+                )));
+                #[cfg(debug_assertions)]
+                debug_log_llm_messages(
+                    &format!("forced follow-up round {}", round + 1),
+                    &client_messages,
+                );
+                continue;
+            }
+
             println!("[Chat] No feedback-requiring tools, ending loop");
             break;
         }
 
         // Only inject tool results — no need to replay the assistant's previous output
-        client_messages.push(crate::llm::openai::Message {
-            role: "system".to_string(),
-            content: crate::llm::openai::MessageContent::Text(format!(
-                "[Tool results]\n\
-                {}\n\n\
-                Incorporate these results naturally into your dialogue. Do NOT echo raw data or JSON.",
-                tool_results.join("\n")
-            )),
-        });
+        client_messages.push(system_message(format!(
+            "[Tool results]\n\
+            {}\n\n\
+            Incorporate these results naturally into your dialogue. Do NOT echo raw data or JSON.",
+            tool_results.join("\n")
+        )));
+        #[cfg(debug_assertions)]
+        debug_log_llm_messages(
+            &format!("feedback continuation round {}", round + 1),
+            &client_messages,
+        );
     }
 
     let full_response = strip_leaked_tags(&all_cleaned_text);
@@ -788,16 +982,11 @@ pub async fn stream_chat(
         if !user_lang.is_empty() && !resp_lang.is_empty() && user_lang != resp_lang {
             println!("[Chat] Translation missing, triggering fallback translation into {}", user_lang);
             let fallback_messages = vec![
-                crate::llm::openai::Message {
-                    role: "system".to_string(),
-                    content: crate::llm::openai::MessageContent::Text(
-                        format!("You are a translator. Translate the following text into {}. Output only the translation, nothing else.", user_lang)
-                    ),
-                },
-                crate::llm::openai::Message {
-                    role: "user".to_string(),
-                    content: crate::llm::openai::MessageContent::Text(full_response.clone()),
-                },
+                system_message(format!(
+                    "You are a translator. Translate the following text into {}. Output only the translation, nothing else.",
+                    user_lang
+                )),
+                user_text_message(full_response.clone()),
             ];
             match system_provider.chat(fallback_messages, None).await {
                 Ok(translation) => {
@@ -814,33 +1003,51 @@ pub async fn stream_chat(
         }
     }
 
-    // Fallback emotion: if main LLM never called change_expression, infer via system LLM
-    if !expression_set_by_tool && !full_response.is_empty() {
-        println!("[Chat] Expression not set by tool, triggering fallback emotion analysis");
-        let emotion_messages = vec![
-            crate::llm::openai::Message {
-                role: "system".to_string(),
-                content: crate::llm::openai::MessageContent::Text(
-                    crate::ai::prompts::EMOTION_ANALYZER_PROMPT.to_string(),
-                ),
-            },
-            crate::llm::openai::Message {
-                role: "user".to_string(),
-                content: crate::llm::openai::MessageContent::Text(full_response.clone()),
-            },
+    // Fallback cue: if main LLM never called play_cue, infer via system LLM
+    if !cue_set_by_tool && !full_response.is_empty() {
+        println!("[Chat] Cue not set by tool, triggering fallback cue analysis");
+        let mut emotion_messages = vec![
+            system_message(crate::ai::prompts::EMOTION_ANALYZER_PROMPT.to_string()),
         ];
+        if let Some(profile) = crate::commands::live2d::load_active_live2d_profile() {
+            let available_cues = profile
+                .cue_map
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            emotion_messages.push(system_message(format!(
+                "Available cues for the active model: {}.\nChoose exactly one from this list, or return null if none fit.",
+                if available_cues.is_empty() { "(none)" } else { &available_cues }
+            )));
+        }
+        emotion_messages.push(user_text_message(full_response.clone()));
+        let valid_fallback_cues = crate::commands::live2d::load_active_live2d_profile()
+            .map(|profile| profile.cue_map.keys().cloned().collect::<std::collections::HashSet<_>>());
         match system_provider.chat(emotion_messages, None).await {
             Ok(json_str) => {
                 let clean = json_str.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```");
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(clean) {
-                    if let Some(expr) = val.get("expression").and_then(|v| v.as_str()) {
-                        println!("[Chat] Fallback expression: {}", expr);
-                        let _ = app.emit("chat-expression", serde_json::json!({ "expression": expr, "mood": 0.5 }));
+                    if let Some(cue) = val.get("cue").and_then(|v| v.as_str()) {
+                        let trimmed = cue.trim();
+                        let is_valid = valid_fallback_cues
+                            .as_ref()
+                            .map(|cues| cues.contains(trimmed))
+                            .unwrap_or(false);
+                        if is_valid {
+                            println!("[Chat] Fallback cue: {}", trimmed);
+                            let _ = app.emit(
+                                "chat-cue",
+                                serde_json::json!({ "cue": trimmed, "source": "fallback-cue" }),
+                            );
+                        } else {
+                            println!("[Chat] Ignoring invalid fallback cue: {}", trimmed);
+                        }
                     }
                 }
             }
             Err(e) => {
-                eprintln!("[Chat] Fallback emotion analysis failed: {}", e);
+                eprintln!("[Chat] Fallback cue analysis failed: {}", e);
             }
         }
     }
@@ -848,7 +1055,32 @@ pub async fn stream_chat(
     // Emit combined translation from all rounds
     if !all_translations.is_empty() {
         let combined_translation = all_translations.join(" ");
-        let _ = app.emit("chat-translation", &combined_translation);
+        let _ = app.emit(
+            "chat-turn-translation",
+            serde_json::json!({
+                "turn_id": assistant_turn_id,
+                "translation": combined_translation,
+            }),
+        );
+    }
+
+    // Update character emotion from the final assistant response, not from the user input.
+    if emotion_enabled && !full_response.is_empty() {
+        let emotion_input = build_emotion_input_from_response(&full_response);
+        if !emotion_input.is_empty() {
+            if let Some(emotion_classification) =
+                crate::ai::emotion_classifier::classify_text(&emotion_input).await
+            {
+                state
+                    .update_emotion(
+                        &emotion_classification.label,
+                        emotion_classification.raw_mood,
+                    )
+                    .await;
+            } else {
+                eprintln!("[EmotionClassifier] Emotion update skipped because classifier is unavailable.");
+            }
+        }
     }
 
     // 8. Update History with final response
@@ -856,9 +1088,14 @@ pub async fn stream_chat(
     if !full_response.is_empty() {
         let metadata = if !all_translations.is_empty() {
             let combined = all_translations.join(" ");
-            Some(serde_json::json!({ "translation": combined }).to_string())
+            Some(serde_json::json!({
+                "translation": combined,
+                "turn_id": assistant_turn_id,
+            }).to_string())
         } else {
-            None
+            Some(serde_json::json!({
+                "turn_id": assistant_turn_id,
+            }).to_string())
         };
 
         // Update the draft row with final content + metadata (DB already has the row)
@@ -946,18 +1183,8 @@ pub async fn stream_chat(
 
         tauri::async_runtime::spawn(async move {
             let analyze_messages = vec![
-                crate::llm::openai::Message {
-                    role: "system".to_string(),
-                    content: crate::llm::openai::MessageContent::Text(
-                        crate::ai::prompts::BG_IMAGE_ANALYZER_PROMPT.to_string(),
-                    ),
-                },
-                crate::llm::openai::Message {
-                    role: "user".to_string(),
-                    content: crate::llm::openai::MessageContent::Text(
-                        format!("Character reply: {}", reply_for_analysis)
-                    ),
-                },
+                system_message(crate::ai::prompts::BG_IMAGE_ANALYZER_PROMPT.to_string()),
+                user_text_message(format!("Character reply: {}", reply_for_analysis)),
             ];
 
             let json_str = match system_provider.chat(analyze_messages, None).await {
@@ -1013,7 +1240,19 @@ pub async fn stream_chat(
         });
     }
 
-    app.emit("chat-done", ()).map_err(|e| KokoroError::Chat(e.to_string()))?;
+    let finish_status = if stream_failed && full_response.is_empty() {
+        "error"
+    } else {
+        "completed"
+    };
+    app.emit(
+        "chat-turn-finish",
+        serde_json::json!({
+            "turn_id": assistant_turn_id,
+            "status": finish_status,
+        }),
+    )
+    .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
     Ok(())
 }
@@ -1130,12 +1369,12 @@ mod tests {
 
     #[test]
     fn test_parse_tool_call_basic() {
-        let input = "text[TOOL_CALL:change_expression|expression=happy]more";
+        let input = "text[TOOL_CALL:play_cue|cue=happy]more";
         let (cleaned, calls) = parse_tool_call_tags(input);
         assert_eq!(cleaned.trim(), "textmore");
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "change_expression");
-        assert_eq!(calls[0].args.get("expression"), Some(&"happy".to_string()));
+        assert_eq!(calls[0].name, "play_cue");
+        assert_eq!(calls[0].args.get("cue"), Some(&"happy".to_string()));
     }
 
     #[test]
@@ -1157,17 +1396,17 @@ mod tests {
 
     #[test]
     fn test_parse_tool_call_simplified_format() {
-        let input = "text[change_expression|expression=shy]more";
+        let input = "text[play_cue|cue=shy]more";
         let (cleaned, calls) = parse_tool_call_tags(input);
         assert_eq!(cleaned.trim(), "textmore");
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "change_expression");
-        assert_eq!(calls[0].args.get("expression"), Some(&"shy".to_string()));
+        assert_eq!(calls[0].name, "play_cue");
+        assert_eq!(calls[0].args.get("cue"), Some(&"shy".to_string()));
     }
 
     #[test]
     fn test_parse_tool_call_simplified_multiple() {
-        let input = "hello[change_expression|expression=happy]world[change_expression|expression=sad]end";
+        let input = "hello[play_cue|cue=happy]world[play_cue|cue=sad]end";
         let (cleaned, calls) = parse_tool_call_tags(input);
         assert_eq!(cleaned.trim(), "helloworldend");
         assert_eq!(calls.len(), 2);
@@ -1184,12 +1423,12 @@ mod tests {
 
     #[test]
     fn test_parse_tool_call_colon_format() {
-        let input = "text[change_expression:happy]more";
+        let input = "text[play_cue:happy]more";
         let (cleaned, calls) = parse_tool_call_tags(input);
         assert_eq!(cleaned.trim(), "textmore");
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "change_expression");
-        assert_eq!(calls[0].args.get("expression"), Some(&"happy".to_string()));
+        assert_eq!(calls[0].name, "play_cue");
+        assert_eq!(calls[0].args.get("cue"), Some(&"happy".to_string()));
     }
 
     #[test]

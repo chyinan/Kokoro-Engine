@@ -9,6 +9,7 @@ import { usePetChat } from "../features/pet/usePetChat";
 import type { Live2DViewerHandle } from "../features/live2d/Live2DViewer";
 import "../ui/i18n";
 import { live2dUrl } from "../lib/utils";
+import { BUILTIN_LIVE2D_MODEL_PATH, setActiveLive2dModel } from "../lib/kokoro-bridge";
 
 type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
 
@@ -24,25 +25,51 @@ interface PetConfig {
     render_fps?: number;
 }
 
+interface Live2dSelectionEvent {
+    modelPath: string;
+    customModelPath: string | null;
+    modelUrl: string;
+}
+
 export default function PetWindow() {
     const currentWindow = getCurrentWindow();
-    // Read model from localStorage and sync when main window changes it
-    const getModelUrl = () => {
-        const saved = localStorage.getItem("kokoro_custom_model_path");
-        if (saved) return live2dUrl(saved);
-        return "/live2d/haru/haru_greeter_t03.model3.json";
+    const getModelSelection = () => {
+        const savedPath = localStorage.getItem("kokoro_custom_model_path");
+        return {
+            modelPath: savedPath ?? BUILTIN_LIVE2D_MODEL_PATH,
+            modelUrl: savedPath ? live2dUrl(savedPath) : "/live2d/haru/haru_greeter_t03.model3.json",
+        };
     };
-    const [modelUrl, setModelUrl] = useState(getModelUrl);
+    const [{ modelUrl, modelPath }, setModelSelection] = useState(getModelSelection);
 
     useEffect(() => {
         const onStorage = (e: StorageEvent) => {
             if (e.key === "kokoro_custom_model_path") {
-                setModelUrl(getModelUrl());
+                setModelSelection(getModelSelection());
             }
         };
         window.addEventListener("storage", onStorage);
         return () => window.removeEventListener("storage", onStorage);
     }, []);
+
+    useEffect(() => {
+        const unlisten = listen<Live2dSelectionEvent>("live2d-model-selection-updated", (event) => {
+            setModelSelection({
+                modelPath: event.payload.modelPath,
+                modelUrl: event.payload.modelUrl,
+            });
+        });
+
+        return () => {
+            unlisten.then(fn => fn()).catch(console.error);
+        };
+    }, []);
+
+    useEffect(() => {
+        setActiveLive2dModel(modelPath).catch((error) => {
+            console.error("[PetWindow] Failed to sync active Live2D model:", error);
+        });
+    }, [modelPath]);
     const [isDragMode, setIsDragMode] = useState(false);
     const [isResizeMode, setIsResizeMode] = useState(false);
     const [contextMenu, setContextMenu] = useState<{ visible: boolean; x: number; y: number }>({
@@ -566,7 +593,8 @@ export default function PetWindow() {
                 {configLoaded && <Live2DViewer
                     ref={viewerRef}
                     modelUrl={modelUrl}
-                    // Live2DViewer owns the chat-expression/chat-action subscriptions
+                    modelPath={modelPath}
+                    // Live2DViewer owns the chat-cue subscriptions
                     // and drives this shared controller directly.
                     controller={controllerRef.current}
                     backgroundAlpha={0}

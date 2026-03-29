@@ -1,7 +1,7 @@
 # Kokoro Engine — API Specification
 
 > **Version:** 1.1
-> **Last Updated:** 2026-03-01
+> **Last Updated:** 2026-03-29
 > **Transport:** Tauri IPC (`invoke` + event system)  
 > **Companion:** [architecture.md](file:///d:/Program/Kokoro%20Engine/docs/architecture.md)
 
@@ -82,7 +82,7 @@ pub struct SystemStatus {
 ```rust
 pub struct CharacterState {
     pub name: String,                // "Kokoro"
-    pub current_expression: String,  // "neutral" | "happy" | "sad" | ...
+    pub current_cue: String,         // "neutral" | "happy" | "sad" | ...
     pub mood: f32,                   // 0.0 – 1.0
     pub is_speaking: bool,
 }
@@ -93,7 +93,7 @@ pub struct CharacterState {
 ```rust
 pub struct ChatResponse {
     pub text: String,           // AI reply text
-    pub expression: String,     // Suggested expression
+    pub cue: String,            // Suggested visual cue
     pub mood_delta: f32,        // Mood change (-1.0 to 1.0)
 }
 ```
@@ -163,9 +163,11 @@ Mirrored in [`kokoro-bridge.ts`](file:///d:/Program/Kokoro%20Engine/src/lib/koko
 ```typescript
 interface EngineInfo      { name: string; version: string; platform: string }
 interface SystemStatus    { engine_running: boolean; active_modules: string[]; memory_usage_mb: number }
-interface CharacterState  { name: string; current_expression: string; mood: number; is_speaking: boolean }
-interface ChatResponse    { text: string; expression: string; mood_delta: number }
+interface CharacterState  { name: string; current_cue: string; mood: number; is_speaking: boolean }
+interface ChatResponse    { text: string; cue: string; mood_delta: number }
 interface ChatRequest     { message: string; api_key?: string; endpoint?: string; model?: string }
+interface EmotionSettings { enabled: boolean }
+interface ToolSettings    { max_tool_rounds: number; enabled_tools: Record<string, boolean> }
 interface DbTestResult    { success: boolean; message: string; record_count: number }
 ```
 
@@ -244,19 +246,19 @@ Returns the current character state for Live2D synchronization.
 
 ```typescript
 const state = await getCharacterState();
-// { name: "Kokoro", current_expression: "neutral", mood: 0.5, is_speaking: false }
+// { name: "Kokoro", current_cue: "neutral", mood: 0.5, is_speaking: false }
 ```
 
 ---
 
-### `set_expression`
+### `play_cue`
 
-Sets the character's current expression and returns the updated state.
+Triggers the character's current cue and returns the updated state.
 
 | Property | Value |
 |---|---|
-| **Command** | `set_expression` |
-| **Parameters** | `expression: string` |
+| **Command** | `play_cue` |
+| **Parameters** | `cue: string` |
 | **Returns** | `CharacterState` |
 | **Errors** | *none* |
 | **Source** | [character.rs](file:///d:/Program/Kokoro%20Engine/src-tauri/src/commands/character.rs#L31-L40) |
@@ -264,8 +266,8 @@ Sets the character's current expression and returns the updated state.
 **Example:**
 
 ```typescript
-const state = await setExpression("happy");
-// { name: "Kokoro", current_expression: "happy", mood: 0.5, is_speaking: false }
+const state = await playCue("happy");
+// { name: "Kokoro", current_cue: "happy", mood: 0.5, is_speaking: false }
 ```
 
 ---
@@ -286,7 +288,7 @@ Sends a message and returns a non-streaming AI response. *(Legacy — prefer `st
 
 ```typescript
 const response = await sendMessage("Hello!");
-// { text: "Echo from Kokoro Engine: Hello!", expression: "happy", mood_delta: 0.1 }
+// { text: "Echo from Kokoro Engine: Hello!", cue: "joy", mood_delta: 0.1 }
 ```
 
 ---
@@ -295,7 +297,7 @@ const response = await sendMessage("Hello!");
 
 ### `stream_chat`
 
-Initiates a streaming chat session. The response is delivered incrementally via events.
+Initiates a streaming chat session. The response is delivered incrementally via turn-scoped events.
 
 | Property | Value |
 |---|---|
@@ -303,26 +305,27 @@ Initiates a streaming chat session. The response is delivered incrementally via 
 | **Parameters** | `request: ChatRequest` |
 | **Returns** | `Result<void, string>` |
 | **Errors** | `"API Key is required"` if `api_key` is missing |
-| **Events emitted** | `chat-delta`, `chat-error`, `chat-done` |
+| **Events emitted** | `chat-turn-start`, `chat-turn-delta`, `chat-turn-finish`, `chat-turn-translation`, `chat-turn-tool`, `chat-cue`, `chat-error` |
 | **Source** | [chat.rs](file:///d:/Program/Kokoro%20Engine/src-tauri/src/commands/chat.rs#L14-L72) |
 
 **Internal flow:**
 
-1. Adds user message to conversation history
+1. Adds the user message to conversation history unless the request is hidden
 2. Assembles prompt via `AIOrchestrator.compose_prompt()`
-3. Sends to LLM via `OpenAIClient.chat_stream()`
-4. Emits `chat-delta` for each SSE chunk
-5. Emits `chat-error` on any stream error
-6. Adds full response to history
-7. Emits `chat-done` when complete
+3. Emits `chat-turn-start` with a generated `turn_id`
+4. Streams LLM output and emits `chat-turn-delta` chunks for that turn
+5. Executes tools when tool calls are present and emits `chat-turn-tool`
+6. Emits `chat-turn-translation` if a translation payload is produced
+7. Emits `chat-cue` when a cue is played directly or inferred as a fallback
+8. Emits `chat-turn-finish` with `completed` or `error`
 
 **Example:**
 
 ```typescript
 // 1. Register event listeners
-const offDelta = await onChatDelta((text) => appendToUI(text));
+const offDelta = await onChatTurnDelta(({ turn_id, delta }) => appendToUI(turn_id, delta));
 const offError = await onChatError((err) => showError(err));
-const offDone  = await onChatDone(() => finalize());
+const offDone  = await onChatTurnFinish(({ turn_id, status }) => finalize(turn_id, status));
 
 // 2. Start streaming
 await streamChat({
@@ -376,6 +379,84 @@ Clears the conversation history (rolling window).
 
 ```typescript
 await clearHistory();
+```
+
+---
+
+### `get_emotion_settings`
+
+Returns the persisted runtime switch for the emotion system.
+
+| Property | Value |
+|---|---|
+| **Command** | `get_emotion_settings` |
+| **Parameters** | *none* |
+| **Returns** | `EmotionSettings` |
+| **Errors** | *none* |
+
+**Example:**
+
+```typescript
+const settings = await getEmotionSettings();
+// { enabled: true }
+```
+
+---
+
+### `save_emotion_settings`
+
+Saves the emotion system toggle. Disabling emotion resets the in-memory emotion state to the character baseline.
+
+| Property | Value |
+|---|---|
+| **Command** | `save_emotion_settings` |
+| **Parameters** | `settings: EmotionSettings` |
+| **Returns** | `Result<void, string>` |
+| **Errors** | Persist/write failure |
+
+**Example:**
+
+```typescript
+await saveEmotionSettings({ enabled: false });
+```
+
+---
+
+### `get_tool_settings`
+
+Returns tool execution settings used by chat and Telegram tool loops.
+
+| Property | Value |
+|---|---|
+| **Command** | `get_tool_settings` |
+| **Parameters** | *none* |
+| **Returns** | `ToolSettings` |
+| **Errors** | *none* |
+
+**Example:**
+
+```typescript
+const settings = await getToolSettings();
+// { max_tool_rounds: 10, enabled_tools: { play_cue: true } }
+```
+
+---
+
+### `save_tool_settings`
+
+Persists tool execution settings. `max_tool_rounds` is clamped to `1..20`.
+
+| Property | Value |
+|---|---|
+| **Command** | `save_tool_settings` |
+| **Parameters** | `settings: ToolSettings` |
+| **Returns** | `Result<void, string>` |
+| **Errors** | Persist/write failure |
+
+**Example:**
+
+```typescript
+await saveToolSettings({ max_tool_rounds: 8, enabled_tools: { play_cue: true } });
 ```
 
 ---
@@ -503,9 +584,13 @@ Events are push-based messages from the backend to the frontend. Subscribe via `
 
 | Event | Payload | Description |
 |---|---|---|
-| `chat-delta` | `string` | Incremental text chunk from LLM streaming |
+| `chat-turn-start` | `{ turn_id: string }` | Starts a streamed assistant turn |
+| `chat-turn-delta` | `{ turn_id: string, delta: string }` | Incremental text chunk for one turn |
+| `chat-turn-finish` | `{ turn_id: string, status: "completed" \| "error" }` | Ends a streamed assistant turn |
+| `chat-turn-translation` | `{ turn_id: string, translation: string }` | Combined translation output for one turn |
+| `chat-turn-tool` | `{ turn_id: string, tool: string, result?, error? }` | Tool execution result associated with a turn |
+| `chat-cue` | `{ cue: string, source?: string }` | Live2D cue playback event |
 | `chat-error` | `string` | Error message during streaming |
-| `chat-done` | `void` | Stream completed successfully |
 
 ### TTS Events
 
@@ -521,8 +606,8 @@ Events are push-based messages from the backend to the frontend. Subscribe via `
 import { listen } from "@tauri-apps/api/event";
 
 // Chat events
-const off = await listen<string>("chat-delta", (event) => {
-  console.log("Chunk:", event.payload);
+const off = await listen<{ turn_id: string; delta: string }>("chat-turn-delta", (event) => {
+  console.log("Chunk:", event.payload.turn_id, event.payload.delta);
 });
 
 // TTS events
@@ -624,16 +709,18 @@ getSystemStatus():                           Promise<SystemStatus>
 
 // Character
 getCharacterState():                         Promise<CharacterState>
-setExpression(expression: string):           Promise<CharacterState>
+playCue(cue: string):                        Promise<CharacterState>
 sendMessage(message: string):                Promise<ChatResponse>
 
 // Chat (streaming)
 streamChat(request: ChatRequest):            Promise<void>
-onChatDelta(cb: (delta: string) => void):    Promise<UnlistenFn>
+onChatTurnStart(cb):                         Promise<UnlistenFn>
+onChatTurnDelta(cb):                         Promise<UnlistenFn>
+onChatTurnFinish(cb):                        Promise<UnlistenFn>
+onChatTurnTranslation(cb):                   Promise<UnlistenFn>
+onChatTurnTool(cb):                          Promise<UnlistenFn>
 onChatError(cb: (error: string) => void):    Promise<UnlistenFn>
-onChatDone(cb: () => void):                  Promise<UnlistenFn>
-onChatTranslation(cb):                       Promise<UnlistenFn>
-onChatExpression(cb):                        Promise<UnlistenFn>
+onChatCue(cb):                               Promise<UnlistenFn>
 
 // Context
 setPersona(prompt: string):                  Promise<void>
@@ -647,8 +734,11 @@ setProactiveEnabled(enabled: boolean):       Promise<void>
 getProactiveEnabled():                       Promise<boolean>
 clearHistory():                              Promise<void>
 deleteLastMessages(count: number):           Promise<void>
-endSession():                                Promise<void>
 getEmotionState():                           Promise<EmotionStateResponse>
+getEmotionSettings():                        Promise<EmotionSettings>
+saveEmotionSettings(settings):               Promise<void>
+getToolSettings():                           Promise<ToolSettings>
+saveToolSettings(settings):                  Promise<void>
 
 // Database
 initDb():                                    Promise<string>
@@ -669,6 +759,7 @@ getLlmConfig():                              Promise<LlmConfig>
 saveLlmConfig(config):                       Promise<void>
 listOllamaModels(baseUrl):                   Promise<OllamaModelInfo[]>
 fetchModels(baseUrl, apiKey):                Promise<string[]>
+// `LlmConfig` includes `system_provider`, `system_model`, and per-provider `supports_native_tools`
 
 // Vision
 captureScreen():                             Promise<string>

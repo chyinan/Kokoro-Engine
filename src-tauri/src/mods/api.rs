@@ -15,8 +15,8 @@ pub enum ScriptEvent {
         component: String,
         data: serde_json::Value,
     },
-    /// Kokoro.character.setExpression(expr) → set-expression Tauri event
-    SetExpression { expression: String },
+    /// Kokoro.character.playCue(cue) → chat-cue Tauri event
+    PlayCue { cue: String },
 }
 
 /// Register the Kokoro API into the QuickJS context.
@@ -114,9 +114,9 @@ pub fn register_api(ctx: &Ctx<'_>, event_tx: Sender<ScriptEvent>) -> Result<()> 
 
     let char_tx = event_tx.clone();
     character.set(
-        "setExpression",
-        Function::new(ctx.clone(), move |expression: String| {
-            let _ = char_tx.send(ScriptEvent::SetExpression { expression });
+        "playCue",
+        Function::new(ctx.clone(), move |cue: String| {
+            let _ = char_tx.send(ScriptEvent::PlayCue { cue });
         })?,
     )?;
 

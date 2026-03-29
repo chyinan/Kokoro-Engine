@@ -5,9 +5,11 @@
             "saved": "저장됨",
             "cancel": "취소",
             "edit": "편집",
+            "preview": "미리보기",
             "done": "완료",
             "delete": "삭제",
-            "add": "추가"
+            "add": "추가",
+            "rename": "이름 변경"
         }
     },
     "sing": {
@@ -92,6 +94,11 @@
             "model_label": "모델 이름",
             "fetch_models": "사용 가능 모델 가져오기",
             "fetching": "가져오는 중...",
+            "native_tools": {
+                "label": "도구 호출",
+                "toggle": "네이티브 tool calling 사용",
+                "desc": "가짜 [TOOL_CALL:...] 태그 대신 현재 model/provider 의 네이티브 tool calling 인터페이스를 사용합니다."
+            },
             "save_config": "LLM 설정 저장",
             "saving": "저장 중...",
             "vision_mode": "비전 모드",
@@ -105,6 +112,10 @@
                 "strategy_summary_desc": "오래된 메시지를 요약으로 압축",
                 "max_chars_label": "메시지당 최대 글자 수",
                 "max_chars_hint": "이 길이를 초과하는 메시지는 잘립니다. 두 전략 모두에 적용됩니다."
+            },
+            "emotion": {
+                "label": "감정 시스템",
+                "desc": "로컬 ONNX 모델을 사용해 Kokoro의 최종 응답에서 응답 후 감정 상태를 추정합니다."
             },
             "system_llm": {
                 "title": "시스템 LLM (의도 파악)",
@@ -310,6 +321,14 @@
                 "loading": "가져오는 중...",
                 "hint": ".zip 패키지 또는 .model3.json 파일을 선택하세요."
             },
+            "rename": {
+                "prompt": "새 모델 이름을 입력하세요"
+            },
+            "export": {
+                "button": "Live2D 내보내기",
+                "loading": "내보내는 중...",
+                "hint": "내보낸 패키지에는 모델 파일과 Kokoro의 cue 매핑이 함께 포함됩니다."
+            },
             "gaze_tracking": {
                 "label": "시선 추적",
                 "desc": "모델의 눈이 마우스 커서를 따라갑니다"
@@ -321,6 +340,90 @@
                     "fps_60": "60 FPS",
                     "unlimited": "무제한",
                     "custom": "사용자 지정"
+                }
+            },
+            "mapping": {
+                "select_model": "매핑을 편집하려면 가져온 모델을 선택하세요.",
+                "loading_profile": "모델 프로필을 불러오는 중...",
+                "placeholders": {
+                    "cue_name": "cue 이름"
+                },
+                "options": {
+                    "select_cue": "Cue 선택",
+                    "no_expression": "표정 없음",
+                    "no_motion_group": "모션 그룹 없음"
+                },
+                "actions": {
+                    "save_cue": "Cue 저장",
+                    "save_interaction": "상호작용 매핑 저장",
+                    "save_semantic": "시맨틱 매핑 저장",
+                    "clear": "지우기",
+                    "exclude_from_prompt": "프롬프트에서 제외",
+                    "include_in_prompt": "프롬프트에 포함"
+                },
+                "cues": {
+                    "title": "Cue 매핑",
+                    "desc": "가져온 모델은 모델별 cue 를 사용합니다. cue 이름을 모델 표정 또는 모션 그룹에 매핑하세요."
+                },
+                "available_expressions": "표정 ({{count}})",
+                "available_motion_groups": "모션 그룹 ({{count}})",
+                "configured_cues": "설정된 Cue ({{count}})",
+                "empty_cues": "아직 설정된 cue 가 없습니다.",
+                "interactions": {
+                    "title": "상호작용 매핑",
+                    "desc": "제스처와 신체 부위 시맨틱 이벤트를 cue 에 매핑합니다. 일치 순서는 정확 일치, 제스처 와일드카드, 부위 와일드카드, 전역 와일드카드입니다.",
+                    "configured": "설정된 상호작용 규칙 ({{count}})",
+                    "empty": "상호작용 cue 매핑이 아직 없습니다."
+                },
+                "semantic": {
+                    "title": "시맨틱 이벤트 매핑",
+                    "desc": "비상호작용 시맨틱 이벤트를 cue 에 매핑합니다. 이 매핑은 감정 이벤트와 기타 모델 비종속 로직에 사용됩니다.",
+                    "configured": "설정된 시맨틱 규칙 ({{count}})",
+                    "empty": "시맨틱 cue 매핑이 아직 없습니다."
+                },
+                "summary": {
+                    "expression": "표정: {{value}}",
+                    "expression_none": "표정: 없음",
+                    "motion": "모션: {{value}}",
+                    "motion_none": "모션: 없음",
+                    "cue": "cue: {{value}}",
+                    "prompt_hidden": "프롬프트에서 숨김"
+                },
+                "prompt_exclusions": {
+                    "title": "프롬프트 제외",
+                    "desc": "모든 cue 는 기본적으로 채팅 모델에 노출됩니다. 여기에는 제외할 cue 만 추가합니다.",
+                    "select_cue": "제외할 cue 선택",
+                    "empty": "현재 프롬프트에서 제외된 cue 가 없습니다."
+                },
+                "gestures": {
+                    "tap": "탭",
+                    "long_press": "길게 누르기",
+                    "rapid_tap": "빠른 연속 탭",
+                    "any": "모든 제스처"
+                },
+                "areas": {
+                    "eyes": "눈",
+                    "lips": "입술",
+                    "face": "얼굴",
+                    "head": "머리",
+                    "hair": "머리카락",
+                    "hand": "손",
+                    "arm": "팔",
+                    "chest": "가슴",
+                    "body": "몸",
+                    "leg": "다리",
+                    "skirt": "치마",
+                    "accessory": "장식품",
+                    "any": "모든 부위"
+                },
+                "semantic_keys": {
+                    "emotion": {
+                        "ecstatic": "감정: 황홀함",
+                        "very_happy": "감정: 매우 기쁨",
+                        "sulking": "감정: 토라짐",
+                        "very_sad": "감정: 매우 슬픔",
+                        "mood_swing": "감정: 기분 변화"
+                    }
                 }
             }
         },
@@ -468,6 +571,7 @@
                 "not_installed_prefix": "(설치되지 않음)",
                 "install_warning": "모델 \"{{model}}\"이(가) 설치되지 않았습니다",
                 "install_desc": "이 비전 모델을 사용하려면 다운로드가 필요합니다.",
+                "install_desc_manual": "이 모델은 아직 Ollama에 설치되어 있지 않습니다. 먼저 Ollama에서 수동으로 pull 한 뒤 여기서 모델 목록을 새로고침하세요.",
                 "install_btn": "{{model}} 설치",
                 "installing": "{{model}} 설치 중...",
                 "success": "모델 \"{{model}}\" 설치 성공!",
@@ -519,6 +623,40 @@
         "mcp": {
             "title": "MCP 도구 서버",
             "desc": "Model Context Protocol을 통해 외부 도구 연결",
+            "native_loop": {
+                "title": "툴 루프",
+                "desc": "한 번의 답변에서 Kokoro가 이어서 수행할 수 있는 도구 호출 라운드 수를 제한합니다.",
+                "max_rounds": "최대 도구 라운드"
+            },
+            "builtin_tools": {
+                "title": "내장 도구",
+                "desc": "모델이 호출할 수 있는 내장 도구를 선택합니다.",
+                "saving": "저장 중...",
+                "saved_auto": "자동 저장됨",
+                "items": {
+                    "get_time": {
+                        "description": "현재 날짜와 시간을 가져옵니다."
+                    },
+                    "play_cue": {
+                        "description": "현재 모델에 설정된 Live2D cue를 실행합니다."
+                    },
+                    "set_background": {
+                        "description": "장면 설명을 바탕으로 새 배경을 생성하고 전환합니다."
+                    },
+                    "search_memory": {
+                        "description": "사용자에 대한 저장된 기억을 검색합니다."
+                    },
+                    "store_memory": {
+                        "description": "앞으로의 대화를 위해 중요한 사실이나 세부 정보를 저장합니다."
+                    },
+                    "forget_memory": {
+                        "description": "잊어달라는 요청이 있을 때 관련 기억을 찾아 삭제합니다."
+                    },
+                    "send_notification": {
+                        "description": "사용자에게 데스크톱 알림을 표시합니다."
+                    }
+                }
+            },
             "refresh_tooltip": "모든 서버의 도구 새로 고침",
             "add_button": "추가",
             "add_modal": {
@@ -682,24 +820,20 @@
     },
     "footer": {
         "emotions": {
-            "calm": "평온",
-            "happy": "기쁨",
-            "excited": "신남",
-            "smug": "우쭐",
-            "shy": "부끄럼",
-            "thinking": "생각 중",
-            "surprised": "놀람",
-            "worried": "걱정",
-            "sad": "슬픔",
-            "angry": "화남"
+            "neutral": "중립",
+            "joy": "기쁨",
+            "love": "애정",
+            "sadness": "슬픔",
+            "anger": "분노",
+            "fear": "두려움",
+            "surprise": "놀람"
         },
         "mode": {
             "auto": "자동",
             "manual": "수동",
             "auto_desc": "AI가 표정 제어",
             "manual_desc": "수동으로 표정 제어"
-        },
-        "set_expression": "표정 설정: "
+        }
     },
     "mods": {
         "title": "모드 관리자",

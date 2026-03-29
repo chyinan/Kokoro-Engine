@@ -6,7 +6,7 @@
 
 use crate::ai::context::Message;
 use crate::ai::memory::MemoryManager;
-use crate::llm::openai::{Message as LLMMessage, MessageContent};
+use crate::llm::messages::{system_message, user_text_message};
 use crate::llm::provider::LlmProvider;
 use std::sync::Arc;
 
@@ -87,14 +87,8 @@ pub async fn extract_and_store_memories(
         .join("\n");
 
     let messages = vec![
-        LLMMessage {
-            role: "system".to_string(),
-            content: MessageContent::Text(format!("{}{}", EXTRACTION_PROMPT, existing_block)),
-        },
-        LLMMessage {
-            role: "user".to_string(),
-            content: MessageContent::Text(format!("Conversation to analyze:\n\n{}", transcript)),
-        },
+        system_message(format!("{}{}", EXTRACTION_PROMPT, existing_block)),
+        user_text_message(format!("Conversation to analyze:\n\n{}", transcript)),
     ];
 
     match provider.chat(messages, None).await {

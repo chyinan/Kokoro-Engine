@@ -5,9 +5,11 @@
             "saved": "保存完了",
             "cancel": "キャンセル",
             "edit": "編集",
+            "preview": "プレビュー",
             "done": "完了",
             "delete": "削除",
-            "add": "追加"
+            "add": "追加",
+            "rename": "名前変更"
         }
     },
     "sing": {
@@ -92,6 +94,11 @@
             "model_label": "モデル名",
             "fetch_models": "モデル一覧を取得",
             "fetching": "取得中...",
+            "native_tools": {
+                "label": "ツール呼び出し",
+                "toggle": "ネイティブ tool calling を有効化",
+                "desc": "疑似的な [TOOL_CALL:...] タグではなく、現在の model/provider のネイティブ tool calling を使います。"
+            },
             "save_config": "LLM 設定を保存",
             "saving": "保存中...",
             "vision_mode": "ビジョンモード",
@@ -105,6 +112,10 @@
                 "strategy_summary_desc": "古いメッセージを要約に圧縮",
                 "max_chars_label": "メッセージ最大文字数",
                 "max_chars_hint": "この長さを超えるメッセージは切り捨てられます。両方の戦略に適用されます。"
+            },
+            "emotion": {
+                "label": "感情システム",
+                "desc": "ローカル ONNX モデルを使って、Kokoro の最終応答から応答後の感情状態を推定します。"
             },
             "system_llm": {
                 "title": "システム LLM (意図解釈)",
@@ -310,6 +321,14 @@
                 "loading": "インポート中...",
                 "hint": ".zipパッケージまたは.model3.jsonファイルを選択してください。"
             },
+            "rename": {
+                "prompt": "新しいモデル名を入力してください"
+            },
+            "export": {
+                "button": "Live2Dをエクスポート",
+                "loading": "エクスポート中...",
+                "hint": "エクスポートされたパッケージにはモデルファイルと Kokoro の cue マッピングが含まれます。"
+            },
             "gaze_tracking": {
                 "label": "視線追従",
                 "desc": "モデルの目がマウスカーソルを追従します"
@@ -321,6 +340,90 @@
                     "fps_60": "60 FPS",
                     "unlimited": "無制限",
                     "custom": "カスタム"
+                }
+            },
+            "mapping": {
+                "select_model": "マッピングを編集するにはインポート済みモデルを選択してください。",
+                "loading_profile": "モデルプロファイルを読み込み中...",
+                "placeholders": {
+                    "cue_name": "cue 名"
+                },
+                "options": {
+                    "select_cue": "Cue を選択",
+                    "no_expression": "表情なし",
+                    "no_motion_group": "モーショングループなし"
+                },
+                "actions": {
+                    "save_cue": "Cue を保存",
+                    "save_interaction": "インタラクションマッピングを保存",
+                    "save_semantic": "意味イベントマッピングを保存",
+                    "clear": "クリア",
+                    "exclude_from_prompt": "プロンプトから除外",
+                    "include_in_prompt": "プロンプトに含める"
+                },
+                "cues": {
+                    "title": "Cue マッピング",
+                    "desc": "インポートモデルはモデルごとの cue を使用します。cue 名をモデルの表情またはモーショングループに割り当てます。"
+                },
+                "available_expressions": "表情 ({{count}})",
+                "available_motion_groups": "モーショングループ ({{count}})",
+                "configured_cues": "設定済み Cue ({{count}})",
+                "empty_cues": "まだ cue は設定されていません。",
+                "interactions": {
+                    "title": "インタラクションマッピング",
+                    "desc": "ジェスチャーと部位の意味イベントを cue にマッピングします。優先順は完全一致、ジェスチャーワイルドカード、部位ワイルドカード、全体ワイルドカードです。",
+                    "configured": "設定済みインタラクションルール ({{count}})",
+                    "empty": "インタラクション cue マッピングはまだありません。"
+                },
+                "semantic": {
+                    "title": "意味イベントマッピング",
+                    "desc": "非インタラクションの意味イベントを cue にマッピングします。これらは感情イベントやその他のモデル非依存ロジックで使われます。",
+                    "configured": "設定済み意味ルール ({{count}})",
+                    "empty": "意味 cue マッピングはまだありません。"
+                },
+                "summary": {
+                    "expression": "表情: {{value}}",
+                    "expression_none": "表情: なし",
+                    "motion": "モーション: {{value}}",
+                    "motion_none": "モーション: なし",
+                    "cue": "cue: {{value}}",
+                    "prompt_hidden": "プロンプトから除外"
+                },
+                "prompt_exclusions": {
+                    "title": "プロンプト除外",
+                    "desc": "すべての cue はデフォルトでチャットモデルに公開されます。ここには除外したい cue だけを追加します。",
+                    "select_cue": "除外する cue を選択",
+                    "empty": "現在、プロンプトから除外されている cue はありません。"
+                },
+                "gestures": {
+                    "tap": "タップ",
+                    "long_press": "長押し",
+                    "rapid_tap": "連続タップ",
+                    "any": "任意のジェスチャー"
+                },
+                "areas": {
+                    "eyes": "目",
+                    "lips": "唇",
+                    "face": "顔",
+                    "head": "頭",
+                    "hair": "髪",
+                    "hand": "手",
+                    "arm": "腕",
+                    "chest": "胸",
+                    "body": "体",
+                    "leg": "脚",
+                    "skirt": "スカート",
+                    "accessory": "アクセサリー",
+                    "any": "任意の部位"
+                },
+                "semantic_keys": {
+                    "emotion": {
+                        "ecstatic": "感情: 有頂天",
+                        "very_happy": "感情: とても嬉しい",
+                        "sulking": "感情: すねている",
+                        "very_sad": "感情: とても悲しい",
+                        "mood_swing": "感情: 気分の揺れ"
+                    }
                 }
             }
         },
@@ -468,6 +571,7 @@
                 "not_installed_prefix": "(未インストール)",
                 "install_warning": "モデル \"{{model}}\" はインストールされていません",
                 "install_desc": "このビジョンモデルを使用するにはダウンロードが必要です。",
+                "install_desc_manual": "このモデルはまだ Ollama にインストールされていません。まず Ollama 側で手動で pull してから、ここでモデル一覧を更新してください。",
                 "install_btn": "{{model}} をインストール",
                 "installing": "{{model}} をインストール中...",
                 "success": "モデル \"{{model}}\" のインストールに成功しました！",
@@ -519,6 +623,40 @@
         "mcp": {
             "title": "MCP ツールサーバー",
             "desc": "Model Context Protocol 経由で外部ツールを接続",
+            "native_loop": {
+                "title": "ツールループ",
+                "desc": "1 回の返信で Kokoro が継続できるツール呼び出しラウンド数を制限します。",
+                "max_rounds": "最大ツールラウンド"
+            },
+            "builtin_tools": {
+                "title": "内蔵ツール",
+                "desc": "モデルが呼び出せる内蔵ツールを選択します。",
+                "saving": "保存中...",
+                "saved_auto": "自動保存済み",
+                "items": {
+                    "get_time": {
+                        "description": "現在の日付と時刻を取得します。"
+                    },
+                    "play_cue": {
+                        "description": "現在のモデルで設定済みの Live2D cue を再生します。"
+                    },
+                    "set_background": {
+                        "description": "シーン説明から新しい背景を生成して切り替えます。"
+                    },
+                    "search_memory": {
+                        "description": "ユーザーに関する保存済みの記憶を検索します。"
+                    },
+                    "store_memory": {
+                        "description": "今後の会話のために重要な事実や詳細を保存します。"
+                    },
+                    "forget_memory": {
+                        "description": "忘れてほしいと言われた記憶を見つけて削除します。"
+                    },
+                    "send_notification": {
+                        "description": "ユーザーにデスクトップ通知を表示します。"
+                    }
+                }
+            },
             "refresh_tooltip": "全サーバーのツールを更新",
             "add_button": "追加",
             "add_modal": {
@@ -682,24 +820,20 @@
     },
     "footer": {
         "emotions": {
-            "calm": "穏やか",
-            "happy": "嬉しい",
-            "excited": "ワクワク",
-            "smug": "ドヤ顔",
-            "shy": "恥ずかしい",
-            "thinking": "考え中",
-            "surprised": "驚き",
-            "worried": "心配",
-            "sad": "悲しい",
-            "angry": "怒り"
+            "neutral": "ニュートラル",
+            "joy": "喜び",
+            "love": "愛情",
+            "sadness": "悲しみ",
+            "anger": "怒り",
+            "fear": "恐れ",
+            "surprise": "驚き"
         },
         "mode": {
             "auto": "自動",
             "manual": "手動",
             "auto_desc": "AIが表情を制御",
             "manual_desc": "手動で表情を制御"
-        },
-        "set_expression": "表情を設定: "
+        }
     },
     "mods": {
         "title": "Mod マネージャー",

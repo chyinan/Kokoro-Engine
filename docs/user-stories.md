@@ -50,8 +50,8 @@ Each story includes **acceptance criteria** and a **priority** label:
 **Acceptance Criteria:**
 - [ ] Expressions map to named states (e.g., `neutral`, `happy`, `sad`, `surprised`)
 - [ ] Expression changes animate smoothly (blend, not snap)
-- [ ] Expressions can be triggered via `set_expression` IPC command
-- [ ] AI responses can suggest an expression via `ChatResponse.expression`
+- [ ] Visual performance can be triggered via `play_cue` IPC command
+- [ ] AI responses can suggest a cue via `ChatResponse.cue`
 
 ---
 

@@ -72,11 +72,13 @@ pub async fn load_conversation(
     {
         let mut history = state.history.lock().await;
         history.clear();
-        for (role, content, _, _) in &rows {
+        for (role, content, metadata, _) in &rows {
             history.push_back(crate::ai::context::Message {
                 role: role.clone(),
                 content: content.clone(),
-                metadata: None,
+                metadata: metadata
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
             });
         }
     }
@@ -90,11 +92,23 @@ pub async fn load_conversation(
 
     Ok(rows
         .into_iter()
-        .map(|(role, content, metadata, created_at)| ConversationMessage {
-            role,
-            content,
-            metadata,
-            created_at,
+        .filter_map(|(role, content, metadata, created_at)| {
+            let metadata_value = metadata
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            let technical_type = metadata_value
+                .as_ref()
+                .and_then(|meta| meta.get("type"))
+                .and_then(|value| value.as_str());
+            if technical_type == Some("assistant_tool_calls") {
+                return None;
+            }
+            Some(ConversationMessage {
+                role,
+                content,
+                metadata,
+                created_at,
+            })
         })
         .collect())
 }

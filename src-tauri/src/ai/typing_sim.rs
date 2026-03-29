@@ -45,16 +45,13 @@ pub fn calculate_typing_delay(
 
     // Emotion modifier
     let emotion_factor: f64 = match emotion {
-        "excited" => 0.4,
-        "happy" => 0.6,
-        "angry" => 0.5,
-        "thinking" => 2.0,
-        "shy" => 1.5,
-        "worried" => 1.3,
+        "surprise" => 0.45,
+        "joy" => 0.6,
+        "love" => 0.8,
+        "anger" => 0.55,
+        "fear" => 1.3,
         "neutral" => 1.0,
-        "sad" => 1.4,
-        "smug" => 0.7,
-        "surprised" => 0.5,
+        "sadness" => 1.4,
         _ => 1.0,
     };
 
@@ -86,8 +83,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn excited_character_responds_faster() {
-        let excited = calculate_typing_delay("excited", 0.9, 0.7, 20, false);
+    fn surprise_character_responds_faster() {
+        let excited = calculate_typing_delay("surprise", 0.9, 0.7, 20, false);
         let neutral = calculate_typing_delay("neutral", 0.5, 0.7, 20, false);
         assert!(
             excited.duration_ms < neutral.duration_ms,
@@ -98,8 +95,8 @@ mod tests {
     }
 
     #[test]
-    fn thinking_takes_longer() {
-        let thinking = calculate_typing_delay("thinking", 0.5, 0.5, 30, false);
+    fn sadness_takes_longer() {
+        let thinking = calculate_typing_delay("sadness", 0.5, 0.5, 30, false);
         let neutral = calculate_typing_delay("neutral", 0.5, 0.5, 30, false);
         assert!(
             thinking.duration_ms > neutral.duration_ms,
@@ -135,8 +132,8 @@ mod tests {
 
     #[test]
     fn delay_clamped_within_bounds() {
-        let fast = calculate_typing_delay("excited", 0.9, 1.0, 5, false);
-        let slow = calculate_typing_delay("thinking", 0.1, 0.0, 500, true);
+        let fast = calculate_typing_delay("surprise", 0.9, 1.0, 5, false);
+        let slow = calculate_typing_delay("sadness", 0.1, 0.0, 500, true);
         assert!(fast.duration_ms >= 200, "Min should be 200ms");
         assert!(slow.duration_ms <= 5000, "Max should be 5000ms");
     }

@@ -1,7 +1,7 @@
 //! Vision Watcher — background loop that captures screen and analyzes with VLM.
 
-use crate::llm::provider::{LlmParams, Message};
-use crate::llm::openai::MessageContent;
+use crate::llm::messages::user_message_with_images;
+use crate::llm::provider::LlmParams;
 use crate::llm::service::LlmService;
 use crate::vision::capture::{capture_screen, has_significant_change};
 use crate::vision::config::VisionConfig;
@@ -170,10 +170,7 @@ pub async fn analyze_screenshot(
         let svc = llm_service.ok_or_else(|| "LLM service not available".to_string())?;
         let provider = svc.provider().await;
 
-        let messages = vec![Message {
-            role: "user".to_string(),
-            content: MessageContent::with_images(VISION_PROMPT.to_string(), vec![data_url]),
-        }];
+        let messages = vec![user_message_with_images(VISION_PROMPT.to_string(), vec![data_url])];
 
         let params = LlmParams {
             max_tokens: Some(150),

@@ -4,9 +4,14 @@ use super::config::TelegramConfig;
 use crate::ai::context::AIOrchestrator;
 use crate::ai::memory_extractor;
 use crate::imagegen::ImageGenService;
+use crate::llm::messages::{
+    assistant_text_message, is_user_message, replace_user_message_with_images, role_text_message,
+    system_message, user_message_with_images, user_text_message,
+};
 use crate::llm::service::LlmService;
 use crate::stt::{AudioSource, SttService};
 use crate::tts::TtsService;
+use crate::actions::tool_settings::ToolSettings;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,6 +45,14 @@ enum SessionMode {
 }
 
 type Sessions = Arc<RwLock<HashMap<ChatId, SessionMode>>>;
+
+async fn max_tool_rounds(app: &tauri::AppHandle) -> usize {
+    if let Some(settings) = app.try_state::<Arc<RwLock<ToolSettings>>>() {
+        settings.read().await.max_tool_rounds.max(1)
+    } else {
+        10
+    }
+}
 
 /// Event payload for syncing Telegram messages to the desktop chat UI.
 #[derive(Clone, Serialize)]
@@ -285,44 +298,42 @@ async fn handle_text(
     let action_registry = app
         .try_state::<Arc<RwLock<crate::actions::ActionRegistry>>>()
         .ok_or("ActionRegistry not available")?;
+    let tool_settings = app
+        .try_state::<Arc<RwLock<ToolSettings>>>()
+        .ok_or("ToolSettings not available")?;
     let tool_prompt = {
         let registry = action_registry.read().await;
-        let p = registry.generate_tool_prompt_for_prompt(orchestrator.is_memory_enabled());
+        let settings = tool_settings.read().await;
+        let p = registry.generate_tool_prompt_for_prompt_with_settings(
+            orchestrator.is_memory_enabled(),
+            &settings,
+        );
         if p.is_empty() { None } else { Some(p) }
     };
 
     let prompt_messages = orchestrator
-        .compose_prompt(text, false, tool_prompt, &char_id)
+        .compose_prompt(text, false, tool_prompt, false, &char_id)
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut client_messages: Vec<crate::llm::openai::Message> = prompt_messages
+    let mut client_messages = prompt_messages
         .into_iter()
-        .map(|m| crate::llm::openai::Message {
-            role: m.role,
-            content: crate::llm::openai::MessageContent::Text(m.content),
-        })
-        .collect();
+        .map(|m| role_text_message(&m.role, m.content))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Ensure the latest user turn is in the messages
-    let already_has_user = client_messages
-        .last()
-        .map(|m| m.role == "user")
-        .unwrap_or(false);
+    let already_has_user = client_messages.last().map(is_user_message).unwrap_or(false);
     if !already_has_user {
-        client_messages.push(crate::llm::openai::Message {
-            role: "user".to_string(),
-            content: crate::llm::openai::MessageContent::Text(text.to_string()),
-        });
+        client_messages.push(user_text_message(text.to_string()));
     }
 
-    // 3. LLM call with tool execution loop (max 5 rounds)
+    // 3. LLM call with tool execution loop
     let provider = llm_service.provider().await;
-    const MAX_TOOL_ROUNDS: usize = 5;
+    let max_rounds = max_tool_rounds(app).await;
     let mut all_cleaned_text = String::new();
     let mut all_translations: Vec<String> = Vec::new();
 
-    for _round in 0..MAX_TOOL_ROUNDS {
+    for _round in 0..max_rounds {
         let mut stream = provider
             .chat_stream(client_messages.clone(), None)
             .await
@@ -370,6 +381,14 @@ async fn handle_text(
             if registry.needs_feedback(&tc.name) {
                 any_needs_feedback = true;
             }
+            let enabled = {
+                let settings = tool_settings.read().await;
+                settings.is_enabled(&tc.name)
+            };
+            if !enabled {
+                tool_results.push(format!("- {}: Error: Tool '{}' is disabled", tc.name, tc.name));
+                continue;
+            }
             let ctx = crate::actions::registry::ActionContext {
                 app: app.clone(),
                 character_id: char_id.clone(),
@@ -391,17 +410,11 @@ async fn handle_text(
             break;
         }
 
-        client_messages.push(crate::llm::openai::Message {
-            role: "assistant".to_string(),
-            content: crate::llm::openai::MessageContent::Text(response),
-        });
-        client_messages.push(crate::llm::openai::Message {
-            role: "system".to_string(),
-            content: crate::llm::openai::MessageContent::Text(format!(
-                "[Tool results]\n{}\nContinue your response naturally.",
-                tool_results.join("\n")
-            )),
-        });
+        client_messages.push(assistant_text_message(response));
+        client_messages.push(system_message(format!(
+            "[Tool results]\n{}\nContinue your response naturally.",
+            tool_results.join("\n")
+        )));
     }
 
     let response = strip_control_tags(&compact_newlines(&all_cleaned_text));
@@ -634,53 +647,45 @@ async fn handle_photo(
     let action_registry = app
         .try_state::<Arc<RwLock<crate::actions::ActionRegistry>>>()
         .ok_or("ActionRegistry not available")?;
+    let tool_settings = app
+        .try_state::<Arc<RwLock<ToolSettings>>>()
+        .ok_or("ToolSettings not available")?;
     let tool_prompt = {
         let registry = action_registry.read().await;
-        let p = registry.generate_tool_prompt_for_prompt(orchestrator.is_memory_enabled());
+        let settings = tool_settings.read().await;
+        let p = registry.generate_tool_prompt_for_prompt_with_settings(
+            orchestrator.is_memory_enabled(),
+            &settings,
+        );
         if p.is_empty() { None } else { Some(p) }
     };
 
     let prompt_messages = orchestrator
-        .compose_prompt(&caption, false, tool_prompt, &char_id)
+        .compose_prompt(&caption, false, tool_prompt, false, &char_id)
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut client_messages: Vec<crate::llm::openai::Message> = prompt_messages
+    let mut client_messages = prompt_messages
         .into_iter()
-        .map(|m| crate::llm::openai::Message {
-            role: m.role,
-            content: crate::llm::openai::MessageContent::Text(m.content),
-        })
-        .collect();
+        .map(|m| role_text_message(&m.role, m.content))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Replace or append the last user message with multimodal content (text + image)
-    let already_has_user = client_messages
-        .last()
-        .map(|m| m.role == "user")
-        .unwrap_or(false);
+    let already_has_user = client_messages.last().map(is_user_message).unwrap_or(false);
     if already_has_user {
         let last = client_messages.last_mut().unwrap();
-        last.content = crate::llm::openai::MessageContent::with_images(
-            caption.clone(),
-            vec![data_url],
-        );
+        replace_user_message_with_images(last, caption.clone(), vec![data_url])?;
     } else {
-        client_messages.push(crate::llm::openai::Message {
-            role: "user".to_string(),
-            content: crate::llm::openai::MessageContent::with_images(
-                caption.clone(),
-                vec![data_url],
-            ),
-        });
+        client_messages.push(user_message_with_images(caption.clone(), vec![data_url]));
     }
 
-    // 3. LLM call with tool execution loop (max 5 rounds)
+    // 3. LLM call with tool execution loop
     let provider = llm_service.provider().await;
-    const MAX_TOOL_ROUNDS: usize = 5;
+    let max_rounds = max_tool_rounds(app).await;
     let mut all_cleaned_text = String::new();
     let mut all_translations: Vec<String> = Vec::new();
 
-    for _round in 0..MAX_TOOL_ROUNDS {
+    for _round in 0..max_rounds {
         let mut stream = provider
             .chat_stream(client_messages.clone(), None)
             .await
@@ -727,6 +732,14 @@ async fn handle_photo(
             if registry.needs_feedback(&tc.name) {
                 any_needs_feedback = true;
             }
+            let enabled = {
+                let settings = tool_settings.read().await;
+                settings.is_enabled(&tc.name)
+            };
+            if !enabled {
+                tool_results.push(format!("- {}: Error: Tool '{}' is disabled", tc.name, tc.name));
+                continue;
+            }
             let ctx = crate::actions::registry::ActionContext {
                 app: app.clone(),
                 character_id: char_id.clone(),
@@ -748,17 +761,11 @@ async fn handle_photo(
             break;
         }
 
-        client_messages.push(crate::llm::openai::Message {
-            role: "assistant".to_string(),
-            content: crate::llm::openai::MessageContent::Text(round_response),
-        });
-        client_messages.push(crate::llm::openai::Message {
-            role: "system".to_string(),
-            content: crate::llm::openai::MessageContent::Text(format!(
-                "[Tool results]\n{}\nContinue your response naturally.",
-                tool_results.join("\n")
-            )),
-        });
+        client_messages.push(assistant_text_message(round_response));
+        client_messages.push(system_message(format!(
+            "[Tool results]\n{}\nContinue your response naturally.",
+            tool_results.join("\n")
+        )));
     }
 
     let response = strip_control_tags(&compact_newlines(&all_cleaned_text));

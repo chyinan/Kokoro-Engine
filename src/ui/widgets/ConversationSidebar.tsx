@@ -3,15 +3,11 @@ import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Plus, Trash2, History, X, Check, Pencil } from "lucide-react";
 import { listConversations, loadConversation, deleteConversation, createConversation, renameConversation } from "../../lib/kokoro-bridge";
-import type { Conversation, ConversationMessage } from "../../lib/kokoro-bridge";
+import type { Conversation } from "../../lib/kokoro-bridge";
 import { useTranslation } from "react-i18next";
+import { buildChatMessagesFromConversation } from "./chat-history";
 
-interface ChatMessage {
-    role: "user" | "kokoro";
-    text: string;
-    images?: string[];
-    translation?: string;
-}
+type ChatMessage = ReturnType<typeof buildChatMessagesFromConversation>[number];
 
 interface ConversationSidebarProps {
     open: boolean;
@@ -52,33 +48,8 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
     const handleLoad = async (id: string) => {
         if (id === activeId) return;
         try {
-            const msgs: ConversationMessage[] = await loadConversation(id);
-            const chatMsgs: ChatMessage[] = msgs.map(m => {
-                if (m.role !== "user") {
-                    // 优先从 metadata 读取翻译（后端保存时翻译存在 metadata，content 已清除标签）
-                    let translation: string | undefined;
-                    if (m.metadata) {
-                        try {
-                            const meta = JSON.parse(m.metadata);
-                            if (meta.translation) translation = meta.translation;
-                        } catch { /* ignore malformed metadata */ }
-                    }
-                    // 兜底：兼容旧格式，尝试从 content 中提取 [TRANSLATE:...] 标签
-                    if (!translation) {
-                        const translateMatch = m.content.match(/\[TRANSLATE:\s*([\s\S]*?)\]/i);
-                        if (translateMatch) translation = translateMatch[1].trim();
-                    }
-                    const text = m.content
-                        .replace(/\[ACTION:\w+\]\s*/g, "")
-                        .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
-                        .replace(/\[EMOTION:[^\]]*\]/g, "")
-                        .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-                        .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "")
-                        .trim();
-                    return { role: "kokoro" as const, text, translation };
-                }
-                return { role: "user" as const, text: m.content };
-            });
+            const msgs = await loadConversation(id);
+            const chatMsgs: ChatMessage[] = buildChatMessagesFromConversation(msgs);
             setActiveId(id);
             onLoadMessages(chatMsgs);
         } catch (err) {

@@ -7,6 +7,8 @@
   ],
   "permissions": [
     "core:default",
+    "notification:default",
+    "notification:allow-is-permission-granted",
     "core:window:allow-start-dragging",
     "core:window:allow-start-resize-dragging",
     "core:window:allow-outer-position",

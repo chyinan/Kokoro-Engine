@@ -4,10 +4,12 @@
  * Uses Cubism SDK drawable mesh data (vertices + triangle indices) to perform
  * precise hit testing, then maps the hit drawable/part to a semantic body region.
  *
- * Three-level fallback:
- * 1. Drawable mesh triangle hit test → body region from part/drawable name
- * 2. Original HitArea detection (for models that define them)
- * 3. Y-coordinate estimation (rough vertical split)
+ * This module handles the drawable-name branch of hit testing:
+ * 1. Drawable mesh triangle hit test
+ * 2. Body region inference from part/drawable names
+ *
+ * Higher-level orchestration in Live2DViewer decides when to prefer model
+ * HitAreas and when to fall back to geometry-based estimation.
  */
 import type { Live2DModel } from "pixi-live2d-display/cubism4";
 import * as PIXI from "pixi.js";

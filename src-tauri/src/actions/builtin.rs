@@ -1,10 +1,11 @@
-//! Built-in action handlers for the Action Registry.
+//! Built-in tool handlers for the Tool Registry.
 
 use super::registry::{ActionContext, ActionError, ActionHandler, ActionParam, ActionResult};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use tauri::Emitter;
 use tauri::Manager;
+use tauri_plugin_notification::NotificationExt;
 
 // ── get_time ───────────────────────────────────────────
 
@@ -42,24 +43,24 @@ impl ActionHandler for GetTimeAction {
     }
 }
 
-// ── change_expression ──────────────────────────────────
+// ── play_cue ──────────────────────────────────
 
-pub struct ChangeExpressionAction;
+pub struct PlayCueAction;
 
 #[async_trait]
-impl ActionHandler for ChangeExpressionAction {
+impl ActionHandler for PlayCueAction {
     fn name(&self) -> &str {
-        "change_expression"
+        "play_cue"
     }
 
     fn description(&self) -> &str {
-        "Change the character's facial expression"
+        "Trigger a configured Live2D cue"
     }
 
     fn parameters(&self) -> Vec<ActionParam> {
         vec![ActionParam {
-            name: "expression".to_string(),
-            description: "One of: neutral, happy, sad, angry, surprised, thinking, shy, smug, worried, excited".to_string(),
+            name: "cue".to_string(),
+            description: "Configured Live2D cue name for the active model".to_string(),
             required: true,
         }]
     }
@@ -69,37 +70,35 @@ impl ActionHandler for ChangeExpressionAction {
         args: HashMap<String, String>,
         ctx: ActionContext,
     ) -> Result<ActionResult, ActionError> {
-        let expression = args
-            .get("expression")
-            .ok_or_else(|| ActionError("Missing 'expression' parameter".into()))?;
+        let cue = args
+            .get("cue")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| ActionError("Missing 'cue' parameter".into()))?;
 
-        let valid = [
-            "neutral",
-            "happy",
-            "sad",
-            "angry",
-            "surprised",
-            "thinking",
-            "shy",
-            "smug",
-            "worried",
-            "excited",
-        ];
-        let expr = expression.to_lowercase();
-        if !valid.contains(&expr.as_str()) {
-            return Ok(ActionResult::err(format!(
-                "Invalid expression: {}",
-                expression
+        let profile = crate::commands::live2d::load_active_live2d_profile()
+            .ok_or_else(|| ActionError("No active Live2D model profile loaded".into()))?;
+        if !profile.cue_map.contains_key(cue) {
+            let available_cues = profile
+                .cue_map
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(ActionError(format!(
+                "Unknown cue '{}'. Available configured cues: {}",
+                cue,
+                if available_cues.is_empty() { "(none)" } else { &available_cues }
             )));
         }
 
-        // Emit expression change event to frontend
+        // Emit cue event to frontend
         let _ = ctx.app.emit(
-            "chat-expression",
-            serde_json::json!({ "expression": expr, "mood": 0.5 }),
+            "chat-cue",
+            serde_json::json!({ "cue": cue, "source": "builtin-play-cue" }),
         );
 
-        Ok(ActionResult::ok(format!("Expression changed to: {}", expr)))
+        Ok(ActionResult::ok(format!("Cue triggered: {}", cue)))
     }
 }
 
@@ -390,57 +389,15 @@ impl ActionHandler for SendNotificationAction {
             .get("message")
             .ok_or_else(|| ActionError("Missing 'message' parameter".into()))?;
 
-        let _ = ctx.app.emit(
-            "notification",
-            serde_json::json!({ "title": title, "message": message }),
-        );
+        ctx.app
+            .notification()
+            .builder()
+            .title(title)
+            .body(message)
+            .show()
+            .map_err(|e| ActionError(format!("Failed to show native notification: {}", e)))?;
 
-        Ok(ActionResult::ok(format!("Notification sent: {}", title)))
-    }
-}
-
-// ── play_sound ─────────────────────────────────────────
-
-pub struct PlaySoundAction;
-
-#[async_trait]
-impl ActionHandler for PlaySoundAction {
-    fn name(&self) -> &str {
-        "play_sound"
-    }
-
-    fn description(&self) -> &str {
-        "Play a sound effect"
-    }
-
-    fn parameters(&self) -> Vec<ActionParam> {
-        vec![ActionParam {
-            name: "sound".to_string(),
-            description: "One of: alert, chime, laugh, applause, ding".to_string(),
-            required: true,
-        }]
-    }
-
-    async fn execute(
-        &self,
-        args: HashMap<String, String>,
-        ctx: ActionContext,
-    ) -> Result<ActionResult, ActionError> {
-        let sound = args
-            .get("sound")
-            .ok_or_else(|| ActionError("Missing 'sound' parameter".into()))?;
-
-        let valid = ["alert", "chime", "laugh", "applause", "ding"];
-        let snd = sound.to_lowercase();
-        if !valid.contains(&snd.as_str()) {
-            return Ok(ActionResult::err(format!("Unknown sound: {}", sound)));
-        }
-
-        let _ = ctx
-            .app
-            .emit("play-sound", serde_json::json!({ "sound": snd }));
-
-        Ok(ActionResult::ok(format!("Playing sound: {}", snd)))
+        Ok(ActionResult::ok(format!("Notification shown: {}", title)))
     }
 }
 
@@ -449,11 +406,10 @@ impl ActionHandler for PlaySoundAction {
 /// Register all built-in action handlers into the given registry.
 pub fn register_builtins(registry: &mut super::registry::ActionRegistry) {
     registry.register(GetTimeAction);
-    registry.register(ChangeExpressionAction);
+    registry.register(PlayCueAction);
     registry.register(SetBackgroundAction);
     registry.register(SearchMemoryAction);
     registry.register(StoreMemoryAction);
     registry.register(ForgetMemoryAction);
     registry.register(SendNotificationAction);
-    registry.register(PlaySoundAction);
 }

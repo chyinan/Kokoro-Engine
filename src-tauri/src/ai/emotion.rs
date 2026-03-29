@@ -244,10 +244,19 @@ impl EmotionState {
             EmotionTrend::Falling => "，而且在走低",
             EmotionTrend::Stable => "",
         };
+        let emotion_desc = match self.current_emotion.as_str() {
+            "joy" => "喜悦",
+            "love" => "喜爱",
+            "sadness" => "悲伤",
+            "anger" => "愤怒",
+            "fear" => "恐惧",
+            "surprise" => "惊讶",
+            _ => "中性",
+        };
 
         format!(
             "你现在的心情{}{}。当前情绪状态：{}。",
-            mood_desc, trend_desc, self.current_emotion
+            mood_desc, trend_desc, emotion_desc
         )
     }
 
@@ -416,8 +425,8 @@ mod tests {
     #[test]
     fn smooth_transition_prevents_mood_jump() {
         let mut state = EmotionState::new(stoic_personality());
-        // Start neutral (mood ≈ 0.5), then suddenly get "happy" with mood 1.0
-        let (_, mood1) = state.update("happy", 1.0);
+        // Start neutral (mood ≈ 0.5), then suddenly get "joy" with mood 1.0
+        let (_, mood1) = state.update("joy", 1.0);
         // Stoic character should NOT jump to 1.0
         assert!(
             mood1 < 0.8,
@@ -431,8 +440,8 @@ mod tests {
         let mut lively = EmotionState::new(lively_personality());
         let mut stoic = EmotionState::new(stoic_personality());
 
-        let (_, lively_mood) = lively.update("happy", 1.0);
-        let (_, stoic_mood) = stoic.update("happy", 1.0);
+        let (_, lively_mood) = lively.update("joy", 1.0);
+        let (_, stoic_mood) = stoic.update("joy", 1.0);
 
         assert!(
             lively_mood > stoic_mood,
@@ -446,17 +455,17 @@ mod tests {
     fn accumulated_inertia_resists_change() {
         let mut state = EmotionState::new(EmotionPersonality::default());
 
-        // Build up inertia with 5 happy updates
+        // Build up inertia with repeated joy updates
         for _ in 0..5 {
-            state.update("happy", 0.8);
+            state.update("joy", 0.8);
         }
 
-        // Now try a small mood shift to "sad" — close enough to resist
-        let (emotion, _) = state.update("sad", 0.65);
+        // Now try a small mood shift to "sadness" — close enough to resist
+        let (emotion, _) = state.update("sadness", 0.65);
         // Should resist the change because inertia is built up
         // and mood delta is small
         assert_eq!(
-            emotion, "happy",
+            emotion, "joy",
             "Should resist emotion change with high accumulated inertia"
         );
     }
@@ -467,13 +476,13 @@ mod tests {
 
         // Build up inertia
         for _ in 0..3 {
-            state.update("happy", 0.8);
+            state.update("joy", 0.8);
         }
 
         // Very strong negative stimulus should overcome inertia
-        let (emotion, _) = state.update("angry", 0.1);
+        let (emotion, _) = state.update("anger", 0.1);
         assert_eq!(
-            emotion, "angry",
+            emotion, "anger",
             "Strong stimulus should overcome accumulated inertia"
         );
     }
@@ -523,7 +532,7 @@ mod tests {
     #[test]
     fn describe_produces_readable_text() {
         let mut state = EmotionState::new(EmotionPersonality::default());
-        state.update("happy", 0.8);
+        state.update("joy", 0.8);
         let desc = state.describe();
         assert!(!desc.is_empty(), "describe() should produce non-empty text");
         assert!(desc.contains("心情"), "describe() should mention mood");
@@ -532,8 +541,8 @@ mod tests {
     #[test]
     fn set_personality_resets_state() {
         let mut state = EmotionState::new(lively_personality());
-        state.update("happy", 0.9);
-        state.update("happy", 0.9);
+        state.update("joy", 0.9);
+        state.update("joy", 0.9);
 
         // Switch to stoic character
         state.set_personality(stoic_personality());
@@ -547,7 +556,7 @@ mod tests {
             default_mood: 0.5,
             ..EmotionPersonality::default()
         });
-        state.update("happy", 0.9);
+        state.update("joy", 0.9);
         let initial_mood = state.mood();
 
         // Decay multiple times
@@ -565,7 +574,7 @@ mod tests {
     #[test]
     fn decay_eventually_reaches_default() {
         let mut state = EmotionState::new(EmotionPersonality::default());
-        state.update("sad", 0.1);
+        state.update("sadness", 0.1);
 
         // Many decay cycles
         for _ in 0..200 {
@@ -617,16 +626,16 @@ mod tests {
     #[test]
     fn snapshot_and_restore_preserves_state() {
         let mut state = EmotionState::new(EmotionPersonality::default());
-        state.update("happy", 0.85);
-        state.update("happy", 0.85);
+        state.update("joy", 0.85);
+        state.update("joy", 0.85);
 
         let snap = state.snapshot();
-        assert_eq!(snap.emotion, "happy");
+        assert_eq!(snap.emotion, "joy");
 
         // Create new state and restore
         let mut state2 = EmotionState::new(EmotionPersonality::default());
         state2.restore_from_snapshot(&snap);
-        assert_eq!(state2.current_emotion(), "happy");
+        assert_eq!(state2.current_emotion(), "joy");
         assert!((state2.mood() - state.mood()).abs() < 0.01);
     }
 }

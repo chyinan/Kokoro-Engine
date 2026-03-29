@@ -115,6 +115,7 @@
           nativeBuildInputs = with pkgs; [
             cargo
             cargo-tauri
+            clippy
             nodejs
             pkg-config
             rust-analyzer

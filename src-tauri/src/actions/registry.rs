@@ -1,9 +1,11 @@
-//! Action Registry — core framework for tool calling.
+//! Tool Registry — core framework for tool calling.
 //!
 //! Provides a registry of actions that the LLM can invoke via `[TOOL_CALL:name|args]` tags.
 //! Actions are registered at startup and can be invoked by the chat pipeline.
 
 use async_trait::async_trait;
+use crate::llm::provider::{LlmToolDefinition, LlmToolParam};
+use crate::actions::tool_settings::ToolSettings;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -92,7 +94,7 @@ pub trait ActionHandler: Send + Sync {
 
     /// Whether the LLM needs to see the result of this action to continue its response.
     /// Return `true` for information-retrieval tools (get_time, search_memory, etc.).
-    /// Return `false` (default) for side-effect tools (change_expression, play_sound, etc.).
+    /// Return `false` (default) for side-effect tools (play_cue, set_background, etc.).
     fn needs_feedback(&self) -> bool {
         false
     }
@@ -131,7 +133,7 @@ impl ActionRegistry {
     /// Register an action handler.
     pub fn register(&mut self, handler: impl ActionHandler + 'static) {
         let name = handler.name().to_string();
-        println!("[Actions] Registered: {}", name);
+        println!("[Tools] Registered: {}", name);
         self.handlers.insert(name, Arc::new(handler));
     }
 
@@ -158,7 +160,7 @@ impl ActionRegistry {
         let handler = self
             .handlers
             .get(name)
-            .ok_or_else(|| ActionError(format!("Unknown action: {}", name)))?;
+            .ok_or_else(|| ActionError(format!("Unknown tool: {}", name)))?;
 
         handler.execute(args, ctx).await
     }
@@ -197,6 +199,73 @@ impl ActionRegistry {
             .collect()
     }
 
+    pub fn list_builtin_actions(&self) -> Vec<ActionInfo> {
+        let mut actions: Vec<_> = self.handlers
+            .iter()
+            .filter(|(name, _)| !self.mcp_tool_names.contains(*name))
+            .map(|(_, h)| ActionInfo {
+                name: h.name().to_string(),
+                description: h.description().to_string(),
+                parameters: h.parameters(),
+            })
+            .collect();
+        actions.sort_by(|a, b| a.name.cmp(&b.name));
+        actions
+    }
+
+    pub fn list_actions_for_prompt_with_settings(
+        &self,
+        memory_enabled: bool,
+        tool_settings: &ToolSettings,
+    ) -> Vec<ActionInfo> {
+        self.list_actions_for_prompt(memory_enabled)
+            .into_iter()
+            .filter(|action| tool_settings.is_enabled(&action.name))
+            .collect()
+    }
+
+    pub fn list_tools_for_llm(&self, memory_enabled: bool) -> Vec<LlmToolDefinition> {
+        self.list_actions_for_prompt(memory_enabled)
+            .into_iter()
+            .map(|action| LlmToolDefinition {
+                name: action.name,
+                description: action.description,
+                parameters: action
+                    .parameters
+                    .into_iter()
+                    .map(|param| LlmToolParam {
+                        name: param.name,
+                        description: param.description,
+                        required: param.required,
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    pub fn list_tools_for_llm_with_settings(
+        &self,
+        memory_enabled: bool,
+        tool_settings: &ToolSettings,
+    ) -> Vec<LlmToolDefinition> {
+        self.list_actions_for_prompt_with_settings(memory_enabled, tool_settings)
+            .into_iter()
+            .map(|action| LlmToolDefinition {
+                name: action.name,
+                description: action.description,
+                parameters: action
+                    .parameters
+                    .into_iter()
+                    .map(|param| LlmToolParam {
+                        name: param.name,
+                        description: param.description,
+                        required: param.required,
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// Generate the prompt instruction block describing available tools.
     pub fn generate_tool_prompt(&self) -> String {
         self.generate_tool_prompt_for_prompt(true)
@@ -204,6 +273,19 @@ impl ActionRegistry {
 
     pub fn generate_tool_prompt_for_prompt(&self, memory_enabled: bool) -> String {
         let actions = self.list_actions_for_prompt(memory_enabled);
+        self.generate_tool_prompt_from_actions(actions)
+    }
+
+    pub fn generate_tool_prompt_for_prompt_with_settings(
+        &self,
+        memory_enabled: bool,
+        tool_settings: &ToolSettings,
+    ) -> String {
+        let actions = self.list_actions_for_prompt_with_settings(memory_enabled, tool_settings);
+        self.generate_tool_prompt_from_actions(actions)
+    }
+
+    fn generate_tool_prompt_from_actions(&self, actions: Vec<ActionInfo>) -> String {
         if actions.is_empty() {
             return String::new();
         }
@@ -214,7 +296,7 @@ impl ActionRegistry {
             String::new(),
             "When you use a tool, the system will execute it and return the result to you. You can then use the result to continue your response naturally.".to_string(),
             "For information-retrieval tools (e.g. get_time, search_memory), wait for the result before answering the user's question.".to_string(),
-            "For side-effect tools (e.g. change_expression), the system will confirm execution; you do not need to elaborate further.".to_string(),
+            "For side-effect tools (e.g. play_cue), the system will confirm execution; you do not need to elaborate further.".to_string(),
             String::new(),
             "Available tools:".to_string(),
         ];
@@ -248,6 +330,49 @@ impl ActionRegistry {
         lines.push(
             "Only use tools when they are genuinely helpful for the user's request.".to_string(),
         );
+
+        lines.join("\n")
+    }
+
+    pub fn generate_native_tool_prompt_for_prompt(&self, memory_enabled: bool) -> String {
+        let actions = self.list_actions_for_prompt(memory_enabled);
+        if actions.is_empty() {
+            return String::new();
+        }
+
+        let mut lines = vec![
+            "You have native tools available.".to_string(),
+            "Use the tool calling interface when a tool is genuinely helpful.".to_string(),
+            "Do not write pseudo tool tags like [TOOL_CALL:...]; call the tool directly.".to_string(),
+            "If the current reply clearly fits an existing cue, call play_cue at an appropriate moment.".to_string(),
+            "Do not merely describe an expression or animation in prose when play_cue is appropriate.".to_string(),
+            String::new(),
+            "Available tools:".to_string(),
+        ];
+
+        for action in &actions {
+            if action.parameters.is_empty() {
+                lines.push(format!(
+                    "- {}: {}. No parameters.",
+                    action.name, action.description
+                ));
+            } else {
+                let params: Vec<String> = action
+                    .parameters
+                    .iter()
+                    .map(|p| {
+                        let req = if p.required { "required" } else { "optional" };
+                        format!("{}({}, {})", p.name, p.description, req)
+                    })
+                    .collect();
+                lines.push(format!(
+                    "- {}: {}. Params: {}",
+                    action.name,
+                    action.description,
+                    params.join(", ")
+                ));
+            }
+        }
 
         lines.join("\n")
     }

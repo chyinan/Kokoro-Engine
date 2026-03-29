@@ -10,12 +10,19 @@ export interface PetChatState {
 
 export function usePetChat(): PetChatState {
     const [isStreaming, setIsStreaming] = useState(false);
+    const activeTurnIdRef = useRef<string | null>(null);
     const accumulatedRef = useRef("");
     const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
-        const unlistenDelta = listen<string>("chat-delta", async (event) => {
-            accumulatedRef.current += event.payload;
+        const unlistenStart = listen<{ turn_id: string }>("chat-turn-start", async (event) => {
+            activeTurnIdRef.current = event.payload.turn_id;
+            accumulatedRef.current = "";
+        });
+
+        const unlistenDelta = listen<{ turn_id: string; delta: string }>("chat-turn-delta", async (event) => {
+            if (activeTurnIdRef.current !== event.payload.turn_id) return;
+            accumulatedRef.current += event.payload.delta;
             setIsStreaming(true);
             if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
 
@@ -28,10 +35,12 @@ export function usePetChat(): PetChatState {
             }
         });
 
-        const unlistenDone = listen("chat-done", () => {
+        const unlistenDone = listen<{ turn_id: string; status: "completed" | "error" }>("chat-turn-finish", (event) => {
+            if (activeTurnIdRef.current !== event.payload.turn_id) return;
             setIsStreaming(false);
             if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
             hideTimerRef.current = setTimeout(async () => {
+                activeTurnIdRef.current = null;
                 accumulatedRef.current = "";
                 await invoke("hide_bubble_window").catch(() => {});
             }, 5000);
@@ -39,11 +48,13 @@ export function usePetChat(): PetChatState {
 
         const unlistenError = listen("chat-error", () => {
             setIsStreaming(false);
+            activeTurnIdRef.current = null;
             accumulatedRef.current = "";
             invoke("hide_bubble_window").catch(() => {});
         });
 
         return () => {
+            unlistenStart.then(fn => fn());
             unlistenDelta.then(fn => fn());
             unlistenDone.then(fn => fn());
             unlistenError.then(fn => fn());
@@ -53,6 +64,7 @@ export function usePetChat(): PetChatState {
 
     const sendMessage = async (text: string) => {
         if (!text.trim()) return;
+        activeTurnIdRef.current = null;
         accumulatedRef.current = "";
         setIsStreaming(true);
 
@@ -71,4 +83,3 @@ export function usePetChat(): PetChatState {
 
     return { isStreaming, sendMessage };
 }
-

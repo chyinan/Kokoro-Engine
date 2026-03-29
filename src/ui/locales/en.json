@@ -5,9 +5,11 @@
             "saved": "SAVED",
             "cancel": "CANCEL",
             "edit": "Edit",
+            "preview": "Preview",
             "done": "Done",
             "delete": "Delete",
-            "add": "Add"
+            "add": "Add",
+            "rename": "Rename"
         }
     },
     "sing": {
@@ -92,6 +94,11 @@
             "model_label": "Model",
             "fetch_models": "Fetch Available",
             "fetching": "Fetching...",
+            "native_tools": {
+                "label": "Tool Calling",
+                "toggle": "Enable native tool calling",
+                "desc": "Use the model/provider's native tool calling interface instead of pseudo [TOOL_CALL:...] tags."
+            },
             "save_config": "Save LLM Config",
             "saving": "Saving...",
             "vision_mode": "Vision Mode",
@@ -105,6 +112,10 @@
                 "strategy_summary_desc": "Compress old messages into summaries",
                 "max_chars_label": "Max chars per message",
                 "max_chars_hint": "Messages exceeding this length will be truncated. Applies to both strategies."
+            },
+            "emotion": {
+                "label": "Emotion System",
+                "desc": "Detect Kokoro's post-response emotion from the final assistant output using the local ONNX model."
             },
             "system_llm": {
                 "title": "System LLM (Intent Parsing)",
@@ -310,6 +321,14 @@
                 "loading": "Importing...",
                 "hint": "Select a .zip package or a .model3.json file."
             },
+            "rename": {
+                "prompt": "Enter a new model name"
+            },
+            "export": {
+                "button": "Export Live2D",
+                "loading": "Exporting...",
+                "hint": "Exported packages include the model files and Kokoro cue mappings."
+            },
             "gaze_tracking": {
                 "label": "Gaze Tracking",
                 "desc": "Model eyes follow the mouse cursor"
@@ -321,6 +340,90 @@
                     "fps_60": "60 FPS",
                     "unlimited": "Unlimited",
                     "custom": "Custom"
+                }
+            },
+            "mapping": {
+                "select_model": "Select an imported model to edit its mappings.",
+                "loading_profile": "Loading model profile...",
+                "placeholders": {
+                    "cue_name": "cue name"
+                },
+                "options": {
+                    "select_cue": "Select cue",
+                    "no_expression": "No expression",
+                    "no_motion_group": "No motion group"
+                },
+                "actions": {
+                    "save_cue": "Save Cue",
+                    "save_interaction": "Save Interaction Mapping",
+                    "save_semantic": "Save Semantic Mapping",
+                    "clear": "Clear",
+                    "exclude_from_prompt": "Hide From Prompt",
+                    "include_in_prompt": "Show In Prompt"
+                },
+                "cues": {
+                    "title": "Cue Mapping",
+                    "desc": "Imported models use per-model cues. Map your own cue names to model expressions or motion groups."
+                },
+                "available_expressions": "Expressions ({{count}})",
+                "available_motion_groups": "Motion Groups ({{count}})",
+                "configured_cues": "Configured Cues ({{count}})",
+                "empty_cues": "No cues configured yet.",
+                "interactions": {
+                    "title": "Interaction Mapping",
+                    "desc": "Map gesture and body area semantic events to a cue. Matching order is exact, then gesture wildcard, then area wildcard, then global wildcard.",
+                    "configured": "Configured Interaction Rules ({{count}})",
+                    "empty": "No interaction cue mappings yet."
+                },
+                "semantic": {
+                    "title": "Semantic Event Mapping",
+                    "desc": "Map non-interaction semantic events to cues. These mappings are used by emotion events and other model-agnostic logic.",
+                    "configured": "Configured Semantic Rules ({{count}})",
+                    "empty": "No semantic cue mappings yet."
+                },
+                "summary": {
+                    "expression": "expr: {{value}}",
+                    "expression_none": "expr: none",
+                    "motion": "motion: {{value}}",
+                    "motion_none": "motion: none",
+                    "cue": "cue: {{value}}",
+                    "prompt_hidden": "hidden from prompt"
+                },
+                "prompt_exclusions": {
+                    "title": "Prompt Exclusions",
+                    "desc": "All cues are exposed to the chat model by default. List only the cues you want excluded here.",
+                    "select_cue": "Select cue to exclude",
+                    "empty": "No cues are excluded from the prompt."
+                },
+                "gestures": {
+                    "tap": "Tap",
+                    "long_press": "Long Press",
+                    "rapid_tap": "Rapid Tap",
+                    "any": "Any Gesture"
+                },
+                "areas": {
+                    "eyes": "Eyes",
+                    "lips": "Lips",
+                    "face": "Face",
+                    "head": "Head",
+                    "hair": "Hair",
+                    "hand": "Hand",
+                    "arm": "Arm",
+                    "chest": "Chest",
+                    "body": "Body",
+                    "leg": "Leg",
+                    "skirt": "Skirt",
+                    "accessory": "Accessory",
+                    "any": "Any Area"
+                },
+                "semantic_keys": {
+                    "emotion": {
+                        "ecstatic": "Emotion: Ecstatic",
+                        "very_happy": "Emotion: Very Happy",
+                        "sulking": "Emotion: Sulking",
+                        "very_sad": "Emotion: Very Sad",
+                        "mood_swing": "Emotion: Mood Swing"
+                    }
                 }
             }
         },
@@ -468,6 +571,7 @@
                 "not_installed_prefix": "(not installed)",
                 "install_warning": "Model \"{{model}}\" is not installed",
                 "install_desc": "This vision model needs to be downloaded before it can be used.",
+                "install_desc_manual": "This model is not installed in Ollama yet. Pull it manually in Ollama, then refresh the model list here.",
                 "install_btn": "Install {{model}}",
                 "installing": "Installing {{model}}...",
                 "success": "Model \"{{model}}\" installed successfully!",
@@ -519,6 +623,40 @@
         "mcp": {
             "title": "MCP Tool Servers",
             "desc": "Connect external tools via Model Context Protocol",
+            "native_loop": {
+                "title": "Tool Loop",
+                "desc": "Limit how many tool-call continuation rounds Kokoro may run for one reply.",
+                "max_rounds": "Max Tool Rounds"
+            },
+            "builtin_tools": {
+                "title": "Built-in Tools",
+                "desc": "Choose which built-in tools the model may call.",
+                "saving": "Saving...",
+                "saved_auto": "Saved automatically",
+                "items": {
+                    "get_time": {
+                        "description": "Get the current date and time."
+                    },
+                    "play_cue": {
+                        "description": "Trigger a configured Live2D cue on the active model."
+                    },
+                    "set_background": {
+                        "description": "Generate and switch to a new background from a scene description."
+                    },
+                    "search_memory": {
+                        "description": "Search stored memories about the user."
+                    },
+                    "store_memory": {
+                        "description": "Store an important fact or detail for future conversations."
+                    },
+                    "forget_memory": {
+                        "description": "Find and remove a memory when the user asks you to forget something."
+                    },
+                    "send_notification": {
+                        "description": "Show a desktop notification to the user."
+                    }
+                }
+            },
             "refresh_tooltip": "Refresh tools from all servers",
             "add_button": "ADD",
             "add_modal": {
@@ -682,24 +820,20 @@
     },
     "footer": {
         "emotions": {
-            "calm": "Calm",
-            "happy": "Happy",
-            "excited": "Excited",
-            "smug": "Smug",
-            "shy": "Shy",
-            "thinking": "Thinking",
-            "surprised": "Surprised",
-            "worried": "Worried",
-            "sad": "Sad",
-            "angry": "Angry"
+            "neutral": "Neutral",
+            "joy": "Joy",
+            "love": "Love",
+            "sadness": "Sadness",
+            "anger": "Anger",
+            "fear": "Fear",
+            "surprise": "Surprise"
         },
         "mode": {
             "auto": "AUTO",
             "manual": "MANUAL",
             "auto_desc": "Expression controlled by AI",
             "manual_desc": "Expression controlled manually"
-        },
-        "set_expression": "Set expression: "
+        }
     },
     "mods": {
         "title": "MOD MANAGER",

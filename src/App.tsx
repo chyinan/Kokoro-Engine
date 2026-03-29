@@ -19,7 +19,7 @@ import { live2dUrl } from "./lib/utils";
 registerCoreComponents();
 
 // Build layout config as a function of displayMode
-function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; gazeTracking: boolean; renderFps: number }): LayoutConfig {
+function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; modelPath: string | null; gazeTracking: boolean; renderFps: number }): LayoutConfig {
   return {
     root: {
       id: "root-layer",
@@ -32,6 +32,7 @@ function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; 
           zIndex: 0,
           props: {
             modelUrl: displayMode.modelUrl,
+            modelPath: displayMode.modelPath,
             displayMode: displayMode.mode,
             gazeTracking: displayMode.gazeTracking,
             maxFps: displayMode.renderFps,
@@ -43,10 +44,9 @@ function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; 
           zIndex: 10,
           style: {
             gridTemplateColumns: "350px 1fr",
-            gridTemplateRows: "1fr 60px",
+            gridTemplateRows: "1fr",
             gridTemplateAreas: `
                         "highlight main"
-                        "footer footer"
                     `,
             pointerEvents: "none",
             position: "absolute",
@@ -60,13 +60,6 @@ function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; 
               area: "highlight",
               style: { pointerEvents: "auto", margin: "20px 0 20px 20px", padding: "0" },
               motion: "panelEntry"
-            },
-            {
-              id: "footer-bar",
-              type: "component",
-              component: "FooterBar",
-              area: "footer",
-              style: { pointerEvents: "auto" }
             }
           ]
         }
@@ -83,10 +76,9 @@ import {
   onModUiMessage,
   onModScriptEvent,
   onModUnload,
-  onChatDelta,
-  onChatDone,
-  onChatExpression,
-  onChatAction,
+  onChatTurnDelta,
+  onChatTurnFinish,
+  onChatCue,
   streamChat,
   dispatchModEvent,
   unloadMod,
@@ -139,6 +131,8 @@ import {
   // New: Live2D
   deleteLive2dModel,
   importLive2dZip,
+  setActiveLive2dModel,
+  BUILTIN_LIVE2D_MODEL_PATH,
   // New: Context
   setUserLanguage,
   // Types
@@ -192,6 +186,7 @@ function App() {
     () => localStorage.getItem("kokoro_gaze_tracking") !== "false"
   );
   const [renderFps, setRenderFps] = useState<number>(60);
+  const activeLive2dModelPath = customModelPath ?? BUILTIN_LIVE2D_MODEL_PATH;
 
   const handleGazeTrackingChange = (enabled: boolean) => {
     setGazeTracking(enabled);
@@ -245,9 +240,22 @@ function App() {
     return "/live2d/haru/haru_greeter_t03.model3.json";
   }, [customModelPath]);
 
+  useEffect(() => {
+    setActiveLive2dModel(activeLive2dModelPath).catch((err) => {
+      console.error("[App] Failed to sync active Live2D model:", err);
+    });
+    emit("live2d-model-selection-updated", {
+      modelPath: activeLive2dModelPath,
+      customModelPath,
+      modelUrl,
+    }).catch((err) => {
+      console.error("[App] Failed to broadcast Live2D model selection:", err);
+    });
+  }, [activeLive2dModelPath, customModelPath, modelUrl]);
+
   const layout = useMemo(
-    () => createLayout({ mode: displayMode, modelUrl, gazeTracking, renderFps }),
-    [displayMode, modelUrl, gazeTracking, renderFps]
+    () => createLayout({ mode: displayMode, modelUrl, modelPath: activeLive2dModelPath, gazeTracking, renderFps }),
+    [displayMode, modelUrl, activeLive2dModelPath, gazeTracking, renderFps]
   );
 
   const handleDisplayModeChange = (mode: Live2DDisplayMode) => {
@@ -431,37 +439,29 @@ function App() {
     });
 
     // ── MOD System: Engine event bridge → broadcast to iframes + forward to QuickJS ──
-    const unlistenModChatDelta = onChatDelta((delta) => {
+    const unlistenModChatDelta = onChatTurnDelta(({ turn_id, delta }) => {
       modMessageBus.broadcast({
         type: 'event',
-        payload: { name: 'chat-delta', delta },
+        payload: { name: 'chat-delta', delta, turn_id },
       });
       // Forward to QuickJS scripts so Kokoro.on('chat', ...) works
-      dispatchModEvent('chat', { delta }).catch(() => { });
+      dispatchModEvent('chat', { delta, turn_id }).catch(() => { });
     });
 
-    const unlistenModExpression = onChatExpression((data) => {
+    const unlistenModCue = onChatCue((data) => {
       modMessageBus.broadcast({
         type: 'event',
-        payload: { name: 'chat-expression', ...data },
+        payload: { name: 'chat-cue', ...data },
       });
-      dispatchModEvent('expression', data).catch(() => { });
+      dispatchModEvent('cue', data).catch(() => { });
     });
 
-    const unlistenModAction = onChatAction((data) => {
+    const unlistenModChatDone = onChatTurnFinish(({ turn_id, status }) => {
       modMessageBus.broadcast({
         type: 'event',
-        payload: { name: 'chat-action', ...data },
+        payload: { name: 'chat-done', turn_id, status },
       });
-      dispatchModEvent('action', data).catch(() => { });
-    });
-
-    const unlistenModChatDone = onChatDone(() => {
-      modMessageBus.broadcast({
-        type: 'event',
-        payload: { name: 'chat-done' },
-      });
-      dispatchModEvent('chat-done', {}).catch(() => { });
+      dispatchModEvent('chat-done', { turn_id, status }).catch(() => { });
     });
 
     // ── MOD System: Script events → broadcast to iframes ──
@@ -492,8 +492,7 @@ function App() {
       unlistenModComponents.then(unlisten => unlisten());
       unlistenModUiMessage.then(unlisten => unlisten());
       unlistenModChatDelta.then(unlisten => unlisten());
-      unlistenModExpression.then(unlisten => unlisten());
-      unlistenModAction.then(unlisten => unlisten());
+      unlistenModCue.then(unlisten => unlisten());
       unlistenModChatDone.then(unlisten => unlisten());
       unlistenModScriptEvent.then(unlisten => unlisten());
       unlistenModUnload.then(unlisten => unlisten());

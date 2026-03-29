@@ -7,9 +7,10 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
-    listMcpServers, addMcpServer, removeMcpServer, refreshMcpTools, reconnectMcpServer, toggleMcpServer
+    listMcpServers, addMcpServer, removeMcpServer, refreshMcpTools, reconnectMcpServer, toggleMcpServer,
+    listBuiltinTools, getToolSettings, saveToolSettings
 } from "../../../lib/kokoro-bridge";
-import type { McpServerConfig, McpServerStatus } from "../../../lib/kokoro-bridge";
+import type { ActionInfo, McpServerConfig, McpServerStatus, ToolSettings } from "../../../lib/kokoro-bridge";
 
 // ── Helpers ─────────────────────────────────────────────
 
@@ -89,6 +90,9 @@ export default function McpTab() {
     const [adding, setAdding] = useState(false);
     const [removingName, setRemovingName] = useState<string | null>(null);
     const [successMsg, setSuccessMsg] = useState<string | null>(null);
+    const [builtinTools, setBuiltinTools] = useState<ActionInfo[]>([]);
+    const [toolSettings, setToolSettings] = useState<ToolSettings>({ max_tool_rounds: 10, enabled_tools: {} });
+    const [savingToolSettings, setSavingToolSettings] = useState(false);
 
     const fetchServers = useCallback(async () => {
         try {
@@ -101,9 +105,23 @@ export default function McpTab() {
         }
     }, []);
 
+    const fetchBuiltinToolState = useCallback(async () => {
+        try {
+            const [tools, settings] = await Promise.all([
+                listBuiltinTools(),
+                getToolSettings(),
+            ]);
+            setBuiltinTools(tools);
+            setToolSettings(settings);
+        } catch (e) {
+            console.error("[McpTab] Failed to fetch builtin tool settings:", e);
+        }
+    }, []);
+
     useEffect(() => {
         fetchServers();
-    }, [fetchServers]);
+        fetchBuiltinToolState();
+    }, [fetchServers, fetchBuiltinToolState]);
 
     // Auto-poll while any server is in "connecting" state
     useEffect(() => {
@@ -192,6 +210,39 @@ export default function McpTab() {
         }
     };
 
+    const persistToolSettings = useCallback(async (next: ToolSettings) => {
+        setSavingToolSettings(true);
+        try {
+            await saveToolSettings(next);
+            setToolSettings(next);
+        } catch (e) {
+            console.error("[McpTab] Failed to save tool settings:", e);
+        } finally {
+            setSavingToolSettings(false);
+        }
+    }, []);
+
+    const handleToolToggle = async (name: string, enabled: boolean) => {
+        const next: ToolSettings = {
+            ...toolSettings,
+            enabled_tools: {
+                ...toolSettings.enabled_tools,
+                [name]: enabled,
+            },
+        };
+        await persistToolSettings(next);
+    };
+
+    const handleMaxToolRoundsChange = async (value: string) => {
+        const parsed = Number.parseInt(value, 10);
+        const next: ToolSettings = {
+            ...toolSettings,
+            max_tool_rounds: Number.isFinite(parsed) ? Math.max(1, Math.min(20, parsed)) : 10,
+        };
+        setToolSettings(next);
+        await persistToolSettings(next);
+    };
+
     // Dismiss success after 3s
     useEffect(() => {
         if (successMsg) {
@@ -210,6 +261,79 @@ export default function McpTab() {
 
     return (
         <div className="space-y-5">
+            <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-2)]/80 p-4 space-y-4">
+                <div className="flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-1)]/80 px-3 py-3">
+                    <div className="min-w-0">
+                        <div className="text-sm font-heading font-semibold text-[var(--color-text-primary)]">
+                            {t("settings.mcp.native_loop.title")}
+                        </div>
+                        <div className="mt-1 text-xs text-[var(--color-text-muted)]">
+                            {t("settings.mcp.native_loop.desc")}
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-xs text-[var(--color-text-secondary)]">{t("settings.mcp.native_loop.max_rounds")}</span>
+                        <input
+                            type="number"
+                            min={1}
+                            max={20}
+                            value={toolSettings.max_tool_rounds}
+                            onChange={(e) => { void handleMaxToolRoundsChange(e.target.value); }}
+                            className="w-20 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
+                        />
+                    </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-4">
+                    <div>
+                        <div className="text-sm font-heading font-semibold text-[var(--color-text-primary)]">
+                            {t("settings.mcp.builtin_tools.title")}
+                        </div>
+                        <div className="text-xs text-[var(--color-text-muted)]">
+                            {t("settings.mcp.builtin_tools.desc")}
+                        </div>
+                    </div>
+                    <div className="text-[11px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                        {savingToolSettings ? t("settings.mcp.builtin_tools.saving") : t("settings.mcp.builtin_tools.saved_auto")}
+                    </div>
+                </div>
+
+                <div className="space-y-2">
+                    {builtinTools.map((tool) => {
+                        const enabled = toolSettings.enabled_tools[tool.name] ?? true;
+                        return (
+                            <div
+                                key={tool.name}
+                                className="flex items-start justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-1)]/80 px-3 py-3"
+                            >
+                                <div className="min-w-0">
+                                    <div className="text-sm font-medium text-[var(--color-text-primary)]">
+                                        {tool.name}
+                                    </div>
+                                    <div className="mt-1 text-xs text-[var(--color-text-muted)]">
+                                        {t(`settings.mcp.builtin_tools.items.${tool.name}.description`, { defaultValue: tool.description })}
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => { void handleToolToggle(tool.name, !enabled); }}
+                                    aria-checked={enabled}
+                                    aria-label={tool.name}
+                                    className={clsx(
+                                        "w-10 h-5 rounded-full transition-colors relative shrink-0",
+                                        enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
+                                    )}
+                                >
+                                    <motion.div
+                                        animate={{ x: enabled ? 20 : 2 }}
+                                        className="absolute top-0.5 w-4 h-4 rounded-full bg-white"
+                                    />
+                                </button>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+
             {/* Header row */}
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">

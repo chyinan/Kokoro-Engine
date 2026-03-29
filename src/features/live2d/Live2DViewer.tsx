@@ -9,9 +9,9 @@
  */
 import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from "react";
 import { Live2DModel } from "pixi-live2d-display/cubism4";
-import { Live2DController, type EmotionState, type ActionIntent, type IdleBehavior } from "./Live2DController";
+import { Live2DController, type IdleBehavior } from "./Live2DController";
 import { drawableHitTest, estimateRegionByY, REGION_DESCRIPTIONS } from "./DrawableHitTest";
-import { onChatExpression, onChatAction } from "../../lib/kokoro-bridge";
+import { onChatCue, type Live2dModelProfile } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { interactionService, type GestureEvent } from "../../core/services/interaction-service";
 import * as PIXI from "pixi.js";
@@ -22,8 +22,7 @@ Live2DModel.registerTicker(PIXI.Ticker);
 // ── Types ──────────────────────────────────────────
 
 export interface Live2DViewerHandle {
-    /** @deprecated Use controller directly */
-    setExpression: (name: string) => void;
+    playCue: (cue: string) => void;
     /** @deprecated Use controller directly */
     setMouthOpen: (val: number) => void;
     /** @deprecated Use controller directly */
@@ -38,8 +37,10 @@ export type Live2DDisplayMode = "full" | "upper" | "upper-thigh";
 export interface Live2DViewerProps {
     /** URL to the .model3.json file */
     modelUrl: string;
+    /** Relative imported-model path used for cue profile loading. */
+    modelPath?: string | null;
     /** Optional controller instance to manage the model state.
-     * Chat expression/action events are routed through this controller when provided. */
+     * Chat cue events are routed through this controller when provided. */
     controller?: Live2DController;
     /** Called when a hit area on the model is tapped (legacy) */
     onHitAreaTap?: (hitArea: string) => void;
@@ -64,7 +65,7 @@ export interface Live2DViewerProps {
 // ── Component ──────────────────────────────────────
 
 const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
-    ({ modelUrl, controller, onHitAreaTap, className, backgroundAlpha = 0, displayMode = "full", gazeTracking = true, fixedSize, scaleMultiplier = 1, maxFps = 60, onModelLoaded }, ref) => {
+    ({ modelUrl, modelPath = null, controller, onHitAreaTap, className, backgroundAlpha = 0, displayMode = "full", gazeTracking = true, fixedSize, scaleMultiplier = 1, maxFps = 60, onModelLoaded }, ref) => {
         const containerRef = useRef<HTMLDivElement>(null);
         const appRef = useRef<PIXI.Application | null>(null);
         const modelRef = useRef<Live2DModel | null>(null);
@@ -90,12 +91,31 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
             };
         }, [controller]);
 
+        useEffect(() => {
+            const ctrl = getActiveController();
+            if (!ctrl) return;
+            void ctrl.loadProfileForModel(modelPath);
+        }, [getActiveController, modelPath]);
+
+        useEffect(() => {
+            let unlisten: (() => void) | undefined;
+
+            listen<Live2dModelProfile>("live2d-profile-updated", (event) => {
+                const ctrl = getActiveController();
+                if (!ctrl || !modelPath) return;
+                if (event.payload?.model_path !== modelPath) return;
+                ctrl.setProfile(event.payload);
+            }).then(fn => { unlisten = fn; });
+
+            return () => { unlisten?.(); };
+        }, [getActiveController, modelPath]);
+
         // Expose control methods to parent
         useImperativeHandle(ref, () => {
             const ctrl = getActiveController();
             return {
-                setExpression(name: string) {
-                    ctrl?.setEmotion(name as EmotionState);
+                playCue(cue: string) {
+                    ctrl?.playCue(cue);
                 },
                 playMotion(group: string, index = 0) {
                     ctrl?.playMotion(group, index);
@@ -118,30 +138,15 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
             };
         });
 
-        // Centralize chat-driven animation listeners here so both the main stage
+        // Centralize chat-driven cue listeners here so both the main stage
         // and the floating pet window react through the same controller instance.
         useEffect(() => {
             let unlisten: (() => void) | undefined;
 
-            onChatExpression((data) => {
+            onChatCue((data) => {
                 const ctrl = getActiveController();
                 if (ctrl) {
-                    ctrl.setEmotion(data.expression as EmotionState);
-                }
-            }).then(fn => { unlisten = fn; });
-
-            return () => { unlisten?.(); };
-        }, [getActiveController]);
-
-        // Keep action/motion routing colocated with expression routing to avoid
-        // duplicate listeners in individual windows such as PetWindow.
-        useEffect(() => {
-            let unlisten: (() => void) | undefined;
-
-            onChatAction((data) => {
-                const ctrl = getActiveController();
-                if (ctrl) {
-                    ctrl.playActionMotion(data.action as ActionIntent);
+                    void ctrl.playCue(data.cue);
                 }
             }).then(fn => { unlisten = fn; });
 
@@ -156,6 +161,25 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                 const ctrl = getActiveController();
                 if (ctrl && event.payload && event.payload.behavior) {
                     ctrl.playIdleBehavior(event.payload.behavior as IdleBehavior);
+                }
+            }).then(fn => { unlisten = fn; });
+
+            return () => { unlisten?.(); };
+        }, [getActiveController]);
+
+        useEffect(() => {
+            let unlisten: (() => void) | undefined;
+
+            listen<{ semantic_key?: string; event_type?: string }>("emotion-event", (event) => {
+                const ctrl = getActiveController();
+                if (!ctrl) return;
+
+                const semanticKey = event.payload?.semantic_key;
+                if (!semanticKey) return;
+
+                const cue = ctrl.resolveSemanticCue(semanticKey);
+                if (cue) {
+                    void ctrl.playCue(cue);
                 }
             }).then(fn => { unlisten = fn; });
 
@@ -319,20 +343,27 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                     let longPressFired = false;
 
                     const hitTestFirst = (globalX: number, globalY: number): string | null => {
-                        // Level 1: Drawable mesh hit test — front-most visible mesh wins.
-                        // null = nothing hit; "unknown" = hit an unrecognised mesh (still on model).
-                        const region = drawableHitTest(model, globalX, globalY, import.meta.env.DEV);
-                        if (region !== null) {
-                            return region === "unknown"
-                                ? REGION_DESCRIPTIONS["body"]
-                                : REGION_DESCRIPTIONS[region];
+                        // Level 1: Prefer model-defined HitAreas when available.
+                        const hits = model.hitTest(globalX, globalY);
+                        if (hits.length > 0) {
+                            if (import.meta.env.DEV) {
+                                console.log(`[HitTest] source=hitarea | hits=${hits.join(", ")}`);
+                            }
+                            return hits[0];
                         }
 
-                        // Level 2: Original HitArea detection (for models that define them)
-                        const hits = model.hitTest(globalX, globalY);
-                        if (hits.length > 0) return hits[0];
+                        // Level 2: Drawable mesh hit test — front-most visible mesh wins.
+                        // null = nothing hit; "unknown" = hit an unrecognised mesh (still on model).
+                        const region = drawableHitTest(model, globalX, globalY, import.meta.env.DEV);
+                        if (region !== null && region !== "unknown") {
+                            if (import.meta.env.DEV) {
+                                console.log(`[HitTest] source=drawable | region=${region}`);
+                            }
+                            return REGION_DESCRIPTIONS[region];
+                        }
 
-                        // Level 3: Y-coordinate estimation — only inside model bounds
+                        // Level 3: Y-coordinate estimation — only inside model bounds.
+                        // This is also the fallback for drawable="unknown" hits.
                         const bounds = model.getBounds();
                         const inBounds =
                             globalX >= bounds.x && globalX <= bounds.x + bounds.width &&
@@ -340,6 +371,10 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                         if (!inBounds) return null;
 
                         const fallback = estimateRegionByY(model, globalY);
+                        if (import.meta.env.DEV) {
+                            const source = region === "unknown" ? "drawable-unknown" : "geometry-fallback";
+                            console.log(`[HitTest] source=${source} | region=${fallback}`);
+                        }
                         return REGION_DESCRIPTIONS[fallback];
                     };
 

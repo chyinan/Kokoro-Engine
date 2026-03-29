@@ -3,14 +3,14 @@ import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import {
     Eye, MonitorSmartphone, Timer, Gauge, Server, KeyRound, Cpu,
-    Camera, Loader2, AlertTriangle, Download, CheckCircle2, XCircle, Video
+    Camera, Loader2, AlertTriangle, Video
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
     getVisionConfig, saveVisionConfig, captureScreenNow,
-    listOllamaModels, pullOllamaModel, onOllamaPullProgress,
+    listOllamaModels,
 } from "../../../lib/kokoro-bridge";
-import type { VisionConfig, OllamaModelInfo, OllamaPullProgress } from "../../../lib/kokoro-bridge";
+import type { VisionConfig, OllamaModelInfo } from "../../../lib/kokoro-bridge";
 import { Select } from "@/components/ui/select";
 
 export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: VisionConfig) => void } = {}) {
@@ -24,13 +24,6 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
     const [dirty, setDirty] = useState(false);
     const [editingInterval, setEditingInterval] = useState(false);
     const [intervalInput, setIntervalInput] = useState("");
-
-    // ── Model install state ──
-    const [pulling, setPulling] = useState(false);
-    const [pullProgress, setPullProgress] = useState<OllamaPullProgress | null>(null);
-    const [pullError, setPullError] = useState<string | null>(null);
-    const [pullDone, setPullDone] = useState(false);
-    const unlistenRef = useRef<(() => void) | null>(null);
 
     // ── Camera device picker + preview ──
     const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
@@ -101,7 +94,6 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
     useEffect(() => {
         loadConfig();
         return () => {
-            unlistenRef.current?.();
             stopPreview();
         };
     }, []);
@@ -115,7 +107,7 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
             // Try to load Ollama models in background
             if (cfg.vlm_provider === "ollama" && cfg.vlm_base_url) {
                 try {
-                    const models = await listOllamaModels(cfg.vlm_base_url.replace("/v1", ""));
+                    const models = await listOllamaModels(cfg.vlm_base_url);
                     setOllamaModels(models);
                     setOllamaReachable(true);
                 } catch {
@@ -174,74 +166,7 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
             return installedModel === configModel;
         })
         : true; // If we can't check, don't show warning
-    const showModelWarning = isOllamaProvider && ollamaReachable && ollamaModels.length > 0 && !modelInstalled && !pulling && !pullDone;
-
-    // ── Install model handler ──
-    const handleInstallModel = async () => {
-        if (!config || !config.vlm_base_url) return;
-        setPulling(true);
-        setPullError(null);
-        setPullDone(false);
-        setPullProgress(null);
-
-        // Listen for progress events
-        const capturedBaseUrl = config.vlm_base_url;
-        const unlisten = await onOllamaPullProgress((p) => {
-            setPullProgress(p);
-            if (p.status === "success") {
-                setPullDone(true);
-                setPulling(false);
-                // Refresh model list
-                refreshModels(capturedBaseUrl);
-            }
-        });
-        unlistenRef.current = unlisten;
-
-        try {
-            const baseUrl = config.vlm_base_url.replace("/v1", "");
-            await pullOllamaModel(baseUrl, config.vlm_model);
-            // If the promise resolved without a "success" status event, mark done
-            setPullDone(prev => {
-                if (!prev) refreshModels(capturedBaseUrl);
-                return true;
-            });
-            setPulling(false);
-        } catch (e) {
-            setPullError(String(e));
-            setPulling(false);
-        } finally {
-            unlisten();
-            unlistenRef.current = null;
-        }
-    };
-
-    const refreshModels = async (baseUrl?: string) => {
-        const url = baseUrl ?? config?.vlm_base_url;
-        if (!url) return;
-        try {
-            const models = await listOllamaModels(url.replace("/v1", ""));
-            setOllamaModels(models);
-        } catch { /* ignore */ }
-    };
-
-    // ── Progress helpers ──
-    const progressPercent = pullProgress?.total && pullProgress?.completed
-        ? Math.min(100, Math.round((pullProgress.completed / pullProgress.total) * 100))
-        : null;
-
-    const progressLabel = (() => {
-        if (!pullProgress) return t("settings.vision.progress.initializing");
-        const { status } = pullProgress;
-        if (status === "success") return t("settings.vision.progress.complete");
-        if (status.startsWith("pulling")) {
-            if (progressPercent !== null) return t("settings.vision.progress.downloading", { percent: progressPercent });
-            return t("settings.vision.progress.pulling_manifest");
-        }
-        if (status.includes("verifying")) return t("settings.vision.progress.verifying");
-        if (status.includes("writing")) return t("settings.vision.progress.writing");
-        if (status.includes("removing")) return t("settings.vision.progress.cleanup");
-        return status;
-    })();
+    const showModelWarning = isOllamaProvider && ollamaReachable && ollamaModels.length > 0 && !modelInstalled;
 
     if (loading || !config) {
         return (
@@ -313,8 +238,6 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
                                 vlm_model: prov === "ollama" ? "minicpm-v" : prov === "llm" ? "" : "gpt-4o",
                                 vlm_api_key: prov === "ollama" || prov === "llm" ? null : config.vlm_api_key,
                             });
-                            setPullDone(false);
-                            setPullError(null);
                         }}
                         options={[
                             { value: "ollama", label: t("settings.vision.provider.ollama") },
@@ -385,11 +308,7 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
                     {config.vlm_provider === "ollama" && ollamaModels.length > 0 ? (
                         <Select
                             value={config.vlm_model}
-                            onChange={(v) => {
-                                update({ vlm_model: v });
-                                setPullDone(false);
-                                setPullError(null);
-                            }}
+                            onChange={(v) => update({ vlm_model: v })}
                             options={[
                                 ...ollamaModels.map(m => ({ value: m.name, label: m.name })),
                                 ...(!ollamaModels.some(m => m.name.split(":")[0].toLowerCase() === config.vlm_model.split(":")[0].toLowerCase())
@@ -401,11 +320,7 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
                         <input
                             type="text"
                             value={config.vlm_model}
-                            onChange={(e) => {
-                                update({ vlm_model: e.target.value });
-                                setPullDone(false);
-                                setPullError(null);
-                            }}
+                            onChange={(e) => update({ vlm_model: e.target.value })}
                             placeholder={config.vlm_provider === "ollama" ? "minicpm-v" : "gpt-4o"}
                             className={clsx(
                                 "w-full px-3 py-2 rounded-lg text-sm",
@@ -423,7 +338,7 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
                 </div>
                 )}
 
-                {/* ── Model not installed warning + install UI ── */}
+                {/* ── Model not installed warning ── */}
                 <AnimatePresence>
                     {showModelWarning && (
                         <motion.div
@@ -439,131 +354,10 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
                                         {t("settings.vision.model.install_warning", { model: config.vlm_model })}
                                     </p>
                                     <p className="text-xs text-[var(--color-text-muted)]">
-                                        {t("settings.vision.model.install_desc")}
+                                        {t("settings.vision.model.install_desc_manual")}
                                     </p>
                                 </div>
                             </div>
-                            <motion.button
-                                whileTap={{ scale: 0.97 }}
-                                onClick={handleInstallModel}
-                                className={clsx(
-                                    "w-full flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-heading font-semibold tracking-wider uppercase",
-                                    "bg-[var(--color-warning)]/20 border border-[var(--color-warning)]/30",
-                                    "text-[var(--color-warning)]",
-                                    "hover:bg-[var(--color-warning)]/30 transition-colors"
-                                )}
-                            >
-                                <Download size={13} strokeWidth={1.5} />
-                                {t("settings.vision.model.install_btn", { model: config.vlm_model })}
-                            </motion.button>
-                        </motion.div>
-                    )}
-                </AnimatePresence>
-
-                {/* ── Pull progress UI ── */}
-                <AnimatePresence>
-                    {pulling && (
-                        <motion.div
-                            initial={{ opacity: 0, height: 0 }}
-                            animate={{ opacity: 1, height: "auto" }}
-                            exit={{ opacity: 0, height: 0 }}
-                            className="rounded-lg border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/5 p-3 space-y-2"
-                        >
-                            <div className="flex items-center gap-2">
-                                <Loader2 size={14} className="text-[var(--color-accent)] animate-spin" />
-                                <span className="text-xs text-[var(--color-accent)] font-semibold">
-                                    {t("settings.vision.model.installing", { model: config.vlm_model })}
-                                </span>
-                            </div>
-                            <p className="text-xs text-[var(--color-text-muted)]">
-                                {progressLabel}
-                            </p>
-                            {/* Progress bar */}
-                            <div className="w-full h-1.5 rounded-full bg-[var(--color-bg-surface)] overflow-hidden">
-                                <motion.div
-                                    className="h-full rounded-full bg-[var(--color-accent)]"
-                                    initial={{ width: "0%" }}
-                                    animate={{
-                                        width: progressPercent !== null ? `${progressPercent}%` : "30%",
-                                    }}
-                                    transition={{
-                                        duration: 0.3,
-                                        ease: "easeOut",
-                                        ...(progressPercent === null ? {
-                                            repeat: Infinity,
-                                            repeatType: "mirror" as const,
-                                            duration: 1.5
-                                        } : {})
-                                    }}
-                                />
-                            </div>
-                            {progressPercent !== null && (
-                                <p className="text-xs text-[var(--color-text-muted)] text-right font-mono">
-                                    {pullProgress?.completed
-                                        ? `${(pullProgress.completed / 1024 / 1024).toFixed(0)} MB`
-                                        : ""
-                                    }
-                                    {pullProgress?.total
-                                        ? ` / ${(pullProgress.total / 1024 / 1024).toFixed(0)} MB`
-                                        : ""
-                                    }
-                                </p>
-                            )}
-                        </motion.div>
-                    )}
-                </AnimatePresence>
-
-                {/* ── Pull complete ── */}
-                <AnimatePresence>
-                    {pullDone && !pulling && (
-                        <motion.div
-                            initial={{ opacity: 0, height: 0 }}
-                            animate={{ opacity: 1, height: "auto" }}
-                            exit={{ opacity: 0, height: 0 }}
-                            className="rounded-lg border border-[var(--color-success)]/30 bg-[var(--color-success)]/5 p-3"
-                        >
-                            <div className="flex items-center gap-2">
-                                <CheckCircle2 size={14} className="text-[var(--color-success)]" />
-                                <span className="text-xs text-[var(--color-success)] font-semibold">
-                                    {t("settings.vision.model.success", { model: config.vlm_model })}
-                                </span>
-                            </div>
-                        </motion.div>
-                    )}
-                </AnimatePresence>
-
-                {/* ── Pull error ── */}
-                <AnimatePresence>
-                    {pullError && (
-                        <motion.div
-                            initial={{ opacity: 0, height: 0 }}
-                            animate={{ opacity: 1, height: "auto" }}
-                            exit={{ opacity: 0, height: 0 }}
-                            className="rounded-lg border border-[var(--color-error)]/30 bg-[var(--color-error)]/5 p-3"
-                        >
-                            <div className="flex items-start gap-2">
-                                <XCircle size={14} className="text-[var(--color-error)] mt-0.5 shrink-0" />
-                                <div className="space-y-1">
-                                    <p className="text-xs text-[var(--color-error)] font-semibold">
-                                        {t("settings.vision.model.failed")}
-                                    </p>
-                                    <p className="text-xs text-[var(--color-text-muted)] break-all">
-                                        {pullError}
-                                    </p>
-                                </div>
-                            </div>
-                            <motion.button
-                                whileTap={{ scale: 0.97 }}
-                                onClick={handleInstallModel}
-                                className={clsx(
-                                    "mt-2 w-full flex items-center justify-center gap-2 py-1.5 rounded-lg text-xs",
-                                    "border border-[var(--color-border)] text-[var(--color-text-secondary)]",
-                                    "hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-colors"
-                                )}
-                            >
-                                <Download size={12} strokeWidth={1.5} />
-                                {t("settings.vision.model.retry")}
-                            </motion.button>
                         </motion.div>
                     )}
                 </AnimatePresence>

@@ -13,6 +13,8 @@ pub struct LlmProviderConfig {
     pub provider_type: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub supports_native_tools: bool,
 
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
@@ -74,6 +76,7 @@ fn default_providers() -> Vec<LlmProviderConfig> {
             id: "openai".to_string(),
             provider_type: "openai".to_string(),
             enabled: true,
+            supports_native_tools: true,
             api_key: None,
             api_key_env: Some("OPENAI_API_KEY".to_string()),
             base_url: Some("https://api.openai.com/v1".to_string()),
@@ -84,6 +87,7 @@ fn default_providers() -> Vec<LlmProviderConfig> {
             id: "ollama".to_string(),
             provider_type: "ollama".to_string(),
             enabled: false,
+            supports_native_tools: true,
             api_key: None,
             api_key_env: None,
             base_url: Some("http://localhost:11434".to_string()),

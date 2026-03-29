@@ -87,7 +87,7 @@ export default function HeaderBar({ onSettingsClick }: HeaderBarProps) {
                             title={`Mood: ${Math.round(character.mood * 100)}%`}
                         />
                         <span className="text-[var(--color-text-muted)] text-xs">
-                            {character.current_expression}
+                            {character.current_cue}
                         </span>
                     </>
                 )}

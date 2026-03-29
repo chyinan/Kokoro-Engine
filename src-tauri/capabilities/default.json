@@ -8,6 +8,8 @@
   "permissions": [
     "core:default",
     "opener:default",
+    "notification:default",
+    "notification:allow-is-permission-granted",
     "dialog:default",
     "fs:default",
     "fs:allow-read-text-file",
