@@ -103,7 +103,7 @@ async fn stream_from_mock(mock_server: &MockServer, sse_body: &str) -> Vec<Strin
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
     let response = client
-        .post(&format!("{}/v1/chat/completions", mock_server.uri()))
+        .post(format!("{}/v1/chat/completions", mock_server.uri()))
         .header("Content-Type", "application/json")
         .body("{}")
         .send()
@@ -116,18 +116,15 @@ async fn stream_from_mock(mock_server: &MockServer, sse_body: &str) -> Vec<Strin
     let mut stream = response.bytes_stream().eventsource();
 
     while let Some(event_result) = stream.next().await {
-        match event_result {
-            Ok(event) => {
-                if event.data == "[DONE]" {
-                    break;
-                }
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event.data) {
-                    if let Some(content) = parsed["choices"][0]["delta"]["content"].as_str() {
-                        tokens.push(content.to_string());
-                    }
+        if let Ok(event) = event_result {
+            if event.data == "[DONE]" {
+                break;
+            }
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event.data) {
+                if let Some(content) = parsed["choices"][0]["delta"]["content"].as_str() {
+                    tokens.push(content.to_string());
                 }
             }
-            Err(_) => {} // Ignore parse errors (like OpenAIClient does)
         }
     }
 
@@ -224,7 +221,7 @@ async fn test_full_vision_to_mock_llm_pipeline() {
 
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let response = client
-        .post(&format!("{}/v1/chat/completions", mock_server.uri()))
+        .post(format!("{}/v1/chat/completions", mock_server.uri()))
         .header("Content-Type", "application/json")
         .json(&json)
         .send()
@@ -237,18 +234,15 @@ async fn test_full_vision_to_mock_llm_pipeline() {
     let mut stream = response.bytes_stream().eventsource();
 
     while let Some(event_result) = stream.next().await {
-        match event_result {
-            Ok(event) => {
-                if event.data == "[DONE]" {
-                    break;
-                }
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event.data) {
-                    if let Some(content) = parsed["choices"][0]["delta"]["content"].as_str() {
-                        full.push_str(content);
-                    }
+        if let Ok(event) = event_result {
+            if event.data == "[DONE]" {
+                break;
+            }
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event.data) {
+                if let Some(content) = parsed["choices"][0]["delta"]["content"].as_str() {
+                    full.push_str(content);
                 }
             }
-            Err(_) => {}
         }
     }
 

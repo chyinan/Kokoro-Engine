@@ -47,11 +47,11 @@ fn arb_garbage_bytes() -> impl Strategy<Value = Vec<u8>> {
     prop::collection::vec(any::<u8>(), 4..512).prop_filter(
         "must not accidentally start with a valid image magic",
         |bytes| {
-            !bytes.starts_with(b"\x89PNG")
-                && !bytes.starts_with(b"\xFF\xD8\xFF")
-                && !bytes.starts_with(b"GIF8")
-                && !(bytes.starts_with(b"RIFF") && bytes.len() > 11 && &bytes[8..12] == b"WEBP")
-                && !bytes.starts_with(b"BM")
+            !(bytes.starts_with(b"\x89PNG")
+                || bytes.starts_with(b"\xFF\xD8\xFF")
+                || bytes.starts_with(b"GIF8")
+                || bytes.starts_with(b"BM")
+                || (bytes.starts_with(b"RIFF") && bytes.len() > 11 && &bytes[8..12] == b"WEBP"))
         },
     )
 }

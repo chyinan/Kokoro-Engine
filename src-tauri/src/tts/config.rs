@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn test_cache_config_defaults() {
         let cache = CacheConfig::default();
-        assert_eq!(cache.enabled, true, "Cache should be enabled by default");
+        assert!(cache.enabled, "Cache should be enabled by default");
         assert_eq!(cache.max_entries, 500, "Default max_entries should be 500");
         assert_eq!(cache.ttl_secs, 3600, "Default TTL should be 3600 seconds (1 hour)");
     }
@@ -162,8 +162,8 @@ mod tests {
             Some("browser".to_string()),
             "Default provider should be 'browser'"
         );
-        assert_eq!(
-            config.cache.enabled, true,
+        assert!(
+            config.cache.enabled,
             "Cache should be enabled in default config"
         );
         assert_eq!(
@@ -183,8 +183,8 @@ mod tests {
             config.providers[0].provider_type, "browser",
             "Default provider type should be browser"
         );
-        assert_eq!(
-            config.providers[0].enabled, true,
+        assert!(
+            config.providers[0].enabled,
             "Default browser provider should be enabled"
         );
     }
@@ -242,7 +242,7 @@ mod tests {
 
         assert_eq!(provider.id, "test", "Provider ID should be set");
         assert_eq!(provider.provider_type, "openai", "Provider type should be set");
-        assert_eq!(provider.enabled, true, "Provider should be enabled");
+        assert!(provider.enabled, "Provider should be enabled");
         assert_eq!(provider.api_key, None, "API key should be None");
     }
 }
