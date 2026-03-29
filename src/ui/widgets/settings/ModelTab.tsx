@@ -5,6 +5,7 @@ import { FolderOpen, RefreshCw, Trash2, Check, Download, Pencil } from "lucide-r
 import { motion, AnimatePresence } from "framer-motion";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { labelClasses } from "../../styles/settings-primitives";
+import { Select } from "@/components/ui/select";
 import {
     importLive2dZip,
     importLive2dFolder,
@@ -514,16 +515,16 @@ export default function ModelTab({
             <div>
                 <label className={labelClasses}>{t("settings.model.render_fps.label")}</label>
                 <div className="mt-3 flex items-center gap-3">
-                    <select
+                    <Select
                         value={renderFpsPreset}
-                        onChange={(e) => handleRenderFpsPresetChange(e.target.value)}
-                        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
-                    >
-                        <option value="30">{t("settings.model.render_fps.options.fps_30")}</option>
-                        <option value="60">{t("settings.model.render_fps.options.fps_60")}</option>
-                        <option value="0">{t("settings.model.render_fps.options.unlimited")}</option>
-                        <option value="custom">{t("settings.model.render_fps.options.custom")}</option>
-                    </select>
+                        onChange={handleRenderFpsPresetChange}
+                        options={[
+                            { value: "30", label: t("settings.model.render_fps.options.fps_30") },
+                            { value: "60", label: t("settings.model.render_fps.options.fps_60") },
+                            { value: "0", label: t("settings.model.render_fps.options.unlimited") },
+                            { value: "custom", label: t("settings.model.render_fps.options.custom") },
+                        ]}
+                    />
                     {renderFpsPreset === "custom" && (
                         <input
                             type="number"
@@ -742,26 +743,22 @@ export default function ModelTab({
                                 placeholder={t("settings.model.mapping.placeholders.cue_name")}
                                 className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
                             />
-                            <select
+                            <Select
                                 value={draftExpression}
-                                onChange={(e) => setDraftExpression(e.target.value)}
-                                className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
-                            >
-                                <option value="">{t("settings.model.mapping.options.no_expression")}</option>
-                                {modelProfile.available_expressions.map((expression) => (
-                                    <option key={expression} value={expression}>{expression}</option>
-                                ))}
-                            </select>
-                            <select
+                                onChange={setDraftExpression}
+                                options={[
+                                    { value: "", label: t("settings.model.mapping.options.no_expression") },
+                                    ...modelProfile.available_expressions.map((expression) => ({ value: expression, label: expression })),
+                                ]}
+                            />
+                            <Select
                                 value={draftMotionGroup}
-                                onChange={(e) => setDraftMotionGroup(e.target.value)}
-                                className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
-                            >
-                                <option value="">{t("settings.model.mapping.options.no_motion_group")}</option>
-                                {Object.entries(modelProfile.available_motion_groups).map(([group, count]) => (
-                                    <option key={group} value={group}>{group} ({count})</option>
-                                ))}
-                            </select>
+                                onChange={setDraftMotionGroup}
+                                options={[
+                                    { value: "", label: t("settings.model.mapping.options.no_motion_group") },
+                                    ...Object.entries(modelProfile.available_motion_groups).map(([group, count]) => ({ value: group, label: `${group} (${count})` })),
+                                ]}
+                            />
                         </div>
 
                         <div className="flex items-center gap-2">
@@ -875,16 +872,16 @@ export default function ModelTab({
                             </div>
 
                             <div className="flex flex-col gap-3 md:flex-row">
-                                <select
+                                <Select
                                     value={excludedPromptCue}
-                                    onChange={(e) => setExcludedPromptCue(e.target.value)}
-                                    className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
-                                >
-                                    <option value="">{t("settings.model.mapping.prompt_exclusions.select_cue")}</option>
-                                    {includablePromptCueNames.map((cue) => (
-                                        <option key={cue} value={cue}>{cue}</option>
-                                    ))}
-                                </select>
+                                    onChange={setExcludedPromptCue}
+                                    className="flex-1"
+                                    placeholder={t("settings.model.mapping.prompt_exclusions.select_cue")}
+                                    options={[
+                                        { value: "", label: t("settings.model.mapping.prompt_exclusions.select_cue") },
+                                        ...includablePromptCueNames.map((cue) => ({ value: cue, label: cue })),
+                                    ]}
+                                />
                                 <button
                                     onClick={async () => {
                                         const cue = excludedPromptCue.trim();
@@ -933,34 +930,24 @@ export default function ModelTab({
                             </div>
 
                             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                                <select
+                                <Select
                                     value={interactionGesture}
-                                    onChange={(e) => setInteractionGesture(e.target.value as (typeof INTERACTION_GESTURES)[number]["value"])}
-                                    className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
-                                >
-                                    {INTERACTION_GESTURES.map((gesture) => (
-                                        <option key={gesture.value} value={gesture.value}>{interactionGestureLabel(gesture.value)}</option>
-                                    ))}
-                                </select>
-                                <select
+                                    onChange={(v) => setInteractionGesture(v as (typeof INTERACTION_GESTURES)[number]["value"])}
+                                    options={INTERACTION_GESTURES.map((gesture) => ({ value: gesture.value, label: interactionGestureLabel(gesture.value) }))}
+                                />
+                                <Select
                                     value={interactionArea}
-                                    onChange={(e) => setInteractionArea(e.target.value)}
-                                    className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
-                                >
-                                    {interactionAreaOptions.map((area) => (
-                                        <option key={area} value={area}>{interactionAreaLabel(area)}</option>
-                                    ))}
-                                </select>
-                                <select
+                                    onChange={setInteractionArea}
+                                    options={interactionAreaOptions.map((area) => ({ value: area, label: interactionAreaLabel(area) }))}
+                                />
+                                <Select
                                     value={interactionCue}
-                                    onChange={(e) => setInteractionCue(e.target.value)}
-                                    className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
-                                >
-                                    <option value="">{t("settings.model.mapping.options.select_cue")}</option>
-                                    {availableCueNames.map((cue) => (
-                                        <option key={cue} value={cue}>{cue}</option>
-                                    ))}
-                                </select>
+                                    onChange={setInteractionCue}
+                                    options={[
+                                        { value: "", label: t("settings.model.mapping.options.select_cue") },
+                                        ...availableCueNames.map((cue) => ({ value: cue, label: cue })),
+                                    ]}
+                                />
                             </div>
 
                             <div className="flex items-center gap-2">
@@ -1025,25 +1012,19 @@ export default function ModelTab({
                             </div>
 
                             <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr]">
-                                <select
+                                <Select
                                     value={semanticKey}
-                                    onChange={(e) => setSemanticKey(e.target.value as (typeof SEMANTIC_KEYS)[number]["value"])}
-                                    className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
-                                >
-                                    {SEMANTIC_KEYS.map((item) => (
-                                        <option key={item.value} value={item.value}>{semanticKeyLabel(item.value)}</option>
-                                    ))}
-                                </select>
-                                <select
+                                    onChange={(v) => setSemanticKey(v as (typeof SEMANTIC_KEYS)[number]["value"])}
+                                    options={SEMANTIC_KEYS.map((item) => ({ value: item.value, label: semanticKeyLabel(item.value) }))}
+                                />
+                                <Select
                                     value={semanticCue}
-                                    onChange={(e) => setSemanticCue(e.target.value)}
-                                    className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
-                                >
-                                    <option value="">{t("settings.model.mapping.options.select_cue")}</option>
-                                    {availableCueNames.map((cue) => (
-                                        <option key={cue} value={cue}>{cue}</option>
-                                    ))}
-                                </select>
+                                    onChange={setSemanticCue}
+                                    options={[
+                                        { value: "", label: t("settings.model.mapping.options.select_cue") },
+                                        ...availableCueNames.map((cue) => ({ value: cue, label: cue })),
+                                    ]}
+                                />
                             </div>
 
                             <div className="flex items-center gap-2">
