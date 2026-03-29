@@ -532,7 +532,7 @@ export default function ModelTab({
                             step={1}
                             value={renderFps}
                             onChange={(e) => handleCustomRenderFpsChange(e.target.value)}
-                            className="w-28 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
+                            className="w-28 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface-soft)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none [&::-webkit-outer-spin-button]:hidden [&::-webkit-inner-spin-button]:hidden [&]:[-moz-appearance:textfield]"
                         />
                     )}
                 </div>
