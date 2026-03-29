@@ -1,7 +1,7 @@
 name: Auto Code Review
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize]
 
 jobs:
@@ -11,77 +11,56 @@ jobs:
       pull-requests: write
       issues: write
       contents: read
-    environment: production
 
     steps:
+      # 只 checkout base repo 的代码（包含 review 脚本），不执行 fork 代码
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
 
       - name: Get PR diff
-        id: diff
         run: |
           git fetch origin pull/${{ github.event.pull_request.number }}/head:pr-branch
-          git diff origin/main...pr-branch > pr.diff
-          echo "diff_size=$(wc -c < pr.diff)" >> $GITHUB_OUTPUT
-
-      - name: Check diff size
-        run: |
+          git diff origin/${{ github.event.pull_request.base.ref }}...pr-branch > pr.diff
           SIZE=$(wc -c < pr.diff)
-          if [ $SIZE -gt 50000 ]; then
+          echo "Diff size: ${SIZE} bytes"
+          if [ "$SIZE" -gt 50000 ]; then
             echo "⚠️ Diff too large ($(($SIZE / 1024))KB), skipping review"
-            exit 0
+            echo "SKIP_REVIEW=true" >> $GITHUB_ENV
           fi
 
       - name: Set up Python
+        if: env.SKIP_REVIEW != 'true'
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install anthropic
+        if: env.SKIP_REVIEW != 'true'
+        run: pip install anthropic
 
       - name: Review with Claude
-        id: review
+        if: env.SKIP_REVIEW != 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
-        run: |
-          python scripts/review-pr.py pr.diff > review.md
+        run: python scripts/review-pr.py pr.diff > review.md
 
       - name: Post review comment
-        if: always()
+        if: env.SKIP_REVIEW != 'true'
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            const reviewFile = 'review.md';
+            if (!fs.existsSync('review.md')) return;
+            const review = fs.readFileSync('review.md', 'utf8');
+            if (!review.trim()) return;
 
-            if (!fs.existsSync(reviewFile)) {
-              console.log('No review file found');
-              return;
-            }
-
-            const review = fs.readFileSync(reviewFile, 'utf8');
-
-            if (!review.trim()) {
-              console.log('Review is empty');
-              return;
-            }
-
-            try {
-              await github.rest.pulls.createReview({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: context.pull_request.number,
-                body: review,
-                event: 'COMMENT'
-              });
-              console.log('Review posted successfully');
-            } catch (error) {
-              console.error('Failed to post review:', error);
-              throw error;
-            }
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: review
+            });
 
