@@ -58,8 +58,9 @@ const buildInteractionSemanticKey = (gesture: string, area: string) =>
 
 const parseInteractionSemanticKey = (key: string) => {
     const suffix = key.startsWith("interaction:") ? key.slice("interaction:".length) : key;
-    const [gesture = "tap", area = "face"] = suffix.split("_");
-    return { gesture, area };
+    const lastUnderscore = suffix.lastIndexOf("_");
+    if (lastUnderscore === -1) return { gesture: suffix || "tap", area: "face" };
+    return { gesture: suffix.slice(0, lastUnderscore) || "tap", area: suffix.slice(lastUnderscore + 1) || "face" };
 };
 
 export interface ModelTabProps {
