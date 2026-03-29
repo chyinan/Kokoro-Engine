@@ -749,6 +749,7 @@ pub async fn stream_chat(
         let mut tool_results = Vec::new();
         let mut tool_result_messages = Vec::new();
         let mut continuation_tool_calls = Vec::new();
+        let mut persisted_native_tool_results = Vec::new();
         let mut any_needs_feedback = false;
         let has_native_tool_calls = tool_calls.iter().any(|tc| tc.tool_call_id.is_some());
 
@@ -785,9 +786,15 @@ pub async fn stream_chat(
                         tc.name.clone(),
                         serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
                     ));
-                    tool_result_messages.push(tool_result_message(
+                    let tool_result_message = tool_result_message(
                         tool_call_id.clone(),
                         format!("Error: {}", message),
+                    );
+                    tool_result_messages.push(tool_result_message.clone());
+                    persisted_native_tool_results.push((
+                        tool_call_id.clone(),
+                        tc.name.clone(),
+                        tool_result_message,
                     ));
                 }
                 continue;
@@ -814,9 +821,13 @@ pub async fn stream_chat(
                             tc.name.clone(),
                             serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
                         ));
-                        tool_result_messages.push(tool_result_message(
+                        let tool_result_message =
+                            tool_result_message(tool_call_id.clone(), result.message.clone());
+                        tool_result_messages.push(tool_result_message.clone());
+                        persisted_native_tool_results.push((
                             tool_call_id.clone(),
-                            result.message.clone(),
+                            tc.name.clone(),
+                            tool_result_message,
                         ));
                     }
                 }
@@ -837,9 +848,13 @@ pub async fn stream_chat(
                             tc.name.clone(),
                             serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
                         ));
-                        tool_result_messages.push(tool_result_message(
+                        let tool_result_message =
+                            tool_result_message(tool_call_id.clone(), format!("Error: {}", e.0));
+                        tool_result_messages.push(tool_result_message.clone());
+                        persisted_native_tool_results.push((
                             tool_call_id.clone(),
-                            format!("Error: {}", e.0),
+                            tc.name.clone(),
+                            tool_result_message,
                         ));
                     }
                 }
@@ -864,30 +879,28 @@ pub async fn stream_chat(
             state
                 .add_message_with_metadata(
                     "assistant".to_string(),
-                    String::new(),
+                    cleaned_text.clone(),
                     Some(assistant_tool_call_metadata),
                     &char_id,
                 )
                 .await;
-            for (index, tool_message) in tool_result_messages.iter().enumerate() {
-                if let Some(tool_call_id) = &tool_calls[index].tool_call_id {
-                    let tool_content = extract_message_text(tool_message);
-                    let tool_metadata = serde_json::json!({
-                        "type": "tool_result",
-                        "turn_id": assistant_turn_id,
-                        "tool_call_id": tool_call_id,
-                        "tool_name": tool_calls[index].name,
-                    })
-                    .to_string();
-                    state
-                        .add_message_with_metadata(
-                            "tool".to_string(),
-                            tool_content,
-                            Some(tool_metadata),
-                            &char_id,
-                        )
-                        .await;
-                }
+            for (tool_call_id, tool_name, tool_message) in &persisted_native_tool_results {
+                let tool_content = extract_message_text(tool_message);
+                let tool_metadata = serde_json::json!({
+                    "type": "tool_result",
+                    "turn_id": assistant_turn_id,
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                })
+                .to_string();
+                state
+                    .add_message_with_metadata(
+                        "tool".to_string(),
+                        tool_content,
+                        Some(tool_metadata),
+                        &char_id,
+                    )
+                    .await;
             }
             client_messages.push(assistant_tool_calls_message(
                 if cleaned_text.is_empty() {
