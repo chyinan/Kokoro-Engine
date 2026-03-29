@@ -153,7 +153,10 @@ function normalizeTtsVoice(
 
 export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: _telegramConfigProp, onVisionConfigChange }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
-    const [activeTab, setActiveTab] = useState<TabId>("bg");
+    const [activeTab, setActiveTab] = useState<TabId>(() => {
+        const saved = localStorage.getItem("kokoro_settings_active_tab");
+        return (saved as TabId) || "bg";
+    });
     const bg = backgroundControls;
     const overlayRef = useRef<HTMLDivElement>(null);
 
@@ -188,6 +191,11 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
             fetchData();
         }
     }, [isOpen]);
+
+    // Persist active tab selection
+    useEffect(() => {
+        localStorage.setItem("kokoro_settings_active_tab", activeTab);
+    }, [activeTab]);
 
     // Load Telegram config only when panel first opens, not on every bg.config change
     useEffect(() => {
