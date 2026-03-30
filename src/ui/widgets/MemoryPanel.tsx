@@ -164,7 +164,7 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
     };
 
     return (
-        <div className="space-y-4 h-full flex flex-col">
+        <div className="space-y-4 flex flex-col">
             {/* Header & Character Selector */}
             <div className="flex flex-col gap-4 shrink-0">
                 <div className="flex items-center justify-between">
