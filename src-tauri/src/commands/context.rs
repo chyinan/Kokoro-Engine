@@ -164,9 +164,10 @@ pub async fn delete_last_messages(
     }
 
     history.truncate(current_len - to_remove);
-    println!("[AI] Deleted last {} message(s) from history", to_remove);
+    let new_len = history.len();
+    println!("[AI] Deleted last {} message(s) from history (now {} messages)", to_remove, new_len);
 
-    // 同时删除数据库中的消息
+    // 同时删除数据库中的消息，保留到 new_len 条
     let conv_id = state.current_conversation_id.lock().await.clone();
     if let Some(conversation_id) = conv_id {
         // 获取该对话的所有消息 ID，按顺序排列
@@ -178,9 +179,9 @@ pub async fn delete_last_messages(
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
 
-        // 删除最后 to_remove 条消息
-        if message_ids.len() >= to_remove {
-            let ids_to_delete = &message_ids[message_ids.len() - to_remove..];
+        // 删除超过 new_len 的所有消息
+        if message_ids.len() > new_len {
+            let ids_to_delete = &message_ids[new_len..];
             for id in ids_to_delete {
                 sqlx::query("DELETE FROM conversation_messages WHERE id = ?")
                     .bind(id)
@@ -188,7 +189,7 @@ pub async fn delete_last_messages(
                     .await
                     .map_err(|e| KokoroError::Database(e.to_string()))?;
             }
-            println!("[AI] Deleted {} message(s) from database", to_remove);
+            println!("[AI] Deleted {} message(s) from database (kept {} messages)", ids_to_delete.len(), new_len);
         }
     }
 
