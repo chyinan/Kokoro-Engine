@@ -2,8 +2,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// ONNX Runtime version that matches ort-sys 2.0.0-rc.11 (used by ort 2.0.0-rc.9)
-const ORT_VERSION: &str = "1.21.1";
+/// ONNX Runtime version that matches ort-sys 2.0.0-rc.11 (used by ort 2.0.0-rc.9).
+/// v1.21.1 only ships GPU builds; v1.21.0 is the latest with CPU-only archives.
+const ORT_VERSION: &str = "1.21.0";
 
 fn main() {
     // --- Tauri codegen (must always run) ---
@@ -74,7 +75,7 @@ fn ort_platform_info() -> (&'static str, String) {
         ),
         ("macos", "x86_64") => (
             "libonnxruntime.dylib",
-            format!("{}/onnxruntime-osx-x64-{}.tgz", base, ORT_VERSION),
+            format!("{}/onnxruntime-osx-x86_64-{}.tgz", base, ORT_VERSION),
         ),
         ("linux", "x86_64") => (
             "libonnxruntime.so",
@@ -98,7 +99,7 @@ fn archive_filename() -> String {
         ("windows", "x86_64") => "win-x64",
         ("windows", "aarch64") => "win-arm64",
         ("macos", "aarch64") => "osx-arm64",
-        ("macos", "x86_64") => "osx-x64",
+        ("macos", "x86_64") => "osx-x86_64",
         ("linux", "x86_64") => "linux-x64",
         ("linux", "aarch64") => "linux-aarch64",
         _ => "unknown",
