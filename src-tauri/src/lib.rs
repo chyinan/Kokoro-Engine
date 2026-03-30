@@ -18,6 +18,31 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Pin the ONNX Runtime dylib to the copy we ship, so the ort crate
+    // never accidentally loads an incompatible system-wide library
+    // (e.g. an older onnxruntime.dll in C:\Windows\System32 on Windows).
+    if std::env::var("ORT_DYLIB_PATH").is_err() {
+        #[cfg(target_os = "windows")]
+        const ORT_LIB_NAME: &str = "onnxruntime.dll";
+        #[cfg(target_os = "macos")]
+        const ORT_LIB_NAME: &str = "libonnxruntime.dylib";
+        #[cfg(target_os = "linux")]
+        const ORT_LIB_NAME: &str = "libonnxruntime.so";
+
+        let search_roots = [
+            std::env::current_dir().ok(),
+            std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())),
+        ];
+        for root in search_roots.into_iter().flatten() {
+            let candidate = root.join(ORT_LIB_NAME);
+            if candidate.exists() {
+                println!("[ORT] Using bundled ONNX Runtime: {}", candidate.display());
+                std::env::set_var("ORT_DYLIB_PATH", &candidate);
+                break;
+            }
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
