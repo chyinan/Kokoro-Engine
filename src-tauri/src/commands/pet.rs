@@ -68,8 +68,9 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
     println!("[pet] show_pet_window called");
     let windows: Vec<String> = app.webview_windows().keys().cloned().collect();
     println!("[pet] available windows: {:?}", windows);
+
     if let Some(win) = app.get_webview_window("pet") {
-        println!("[pet] found pet window, showing...");
+        println!("[pet] found existing pet window, showing...");
         let cfg = load_pet_config();
         let x = if cfg.position_x != 0 { cfg.position_x } else { 100 };
         let y = if cfg.position_y != 0 { cfg.position_y } else { 100 };
@@ -83,8 +84,35 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
         win.set_focus().map_err(|e| KokoroError::Internal(e.to_string()))?;
         println!("[pet] pet window shown successfully");
     } else {
-        println!("[pet] ERROR: pet window not found!");
-        return Err(KokoroError::NotFound("Pet window not found".to_string()));
+        println!("[pet] pet window not found, creating new one...");
+        let cfg = load_pet_config();
+        let x = if cfg.position_x != 0 { cfg.position_x } else { 100 };
+        let y = if cfg.position_y != 0 { cfg.position_y } else { 100 };
+        let w = if cfg.window_width >= 100 { cfg.window_width } else { 400 };
+        let h = if cfg.window_height >= 100 { cfg.window_height } else { 600 };
+
+        let url = if cfg!(debug_assertions) {
+            tauri::WebviewUrl::External("http://localhost:1420/src/windows/pet.html".parse().unwrap())
+        } else {
+            tauri::WebviewUrl::App("src/windows/pet.html".into())
+        };
+
+        let win = tauri::WebviewWindowBuilder::new(&app, "pet", url)
+            .title("Kokoro Pet")
+            .inner_size(w as f64, h as f64)
+            .position(x as f64, y as f64)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .shadow(false)
+            .build()
+            .map_err(|e: tauri::Error| KokoroError::Internal(e.to_string()))?;
+
+        win.show().map_err(|e| KokoroError::Internal(e.to_string()))?;
+        win.set_focus().map_err(|e| KokoroError::Internal(e.to_string()))?;
+        println!("[pet] pet window created and shown successfully");
     }
     Ok(())
 }
