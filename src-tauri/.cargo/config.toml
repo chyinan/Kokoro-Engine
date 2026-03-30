@@ -1,3 +1,6 @@
 [env]
 PROTOC = "D:\\Program\\Kokoro Engine\\bin\\bin\\protoc.exe"
 PROTOC_INCLUDE = "D:\\Program\\Kokoro Engine\\bin\\include"
+
+[target.x86_64-pc-windows-msvc]
+linker = "link.exe"
