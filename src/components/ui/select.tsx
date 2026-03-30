@@ -54,19 +54,12 @@ const Select = React.forwardRef<HTMLDivElement, SelectProps>(
             return () => document.removeEventListener("mousedown", handler);
         }, [open]);
 
-        const [dropdownPos, setDropdownPos] = React.useState<{ top: number; left: number; width: number } | null>(null);
-
         const handleToggle = () => {
             if (disabled) return;
             if (!open && containerRef.current) {
                 const rect = containerRef.current.getBoundingClientRect();
                 const spaceBelow = window.innerHeight - rect.bottom;
                 setDropUp(spaceBelow < 220);
-                setDropdownPos({
-                    top: spaceBelow < 220 ? rect.top - 220 : rect.bottom,
-                    left: rect.left,
-                    width: rect.width,
-                });
             }
             setOpen(v => !v);
         };
@@ -108,19 +101,15 @@ const Select = React.forwardRef<HTMLDivElement, SelectProps>(
                     </span>
                 </button>
 
-                {open && dropdownPos && (
+                {open && (
                     <div
                         className={cn(
-                            "fixed z-50",
+                            "absolute z-50 w-full",
+                            dropUp ? "bottom-full mb-1" : "top-full mt-1",
                             "bg-[#0a0a1a] border border-[var(--color-accent)]/30",
                             "rounded-md overflow-hidden",
                             "shadow-[0_8px_32px_rgba(0,0,0,0.6),0_0_0_1px_rgba(0,240,255,0.05)]"
                         )}
-                        style={{
-                            top: `${dropUp ? dropdownPos.top - 220 : dropdownPos.top}px`,
-                            left: `${dropdownPos.left}px`,
-                            width: `${dropdownPos.width}px`,
-                        }}
                     >
                         <ul className="max-h-52 overflow-y-auto py-1 scrollbar-thin">
                             {options.map(opt => (
