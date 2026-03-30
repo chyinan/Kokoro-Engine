@@ -164,32 +164,36 @@ pub async fn delete_last_messages(
     }
 
     history.truncate(current_len - to_remove);
-    let new_len = history.len();
-    println!("[AI] Deleted last {} message(s) from history (now {} messages)", to_remove, new_len);
+    println!("[AI] Deleted last {} message(s) from history (now {} messages)", to_remove, history.len());
 
-    // 同时删除数据库中的消息，保留到 new_len 条
+    // 从数据库末尾删除最后 to_remove 条消息（按 ID DESC），
+    // 避免因内存滚动窗口驱逐导致内存长度 ≠ DB 行数的误删问题
     let conv_id = state.current_conversation_id.lock().await.clone();
     if let Some(conversation_id) = conv_id {
-        // 获取该对话的所有消息 ID，按顺序排列
-        let message_ids: Vec<i64> = sqlx::query_scalar(
-            "SELECT id FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC"
+        // 获取末尾 to_remove 条消息的 ID
+        let ids_to_delete: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM conversation_messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?"
         )
         .bind(&conversation_id)
+        .bind(to_remove as i64)
         .fetch_all(&state.db)
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
 
-        // 删除超过 new_len 的所有消息
-        if message_ids.len() > new_len {
-            let ids_to_delete = &message_ids[new_len..];
-            for id in ids_to_delete {
+        if !ids_to_delete.is_empty() {
+            // 用事务保证原子性，避免崩溃导致部分删除
+            let mut tx = state.db.begin().await
+                .map_err(|e| KokoroError::Database(e.to_string()))?;
+            for id in &ids_to_delete {
                 sqlx::query("DELETE FROM conversation_messages WHERE id = ?")
                     .bind(id)
-                    .execute(&state.db)
+                    .execute(&mut *tx)
                     .await
                     .map_err(|e| KokoroError::Database(e.to_string()))?;
             }
-            println!("[AI] Deleted {} message(s) from database (kept {} messages)", ids_to_delete.len(), new_len);
+            tx.commit().await
+                .map_err(|e| KokoroError::Database(e.to_string()))?;
+            println!("[AI] Deleted {} message(s) from database", ids_to_delete.len());
         }
     }
 

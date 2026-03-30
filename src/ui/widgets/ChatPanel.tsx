@@ -802,13 +802,14 @@ export default function ChatPanel() {
         const userMsg = msgs[userMsgIndex];
 
         const messagesToDelete = msgs.length - globalIndex;
-        setMessages(prev => prev.slice(0, globalIndex));
 
         try {
+            // 先删除数据库，再更新 UI，避免竞态条件
             await deleteLastMessages(messagesToDelete);
         } catch (e) {
             console.error("[ChatPanel] Failed to delete messages:", e);
         }
+        setMessages(prev => prev.slice(0, globalIndex));
 
         startStreaming();
         setIsThinking(true);
