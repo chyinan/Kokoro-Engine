@@ -623,6 +623,7 @@ pub async fn stream_chat(
     let mut draft_row_id: Option<i64> = None;
     let mut forced_text_after_side_effect = false;
     let mut stream_failed = false;
+    let mut text_retry_count = 0u32;
 
     for round in 0..max_tool_rounds {
         println!("[Chat] Tool loop round {}", round + 1);
@@ -939,8 +940,19 @@ pub async fn stream_chat(
                             .to_string(),
                     ));
                 } else if all_cleaned_text.trim().is_empty() {
-                    // Already forced once but still no text — break to avoid infinite loop
-                    println!("[Chat] Native tool loop: still no text after forced round, ending loop");
+                    // Already forced once but still no text — retry up to 3 times
+                    if text_retry_count < 3 {
+                        text_retry_count += 1;
+                        forced_text_after_side_effect = false;
+                        println!("[Chat] Native tool loop: no text after forced round, retrying ({}/3)", text_retry_count);
+                        client_messages.push(system_message(
+                            "IMPORTANT: You MUST write a dialogue reply now. \
+                             Do NOT call any tools. Just respond with natural dialogue text."
+                                .to_string(),
+                        ));
+                        continue;
+                    }
+                    println!("[Chat] Native tool loop: still no text after {} retries, ending loop", text_retry_count);
                     break;
                 }
                 // If there IS text, fall through to continue normally
