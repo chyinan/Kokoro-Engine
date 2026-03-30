@@ -228,10 +228,12 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                         <Select
                             value={selectedCharId}
                             onChange={setSelectedCharId}
-                            options={characters.map(char => ({
-                                value: char.id,
-                                label: `${char.name}${char.id === characterId ? ` ${t("settings.memory.active_char")}` : ""}`,
-                            }))}
+                            options={characters
+                                .filter(char => char.id === characterId || !characters.some(c => c.name === char.name && c.id === characterId))
+                                .map(char => ({
+                                    value: char.id,
+                                    label: `${char.name}${char.id === characterId ? ` ${t("settings.memory.active_char")}` : ""}`,
+                                }))}
                             className="[&>button]:pl-9"
                         />
                     </div>
