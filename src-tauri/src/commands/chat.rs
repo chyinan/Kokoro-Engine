@@ -508,15 +508,20 @@ pub async fn stream_chat(
     }
 
     // 1. Update History with User Message (skip for hidden/touch interactions)
+    let system_provider = llm_state.system_provider().await;
     if !request.hidden {
         state
-            .add_message("user".to_string(), request.message.clone(), &char_id)
+            .add_message_with_metadata(
+                "user".to_string(),
+                request.message.clone(),
+                None,
+                &char_id,
+                Some(system_provider.clone()),
+            )
             .await;
     }
 
     // ── LAYER 1 & 2: SYSTEM SETUP ───────────────────────────────
-
-    let system_provider = llm_state.system_provider().await;
 
     // ── EXECUTION & STATE UPDATE ────────────────────────────────
 
@@ -967,6 +972,7 @@ pub async fn stream_chat(
                     cleaned_text.clone(),
                     Some(assistant_tool_call_metadata),
                     &char_id,
+                    None,
                 )
                 .await;
             for (tool_call_id, tool_name, tool_message) in &persisted_native_tool_results {
@@ -984,6 +990,7 @@ pub async fn stream_chat(
                         tool_content,
                         Some(tool_metadata),
                         &char_id,
+                        None,
                     )
                     .await;
             }
@@ -1294,7 +1301,7 @@ pub async fn stream_chat(
         let history = state.get_recent_memory_history(10).await;
         let memory_mgr = state.memory_manager.clone();
         let char_id_for_mem = char_id.clone();
-        let provider_for_mem = llm_state.provider().await;
+        let provider_for_mem = system_provider.clone();
         let memory_enabled = state.memory_enabled_flag();
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1314,7 +1321,7 @@ pub async fn stream_chat(
     if state.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
         let memory_mgr = state.memory_manager.clone();
         let char_id_for_consolidation = char_id.clone();
-        let provider_for_consolidation = llm_state.provider().await;
+        let provider_for_consolidation = system_provider.clone();
         let memory_enabled = state.memory_enabled_flag();
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
