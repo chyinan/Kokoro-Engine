@@ -166,19 +166,41 @@ pub async fn delete_last_messages(
     history.truncate(current_len - to_remove);
     println!("[AI] Deleted last {} message(s) from history (now {} messages)", to_remove, history.len());
 
-    // 从数据库末尾删除最后 to_remove 条消息（按 ID DESC），
-    // 避免因内存滚动窗口驱逐导致内存长度 ≠ DB 行数的误删问题
+    // 从数据库末尾删除，直到删够 to_remove 条「可见」消息为止。
+    // 一条可见消息可能对应多行 DB（assistant_tool_calls + tool_result + assistant），
+    // 需要跳过不可见行继续计数，否则重启后残留行会重新显示。
     let conv_id = state.current_conversation_id.lock().await.clone();
     if let Some(conversation_id) = conv_id {
-        // 获取末尾 to_remove 条消息的 ID
-        let ids_to_delete: Vec<i64> = sqlx::query_scalar(
-            "SELECT id FROM conversation_messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?"
+        // 从末尾倒序读取所有行（id + metadata）
+        let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT id, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id DESC"
         )
         .bind(&conversation_id)
-        .bind(to_remove as i64)
         .fetch_all(&state.db)
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+        // 收集需要删除的行 ID，跳过不可见行时不计入 visible_deleted
+        let mut ids_to_delete: Vec<i64> = Vec::new();
+        let mut visible_deleted = 0usize;
+        for (id, metadata) in &rows {
+            if visible_deleted >= to_remove {
+                break;
+            }
+            ids_to_delete.push(*id);
+            // 判断是否为不可见的技术行（assistant_tool_calls 或 tool/tool_result）
+            let technical_type = metadata
+                .as_deref()
+                .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()));
+            let is_invisible = matches!(
+                technical_type.as_deref(),
+                Some("assistant_tool_calls") | Some("tool_result")
+            );
+            if !is_invisible {
+                visible_deleted += 1;
+            }
+        }
 
         if !ids_to_delete.is_empty() {
             // 用事务保证原子性，避免崩溃导致部分删除
@@ -193,7 +215,7 @@ pub async fn delete_last_messages(
             }
             tx.commit().await
                 .map_err(|e| KokoroError::Database(e.to_string()))?;
-            println!("[AI] Deleted {} message(s) from database", ids_to_delete.len());
+            println!("[AI] Deleted {} DB row(s) for {} visible message(s)", ids_to_delete.len(), visible_deleted);
         }
     }
 
