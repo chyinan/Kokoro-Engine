@@ -68,18 +68,27 @@ pub async fn load_conversation(
     .await
     .map_err(|e| KokoroError::Database(e.to_string()))?;
 
-    // 恢复到内存 history
+    // 恢复到内存 history，但只加载显示的消息（过滤掉 assistant_tool_calls）
     {
         let mut history = state.history.lock().await;
         history.clear();
         for (role, content, metadata, _) in &rows {
-            history.push_back(crate::ai::context::Message {
-                role: role.clone(),
-                content: content.clone(),
-                metadata: metadata
-                    .as_deref()
-                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
-            });
+            let metadata_value = metadata
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            let technical_type = metadata_value
+                .as_ref()
+                .and_then(|meta| meta.get("type"))
+                .and_then(|value| value.as_str());
+
+            // 只加载显示的消息到内存
+            if technical_type != Some("assistant_tool_calls") {
+                history.push_back(crate::ai::context::Message {
+                    role: role.clone(),
+                    content: content.clone(),
+                    metadata: metadata_value,
+                });
+            }
         }
     }
 
