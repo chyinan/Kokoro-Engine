@@ -840,9 +840,10 @@ export default function ChatPanel() {
         const msgs = messagesRef.current;
         const messagesToDelete = msgs.length - globalIndex - 1;
         if (messagesToDelete > 0) {
-            setMessages(prev => prev.slice(0, globalIndex + 1));
             try {
+                // 先删除数据库，再更新 UI，避免竞态条件
                 await deleteLastMessages(messagesToDelete);
+                setMessages(prev => prev.slice(0, globalIndex + 1));
             } catch (e) {
                 console.error("[ChatPanel] Failed to delete messages:", e);
             }
