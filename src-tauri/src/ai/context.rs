@@ -802,9 +802,11 @@ impl AIOrchestrator {
                         "IMPORTANT: After your dialogue response, \
                          append a translation of your ENTIRE dialogue response into {} using this EXACT format:\n\
                          [TRANSLATE: <your entire response translated into {}>]\n\
+                         The content inside [TRANSLATE:...] MUST be written in {}, NOT in {}. \
+                         This is an explicit exception to the language rule above. \
                          Only translate the dialogue text. Do NOT include any control tags inside the translation.\n\
                          This translation tag is mandatory for every response.",
-                        user_lang, user_lang
+                        user_lang, user_lang, user_lang, resp_lang
                     ),
                     metadata: Some(serde_json::json!({"type": "translation_instruction"})),
                 });
