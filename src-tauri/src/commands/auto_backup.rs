@@ -83,7 +83,9 @@ pub async fn run_auto_backup_now(app: AppHandle) -> Result<String, KokoroError> 
     let app_data = app_data_dir(&app)?;
     let config = load_config(&app_data);
     if config.backup_dir.is_empty() {
-        return Err(KokoroError::Validation("Backup directory not set".to_string()));
+        return Err(KokoroError::Validation(
+            "Backup directory not set".to_string(),
+        ));
     }
     do_backup(&app_data, &config).await
 }
@@ -104,8 +106,7 @@ pub async fn do_backup(app_data: &Path, config: &AutoBackupConfig) -> Result<Str
 
 /// 删除目录中超过 keep_days 天的 .kokoro 备份文件
 fn cleanup_old_backups(dir: &PathBuf, keep_days: u32) {
-    let cutoff = chrono::Local::now()
-        - chrono::Duration::days(keep_days as i64);
+    let cutoff = chrono::Local::now() - chrono::Duration::days(keep_days as i64);
     let cutoff_ts = cutoff.timestamp();
 
     let entries = match fs::read_dir(dir) {

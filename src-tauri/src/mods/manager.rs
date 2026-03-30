@@ -13,12 +13,12 @@ use tokio::sync::{mpsc, oneshot};
 fn safe_join(base_dir: &Path, file_path: &str) -> Result<PathBuf, String> {
     let joined = base_dir.join(file_path);
     // canonicalize 会解析 .. 和符号链接；文件必须已存在
-    let canonical = joined.canonicalize().map_err(|e| {
-        format!("Invalid path '{}': {}", file_path, e)
-    })?;
-    let canonical_base = base_dir.canonicalize().map_err(|e| {
-        format!("Cannot canonicalize mod dir: {}", e)
-    })?;
+    let canonical = joined
+        .canonicalize()
+        .map_err(|e| format!("Invalid path '{}': {}", file_path, e))?;
+    let canonical_base = base_dir
+        .canonicalize()
+        .map_err(|e| format!("Cannot canonicalize mod dir: {}", e))?;
     if canonical.starts_with(&canonical_base) {
         Ok(canonical)
     } else {
@@ -126,11 +126,11 @@ impl ModManager {
                             let event_json = serde_json::to_string(&event).unwrap_or_default();
                             let payload_str = serde_json::to_string(&payload).unwrap_or_default();
                             // 二次编码：将 JSON 字符串本身编码为 JS 字符串字面量
-                            let payload_escaped = serde_json::to_string(&payload_str).unwrap_or_default();
+                            let payload_escaped =
+                                serde_json::to_string(&payload_str).unwrap_or_default();
                             let dispatch_code = format!(
                                 "globalThis.__dispatch({}, JSON.parse({}));",
-                                event_json,
-                                payload_escaped
+                                event_json, payload_escaped
                             );
                             if let Err(_e) = ctx.eval::<(), _>(dispatch_code.as_str()) {
                                 // Silently ignore — expected when no mods register listeners
@@ -172,12 +172,7 @@ impl ModManager {
                         println!("[ModManager] UI message sent to component '{}'", component);
                     }
                     ScriptEvent::PlayCue { cue } => {
-                        let _ = handle.emit(
-                            "chat-cue",
-                            CuePayload {
-                                cue: cue.clone(),
-                            },
-                        );
+                        let _ = handle.emit("chat-cue", CuePayload { cue: cue.clone() });
                         println!("[ModManager] Cue triggered '{}'", cue);
                     }
                 }

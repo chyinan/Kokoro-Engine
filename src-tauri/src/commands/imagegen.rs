@@ -56,13 +56,13 @@ pub async fn test_sd_connection(base_url: String) -> Result<Vec<String>, KokoroE
         .no_proxy()
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .map_err(|e| KokoroError::ExternalService(format!("Failed to create HTTP client: {}", e)))?;
+        .map_err(|e| {
+            KokoroError::ExternalService(format!("Failed to create HTTP client: {}", e))
+        })?;
 
-    let res = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| KokoroError::ExternalService(format!("Cannot connect to SD WebUI at {}: {}", url, e)))?;
+    let res = client.get(&url).send().await.map_err(|e| {
+        KokoroError::ExternalService(format!("Cannot connect to SD WebUI at {}: {}", url, e))
+    })?;
 
     if !res.status().is_success() {
         let status = res.status();
@@ -73,10 +73,9 @@ pub async fn test_sd_connection(base_url: String) -> Result<Vec<String>, KokoroE
         )));
     }
 
-    let models: Vec<serde_json::Value> = res
-        .json()
-        .await
-        .map_err(|e| KokoroError::ExternalService(format!("Failed to parse SD models response: {}", e)))?;
+    let models: Vec<serde_json::Value> = res.json().await.map_err(|e| {
+        KokoroError::ExternalService(format!("Failed to parse SD models response: {}", e))
+    })?;
 
     let model_names: Vec<String> = models
         .iter()

@@ -88,7 +88,11 @@ impl ActionHandler for PlayCueAction {
             return Err(ActionError(format!(
                 "Unknown cue '{}'. Available configured cues: {}",
                 cue,
-                if available_cues.is_empty() { "(none)" } else { &available_cues }
+                if available_cues.is_empty() {
+                    "(none)"
+                } else {
+                    &available_cues
+                }
             )));
         }
 

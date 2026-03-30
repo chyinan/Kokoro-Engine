@@ -143,7 +143,9 @@ mod tests {
     #[test]
     fn all_values_in_range() {
         // Test a variety of inputs
-        for emotion in &["joy", "love", "sadness", "anger", "fear", "surprise", "neutral"] {
+        for emotion in &[
+            "joy", "love", "sadness", "anger", "fear", "surprise", "neutral",
+        ] {
             for mood in &[0.0, 0.5, 1.0] {
                 let frame = compute_expression_frame(emotion, *mood, "stable", 0.5);
                 assert!(frame.micro.blink_rate >= 0.0 && frame.micro.blink_rate <= 1.0);

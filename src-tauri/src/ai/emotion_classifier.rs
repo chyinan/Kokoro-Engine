@@ -8,7 +8,6 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tokio::sync::OnceCell;
 
-
 const LOCAL_MODEL_DIR: &str = "models/models--AdamCodd--tinybert-emotion-balanced";
 const MODEL_REPO: &str = "AdamCodd/tinybert-emotion-balanced";
 const DEFAULT_MODEL_NAME: &str = "model_int8.onnx";
@@ -138,11 +137,15 @@ impl EmotionClassifier {
 
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|error| anyhow!(error.to_string()))
-            .with_context(|| format!("failed to load tokenizer from {}", tokenizer_path.display()))?;
+            .with_context(|| {
+                format!("failed to load tokenizer from {}", tokenizer_path.display())
+            })?;
 
         let session = Session::builder()?
             .commit_from_file(&model_path)
-            .with_context(|| format!("failed to load ONNX session from {}", model_path.display()))?;
+            .with_context(|| {
+                format!("failed to load ONNX session from {}", model_path.display())
+            })?;
 
         let input_names = ModelInputs::from_session(&session)?;
         let labels = load_labels(&config_path)?;
@@ -160,7 +163,11 @@ impl EmotionClassifier {
             .tokenizer
             .encode(text, true)
             .map_err(|error| anyhow!(error.to_string()))?;
-        let mut input_ids: Vec<i64> = encoding.get_ids().iter().map(|value| i64::from(*value)).collect();
+        let mut input_ids: Vec<i64> = encoding
+            .get_ids()
+            .iter()
+            .map(|value| i64::from(*value))
+            .collect();
         let mut attention_mask: Vec<i64> = encoding
             .get_attention_mask()
             .iter()
@@ -227,11 +234,9 @@ impl EmotionClassifier {
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .ok_or_else(|| anyhow!("emotion classifier produced empty logits"))?;
-        let label = self
-            .labels
-            .get(best_index)
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_LABELS[best_index.min(DEFAULT_LABELS.len() - 1)].to_string());
+        let label = self.labels.get(best_index).cloned().unwrap_or_else(|| {
+            DEFAULT_LABELS[best_index.min(DEFAULT_LABELS.len() - 1)].to_string()
+        });
 
         Ok(EmotionClassification {
             raw_mood: compute_raw_mood(&label, best_score),
@@ -266,7 +271,10 @@ impl ModelInputs {
 
 fn load_labels(config_path: &Path) -> Result<Vec<String>> {
     if !config_path.exists() {
-        return Ok(DEFAULT_LABELS.iter().map(|label| (*label).to_string()).collect());
+        return Ok(DEFAULT_LABELS
+            .iter()
+            .map(|label| (*label).to_string())
+            .collect());
     }
 
     let content = fs::read_to_string(config_path)?;
@@ -276,10 +284,17 @@ fn load_labels(config_path: &Path) -> Result<Vec<String>> {
         let mut pairs = config
             .id2label
             .iter()
-            .filter_map(|(key, value)| key.parse::<usize>().ok().map(|index| (index, value.clone())))
+            .filter_map(|(key, value)| {
+                key.parse::<usize>()
+                    .ok()
+                    .map(|index| (index, value.clone()))
+            })
             .collect::<Vec<_>>();
         pairs.sort_by_key(|(index, _)| *index);
-        return Ok(pairs.into_iter().map(|(_, label)| normalize_label(&label)).collect());
+        return Ok(pairs
+            .into_iter()
+            .map(|(_, label)| normalize_label(&label))
+            .collect());
     }
 
     if !config.label2id.is_empty() {
@@ -289,10 +304,16 @@ fn load_labels(config_path: &Path) -> Result<Vec<String>> {
             .map(|(label, index)| (*index, label.clone()))
             .collect::<Vec<_>>();
         pairs.sort_by_key(|(index, _)| *index);
-        return Ok(pairs.into_iter().map(|(_, label)| normalize_label(&label)).collect());
+        return Ok(pairs
+            .into_iter()
+            .map(|(_, label)| normalize_label(&label))
+            .collect());
     }
 
-    Ok(DEFAULT_LABELS.iter().map(|label| (*label).to_string()).collect())
+    Ok(DEFAULT_LABELS
+        .iter()
+        .map(|label| (*label).to_string())
+        .collect())
 }
 
 fn normalize_label(label: &str) -> String {
@@ -379,7 +400,11 @@ fn resolve_snapshot_dir(repo_dir: &Path) -> Option<PathBuf> {
         .find(|path| path.is_dir())
 }
 
-async fn download_file(client: &reqwest::Client, remote_path: &str, destination: PathBuf) -> Result<()> {
+async fn download_file(
+    client: &reqwest::Client,
+    remote_path: &str,
+    destination: PathBuf,
+) -> Result<()> {
     if destination.exists() {
         return Ok(());
     }
@@ -403,11 +428,11 @@ fn softmax(values: &[f32]) -> Vec<f32> {
     if values.is_empty() {
         return Vec::new();
     }
-    let max = values
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let exps = values
         .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max);
-    let exps = values.iter().map(|value| (value - max).exp()).collect::<Vec<_>>();
+        .map(|value| (value - max).exp())
+        .collect::<Vec<_>>();
     let sum = exps.iter().sum::<f32>().max(f32::EPSILON);
     exps.into_iter().map(|value| value / sum).collect()
 }

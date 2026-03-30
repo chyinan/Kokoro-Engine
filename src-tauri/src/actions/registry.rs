@@ -3,9 +3,9 @@
 //! Provides a registry of actions that the LLM can invoke via `[TOOL_CALL:name|args]` tags.
 //! Actions are registered at startup and can be invoked by the chat pipeline.
 
-use async_trait::async_trait;
-use crate::llm::provider::{LlmToolDefinition, LlmToolParam};
 use crate::actions::tool_settings::ToolSettings;
+use crate::llm::provider::{LlmToolDefinition, LlmToolParam};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -200,7 +200,8 @@ impl ActionRegistry {
     }
 
     pub fn list_builtin_actions(&self) -> Vec<ActionInfo> {
-        let mut actions: Vec<_> = self.handlers
+        let mut actions: Vec<_> = self
+            .handlers
             .iter()
             .filter(|(name, _)| !self.mcp_tool_names.contains(*name))
             .map(|(_, h)| ActionInfo {
@@ -326,7 +327,9 @@ impl ActionRegistry {
         }
 
         lines.push(String::new());
-        lines.push("You may include multiple [TOOL_CALL:...] tags in a single response.".to_string());
+        lines.push(
+            "You may include multiple [TOOL_CALL:...] tags in a single response.".to_string(),
+        );
         lines.push(
             "Only use tools when they are genuinely helpful for the user's request.".to_string(),
         );

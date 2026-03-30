@@ -104,17 +104,15 @@ fn archive_filename() -> String {
         ("linux", "aarch64") => "linux-aarch64",
         _ => "unknown",
     };
-    let ext = if target_os == "windows" {
-        "zip"
-    } else {
-        "tgz"
-    };
+    let ext = if target_os == "windows" { "zip" } else { "tgz" };
     format!("onnxruntime-{}-{}.{}", arch_label, ORT_VERSION, ext)
 }
 
 fn download(url: &str, dest: &Path) {
     println!("cargo:warning=GET {}", url);
-    let resp = ureq::get(url).call().expect("failed to download ONNX Runtime");
+    let resp = ureq::get(url)
+        .call()
+        .expect("failed to download ONNX Runtime");
     let mut reader = resp.into_body().into_reader();
     let mut file = fs::File::create(dest).expect("failed to create archive file");
     io::copy(&mut reader, &mut file).expect("failed to write archive");
@@ -159,9 +157,14 @@ fn extract_from_tgz(archive: &Path, cache_dir: &Path, lib_name: &str) -> PathBuf
     let suffix = format!("/lib/{}", lib_name);
     for entry in tar.entries().expect("failed to read tar entries") {
         let mut entry = entry.expect("failed to read tar entry");
-        let path = entry.path().expect("failed to read entry path").to_path_buf();
+        let path = entry
+            .path()
+            .expect("failed to read entry path")
+            .to_path_buf();
         if path.to_string_lossy().ends_with(&suffix)
-            || path.to_string_lossy().contains(&format!("/lib/{}", lib_name.split('.').next().unwrap()))
+            || path
+                .to_string_lossy()
+                .contains(&format!("/lib/{}", lib_name.split('.').next().unwrap()))
         {
             let out_path = cache_dir.join(lib_name);
             let mut out = fs::File::create(&out_path).expect("failed to create extracted file");

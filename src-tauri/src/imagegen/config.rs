@@ -17,7 +17,7 @@ pub struct ImageGenProviderConfig {
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
     pub base_url: Option<String>,
-    pub model: Option<String>,   // e.g. "dall-e-3", "sd_xl"
+    pub model: Option<String>,           // e.g. "dall-e-3", "sd_xl"
     pub size: Option<String>,            // e.g. "1024x1024"
     pub quality: Option<String>,         // e.g. "standard", "hd"
     pub style: Option<String>,           // e.g. "vivid", "natural"

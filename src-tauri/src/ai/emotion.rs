@@ -307,7 +307,11 @@ impl EmotionState {
     }
 
     /// Replace personality with optional state reset.
-    pub fn set_personality_with_reset(&mut self, personality: EmotionPersonality, reset_state: bool) {
+    pub fn set_personality_with_reset(
+        &mut self,
+        personality: EmotionPersonality,
+        reset_state: bool,
+    ) {
         self.personality = personality;
         if reset_state {
             // Reset to new character's default mood

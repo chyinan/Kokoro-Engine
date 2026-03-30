@@ -15,8 +15,14 @@ pub async fn transcribe_audio(
     audio_bytes: Vec<u8>,
     format: String,
 ) -> Result<String, KokoroError> {
-    let source = AudioSource::Encoded { data: audio_bytes, format };
-    let result = state.transcribe(&source, None).await.map_err(|e| KokoroError::Stt(e.to_string()))?;
+    let source = AudioSource::Encoded {
+        data: audio_bytes,
+        format,
+    };
+    let result = state
+        .transcribe(&source, None)
+        .await
+        .map_err(|e| KokoroError::Stt(e.to_string()))?;
     Ok(result.text)
 }
 
@@ -74,9 +80,16 @@ pub async fn transcribe_wake_word_audio(
     if samples.is_empty() {
         return Ok(String::new());
     }
-    let chunk = AudioChunk { samples: Arc::new(samples), sample_rate: 16000 };
-    let result = state.transcribe(&AudioSource::Chunk(chunk), None).await.map_err(|e| KokoroError::Stt(e.to_string()))?;
-    Ok(result.text)}
+    let chunk = AudioChunk {
+        samples: Arc::new(samples),
+        sample_rate: 16000,
+    };
+    let result = state
+        .transcribe(&AudioSource::Chunk(chunk), None)
+        .await
+        .map_err(|e| KokoroError::Stt(e.to_string()))?;
+    Ok(result.text)
+}
 
 #[command]
 pub async fn start_native_mic(
@@ -84,8 +97,12 @@ pub async fn start_native_mic(
     mic_state: State<'_, NativeMicState>,
     auto_stop_on_silence: Option<bool>,
 ) -> Result<(), KokoroError> {
-    crate::stt::mic::start_native_mic_with_options(&app, mic_state.inner(), auto_stop_on_silence.unwrap_or(false))
-        .map_err(KokoroError::Stt)
+    crate::stt::mic::start_native_mic_with_options(
+        &app,
+        mic_state.inner(),
+        auto_stop_on_silence.unwrap_or(false),
+    )
+    .map_err(KokoroError::Stt)
 }
 
 #[command]
@@ -103,8 +120,13 @@ pub async fn start_native_wake_word(
     wake_word: String,
     trigger_on_speech: Option<bool>,
 ) -> Result<(), KokoroError> {
-    crate::stt::wake_word::start_native_wake_word(&app, wake_word_state.inner(), wake_word, trigger_on_speech.unwrap_or(false))
-        .map_err(KokoroError::Stt)
+    crate::stt::wake_word::start_native_wake_word(
+        &app,
+        wake_word_state.inner(),
+        wake_word,
+        trigger_on_speech.unwrap_or(false),
+    )
+    .map_err(KokoroError::Stt)
 }
 
 #[command]
@@ -112,7 +134,8 @@ pub async fn stop_native_wake_word(
     app: AppHandle,
     wake_word_state: State<'_, NativeWakeWordState>,
 ) -> Result<(), KokoroError> {
-    crate::stt::wake_word::stop_native_wake_word(&app, wake_word_state.inner()).map_err(KokoroError::Stt)
+    crate::stt::wake_word::stop_native_wake_word(&app, wake_word_state.inner())
+        .map_err(KokoroError::Stt)
 }
 
 #[command]

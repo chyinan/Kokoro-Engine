@@ -3,17 +3,17 @@
 //! Chat traffic and model listing are routed through Ollama's OpenAI-compatible
 //! `/v1` endpoints using `async-openai`.
 
-use async_trait::async_trait;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::ChatCompletionRequestMessage;
 use async_openai::Client;
+use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
 use crate::llm::provider::{
-    LlmParams, LlmProvider, LlmStreamEvent, LlmToolDefinition, build_openai_client, create_chat,
-    create_chat_stream, create_chat_stream_with_tools, list_model_ids,
+    build_openai_client, create_chat, create_chat_stream, create_chat_stream_with_tools,
+    list_model_ids, LlmParams, LlmProvider, LlmStreamEvent, LlmToolDefinition,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,9 +30,8 @@ pub struct OllamaProvider {
 
 impl OllamaProvider {
     pub fn new(base_url: Option<String>, model: String) -> Self {
-        let compat_base = normalize_ollama_chat_base_url(
-            base_url.as_deref().unwrap_or("http://localhost:11434"),
-        );
+        let compat_base =
+            normalize_ollama_chat_base_url(base_url.as_deref().unwrap_or("http://localhost:11434"));
 
         Self {
             client: build_openai_client("ollama".to_string(), Some(compat_base)),

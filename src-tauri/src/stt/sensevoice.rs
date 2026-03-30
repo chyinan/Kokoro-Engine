@@ -56,7 +56,12 @@ impl SttEngine for SenseVoiceProvider {
 
     async fn is_available(&self) -> bool {
         let url = format!("{}/", self.base_url.trim_end_matches('/'));
-        self.client.get(&url).send().await.map(|r| r.status().is_success()).unwrap_or(false)
+        self.client
+            .get(&url)
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
     }
 
     async fn transcribe(
@@ -68,7 +73,9 @@ impl SttEngine for SenseVoiceProvider {
 
         // Build WAV bytes
         let (file_bytes, file_name, mime) = match audio {
-            AudioSource::Chunk(chunk) => (chunk.to_wav_bytes(), "audio.wav".to_string(), "audio/wav"),
+            AudioSource::Chunk(chunk) => {
+                (chunk.to_wav_bytes(), "audio.wav".to_string(), "audio/wav")
+            }
             AudioSource::Encoded { data, format } => {
                 let (ext, mime) = match format.to_lowercase().as_str() {
                     "mp3" | "mpeg" => ("mp3", "audio/mpeg"),

@@ -22,7 +22,10 @@ pub async fn check_rvc_status(app: AppHandle) -> Result<bool, KokoroError> {
 #[command]
 pub async fn list_rvc_models(app: AppHandle) -> Result<Vec<RvcModelInfo>, KokoroError> {
     let provider = get_rvc_provider(&app)?;
-    provider.list_models().await.map_err(KokoroError::ExternalService)
+    provider
+        .list_models()
+        .await
+        .map_err(KokoroError::ExternalService)
 }
 
 /// Convert a song/audio file to the character's voice using RVC.

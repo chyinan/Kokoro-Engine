@@ -51,13 +51,14 @@ pub async fn extract_and_store_memories(
         return;
     }
 
-    println!("[Memory] Starting extraction for '{}' with {} history messages", character_id, recent_history.len());
+    println!(
+        "[Memory] Starting extraction for '{}' with {} history messages",
+        character_id,
+        recent_history.len()
+    );
 
     // Fetch existing memories so the LLM can avoid duplicates
-    let existing_memories = match memory_manager
-        .get_all_memory_contents(&character_id)
-        .await
-    {
+    let existing_memories = match memory_manager.get_all_memory_contents(&character_id).await {
         Ok(mems) => mems,
         Err(e) => {
             eprintln!("[Memory] Failed to fetch existing memories: {}", e);

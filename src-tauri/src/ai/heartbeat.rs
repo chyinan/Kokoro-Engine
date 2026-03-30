@@ -92,7 +92,11 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
             let emotion = orchestrator.emotion_state.lock().await;
             let neutral_emotion = EmotionState::new(emotion.personality().clone());
             let mut idle_sys = orchestrator.idle_behaviors.lock().await;
-            let emotion_ref = if emotion_enabled { &*emotion } else { &neutral_emotion };
+            let emotion_ref = if emotion_enabled {
+                &*emotion
+            } else {
+                &neutral_emotion
+            };
             if let Some(behavior) = idle_sys.decide(emotion_ref, idle_secs) {
                 let _ = app_handle.emit("idle-behavior", IdleBehaviorEvent { behavior });
             }
@@ -164,7 +168,11 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
                 let mut curiosity = orchestrator.curiosity.lock().await;
                 let emotion = orchestrator.emotion_state.lock().await;
                 let neutral_emotion = EmotionState::new(emotion.personality().clone());
-                let emotion_ref = if emotion_enabled { &*emotion } else { &neutral_emotion };
+                let emotion_ref = if emotion_enabled {
+                    &*emotion
+                } else {
+                    &neutral_emotion
+                };
 
                 initiative.decide(&mut curiosity, emotion_ref, conversation_count, idle_secs)
             };

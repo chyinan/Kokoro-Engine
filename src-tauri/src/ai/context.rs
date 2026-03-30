@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::VecDeque;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
@@ -182,8 +182,12 @@ impl AIOrchestrator {
         let path = app_data.join("emotion_state.json");
         let json = serde_json::to_string_pretty(&*emotion)?;
         std::fs::write(&path, json)?;
-        println!("[AI] Saved emotion state: {} (mood: {:.2}) to {:?}",
-                 emotion.current_emotion(), emotion.mood(), path);
+        println!(
+            "[AI] Saved emotion state: {} (mood: {:.2}) to {:?}",
+            emotion.current_emotion(),
+            emotion.mood(),
+            path
+        );
         Ok(())
     }
 
@@ -198,20 +202,25 @@ impl AIOrchestrator {
             let loaded_state: EmotionState = serde_json::from_str(&content)?;
             let mut emotion = self.emotion_state.lock().await;
             *emotion = loaded_state;
-            println!("[AI] Restored emotion state: {} (mood: {:.2})",
-                     emotion.current_emotion(), emotion.mood());
+            println!(
+                "[AI] Restored emotion state: {} (mood: {:.2})",
+                emotion.current_emotion(),
+                emotion.mood()
+            );
         }
         Ok(())
     }
 
     /// Enable or disable proactive (idle auto-talk) messages.
     pub fn set_proactive_enabled(&self, enabled: bool) {
-        self.proactive_enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
+        self.proactive_enabled
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Check if proactive messages are enabled.
     pub fn is_proactive_enabled(&self) -> bool {
-        self.proactive_enabled.load(std::sync::atomic::Ordering::SeqCst)
+        self.proactive_enabled
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Update emotion state with smoothing and return the smoothed values.
@@ -289,10 +298,17 @@ impl AIOrchestrator {
     }
 
     pub async fn add_message(&self, role: String, content: String, character_id: &str) {
-        self.add_message_with_metadata(role, content, None, character_id).await;
+        self.add_message_with_metadata(role, content, None, character_id)
+            .await;
     }
 
-    pub async fn add_message_with_metadata(&self, role: String, content: String, metadata: Option<String>, character_id: &str) {
+    pub async fn add_message_with_metadata(
+        &self,
+        role: String,
+        content: String,
+        metadata: Option<String>,
+        character_id: &str,
+    ) {
         // Track user message count for memory extraction triggers
         if role == "user" {
             let mut count = self.message_count.lock().await;
@@ -313,7 +329,9 @@ impl AIOrchestrator {
         };
 
         // Persist to database FIRST so no code path can skip it
-        let _ = self.persist_message(&role, &content, metadata.as_deref(), character_id).await;
+        let _ = self
+            .persist_message(&role, &content, metadata.as_deref(), character_id)
+            .await;
 
         let mut history = self.history.lock().await;
         let parsed_metadata = metadata
@@ -356,7 +374,11 @@ impl AIOrchestrator {
                     formatted.chars().take(500).collect::<String>()
                 );
 
-                println!("[Context] Summary compression: storing {} msg summary for '{}'", to_summarize.len(), cid);
+                println!(
+                    "[Context] Summary compression: storing {} msg summary for '{}'",
+                    to_summarize.len(),
+                    cid
+                );
                 if let Err(e) = memory_manager.save_session_summary(&cid, &summary).await {
                     eprintln!("[Context] Failed to save summary: {}", e);
                 }
@@ -369,7 +391,13 @@ impl AIOrchestrator {
     }
 
     /// 将消息持久化到 SQLite，如果没有活跃对话则自动创建
-    async fn persist_message(&self, role: &str, content: &str, metadata: Option<&str>, character_id: &str) -> Result<()> {
+    async fn persist_message(
+        &self,
+        role: &str,
+        content: &str,
+        metadata: Option<&str>,
+        character_id: &str,
+    ) -> Result<()> {
         let cid = character_id;
         let mut conv_id_lock = self.current_conversation_id.lock().await;
 
@@ -508,7 +536,12 @@ impl AIOrchestrator {
     }
 
     /// Update a streaming draft row with final content and metadata.
-    pub async fn update_streaming_draft(&self, row_id: i64, content: &str, metadata: Option<&str>) -> Result<()> {
+    pub async fn update_streaming_draft(
+        &self,
+        row_id: i64,
+        content: &str,
+        metadata: Option<&str>,
+    ) -> Result<()> {
         sqlx::query("UPDATE conversation_messages SET content = ?, metadata = ? WHERE id = ?")
             .bind(content)
             .bind(metadata)
@@ -589,7 +622,10 @@ impl AIOrchestrator {
                 .join("emotion_state.json");
             if path.exists() {
                 if let Err(e) = std::fs::remove_file(&path) {
-                    eprintln!("[AI] Failed to remove emotion state while disabling memory: {}", e);
+                    eprintln!(
+                        "[AI] Failed to remove emotion state while disabling memory: {}",
+                        e
+                    );
                 }
             }
         }
@@ -658,7 +694,10 @@ impl AIOrchestrator {
         // -- System Prompt (P0) --
         // Embed language requirement early for primacy effect
         let lang_preamble = if !resp_lang.is_empty() {
-            format!("\n\n[LANGUAGE: You speak {}. All your replies must be in {}.]", resp_lang, resp_lang)
+            format!(
+                "\n\n[LANGUAGE: You speak {}. All your replies must be in {}.]",
+                resp_lang, resp_lang
+            )
         } else {
             String::new()
         };
@@ -703,7 +742,9 @@ impl AIOrchestrator {
                 let cue_lines = profile
                     .cue_map
                     .iter()
-                    .filter_map(|(cue, binding)| (!binding.exclude_from_prompt).then_some(cue.clone()))
+                    .filter_map(|(cue, binding)| {
+                        (!binding.exclude_from_prompt).then_some(cue.clone())
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 if !cue_lines.is_empty() {
@@ -721,7 +762,6 @@ impl AIOrchestrator {
                     });
                 }
             }
-
         }
 
         // -- Relevant Memories (P1) --
@@ -903,13 +943,16 @@ mod tests {
     #[tokio::test]
     async fn test_add_message_truncation() {
         let orchestrator = setup_test_orchestrator().await;
-        orchestrator.set_character_name("TestChar".to_string()).await;
+        orchestrator
+            .set_character_name("TestChar".to_string())
+            .await;
 
         // Set max_message_chars to 50
         *orchestrator.max_message_chars.lock().await = 50;
 
         // Add a message longer than 50 chars
-        let long_message = "This is a very long message that exceeds the maximum character limit".to_string();
+        let long_message =
+            "This is a very long message that exceeds the maximum character limit".to_string();
         orchestrator
             .add_message("user".to_string(), long_message, "test_char")
             .await;
@@ -938,11 +981,7 @@ mod tests {
         // Add 35 messages (exceeds 30 limit)
         for i in 0..35 {
             orchestrator
-                .add_message(
-                    "user".to_string(),
-                    format!("Message {}", i),
-                    "test_char",
-                )
+                .add_message("user".to_string(), format!("Message {}", i), "test_char")
                 .await;
         }
 
@@ -961,11 +1000,7 @@ mod tests {
         // Add 5 messages
         for i in 0..5 {
             orchestrator
-                .add_message(
-                    "user".to_string(),
-                    format!("Message {}", i),
-                    "test_char",
-                )
+                .add_message("user".to_string(), format!("Message {}", i), "test_char")
                 .await;
         }
 
@@ -985,11 +1020,7 @@ mod tests {
         // Add 10 messages
         for i in 0..10 {
             orchestrator
-                .add_message(
-                    "user".to_string(),
-                    format!("Message {}", i),
-                    "test_char",
-                )
+                .add_message("user".to_string(), format!("Message {}", i), "test_char")
                 .await;
         }
 
@@ -1000,7 +1031,10 @@ mod tests {
             recent[0].content, "Message 5",
             "Should return the last 5 messages"
         );
-        assert_eq!(recent[4].content, "Message 9", "Last message should be Message 9");
+        assert_eq!(
+            recent[4].content, "Message 9",
+            "Last message should be Message 9"
+        );
     }
 
     #[tokio::test]
@@ -1010,11 +1044,7 @@ mod tests {
         // Add some messages
         for i in 0..5 {
             orchestrator
-                .add_message(
-                    "user".to_string(),
-                    format!("Message {}", i),
-                    "test_char",
-                )
+                .add_message("user".to_string(), format!("Message {}", i), "test_char")
                 .await;
         }
 
@@ -1040,7 +1070,10 @@ mod tests {
 
         {
             let trigger_count = *orchestrator.memory_trigger_count.lock().await;
-            assert_eq!(trigger_count, 0, "Memory trigger count should be 0 after clear");
+            assert_eq!(
+                trigger_count, 0,
+                "Memory trigger count should be 0 after clear"
+            );
         }
 
         {
@@ -1059,11 +1092,7 @@ mod tests {
         // Add some user messages to increment trigger count
         for i in 0..3 {
             orchestrator
-                .add_message(
-                    "user".to_string(),
-                    format!("Message {}", i),
-                    "test_char",
-                )
+                .add_message("user".to_string(), format!("Message {}", i), "test_char")
                 .await;
         }
 
@@ -1102,11 +1131,7 @@ mod tests {
         // Add some messages
         for i in 0..5 {
             orchestrator
-                .add_message(
-                    "user".to_string(),
-                    format!("Message {}", i),
-                    "test_char",
-                )
+                .add_message("user".to_string(), format!("Message {}", i), "test_char")
                 .await;
         }
 
@@ -1149,11 +1174,7 @@ mod tests {
         // Add user messages
         for i in 0..3 {
             orchestrator
-                .add_message(
-                    "user".to_string(),
-                    format!("Message {}", i),
-                    "test_char",
-                )
+                .add_message("user".to_string(), format!("Message {}", i), "test_char")
                 .await;
         }
 
@@ -1167,11 +1188,7 @@ mod tests {
 
         // Add assistant message
         orchestrator
-            .add_message(
-                "assistant".to_string(),
-                "Response".to_string(),
-                "test_char",
-            )
+            .add_message("assistant".to_string(), "Response".to_string(), "test_char")
             .await;
 
         let count = *orchestrator.message_count.lock().await;

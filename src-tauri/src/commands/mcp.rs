@@ -43,8 +43,14 @@ pub async fn add_mcp_server(
                 let mut mgr = mgr_arc.lock().await;
                 mgr.clear_connecting(&cfg.name);
                 match build_result {
-                    Ok(client) => { mgr.insert_client(cfg.name.clone(), client); Ok(()) }
-                    Err(e) => { mgr.set_connection_error(&cfg.name, e.to_string()); Err(e) }
+                    Ok(client) => {
+                        mgr.insert_client(cfg.name.clone(), client);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        mgr.set_connection_error(&cfg.name, e.to_string());
+                        Err(e)
+                    }
                 }
             };
             match connect_result {
@@ -108,8 +114,14 @@ pub async fn reconnect_mcp_server(
             let mut mgr = mgr_arc.lock().await;
             mgr.clear_connecting(&cfg.name);
             match build_result {
-                Ok(client) => { mgr.insert_client(cfg.name.clone(), client); Ok(()) }
-                Err(e) => { mgr.set_connection_error(&cfg.name, e.to_string()); Err(e) }
+                Ok(client) => {
+                    mgr.insert_client(cfg.name.clone(), client);
+                    Ok(())
+                }
+                Err(e) => {
+                    mgr.set_connection_error(&cfg.name, e.to_string());
+                    Err(e)
+                }
             }
         };
         match connect_result {
@@ -140,7 +152,8 @@ pub async fn toggle_mcp_server(
         mgr.toggle_server(&name, enabled).await?;
 
         if enabled {
-            let cfg = mgr.get_config(&name)
+            let cfg = mgr
+                .get_config(&name)
                 .ok_or_else(|| KokoroError::NotFound(format!("Server '{}' not found", name)))?;
             mgr.mark_connecting(&name);
             Some(cfg)
@@ -159,8 +172,14 @@ pub async fn toggle_mcp_server(
                 let mut mgr = mgr_arc.lock().await;
                 mgr.clear_connecting(&cfg.name);
                 match build_result {
-                    Ok(client) => { mgr.insert_client(cfg.name.clone(), client); Ok(()) }
-                    Err(e) => { mgr.set_connection_error(&cfg.name, e.to_string()); Err(e) }
+                    Ok(client) => {
+                        mgr.insert_client(cfg.name.clone(), client);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        mgr.set_connection_error(&cfg.name, e.to_string());
+                        Err(e)
+                    }
                 }
             };
             match connect_result {

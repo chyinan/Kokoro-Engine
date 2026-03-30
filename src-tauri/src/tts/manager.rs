@@ -418,7 +418,11 @@ impl TtsService {
 
     /// Synthesize text to raw audio bytes without requiring an AppHandle.
     /// Used by services that need audio data directly (e.g. Telegram bot).
-    pub async fn synthesize_text(&self, text: &str, params: Option<TtsParams>) -> Result<Vec<u8>, String> {
+    pub async fn synthesize_text(
+        &self,
+        text: &str,
+        params: Option<TtsParams>,
+    ) -> Result<Vec<u8>, String> {
         let params = params.unwrap_or_default();
         let router = TtsRouter::new(self.providers.clone(), self.default_provider.clone());
         let route = router

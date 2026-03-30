@@ -113,7 +113,11 @@ async fn test_sequential_counter_under_contention() {
         filenames.insert(name);
     }
 
-    assert_eq!(filenames.len(), 200, "all 200 filenames must be unique under contention");
+    assert_eq!(
+        filenames.len(),
+        200,
+        "all 200 filenames must be unique under contention"
+    );
 }
 
 // ── Concurrent Upload and Cleanup ───────────────────────────
@@ -167,7 +171,10 @@ async fn test_concurrent_upload_and_cleanup() {
         .unwrap()
         .filter_map(|e| e.ok())
         .count();
-    assert!(remaining > 0, "fresh files should survive concurrent cleanup");
+    assert!(
+        remaining > 0,
+        "fresh files should survive concurrent cleanup"
+    );
 }
 
 // ── IPC Flood (rapid sequential uploads) ────────────────────
@@ -198,7 +205,10 @@ async fn test_ipc_flood_5000() {
     );
     println!(
         "[stress] Total bytes: {:.2} MB",
-        metrics.bytes_uploaded.load(std::sync::atomic::Ordering::Relaxed) as f64 / (1024.0 * 1024.0)
+        metrics
+            .bytes_uploaded
+            .load(std::sync::atomic::Ordering::Relaxed) as f64
+            / (1024.0 * 1024.0)
     );
 
     assert_eq!(metrics.failed(), 0, "no failures in IPC flood");

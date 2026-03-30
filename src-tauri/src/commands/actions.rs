@@ -30,10 +30,13 @@ pub async fn execute_action(
     name: String,
     args: HashMap<String, String>,
     character_id: Option<String>,
- ) -> Result<ActionResult, KokoroError> {
+) -> Result<ActionResult, KokoroError> {
     let tool_settings = tool_settings_state.read().await;
     if !tool_settings.is_enabled(&name) {
-        return Err(KokoroError::Validation(format!("Tool '{}' is disabled", name)));
+        return Err(KokoroError::Validation(format!(
+            "Tool '{}' is disabled",
+            name
+        )));
     }
     drop(tool_settings);
     let registry = registry_state.read().await;

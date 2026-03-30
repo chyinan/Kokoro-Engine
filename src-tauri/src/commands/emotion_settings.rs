@@ -37,7 +37,10 @@ pub async fn save_emotion_settings(
         drop(emotion);
 
         if let Err(e) = orchestrator.save_emotion_state().await {
-            eprintln!("[Emotion] Failed to persist reset state while disabling emotion: {}", e);
+            eprintln!(
+                "[Emotion] Failed to persist reset state while disabling emotion: {}",
+                e
+            );
         }
     }
 

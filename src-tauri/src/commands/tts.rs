@@ -42,7 +42,9 @@ pub async fn list_tts_providers(
 }
 
 #[command]
-pub async fn list_tts_voices(state: State<'_, TtsService>) -> Result<Vec<VoiceProfile>, KokoroError> {
+pub async fn list_tts_voices(
+    state: State<'_, TtsService>,
+) -> Result<Vec<VoiceProfile>, KokoroError> {
     Ok(state.list_voices().await)
 }
 

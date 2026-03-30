@@ -1,15 +1,14 @@
+use crate::actions::tool_settings::ToolSettings;
 use crate::ai::context::AIOrchestrator;
 use crate::ai::context::Message;
+use crate::ai::emotion_settings::EmotionSettings;
 use crate::ai::memory_extractor;
 use crate::commands::system::WindowSizeState;
 use crate::error::KokoroError;
 use crate::imagegen::ImageGenService;
-use crate::actions::tool_settings::ToolSettings;
-use crate::ai::emotion_settings::EmotionSettings;
 use crate::llm::messages::{
-    assistant_tool_calls_message, extract_message_text, replace_user_message_with_images,
-    history_message_to_chat_message, system_message, tool_result_message,
-    user_text_message,
+    assistant_tool_calls_message, extract_message_text, history_message_to_chat_message,
+    replace_user_message_with_images, system_message, tool_result_message, user_text_message,
 };
 use crate::llm::provider::LlmStreamEvent;
 use crate::llm::service::LlmService;
@@ -30,7 +29,10 @@ pub async fn get_context_settings(
     state: State<'_, AIOrchestrator>,
 ) -> Result<ContextSettings, KokoroError> {
     let (strategy, max_message_chars) = state.get_context_settings().await;
-    Ok(ContextSettings { strategy, max_message_chars })
+    Ok(ContextSettings {
+        strategy,
+        max_message_chars,
+    })
 }
 
 #[tauri::command]
@@ -47,7 +49,9 @@ pub async fn set_context_settings(
     // Clamp max_message_chars to safe range
     let max_chars = settings.max_message_chars.clamp(100, 50_000);
 
-    state.set_context_settings(strategy.clone(), max_chars).await;
+    state
+        .set_context_settings(strategy.clone(), max_chars)
+        .await;
 
     // Persist to disk
     let app_data = dirs_next::data_dir()
@@ -88,7 +92,10 @@ struct ChatImageGenEvent {
 }
 
 #[cfg(debug_assertions)]
-fn debug_log_llm_messages(label: &str, messages: &[async_openai::types::chat::ChatCompletionRequestMessage]) {
+fn debug_log_llm_messages(
+    label: &str,
+    messages: &[async_openai::types::chat::ChatCompletionRequestMessage],
+) {
     println!("[LLM/Debug] {} ({} messages)", label, messages.len());
     for (index, message) in messages.iter().enumerate() {
         let role = match message {
@@ -143,10 +150,17 @@ fn strip_leaked_tags(text: &str) -> String {
     while let Some(start) = result.find("<tool_result>") {
         if let Some(end) = result[start..].find("</tool_result>") {
             let tag_end = start + end + "</tool_result>".len();
-            result = format!("{}{}", result[..start].trim_end(), result[tag_end..].trim_start());
+            result = format!(
+                "{}{}",
+                result[..start].trim_end(),
+                result[tag_end..].trim_start()
+            );
         } else {
             // Unclosed tag — remove from <tool_result> to end of line
-            let line_end = result[start..].find('\n').map(|i| start + i).unwrap_or(result.len());
+            let line_end = result[start..]
+                .find('\n')
+                .map(|i| start + i)
+                .unwrap_or(result.len());
             result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
         }
     }
@@ -182,7 +196,11 @@ fn strip_translate_tags(text: &str) -> String {
     while let Some(start) = result.find(TRANSLATE_TAG_PREFIX) {
         if let Some(end_bracket) = result[start..].find(']') {
             let tag_end = start + end_bracket + 1;
-            result = format!("{}{}", result[..start].trim_end(), result[tag_end..].trim_start());
+            result = format!(
+                "{}{}",
+                result[..start].trim_end(),
+                result[tag_end..].trim_start()
+            );
         } else {
             // Unclosed tag — remove from [TRANSLATE: to end
             result = result[..start].trim_end().to_string();
@@ -242,7 +260,11 @@ fn extract_translate_tags(text: &str) -> (String, Option<String>) {
                 translations.push(trimmed.to_string());
             }
             let tag_end = start + end_bracket + 1;
-            result = format!("{}{}", result[..start].trim_end(), result[tag_end..].trim_start());
+            result = format!(
+                "{}{}",
+                result[..start].trim_end(),
+                result[tag_end..].trim_start()
+            );
         } else {
             // Unclosed tag — extract what we can
             let inner = &result[start + TRANSLATE_TAG_PREFIX.len()..];
@@ -293,7 +315,11 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
                     }
                 }
 
-                calls.push(ToolCall { tool_call_id: None, name, args });
+                calls.push(ToolCall {
+                    tool_call_id: None,
+                    name,
+                    args,
+                });
             }
 
             let tag_end = start + end_bracket + 1;
@@ -317,7 +343,9 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
     let mut cleaned = result.clone();
     let mut offset = 0;
     while offset < cleaned.len() {
-        let Some(rel_start) = cleaned[offset..].find('[') else { break };
+        let Some(rel_start) = cleaned[offset..].find('[') else {
+            break;
+        };
         let start = offset + rel_start;
         let rest = &cleaned[start..];
         let Some(end) = rest.find(']') else { break };
@@ -326,8 +354,8 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
         let mut matched = false;
         if let Some(pipe_pos) = inner.find('|') {
             let name_part = &inner[..pipe_pos];
-            let is_identifier = !name_part.is_empty()
-                && name_part.chars().all(|c| c.is_alphanumeric() || c == '_');
+            let is_identifier =
+                !name_part.is_empty() && name_part.chars().all(|c| c.is_alphanumeric() || c == '_');
             let has_kv = inner[pipe_pos + 1..].contains('=');
 
             if is_identifier && has_kv {
@@ -341,12 +369,20 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
                         args.insert(key, val);
                     }
                 }
-                extra_calls.push(ToolCall { tool_call_id: None, name, args });
+                extra_calls.push(ToolCall {
+                    tool_call_id: None,
+                    name,
+                    args,
+                });
                 let tag_end = start + end + 1;
                 cleaned = format!(
                     "{}{}",
                     cleaned[..start].trim_end(),
-                    if tag_end < cleaned.len() { &cleaned[tag_end..] } else { "" }
+                    if tag_end < cleaned.len() {
+                        &cleaned[tag_end..]
+                    } else {
+                        ""
+                    }
                 );
                 // offset 不变，继续从同一位置扫描（内容已缩短）
                 matched = true;
@@ -362,15 +398,14 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
     // 支持冒号格式: [action_name:value]
     // 例: [play_cue:happy]、[set_background:beach]
     // 将 value 映射到该 action 的主参数名
-    let primary_arg_map: &[(&str, &str)] = &[
-        ("play_cue", "cue"),
-        ("set_background", "prompt"),
-    ];
+    let primary_arg_map: &[(&str, &str)] = &[("play_cue", "cue"), ("set_background", "prompt")];
     let mut colon_calls = Vec::new();
     let mut cleaned2 = cleaned.clone();
     let mut offset2 = 0;
     while offset2 < cleaned2.len() {
-        let Some(rel_start) = cleaned2[offset2..].find('[') else { break };
+        let Some(rel_start) = cleaned2[offset2..].find('[') else {
+            break;
+        };
         let start = offset2 + rel_start;
         let rest = &cleaned2[start..];
         let Some(end) = rest.find(']') else { break };
@@ -380,19 +415,28 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
         if let Some(colon_pos) = inner.find(':') {
             let name_part = inner[..colon_pos].trim();
             let val_part = inner[colon_pos + 1..].trim();
-            let is_identifier = !name_part.is_empty()
-                && name_part.chars().all(|c| c.is_alphanumeric() || c == '_');
+            let is_identifier =
+                !name_part.is_empty() && name_part.chars().all(|c| c.is_alphanumeric() || c == '_');
 
             if is_identifier && !val_part.is_empty() {
-                if let Some(&(_, arg_key)) = primary_arg_map.iter().find(|&&(n, _)| n == name_part) {
+                if let Some(&(_, arg_key)) = primary_arg_map.iter().find(|&&(n, _)| n == name_part)
+                {
                     let mut args = HashMap::new();
                     args.insert(arg_key.to_string(), val_part.to_string());
-                    colon_calls.push(ToolCall { tool_call_id: None, name: name_part.to_string(), args });
+                    colon_calls.push(ToolCall {
+                        tool_call_id: None,
+                        name: name_part.to_string(),
+                        args,
+                    });
                     let tag_end = start + end + 1;
                     cleaned2 = format!(
                         "{}{}",
                         cleaned2[..start].trim_end(),
-                        if tag_end < cleaned2.len() { &cleaned2[tag_end..] } else { "" }
+                        if tag_end < cleaned2.len() {
+                            &cleaned2[tag_end..]
+                        } else {
+                            ""
+                        }
                     );
                     matched = true;
                 }
@@ -504,7 +548,11 @@ pub async fn stream_chat(
                 &tool_settings,
             )
         };
-        if prompt.is_empty() { None } else { Some(prompt) }
+        if prompt.is_empty() {
+            None
+        } else {
+            Some(prompt)
+        }
     };
 
     let native_tools = {
@@ -661,15 +709,14 @@ pub async fn stream_chat(
                             if safe > 0 {
                                 let to_emit = emit_buffer[..safe].to_string();
                                 emit_buffer = emit_buffer[safe..].to_string();
-                                app
-                                    .emit(
-                                        "chat-turn-delta",
-                                        serde_json::json!({
-                                            "turn_id": assistant_turn_id,
-                                            "delta": to_emit,
-                                        }),
-                                    )
-                                    .map_err(|e| KokoroError::Chat(e.to_string()))?;
+                                app.emit(
+                                    "chat-turn-delta",
+                                    serde_json::json!({
+                                        "turn_id": assistant_turn_id,
+                                        "delta": to_emit,
+                                    }),
+                                )
+                                .map_err(|e| KokoroError::Chat(e.to_string()))?;
                             }
                         }
                         LlmStreamEvent::ToolCall(tool_call) => {
@@ -684,7 +731,8 @@ pub async fn stream_chat(
                 Err(e) => {
                     if round_response.is_empty() && emit_buffer.is_empty() {
                         stream_failed = true;
-                        app.emit("chat-error", e).map_err(|e| KokoroError::Chat(e.to_string()))?;
+                        app.emit("chat-error", e)
+                            .map_err(|e| KokoroError::Chat(e.to_string()))?;
                     } else {
                         eprintln!(
                             "[Chat] Ignoring trailing stream error after partial response: {}",
@@ -701,15 +749,14 @@ pub async fn stream_chat(
             let (cleaned_remainder, _) = parse_tool_call_tags(&emit_buffer);
             let cleaned_remainder = strip_translate_tags(&cleaned_remainder);
             if !cleaned_remainder.is_empty() {
-                app
-                    .emit(
-                        "chat-turn-delta",
-                        serde_json::json!({
-                            "turn_id": assistant_turn_id,
-                            "delta": cleaned_remainder,
-                        }),
-                    )
-                    .map_err(|e| KokoroError::Chat(e.to_string()))?;
+                app.emit(
+                    "chat-turn-delta",
+                    serde_json::json!({
+                        "turn_id": assistant_turn_id,
+                        "delta": cleaned_remainder,
+                    }),
+                )
+                .map_err(|e| KokoroError::Chat(e.to_string()))?;
             }
         }
 
@@ -717,12 +764,29 @@ pub async fn stream_chat(
         let (cleaned_text, round_translation) = extract_translate_tags(&cleaned_text);
         tool_calls.extend(native_tool_calls);
 
-        println!("[Chat] Round {} raw response ({} chars): ...{}",
+        println!(
+            "[Chat] Round {} raw response ({} chars): ...{}",
             round + 1,
             round_response.len(),
-            round_response.chars().rev().take(100).collect::<String>().chars().rev().collect::<String>());
-        println!("[Chat] Round {} translation: {:?}", round + 1, round_translation);
-        println!("[Chat] Round {} tool_calls: {}", round + 1, tool_calls.len());
+            round_response
+                .chars()
+                .rev()
+                .take(100)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+        );
+        println!(
+            "[Chat] Round {} translation: {:?}",
+            round + 1,
+            round_translation
+        );
+        println!(
+            "[Chat] Round {} tool_calls: {}",
+            round + 1,
+            tool_calls.len()
+        );
 
         // Collect translation from this round
         if let Some(t) = round_translation {
@@ -739,14 +803,22 @@ pub async fn stream_chat(
                 match draft_row_id {
                     None => {
                         // First round: insert draft row
-                        match state.persist_streaming_draft(&draft_content, &char_id).await {
-                            Ok(id) => { draft_row_id = Some(id); }
-                            Err(e) => { eprintln!("[Chat] Failed to persist streaming draft: {}", e); }
+                        match state
+                            .persist_streaming_draft(&draft_content, &char_id)
+                            .await
+                        {
+                            Ok(id) => {
+                                draft_row_id = Some(id);
+                            }
+                            Err(e) => {
+                                eprintln!("[Chat] Failed to persist streaming draft: {}", e);
+                            }
                         }
                     }
                     Some(id) => {
                         // Subsequent rounds: update draft row
-                        if let Err(e) = state.update_streaming_draft(id, &draft_content, None).await {
+                        if let Err(e) = state.update_streaming_draft(id, &draft_content, None).await
+                        {
                             eprintln!("[Chat] Failed to update streaming draft: {}", e);
                         }
                     }
@@ -801,10 +873,8 @@ pub async fn stream_chat(
                         tc.name.clone(),
                         serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
                     ));
-                    let tool_result_message = tool_result_message(
-                        tool_call_id.clone(),
-                        format!("Error: {}", message),
-                    );
+                    let tool_result_message =
+                        tool_result_message(tool_call_id.clone(), format!("Error: {}", message));
                     tool_result_messages.push(tool_result_message.clone());
                     persisted_native_tool_results.push((
                         tool_call_id.clone(),
@@ -971,13 +1041,18 @@ pub async fn stream_chat(
                         ));
                         continue;
                     }
-                    println!("[Chat] Native tool loop: still no text after {} retries, ending loop", text_retry_count);
+                    println!(
+                        "[Chat] Native tool loop: still no text after {} retries, ending loop",
+                        text_retry_count
+                    );
                     break;
                 }
                 // If there IS text, fall through to continue normally
             }
 
-            println!("[Chat] Continuing after native tool calls with assistant/tool result messages");
+            println!(
+                "[Chat] Continuing after native tool calls with assistant/tool result messages"
+            );
             #[cfg(debug_assertions)]
             debug_log_llm_messages(
                 &format!("post-tool continuation round {}", round + 1),
@@ -1031,9 +1106,15 @@ pub async fn stream_chat(
     if all_translations.is_empty() && !full_response.is_empty() {
         let user_lang = state.user_language.lock().await.clone();
         let resp_lang = state.response_language.lock().await.clone();
-        println!("[Chat] Fallback check: user_lang={:?}, resp_lang={:?}", user_lang, resp_lang);
+        println!(
+            "[Chat] Fallback check: user_lang={:?}, resp_lang={:?}",
+            user_lang, resp_lang
+        );
         if !user_lang.is_empty() && !resp_lang.is_empty() && user_lang != resp_lang {
-            println!("[Chat] Translation missing, triggering fallback translation into {}", user_lang);
+            println!(
+                "[Chat] Translation missing, triggering fallback translation into {}",
+                user_lang
+            );
             let fallback_messages = vec![
                 system_message(format!(
                     "You are a translator. Translate the following text into {}. Output only the translation, nothing else.",
@@ -1059,9 +1140,9 @@ pub async fn stream_chat(
     // Fallback cue: if main LLM never called play_cue, infer via system LLM
     if !cue_set_by_tool && !full_response.is_empty() {
         println!("[Chat] Cue not set by tool, triggering fallback cue analysis");
-        let mut emotion_messages = vec![
-            system_message(crate::ai::prompts::EMOTION_ANALYZER_PROMPT.to_string()),
-        ];
+        let mut emotion_messages = vec![system_message(
+            crate::ai::prompts::EMOTION_ANALYZER_PROMPT.to_string(),
+        )];
         if let Some(profile) = crate::commands::live2d::load_active_live2d_profile() {
             let available_cues = profile
                 .cue_map
@@ -1075,11 +1156,21 @@ pub async fn stream_chat(
             )));
         }
         emotion_messages.push(user_text_message(full_response.clone()));
-        let valid_fallback_cues = crate::commands::live2d::load_active_live2d_profile()
-            .map(|profile| profile.cue_map.keys().cloned().collect::<std::collections::HashSet<_>>());
+        let valid_fallback_cues =
+            crate::commands::live2d::load_active_live2d_profile().map(|profile| {
+                profile
+                    .cue_map
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::HashSet<_>>()
+            });
         match system_provider.chat(emotion_messages, None).await {
             Ok(json_str) => {
-                let clean = json_str.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```");
+                let clean = json_str
+                    .trim()
+                    .trim_start_matches("```json")
+                    .trim_start_matches("```")
+                    .trim_end_matches("```");
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(clean) {
                     if let Some(cue) = val.get("cue").and_then(|v| v.as_str()) {
                         let trimmed = cue.trim();
@@ -1131,7 +1222,9 @@ pub async fn stream_chat(
                     )
                     .await;
             } else {
-                eprintln!("[EmotionClassifier] Emotion update skipped because classifier is unavailable.");
+                eprintln!(
+                    "[EmotionClassifier] Emotion update skipped because classifier is unavailable."
+                );
             }
         }
     }
@@ -1141,19 +1234,28 @@ pub async fn stream_chat(
     if !full_response.is_empty() {
         let metadata = if !all_translations.is_empty() {
             let combined = all_translations.join(" ");
-            Some(serde_json::json!({
-                "translation": combined,
-                "turn_id": assistant_turn_id,
-            }).to_string())
+            Some(
+                serde_json::json!({
+                    "translation": combined,
+                    "turn_id": assistant_turn_id,
+                })
+                .to_string(),
+            )
         } else {
-            Some(serde_json::json!({
-                "turn_id": assistant_turn_id,
-            }).to_string())
+            Some(
+                serde_json::json!({
+                    "turn_id": assistant_turn_id,
+                })
+                .to_string(),
+            )
         };
 
         // Update the draft row with final content + metadata (DB already has the row)
         if let Some(row_id) = draft_row_id {
-            if let Err(e) = state.update_streaming_draft(row_id, &full_response, metadata.as_deref()).await {
+            if let Err(e) = state
+                .update_streaming_draft(row_id, &full_response, metadata.as_deref())
+                .await
+            {
                 eprintln!("[Chat] Failed to finalize streaming draft: {}", e);
             }
         }
@@ -1167,20 +1269,28 @@ pub async fn stream_chat(
             } else {
                 full_response.clone()
             };
-            state.push_history_message(Message {
-                role: "assistant".to_string(),
-                content,
-                metadata: None,
-            }).await;
+            state
+                .push_history_message(Message {
+                    role: "assistant".to_string(),
+                    content,
+                    metadata: None,
+                })
+                .await;
         }
     }
 
     // Periodic memory extraction
     let msg_count = state.get_message_count().await;
     let memory_msg_count = state.get_memory_trigger_count().await;
-    println!("[Memory] User message count: {}, memory trigger count: {}", msg_count, memory_msg_count);
+    println!(
+        "[Memory] User message count: {}, memory trigger count: {}",
+        msg_count, memory_msg_count
+    );
     if state.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        println!("[Memory] Triggering memory extraction (count={})", msg_count);
+        println!(
+            "[Memory] Triggering memory extraction (count={})",
+            msg_count
+        );
         let history = state.get_recent_memory_history(10).await;
         let memory_mgr = state.memory_manager.clone();
         let char_id_for_mem = char_id.clone();
@@ -1227,7 +1337,10 @@ pub async fn stream_chat(
 
     // Background image generation: analyze reply and optionally generate a scene image
     // Skip if the main LLM already triggered set_background via tool call
-    if request.allow_image_gen.unwrap_or(false) && !full_response.is_empty() && !bg_generated_by_tool {
+    if request.allow_image_gen.unwrap_or(false)
+        && !full_response.is_empty()
+        && !bg_generated_by_tool
+    {
         let imagegen_svc = imagegen_state.inner().clone();
         let system_provider = llm_state.system_provider().await;
         let reply_for_analysis = full_response.clone();
@@ -1263,7 +1376,10 @@ pub async fn stream_chat(
             let analysis: BgAnalysis = match serde_json::from_str(clean) {
                 Ok(a) => a,
                 Err(e) => {
-                    eprintln!("[ImageGen] BG analyzer parse failed: {} | raw: {}", e, json_str);
+                    eprintln!(
+                        "[ImageGen] BG analyzer parse failed: {} | raw: {}",
+                        e, json_str
+                    );
                     return;
                 }
             };
@@ -1280,7 +1396,10 @@ pub async fn stream_chat(
 
             println!("[ImageGen] BG analyzer triggered generation: {}", prompt);
 
-            match imagegen_svc.generate(prompt.clone(), None, None, Some(window_size)).await {
+            match imagegen_svc
+                .generate(prompt.clone(), None, None, Some(window_size))
+                .await
+            {
                 Ok(result) => {
                     let _ = window_for_img.emit("imagegen:done", &result);
                     println!("[ImageGen] BG image generated: {}", result.image_url);

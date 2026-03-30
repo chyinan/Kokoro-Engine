@@ -395,7 +395,16 @@ async fn tier_column_defaults_to_ephemeral() {
 async fn core_tier_can_be_set() {
     let pool = setup_db().await;
     let emb: Vec<f32> = vec![1.0, 0.0, 0.0];
-    insert_memory_with_tier(&pool, "User's name is Alice", "char1", 0.9, "core", &emb, chrono::Utc::now().timestamp()).await;
+    insert_memory_with_tier(
+        &pool,
+        "User's name is Alice",
+        "char1",
+        0.9,
+        "core",
+        &emb,
+        chrono::Utc::now().timestamp(),
+    )
+    .await;
 
     let row = sqlx::query("SELECT tier, importance FROM memories WHERE id = 1")
         .fetch_one(&pool)
@@ -446,7 +455,10 @@ async fn tier_migration_defaults_existing_rows() {
         .await
         .unwrap();
     let tier: String = row.get("tier");
-    assert_eq!(tier, "ephemeral", "Legacy rows should default to 'ephemeral'");
+    assert_eq!(
+        tier, "ephemeral",
+        "Legacy rows should default to 'ephemeral'"
+    );
 }
 
 // ── Phase 2: FTS5 / Hybrid Retrieval Tests ────────────────
@@ -477,12 +489,11 @@ async fn fts5_syncs_on_delete() {
     insert_memory(&pool, "User loves Rust programming", "bob").await;
 
     // Verify FTS has it
-    let before = sqlx::query(
-        "SELECT COUNT(*) as cnt FROM memories_fts WHERE memories_fts MATCH '\"Rust\"'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let before =
+        sqlx::query("SELECT COUNT(*) as cnt FROM memories_fts WHERE memories_fts MATCH '\"Rust\"'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(before.get::<i64, _>("cnt"), 1);
 
     // Delete the memory
@@ -492,12 +503,11 @@ async fn fts5_syncs_on_delete() {
         .unwrap();
 
     // FTS should be empty now
-    let after = sqlx::query(
-        "SELECT COUNT(*) as cnt FROM memories_fts WHERE memories_fts MATCH '\"Rust\"'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let after =
+        sqlx::query("SELECT COUNT(*) as cnt FROM memories_fts WHERE memories_fts MATCH '\"Rust\"'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(after.get::<i64, _>("cnt"), 0, "FTS should sync on delete");
 }
 
@@ -531,8 +541,16 @@ async fn similar_memories_are_in_same_cluster() {
     let sim_ab = cosine_similarity(&a, &b);
     let sim_ac = cosine_similarity(&a, &c);
 
-    assert!(sim_ab > 0.75, "Similar vectors should exceed threshold: {}", sim_ab);
-    assert!(sim_ac < 0.75, "Dissimilar vectors should be below threshold: {}", sim_ac);
+    assert!(
+        sim_ab > 0.75,
+        "Similar vectors should exceed threshold: {}",
+        sim_ab
+    );
+    assert!(
+        sim_ac < 0.75,
+        "Dissimilar vectors should be below threshold: {}",
+        sim_ac
+    );
 }
 
 #[tokio::test]

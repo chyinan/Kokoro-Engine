@@ -1,6 +1,6 @@
 use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, Emitter};
+use tauri::{Emitter, Manager};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PetConfig {
@@ -72,27 +72,65 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("pet") {
         println!("[pet] found existing pet window, showing...");
         let cfg = load_pet_config();
-        let x = if cfg.position_x != 0 { cfg.position_x } else { 100 };
-        let y = if cfg.position_y != 0 { cfg.position_y } else { 100 };
+        let x = if cfg.position_x != 0 {
+            cfg.position_x
+        } else {
+            100
+        };
+        let y = if cfg.position_y != 0 {
+            cfg.position_y
+        } else {
+            100
+        };
         win.set_position(tauri::PhysicalPosition::new(x, y))
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
-        let w = if cfg.window_width >= 100 { cfg.window_width } else { 400 };
-        let h = if cfg.window_height >= 100 { cfg.window_height } else { 600 };
+        let w = if cfg.window_width >= 100 {
+            cfg.window_width
+        } else {
+            400
+        };
+        let h = if cfg.window_height >= 100 {
+            cfg.window_height
+        } else {
+            600
+        };
         win.set_size(tauri::PhysicalSize::new(w, h))
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
-        win.show().map_err(|e| KokoroError::Internal(e.to_string()))?;
-        win.set_focus().map_err(|e| KokoroError::Internal(e.to_string()))?;
+        win.show()
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
+        win.set_focus()
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
         println!("[pet] pet window shown successfully");
     } else {
         println!("[pet] pet window not found, creating new one...");
         let cfg = load_pet_config();
-        let x = if cfg.position_x != 0 { cfg.position_x } else { 100 };
-        let y = if cfg.position_y != 0 { cfg.position_y } else { 100 };
-        let w = if cfg.window_width >= 100 { cfg.window_width } else { 400 };
-        let h = if cfg.window_height >= 100 { cfg.window_height } else { 600 };
+        let x = if cfg.position_x != 0 {
+            cfg.position_x
+        } else {
+            100
+        };
+        let y = if cfg.position_y != 0 {
+            cfg.position_y
+        } else {
+            100
+        };
+        let w = if cfg.window_width >= 100 {
+            cfg.window_width
+        } else {
+            400
+        };
+        let h = if cfg.window_height >= 100 {
+            cfg.window_height
+        } else {
+            600
+        };
 
         let url = if cfg!(debug_assertions) {
-            tauri::WebviewUrl::External("http://localhost:1420/src/windows/pet.html".parse().unwrap())
+            tauri::WebviewUrl::External(
+                "http://localhost:1420/src/windows/pet.html"
+                    .parse()
+                    .unwrap(),
+            )
         } else {
             tauri::WebviewUrl::App("src/windows/pet.html".into())
         };
@@ -110,8 +148,10 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
             .build()
             .map_err(|e: tauri::Error| KokoroError::Internal(e.to_string()))?;
 
-        win.show().map_err(|e| KokoroError::Internal(e.to_string()))?;
-        win.set_focus().map_err(|e| KokoroError::Internal(e.to_string()))?;
+        win.show()
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
+        win.set_focus()
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
         println!("[pet] pet window created and shown successfully");
     }
     Ok(())
@@ -120,7 +160,8 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
 #[tauri::command]
 pub async fn hide_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("pet") {
-        win.hide().map_err(|e| KokoroError::Internal(e.to_string()))?;
+        win.hide()
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
 
         // Update config to reflect window is closed
         let mut cfg = load_pet_config();
@@ -128,7 +169,8 @@ pub async fn hide_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
         save_pet_config_to_disk(&cfg)?;
 
         // Emit event to notify main window
-        app.emit("pet-window-closed", ()).map_err(|e| KokoroError::Internal(e.to_string()))?;
+        app.emit("pet-window-closed", ())
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
     }
     Ok(())
 }
@@ -136,7 +178,8 @@ pub async fn hide_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
 #[tauri::command]
 pub async fn set_pet_drag_mode(app: tauri::AppHandle, _enabled: bool) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("pet") {
-        win.set_ignore_cursor_events(false).map_err(|e| KokoroError::Internal(e.to_string()))?;
+        win.set_ignore_cursor_events(false)
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
     }
     Ok(())
 }
@@ -161,7 +204,11 @@ pub async fn move_pet_window(app: tauri::AppHandle, x: i32, y: i32) -> Result<()
 }
 
 #[tauri::command]
-pub async fn resize_pet_window(app: tauri::AppHandle, width: u32, height: u32) -> Result<(), KokoroError> {
+pub async fn resize_pet_window(
+    app: tauri::AppHandle,
+    width: u32,
+    height: u32,
+) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("pet") {
         win.set_size(tauri::PhysicalSize::new(width, height))
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
@@ -179,8 +226,12 @@ pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(
         if !pet.is_visible().unwrap_or(false) {
             return Ok(());
         }
-        let pos = pet.outer_position().map_err(|e| KokoroError::Internal(e.to_string()))?;
-        let size = pet.inner_size().map_err(|e| KokoroError::Internal(e.to_string()))?;
+        let pos = pet
+            .outer_position()
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
+        let size = pet
+            .inner_size()
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
         let x = pos.x + (size.width as i32 - bubble_w) / 2;
         let y = pos.y - bubble_h - gap;
         (x, y)
@@ -189,12 +240,22 @@ pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(
     };
 
     if let Some(existing) = app.get_webview_window("bubble") {
-        existing.set_position(tauri::PhysicalPosition::new(bx, by)).map_err(|e| KokoroError::Internal(e.to_string()))?;
-        existing.show().map_err(|e| KokoroError::Internal(e.to_string()))?;
-        existing.emit("bubble-text-update", &text).map_err(|e| KokoroError::Internal(e.to_string()))?;
+        existing
+            .set_position(tauri::PhysicalPosition::new(bx, by))
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
+        existing
+            .show()
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
+        existing
+            .emit("bubble-text-update", &text)
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
     } else {
         let url = if cfg!(debug_assertions) {
-            tauri::WebviewUrl::External("http://localhost:1420/src/windows/bubble.html".parse().unwrap())
+            tauri::WebviewUrl::External(
+                "http://localhost:1420/src/windows/bubble.html"
+                    .parse()
+                    .unwrap(),
+            )
         } else {
             tauri::WebviewUrl::App("src/windows/bubble.html".into())
         };
@@ -212,7 +273,8 @@ pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(
             .build()
             .map_err(|e: tauri::Error| KokoroError::Internal(e.to_string()))?;
 
-        win.set_ignore_cursor_events(false).map_err(|e: tauri::Error| KokoroError::Internal(e.to_string()))?;
+        win.set_ignore_cursor_events(false)
+            .map_err(|e: tauri::Error| KokoroError::Internal(e.to_string()))?;
 
         let win_clone = win.clone();
         let text_clone = text.clone();
@@ -228,7 +290,8 @@ pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(
 #[tauri::command]
 pub async fn update_bubble_text(app: tauri::AppHandle, text: String) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("bubble") {
-        win.emit("bubble-text-update", &text).map_err(|e| KokoroError::Internal(e.to_string()))?;
+        win.emit("bubble-text-update", &text)
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
         Ok(())
     } else {
         Err(KokoroError::NotFound("bubble window not found".to_string()))
@@ -238,7 +301,8 @@ pub async fn update_bubble_text(app: tauri::AppHandle, text: String) -> Result<(
 #[tauri::command]
 pub async fn hide_bubble_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("bubble") {
-        win.hide().map_err(|e| KokoroError::Internal(e.to_string()))?;
+        win.hide()
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
     }
     Ok(())
 }

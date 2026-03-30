@@ -12,7 +12,12 @@ async fn test_path_traversal_dot_dot_in_url() {
     // Attempt to traverse using encoded slashes — warp will likely 404 or reject
     let url = format!("http://127.0.0.1:{}/vision/..%5C..%5Csecrets", server.port);
     let resp = client.get(&url).send().await.unwrap();
-    assert_ne!(resp.status(), 200, "path traversal must not succeed (got {})", resp.status());
+    assert_ne!(
+        resp.status(),
+        200,
+        "path traversal must not succeed (got {})",
+        resp.status()
+    );
 }
 
 #[tokio::test]
@@ -24,7 +29,11 @@ async fn test_path_traversal_direct() {
     // Direct .. in path — warp normalizes this before routing
     let url = format!("http://127.0.0.1:{}/vision/..%2fCargo.toml", server.port);
     let resp = client.get(&url).send().await.unwrap();
-    assert_ne!(resp.status(), 200, "path traversal via encoded / must not succeed");
+    assert_ne!(
+        resp.status(),
+        200,
+        "path traversal via encoded / must not succeed"
+    );
 }
 
 #[tokio::test]
@@ -34,9 +43,16 @@ async fn test_path_traversal_backslash_in_url() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Literal backslash in URL
-    let url = format!("http://127.0.0.1:{}/vision/test%5C..%5Csecrets", server.port);
+    let url = format!(
+        "http://127.0.0.1:{}/vision/test%5C..%5Csecrets",
+        server.port
+    );
     let resp = client.get(&url).send().await.unwrap();
-    assert_ne!(resp.status(), 200, "backslash path traversal must not succeed");
+    assert_ne!(
+        resp.status(),
+        200,
+        "backslash path traversal must not succeed"
+    );
 }
 
 // ── Oversized Upload ────────────────────────────────────────

@@ -42,9 +42,7 @@ pub async fn start_telegram_bot(
 }
 
 #[tauri::command]
-pub async fn stop_telegram_bot(
-    state: State<'_, TelegramService>,
-) -> Result<(), KokoroError> {
+pub async fn stop_telegram_bot(state: State<'_, TelegramService>) -> Result<(), KokoroError> {
     state.stop().await.map_err(KokoroError::ExternalService)
 }
 

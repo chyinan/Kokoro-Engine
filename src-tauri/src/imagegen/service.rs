@@ -1,14 +1,14 @@
 use super::config::{ImageGenProviderConfig, ImageGenSystemConfig};
-use super::interface::{ImageGenError, ImageGenParams, ImageGenProvider};
 use super::google::GoogleImageGenProvider;
+use super::interface::{ImageGenError, ImageGenParams, ImageGenProvider};
 use super::openai::OpenAIImageGenProvider;
 use super::stable_diffusion::StableDiffusionProvider;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Clone, Serialize)]
@@ -60,7 +60,9 @@ impl ImageGenService {
             match Self::build_provider(provider_config) {
                 Some(provider) => {
                     println!("[ImageGen] Registering provider: {}", provider.id());
-                    service.register_provider(provider, provider_config.clone()).await;
+                    service
+                        .register_provider(provider, provider_config.clone())
+                        .await;
                 }
                 None => {
                     eprintln!(
@@ -98,7 +100,11 @@ impl ImageGenService {
         }
     }
 
-    pub async fn register_provider(&self, provider: Box<dyn ImageGenProvider>, config: ImageGenProviderConfig) {
+    pub async fn register_provider(
+        &self,
+        provider: Box<dyn ImageGenProvider>,
+        config: ImageGenProviderConfig,
+    ) {
         let id = provider.id();
         let mut providers = self.providers.write().await;
         providers.insert(id.clone(), provider);
@@ -114,11 +120,19 @@ impl ImageGenService {
         window_size: Option<(u32, u32)>,
     ) -> Result<ImageGenResult, ImageGenError> {
         // Drop background requests if a generation is already in flight
-        if self.generating.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-            return Err(ImageGenError::ConfigError("Generation already in progress, skipping".to_string()));
+        if self
+            .generating
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(ImageGenError::ConfigError(
+                "Generation already in progress, skipping".to_string(),
+            ));
         }
 
-        let result = self.generate_inner(prompt, provider_id, params, window_size).await;
+        let result = self
+            .generate_inner(prompt, provider_id, params, window_size)
+            .await;
         self.generating.store(false, Ordering::SeqCst);
         result
     }
@@ -131,26 +145,37 @@ impl ImageGenService {
         window_size: Option<(u32, u32)>,
     ) -> Result<ImageGenResult, ImageGenError> {
         let providers = self.providers.read().await;
-        
+
         let target_id = if let Some(id) = provider_id {
             id
         } else {
             let default = self.default_provider.read().await;
-            let preferred = default.clone().ok_or(ImageGenError::ConfigError("No default provider configured".to_string()))?;
+            let preferred = default.clone().ok_or(ImageGenError::ConfigError(
+                "No default provider configured".to_string(),
+            ))?;
             // Fall back to first registered provider if the configured default isn't available
             if providers.contains_key(&preferred) {
                 preferred
             } else {
-                providers.keys().next()
+                providers
+                    .keys()
+                    .next()
                     .cloned()
-                    .ok_or(ImageGenError::ConfigError("No providers registered".to_string()))?
+                    .ok_or(ImageGenError::ConfigError(
+                        "No providers registered".to_string(),
+                    ))?
             }
         };
 
-        let provider = providers.get(&target_id).ok_or(ImageGenError::ProviderNotFound(target_id.clone()))?;
+        let provider = providers
+            .get(&target_id)
+            .ok_or(ImageGenError::ProviderNotFound(target_id.clone()))?;
 
         if !provider.is_available().await {
-            return Err(ImageGenError::Unavailable(format!("Provider {} is not available", target_id)));
+            return Err(ImageGenError::Unavailable(format!(
+                "Provider {} is not available",
+                target_id
+            )));
         }
 
         let mut gen_params = params.unwrap_or_default();
@@ -172,7 +197,10 @@ impl ImageGenService {
             }
         }
 
-        println!("[ImageGen] Generating with provider '{}': {}", target_id, prompt);
+        println!(
+            "[ImageGen] Generating with provider '{}': {}",
+            target_id, prompt
+        );
 
         let response = provider.generate(gen_params).await?;
 
@@ -185,19 +213,18 @@ impl ImageGenService {
         );
         let path = self.output_dir.join(&filename);
 
-        fs::write(&path, &response.data).map_err(|e| {
-            ImageGenError::GenerationFailed(format!("Failed to save image: {}", e))
-        })?;
+        fs::write(&path, &response.data)
+            .map_err(|e| ImageGenError::GenerationFailed(format!("Failed to save image: {}", e)))?;
 
         // Construct file URL
         // In Tauri v2, we can't easily guess the "asset protocol" URL perfectly without knowing the scope,
         // but typically "file://" works if scope allows, or we use the custom protocol.
-        // For now, let's return the absolute path, and frontend can convert it if needed, 
+        // For now, let's return the absolute path, and frontend can convert it if needed,
         // OR we return a `asset://` compatible URL?
         // Actually `BackgroundLayer` likely expects a browser-compatible URL.
         // For local files in Tauri, we usually need the `tauri-plugin-fs` or `convertFileSrc`.
         // Ideally we return the absolute path, and the frontend helper utilizes `convertFileSrc`.
-        
+
         let abs_path = path.to_string_lossy().to_string();
 
         Ok(ImageGenResult {
@@ -206,12 +233,12 @@ impl ImageGenService {
             provider_id: target_id,
         })
     }
-    
+
     pub async fn list_providers(&self) -> Vec<String> {
         let providers = self.providers.read().await;
         providers.keys().cloned().collect()
     }
-    
+
     pub async fn reload_from_config(&self, config: &ImageGenSystemConfig) {
         let mut providers = self.providers.write().await;
         providers.clear();
@@ -223,7 +250,9 @@ impl ImageGenService {
 
         if config.enabled {
             for provider_config in &config.providers {
-                if !provider_config.enabled { continue; }
+                if !provider_config.enabled {
+                    continue;
+                }
                 if let Some(provider) = Self::build_provider(provider_config) {
                     let id = provider.id();
                     providers.insert(id.clone(), provider);

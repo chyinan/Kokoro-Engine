@@ -21,5 +21,7 @@ pub async fn save_llm_config(
 
 #[tauri::command]
 pub async fn list_ollama_models(base_url: String) -> Result<Vec<OllamaModelInfo>, KokoroError> {
-    OllamaProvider::list_models(&base_url).await.map_err(KokoroError::Llm)
+    OllamaProvider::list_models(&base_url)
+        .await
+        .map_err(KokoroError::Llm)
 }

@@ -31,7 +31,9 @@ pub fn run() {
 
         let search_roots = [
             std::env::current_dir().ok(),
-            std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())),
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf())),
         ];
         for root in search_roots.into_iter().flatten() {
             let candidate = root.join(ORT_LIB_NAME);
@@ -584,7 +586,10 @@ pub fn run() {
 
 /// Recursively copy a directory tree from `src` to `dst`.
 #[cfg(not(debug_assertions))]
-fn copy_dir_all(src: impl AsRef<std::path::Path>, dst: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+fn copy_dir_all(
+    src: impl AsRef<std::path::Path>,
+    dst: impl AsRef<std::path::Path>,
+) -> std::io::Result<()> {
     std::fs::create_dir_all(&dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;

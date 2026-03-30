@@ -1,6 +1,5 @@
 //! LLM Provider trait and async-openai-backed provider implementation.
 
-use async_trait::async_trait;
 use async_openai::config::OpenAIConfig;
 use async_openai::error::OpenAIError;
 use async_openai::types::chat::{
@@ -9,7 +8,8 @@ use async_openai::types::chat::{
     CreateChatCompletionRequestArgs, FinishReason, FunctionObjectArgs, ToolChoiceOptions,
 };
 use async_openai::Client;
-use futures::{Stream, StreamExt, channel::mpsc};
+use async_trait::async_trait;
+use futures::{channel::mpsc, Stream, StreamExt};
 use std::collections::HashMap;
 use std::pin::Pin;
 
@@ -111,7 +111,11 @@ pub async fn create_chat(
     options: Option<LlmParams>,
 ) -> Result<String, String> {
     let request = build_request(model, messages, options, None, false)?;
-    let response = client.chat().create(request).await.map_err(format_openai_error)?;
+    let response = client
+        .chat()
+        .create(request)
+        .await
+        .map_err(format_openai_error)?;
 
     Ok(response
         .choices
@@ -248,7 +252,9 @@ fn build_request(
     }
     if let Some(tools) = converted_tools {
         builder.tools(tools);
-        builder.tool_choice(ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::Auto));
+        builder.tool_choice(ChatCompletionToolChoiceOption::Mode(
+            ToolChoiceOptions::Auto,
+        ));
         builder.parallel_tool_calls(false);
     }
 
@@ -290,7 +296,9 @@ fn convert_tools(tools: Vec<LlmToolDefinition>) -> Result<Vec<ChatCompletionTool
                 .build()
                 .map_err(|error| error.to_string())?;
 
-            Ok(ChatCompletionTools::Function(ChatCompletionTool { function }))
+            Ok(ChatCompletionTools::Function(ChatCompletionTool {
+                function,
+            }))
         })
         .collect()
 }

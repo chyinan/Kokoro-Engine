@@ -47,7 +47,11 @@ fn transcription_url(base_url: &str) -> String {
     }
 
     if let Ok(mut url) = Url::parse(trimmed) {
-        let normalized_path = if url.path().trim_end_matches('/').ends_with("/audio/transcriptions") {
+        let normalized_path = if url
+            .path()
+            .trim_end_matches('/')
+            .ends_with("/audio/transcriptions")
+        {
             url.path().trim_end_matches('/').to_string()
         } else {
             format!("{}/audio/transcriptions", url.path().trim_end_matches('/'))

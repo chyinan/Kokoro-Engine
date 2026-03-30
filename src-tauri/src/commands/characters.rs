@@ -45,9 +45,22 @@ pub async fn list_characters(
     .fetch_all(&orchestrator.db)
     .await?;
 
-    Ok(rows.into_iter().map(|(id, name, persona, user_nickname, source_format, created_at, updated_at)| {
-        CharacterRecord { id, name, persona, user_nickname, source_format, created_at, updated_at }
-    }).collect())
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, name, persona, user_nickname, source_format, created_at, updated_at)| {
+                CharacterRecord {
+                    id,
+                    name,
+                    persona,
+                    user_nickname,
+                    source_format,
+                    created_at,
+                    updated_at,
+                }
+            },
+        )
+        .collect())
 }
 
 #[tauri::command]

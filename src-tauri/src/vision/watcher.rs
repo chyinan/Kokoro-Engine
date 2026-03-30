@@ -40,7 +40,16 @@ impl VisionWatcher {
 
     /// Start the background vision loop.
     pub fn start(&self, app_handle: AppHandle) {
-        if self.running.compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed).is_err() {
+        if self
+            .running
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
             println!("[Vision] Watcher already running");
             return;
         }
@@ -92,7 +101,14 @@ impl VisionWatcher {
                     println!("[Vision] Screen changed, analyzing with VLM...");
 
                     // 3. Send to VLM for analysis
-                    match analyze_screenshot(&client, &config, &screenshot, watcher.llm_service.as_ref()).await {
+                    match analyze_screenshot(
+                        &client,
+                        &config,
+                        &screenshot,
+                        watcher.llm_service.as_ref(),
+                    )
+                    .await
+                    {
                         Ok(description) => {
                             println!(
                                 "[Vision] Observation: {}",
@@ -102,8 +118,10 @@ impl VisionWatcher {
                             let _ = app_handle.emit("vision-observation", &description);
 
                             // 冷却检查：距上次 proactive 至少间隔 interval_secs
-                            let cooldown = std::time::Duration::from_secs(config.interval_secs as u64);
-                            let ready = !proactive_initialized || last_proactive_ts.elapsed() >= cooldown;
+                            let cooldown =
+                                std::time::Duration::from_secs(config.interval_secs as u64);
+                            let ready =
+                                !proactive_initialized || last_proactive_ts.elapsed() >= cooldown;
                             if ready {
                                 proactive_initialized = true;
                                 last_proactive_ts = std::time::Instant::now();
@@ -170,7 +188,10 @@ pub async fn analyze_screenshot(
         let svc = llm_service.ok_or_else(|| "LLM service not available".to_string())?;
         let provider = svc.provider().await;
 
-        let messages = vec![user_message_with_images(VISION_PROMPT.to_string(), vec![data_url])];
+        let messages = vec![user_message_with_images(
+            VISION_PROMPT.to_string(),
+            vec![data_url],
+        )];
 
         let params = LlmParams {
             max_tokens: Some(150),

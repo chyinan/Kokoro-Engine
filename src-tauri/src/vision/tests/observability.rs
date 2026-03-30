@@ -28,7 +28,8 @@ impl VisionMetrics {
     pub fn record_upload(&self, size: u64, latency: std::time::Duration) {
         self.uploads_total.fetch_add(1, Ordering::Relaxed);
         self.bytes_uploaded.fetch_add(size, Ordering::Relaxed);
-        self.upload_latency_us.store(latency.as_micros() as u64, Ordering::Relaxed);
+        self.upload_latency_us
+            .store(latency.as_micros() as u64, Ordering::Relaxed);
     }
 
     pub fn record_failure(&self) {

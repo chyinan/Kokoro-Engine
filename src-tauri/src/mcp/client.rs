@@ -131,7 +131,10 @@ impl McpClient {
 
     /// Refresh the tool list from the server.
     pub async fn refresh_tools(&mut self) -> Result<(), String> {
-        let result = self.transport.request("tools/list", Some(serde_json::json!({}))).await?;
+        let result = self
+            .transport
+            .request("tools/list", Some(serde_json::json!({})))
+            .await?;
 
         #[derive(Deserialize)]
         struct ToolListResult {

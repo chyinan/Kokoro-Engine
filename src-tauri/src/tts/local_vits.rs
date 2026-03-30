@@ -90,7 +90,13 @@ impl TtsProvider for LocalVITSProvider {
 
     async fn is_available(&self) -> bool {
         let url = format!("{}/health", self.endpoint);
-        match self.client.get(&url).timeout(std::time::Duration::from_secs(3)).send().await {
+        match self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+        {
             Ok(resp) => resp.status().is_success(),
             Err(_) => false,
         }

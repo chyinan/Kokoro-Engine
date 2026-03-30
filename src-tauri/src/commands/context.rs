@@ -34,26 +34,38 @@ pub async fn get_emotion_state(
 }
 
 #[tauri::command]
-pub async fn set_persona(prompt: String, state: State<'_, AIOrchestrator>) -> Result<(), KokoroError> {
+pub async fn set_persona(
+    prompt: String,
+    state: State<'_, AIOrchestrator>,
+) -> Result<(), KokoroError> {
     state.set_system_prompt(prompt).await;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn set_character_name(name: String, state: State<'_, AIOrchestrator>) -> Result<(), KokoroError> {
+pub async fn set_character_name(
+    name: String,
+    state: State<'_, AIOrchestrator>,
+) -> Result<(), KokoroError> {
     state.set_character_name(name).await;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn set_active_character_id(id: String, state: State<'_, AIOrchestrator>) -> Result<(), KokoroError> {
+pub async fn set_active_character_id(
+    id: String,
+    state: State<'_, AIOrchestrator>,
+) -> Result<(), KokoroError> {
     state.set_character_id(id.clone()).await;
     crate::ai::context::AIOrchestrator::persist_active_character_id(&id);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn set_user_name(name: String, state: State<'_, AIOrchestrator>) -> Result<(), KokoroError> {
+pub async fn set_user_name(
+    name: String,
+    state: State<'_, AIOrchestrator>,
+) -> Result<(), KokoroError> {
     state.set_user_name(name).await;
     Ok(())
 }
@@ -94,9 +106,7 @@ pub async fn set_jailbreak_prompt(
 }
 
 #[tauri::command]
-pub async fn get_jailbreak_prompt(
-    state: State<'_, AIOrchestrator>,
-) -> Result<String, KokoroError> {
+pub async fn get_jailbreak_prompt(state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
     Ok(state.get_jailbreak_prompt().await)
 }
 
@@ -106,7 +116,10 @@ pub async fn set_proactive_enabled(
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
     state.set_proactive_enabled(enabled);
-    println!("[AI] Proactive messages {}", if enabled { "enabled" } else { "disabled" });
+    println!(
+        "[AI] Proactive messages {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
 
     // Persist to disk
     let app_data = dirs_next::data_dir()
@@ -118,9 +131,7 @@ pub async fn set_proactive_enabled(
 }
 
 #[tauri::command]
-pub async fn get_proactive_enabled(
-    state: State<'_, AIOrchestrator>,
-) -> Result<bool, KokoroError> {
+pub async fn get_proactive_enabled(state: State<'_, AIOrchestrator>) -> Result<bool, KokoroError> {
     Ok(state.is_proactive_enabled())
 }
 
@@ -138,9 +149,7 @@ pub async fn set_memory_enabled(
 }
 
 #[tauri::command]
-pub async fn get_memory_enabled(
-    state: State<'_, AIOrchestrator>,
-) -> Result<bool, KokoroError> {
+pub async fn get_memory_enabled(state: State<'_, AIOrchestrator>) -> Result<bool, KokoroError> {
     Ok(state.is_memory_enabled())
 }
 
@@ -164,7 +173,11 @@ pub async fn delete_last_messages(
     }
 
     history.truncate(current_len - to_remove);
-    println!("[AI] Deleted last {} message(s) from history (now {} messages)", to_remove, history.len());
+    println!(
+        "[AI] Deleted last {} message(s) from history (now {} messages)",
+        to_remove,
+        history.len()
+    );
 
     // 从数据库末尾删除，直到删够 to_remove 条「可见」消息为止。
     // 一条可见消息可能对应多行 DB（assistant_tool_calls + tool_result + assistant），
@@ -192,7 +205,11 @@ pub async fn delete_last_messages(
             let technical_type = metadata
                 .as_deref()
                 .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-                .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()));
+                .and_then(|v| {
+                    v.get("type")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
+                });
             let is_invisible = matches!(
                 technical_type.as_deref(),
                 Some("assistant_tool_calls") | Some("tool_result")
@@ -204,7 +221,10 @@ pub async fn delete_last_messages(
 
         if !ids_to_delete.is_empty() {
             // 用事务保证原子性，避免崩溃导致部分删除
-            let mut tx = state.db.begin().await
+            let mut tx = state
+                .db
+                .begin()
+                .await
                 .map_err(|e| KokoroError::Database(e.to_string()))?;
             for id in &ids_to_delete {
                 sqlx::query("DELETE FROM conversation_messages WHERE id = ?")
@@ -213,9 +233,14 @@ pub async fn delete_last_messages(
                     .await
                     .map_err(|e| KokoroError::Database(e.to_string()))?;
             }
-            tx.commit().await
+            tx.commit()
+                .await
                 .map_err(|e| KokoroError::Database(e.to_string()))?;
-            println!("[AI] Deleted {} DB row(s) for {} visible message(s)", ids_to_delete.len(), visible_deleted);
+            println!(
+                "[AI] Deleted {} DB row(s) for {} visible message(s)",
+                ids_to_delete.len(),
+                visible_deleted
+            );
         }
     }
 

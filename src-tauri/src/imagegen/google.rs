@@ -1,5 +1,7 @@
-use crate::imagegen::interface::{ImageGenError, ImageGenParams, ImageGenProvider, ImageGenResponse};
 use crate::imagegen::config::ImageGenProviderConfig;
+use crate::imagegen::interface::{
+    ImageGenError, ImageGenParams, ImageGenProvider, ImageGenResponse,
+};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::json;
@@ -17,11 +19,17 @@ fn parse_aspect_ratio(size: &str) -> &'static str {
                 if let (Ok(w), Ok(h)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>()) {
                     if h > 0.0 {
                         let r = w / h;
-                        return if r > 1.6 { "16:9" }
-                               else if r > 1.2 { "4:3" }
-                               else if r < 0.625 { "9:16" }
-                               else if r < 0.85 { "3:4" }
-                               else { "1:1" };
+                        return if r > 1.6 {
+                            "16:9"
+                        } else if r > 1.2 {
+                            "4:3"
+                        } else if r < 0.625 {
+                            "9:16"
+                        } else if r < 0.85 {
+                            "3:4"
+                        } else {
+                            "1:1"
+                        };
                     }
                 }
             }
@@ -40,10 +48,17 @@ pub struct GoogleImageGenProvider {
 impl GoogleImageGenProvider {
     pub fn new(config: &ImageGenProviderConfig) -> Result<Self, String> {
         let api_key = config.api_key.clone().ok_or("Google API Key is required")?;
-        let model = config.model.clone().unwrap_or_else(|| "imagen-3.0-generate-001".to_string());
-        
+        let model = config
+            .model
+            .clone()
+            .unwrap_or_else(|| "imagen-3.0-generate-001".to_string());
+
         // If empty string provided, fall back to default
-        let model = if model.is_empty() { "imagen-3.0-generate-001".to_string() } else { model };
+        let model = if model.is_empty() {
+            "imagen-3.0-generate-001".to_string()
+        } else {
+            model
+        };
 
         Ok(Self {
             id: config.id.clone(),
@@ -59,7 +74,7 @@ impl GoogleImageGenProvider {
 
 #[async_trait]
 impl ImageGenProvider for GoogleImageGenProvider {
-     fn id(&self) -> String {
+    fn id(&self) -> String {
         self.id.clone()
     }
 
@@ -102,12 +117,7 @@ impl ImageGenProvider for GoogleImageGenProvider {
                 let client = client.clone();
                 let url = url_clone.clone();
                 let body = body_clone.clone();
-                async move {
-                    client.post(&url)
-                        .json(&body)
-                        .send()
-                        .await
-                }
+                async move { client.post(&url).json(&body).send().await }
             },
             2,
         )
@@ -116,37 +126,50 @@ impl ImageGenProvider for GoogleImageGenProvider {
 
         if !res.status().is_success() {
             let error_text = res.text().await.unwrap_or_default();
-            return Err(ImageGenError::GenerationFailed(format!("Google API Error: {}", error_text)));
+            return Err(ImageGenError::GenerationFailed(format!(
+                "Google API Error: {}",
+                error_text
+            )));
         }
 
-        let json: serde_json::Value = res.json().await
+        let json: serde_json::Value = res
+            .json()
+            .await
             .map_err(|e| ImageGenError::GenerationFailed(format!("JSON Error: {}", e)))?;
 
         // Parse response
         // Structure: { "generatedImages": [ { "image": { "imageBytes": "..." } } ] }
-        let generated_images = json.get("generatedImages")
+        let generated_images = json
+            .get("generatedImages")
             .and_then(|v| v.as_array())
-            .ok_or(ImageGenError::GenerationFailed("Missing 'generatedImages' array".to_string()))?;
+            .ok_or(ImageGenError::GenerationFailed(
+                "Missing 'generatedImages' array".to_string(),
+            ))?;
 
         if generated_images.is_empty() {
-            return Err(ImageGenError::GenerationFailed("No images returned".to_string()));
+            return Err(ImageGenError::GenerationFailed(
+                "No images returned".to_string(),
+            ));
         }
 
         let first_image = &generated_images[0];
-        let b64_data = first_image.get("image")
+        let b64_data = first_image
+            .get("image")
             .and_then(|v| v.get("imageBytes"))
             .and_then(|v| v.as_str())
-            .ok_or(ImageGenError::GenerationFailed("Missing 'image.imageBytes' field".to_string()))?;
+            .ok_or(ImageGenError::GenerationFailed(
+                "Missing 'image.imageBytes' field".to_string(),
+            ))?;
 
         // Decode Base64
-        use base64::{Engine as _, engine::general_purpose};
+        use base64::{engine::general_purpose, Engine as _};
         let image_data = general_purpose::STANDARD
             .decode(b64_data)
             .map_err(|e| ImageGenError::GenerationFailed(format!("Base64 decode failed: {}", e)))?;
 
         Ok(ImageGenResponse {
             data: image_data,
-            format: "png".to_string(), 
+            format: "png".to_string(),
         })
     }
 }

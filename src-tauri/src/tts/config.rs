@@ -143,7 +143,10 @@ mod tests {
         let cache = CacheConfig::default();
         assert!(cache.enabled, "Cache should be enabled by default");
         assert_eq!(cache.max_entries, 500, "Default max_entries should be 500");
-        assert_eq!(cache.ttl_secs, 3600, "Default TTL should be 3600 seconds (1 hour)");
+        assert_eq!(
+            cache.ttl_secs, 3600,
+            "Default TTL should be 3600 seconds (1 hour)"
+        );
     }
 
     #[test]
@@ -193,8 +196,7 @@ mod tests {
     #[test]
     fn test_tts_system_config_serde_roundtrip() {
         let original = TtsSystemConfig::default();
-        let json = serde_json::to_string(&original)
-            .expect("Failed to serialize TtsSystemConfig");
+        let json = serde_json::to_string(&original).expect("Failed to serialize TtsSystemConfig");
         let deserialized: TtsSystemConfig =
             serde_json::from_str(&json).expect("Failed to deserialize TtsSystemConfig");
 
@@ -242,7 +244,10 @@ mod tests {
         };
 
         assert_eq!(provider.id, "test", "Provider ID should be set");
-        assert_eq!(provider.provider_type, "openai", "Provider type should be set");
+        assert_eq!(
+            provider.provider_type, "openai",
+            "Provider type should be set"
+        );
         assert!(provider.enabled, "Provider should be enabled");
         assert_eq!(provider.api_key, None, "API key should be None");
     }

@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn apply_modifiers_lower_bound_clamping() {
         let m = EmotionTtsModifiers {
-            speed_factor: 0.1, // Very low
+            speed_factor: 0.1,  // Very low
             pitch_offset: -5.0, // Very negative
         };
         let (speed, pitch) = apply_modifiers(1.0, 0.0, &m);
@@ -143,7 +143,10 @@ mod tests {
             m.speed_factor > 1.0,
             "Should handle mood > 1.0 without panic"
         );
-        assert!(m.speed_factor <= 2.0, "Should still be within reasonable bounds");
+        assert!(
+            m.speed_factor <= 2.0,
+            "Should still be within reasonable bounds"
+        );
     }
 
     #[test]
@@ -153,7 +156,10 @@ mod tests {
             m.speed_factor < 1.0,
             "Should handle mood < 0.0 without panic"
         );
-        assert!(m.speed_factor >= 0.5, "Should still be within reasonable bounds");
+        assert!(
+            m.speed_factor >= 0.5,
+            "Should still be within reasonable bounds"
+        );
     }
 
     #[test]
@@ -174,7 +180,10 @@ mod tests {
     fn joy_emotion_spot_check() {
         let m = get_modifiers("joy", 0.8);
         assert!(m.speed_factor > 1.0, "Joy should increase speed");
-        assert!(m.pitch_offset > 0.0, "Joy should have positive pitch offset");
+        assert!(
+            m.pitch_offset > 0.0,
+            "Joy should have positive pitch offset"
+        );
     }
 
     #[test]
@@ -198,7 +207,10 @@ mod tests {
     fn love_emotion_spot_check() {
         let m = get_modifiers("love", 0.5);
         assert!(m.speed_factor < 1.0, "Love should soften speed");
-        assert!(m.pitch_offset > 0.0, "Love should have a slightly higher pitch");
+        assert!(
+            m.pitch_offset > 0.0,
+            "Love should have a slightly higher pitch"
+        );
     }
 
     #[test]

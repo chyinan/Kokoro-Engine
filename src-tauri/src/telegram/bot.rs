@@ -1,6 +1,7 @@
 //! Telegram Bot core — message handling, command dispatch, and AI pipeline bridge.
 
 use super::config::TelegramConfig;
+use crate::actions::tool_settings::ToolSettings;
 use crate::ai::context::AIOrchestrator;
 use crate::ai::memory_extractor;
 use crate::imagegen::ImageGenService;
@@ -11,12 +12,11 @@ use crate::llm::messages::{
 use crate::llm::service::LlmService;
 use crate::stt::{AudioSource, SttService};
 use crate::tts::TtsService;
-use crate::actions::tool_settings::ToolSettings;
 use futures::StreamExt;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use serde::Serialize;
 use tauri::{Emitter, Manager};
 use teloxide::prelude::*;
 use teloxide::types::InputFile;
@@ -78,7 +78,12 @@ pub async fn run_polling(
     let handler = Update::filter_message().endpoint(handle_message);
 
     let mut dispatcher = Dispatcher::builder(bot.clone(), handler)
-        .dependencies(dptree::deps![config.clone(), sessions.clone(), app.clone(), rate_limiter.clone()])
+        .dependencies(dptree::deps![
+            config.clone(),
+            sessions.clone(),
+            app.clone(),
+            rate_limiter.clone()
+        ])
         .default_handler(|_upd| async {})
         .build();
 
@@ -112,9 +117,7 @@ async fn handle_message(
     let config = Arc::new(config.read().await.clone());
 
     // Access control: check whitelist
-    if !config.allowed_chat_ids.is_empty()
-        && !config.allowed_chat_ids.contains(&chat_id.0)
-    {
+    if !config.allowed_chat_ids.is_empty() && !config.allowed_chat_ids.contains(&chat_id.0) {
         println!("[Telegram] Chat {} not in whitelist, ignoring", chat_id.0);
         return Ok(());
     }
@@ -288,11 +291,14 @@ async fn handle_text(
         .await;
 
     // Sync user message to desktop UI
-    let _ = app.emit("telegram:chat-sync", TelegramChatSync {
-        role: "user".to_string(),
-        text: text.to_string(),
-        translation: None,
-    });
+    let _ = app.emit(
+        "telegram:chat-sync",
+        TelegramChatSync {
+            role: "user".to_string(),
+            text: text.to_string(),
+            translation: None,
+        },
+    );
 
     // 2. Compose prompt context (with tool prompt)
     let action_registry = app
@@ -308,7 +314,11 @@ async fn handle_text(
             orchestrator.is_memory_enabled(),
             &settings,
         );
-        if p.is_empty() { None } else { Some(p) }
+        if p.is_empty() {
+            None
+        } else {
+            Some(p)
+        }
     };
 
     let prompt_messages = orchestrator
@@ -358,13 +368,19 @@ async fn handle_text(
         let (cleaned, round_translation) = extract_translate_tags(&cleaned);
         let cleaned = strip_leaked_tags(&cleaned);
 
-        println!("[Telegram] Tool loop round: {} tool_calls found, char_id='{}'", tool_calls.len(), char_id);
+        println!(
+            "[Telegram] Tool loop round: {} tool_calls found, char_id='{}'",
+            tool_calls.len(),
+            char_id
+        );
 
         if let Some(t) = round_translation {
             all_translations.push(t);
         }
         if !cleaned.is_empty() {
-            if !all_cleaned_text.is_empty() { all_cleaned_text.push(' '); }
+            if !all_cleaned_text.is_empty() {
+                all_cleaned_text.push(' ');
+            }
             all_cleaned_text.push_str(&cleaned);
         }
 
@@ -377,7 +393,10 @@ async fn handle_text(
         let mut tool_results = Vec::new();
         let mut any_needs_feedback = false;
         for tc in &tool_calls {
-            println!("[Telegram/ToolCall] Executing: {} with args {:?}", tc.name, tc.args);
+            println!(
+                "[Telegram/ToolCall] Executing: {} with args {:?}",
+                tc.name, tc.args
+            );
             if registry.needs_feedback(&tc.name) {
                 any_needs_feedback = true;
             }
@@ -386,7 +405,10 @@ async fn handle_text(
                 settings.is_enabled(&tc.name)
             };
             if !enabled {
-                tool_results.push(format!("- {}: Error: Tool '{}' is disabled", tc.name, tc.name));
+                tool_results.push(format!(
+                    "- {}: Error: Tool '{}' is disabled",
+                    tc.name, tc.name
+                ));
                 continue;
             }
             let ctx = crate::actions::registry::ActionContext {
@@ -436,15 +458,26 @@ async fn handle_text(
         .as_ref()
         .map(|t| serde_json::json!({ "translation": t }).to_string());
     orchestrator
-        .add_message_with_metadata("assistant".to_string(), response.clone(), metadata, &char_id)
+        .add_message_with_metadata(
+            "assistant".to_string(),
+            response.clone(),
+            metadata,
+            &char_id,
+        )
         .await;
 
     // Trigger periodic memory extraction (every 5 user messages)
     let msg_count = orchestrator.get_message_count().await;
     let memory_msg_count = orchestrator.get_memory_trigger_count().await;
-    println!("[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}", msg_count, memory_msg_count, char_id);
+    println!(
+        "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
+        msg_count, memory_msg_count, char_id
+    );
     if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        println!("[Telegram/Memory] Triggering memory extraction (count={})", msg_count);
+        println!(
+            "[Telegram/Memory] Triggering memory extraction (count={})",
+            msg_count
+        );
         let history = orchestrator.get_recent_memory_history(10).await;
         let memory_mgr = orchestrator.memory_manager.clone();
         let provider_for_mem = llm_service.provider().await;
@@ -488,11 +521,14 @@ async fn handle_text(
     }
 
     // Sync assistant message to desktop UI
-    let _ = app.emit("telegram:chat-sync", TelegramChatSync {
-        role: "assistant".to_string(),
-        text: response.clone(),
-        translation: translation.clone(),
-    });
+    let _ = app.emit(
+        "telegram:chat-sync",
+        TelegramChatSync {
+            role: "assistant".to_string(),
+            text: response.clone(),
+            translation: translation.clone(),
+        },
+    );
 
     // 6. Build reply text (include translation if present)
     let reply_text = if let Some(ref t) = translation {
@@ -631,17 +667,23 @@ async fn handle_photo(
             }
         }
     };
-    println!("[Telegram] Resolved char_id='{}' for photo request", char_id);
+    println!(
+        "[Telegram] Resolved char_id='{}' for photo request",
+        char_id
+    );
     orchestrator
         .add_message("user".to_string(), caption.clone(), &char_id)
         .await;
 
     // Sync user message to desktop UI
-    let _ = app.emit("telegram:chat-sync", TelegramChatSync {
-        role: "user".to_string(),
-        text: format!("[TG] 📷 {}", caption),
-        translation: None,
-    });
+    let _ = app.emit(
+        "telegram:chat-sync",
+        TelegramChatSync {
+            role: "user".to_string(),
+            text: format!("[TG] 📷 {}", caption),
+            translation: None,
+        },
+    );
 
     // 2. Compose prompt context (with tool prompt)
     let action_registry = app
@@ -657,7 +699,11 @@ async fn handle_photo(
             orchestrator.is_memory_enabled(),
             &settings,
         );
-        if p.is_empty() { None } else { Some(p) }
+        if p.is_empty() {
+            None
+        } else {
+            Some(p)
+        }
     };
 
     let prompt_messages = orchestrator
@@ -710,13 +756,19 @@ async fn handle_photo(
         let (cleaned, round_translation) = extract_translate_tags(&cleaned);
         let cleaned = strip_leaked_tags(&cleaned);
 
-        println!("[Telegram/Photo] Tool loop round: {} tool_calls found, char_id='{}'", tool_calls.len(), char_id);
+        println!(
+            "[Telegram/Photo] Tool loop round: {} tool_calls found, char_id='{}'",
+            tool_calls.len(),
+            char_id
+        );
 
         if let Some(t) = round_translation {
             all_translations.push(t);
         }
         if !cleaned.is_empty() {
-            if !all_cleaned_text.is_empty() { all_cleaned_text.push(' '); }
+            if !all_cleaned_text.is_empty() {
+                all_cleaned_text.push(' ');
+            }
             all_cleaned_text.push_str(&cleaned);
         }
 
@@ -728,7 +780,10 @@ async fn handle_photo(
         let mut tool_results = Vec::new();
         let mut any_needs_feedback = false;
         for tc in &tool_calls {
-            println!("[Telegram/ToolCall] Executing: {} with args {:?}", tc.name, tc.args);
+            println!(
+                "[Telegram/ToolCall] Executing: {} with args {:?}",
+                tc.name, tc.args
+            );
             if registry.needs_feedback(&tc.name) {
                 any_needs_feedback = true;
             }
@@ -737,7 +792,10 @@ async fn handle_photo(
                 settings.is_enabled(&tc.name)
             };
             if !enabled {
-                tool_results.push(format!("- {}: Error: Tool '{}' is disabled", tc.name, tc.name));
+                tool_results.push(format!(
+                    "- {}: Error: Tool '{}' is disabled",
+                    tc.name, tc.name
+                ));
                 continue;
             }
             let ctx = crate::actions::registry::ActionContext {
@@ -787,15 +845,26 @@ async fn handle_photo(
         .as_ref()
         .map(|t| serde_json::json!({ "translation": t }).to_string());
     orchestrator
-        .add_message_with_metadata("assistant".to_string(), response.clone(), metadata, &char_id)
+        .add_message_with_metadata(
+            "assistant".to_string(),
+            response.clone(),
+            metadata,
+            &char_id,
+        )
         .await;
 
     // Trigger periodic memory extraction (every 5 user messages)
     let msg_count = orchestrator.get_message_count().await;
     let memory_msg_count = orchestrator.get_memory_trigger_count().await;
-    println!("[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}", msg_count, memory_msg_count, char_id);
+    println!(
+        "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
+        msg_count, memory_msg_count, char_id
+    );
     if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        println!("[Telegram/Memory] Triggering memory extraction (count={})", msg_count);
+        println!(
+            "[Telegram/Memory] Triggering memory extraction (count={})",
+            msg_count
+        );
         let history = orchestrator.get_recent_memory_history(10).await;
         let memory_mgr = orchestrator.memory_manager.clone();
         let provider_for_mem = llm_service.provider().await;
@@ -839,11 +908,14 @@ async fn handle_photo(
     }
 
     // Sync to desktop
-    let _ = app.emit("telegram:chat-sync", TelegramChatSync {
-        role: "assistant".to_string(),
-        text: response.clone(),
-        translation: translation.clone(),
-    });
+    let _ = app.emit(
+        "telegram:chat-sync",
+        TelegramChatSync {
+            role: "assistant".to_string(),
+            text: response.clone(),
+            translation: translation.clone(),
+        },
+    );
 
     // 6. Reply
     let reply_text = if let Some(ref t) = translation {
@@ -913,7 +985,10 @@ async fn handle_image_tags(bot: &Bot, chat_id: ChatId, response: &str, app: &tau
             None => break,
         };
 
-        match imagegen.generate(prompt.to_string(), None, None, None).await {
+        match imagegen
+            .generate(prompt.to_string(), None, None, None)
+            .await
+        {
             Ok(result) => {
                 // result.image_url is a local file path
                 match tokio::fs::read(&result.image_url).await {
@@ -975,7 +1050,11 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
             result = format!(
                 "{}{}",
                 result[..start].trim_end(),
-                if tag_end < result.len() { &result[tag_end..] } else { "" }
+                if tag_end < result.len() {
+                    &result[tag_end..]
+                } else {
+                    ""
+                }
             );
         } else {
             break;
@@ -987,7 +1066,9 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
     let mut cleaned = result.clone();
     let mut offset = 0;
     while offset < cleaned.len() {
-        let Some(rel_start) = cleaned[offset..].find('[') else { break };
+        let Some(rel_start) = cleaned[offset..].find('[') else {
+            break;
+        };
         let start = offset + rel_start;
         let rest = &cleaned[start..];
         let Some(end) = rest.find(']') else { break };
@@ -995,8 +1076,8 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
         let mut matched = false;
         if let Some(pipe_pos) = inner.find('|') {
             let name_part = &inner[..pipe_pos];
-            let is_identifier = !name_part.is_empty()
-                && name_part.chars().all(|c| c.is_alphanumeric() || c == '_');
+            let is_identifier =
+                !name_part.is_empty() && name_part.chars().all(|c| c.is_alphanumeric() || c == '_');
             let has_kv = inner[pipe_pos + 1..].contains('=');
             if is_identifier && has_kv {
                 let parts: Vec<&str> = inner.split('|').collect();
@@ -1014,7 +1095,11 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
                 cleaned = format!(
                     "{}{}",
                     cleaned[..start].trim_end(),
-                    if tag_end < cleaned.len() { &cleaned[tag_end..] } else { "" }
+                    if tag_end < cleaned.len() {
+                        &cleaned[tag_end..]
+                    } else {
+                        ""
+                    }
                 );
                 matched = true;
             }

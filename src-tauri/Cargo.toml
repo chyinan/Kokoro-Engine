@@ -1,6 +1,6 @@
 [package]
 name = "tauri-appkokoro-engine"
-version = "0.1.9"
+version = "0.2.0"
 description = "A cross-platform desktop virtual character interaction engine"
 authors = ["chyinan"]
 edition = "2021"

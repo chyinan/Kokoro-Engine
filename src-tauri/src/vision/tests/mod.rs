@@ -1,10 +1,10 @@
-mod helpers;
 mod correctness;
 mod failure_injection;
-mod security;
+mod helpers;
 mod mock_llm;
 mod observability;
 mod property_tests;
+mod security;
 
 #[cfg(feature = "stress")]
 mod concurrency;

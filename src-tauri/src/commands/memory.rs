@@ -94,7 +94,9 @@ pub async fn update_memory_tier(
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
     if request.tier != "core" && request.tier != "ephemeral" {
-        return Err(KokoroError::Validation("tier must be 'core' or 'ephemeral'".to_string()));
+        return Err(KokoroError::Validation(
+            "tier must be 'core' or 'ephemeral'".to_string(),
+        ));
     }
     state
         .memory_manager

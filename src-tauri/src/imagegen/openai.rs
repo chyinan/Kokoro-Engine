@@ -14,7 +14,12 @@ pub struct OpenAIImageGenProvider {
 }
 
 impl OpenAIImageGenProvider {
-    pub fn new(id: String, api_key: String, base_url: Option<String>, model: Option<String>) -> Self {
+    pub fn new(
+        id: String,
+        api_key: String,
+        base_url: Option<String>,
+        model: Option<String>,
+    ) -> Self {
         Self {
             id,
             api_key,
@@ -118,9 +123,9 @@ impl ImageGenProvider for OpenAIImageGenProvider {
             if let Some(first) = data.first() {
                 if let Some(b64) = first.get("b64_json").and_then(|v| v.as_str()) {
                     // Decode base64
-                    let bytes = general_purpose::STANDARD
-                        .decode(b64)
-                        .map_err(|e| ImageGenError::GenerationFailed(format!("Base64 decode error: {}", e)))?;
+                    let bytes = general_purpose::STANDARD.decode(b64).map_err(|e| {
+                        ImageGenError::GenerationFailed(format!("Base64 decode error: {}", e))
+                    })?;
 
                     return Ok(ImageGenResponse {
                         format: "png".to_string(), // DALL-E returns PNG

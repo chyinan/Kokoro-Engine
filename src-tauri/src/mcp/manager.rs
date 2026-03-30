@@ -125,7 +125,8 @@ impl McpManager {
     pub fn save_configs(&self) -> Result<(), KokoroError> {
         let content = serde_json::to_string_pretty(&self.configs)
             .map_err(|e| KokoroError::Config(format!("Serialize error: {}", e)))?;
-        std::fs::write(&self.config_path, content).map_err(|e| KokoroError::Io(format!("Write error: {}", e)))?;
+        std::fs::write(&self.config_path, content)
+            .map_err(|e| KokoroError::Io(format!("Write error: {}", e)))?;
         Ok(())
     }
 
@@ -155,8 +156,7 @@ impl McpManager {
 
     /// Insert a pre-built client (used after lock-free connection).
     pub fn insert_client(&mut self, name: String, client: McpClient) {
-        self.clients
-            .insert(name, Arc::new(Mutex::new(client)));
+        self.clients.insert(name, Arc::new(Mutex::new(client)));
     }
 
     /// Connect to a single server.
@@ -204,7 +204,10 @@ impl McpManager {
     /// If disabling, disconnects the server. If enabling, only saves config
     /// (caller should spawn background connection task).
     pub async fn toggle_server(&mut self, name: &str, enabled: bool) -> Result<(), KokoroError> {
-        let config = self.configs.iter_mut().find(|c| c.name == name)
+        let config = self
+            .configs
+            .iter_mut()
+            .find(|c| c.name == name)
             .ok_or_else(|| KokoroError::NotFound(format!("Server '{}' not found", name)))?;
         config.enabled = enabled;
         self.save_configs()?;
@@ -363,8 +366,7 @@ pub async fn build_connected_client(config: &McpServerConfig) -> Result<McpClien
                 }
             } else {
                 Arc::new(
-                    StdioTransport::spawn(&config.command, &config.args, Some(&config.env))
-                        .await?,
+                    StdioTransport::spawn(&config.command, &config.args, Some(&config.env)).await?,
                 )
             }
         }

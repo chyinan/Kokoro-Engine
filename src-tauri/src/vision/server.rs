@@ -48,12 +48,14 @@ impl VisionServer {
             })
             .and_then(serve_file);
 
-        let (addr, fut) = warp::serve(vision_route)
-            .bind_ephemeral(([127, 0, 0, 1], 0));
+        let (addr, fut) = warp::serve(vision_route).bind_ephemeral(([127, 0, 0, 1], 0));
 
         self.port = addr.port();
 
-        println!("[Vision] Static file server started on http://127.0.0.1:{}", self.port);
+        println!(
+            "[Vision] Static file server started on http://127.0.0.1:{}",
+            self.port
+        );
 
         // Spawn the server in the background
         tokio::spawn(fut);
@@ -64,8 +66,8 @@ impl VisionServer {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(600)).await;
                 if let Ok(entries) = std::fs::read_dir(&cleanup_dir) {
-                    let cutoff = std::time::SystemTime::now()
-                        - std::time::Duration::from_secs(1800);
+                    let cutoff =
+                        std::time::SystemTime::now() - std::time::Duration::from_secs(1800);
                     for entry in entries.flatten() {
                         if let Ok(meta) = entry.metadata() {
                             if let Ok(modified) = meta.modified() {
@@ -85,7 +87,11 @@ impl VisionServer {
     pub fn upload(&self, file_bytes: &[u8], original_filename: &str) -> Result<String, String> {
         // Validate file size
         if file_bytes.len() > MAX_UPLOAD_SIZE {
-            return Err(format!("File too large: {} bytes (max {})", file_bytes.len(), MAX_UPLOAD_SIZE));
+            return Err(format!(
+                "File too large: {} bytes (max {})",
+                file_bytes.len(),
+                MAX_UPLOAD_SIZE
+            ));
         }
 
         // Validate MIME type by checking magic bytes

@@ -174,7 +174,8 @@ impl TtsProvider for LocalGPTSoVITSProvider {
             .get(&url)
             .timeout(std::time::Duration::from_secs(3))
             .send()
-            .await).is_ok()
+            .await)
+            .is_ok()
     }
 
     async fn synthesize(&self, text: &str, params: TtsParams) -> Result<Vec<u8>, TtsError> {

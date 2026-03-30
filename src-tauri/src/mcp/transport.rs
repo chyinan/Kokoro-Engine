@@ -134,8 +134,7 @@ impl StdioTransport {
             mpsc::channel::<(Value, Option<oneshot::Sender<Result<Value, String>>>)>(64);
 
         // Pending response map — shared between writer and reader
-        let pending: PendingMap =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let pending_writer = pending.clone();
         let pending_reader = pending.clone();
 
@@ -159,7 +158,8 @@ impl StdioTransport {
                     // 清理所有 pending 请求，通知等待者连接已断开
                     let mut pending = pending_cleanup.lock().await;
                     for (_, responder) in pending.drain() {
-                        let _ = responder.send(Err("Transport write error: connection lost".to_string()));
+                        let _ = responder
+                            .send(Err("Transport write error: connection lost".to_string()));
                     }
                     break;
                 }
@@ -167,7 +167,8 @@ impl StdioTransport {
                     eprintln!("[MCP/Stdio] Flush error: {}", e);
                     let mut pending = pending_cleanup.lock().await;
                     for (_, responder) in pending.drain() {
-                        let _ = responder.send(Err("Transport flush error: connection lost".to_string()));
+                        let _ = responder
+                            .send(Err("Transport flush error: connection lost".to_string()));
                     }
                     break;
                 }
@@ -402,7 +403,10 @@ impl McpTransport for StreamableHttpTransport {
 
         if content_type.contains("text/event-stream") {
             // SSE: read events until we find the JSON-RPC response
-            let text = resp.text().await.map_err(|e| format!("SSE read error: {}", e))?;
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| format!("SSE read error: {}", e))?;
             parse_sse_response(&text, id)
         } else {
             // Plain JSON response
@@ -518,9 +522,7 @@ impl SseTransport {
     pub fn new(url: &str) -> Self {
         // No global timeout — SSE stream is long-lived.
         // Per-request timeouts are applied on POST calls instead.
-        let client = reqwest::Client::builder()
-            .build()
-            .unwrap_or_default();
+        let client = reqwest::Client::builder().build().unwrap_or_default();
 
         // Extract origin (scheme + host + port) from the URL for building POST URLs.
         // e.g. "http://localhost:8080/sse" → "http://localhost:8080"

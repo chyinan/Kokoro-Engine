@@ -40,13 +40,15 @@ pub async fn list_conversations(
 
     Ok(rows
         .into_iter()
-        .map(|(id, character_id, title, created_at, updated_at)| ConversationInfo {
-            id,
-            character_id,
-            title,
-            created_at,
-            updated_at,
-        })
+        .map(
+            |(id, character_id, title, created_at, updated_at)| ConversationInfo {
+                id,
+                character_id,
+                title,
+                created_at,
+                updated_at,
+            },
+        )
         .collect())
 }
 
@@ -155,7 +157,7 @@ pub async fn list_character_ids(
         "SELECT DISTINCT character_id FROM conversations
          UNION
          SELECT DISTINCT character_id FROM memories
-         ORDER BY character_id ASC"
+         ORDER BY character_id ASC",
     )
     .fetch_all(&state.db)
     .await
@@ -165,9 +167,7 @@ pub async fn list_character_ids(
 }
 
 #[tauri::command]
-pub async fn create_conversation(
-    state: State<'_, AIOrchestrator>,
-) -> Result<String, KokoroError> {
+pub async fn create_conversation(state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
     // 清空内存 history
     state.clear_history().await;
 

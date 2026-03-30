@@ -255,8 +255,7 @@ impl MemoryManager {
                     .unwrap_or_else(|| std::path::PathBuf::from("models"));
                 let _ = std::fs::create_dir_all(&cache_dir);
                 let model = TextEmbedding::try_new(
-                    InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-                        .with_cache_dir(cache_dir),
+                    InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_cache_dir(cache_dir),
                 )?;
 
                 // Persist any missing small files so the next startup can load locally
@@ -322,10 +321,12 @@ impl MemoryManager {
 
     /// Return all memory content strings for a given character (used for dedup in extraction).
     pub async fn get_all_memory_contents(&self, character_id: &str) -> Result<Vec<String>> {
-        let rows = sqlx::query("SELECT content FROM memories WHERE character_id = ? ORDER BY importance DESC LIMIT 50")
-            .bind(character_id)
-            .fetch_all(&self.db)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT content FROM memories WHERE character_id = ? ORDER BY importance DESC LIMIT 50",
+        )
+        .bind(character_id)
+        .fetch_all(&self.db)
+        .await?;
         Ok(rows.iter().map(|r| r.get::<String, _>("content")).collect())
     }
 
@@ -348,7 +349,10 @@ impl MemoryManager {
             let sim = cosine_similarity(new_embedding, &existing);
             if sim > DEDUP_THRESHOLD {
                 let id: i64 = row.get("id");
-                println!("[Memory] Dedup: similarity={:.3} > {:.3}, refreshing id={}", sim, DEDUP_THRESHOLD, id);
+                println!(
+                    "[Memory] Dedup: similarity={:.3} > {:.3}, refreshing id={}",
+                    sim, DEDUP_THRESHOLD, id
+                );
                 // Refresh updated_at only — created_at must remain immutable
                 sqlx::query("UPDATE memories SET updated_at = ? WHERE id = ?")
                     .bind(now)
@@ -382,7 +386,10 @@ impl MemoryManager {
             let sim = cosine_similarity(new_embedding, &existing);
             if sim > DEDUP_THRESHOLD {
                 let id: i64 = row.get("id");
-                println!("[Memory] Dedup-upgrade: similarity={:.3} > {:.3}, upgrading id={}", sim, DEDUP_THRESHOLD, id);
+                println!(
+                    "[Memory] Dedup-upgrade: similarity={:.3} > {:.3}, upgrading id={}",
+                    sim, DEDUP_THRESHOLD, id
+                );
                 let existing_importance: f64 = row.get("importance");
                 let best_importance = existing_importance.max(new_importance);
                 let tier = if best_importance >= 0.8 {
@@ -413,11 +420,15 @@ impl MemoryManager {
     ) -> Result<Vec<MemorySnippet>> {
         // Run semantic search and BM25 search in parallel
         let semantic_results = self.semantic_search(query, limit * 2, character_id).await?;
-        let bm25_results = self.bm25_search(query, character_id, limit * 2).await.unwrap_or_default();
+        let bm25_results = self
+            .bm25_search(query, character_id, limit * 2)
+            .await
+            .unwrap_or_default();
 
         // RRF (Reciprocal Rank Fusion) with k=60
         let k = 60.0_f32;
-        let mut rrf_scores: std::collections::HashMap<i64, (f32, MemorySnippet)> = std::collections::HashMap::new();
+        let mut rrf_scores: std::collections::HashMap<i64, (f32, MemorySnippet)> =
+            std::collections::HashMap::new();
 
         for (rank, mem) in semantic_results.iter().enumerate() {
             let score = 1.0 / (k + rank as f32 + 1.0);
@@ -685,7 +696,11 @@ impl MemoryManager {
             return Ok(());
         }
 
-        let tier = if importance >= 0.8 { "core" } else { "ephemeral" };
+        let tier = if importance >= 0.8 {
+            "core"
+        } else {
+            "ephemeral"
+        };
 
         sqlx::query(
             "INSERT INTO memories (content, embedding, created_at, updated_at, importance, character_id, tier) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -796,11 +811,7 @@ impl MemoryManager {
     /// Delete ephemeral memories whose effective importance (original × decay) has fallen
     /// below `threshold`. Core memories are never pruned.
     /// Returns the number of deleted rows.
-    pub async fn prune_decayed_memories(
-        &self,
-        character_id: &str,
-        threshold: f64,
-    ) -> Result<u64> {
+    pub async fn prune_decayed_memories(&self, character_id: &str, threshold: f64) -> Result<u64> {
         let now = chrono::Utc::now().timestamp();
         // Compute the minimum age (in seconds) at which a memory with max importance (1.0)
         // would decay below the threshold:
@@ -1311,11 +1322,7 @@ mod tests {
             1,
             "Alice should have exactly one memory"
         );
-        assert_eq!(
-            bob_memories.len(),
-            1,
-            "Bob should have exactly one memory"
-        );
+        assert_eq!(bob_memories.len(), 1, "Bob should have exactly one memory");
         assert_eq!(alice_memories[0], "Alice's memory");
         assert_eq!(bob_memories[0], "Bob's memory");
     }

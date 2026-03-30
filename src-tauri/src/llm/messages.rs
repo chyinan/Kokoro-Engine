@@ -1,13 +1,12 @@
 use async_openai::types::chat::{
-    ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessageArgs,
-    ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestDeveloperMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImageArgs,
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
+    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestAssistantMessageContent,
+    ChatCompletionRequestDeveloperMessageContent, ChatCompletionRequestMessage,
+    ChatCompletionRequestMessageContentPartImageArgs,
     ChatCompletionRequestMessageContentPartTextArgs, ChatCompletionRequestSystemMessageArgs,
-    ChatCompletionRequestSystemMessageContent,
-    ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs,
-    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ImageUrlArgs, FunctionCall,
+    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessageArgs,
+    ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, FunctionCall, ImageUrlArgs,
 };
 
 pub fn role_text_message(
@@ -66,10 +65,7 @@ pub fn history_message_to_chat_message(
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        return Ok(assistant_tool_calls_message(
-            None,
-            tool_calls,
-        ));
+        return Ok(assistant_tool_calls_message(None, tool_calls));
     }
 
     role_text_message(role, content)
@@ -93,7 +89,9 @@ pub fn user_text_message(text: impl Into<String>) -> ChatCompletionRequestMessag
 
 pub fn assistant_text_message(text: impl Into<String>) -> ChatCompletionRequestMessage {
     let message = ChatCompletionRequestAssistantMessageArgs::default()
-        .content(ChatCompletionRequestAssistantMessageContent::Text(text.into()))
+        .content(ChatCompletionRequestAssistantMessageContent::Text(
+            text.into(),
+        ))
         .build()
         .expect("assistant message build should not fail");
     ChatCompletionRequestMessage::Assistant(message)
@@ -145,7 +143,9 @@ pub fn user_message_with_images(
             .image_url(image_url)
             .build()
             .expect("image part build should not fail");
-        parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part));
+        parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
+            image_part,
+        ));
     }
 
     let message = ChatCompletionRequestUserMessageArgs::default()

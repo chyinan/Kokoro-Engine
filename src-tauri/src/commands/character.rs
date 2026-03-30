@@ -55,7 +55,9 @@ pub fn play_cue(app: tauri::AppHandle, cue: String) -> CharacterState {
 #[tauri::command]
 pub async fn send_message(message: String) -> Result<ChatResponse, KokoroError> {
     if message.trim().is_empty() {
-        return Err(KokoroError::Validation("Message cannot be empty".to_string()));
+        return Err(KokoroError::Validation(
+            "Message cannot be empty".to_string(),
+        ));
     }
     Ok(ChatResponse {
         text: format!("Echo from Kokoro Engine: {}", message),

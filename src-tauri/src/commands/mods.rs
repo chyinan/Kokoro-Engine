@@ -8,14 +8,17 @@ use tokio::sync::Mutex;
 
 /// Validate mod ID format: must be non-empty and contain only alphanumeric, underscore, or dash
 fn is_valid_mod_id(id: &str) -> bool {
-    !id.is_empty() && id.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Check if a file extension is allowed for MOD extraction
 fn is_allowed_mod_file(ext: &str) -> bool {
     const ALLOWED_EXTENSIONS: &[&str] = &[
-        "html", "js", "css", "json", "png", "jpg", "jpeg", "webp",
-        "svg", "gif", "woff", "woff2", "ttf", "otf", "txt", "md",
+        "html", "js", "css", "json", "png", "jpg", "jpeg", "webp", "svg", "gif", "woff", "woff2",
+        "ttf", "otf", "txt", "md",
     ];
     ALLOWED_EXTENSIONS.contains(&ext.to_lowercase().as_str())
 }
@@ -35,7 +38,10 @@ pub async fn load_mod(
     mod_id: String,
 ) -> Result<(), KokoroError> {
     let mut manager = mod_manager.lock().await;
-    manager.load_mod(&mod_id, &app_handle).await.map_err(KokoroError::Mod)
+    manager
+        .load_mod(&mod_id, &app_handle)
+        .await
+        .map_err(KokoroError::Mod)
 }
 
 #[command]
@@ -85,12 +91,15 @@ pub async fn install_mod(
         .map_err(|e| KokoroError::Mod(format!("Invalid mod.json: {}", e)))?;
 
     if !is_valid_mod_id(&manifest.id) {
-        return Err(KokoroError::Validation("Invalid mod ID. Must be alphanumeric, underscore or dash.".to_string()));
+        return Err(KokoroError::Validation(
+            "Invalid mod ID. Must be alphanumeric, underscore or dash.".to_string(),
+        ));
     }
 
     let target_dir = mods_dir.join(&manifest.id);
     if target_dir.exists() {
-        fs::remove_dir_all(&target_dir).map_err(|e| KokoroError::Mod(format!("Failed to remove old mod: {}", e)))?;
+        fs::remove_dir_all(&target_dir)
+            .map_err(|e| KokoroError::Mod(format!("Failed to remove old mod: {}", e)))?;
     }
     fs::create_dir_all(&target_dir).map_err(KokoroError::from)?;
 
@@ -99,7 +108,9 @@ pub async fn install_mod(
 
     let mut total_size: u64 = 0;
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i).map_err(|e| KokoroError::Mod(e.to_string()))?;
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| KokoroError::Mod(e.to_string()))?;
         let outpath = match file.enclosed_name() {
             Some(path) => target_dir.join(path),
             None => continue,
@@ -108,16 +119,25 @@ pub async fn install_mod(
         if file.name().ends_with('/') {
             fs::create_dir_all(&outpath).map_err(KokoroError::from)?;
         } else {
-            let ext = outpath.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let ext = outpath
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             if !is_allowed_mod_file(&ext) {
                 continue;
             }
             if file.size() > MAX_FILE_SIZE {
-                return Err(KokoroError::Mod(format!("File '{}' exceeds maximum size of 10MB", file.name())));
+                return Err(KokoroError::Mod(format!(
+                    "File '{}' exceeds maximum size of 10MB",
+                    file.name()
+                )));
             }
             total_size += file.size();
             if total_size > MAX_TOTAL_SIZE {
-                return Err(KokoroError::Mod("MOD package total size exceeds 50MB limit".to_string()));
+                return Err(KokoroError::Mod(
+                    "MOD package total size exceeds 50MB limit".to_string(),
+                ));
             }
             if let Some(p) = outpath.parent() {
                 if !p.exists() {
@@ -139,7 +159,10 @@ pub async fn dispatch_mod_event(
     payload: JsonValue,
 ) -> Result<(), KokoroError> {
     let manager = mod_manager.lock().await;
-    manager.dispatch_event(&event, payload).await.map_err(KokoroError::Mod)
+    manager
+        .dispatch_event(&event, payload)
+        .await
+        .map_err(KokoroError::Mod)
 }
 
 #[command]
@@ -164,7 +187,10 @@ mod tests {
     #[test]
     fn test_is_valid_mod_id_valid_alphanumeric() {
         assert!(is_valid_mod_id("mymod"), "Alphanumeric ID should be valid");
-        assert!(is_valid_mod_id("MyMod123"), "Mixed case alphanumeric should be valid");
+        assert!(
+            is_valid_mod_id("MyMod123"),
+            "Mixed case alphanumeric should be valid"
+        );
     }
 
     #[test]
@@ -190,14 +216,8 @@ mod tests {
 
     #[test]
     fn test_is_valid_mod_id_invalid_special_chars() {
-        assert!(
-            !is_valid_mod_id("my.mod"),
-            "ID with dot should be invalid"
-        );
-        assert!(
-            !is_valid_mod_id("my@mod"),
-            "ID with @ should be invalid"
-        );
+        assert!(!is_valid_mod_id("my.mod"), "ID with dot should be invalid");
+        assert!(!is_valid_mod_id("my@mod"), "ID with @ should be invalid");
         assert!(
             !is_valid_mod_id("my mod"),
             "ID with space should be invalid"
@@ -230,37 +250,25 @@ mod tests {
 
     #[test]
     fn test_is_allowed_mod_file_case_insensitive() {
-        assert!(is_allowed_mod_file("HTML"), "HTML uppercase should be allowed");
+        assert!(
+            is_allowed_mod_file("HTML"),
+            "HTML uppercase should be allowed"
+        );
         assert!(is_allowed_mod_file("Js"), "Js mixed case should be allowed");
-        assert!(is_allowed_mod_file("JSON"), "JSON uppercase should be allowed");
+        assert!(
+            is_allowed_mod_file("JSON"),
+            "JSON uppercase should be allowed"
+        );
     }
 
     #[test]
     fn test_is_allowed_mod_file_disallowed_extensions() {
-        assert!(
-            !is_allowed_mod_file("exe"),
-            "exe should not be allowed"
-        );
-        assert!(
-            !is_allowed_mod_file("sh"),
-            "sh should not be allowed"
-        );
-        assert!(
-            !is_allowed_mod_file("bat"),
-            "bat should not be allowed"
-        );
-        assert!(
-            !is_allowed_mod_file("dll"),
-            "dll should not be allowed"
-        );
-        assert!(
-            !is_allowed_mod_file("so"),
-            "so should not be allowed"
-        );
-        assert!(
-            !is_allowed_mod_file("zip"),
-            "zip should not be allowed"
-        );
+        assert!(!is_allowed_mod_file("exe"), "exe should not be allowed");
+        assert!(!is_allowed_mod_file("sh"), "sh should not be allowed");
+        assert!(!is_allowed_mod_file("bat"), "bat should not be allowed");
+        assert!(!is_allowed_mod_file("dll"), "dll should not be allowed");
+        assert!(!is_allowed_mod_file("so"), "so should not be allowed");
+        assert!(!is_allowed_mod_file("zip"), "zip should not be allowed");
     }
 
     #[test]

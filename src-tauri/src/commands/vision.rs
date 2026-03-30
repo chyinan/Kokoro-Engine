@@ -14,11 +14,15 @@ pub async fn upload_vision_image(
     filename: String,
 ) -> Result<String, KokoroError> {
     let server = state.lock().await;
-    server.upload(&file_bytes, &filename).map_err(KokoroError::ExternalService)
+    server
+        .upload(&file_bytes, &filename)
+        .map_err(KokoroError::ExternalService)
 }
 
 #[tauri::command]
-pub async fn get_vision_config(state: State<'_, VisionWatcher>) -> Result<VisionConfig, KokoroError> {
+pub async fn get_vision_config(
+    state: State<'_, VisionWatcher>,
+) -> Result<VisionConfig, KokoroError> {
     let config = state.config.read().await;
     Ok(config.clone())
 }
@@ -67,9 +71,14 @@ pub async fn capture_screen_now(
     let screenshot = capture_screen().map_err(|e| KokoroError::ExternalService(e.to_string()))?;
     let config = state.config.read().await.clone();
     let client = state.client.clone();
-    let description = crate::vision::watcher::analyze_screenshot(&client, &config, &screenshot, Some(&llm_service))
-        .await
-        .map_err(|e| KokoroError::ExternalService(e.to_string()))?;
+    let description = crate::vision::watcher::analyze_screenshot(
+        &client,
+        &config,
+        &screenshot,
+        Some(&llm_service),
+    )
+    .await
+    .map_err(|e| KokoroError::ExternalService(e.to_string()))?;
     state.context.update(description.clone()).await;
     Ok(description)
 }

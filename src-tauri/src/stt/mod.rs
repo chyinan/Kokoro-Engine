@@ -14,6 +14,6 @@ pub use interface::{
     AudioChunk, AudioSource, SttEngine, SttError, TranscriptionResult, TranscriptionSegment,
 };
 pub use mic::NativeMicState;
-pub use wake_word::NativeWakeWordState;
 pub use sensevoice_local::{SenseVoiceLocalDownloadProgress, SenseVoiceLocalModelStatus};
 pub use service::SttService;
+pub use wake_word::NativeWakeWordState;

@@ -17,7 +17,9 @@ pub async fn init_db(_state: State<'_, AIOrchestrator>) -> Result<String, Kokoro
 }
 
 #[tauri::command]
-pub async fn test_vector_store(state: State<'_, AIOrchestrator>) -> Result<DbTestResult, KokoroError> {
+pub async fn test_vector_store(
+    state: State<'_, AIOrchestrator>,
+) -> Result<DbTestResult, KokoroError> {
     // 1. Add a test memory
     state
         .memory_manager

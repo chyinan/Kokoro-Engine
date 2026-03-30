@@ -45,10 +45,9 @@ pub fn handle_live2d_request() -> impl Fn(
         let file_path = models_dir.join(clean_path);
 
         // Security: 验证规范路径在 models 目录内，防止符号链接绕过
-        if let (Ok(canonical_base), Ok(canonical_file)) = (
-            models_dir.canonicalize(),
-            file_path.canonicalize(),
-        ) {
+        if let (Ok(canonical_base), Ok(canonical_file)) =
+            (models_dir.canonicalize(), file_path.canonicalize())
+        {
             if !canonical_file.starts_with(&canonical_base) {
                 return tauri::http::Response::builder()
                     .status(403)
@@ -101,10 +100,9 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
+            if let Ok(byte) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 result.push(byte);
                 i += 3;
                 continue;

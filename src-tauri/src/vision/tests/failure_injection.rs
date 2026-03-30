@@ -60,7 +60,10 @@ async fn test_nonexistent_file_returns_404() {
     // Give server time to start
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let url = format!("http://127.0.0.1:{}/vision/nonexistent_abc123.png", server.port);
+    let url = format!(
+        "http://127.0.0.1:{}/vision/nonexistent_abc123.png",
+        server.port
+    );
     let resp = client.get(&url).send().await.unwrap();
     assert_eq!(resp.status(), 404);
 }
@@ -85,7 +88,12 @@ async fn test_corrupted_file_still_served() {
 
     // Server should still serve the (corrupted) content, not panic
     let resp = client.get(&url).send().await.unwrap();
-    assert_eq!(resp.status(), 200, "corrupted file should still be served (status={})", resp.status());
+    assert_eq!(
+        resp.status(),
+        200,
+        "corrupted file should still be served (status={})",
+        resp.status()
+    );
     let body = resp.bytes().await.unwrap();
     assert_eq!(body.as_ref(), b"CORRUPTED_DATA");
 }

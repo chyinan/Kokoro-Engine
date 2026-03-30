@@ -37,14 +37,20 @@ pub fn load_json_config<T: DeserializeOwned + Default>(path: &Path, label: &str)
 }
 
 /// Generic save for any Serde config type.
-pub fn save_json_config<T: Serialize>(path: &Path, config: &T, label: &str) -> Result<(), KokoroError> {
+pub fn save_json_config<T: Serialize>(
+    path: &Path,
+    config: &T,
+    label: &str,
+) -> Result<(), KokoroError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| KokoroError::Config(format!("Failed to create config directory: {}", e)))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            KokoroError::Config(format!("Failed to create config directory: {}", e))
+        })?;
     }
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| KokoroError::Config(format!("Failed to serialize config: {}", e)))?;
-    std::fs::write(path, json).map_err(|e| KokoroError::Config(format!("Failed to write config file: {}", e)))?;
+    std::fs::write(path, json)
+        .map_err(|e| KokoroError::Config(format!("Failed to write config file: {}", e)))?;
     println!("[{}] Saved config to {}", label, path.display());
     Ok(())
 }

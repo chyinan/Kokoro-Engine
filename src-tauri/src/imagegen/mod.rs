@@ -1,6 +1,6 @@
 pub mod config;
-pub mod interface;
 pub mod google;
+pub mod interface;
 pub mod openai;
 pub mod service;
 pub mod stable_diffusion;
