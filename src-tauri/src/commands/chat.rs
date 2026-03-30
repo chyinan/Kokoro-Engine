@@ -924,6 +924,28 @@ pub async fn stream_chat(
                 continuation_tool_calls,
             ));
             client_messages.extend(tool_result_messages);
+
+            // Apply the same side-effect / feedback guard as the text-tool path
+            // to prevent infinite loops when LLM keeps emitting only tool calls
+            // without any dialogue text.
+            if !any_needs_feedback {
+                if all_cleaned_text.trim().is_empty() && !forced_text_after_side_effect {
+                    println!("[Chat] Native side-effect tools ran without text, forcing one follow-up text round");
+                    forced_text_after_side_effect = true;
+                    client_messages.push(system_message(
+                        "The tool has already been executed successfully. \
+                         Now respond with a natural dialogue reply for the user. \
+                         Do NOT call the same tool again unless absolutely necessary."
+                            .to_string(),
+                    ));
+                } else if all_cleaned_text.trim().is_empty() {
+                    // Already forced once but still no text — break to avoid infinite loop
+                    println!("[Chat] Native tool loop: still no text after forced round, ending loop");
+                    break;
+                }
+                // If there IS text, fall through to continue normally
+            }
+
             println!("[Chat] Continuing after native tool calls with assistant/tool result messages");
             #[cfg(debug_assertions)]
             debug_log_llm_messages(
