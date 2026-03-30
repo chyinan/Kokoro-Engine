@@ -463,6 +463,7 @@ async fn handle_text(
             response.clone(),
             metadata,
             &char_id,
+            None,
         )
         .await;
 
@@ -850,6 +851,7 @@ async fn handle_photo(
             response.clone(),
             metadata,
             &char_id,
+            None,
         )
         .await;
 

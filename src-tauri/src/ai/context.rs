@@ -4,6 +4,8 @@ use crate::ai::idle_behaviors::IdleBehaviorSystem;
 use crate::ai::initiative::InitiativeSystem;
 use crate::ai::memory::MemoryManager;
 use crate::ai::router::{ModelRouter, ModelType};
+use crate::llm::messages::user_text_message;
+use crate::llm::provider::LlmProvider;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -298,7 +300,7 @@ impl AIOrchestrator {
     }
 
     pub async fn add_message(&self, role: String, content: String, character_id: &str) {
-        self.add_message_with_metadata(role, content, None, character_id)
+        self.add_message_with_metadata(role, content, None, character_id, None)
             .await;
     }
 
@@ -308,6 +310,7 @@ impl AIOrchestrator {
         content: String,
         metadata: Option<String>,
         character_id: &str,
+        summary_provider: Option<Arc<dyn LlmProvider>>,
     ) {
         // Track user message count for memory extraction triggers
         if role == "user" {
@@ -343,8 +346,8 @@ impl AIOrchestrator {
             metadata: parsed_metadata,
         });
 
-        // Rolling window: keep at most 30 messages
-        // If summary strategy, compress oldest 10 when exceeding 20
+        // Rolling window: keep at most 20 messages (matches recent_count in compose_prompt)
+        // If summary strategy, compress oldest 10 when exceeding 20 (history oscillates 10-20)
         let strategy = self.context_strategy.lock().await.clone();
         if history.len() > 20 && strategy == "summary" && self.is_memory_enabled() {
             // Take oldest 10 for summarization
@@ -368,11 +371,32 @@ impl AIOrchestrator {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                let summary = format!(
-                    "[Auto-summary of {} messages]: {}",
-                    to_summarize.len(),
-                    formatted.chars().take(500).collect::<String>()
-                );
+                let summary = if let Some(provider) = summary_provider {
+                    let prompt = format!(
+                        "Summarize the following conversation in 2-3 sentences, \
+                         focusing on key facts and decisions. Output only the summary, \
+                         no preamble.\n\n{}",
+                        formatted
+                    );
+                    match provider
+                        .chat(vec![user_text_message(prompt)], None)
+                        .await
+                    {
+                        Ok(text) if !text.trim().is_empty() => text.trim().to_string(),
+                        Ok(_) => {
+                            println!("[Context] Summary LLM returned empty, skipping.");
+                            return;
+                        }
+                        Err(e) => {
+                            eprintln!("[Context] Summary LLM call failed: {e}, skipping.");
+                            return;
+                        }
+                    }
+                } else {
+                    // No provider available — skip rather than store fake summary
+                    println!("[Context] No provider for summarization, skipping.");
+                    return;
+                };
 
                 println!(
                     "[Context] Summary compression: storing {} msg summary for '{}'",
@@ -383,7 +407,7 @@ impl AIOrchestrator {
                     eprintln!("[Context] Failed to save summary: {}", e);
                 }
             });
-        } else if history.len() > 30 {
+        } else if history.len() > 20 {
             history.pop_front();
             let mut boundary = self.memory_history_boundary.lock().await;
             *boundary = boundary.saturating_sub(1);
@@ -636,7 +660,7 @@ impl AIOrchestrator {
     pub async fn push_history_message(&self, message: Message) {
         let mut history = self.history.lock().await;
         history.push_back(message);
-        let evicted = if history.len() > 30 {
+        let evicted = if history.len() > 20 {
             history.pop_front();
             true
         } else {
@@ -813,24 +837,6 @@ impl AIOrchestrator {
             }
         }
 
-        // -- Response Language Instruction (moved here for higher attention) --
-        // Force the LLM to respond in the user-configured language.
-        // Placed just before history so the LLM pays more attention to it.
-        if !resp_lang.is_empty() {
-            final_messages.push(Message {
-                role: "system".to_string(),
-                content: format!(
-                    "CRITICAL INSTRUCTION — LANGUAGE REQUIREMENT:\n\
-                     You MUST respond ENTIRELY in {}. \
-                     Regardless of what language the user writes in, \
-                     your reply MUST be written in {} only. \
-                     Do NOT switch to the user's input language. This is non-negotiable.",
-                    resp_lang, resp_lang
-                ),
-                metadata: Some(serde_json::json!({"type": "language_instruction"})),
-            });
-        }
-
         // -- Translation Instruction --
         // When response language and user language differ, ask LLM to append inline translation
         {
@@ -866,10 +872,8 @@ impl AIOrchestrator {
         }
 
         // -- Recent History (P2) --
-        // Simple strategy: take last N messages that fit
-        // A real tokenizer count is needed here for precision.
-        // We will approximate 1 word = 1.3 tokens or just take last 10 messages.
-        let recent_count = 10;
+        // Take last N messages. History is capped at 20 so recent_count covers all of it.
+        let recent_count = 20;
         let start_index = if history.len() > recent_count {
             history.len() - recent_count
         } else {
@@ -978,7 +982,7 @@ mod tests {
     async fn test_add_message_rolling_window() {
         let orchestrator = setup_test_orchestrator().await;
 
-        // Add 35 messages (exceeds 30 limit)
+        // Add 35 messages (exceeds 20 limit)
         for i in 0..35 {
             orchestrator
                 .add_message("user".to_string(), format!("Message {}", i), "test_char")
@@ -987,8 +991,8 @@ mod tests {
 
         let history = orchestrator.history.lock().await;
         assert!(
-            history.len() <= 30,
-            "History should not exceed 30 messages, got {}",
+            history.len() <= 20,
+            "History should not exceed 20 messages, got {}",
             history.len()
         );
     }
@@ -1149,7 +1153,7 @@ mod tests {
     async fn test_push_history_message_respects_rolling_window() {
         let orchestrator = setup_test_orchestrator().await;
 
-        // Manually push 35 messages to exceed the 30 limit
+        // Manually push 35 messages to exceed the 20 limit
         for i in 0..35 {
             orchestrator
                 .push_history_message(Message {
@@ -1162,8 +1166,8 @@ mod tests {
 
         let history = orchestrator.history.lock().await;
         assert!(
-            history.len() <= 30,
-            "History should not exceed 30 messages after push_history_message"
+            history.len() <= 20,
+            "History should not exceed 20 messages after push_history_message"
         );
     }
 
