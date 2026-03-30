@@ -32,7 +32,10 @@ interface Live2dSelectionEvent {
 }
 
 export default function PetWindow() {
-    const currentWindow = getCurrentWindow();
+    // Get window reference once at module load, not on every render
+    const currentWindowRef = useRef(getCurrentWindow());
+    const currentWindow = currentWindowRef.current;
+
     const getModelSelection = () => {
         const savedPath = localStorage.getItem("kokoro_custom_model_path");
         return {
@@ -434,7 +437,7 @@ export default function PetWindow() {
             document.removeEventListener("mouseup", handleMouseUp, true);
             document.removeEventListener("contextmenu", handleContextMenu, true);
         };
-    }, [currentWindow]);
+    }, []);
 
     // Native pointerup for drag exit — removed, now handled in enterDragMode
     // useEffect(() => {
