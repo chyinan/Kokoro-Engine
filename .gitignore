@@ -58,6 +58,15 @@ Thumbs.db
 bin/
 include/
 
+# ONNX Runtime (auto-downloaded by build.rs)
+onnxruntime.dll
+libonnxruntime.dylib
+libonnxruntime.so
+src-tauri/onnxruntime.dll
+src-tauri/libonnxruntime.dylib
+src-tauri/libonnxruntime.so
+src-tauri/target/ort-dist/
+
 # AI Models
 models/
 

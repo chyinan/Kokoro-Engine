@@ -7014,6 +7014,7 @@ dependencies = [
  "eventsource-stream",
  "fastembed",
  "filetime",
+ "flate2",
  "futures",
  "hound",
  "image 0.25.10",
@@ -7044,6 +7045,7 @@ dependencies = [
  "tokenizers 0.21.4",
  "tokio",
  "tokio-test",
+ "ureq 3.3.0",
  "uuid",
  "warp",
  "wiremock",
@@ -8141,14 +8143,17 @@ checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
 dependencies = [
  "base64 0.22.1",
  "der 0.8.0",
+ "flate2",
  "log",
  "native-tls",
  "percent-encoding",
+ "rustls",
  "rustls-pki-types",
  "socks",
  "ureq-proto",
  "utf8-zero",
  "webpki-root-certs",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]

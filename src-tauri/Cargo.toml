@@ -16,6 +16,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+ureq = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset", "macos-private-api"] }
