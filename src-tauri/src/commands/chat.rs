@@ -624,13 +624,14 @@ pub async fn stream_chat(
     let mut forced_text_after_side_effect = false;
     let mut stream_failed = false;
     let mut text_retry_count = 0u32;
+    let mut force_text_only_round = false;
 
     for round in 0..max_tool_rounds {
         println!("[Chat] Tool loop round {}", round + 1);
 
         let mut stream: std::pin::Pin<
             Box<dyn futures::Stream<Item = Result<LlmStreamEvent, String>> + Send>,
-        > = if native_tools_enabled {
+        > = if native_tools_enabled && !force_text_only_round {
             chat_provider
                 .chat_stream_with_tools(client_messages.clone(), None, native_tools.clone())
                 .await
@@ -940,14 +941,32 @@ pub async fn stream_chat(
                             .to_string(),
                     ));
                 } else if all_cleaned_text.trim().is_empty() {
-                    // Already forced once but still no text — retry up to 3 times
+                    // Already forced once but still no text — retry with tools disabled
                     if text_retry_count < 3 {
                         text_retry_count += 1;
                         forced_text_after_side_effect = false;
-                        println!("[Chat] Native tool loop: no text after forced round, retrying ({}/3)", text_retry_count);
+                        force_text_only_round = true;
+                        println!("[Chat] Native tool loop: no text after forced round, retrying without tools ({}/3)", text_retry_count);
+                        // Strip trailing tool/system/empty-assistant messages to avoid poisoning the context
+                        while client_messages.len() > 1 {
+                            let should_pop = match client_messages.last() {
+                                Some(async_openai::types::chat::ChatCompletionRequestMessage::Tool(_)) => true,
+                                Some(async_openai::types::chat::ChatCompletionRequestMessage::System(_)) => true,
+                                Some(async_openai::types::chat::ChatCompletionRequestMessage::Assistant(m)) => {
+                                    m.content.as_ref().map(|_c| extract_message_text(
+                                        &async_openai::types::chat::ChatCompletionRequestMessage::Assistant(m.clone())
+                                    ).trim().is_empty()).unwrap_or(true)
+                                }
+                                _ => false,
+                            };
+                            if should_pop {
+                                client_messages.pop();
+                            } else {
+                                break;
+                            }
+                        }
                         client_messages.push(system_message(
-                            "IMPORTANT: You MUST write a dialogue reply now. \
-                             Do NOT call any tools. Just respond with natural dialogue text."
+                            "IMPORTANT: Respond with dialogue text only. Do NOT call any tools."
                                 .to_string(),
                         ));
                         continue;
