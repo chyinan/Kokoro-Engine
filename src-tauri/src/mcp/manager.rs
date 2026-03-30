@@ -4,6 +4,7 @@
 
 use super::client::McpClient;
 use super::transport::{SseTransport, StdioTransport, StreamableHttpTransport};
+use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -121,10 +122,10 @@ impl McpManager {
     }
 
     /// Save current configs to disk.
-    pub fn save_configs(&self) -> Result<(), String> {
+    pub fn save_configs(&self) -> Result<(), KokoroError> {
         let content = serde_json::to_string_pretty(&self.configs)
-            .map_err(|e| format!("Serialize error: {}", e))?;
-        std::fs::write(&self.config_path, content).map_err(|e| format!("Write error: {}", e))?;
+            .map_err(|e| KokoroError::Config(format!("Serialize error: {}", e)))?;
+        std::fs::write(&self.config_path, content).map_err(|e| KokoroError::Io(format!("Write error: {}", e)))?;
         Ok(())
     }
 
@@ -159,7 +160,7 @@ impl McpManager {
     }
 
     /// Connect to a single server.
-    pub async fn connect_server(&mut self, config: &McpServerConfig) -> Result<(), String> {
+    pub async fn connect_server(&mut self, config: &McpServerConfig) -> Result<(), KokoroError> {
         let client = build_connected_client(config).await?;
         self.clients
             .insert(config.name.clone(), Arc::new(Mutex::new(client)));
@@ -167,7 +168,7 @@ impl McpManager {
     }
 
     /// Disconnect and remove a server.
-    pub async fn disconnect_server(&mut self, name: &str) -> Result<(), String> {
+    pub async fn disconnect_server(&mut self, name: &str) -> Result<(), KokoroError> {
         if let Some(client) = self.clients.remove(name) {
             client.lock().await.shutdown().await?;
         }
@@ -179,7 +180,7 @@ impl McpManager {
         &mut self,
         config: McpServerConfig,
         connect: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), KokoroError> {
         // Remove existing with same name
         self.configs.retain(|c| c.name != config.name);
         self.configs.push(config.clone());
@@ -192,7 +193,7 @@ impl McpManager {
     }
 
     /// Remove a server config and disconnect.
-    pub async fn remove_server(&mut self, name: &str) -> Result<(), String> {
+    pub async fn remove_server(&mut self, name: &str) -> Result<(), KokoroError> {
         self.disconnect_server(name).await?;
         self.configs.retain(|c| c.name != name);
         self.save_configs()?;
@@ -202,9 +203,9 @@ impl McpManager {
     /// Toggle a server's enabled state.
     /// If disabling, disconnects the server. If enabling, only saves config
     /// (caller should spawn background connection task).
-    pub async fn toggle_server(&mut self, name: &str, enabled: bool) -> Result<(), String> {
+    pub async fn toggle_server(&mut self, name: &str, enabled: bool) -> Result<(), KokoroError> {
         let config = self.configs.iter_mut().find(|c| c.name == name)
-            .ok_or_else(|| format!("Server '{}' not found", name))?;
+            .ok_or_else(|| KokoroError::NotFound(format!("Server '{}' not found", name)))?;
         config.enabled = enabled;
         self.save_configs()?;
 
@@ -312,7 +313,7 @@ impl McpManager {
 /// Build and fully initialize an MCP client for the given config **without holding
 /// any manager lock**. All slow I/O (process spawn, TCP handshake, MCP initialize)
 /// happens here so callers can insert the result with only a brief lock.
-pub async fn build_connected_client(config: &McpServerConfig) -> Result<McpClient, String> {
+pub async fn build_connected_client(config: &McpServerConfig) -> Result<McpClient, KokoroError> {
     println!(
         "[MCP] Connecting to '{}' (transport: {})...",
         config.name, config.transport_type
@@ -321,19 +322,19 @@ pub async fn build_connected_client(config: &McpServerConfig) -> Result<McpClien
     let transport: Arc<dyn super::transport::McpTransport> = match config.transport_type.as_str() {
         "streamable_http" | "streamable-http" => {
             let url = config.url.as_deref().ok_or_else(|| {
-                format!(
+                KokoroError::Config(format!(
                     "Server '{}' has type '{}' but no 'url' configured",
                     config.name, config.transport_type
-                )
+                ))
             })?;
             Arc::new(StreamableHttpTransport::new(url))
         }
         "sse" => {
             let url = config.url.as_deref().ok_or_else(|| {
-                format!(
+                KokoroError::Config(format!(
                     "Server '{}' has type 'sse' but no 'url' configured",
                     config.name
-                )
+                ))
             })?;
             let transport = SseTransport::new(url);
             transport.connect().await?;
@@ -355,10 +356,10 @@ pub async fn build_connected_client(config: &McpServerConfig) -> Result<McpClien
                         Arc::new(StreamableHttpTransport::new(url))
                     }
                 } else {
-                    return Err(format!(
+                    return Err(KokoroError::Config(format!(
                         "Server '{}' has no 'command' or 'url' configured",
                         config.name
-                    ));
+                    )));
                 }
             } else {
                 Arc::new(

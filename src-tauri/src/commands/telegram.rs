@@ -28,7 +28,7 @@ pub async fn save_telegram_config(
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let config_path = app_data.join("telegram_config.json");
-    crate::telegram::save_config(&config_path, &config).map_err(KokoroError::Config)?;
+    crate::telegram::save_config(&config_path, &config)?;
     state.update_config(config).await;
     Ok(())
 }

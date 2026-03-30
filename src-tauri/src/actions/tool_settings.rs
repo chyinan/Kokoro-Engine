@@ -1,4 +1,5 @@
 use crate::config;
+use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -45,6 +46,6 @@ pub fn load_config(path: &Path) -> ToolSettings {
     config::load_json_config::<ToolSettings>(path, "TOOLS").sanitized()
 }
 
-pub fn save_config(path: &Path, config: &ToolSettings) -> Result<(), String> {
+pub fn save_config(path: &Path, config: &ToolSettings) -> Result<(), KokoroError> {
     config::save_json_config(path, config, "TOOLS")
 }

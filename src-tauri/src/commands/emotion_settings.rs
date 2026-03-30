@@ -1,5 +1,6 @@
 use crate::ai::context::AIOrchestrator;
 use crate::ai::emotion_settings::{self, EmotionSettings};
+use crate::error::KokoroError;
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::RwLock;
@@ -14,7 +15,7 @@ fn emotion_settings_path() -> std::path::PathBuf {
 #[tauri::command]
 pub async fn get_emotion_settings(
     state: State<'_, Arc<RwLock<EmotionSettings>>>,
-) -> Result<EmotionSettings, String> {
+) -> Result<EmotionSettings, KokoroError> {
     Ok(state.read().await.clone())
 }
 
@@ -23,7 +24,7 @@ pub async fn save_emotion_settings(
     settings: EmotionSettings,
     settings_state: State<'_, Arc<RwLock<EmotionSettings>>>,
     orchestrator: State<'_, AIOrchestrator>,
-) -> Result<(), String> {
+) -> Result<(), KokoroError> {
     {
         let mut guard = settings_state.write().await;
         *guard = settings.clone();

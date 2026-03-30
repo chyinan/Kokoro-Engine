@@ -82,7 +82,7 @@ pub async fn save_tts_config(
     let config_path = app_data.join("tts_config.json");
 
     // Write to disk
-    save_config(&config_path, &config).map_err(KokoroError::Tts)?;
+    save_config(&config_path, &config)?;
 
     // Hot-reload providers
     state.reload_from_config(&config).await;

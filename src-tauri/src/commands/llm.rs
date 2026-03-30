@@ -16,7 +16,7 @@ pub async fn save_llm_config(
     config: LlmConfig,
     state: State<'_, LlmService>,
 ) -> Result<(), KokoroError> {
-    state.update_config(config).await.map_err(KokoroError::Config)
+    state.update_config(config).await
 }
 
 #[tauri::command]

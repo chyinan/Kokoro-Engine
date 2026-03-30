@@ -1,3 +1,4 @@
+use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -96,6 +97,6 @@ pub fn load_config(path: &Path) -> ImageGenSystemConfig {
 }
 
 /// Save config to a JSON file.
-pub fn save_config(path: &Path, config: &ImageGenSystemConfig) -> Result<(), String> {
+pub fn save_config(path: &Path, config: &ImageGenSystemConfig) -> Result<(), KokoroError> {
     crate::config::save_json_config(path, config, "ImageGen")
 }

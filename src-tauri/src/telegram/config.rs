@@ -1,5 +1,6 @@
 //! Telegram Bot configuration — load/save from app data directory.
 
+use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -51,6 +52,6 @@ pub fn load_config(path: &Path) -> TelegramConfig {
     crate::config::load_json_config(path, "TELEGRAM")
 }
 
-pub fn save_config(path: &Path, config: &TelegramConfig) -> Result<(), String> {
+pub fn save_config(path: &Path, config: &TelegramConfig) -> Result<(), KokoroError> {
     crate::config::save_json_config(path, config, "TELEGRAM")
 }

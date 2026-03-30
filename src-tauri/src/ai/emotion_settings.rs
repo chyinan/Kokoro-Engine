@@ -1,4 +1,5 @@
 use crate::config;
+use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -22,6 +23,6 @@ pub fn load_config(path: &Path) -> EmotionSettings {
     config::load_json_config::<EmotionSettings>(path, "EMOTION")
 }
 
-pub fn save_config(path: &Path, config: &EmotionSettings) -> Result<(), String> {
+pub fn save_config(path: &Path, config: &EmotionSettings) -> Result<(), KokoroError> {
     config::save_json_config(path, config, "EMOTION")
 }

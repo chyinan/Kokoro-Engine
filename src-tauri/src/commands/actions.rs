@@ -17,7 +17,7 @@ pub async fn list_actions(
 #[command]
 pub async fn list_builtin_tools(
     registry_state: State<'_, Arc<RwLock<ActionRegistry>>>,
-) -> Result<Vec<ActionInfo>, String> {
+) -> Result<Vec<ActionInfo>, KokoroError> {
     let registry = registry_state.read().await;
     Ok(registry.list_builtin_actions())
 }

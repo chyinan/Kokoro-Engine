@@ -1,6 +1,7 @@
 //! LLM configuration — persisted to `llm_config.json`.
 
 use crate::config;
+use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -113,6 +114,6 @@ pub fn load_config(path: &Path) -> LlmConfig {
     config::load_json_config(path, "LLM")
 }
 
-pub fn save_config(path: &Path, config: &LlmConfig) -> Result<(), String> {
+pub fn save_config(path: &Path, config: &LlmConfig) -> Result<(), KokoroError> {
     config::save_json_config(path, config, "LLM")
 }

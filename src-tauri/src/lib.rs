@@ -390,7 +390,7 @@ pub fn run() {
                                     Ok(())
                                 }
                                 Err(e) => {
-                                    mgr.set_connection_error(&cfg.name, e.clone());
+                                    mgr.set_connection_error(&cfg.name, e.to_string());
                                     Err(e)
                                 }
                             }

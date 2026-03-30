@@ -1,5 +1,6 @@
 //! LLM Service — managed Tauri state holding the active LLM provider.
 
+use crate::error::KokoroError;
 use crate::llm::llm_config::{LlmConfig, LlmProviderConfig};
 use crate::llm::ollama::OllamaProvider;
 use crate::llm::provider::{LlmProvider, OpenAIProvider};
@@ -37,7 +38,7 @@ impl LlmService {
     }
 
     /// Update config, persist to disk, and hot-swap the active provider.
-    pub async fn update_config(&self, new_config: LlmConfig) -> Result<(), String> {
+    pub async fn update_config(&self, new_config: LlmConfig) -> Result<(), KokoroError> {
         // Save to disk
         crate::llm::llm_config::save_config(&self.config_path, &new_config)?;
 

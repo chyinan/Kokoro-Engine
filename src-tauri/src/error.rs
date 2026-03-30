@@ -99,3 +99,31 @@ impl From<zip::result::ZipError> for KokoroError {
         KokoroError::Io(e.to_string())
     }
 }
+
+/// 自动转换 TtsError
+impl From<crate::tts::interface::TtsError> for KokoroError {
+    fn from(e: crate::tts::interface::TtsError) -> Self {
+        KokoroError::Tts(e.to_string())
+    }
+}
+
+/// 自动转换 SttError
+impl From<crate::stt::interface::SttError> for KokoroError {
+    fn from(e: crate::stt::interface::SttError) -> Self {
+        KokoroError::Stt(e.to_string())
+    }
+}
+
+/// 自动转换 ImageGenError
+impl From<crate::imagegen::interface::ImageGenError> for KokoroError {
+    fn from(e: crate::imagegen::interface::ImageGenError) -> Self {
+        KokoroError::ExternalService(e.to_string())
+    }
+}
+
+/// 自动转换 String（用于兼容返回 Result<T, String> 的函数）
+impl From<String> for KokoroError {
+    fn from(e: String) -> Self {
+        KokoroError::Internal(e)
+    }
+}

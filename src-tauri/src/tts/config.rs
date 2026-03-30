@@ -1,3 +1,4 @@
+use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -129,7 +130,7 @@ pub fn load_config(path: &Path) -> TtsSystemConfig {
 }
 
 /// Save TTS config to a JSON file.
-pub fn save_config(path: &Path, config: &TtsSystemConfig) -> Result<(), String> {
+pub fn save_config(path: &Path, config: &TtsSystemConfig) -> Result<(), KokoroError> {
     crate::config::save_json_config(path, config, "TTS")
 }
 

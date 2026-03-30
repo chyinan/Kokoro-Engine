@@ -59,7 +59,7 @@ pub async fn save_stt_config(
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let config_path = app_data.join("stt_config.json");
-    save_config(&config_path, &config).map_err(KokoroError::Stt)?;
+    save_config(&config_path, &config)?;
     state.reload_from_config(&config).await;
     Ok(())
 }

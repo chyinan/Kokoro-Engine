@@ -135,7 +135,6 @@ pub async fn set_memory_enabled(
         &MemorySystemConfig { enabled },
         "MEMORY",
     )
-    .map_err(KokoroError::Config)
 }
 
 #[tauri::command]

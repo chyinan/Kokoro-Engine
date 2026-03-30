@@ -1,6 +1,7 @@
 //! Shared config utilities for loading/saving JSON config files
 //! and resolving API keys from fields or environment variables.
 
+use crate::error::KokoroError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::Path;
@@ -36,14 +37,14 @@ pub fn load_json_config<T: DeserializeOwned + Default>(path: &Path, label: &str)
 }
 
 /// Generic save for any Serde config type.
-pub fn save_json_config<T: Serialize>(path: &Path, config: &T, label: &str) -> Result<(), String> {
+pub fn save_json_config<T: Serialize>(path: &Path, config: &T, label: &str) -> Result<(), KokoroError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create config directory: {}", e))?;
+            .map_err(|e| KokoroError::Config(format!("Failed to create config directory: {}", e)))?;
     }
     let json = serde_json::to_string_pretty(config)
-        .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    std::fs::write(path, json).map_err(|e| format!("Failed to write config file: {}", e))?;
+        .map_err(|e| KokoroError::Config(format!("Failed to serialize config: {}", e)))?;
+    std::fs::write(path, json).map_err(|e| KokoroError::Config(format!("Failed to write config file: {}", e)))?;
     println!("[{}] Saved config to {}", label, path.display());
     Ok(())
 }
