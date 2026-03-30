@@ -119,7 +119,7 @@ export default function BackgroundTab({
                             className={clsx(
                                 "px-3 py-2 text-xs border rounded-lg transition-colors uppercase font-bold tracking-wider",
                                 (bgConfig.mode || "slideshow") === mode
-                                    ? "bg-[var(--color-accent)] border-[var(--color-accent)] text-white"
+                                    ? "bg-[var(--color-accent)] border-[var(--color-accent)] text-black"
                                     : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-secondary)]"
                             )}
                         >
