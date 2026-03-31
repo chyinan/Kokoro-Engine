@@ -44,8 +44,10 @@ const MIN_COSINE_SIMILARITY: f32 = 0.30;
 
 /// Similarity band where memories are topically related but not duplicates —
 /// potential contradictions (new fact vs old fact about same topic) live here.
+/// CONTRADICTION_BAND_HIGH equals DEDUP_THRESHOLD; the range is exclusive at the
+/// high end, so sim=0.95 falls in neither band — this is intentional.
 const CONTRADICTION_BAND_LOW: f32 = 0.70;
-const CONTRADICTION_BAND_HIGH: f32 = 0.95; // just below DEDUP_THRESHOLD
+const CONTRADICTION_BAND_HIGH: f32 = 0.95; // exclusive upper bound = DEDUP_THRESHOLD
 
 /// Local model directory path (relative to working dir).
 #[cfg(not(test))]
@@ -761,9 +763,12 @@ impl MemoryManager {
     ) -> Result<usize> {
         let rows = sqlx::query(
             "SELECT id, content, embedding FROM memories \
-             WHERE character_id = ? AND tier != 'invalidated'",
+             WHERE character_id = ? AND tier != 'invalidated' \
+             AND created_at >= ? \
+             ORDER BY created_at DESC LIMIT 200",
         )
         .bind(character_id)
+        .bind(chrono::Utc::now().timestamp() - 90 * 24 * 3600) // last 90 days
         .fetch_all(&self.db)
         .await?;
 
@@ -1476,5 +1481,52 @@ mod tests {
             5,
             "Should have exactly 5 distinct memories after adding 5"
         );
+    }
+
+    // ── is_likely_contradiction unit tests ────────────────────────────────
+
+    #[test]
+    fn test_contradiction_one_side_negation_en() {
+        // Exactly one side has negation → contradiction
+        assert!(is_likely_contradiction(
+            "The user likes cats",
+            "The user doesn't like cats"
+        ));
+    }
+
+    #[test]
+    fn test_contradiction_one_side_negation_zh() {
+        // Chinese negation keyword
+        assert!(is_likely_contradiction(
+            "用户喜欢猫",
+            "用户不喜欢猫"
+        ));
+    }
+
+    #[test]
+    fn test_no_contradiction_both_have_negation() {
+        // Both sides have negation → not a contradiction
+        assert!(!is_likely_contradiction(
+            "The user doesn't like dogs",
+            "The user never eats meat"
+        ));
+    }
+
+    #[test]
+    fn test_no_contradiction_neither_has_negation() {
+        // Neither side has negation → not a contradiction
+        assert!(!is_likely_contradiction(
+            "The user likes coffee",
+            "The user drinks tea every morning"
+        ));
+    }
+
+    #[test]
+    fn test_contradiction_hate_keyword() {
+        // 'hate' counts as negation
+        assert!(is_likely_contradiction(
+            "The user loves jazz music",
+            "The user hates jazz music"
+        ));
     }
 }

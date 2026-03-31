@@ -704,14 +704,13 @@ impl AIOrchestrator {
             None
         };
 
-        let sp = self.system_prompt.lock().await;
-        let history = self.history.lock().await;
+        // Read all lock-guarded values upfront and drop locks immediately.
+        // This prevents holding multiple mutexes across .await points.
+        let sp = self.system_prompt.lock().await.clone();
+        let history_snapshot: Vec<Message> = self.history.lock().await.iter().cloned().collect();
 
         // -- Read response language early so all sections can reference it --
-        let resp_lang = {
-            let lang = self.response_language.lock().await;
-            lang.clone()
-        };
+        let resp_lang = self.response_language.lock().await.clone();
 
         let mut final_messages = Vec::new();
 
@@ -731,9 +730,15 @@ impl AIOrchestrator {
         let character_block = if !jailbreak.is_empty() {
             let char_name = self.character_name.lock().await.clone();
             let user_name = self.user_name.lock().await.clone();
-            jailbreak
+            // Preserve base system prompt alongside jailbreak
+            let processed_jailbreak = jailbreak
                 .replace("{{char}}", &char_name)
-                .replace("{{user}}", &user_name)
+                .replace("{{user}}", &user_name);
+            if sp.is_empty() {
+                processed_jailbreak
+            } else {
+                format!("{processed_jailbreak}\n\n{sp}")
+            }
         } else {
             sp.clone()
         };
@@ -871,7 +876,7 @@ impl AIOrchestrator {
         let mut used_chars = 0usize;
         let mut selected: Vec<&Message> = Vec::new();
 
-        for msg in history.iter().rev() {
+        for msg in history_snapshot.iter().rev() {
             let msg_chars = msg.content.chars().count();
             if used_chars + msg_chars > budget_chars && !selected.is_empty() {
                 break;
