@@ -167,25 +167,6 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
             return () => { unlisten?.(); };
         }, [getActiveController]);
 
-        useEffect(() => {
-            let unlisten: (() => void) | undefined;
-
-            listen<{ semantic_key?: string; event_type?: string }>("emotion-event", (event) => {
-                const ctrl = getActiveController();
-                if (!ctrl) return;
-
-                const semanticKey = event.payload?.semantic_key;
-                if (!semanticKey) return;
-
-                const cue = ctrl.resolveSemanticCue(semanticKey);
-                if (cue) {
-                    void ctrl.playCue(cue);
-                }
-            }).then(fn => { unlisten = fn; });
-
-            return () => { unlisten?.(); };
-        }, [getActiveController]);
-
         // Sync gazeTracking prop to ref (avoids recreating handlePointerMove)
         useEffect(() => {
             gazeTrackingRef.current = gazeTracking;

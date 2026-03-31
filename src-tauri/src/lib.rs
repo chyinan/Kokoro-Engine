@@ -69,7 +69,6 @@ pub fn run() {
             commands::context::set_character_name,
             commands::context::set_active_character_id,
             commands::context::set_user_name,
-            commands::context::get_emotion_state,
             commands::context::set_response_language,
             commands::context::set_user_language,
             commands::context::set_jailbreak_prompt,
@@ -78,8 +77,6 @@ pub fn run() {
             commands::context::get_proactive_enabled,
             commands::context::set_memory_enabled,
             commands::context::get_memory_enabled,
-            commands::emotion_settings::get_emotion_settings,
-            commands::emotion_settings::save_emotion_settings,
             commands::context::clear_history,
             commands::context::delete_last_messages,
             commands::context::end_session,
@@ -260,10 +257,6 @@ pub fn run() {
                         let tool_settings = crate::actions::tool_settings::load_config(&tool_settings_path);
                         app_handle.manage(Arc::new(tokio::sync::RwLock::new(tool_settings)));
 
-                        let emotion_settings_path = app_data_dir.join("emotion_settings.json");
-                        let emotion_settings = crate::ai::emotion_settings::load_config(&emotion_settings_path);
-                        app_handle.manage(Arc::new(tokio::sync::RwLock::new(emotion_settings)));
-
                         // Restore current_conversation_id from disk and reload history
                         let conv_id_path = app_data_dir.join("current_conversation_id.json");
                         if let Ok(content) = std::fs::read_to_string(&conv_id_path) {
@@ -306,18 +299,6 @@ pub fn run() {
                             println!("[AI] Restored active_character_id: {}", char_id);
                         }
 
-                        // Restore emotion state from disk (delayed to allow persona to load first)
-                        let emotion_app = app_handle.clone();
-                        tauri::async_runtime::spawn(async move {
-                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                            if let Some(orch) = emotion_app.try_state::<crate::ai::context::AIOrchestrator>() {
-                                if !orch.is_memory_enabled() {
-                                    println!("[AI] Skipping emotion state restore because memory is disabled");
-                                } else if let Err(e) = orch.load_emotion_state().await {
-                                    println!("[AI] Failed to restore emotion state: {}", e);
-                                }
-                            }
-                        });
                     }
                     Err(e) => {
                         eprintln!("AI Orchestrator init failed (will run without AI): {}", e);

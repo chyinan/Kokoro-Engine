@@ -1,11 +1,4 @@
-//! Heartbeat System — Background timer for proactive character behavior.
-//!
-//! Runs a loop every 30 seconds, checks autonomous systems (Curiosity, Initiative, Idle),
-//! and triggers proactive messages or idle animations.
-
 use crate::ai::context::AIOrchestrator;
-use crate::ai::emotion::EmotionState;
-use crate::ai::emotion_settings::EmotionSettings;
 use crate::ai::initiative::InitiativeDecision;
 use chrono::Timelike;
 use serde::Serialize;
@@ -54,11 +47,8 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
     let mut last_proactive_ts = std::time::Instant::now();
     let _last_time_period = current_time_period();
     let mut last_prune_ts = std::time::Instant::now();
-    let mut last_snapshot_ts = std::time::Instant::now();
 
     loop {
-        // Heartbeat tick rate: 5s when active, 30s when idle?
-        // For now, stick to 10s to make idle animations feel responsive enough
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
         // Get orchestrator state
@@ -66,18 +56,10 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
             Some(state) => state,
             None => continue,
         };
-        let emotion_enabled = app_handle
-            .try_state::<std::sync::Arc<tokio::sync::RwLock<EmotionSettings>>>()
-            .map(|settings| async move { settings.read().await.enabled });
-        let emotion_enabled = match emotion_enabled {
-            Some(fut) => fut.await,
-            None => true,
-        };
 
         // Gather metrics
         let idle_secs = orchestrator.idle_seconds().await;
         let conversation_count = orchestrator.get_conversation_count().await;
-        // let now_period = current_time_period();
 
         // ── Autonomous Systems Updates ──
 
@@ -89,65 +71,16 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
 
         // 2. Idle Behaviors (Animations)
         {
-            let emotion = orchestrator.emotion_state.lock().await;
-            let neutral_emotion = EmotionState::new(emotion.personality().clone());
             let mut idle_sys = orchestrator.idle_behaviors.lock().await;
-            let emotion_ref = if emotion_enabled {
-                &*emotion
-            } else {
-                &neutral_emotion
-            };
-            if let Some(behavior) = idle_sys.decide(emotion_ref, idle_secs) {
+            if let Some(behavior) = idle_sys.decide(idle_secs) {
                 let _ = app_handle.emit("idle-behavior", IdleBehaviorEvent { behavior });
             }
         }
 
-        // 3. Emotion System (Decay, Snapshot, Expression Frame)
-        if emotion_enabled {
-            let mut emotion = orchestrator.emotion_state.lock().await;
-
-            // Decay
-            emotion.decay_toward_default();
-
-            // Snapshot — at most once per 60 seconds
-            if orchestrator.is_memory_enabled() && last_snapshot_ts.elapsed().as_secs() >= 60 {
-                last_snapshot_ts = std::time::Instant::now();
-                let snap = emotion.snapshot();
-                let char_id = orchestrator.get_character_id().await;
-                let _ = orchestrator
-                    .memory_manager
-                    .save_emotion_snapshot(&char_id, &snap)
-                    .await;
-            }
-
-            // Expression Frame
-            let trend = emotion.detect_trend();
-            let trend_str = match trend {
-                crate::ai::emotion::EmotionTrend::Rising => "rising",
-                crate::ai::emotion::EmotionTrend::Falling => "falling",
-                crate::ai::emotion::EmotionTrend::Stable => "stable",
-            };
-            let frame = crate::ai::expression_driver::compute_expression_frame(
-                emotion.current_emotion(),
-                emotion.mood(),
-                trend_str,
-                emotion.personality().expressiveness,
-            );
-            let _ = app_handle.emit("expression-frame", &frame);
-
-            // Emotion Events
-            let mood_hist = emotion.mood_history();
-            let events =
-                crate::ai::emotion_events::check_emotion_triggers(emotion.mood(), &mood_hist);
-            for event in &events {
-                let _ = app_handle.emit("emotion-event", event);
-            }
-        }
-
-        // 4. Auto Backup Check (interval configured by user)
+        // 3. Auto Backup Check (interval configured by user)
         crate::commands::auto_backup::check_and_run(&app_handle).await;
 
-        // 5. Memory Decay Pruning (once per hour)
+        // 4. Memory Decay Pruning (once per hour)
         if orchestrator.is_memory_enabled() && last_prune_ts.elapsed().as_secs() >= 3600 {
             last_prune_ts = std::time::Instant::now();
             let memory_mgr = orchestrator.memory_manager.clone();
@@ -157,8 +90,10 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
             });
         }
 
-        // 5. Initiative System (Proactive Messaging)
-        // Only run initiative check if proactive is enabled and cooldown has passed
+        // 5. Initiative System
+        if idle_secs < config.idle_threshold_secs {
+            continue;
+        }
         if !orchestrator.is_proactive_enabled() {
             continue;
         }
@@ -166,15 +101,7 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
             let decision = {
                 let mut initiative = orchestrator.initiative.lock().await;
                 let mut curiosity = orchestrator.curiosity.lock().await;
-                let emotion = orchestrator.emotion_state.lock().await;
-                let neutral_emotion = EmotionState::new(emotion.personality().clone());
-                let emotion_ref = if emotion_enabled {
-                    &*emotion
-                } else {
-                    &neutral_emotion
-                };
-
-                initiative.decide(&mut curiosity, emotion_ref, conversation_count, idle_secs)
+                initiative.decide(&mut curiosity, conversation_count, idle_secs)
             };
 
             match decision {
@@ -223,8 +150,6 @@ async fn trigger_proactive_message(
     let time_ctx = time_of_day_context();
     let idle_secs = orchestrator.idle_seconds().await;
 
-    // Build a lightweight instruction — compose_prompt() handles system prompt,
-    // memory, emotion, history, language settings, etc.
     let full_instruction = format!(
         "User has been idle for {:.0} minutes. {} {}",
         idle_secs as f64 / 60.0,

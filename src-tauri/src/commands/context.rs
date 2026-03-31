@@ -16,23 +16,6 @@ fn memory_config_path() -> std::path::PathBuf {
         .join("memory_system_config.json")
 }
 
-#[derive(serde::Serialize)]
-pub struct EmotionStateResponse {
-    pub emotion: String,
-    pub mood: f32,
-}
-
-#[tauri::command]
-pub async fn get_emotion_state(
-    state: State<'_, AIOrchestrator>,
-) -> Result<EmotionStateResponse, KokoroError> {
-    let emotion = state.emotion_state.lock().await;
-    Ok(EmotionStateResponse {
-        emotion: emotion.current_emotion().to_string(),
-        mood: emotion.mood(),
-    })
-}
-
 #[tauri::command]
 pub async fn set_persona(
     prompt: String,

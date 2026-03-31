@@ -1,10 +1,9 @@
 //! Initiative System — decides when and how the AI should proactively engage.
 //!
-//! Uses curiosity queue + emotion state + relationship depth + time context
+//! Uses curiosity queue + relationship depth + time context
 //! to determine if the AI should speak up when idle.
 
 use super::curiosity::CuriosityModule;
-use super::emotion::EmotionState;
 
 #[derive(Debug, Clone)]
 pub enum InitiativeDecision {
@@ -34,7 +33,6 @@ impl InitiativeSystem {
     pub fn decide(
         &mut self,
         curiosity: &mut CuriosityModule,
-        emotion: &EmotionState,
         conversation_count: u64,
         idle_seconds: u64,
     ) -> InitiativeDecision {
@@ -50,13 +48,6 @@ impl InitiativeSystem {
             51..=200 => 0.4, // Close
             _ => 0.6,        // Intimate
         };
-
-        // Modulate by emotion
-        let mood = emotion.mood(); // 0.0 - 1.0
-        prob *= 0.5 + mood; // Happy (1.0) -> 1.5x, Sad (0.0) -> 0.5x
-
-        // Expressiveness factor
-        prob *= 0.5 + (emotion.personality().expressiveness * 0.5);
 
         // Idle time factor (longer idle = higher chance, up to a point)
         if idle_seconds > 600 {

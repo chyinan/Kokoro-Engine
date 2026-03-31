@@ -7,7 +7,6 @@ pub mod chat;
 pub mod context;
 pub mod conversation;
 pub mod database;
-pub mod emotion_settings;
 pub mod imagegen;
 pub mod live2d;
 pub mod live2d_protocol;

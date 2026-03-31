@@ -1,5 +1,4 @@
 use crate::ai::curiosity::CuriosityModule;
-use crate::ai::emotion::{EmotionPersonality, EmotionState};
 use crate::ai::idle_behaviors::IdleBehaviorSystem;
 use crate::ai::initiative::InitiativeSystem;
 use crate::ai::memory::MemoryManager;
@@ -52,8 +51,6 @@ pub struct AIOrchestrator {
     character_id: Arc<Mutex<String>>,
     /// Global toggle for all automatic memory reads/writes/injection.
     memory_enabled: Arc<AtomicBool>,
-    /// Emotion state with per-character personality.
-    pub emotion_state: Arc<Mutex<EmotionState>>,
     /// Timestamp of last user activity (for idle detection).
     pub last_activity: Arc<Mutex<Instant>>,
     /// Total message count across sessions (for relationship depth).
@@ -106,7 +103,6 @@ impl AIOrchestrator {
             memory_history_boundary: Arc::new(Mutex::new(0)),
             character_id: Arc::new(Mutex::new("default".to_string())),
             memory_enabled: Arc::new(AtomicBool::new(true)),
-            emotion_state: Arc::new(Mutex::new(EmotionState::new(EmotionPersonality::default()))),
             last_activity: Arc::new(Mutex::new(Instant::now())),
             conversation_count: Arc::new(Mutex::new(0)),
             response_language: Arc::new(Mutex::new(String::new())),
@@ -128,13 +124,7 @@ impl AIOrchestrator {
         self.set_system_prompt_with_reset(prompt, true).await;
     }
 
-    pub async fn set_system_prompt_with_reset(&self, prompt: String, reset_emotion: bool) {
-        // Parse emotion personality from the new persona text
-        let personality = EmotionPersonality::parse_from_persona(&prompt);
-        {
-            let mut emotion = self.emotion_state.lock().await;
-            emotion.set_personality_with_reset(personality, reset_emotion);
-        }
+    pub async fn set_system_prompt_with_reset(&self, prompt: String, _reset_emotion: bool) {
         let mut sp = self.system_prompt.lock().await;
         *sp = prompt;
     }
@@ -169,50 +159,6 @@ impl AIOrchestrator {
         *un = name;
     }
 
-    pub async fn save_emotion_state(&self) -> Result<()> {
-        if !self.is_memory_enabled() {
-            return Ok(());
-        }
-        let emotion = self.emotion_state.lock().await;
-        let app_data = dirs_next::data_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("com.chyin.kokoro");
-
-        // 确保目录存在
-        std::fs::create_dir_all(&app_data)?;
-
-        let path = app_data.join("emotion_state.json");
-        let json = serde_json::to_string_pretty(&*emotion)?;
-        std::fs::write(&path, json)?;
-        println!(
-            "[AI] Saved emotion state: {} (mood: {:.2}) to {:?}",
-            emotion.current_emotion(),
-            emotion.mood(),
-            path
-        );
-        Ok(())
-    }
-
-    pub async fn load_emotion_state(&self) -> Result<()> {
-        let app_data = dirs_next::data_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("com.chyin.kokoro");
-        let path = app_data.join("emotion_state.json");
-
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            let loaded_state: EmotionState = serde_json::from_str(&content)?;
-            let mut emotion = self.emotion_state.lock().await;
-            *emotion = loaded_state;
-            println!(
-                "[AI] Restored emotion state: {} (mood: {:.2})",
-                emotion.current_emotion(),
-                emotion.mood()
-            );
-        }
-        Ok(())
-    }
-
     /// Enable or disable proactive (idle auto-talk) messages.
     pub fn set_proactive_enabled(&self, enabled: bool) {
         self.proactive_enabled
@@ -223,29 +169,6 @@ impl AIOrchestrator {
     pub fn is_proactive_enabled(&self) -> bool {
         self.proactive_enabled
             .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// Update emotion state with smoothing and return the smoothed values.
-    pub async fn update_emotion(&self, raw_emotion: &str, raw_mood: f32) -> (String, f32) {
-        let result = {
-            let mut emotion = self.emotion_state.lock().await;
-            emotion.update(raw_emotion, raw_mood)
-        };
-
-        if self.is_memory_enabled() {
-            // Save emotion state to disk after update
-            if let Err(e) = self.save_emotion_state().await {
-                eprintln!("[AI] Failed to save emotion state: {}", e);
-            }
-        }
-
-        result
-    }
-
-    /// Get a natural-language description of current emotion for prompt injection.
-    pub async fn get_emotion_description(&self) -> String {
-        let emotion = self.emotion_state.lock().await;
-        emotion.describe()
     }
 
     /// Record user activity (resets idle timer).
@@ -269,30 +192,7 @@ impl AIOrchestrator {
 
     pub async fn set_character_id(&self, id: String) {
         let mut cid = self.character_id.lock().await;
-        let changed = *cid != id;
-        *cid = id.clone();
-        drop(cid);
-
-        // Restore emotion snapshot from disk only when memory is enabled.
-        // Otherwise reset to the active persona's default state to avoid cross-character leakage.
-        if changed {
-            let mut emotion = self.emotion_state.lock().await;
-            if self.is_memory_enabled() {
-                if let Ok(Some(snap)) = self.memory_manager.load_emotion_snapshot(&id).await {
-                    emotion.restore_from_snapshot(&snap);
-                    println!(
-                        "[Emotion] Restored snapshot for '{}': {} (mood={:.2})",
-                        id, snap.emotion, snap.mood
-                    );
-                } else {
-                    let personality = emotion.personality().clone();
-                    emotion.set_personality_with_reset(personality, true);
-                }
-            } else {
-                let personality = emotion.personality().clone();
-                emotion.set_personality_with_reset(personality, true);
-            }
-        }
+        *cid = id;
     }
 
     pub async fn get_character_id(&self) -> String {
@@ -634,25 +534,6 @@ impl AIOrchestrator {
             let mut boundary = self.memory_history_boundary.lock().await;
             *boundary = history_len;
         }
-        if !enabled {
-            let mut emotion = self.emotion_state.lock().await;
-            let personality = emotion.personality().clone();
-            emotion.set_personality_with_reset(personality, true);
-            drop(emotion);
-
-            let path = dirs_next::data_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("com.chyin.kokoro")
-                .join("emotion_state.json");
-            if path.exists() {
-                if let Err(e) = std::fs::remove_file(&path) {
-                    eprintln!(
-                        "[AI] Failed to remove emotion state while disabling memory: {}",
-                        e
-                    );
-                }
-            }
-        }
     }
 
     /// Append a message to in-memory history only and keep the memory boundary aligned
@@ -744,18 +625,9 @@ impl AIOrchestrator {
         };
 
         // Emotion state hint — subtly colors tone without overriding character persona
-        let emotion_hint = {
-            let emotion = self.emotion_state.lock().await;
-            let desc = emotion.describe();
-            if !desc.is_empty() {
-                format!("\n\n[Current emotional state: {}. Let this subtly color your tone without breaking character.]", desc)
-            } else {
-                String::new()
-            }
-        };
         system_parts.push(format!(
-            "<character>\n{}{}\n</character>",
-            character_block, emotion_hint
+            "<character>\n{}\n</character>",
+            character_block
         ));
 
         // Section 3: Memory context

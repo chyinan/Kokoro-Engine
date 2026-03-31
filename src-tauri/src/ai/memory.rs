@@ -659,48 +659,6 @@ impl MemoryManager {
         Ok(rows.iter().map(|r| r.get("summary")).collect())
     }
 
-    // ── Emotion Persistence ────────────────────────────────
-
-    /// Save an emotion snapshot for a character (upsert).
-    pub async fn save_emotion_snapshot(
-        &self,
-        character_id: &str,
-        snap: &crate::ai::emotion::EmotionSnapshot,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT OR REPLACE INTO emotion_snapshots \
-             (character_id, emotion, mood, accumulated_inertia, updated_at) \
-             VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(character_id)
-        .bind(&snap.emotion)
-        .bind(snap.mood)
-        .bind(snap.accumulated_inertia)
-        .bind(chrono::Utc::now().timestamp())
-        .execute(&self.db)
-        .await?;
-        Ok(())
-    }
-
-    /// Load the most recent emotion snapshot for a character.
-    pub async fn load_emotion_snapshot(
-        &self,
-        character_id: &str,
-    ) -> Result<Option<crate::ai::emotion::EmotionSnapshot>> {
-        let row = sqlx::query(
-            "SELECT emotion, mood, accumulated_inertia FROM emotion_snapshots WHERE character_id = ?",
-        )
-        .bind(character_id)
-        .fetch_optional(&self.db)
-        .await?;
-
-        Ok(row.map(|r| crate::ai::emotion::EmotionSnapshot {
-            emotion: r.get("emotion"),
-            mood: r.get("mood"),
-            accumulated_inertia: r.get("accumulated_inertia"),
-        }))
-    }
-
     // ── Smart Memory Importance ────────────────────────────
 
     /// Add a memory with an explicit importance score (0.0-1.0).
