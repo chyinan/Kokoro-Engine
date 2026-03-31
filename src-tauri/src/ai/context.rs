@@ -715,52 +715,95 @@ impl AIOrchestrator {
 
         let mut final_messages = Vec::new();
 
-        // -- System Prompt (P0) --
-        // Embed language requirement early for primacy effect
-        let lang_preamble = if !resp_lang.is_empty() {
-            format!(
-                "\n\n[LANGUAGE: You speak {}. All your replies must be in {}.]",
-                resp_lang, resp_lang
-            )
-        } else {
-            String::new()
-        };
+        // ── Main System Message ──────────────────────────────────────────────
+        // Structure: <rules> (highest attention) → <character> → <memory> → <tools> → <live2d> → <language>
+        // Placing core_persona rules at the TOP exploits primacy attention effect.
+        let mut system_parts: Vec<String> = Vec::new();
 
-        // Prepend jailbreak prompt if configured
+        // Section 1: Core persona rules (MUST be first for primacy effect)
+        system_parts.push(format!(
+            "<rules>\n{}\n</rules>",
+            crate::ai::prompts::core_persona_prompt(native_tools_enabled)
+        ));
+
+        // Section 2: Character persona (jailbreak + system prompt)
         let jailbreak = self.jailbreak_prompt.lock().await.clone();
-        let system_content = if !jailbreak.is_empty() {
-            // Replace {{char}} and {{user}} placeholders
+        let character_block = if !jailbreak.is_empty() {
             let char_name = self.character_name.lock().await.clone();
             let user_name = self.user_name.lock().await.clone();
-            let processed_jailbreak = jailbreak
+            jailbreak
                 .replace("{{char}}", &char_name)
-                .replace("{{user}}", &user_name);
-
-            format!(
-                "{}\n\n{}\n\n{}{}",
-                processed_jailbreak,
-                sp.clone(),
-                crate::ai::prompts::core_persona_prompt(native_tools_enabled),
-                lang_preamble
-            )
+                .replace("{{user}}", &user_name)
         } else {
-            format!(
-                "{}\n\n{}{}",
-                sp.clone(),
-                crate::ai::prompts::core_persona_prompt(native_tools_enabled),
-                lang_preamble
-            )
+            sp.clone()
         };
 
-        final_messages.push(Message {
-            role: "system".to_string(),
-            content: system_content,
-            metadata: None,
-        });
+        // Emotion state hint — subtly colors tone without overriding character persona
+        let emotion_hint = {
+            let emotion = self.emotion_state.lock().await;
+            let desc = emotion.describe();
+            if !desc.is_empty() {
+                format!("\n\n[Current emotional state: {}. Let this subtly color your tone without breaking character.]", desc)
+            } else {
+                String::new()
+            }
+        };
+        system_parts.push(format!(
+            "<character>\n{}{}\n</character>",
+            character_block, emotion_hint
+        ));
 
-        // Current emotion state is still used by background systems, but it is no longer
-        // injected into the chat prompt as a system message.
-        // -- Live2D Cue Context (P0.35) --
+        // Section 3: Memory context
+        let mut memory_sections: Vec<String> = Vec::new();
+        if let Some(ref mems) = memories {
+            if !mems.is_empty() {
+                let memory_block = mems
+                    .iter()
+                    .map(|m| format!("- {}", m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                memory_sections.push(format!(
+                    concat!(
+                        "You remember these things about the user:\n{}\n\n",
+                        "Naturally reference these memories in conversation so the user feels you truly remember what they said. ",
+                        "Do not list them mechanically; weave them naturally into the dialogue. ",
+                        "If a memory is not relevant to the current topic, do not force it."
+                    ),
+                    memory_block
+                ));
+            }
+        }
+        if self.is_memory_enabled() {
+            if let Ok(summaries) = self.memory_manager.get_recent_summaries(cid, 2).await {
+                if !summaries.is_empty() {
+                    let summary_block = summaries
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| format!("{}. {}", i + 1, s))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    memory_sections.push(format!(
+                        "Previous conversation summaries (most recent first):\n{}",
+                        summary_block
+                    ));
+                }
+            }
+        }
+        if !memory_sections.is_empty() {
+            system_parts.push(format!(
+                "<memory>\n{}\n</memory>",
+                memory_sections.join("\n\n")
+            ));
+        }
+
+        // Section 4: Tool prompt
+        if let Some(ref tp) = tool_prompt {
+            if !tp.is_empty() {
+                system_parts.push(format!("<tools>\n{}\n</tools>", tp));
+            }
+        }
+
+        // Section 5: Live2D cues
         if let Some(profile) = crate::commands::live2d::load_active_live2d_profile() {
             if !profile.cue_map.is_empty() {
                 let cue_lines = profile
@@ -772,73 +815,35 @@ impl AIOrchestrator {
                     .collect::<Vec<_>>()
                     .join(", ");
                 if !cue_lines.is_empty() {
-                    final_messages.push(Message {
-                        role: "system".to_string(),
-                        content: format!(
-                            "Live2D visual playback uses configured cues. Available cues for the active model: {}.\n\
-                             If the current reply clearly fits one of these existing cues, call the play_cue tool at an appropriate moment.\n\
-                             When calling play_cue, the cue argument must be exactly one item from this list.\n\
-                             Never invent a new cue name from an emotion word or description.\n\
-                             Do not rely only on text to describe expressions or actions when a matching cue should be used.",
-                            cue_lines
-                        ),
-                        metadata: Some(serde_json::json!({"type": "live2d_cue_context"})),
-                    });
+                    system_parts.push(format!(
+                        "<live2d>\nAvailable cues for the active model: {}.\n\
+                         If the current reply clearly fits one of these existing cues, call the play_cue tool at an appropriate moment.\n\
+                         When calling play_cue, the cue argument must be exactly one item from this list.\n\
+                         Never invent a new cue name from an emotion word or description.\n\
+                         Do not rely only on text to describe expressions or actions when a matching cue should be triggered — always call the tool instead.\n\
+                         </live2d>",
+                        cue_lines
+                    ));
                 }
             }
         }
 
-        // -- Relevant Memories (P1) --
-        // Upgraded: instruct the LLM to naturally reference these in conversation
-        if let Some(mems) = memories {
-            if !mems.is_empty() {
-                let memory_block = mems
-                    .iter()
-                    .map(|m| format!("- {}", m.content))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                final_messages.push(Message {
-                    role: "system".to_string(),
-                    content: format!(
-                        concat!(
-                            "You remember these things about the user:\n{}\n\n",
-                            "Naturally reference these memories in conversation so the user feels you truly remember what they said. ",
-                            "Do not list them mechanically; weave them naturally into the dialogue. ",
-                            "If a memory is not relevant to the current topic, do not force it."
-                        ),
-                        memory_block
-                    ),
-                    metadata: Some(serde_json::json!({"type": "memory_injection"})),
-                });
-            }
+        // Section 6: Language requirement
+        if !resp_lang.is_empty() {
+            system_parts.push(format!(
+                "<language>\nYou speak {}. All your replies must be in {}.\n</language>",
+                resp_lang, resp_lang
+            ));
         }
 
-        // -- Session Summaries (P1.5) --
-        // Inject recent session summaries so the character remembers past conversations
-        if self.is_memory_enabled() {
-            if let Ok(summaries) = self.memory_manager.get_recent_summaries(cid, 2).await {
-                if !summaries.is_empty() {
-                    let summary_block = summaries
-                        .iter()
-                        .enumerate()
-                        .map(|(i, s)| format!("{}. {}", i + 1, s))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    final_messages.push(Message {
-                        role: "system".to_string(),
-                        content: format!(
-                            "Previous conversation summaries (most recent first):\n{}",
-                            summary_block
-                        ),
-                        metadata: Some(serde_json::json!({"type": "session_summary"})),
-                    });
-                }
-            }
-        }
+        // Push the single consolidated system message
+        final_messages.push(Message {
+            role: "system".to_string(),
+            content: system_parts.join("\n\n"),
+            metadata: None,
+        });
 
-        // -- Translation Instruction --
-        // When response language and user language differ, ask LLM to append inline translation
+        // -- Translation Instruction (kept separate at end for instruction clarity) --
         {
             let user_lang = self.user_language.lock().await;
             if !user_lang.is_empty() && !resp_lang.is_empty() && *user_lang != resp_lang {
@@ -858,29 +863,27 @@ impl AIOrchestrator {
                 });
             }
         }
+        // -- Recent History (P2) --
+        // Token-budget-aware trimming: walk backwards from newest, stop when budget exhausted.
+        const CHARS_PER_TOKEN: usize = 2; // conservative for mixed CJK/Latin
+        const HISTORY_TOKEN_BUDGET: usize = 6000;
+        let budget_chars = HISTORY_TOKEN_BUDGET * CHARS_PER_TOKEN;
+        let mut used_chars = 0usize;
+        let mut selected: Vec<&Message> = Vec::new();
 
-        // -- Tool/Action Prompt --
-        // Inject available tools so the LLM knows it can call them
-        if let Some(ref tp) = tool_prompt {
-            if !tp.is_empty() {
-                final_messages.push(Message {
-                    role: "system".to_string(),
-                    content: tp.clone(),
-                    metadata: Some(serde_json::json!({"type": "tool_prompt"})),
-                });
+        for msg in history.iter().rev() {
+            let msg_chars = msg.content.chars().count();
+            if used_chars + msg_chars > budget_chars && !selected.is_empty() {
+                break;
+            }
+            used_chars += msg_chars;
+            selected.push(msg);
+            if selected.len() >= 20 {
+                break;
             }
         }
-
-        // -- Recent History (P2) --
-        // Take last N messages. History is capped at 20 so recent_count covers all of it.
-        let recent_count = 20;
-        let start_index = if history.len() > recent_count {
-            history.len() - recent_count
-        } else {
-            0
-        };
-
-        for msg in history.iter().skip(start_index) {
+        selected.reverse();
+        for msg in selected {
             final_messages.push(msg.clone());
         }
 

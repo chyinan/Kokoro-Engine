@@ -32,6 +32,21 @@ const CONSOLIDATION_TIME_WINDOW_SECS: i64 = 7 * 24 * 3600; // 7 days
 /// Maximum number of memories in a single consolidation cluster.
 const MAX_CLUSTER_SIZE: usize = 5;
 
+/// Minimum RRF score to be included in search results.
+/// Prevents injecting completely irrelevant memories into the prompt.
+/// At k=60, rank-1 score ≈ 0.0164, rank-60 ≈ 0.0083.
+/// 0.008 filters out memories that appear only at the very bottom of one list.
+const MIN_RRF_SCORE: f32 = 0.008;
+
+/// Minimum cosine similarity (after time decay) for semantic search candidates.
+/// Prevents semantically unrelated memories from entering the RRF pool at all.
+const MIN_COSINE_SIMILARITY: f32 = 0.30;
+
+/// Similarity band where memories are topically related but not duplicates —
+/// potential contradictions (new fact vs old fact about same topic) live here.
+const CONTRADICTION_BAND_LOW: f32 = 0.70;
+const CONTRADICTION_BAND_HIGH: f32 = 0.95; // just below DEDUP_THRESHOLD
+
 /// Local model directory path (relative to working dir).
 #[cfg(not(test))]
 const LOCAL_MODEL_DIR: &str = "models/models--Qdrant--all-MiniLM-L6-v2-onnx";
@@ -450,7 +465,12 @@ impl MemoryManager {
         let mut fused: Vec<(f32, MemorySnippet)> = rrf_scores.into_values().collect();
         fused.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        Ok(fused.into_iter().take(limit).map(|(_, m)| m).collect())
+        Ok(fused
+            .into_iter()
+            .filter(|(score, _)| *score >= MIN_RRF_SCORE)
+            .take(limit)
+            .map(|(_, m)| m)
+            .collect())
     }
 
     /// Pure semantic (embedding) search with time decay, respecting tier.
@@ -463,7 +483,7 @@ impl MemoryManager {
         let query_embedding = self.embed(query).await?;
 
         let rows =
-            sqlx::query("SELECT id, content, embedding, created_at, importance, tier FROM memories WHERE character_id = ?")
+            sqlx::query("SELECT id, content, embedding, created_at, importance, tier FROM memories WHERE character_id = ? AND tier != 'invalidated'")
                 .bind(character_id)
                 .fetch_all(&self.db)
                 .await?;
@@ -488,6 +508,11 @@ impl MemoryManager {
                 (0.5_f64).powf(age_days / MEMORY_HALF_LIFE_DAYS) as f32
             };
             let final_score = similarity * decay;
+
+            // Skip memories with negligible relevance before RRF pooling
+            if final_score < MIN_COSINE_SIMILARITY {
+                continue;
+            }
 
             let memory = MemorySnippet {
                 id: row.get("id"),
@@ -715,7 +740,62 @@ impl MemoryManager {
         .execute(&self.db)
         .await?;
 
+        // After inserting, check for contradiction with existing memories in the 0.70-0.95 band
+        let _ = self
+            .check_and_invalidate_contradictions(content, &embedding, character_id)
+            .await;
+
         Ok(())
+    }
+
+    /// After storing a new memory, scan existing memories in the CONTRADICTION_BAND
+    /// (similarity 0.70–0.95) and mark those that appear to contradict the new fact
+    /// as 'invalidated' so they won't be retrieved in future searches.
+    ///
+    /// Uses a lightweight negation-keyword heuristic — no LLM call needed.
+    pub async fn check_and_invalidate_contradictions(
+        &self,
+        new_content: &str,
+        new_embedding: &[f32],
+        character_id: &str,
+    ) -> Result<usize> {
+        let rows = sqlx::query(
+            "SELECT id, content, embedding FROM memories \
+             WHERE character_id = ? AND tier != 'invalidated'",
+        )
+        .bind(character_id)
+        .fetch_all(&self.db)
+        .await?;
+
+        let mut invalidated = 0usize;
+        for row in rows {
+            let bytes: Vec<u8> = row.get("embedding");
+            let Ok(existing_emb): Result<Vec<f32>, _> = bincode::deserialize(&bytes) else {
+                continue;
+            };
+            let sim = cosine_similarity(new_embedding, &existing_emb);
+
+            if (CONTRADICTION_BAND_LOW..CONTRADICTION_BAND_HIGH).contains(&sim) {
+                let existing_content: String = row.get("content");
+                if is_likely_contradiction(new_content, &existing_content) {
+                    let id: i64 = row.get("id");
+                    sqlx::query(
+                        "UPDATE memories SET tier = 'invalidated', updated_at = ? WHERE id = ?",
+                    )
+                    .bind(chrono::Utc::now().timestamp())
+                    .bind(id)
+                    .execute(&self.db)
+                    .await?;
+                    invalidated += 1;
+                    println!(
+                        "[Memory] Invalidated contradicting memory id={}: '{}'",
+                        id,
+                        &existing_content[..existing_content.len().min(60)]
+                    );
+                }
+            }
+        }
+        Ok(invalidated)
     }
 
     // ── Memory CRUD (for viewer/editor UI) ────────────────
@@ -1058,6 +1138,23 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     } else {
         dot_product / (norm_a * norm_b)
     }
+}
+
+/// Lightweight contradiction heuristic: checks if one statement has negation markers
+/// the other lacks. Catches "likes cats" vs "doesn't like cats" without an LLM call.
+/// False-positive rate is acceptable — only triggers inside the 0.70–0.95 similarity band.
+fn is_likely_contradiction(a: &str, b: &str) -> bool {
+    const NEGATIONS: &[&str] = &[
+        "not", "no", "never", "don't", "dont", "doesn't", "doesnt",
+        "won't", "wont", "can't", "cant", "hate", "dislike",
+        "不", "没", "从不", "不喜欢", "讨厌", "不想", "不会", "没有",
+    ];
+    let a_lower = a.to_lowercase();
+    let b_lower = b.to_lowercase();
+    let a_neg = NEGATIONS.iter().any(|n| a_lower.contains(n));
+    let b_neg = NEGATIONS.iter().any(|n| b_lower.contains(n));
+    // Contradiction = exactly one side has a negation marker
+    a_neg != b_neg
 }
 
 /// Use LLM to merge multiple related facts into a single consolidated memory.
