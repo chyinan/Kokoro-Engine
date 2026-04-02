@@ -703,9 +703,13 @@ export async function onSenseVoiceLocalProgress(
 // ── Actions (Tool Calling) ─────────────────────────────
 
 export interface ActionInfo {
+    id: string;
     name: string;
+    source: "builtin" | "mcp";
+    server_name?: string;
     description: string;
     parameters: { name: string; description: string; required: boolean }[];
+    needs_feedback: boolean;
 }
 
 export interface ActionResult {
@@ -716,6 +720,7 @@ export interface ActionResult {
 
 export interface ToolCallEvent {
     tool: string;
+    tool_id?: string;
     result?: ActionResult;
     error?: string;
 }
@@ -803,6 +808,8 @@ export interface Conversation {
     id: string;
     character_id: string;
     title: string;
+    topic: string;
+    pinned_state: string;
     created_at: string;
     updated_at: string;
 }
@@ -814,16 +821,40 @@ export interface ConversationMessage {
     created_at: string;
 }
 
+export interface LoadedConversation {
+    topic: string;
+    pinned_state: string;
+    messages: ConversationMessage[];
+}
+
 export async function listConversations(characterId: string): Promise<Conversation[]> {
     return invoke<Conversation[]>("list_conversations", {
         request: { character_id: characterId },
     });
 }
 
-export async function loadConversation(id: string): Promise<ConversationMessage[]> {
-    return invoke<ConversationMessage[]>("load_conversation", {
+export async function loadConversation(id: string): Promise<LoadedConversation> {
+    return invoke<LoadedConversation>("load_conversation", {
         request: { id },
     });
+}
+
+export async function updateConversationState(
+    id: string,
+    patch: { topic?: string; pinned_state?: string }
+): Promise<void> {
+    return invoke("update_conversation_state", {
+        request: { id, ...patch },
+    });
+}
+
+export function hasPinnedConversationState(pinnedState: string): boolean {
+    const normalized = pinnedState.trim();
+    return normalized !== "" && normalized !== "{}";
+}
+
+export function getConversationDisplayTitle(conversation: Conversation): string {
+    return conversation.topic.trim() || conversation.title;
 }
 
 export async function deleteConversation(id: string): Promise<void> {

@@ -8,7 +8,7 @@ import {
 import { useTranslation } from "react-i18next";
 import {
     listMcpServers, addMcpServer, removeMcpServer, refreshMcpTools, reconnectMcpServer, toggleMcpServer,
-    listBuiltinTools, getToolSettings, saveToolSettings
+    listActions, getToolSettings, saveToolSettings
 } from "../../../lib/kokoro-bridge";
 import type { ActionInfo, McpServerConfig, McpServerStatus, ToolSettings } from "../../../lib/kokoro-bridge";
 
@@ -90,7 +90,7 @@ export default function McpTab() {
     const [adding, setAdding] = useState(false);
     const [removingName, setRemovingName] = useState<string | null>(null);
     const [successMsg, setSuccessMsg] = useState<string | null>(null);
-    const [builtinTools, setBuiltinTools] = useState<ActionInfo[]>([]);
+    const [tools, setTools] = useState<ActionInfo[]>([]);
     const [toolSettings, setToolSettings] = useState<ToolSettings>({ max_tool_rounds: 10, enabled_tools: {} });
     const [savingToolSettings, setSavingToolSettings] = useState(false);
 
@@ -105,31 +105,41 @@ export default function McpTab() {
         }
     }, []);
 
-    const fetchBuiltinToolState = useCallback(async () => {
+    const fetchToolState = useCallback(async () => {
         try {
-            const [tools, settings] = await Promise.all([
-                listBuiltinTools(),
+            const [toolDirectory, settings] = await Promise.all([
+                listActions(),
                 getToolSettings(),
             ]);
-            setBuiltinTools(tools);
+            setTools(toolDirectory);
             setToolSettings(settings);
         } catch (e) {
-            console.error("[McpTab] Failed to fetch builtin tool settings:", e);
+            console.error("[McpTab] Failed to fetch tool settings:", e);
         }
     }, []);
 
+    const reloadAll = useCallback(async () => {
+        await Promise.all([fetchServers(), fetchToolState()]);
+    }, [fetchServers, fetchToolState]);
+
     useEffect(() => {
-        fetchServers();
-        fetchBuiltinToolState();
-    }, [fetchServers, fetchBuiltinToolState]);
+        void reloadAll();
+    }, [reloadAll]);
 
     // Auto-poll while any server is in "connecting" state
     useEffect(() => {
         const hasConnecting = servers.some(s => s.status === "connecting");
         if (!hasConnecting) return;
-        const interval = setInterval(fetchServers, 2000);
+        const interval = setInterval(() => {
+            void reloadAll();
+        }, 2000);
         return () => clearInterval(interval);
-    }, [servers, fetchServers]);
+    }, [servers, reloadAll]);
+
+    useEffect(() => {
+        if (loading) return;
+        void fetchToolState();
+    }, [servers, loading, fetchToolState]);
 
     // ── Add server(s) from JSON ──────────────────────────
     const handleAdd = async () => {
@@ -156,7 +166,7 @@ export default function McpTab() {
             setSuccessMsg(t("settings.mcp.add_modal.success", { count: configs.length, names: configs.map(c => c.name).join(", ") }));
             setJsonInput("");
             setShowAdd(false);
-            await fetchServers();
+            await reloadAll();
         } catch (e) {
             setParseError(t("settings.mcp.add_modal.failed_add", { error: e instanceof Error ? e.message : String(e) }));
         } finally {
@@ -169,7 +179,7 @@ export default function McpTab() {
         setRemovingName(name);
         try {
             await removeMcpServer(name);
-            await fetchServers();
+            await reloadAll();
         } catch (e) {
             console.error("[McpTab] Remove failed:", e);
         } finally {
@@ -191,7 +201,7 @@ export default function McpTab() {
     const handleToggle = async (name: string, currentEnabled: boolean) => {
         try {
             await toggleMcpServer(name, !currentEnabled);
-            await fetchServers();
+            await reloadAll();
         } catch (e) {
             console.error("[McpTab] Toggle failed:", e);
         }
@@ -202,7 +212,7 @@ export default function McpTab() {
         setRefreshing(true);
         try {
             await refreshMcpTools();
-            await fetchServers();
+            await reloadAll();
         } catch (e) {
             console.error("[McpTab] Refresh failed:", e);
         } finally {
@@ -222,12 +232,12 @@ export default function McpTab() {
         }
     }, []);
 
-    const handleToolToggle = async (name: string, enabled: boolean) => {
+    const handleToolToggle = async (toolId: string, enabled: boolean) => {
         const next: ToolSettings = {
             ...toolSettings,
             enabled_tools: {
                 ...toolSettings.enabled_tools,
-                [name]: enabled,
+                [toolId]: enabled,
             },
         };
         await persistToolSettings(next);
@@ -299,25 +309,36 @@ export default function McpTab() {
                 </div>
 
                 <div className="space-y-2">
-                    {builtinTools.map((tool) => {
-                        const enabled = toolSettings.enabled_tools[tool.name] ?? true;
+                    {tools.map((tool) => {
+                        const enabled = toolSettings.enabled_tools[tool.id] ?? true;
+                        const sourceLabel = tool.source === "mcp"
+                            ? `MCP${tool.server_name ? ` · ${tool.server_name}` : ""}`
+                            : "Built-in";
                         return (
                             <div
-                                key={tool.name}
+                                key={tool.id}
                                 className="flex items-start justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-1)]/80 px-3 py-3"
                             >
                                 <div className="min-w-0">
-                                    <div className="text-sm font-medium text-[var(--color-text-primary)]">
-                                        {tool.name}
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <div className="text-sm font-medium text-[var(--color-text-primary)]">
+                                            {tool.name}
+                                        </div>
+                                        <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">
+                                            {sourceLabel}
+                                        </span>
+                                    </div>
+                                    <div className="mt-1 text-[11px] text-[var(--color-text-muted)] break-all">
+                                        {tool.id}
                                     </div>
                                     <div className="mt-1 text-xs text-[var(--color-text-muted)]">
-                                        {t(`settings.mcp.builtin_tools.items.${tool.name}.description`, { defaultValue: tool.description })}
+                                        {tool.description}
                                     </div>
                                 </div>
                                 <button
-                                    onClick={() => { void handleToolToggle(tool.name, !enabled); }}
+                                    onClick={() => { void handleToolToggle(tool.id, !enabled); }}
                                     aria-checked={enabled}
-                                    aria-label={tool.name}
+                                    aria-label={tool.id}
                                     className={clsx(
                                         "w-10 h-5 rounded-full transition-colors relative shrink-0",
                                         enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"

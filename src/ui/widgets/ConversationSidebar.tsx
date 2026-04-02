@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Plus, Trash2, History, X, Check, Pencil } from "lucide-react";
-import { listConversations, loadConversation, deleteConversation, createConversation, renameConversation } from "../../lib/kokoro-bridge";
+import { Plus, Trash2, History, X, Check, Pencil, Pin, Save } from "lucide-react";
+import { listConversations, loadConversation, deleteConversation, createConversation, renameConversation, updateConversationState, getConversationDisplayTitle, hasPinnedConversationState } from "../../lib/kokoro-bridge";
 import type { Conversation } from "../../lib/kokoro-bridge";
 import { useTranslation } from "react-i18next";
 import { buildChatMessagesFromConversation } from "./chat-history";
@@ -21,6 +21,9 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
     const [activeId, setActiveId] = useState<string | null>(null);
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editTitle, setEditTitle] = useState("");
+    const [topicDraft, setTopicDraft] = useState("");
+    const [pinnedStateDraft, setPinnedStateDraft] = useState("{}");
+    const [isSavingState, setIsSavingState] = useState(false);
     const editInputRef = useRef<HTMLInputElement>(null);
 
     const characterId = localStorage.getItem("kokoro_active_character_id") || "default";
@@ -48,9 +51,11 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
     const handleLoad = async (id: string) => {
         if (id === activeId) return;
         try {
-            const msgs = await loadConversation(id);
-            const chatMsgs: ChatMessage[] = buildChatMessagesFromConversation(msgs);
+            const loaded = await loadConversation(id);
+            const chatMsgs: ChatMessage[] = buildChatMessagesFromConversation(loaded.messages);
             setActiveId(id);
+            setTopicDraft(loaded.topic || "");
+            setPinnedStateDraft(loaded.pinned_state || "{}");
             onLoadMessages(chatMsgs);
         } catch (err) {
             console.error("[ConversationSidebar] Failed to load conversation:", err);
@@ -105,6 +110,22 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
     const handleRenameKeyDown = (e: React.KeyboardEvent, id: string) => {
         if (e.key === "Enter") handleRenameConfirm(id);
         if (e.key === "Escape") setEditingId(null);
+    };
+
+    const handleSaveConversationState = async () => {
+        if (!activeId) return;
+        setIsSavingState(true);
+        try {
+            await updateConversationState(activeId, {
+                topic: topicDraft.trim(),
+                pinned_state: pinnedStateDraft.trim() || "{}",
+            });
+            await refresh();
+        } catch (err) {
+            console.error("[ConversationSidebar] Failed to save conversation state:", err);
+        } finally {
+            setIsSavingState(false);
+        }
     };
 
     const formatTime = (iso: string) => {
@@ -171,6 +192,48 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
                         </button>
                     </div>
 
+                    {activeId && (
+                        <div className="px-3 py-2 border-b border-[var(--color-border)] space-y-2">
+                            <div>
+                                <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] mb-1">
+                                    Topic
+                                </div>
+                                <input
+                                    value={topicDraft}
+                                    onChange={e => setTopicDraft(e.target.value)}
+                                    placeholder="当前会话主题"
+                                    className="w-full bg-black/30 border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] rounded px-2 py-1.5 focus:outline-none focus:border-[var(--color-accent)]"
+                                />
+                            </div>
+                            <div>
+                                <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] mb-1">
+                                    Pinned state
+                                </div>
+                                <textarea
+                                    value={pinnedStateDraft}
+                                    onChange={e => setPinnedStateDraft(e.target.value)}
+                                    placeholder='例如：{"current_goal":"先做 P1"}'
+                                    rows={4}
+                                    className="w-full resize-none bg-black/30 border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] rounded px-2 py-1.5 focus:outline-none focus:border-[var(--color-accent)]"
+                                />
+                            </div>
+                            <button
+                                onClick={handleSaveConversationState}
+                                disabled={isSavingState}
+                                className={clsx(
+                                    "w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs transition-colors",
+                                    "border border-[var(--color-border)]",
+                                    isSavingState
+                                        ? "text-[var(--color-text-muted)] opacity-70"
+                                        : "text-[var(--color-text-primary)] hover:text-[var(--color-accent)] hover:border-[var(--color-accent)]/50"
+                                )}
+                            >
+                                <Save size={12} strokeWidth={1.5} />
+                                {isSavingState ? "保存中..." : "保存会话状态"}
+                            </button>
+                        </div>
+                    )}
+
                     {/* Conversation list */}
                     <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1 scrollable">
                         {conversations.length === 0 ? (
@@ -211,10 +274,19 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
                                         ) : (
                                             <>
                                                 <div className="text-xs text-[var(--color-text-primary)] truncate">
-                                                    {conv.title}
+                                                    {getConversationDisplayTitle(conv)}
                                                 </div>
-                                                <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
-                                                    {formatTime(conv.updated_at)}
+                                                <div className="mt-0.5 flex items-center gap-1 text-[10px] text-[var(--color-text-muted)]">
+                                                    <span>{formatTime(conv.updated_at)}</span>
+                                                    {conv.topic.trim() && (
+                                                        <span className="truncate max-w-[110px]">· {conv.topic}</span>
+                                                    )}
+                                                    {hasPinnedConversationState(conv.pinned_state) && (
+                                                        <span className="inline-flex items-center gap-0.5 text-[var(--color-accent)]">
+                                                            <Pin size={9} strokeWidth={1.5} />
+                                                            已固定
+                                                        </span>
+                                                    )}
                                                 </div>
                                             </>
                                         )}

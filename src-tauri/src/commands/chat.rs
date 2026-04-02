@@ -1,4 +1,5 @@
 use crate::actions::tool_settings::ToolSettings;
+use crate::actions::{builtin_tool_id, execute_tool_calls, ToolInvocation};
 use crate::ai::context::AIOrchestrator;
 use crate::ai::context::Message;
 use crate::ai::memory_extractor;
@@ -266,6 +267,16 @@ struct ToolCall {
     tool_call_id: Option<String>,
     name: String,
     args: HashMap<String, String>,
+}
+
+impl From<ToolCall> for ToolInvocation {
+    fn from(value: ToolCall) -> Self {
+        Self {
+            tool_call_id: value.tool_call_id,
+            name: value.name,
+            args: value.args,
+        }
+    }
 }
 
 /// Parse all `[TOOL_CALL:name|key=val|...]` tags from the text.
@@ -803,120 +814,84 @@ pub async fn stream_chat(
         }
 
         // Execute tool calls and collect results
-        let registry = _action_registry.read().await;
+        let tool_invocations: Vec<ToolInvocation> =
+            tool_calls.iter().cloned().map(Into::into).collect();
+        let execution_outcomes = execute_tool_calls(
+            &window.app_handle(),
+            &_action_registry.inner().clone(),
+            &tool_settings_state.inner().clone(),
+            &char_id,
+            &tool_invocations,
+        )
+        .await;
         let mut tool_results = Vec::new();
         let mut tool_result_messages = Vec::new();
         let mut continuation_tool_calls = Vec::new();
         let mut persisted_native_tool_results = Vec::new();
-        let mut any_needs_feedback = false;
+        let any_needs_feedback = execution_outcomes.iter().any(|outcome| outcome.needs_feedback);
         let has_native_tool_calls = tool_calls.iter().any(|tc| tc.tool_call_id.is_some());
 
-        for tc in &tool_calls {
-            println!("[ToolCall] Executing: {} with args {:?}", tc.name, tc.args);
-            if tc.name == "set_background" {
+        for outcome in execution_outcomes {
+            println!(
+                "[ToolCall] Executing: {} with args {:?}",
+                outcome.invocation.name, outcome.invocation.args
+            );
+            if outcome.tool_id() == builtin_tool_id("set_background") {
                 bg_generated_by_tool = true;
             }
-            if tc.name == "play_cue" {
+            if outcome.tool_id() == builtin_tool_id("play_cue") {
                 cue_set_by_tool = true;
             }
-            if registry.needs_feedback(&tc.name) {
-                any_needs_feedback = true;
-            }
-            let tool_enabled = {
-                let tool_settings = tool_settings_state.read().await;
-                tool_settings.is_enabled(&tc.name)
-            };
-            if !tool_enabled {
-                let message = format!("Tool '{}' is disabled", tc.name);
-                eprintln!("[ToolCall] {}", message);
-                let _ = app.emit(
-                    "chat-turn-tool",
-                    serde_json::json!({
-                        "turn_id": assistant_turn_id,
-                        "tool": tc.name,
-                        "error": message,
-                    }),
-                );
-                tool_results.push(format!("- {}: Error: {}", tc.name, message));
-                if let Some(tool_call_id) = &tc.tool_call_id {
-                    continuation_tool_calls.push((
-                        tool_call_id.clone(),
-                        tc.name.clone(),
-                        serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
-                    ));
-                    let tool_result_message =
-                        tool_result_message(tool_call_id.clone(), format!("Error: {}", message));
-                    tool_result_messages.push(tool_result_message.clone());
-                    persisted_native_tool_results.push((
-                        tool_call_id.clone(),
-                        tc.name.clone(),
-                        tool_result_message,
-                    ));
-                }
-                continue;
-            }
-            let ctx = crate::actions::registry::ActionContext {
-                app: window.app_handle().clone(),
-                character_id: char_id.clone(),
-            };
-            match registry.execute(&tc.name, tc.args.clone(), ctx).await {
+
+            match &outcome.result {
                 Ok(result) => {
-                    println!("[ToolCall] {} => {}", tc.name, result.message);
+                    println!("[ToolCall] {} => {}", outcome.tool_name(), result.message);
                     let _ = app.emit(
                         "chat-turn-tool",
                         serde_json::json!({
                             "turn_id": assistant_turn_id,
-                            "tool": tc.name,
+                            "tool": outcome.tool_name(),
+                            "tool_id": outcome.tool_id(),
                             "result": result,
                         }),
                     );
-                    tool_results.push(format!("- {}: {}", tc.name, result.message));
-                    if let Some(tool_call_id) = &tc.tool_call_id {
-                        continuation_tool_calls.push((
-                            tool_call_id.clone(),
-                            tc.name.clone(),
-                            serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
-                        ));
-                        let tool_result_message =
-                            tool_result_message(tool_call_id.clone(), result.message.clone());
-                        tool_result_messages.push(tool_result_message.clone());
-                        persisted_native_tool_results.push((
-                            tool_call_id.clone(),
-                            tc.name.clone(),
-                            tool_result_message,
-                        ));
-                    }
                 }
-                Err(e) => {
-                    eprintln!("[ToolCall] {} failed: {}", tc.name, e.0);
+                Err(error) => {
+                    eprintln!("[ToolCall] {} failed: {}", outcome.tool_name(), error);
                     let _ = app.emit(
                         "chat-turn-tool",
                         serde_json::json!({
                             "turn_id": assistant_turn_id,
-                            "tool": tc.name,
-                            "error": e.0,
+                            "tool": outcome.tool_name(),
+                            "tool_id": outcome.tool_id(),
+                            "error": error,
                         }),
                     );
-                    tool_results.push(format!("- {}: Error: {}", tc.name, e.0));
-                    if let Some(tool_call_id) = &tc.tool_call_id {
-                        continuation_tool_calls.push((
-                            tool_call_id.clone(),
-                            tc.name.clone(),
-                            serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
-                        ));
-                        let tool_result_message =
-                            tool_result_message(tool_call_id.clone(), format!("Error: {}", e.0));
-                        tool_result_messages.push(tool_result_message.clone());
-                        persisted_native_tool_results.push((
-                            tool_call_id.clone(),
-                            tc.name.clone(),
-                            tool_result_message,
-                        ));
-                    }
                 }
             }
+
+            tool_results.push(outcome.result_line());
+
+            if let Some(tool_call_id) = &outcome.invocation.tool_call_id {
+                continuation_tool_calls.push((
+                    tool_call_id.clone(),
+                    outcome.tool_id().to_string(),
+                    serde_json::to_string(&outcome.invocation.args)
+                        .unwrap_or_else(|_| "{}".to_string()),
+                ));
+                let message_text = match &outcome.result {
+                    Ok(result) => result.message.clone(),
+                    Err(error) => format!("Error: {}", error),
+                };
+                let tool_result_msg = tool_result_message(tool_call_id.clone(), message_text);
+                tool_result_messages.push(tool_result_msg.clone());
+                persisted_native_tool_results.push((
+                    tool_call_id.clone(),
+                    outcome.tool_id().to_string(),
+                    tool_result_msg,
+                ));
+            }
         }
-        drop(registry);
 
         if has_native_tool_calls {
             let assistant_tool_call_metadata = serde_json::json!({

@@ -573,6 +573,43 @@ pub async fn import_data(
             options.target_character_id
         ));
 
+        let import_conversation_columns: Vec<String> = sqlx::query("PRAGMA import_db.table_info(conversations)")
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+        let import_has_topic = import_conversation_columns.iter().any(|col| col == "topic");
+        let import_has_pinned_state = import_conversation_columns
+            .iter()
+            .any(|col| col == "pinned_state");
+        result.debug_log.push(format!(
+            "import conversations columns: {:?}",
+            import_conversation_columns
+        ));
+
+        let conversation_insert_sql = if import_has_topic && import_has_pinned_state {
+            "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at)
+             SELECT id, character_id, title, topic, pinned_state, created_at, updated_at FROM import_db.conversations"
+        } else if import_has_topic {
+            "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at)
+             SELECT id, character_id, title, topic, '{}' as pinned_state, created_at, updated_at FROM import_db.conversations"
+        } else {
+            "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at)
+             SELECT id, character_id, title, '' as topic, '{}' as pinned_state, created_at, updated_at FROM import_db.conversations"
+        };
+        let conversation_insert_skip_sql = if import_has_topic && import_has_pinned_state {
+            "INSERT OR IGNORE INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at)
+             SELECT id, character_id, title, topic, pinned_state, created_at, updated_at FROM import_db.conversations"
+        } else if import_has_topic {
+            "INSERT OR IGNORE INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at)
+             SELECT id, character_id, title, topic, '{}' as pinned_state, created_at, updated_at FROM import_db.conversations"
+        } else {
+            "INSERT OR IGNORE INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at)
+             SELECT id, character_id, title, '' as topic, '{}' as pinned_state, created_at, updated_at FROM import_db.conversations"
+        };
+
         if options.conflict_strategy == "overwrite" {
             // 先删除 FTS 触发器，避免批量操作时触发器访问损坏的 FTS 索引
             sqlx::query("DROP TRIGGER IF EXISTS memories_ai")
@@ -615,7 +652,7 @@ pub async fn import_data(
                 .debug_log
                 .push(format!("inserted memories: {}", result.imported_memories));
 
-            let r = sqlx::query("INSERT INTO conversations SELECT * FROM import_db.conversations")
+            let r = sqlx::query(conversation_insert_sql)
                 .execute(&mut *conn)
                 .await
                 .map_err(|e| {
@@ -667,14 +704,12 @@ pub async fn import_data(
                 result.imported_memories
             ));
 
-            let r = sqlx::query(
-                "INSERT OR IGNORE INTO conversations SELECT * FROM import_db.conversations",
-            )
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| {
-                KokoroError::Database(format!("INSERT OR IGNORE conversations failed: {}", e))
-            })?;
+            let r = sqlx::query(conversation_insert_skip_sql)
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| {
+                    KokoroError::Database(format!("INSERT OR IGNORE conversations failed: {}", e))
+                })?;
             result.imported_conversations = r.rows_affected() as i64;
             result.debug_log.push(format!(
                 "inserted conversations (skip): {}",

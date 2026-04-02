@@ -28,12 +28,12 @@ impl Default for ToolSettings {
 }
 
 impl ToolSettings {
-    pub fn is_enabled(&self, name: &str) -> bool {
-        self.enabled_tools.get(name).copied().unwrap_or(true)
+    pub fn is_enabled(&self, tool_id: &str) -> bool {
+        self.enabled_tools.get(tool_id).copied().unwrap_or(true)
     }
 
-    pub fn set_enabled(&mut self, name: String, enabled: bool) {
-        self.enabled_tools.insert(name, enabled);
+    pub fn set_enabled(&mut self, tool_id: String, enabled: bool) {
+        self.enabled_tools.insert(tool_id, enabled);
     }
 
     pub fn sanitized(mut self) -> Self {

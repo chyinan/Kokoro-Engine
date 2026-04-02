@@ -2,6 +2,7 @@
 
 use super::config::TelegramConfig;
 use crate::actions::tool_settings::ToolSettings;
+use crate::actions::{execute_tool_calls, ToolInvocation};
 use crate::ai::context::AIOrchestrator;
 use crate::ai::memory_extractor;
 use crate::imagegen::ImageGenService;
@@ -388,45 +389,35 @@ async fn handle_text(
             break;
         }
 
-        // Execute tool calls
-        let registry = action_registry.read().await;
-        let mut tool_results = Vec::new();
-        let mut any_needs_feedback = false;
-        for tc in &tool_calls {
-            println!(
-                "[Telegram/ToolCall] Executing: {} with args {:?}",
-                tc.name, tc.args
-            );
-            if registry.needs_feedback(&tc.name) {
-                any_needs_feedback = true;
-            }
-            let enabled = {
-                let settings = tool_settings.read().await;
-                settings.is_enabled(&tc.name)
-            };
-            if !enabled {
-                tool_results.push(format!(
-                    "- {}: Error: Tool '{}' is disabled",
-                    tc.name, tc.name
-                ));
-                continue;
-            }
-            let ctx = crate::actions::registry::ActionContext {
-                app: app.clone(),
-                character_id: char_id.clone(),
-            };
-            match registry.execute(&tc.name, tc.args.clone(), ctx).await {
-                Ok(result) => {
-                    println!("[Telegram/ToolCall] {} => {}", tc.name, result.message);
-                    tool_results.push(format!("- {}: {}", tc.name, result.message));
+        let tool_invocations: Vec<ToolInvocation> =
+            tool_calls.iter().cloned().map(Into::into).collect();
+        let execution_outcomes = execute_tool_calls(
+            app,
+            &action_registry,
+            &tool_settings,
+            &char_id,
+            &tool_invocations,
+        )
+        .await;
+        let tool_results: Vec<String> = execution_outcomes
+            .iter()
+            .map(|outcome| {
+                println!(
+                    "[Telegram/ToolCall] Executing: {} with args {:?}",
+                    outcome.invocation.name, outcome.invocation.args
+                );
+                match &outcome.result {
+                    Ok(result) => {
+                        println!("[Telegram/ToolCall] {} => {}", outcome.tool_name(), result.message);
+                    }
+                    Err(error) => {
+                        eprintln!("[Telegram/ToolCall] {} failed: {}", outcome.tool_name(), error);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("[Telegram/ToolCall] {} failed: {}", tc.name, e.0);
-                    tool_results.push(format!("- {}: Error: {}", tc.name, e.0));
-                }
-            }
-        }
-        drop(registry);
+                outcome.result_line()
+            })
+            .collect();
+        let any_needs_feedback = execution_outcomes.iter().any(|outcome| outcome.needs_feedback);
 
         if !any_needs_feedback {
             break;
@@ -777,44 +768,35 @@ async fn handle_photo(
             break;
         }
 
-        let registry = action_registry.read().await;
-        let mut tool_results = Vec::new();
-        let mut any_needs_feedback = false;
-        for tc in &tool_calls {
-            println!(
-                "[Telegram/ToolCall] Executing: {} with args {:?}",
-                tc.name, tc.args
-            );
-            if registry.needs_feedback(&tc.name) {
-                any_needs_feedback = true;
-            }
-            let enabled = {
-                let settings = tool_settings.read().await;
-                settings.is_enabled(&tc.name)
-            };
-            if !enabled {
-                tool_results.push(format!(
-                    "- {}: Error: Tool '{}' is disabled",
-                    tc.name, tc.name
-                ));
-                continue;
-            }
-            let ctx = crate::actions::registry::ActionContext {
-                app: app.clone(),
-                character_id: char_id.clone(),
-            };
-            match registry.execute(&tc.name, tc.args.clone(), ctx).await {
-                Ok(result) => {
-                    println!("[Telegram/ToolCall] {} => {}", tc.name, result.message);
-                    tool_results.push(format!("- {}: {}", tc.name, result.message));
+        let tool_invocations: Vec<ToolInvocation> =
+            tool_calls.iter().cloned().map(Into::into).collect();
+        let execution_outcomes = execute_tool_calls(
+            app,
+            &action_registry,
+            &tool_settings,
+            &char_id,
+            &tool_invocations,
+        )
+        .await;
+        let tool_results: Vec<String> = execution_outcomes
+            .iter()
+            .map(|outcome| {
+                println!(
+                    "[Telegram/ToolCall] Executing: {} with args {:?}",
+                    outcome.invocation.name, outcome.invocation.args
+                );
+                match &outcome.result {
+                    Ok(result) => {
+                        println!("[Telegram/ToolCall] {} => {}", outcome.tool_name(), result.message);
+                    }
+                    Err(error) => {
+                        eprintln!("[Telegram/ToolCall] {} failed: {}", outcome.tool_name(), error);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("[Telegram/ToolCall] {} failed: {}", tc.name, e.0);
-                    tool_results.push(format!("- {}: Error: {}", tc.name, e.0));
-                }
-            }
-        }
-        drop(registry);
+                outcome.result_line()
+            })
+            .collect();
+        let any_needs_feedback = execution_outcomes.iter().any(|outcome| outcome.needs_feedback);
 
         if !any_needs_feedback {
             break;
@@ -1024,6 +1006,16 @@ const TRANSLATE_TAG_PREFIX: &str = "[TRANSLATE:";
 struct ToolCall {
     name: String,
     args: HashMap<String, String>,
+}
+
+impl From<ToolCall> for ToolInvocation {
+    fn from(value: ToolCall) -> Self {
+        Self {
+            tool_call_id: None,
+            name: value.name,
+            args: value.args,
+        }
+    }
 }
 
 fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {

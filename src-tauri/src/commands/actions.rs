@@ -31,21 +31,26 @@ pub async fn execute_action(
     args: HashMap<String, String>,
     character_id: Option<String>,
 ) -> Result<ActionResult, KokoroError> {
+    let registry = registry_state.read().await;
+    let action = registry
+        .resolve_action(&name)
+        .map_err(|e| KokoroError::Validation(e.to_string()))?;
+
     let tool_settings = tool_settings_state.read().await;
-    if !tool_settings.is_enabled(&name) {
+    if !tool_settings.is_enabled(&action.id) {
         return Err(KokoroError::Validation(format!(
             "Tool '{}' is disabled",
-            name
+            action.id
         )));
     }
     drop(tool_settings);
-    let registry = registry_state.read().await;
+
     let ctx = ActionContext {
         app: app.clone(),
         character_id: character_id.unwrap_or_else(|| "default".to_string()),
     };
     registry
-        .execute(&name, args, ctx)
+        .execute(&action.id, args, ctx)
         .await
         .map_err(|e| KokoroError::Internal(e.to_string()))
 }

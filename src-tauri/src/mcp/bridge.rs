@@ -148,12 +148,12 @@ pub async fn register_mcp_tools(
     reg.clear_mcp_tools();
     for (server_name, tool) in tools {
         let handler = McpToolHandler {
-            server_name,
+            server_name: server_name.clone(),
             tool_name: tool.name.clone(),
             description: tool.description.unwrap_or_default(),
             input_schema: tool.input_schema,
             manager: manager.clone(),
         };
-        reg.register_mcp(handler);
+        reg.register_mcp(server_name, handler);
     }
 }

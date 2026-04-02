@@ -7,7 +7,7 @@ use crate::llm::messages::user_text_message;
 use crate::llm::provider::LlmProvider;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -212,6 +212,7 @@ impl AIOrchestrator {
         character_id: &str,
         summary_provider: Option<Arc<dyn LlmProvider>>,
     ) {
+        let summary_provider = summary_provider.clone();
         // Track user message count for memory extraction triggers
         if role == "user" {
             let mut count = self.message_count.lock().await;
@@ -235,6 +236,7 @@ impl AIOrchestrator {
         let _ = self
             .persist_message(&role, &content, metadata.as_deref(), character_id)
             .await;
+        let current_conversation_id = self.current_conversation_id.lock().await.clone();
 
         let mut history = self.history.lock().await;
         let parsed_metadata = metadata
@@ -246,71 +248,89 @@ impl AIOrchestrator {
             metadata: parsed_metadata,
         });
 
-        // Rolling window: keep at most 20 messages (matches recent_count in compose_prompt)
-        // If summary strategy, compress oldest 10 when exceeding 20 (history oscillates 10-20)
+        // Rolling window: keep at most 20 messages in memory. Summary generation is now
+        // non-destructive and derives from persisted conversation_messages instead of popped history.
         let strategy = self.context_strategy.lock().await.clone();
-        if history.len() > 20 && strategy == "summary" && self.is_memory_enabled() {
-            // Take oldest 10 for summarization
-            let to_summarize: Vec<Message> = history.iter().take(10).cloned().collect();
-            for _ in 0..10 {
-                history.pop_front();
-            }
-            {
-                let mut boundary = self.memory_history_boundary.lock().await;
-                *boundary = boundary.saturating_sub(10);
-            }
-            drop(history);
-
-            // Spawn async summarization task (non-blocking)
-            let memory_manager = self.memory_manager.clone();
-            let cid = character_id.to_string();
-            tauri::async_runtime::spawn(async move {
-                let formatted = to_summarize
-                    .iter()
-                    .map(|m| format!("{}: {}", m.role, m.content))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                let summary = if let Some(provider) = summary_provider {
-                    let prompt = format!(
-                        "Summarize the following conversation in 2-3 sentences, \
-                         focusing on key facts and decisions. Output only the summary, \
-                         no preamble.\n\n{}",
-                        formatted
-                    );
-                    match provider
-                        .chat(vec![user_text_message(prompt)], None)
-                        .await
-                    {
-                        Ok(text) if !text.trim().is_empty() => text.trim().to_string(),
-                        Ok(_) => {
-                            println!("[Context] Summary LLM returned empty, skipping.");
-                            return;
-                        }
-                        Err(e) => {
-                            eprintln!("[Context] Summary LLM call failed: {e}, skipping.");
-                            return;
-                        }
-                    }
-                } else {
-                    // No provider available — skip rather than store fake summary
-                    println!("[Context] No provider for summarization, skipping.");
-                    return;
-                };
-
-                println!(
-                    "[Context] Summary compression: storing {} msg summary for '{}'",
-                    to_summarize.len(),
-                    cid
-                );
-                if let Err(e) = memory_manager.save_session_summary(&cid, &summary).await {
-                    eprintln!("[Context] Failed to save summary: {}", e);
-                }
-            });
-        } else if history.len() > 20 {
+        let evicted = if history.len() > 20 {
             history.pop_front();
+            true
+        } else {
+            false
+        };
+        drop(history);
+
+        if evicted {
             let mut boundary = self.memory_history_boundary.lock().await;
             *boundary = boundary.saturating_sub(1);
+        }
+
+        if strategy == "summary" && self.is_memory_enabled() {
+            if let (Some(conversation_id), Some(provider)) =
+                (current_conversation_id.clone(), summary_provider)
+            {
+                let memory_manager = self.memory_manager.clone();
+                let cid = character_id.to_string();
+                tauri::async_runtime::spawn(async move {
+                    let task = match memory_manager
+                        .get_conversation_summary_task(&conversation_id, &cid)
+                        .await
+                    {
+                        Ok(Some(task)) => task,
+                        Ok(None) => return,
+                        Err(e) => {
+                            eprintln!(
+                                "[Context] Failed to prepare conversation summary task for '{}': {}",
+                                conversation_id, e
+                            );
+                            return;
+                        }
+                    };
+
+                    if let Err(e) = memory_manager
+                        .mark_conversation_summary_running(task.record_id)
+                        .await
+                    {
+                        eprintln!(
+                            "[Context] Failed to mark summary task running for '{}': {}",
+                            conversation_id, e
+                        );
+                        return;
+                    }
+
+                    let prompt = format!(
+                        "Summarize the following conversation in 2-3 sentences, focusing on key facts, decisions, emotional shifts, and unresolved threads. Output only the summary, no preamble.\n\n{}",
+                        task.transcript
+                    );
+
+                    match provider.chat(vec![user_text_message(prompt)], None).await {
+                        Ok(text) if !text.trim().is_empty() => {
+                            let summary = text.trim().to_string();
+                            if let Err(e) = memory_manager
+                                .complete_conversation_summary(task.record_id, &summary)
+                                .await
+                            {
+                                eprintln!(
+                                    "[Context] Failed to persist conversation summary for '{}': {}",
+                                    conversation_id, e
+                                );
+                            }
+                        }
+                        Ok(_) => {
+                            let _ = memory_manager
+                                .fail_conversation_summary(
+                                    task.record_id,
+                                    "summary provider returned empty output",
+                                )
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = memory_manager
+                                .fail_conversation_summary(task.record_id, &e.to_string())
+                                .await;
+                        }
+                    }
+                });
+            }
         }
     }
 
@@ -343,7 +363,7 @@ impl AIOrchestrator {
             let now = chrono::Utc::now().to_rfc3339();
 
             sqlx::query(
-                "INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+                "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, ?, '', '{}', ?, ?)"
             )
             .bind(&new_id)
             .bind(cid)
@@ -431,7 +451,7 @@ impl AIOrchestrator {
             let new_id = uuid::Uuid::new_v4().to_string();
             let now = chrono::Utc::now().to_rfc3339();
             sqlx::query(
-                "INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+                "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, ?, '', '{}', ?, ?)"
             )
             .bind(&new_id)
             .bind(cid)
@@ -576,6 +596,7 @@ impl AIOrchestrator {
         // Only if query looks like it needs context or every N turns
         // For now, always try to fetch relevant memories (scoped to current character)
         let cid = character_id;
+        let current_conversation_id = self.current_conversation_id.lock().await.clone();
         let memories = if self.is_memory_enabled() {
             self.memory_manager
                 .search_memories(query, 5, cid)
@@ -584,11 +605,52 @@ impl AIOrchestrator {
         } else {
             None
         };
+        let conversation_summary = if self.is_memory_enabled() {
+            if let Some(ref conversation_id) = current_conversation_id {
+                self.memory_manager
+                    .get_latest_conversation_summary(conversation_id)
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let conversation_state = if let Some(ref conversation_id) = current_conversation_id {
+            sqlx::query("SELECT topic, pinned_state FROM conversations WHERE id = ?")
+                .bind(conversation_id)
+                .fetch_optional(&self.db)
+                .await
+                .ok()
+                .flatten()
+                .map(|row| {
+                    (
+                        row.get::<String, _>("topic"),
+                        row.get::<String, _>("pinned_state"),
+                    )
+                })
+        } else {
+            None
+        };
 
         // Read all lock-guarded values upfront and drop locks immediately.
         // This prevents holding multiple mutexes across .await points.
         let sp = self.system_prompt.lock().await.clone();
         let history_snapshot: Vec<Message> = self.history.lock().await.iter().cloned().collect();
+        let recent_history_snapshot: Vec<Message> = history_snapshot
+            .iter()
+            .filter(|msg| {
+                let technical_type = msg
+                    .metadata
+                    .as_ref()
+                    .and_then(|meta| meta.get("type"))
+                    .and_then(|value| value.as_str());
+                !matches!(technical_type, Some("translation_instruction"))
+            })
+            .cloned()
+            .collect();
 
         // -- Read response language early so all sections can reference it --
         let resp_lang = self.response_language.lock().await.clone();
@@ -630,8 +692,7 @@ impl AIOrchestrator {
             character_block
         ));
 
-        // Section 3: Memory context
-        let mut memory_sections: Vec<String> = Vec::new();
+        // Section 3: Long-term memory (higher priority than summaries)
         if let Some(ref mems) = memories {
             if !mems.is_empty() {
                 let memory_block = mems
@@ -639,18 +700,52 @@ impl AIOrchestrator {
                     .map(|m| format!("- {}", m.content))
                     .collect::<Vec<_>>()
                     .join("\n");
-                memory_sections.push(format!(
+                system_parts.push(format!(
                     concat!(
-                        "You remember these things about the user:\n{}\n\n",
-                        "Naturally reference these memories in conversation so the user feels you truly remember what they said. ",
-                        "Do not list them mechanically; weave them naturally into the dialogue. ",
-                        "If a memory is not relevant to the current topic, do not force it."
+                        "<long_term_memory>\n",
+                        "You remember these important facts and events about the user and your shared history:\n{}\n\n",
+                        "These long-term memories have higher priority than any conversation summary. ",
+                        "Naturally reference them when relevant. Do not list them mechanically, and do not force them into unrelated topics.\n",
+                        "</long_term_memory>"
                     ),
                     memory_block
                 ));
             }
         }
-        if self.is_memory_enabled() {
+
+        // Section 4: Conversation state (stable session facts)
+        if let Some((topic, pinned_state)) = conversation_state {
+            let normalized_topic = topic.trim();
+            let normalized_pinned = pinned_state.trim();
+            if !normalized_topic.is_empty() || normalized_pinned != "{}" {
+                let mut state_lines = Vec::new();
+                if !normalized_topic.is_empty() {
+                    state_lines.push(format!("Current conversation topic: {}", normalized_topic));
+                }
+                if normalized_pinned != "{}" {
+                    state_lines.push(format!("Pinned conversation state: {}", normalized_pinned));
+                }
+                system_parts.push(format!(
+                    "<conversation_state>\n{}\n</conversation_state>",
+                    state_lines.join("\n")
+                ));
+            }
+        }
+
+        // Section 5: Conversation summary (lower priority than long-term memory and recent raw messages)
+        if let Some(summary_record) = conversation_summary {
+            if !summary_record.summary.trim().is_empty() {
+                system_parts.push(format!(
+                    concat!(
+                        "<conversation_summary>\n",
+                        "This is a compressed summary of earlier messages in the current conversation:\n{}\n\n",
+                        "Use it as background only. If it conflicts with long-term memory or recent raw messages, trust long-term memory and recent raw messages.\n",
+                        "</conversation_summary>"
+                    ),
+                    summary_record.summary.trim()
+                ));
+            }
+        } else if self.is_memory_enabled() {
             if let Ok(summaries) = self.memory_manager.get_recent_summaries(cid, 2).await {
                 if !summaries.is_empty() {
                     let summary_block = summaries
@@ -659,21 +754,15 @@ impl AIOrchestrator {
                         .map(|(i, s)| format!("{}. {}", i + 1, s))
                         .collect::<Vec<_>>()
                         .join("\n");
-                    memory_sections.push(format!(
-                        "Previous conversation summaries (most recent first):\n{}",
+                    system_parts.push(format!(
+                        "<conversation_summary>\nFallback summaries from recent sessions (most recent first):\n{}\n</conversation_summary>",
                         summary_block
                     ));
                 }
             }
         }
-        if !memory_sections.is_empty() {
-            system_parts.push(format!(
-                "<memory>\n{}\n</memory>",
-                memory_sections.join("\n\n")
-            ));
-        }
 
-        // Section 4: Tool prompt
+        // Section 6: Tool prompt
         if let Some(ref tp) = tool_prompt {
             if !tp.is_empty() {
                 system_parts.push(format!("<tools>\n{}\n</tools>", tp));
@@ -748,7 +837,7 @@ impl AIOrchestrator {
         let mut used_chars = 0usize;
         let mut selected: Vec<&Message> = Vec::new();
 
-        for msg in history_snapshot.iter().rev() {
+        for msg in recent_history_snapshot.iter().rev() {
             let msg_chars = msg.content.chars().count();
             if used_chars + msg_chars > budget_chars && !selected.is_empty() {
                 break;

@@ -127,6 +127,7 @@ pub fn run() {
             commands::conversation::delete_conversation,
             commands::conversation::create_conversation,
             commands::conversation::rename_conversation,
+            commands::conversation::update_conversation_state,
             commands::conversation::list_character_ids,
             commands::llm::get_llm_config,
             commands::llm::save_llm_config,
@@ -253,10 +254,6 @@ pub fn run() {
                             }
                         }
 
-                        let tool_settings_path = app_data_dir.join("tool_settings.json");
-                        let tool_settings = crate::actions::tool_settings::load_config(&tool_settings_path);
-                        app_handle.manage(Arc::new(tokio::sync::RwLock::new(tool_settings)));
-
                         // Restore current_conversation_id from disk and reload history
                         let conv_id_path = app_data_dir.join("current_conversation_id.json");
                         if let Ok(content) = std::fs::read_to_string(&conv_id_path) {
@@ -351,9 +348,19 @@ pub fn run() {
             // Action Registry
             let mut action_registry = crate::actions::ActionRegistry::new();
             crate::actions::builtin::register_builtins(&mut action_registry);
+
+            let tool_settings_path = app_data.join("tool_settings.json");
+            let mut tool_settings = crate::actions::tool_settings::load_config(&tool_settings_path);
+            if action_registry.migrate_tool_settings(&mut tool_settings) {
+                if let Err(e) = crate::actions::tool_settings::save_config(&tool_settings_path, &tool_settings) {
+                    eprintln!("[Tools] Failed to persist migrated tool settings: {}", e);
+                }
+            }
+
             app.manage(std::sync::Arc::new(tokio::sync::RwLock::new(
                 action_registry,
             )));
+            app.manage(Arc::new(tokio::sync::RwLock::new(tool_settings)));
 
             // MCP Manager
             let mcp_config_path = app_data.join("mcp_servers.json");

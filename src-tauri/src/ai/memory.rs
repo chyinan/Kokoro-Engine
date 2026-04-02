@@ -1,6 +1,7 @@
 use anyhow::Result;
 #[cfg(not(test))]
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 #[cfg(not(test))]
 use tokio::sync::Mutex;
@@ -48,6 +49,66 @@ const MIN_COSINE_SIMILARITY: f32 = 0.30;
 /// high end, so sim=0.95 falls in neither band — this is intentional.
 const CONTRADICTION_BAND_LOW: f32 = 0.70;
 const CONTRADICTION_BAND_HIGH: f32 = 0.95; // exclusive upper bound = DEDUP_THRESHOLD
+const CONVERSATION_SUMMARY_MIN_MESSAGES: usize = 8;
+const CONVERSATION_SUMMARY_MAX_MESSAGES: usize = 12;
+const CONVERSATION_SUMMARY_FAILURE_THRESHOLD: i64 = 3;
+const CONVERSATION_SUMMARY_COOLDOWN_SECS: i64 = 15 * 60;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationSummaryStatus {
+    Pending,
+    Running,
+    Ready,
+    Failed,
+    CircuitOpen,
+}
+
+impl ConversationSummaryStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+            Self::CircuitOpen => "circuit_open",
+        }
+    }
+
+    fn from_db(value: &str) -> Self {
+        match value {
+            "pending" => Self::Pending,
+            "running" => Self::Running,
+            "ready" => Self::Ready,
+            "failed" => Self::Failed,
+            "circuit_open" => Self::CircuitOpen,
+            _ => Self::Failed,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConversationSummaryTask {
+    pub record_id: i64,
+    pub conversation_id: String,
+    pub character_id: String,
+    pub version: i64,
+    pub start_message_id: i64,
+    pub end_message_id: i64,
+    pub transcript: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationSummaryRecord {
+    pub conversation_id: String,
+    pub version: i64,
+    pub start_message_id: i64,
+    pub end_message_id: i64,
+    pub summary: String,
+    pub status: ConversationSummaryStatus,
+    pub failure_count: i64,
+    pub updated_at: i64,
+}
 
 /// Local model directory path (relative to working dir).
 #[cfg(not(test))]
@@ -626,7 +687,7 @@ fn test_embedding(text: &str) -> Vec<f32> {
     vector
 }
 
-// ── Session Summaries ──────────────────────────────────────
+// ── Session Summaries / Conversation Summaries ─────────────────────────────
 
 impl MemoryManager {
     /// Save a session summary for a character.
@@ -657,6 +718,245 @@ impl MemoryManager {
         .await?;
 
         Ok(rows.iter().map(|r| r.get("summary")).collect())
+    }
+
+    pub async fn get_latest_conversation_summary(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ConversationSummaryRecord>> {
+        let row = sqlx::query(
+            "SELECT conversation_id, version, start_message_id, end_message_id, summary, status, failure_count, updated_at
+             FROM conversation_summaries
+             WHERE conversation_id = ? AND status = 'ready'
+             ORDER BY version DESC
+             LIMIT 1",
+        )
+        .bind(conversation_id)
+        .fetch_optional(&self.db)
+        .await?;
+
+        Ok(row.map(|r| ConversationSummaryRecord {
+            conversation_id: r.get("conversation_id"),
+            version: r.get("version"),
+            start_message_id: r.get("start_message_id"),
+            end_message_id: r.get("end_message_id"),
+            summary: r.get("summary"),
+            status: ConversationSummaryStatus::from_db(r.get::<String, _>("status").as_str()),
+            failure_count: r.get("failure_count"),
+            updated_at: r.get("updated_at"),
+        }))
+    }
+
+    pub async fn get_conversation_summary_task(
+        &self,
+        conversation_id: &str,
+        character_id: &str,
+    ) -> Result<Option<ConversationSummaryTask>> {
+        let now = chrono::Utc::now().timestamp();
+
+        if let Some(circuit_row) = sqlx::query(
+            "SELECT updated_at, failure_count FROM conversation_summaries
+             WHERE conversation_id = ? AND status = 'circuit_open'
+             ORDER BY version DESC
+             LIMIT 1",
+        )
+        .bind(conversation_id)
+        .fetch_optional(&self.db)
+        .await?
+        {
+            let updated_at: i64 = circuit_row.get("updated_at");
+            let failure_count: i64 = circuit_row.get("failure_count");
+            if now - updated_at < CONVERSATION_SUMMARY_COOLDOWN_SECS {
+                return Ok(None);
+            }
+
+            sqlx::query(
+                "UPDATE conversation_summaries
+                 SET status = 'failed', updated_at = ?
+                 WHERE conversation_id = ? AND status = 'circuit_open'",
+            )
+            .bind(now)
+            .bind(conversation_id)
+            .execute(&self.db)
+            .await?;
+
+            println!(
+                "[Context] Reopening conversation summary circuit for '{}' after cooldown (failure_count={})",
+                conversation_id, failure_count
+            );
+        }
+
+        if sqlx::query(
+            "SELECT id FROM conversation_summaries
+             WHERE conversation_id = ? AND status IN ('pending', 'running')
+             LIMIT 1",
+        )
+        .bind(conversation_id)
+        .fetch_optional(&self.db)
+        .await?
+        .is_some()
+        {
+            return Ok(None);
+        }
+
+        let latest_ready_end: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(end_message_id), 0)
+             FROM conversation_summaries
+             WHERE conversation_id = ? AND status = 'ready'",
+        )
+        .bind(conversation_id)
+        .fetch_one(&self.db)
+        .await?;
+
+        let message_rows = sqlx::query(
+            "SELECT id, role, content, metadata
+             FROM conversation_messages
+             WHERE conversation_id = ? AND id > ?
+             ORDER BY id ASC",
+        )
+        .bind(conversation_id)
+        .bind(latest_ready_end)
+        .fetch_all(&self.db)
+        .await?;
+
+        let mut visible = Vec::new();
+        for row in message_rows {
+            let metadata_raw: Option<String> = row.get("metadata");
+            let metadata_json = metadata_raw
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            let technical_type = metadata_json
+                .as_ref()
+                .and_then(|meta| meta.get("type"))
+                .and_then(|value| value.as_str());
+            if matches!(
+                technical_type,
+                Some("assistant_tool_calls") | Some("tool_result") | Some("translation_instruction")
+            ) {
+                continue;
+            }
+
+            visible.push((
+                row.get::<i64, _>("id"),
+                row.get::<String, _>("role"),
+                row.get::<String, _>("content"),
+            ));
+        }
+
+        if visible.len() < CONVERSATION_SUMMARY_MIN_MESSAGES {
+            return Ok(None);
+        }
+
+        let chunk = &visible[..visible.len().min(CONVERSATION_SUMMARY_MAX_MESSAGES)];
+        let start_message_id = chunk.first().map(|(id, _, _)| *id).unwrap_or(0);
+        let end_message_id = chunk.last().map(|(id, _, _)| *id).unwrap_or(0);
+        if start_message_id == 0 || end_message_id == 0 {
+            return Ok(None);
+        }
+
+        let version: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM conversation_summaries WHERE conversation_id = ?",
+        )
+        .bind(conversation_id)
+        .fetch_one(&self.db)
+        .await?;
+
+        let record_id = sqlx::query(
+            "INSERT INTO conversation_summaries
+             (conversation_id, character_id, version, start_message_id, end_message_id, summary, status, failure_count, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, '', 'pending', 0, ?, ?)",
+        )
+        .bind(conversation_id)
+        .bind(character_id)
+        .bind(version)
+        .bind(start_message_id)
+        .bind(end_message_id)
+        .bind(now)
+        .bind(now)
+        .execute(&self.db)
+        .await?
+        .last_insert_rowid();
+
+        let transcript = chunk
+            .iter()
+            .map(|(_, role, content)| format!("{}: {}", role, content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(Some(ConversationSummaryTask {
+            record_id,
+            conversation_id: conversation_id.to_string(),
+            character_id: character_id.to_string(),
+            version,
+            start_message_id,
+            end_message_id,
+            transcript,
+        }))
+    }
+
+    pub async fn mark_conversation_summary_running(&self, record_id: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE conversation_summaries
+             SET status = 'running', updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(chrono::Utc::now().timestamp())
+        .bind(record_id)
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn complete_conversation_summary(&self, record_id: i64, summary: &str) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "UPDATE conversation_summaries
+             SET summary = ?, status = 'ready', failure_count = 0, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(summary)
+        .bind(now)
+        .bind(record_id)
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn fail_conversation_summary(&self, record_id: i64, error: &str) -> Result<()> {
+        let row = sqlx::query(
+            "SELECT conversation_id, failure_count FROM conversation_summaries WHERE id = ?",
+        )
+        .bind(record_id)
+        .fetch_one(&self.db)
+        .await?;
+
+        let conversation_id: String = row.get("conversation_id");
+        let previous_failure_count: i64 = row.get("failure_count");
+        let failure_count = previous_failure_count + 1;
+        let status = if failure_count >= CONVERSATION_SUMMARY_FAILURE_THRESHOLD {
+            ConversationSummaryStatus::CircuitOpen
+        } else {
+            ConversationSummaryStatus::Failed
+        };
+        let now = chrono::Utc::now().timestamp();
+
+        sqlx::query(
+            "UPDATE conversation_summaries
+             SET status = ?, failure_count = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(status.as_str())
+        .bind(failure_count)
+        .bind(now)
+        .bind(record_id)
+        .execute(&self.db)
+        .await?;
+
+        eprintln!(
+            "[Context] Conversation summary failed for '{}' (record={}, failures={}): {}",
+            conversation_id, record_id, failure_count, error
+        );
+        Ok(())
     }
 
     // ── Smart Memory Importance ────────────────────────────

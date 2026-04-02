@@ -219,8 +219,8 @@ export default function ChatPanel() {
         const characterId = localStorage.getItem("kokoro_active_character_id") || "default";
         listConversations(characterId).then(convs => {
             if (convs.length > 0) {
-                loadConversation(convs[0].id).then(msgs => {
-                    setMessages(buildChatMessagesFromConversation(msgs));
+                loadConversation(convs[0].id).then(loaded => {
+                    setMessages(buildChatMessagesFromConversation(loaded.messages));
                     setExpandedTranslations(new Set()); // Reset translation expand state on conversation load
                 }).catch(err => console.error("[ChatPanel] Failed to restore conversation:", err));
             }
