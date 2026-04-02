@@ -1,6 +1,8 @@
+// pattern: Mixed (needs refactoring)
+// Reason: P2.1 需要把 action deny 的纯结果整形与 executor 编排保持最小范围共置，避免额外扩散模块边界。
 use crate::actions::registry::{ActionContext, ActionInfo, ActionRegistry, ActionResult};
 use crate::actions::tool_settings::ToolSettings;
-use crate::hooks::{ActionHookPayload, HookEvent, HookPayload, HookRuntime};
+use crate::hooks::{ActionHookPayload, HookEvent, HookOutcome, HookPayload, HookRuntime};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::Manager;
@@ -21,7 +23,21 @@ pub struct ToolExecutionOutcome {
     pub needs_feedback: bool,
 }
 
-fn build_action_hook_payload(
+pub(crate) fn denied_by_hook_message(reason: &str) -> String {
+    format!("Denied by hook: {}", reason)
+}
+
+pub(crate) fn continue_unless_denied<T>(
+    gate: HookOutcome,
+    on_continue: impl FnOnce() -> T,
+) -> Result<T, String> {
+    match gate {
+        HookOutcome::Continue => Ok(on_continue()),
+        HookOutcome::Deny { reason } => Err(denied_by_hook_message(&reason)),
+    }
+}
+
+pub(crate) fn build_action_hook_payload(
     conversation_id: Option<String>,
     character_id: &str,
     source: Option<String>,
@@ -113,6 +129,63 @@ mod tests {
         assert_eq!(action.success, Some(true));
         assert_eq!(action.result_message.as_deref(), Some("ok"));
     }
+
+    #[test]
+    fn denied_by_hook_message_uses_stable_prefix() {
+        assert_eq!(denied_by_hook_message("blocked"), "Denied by hook: blocked");
+    }
+
+    #[test]
+    fn continue_unless_denied_short_circuits_on_deny() {
+        let mut called = false;
+        let result = continue_unless_denied(
+            HookOutcome::Deny {
+                reason: "blocked".to_string(),
+            },
+            || {
+                called = true;
+                "executed"
+            },
+        );
+
+        assert_eq!(result, Err("Denied by hook: blocked".to_string()));
+        assert!(!called);
+    }
+
+    #[test]
+    fn continue_unless_denied_runs_continuation_on_continue() {
+        let mut called = false;
+        let result = continue_unless_denied(HookOutcome::Continue, || {
+            called = true;
+            "executed"
+        });
+
+        assert_eq!(result, Ok("executed"));
+        assert!(called);
+    }
+
+    #[test]
+    fn build_action_hook_payload_carries_denied_result() {
+        let payload = build_action_hook_payload(
+            None,
+            "char-1",
+            Some("chat".to_string()),
+            &sample_invocation(),
+            Some(&sample_action()),
+            Some(false),
+            Some(denied_by_hook_message("blocked")),
+        );
+
+        let HookPayload::Action(action) = payload else {
+            panic!("expected action payload");
+        };
+
+        assert_eq!(action.success, Some(false));
+        assert_eq!(
+            action.result_message.as_deref(),
+            Some("Denied by hook: blocked")
+        );
+    }
 }
 
 impl ToolExecutionOutcome {
@@ -149,9 +222,9 @@ pub async fn execute_tool_calls(
     let hook_runtime = app.try_state::<HookRuntime>();
 
     for tool_call in tool_calls {
-        if let Some(hooks) = hook_runtime.as_ref() {
+        let gate = if let Some(hooks) = hook_runtime.as_ref() {
             hooks
-                .emit_best_effort(
+                .emit_action_gate(
                     &HookEvent::BeforeActionInvoke,
                     &build_action_hook_payload(
                         None,
@@ -163,41 +236,50 @@ pub async fn execute_tool_calls(
                         None,
                     ),
                 )
-                .await;
-        }
-
-        let resolved = {
-            let registry = registry_state.read().await;
-            registry.resolve_action_for_execution(&tool_call.name)
+                .await
+        } else {
+            HookOutcome::Continue
         };
-        let needs_feedback = resolved
-            .as_ref()
-            .map(|(action, _)| action.needs_feedback)
-            .unwrap_or(true);
 
-        let result = match &resolved {
-            Ok((action, handler)) => {
-                let enabled = {
-                    let tool_settings = tool_settings_state.read().await;
-                    tool_settings.is_enabled(&action.id)
+        let gated = continue_unless_denied(gate, || ());
+        let (action, needs_feedback, result) = match gated {
+            Err(error) => (None, true, Err(error)),
+            Ok(()) => {
+                let resolved = {
+                    let registry = registry_state.read().await;
+                    registry.resolve_action_for_execution(&tool_call.name)
+                };
+                let needs_feedback = resolved
+                    .as_ref()
+                    .map(|(action, _)| action.needs_feedback)
+                    .unwrap_or(true);
+
+                let action = resolved.as_ref().ok().map(|(action, _)| action.clone());
+                let result = match &resolved {
+                    Ok((action, handler)) => {
+                        let enabled = {
+                            let tool_settings = tool_settings_state.read().await;
+                            tool_settings.is_enabled(&action.id)
+                        };
+
+                        if !enabled {
+                            Err(format!("Tool '{}' is disabled", action.id))
+                        } else {
+                            let ctx = ActionContext {
+                                app: app.clone(),
+                                character_id: character_id.to_string(),
+                                conversation_id: None,
+                                source: Some("chat".to_string()),
+                            };
+                            handler.execute(tool_call.args.clone(), ctx).await.map_err(|e| e.0)
+                        }
+                    }
+                    Err(error) => Err(error.0.clone()),
                 };
 
-                if !enabled {
-                    Err(format!("Tool '{}' is disabled", action.id))
-                } else {
-                    let ctx = ActionContext {
-                        app: app.clone(),
-                        character_id: character_id.to_string(),
-                        conversation_id: None,
-                        source: Some("chat".to_string()),
-                    };
-                    handler.execute(tool_call.args.clone(), ctx).await.map_err(|e| e.0)
-                }
+                (action, needs_feedback, result)
             }
-            Err(error) => Err(error.0.clone()),
         };
-
-        let action = resolved.ok().map(|(action, _)| action);
 
         if let Some(hooks) = hook_runtime.as_ref() {
             let result_message = match &result {

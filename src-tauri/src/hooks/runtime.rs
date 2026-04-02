@@ -1,3 +1,4 @@
+// pattern: Imperative Shell
 use crate::hooks::types::{HookEvent, HookOutcome, HookPayload};
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock};
@@ -57,6 +58,30 @@ impl HookRuntime {
                     event,
                     error
                 );
+            }
+        }
+        HookOutcome::Continue
+    }
+
+    pub async fn emit_action_gate(&self, event: &HookEvent, payload: &HookPayload) -> HookOutcome {
+        let handlers = self.handlers.read().unwrap().clone();
+        for handler in handlers {
+            if !handler.events().iter().any(|candidate| candidate == event) {
+                continue;
+            }
+            match handler.handle(event, payload).await {
+                Ok(HookOutcome::Continue) => {}
+                Ok(HookOutcome::Deny { reason }) => {
+                    return HookOutcome::Deny { reason };
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[Hook] handler={} event={:?} error={}",
+                        handler.id(),
+                        event,
+                        error
+                    );
+                }
             }
         }
         HookOutcome::Continue

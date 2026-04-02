@@ -1,3 +1,4 @@
+// pattern: Functional Core
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -57,4 +58,5 @@ pub enum HookPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HookOutcome {
     Continue,
+    Deny { reason: String },
 }
