@@ -458,6 +458,185 @@ git commit -m "feat: emit centralized hooks for mod lifecycle"
 - 第一版只做 runtime + centralized events + audit side effects
 - deny / modify / fail-closed / manifest 扩展全部列为后续接线，不要伪装成已完成能力
 
+#### 当前实现状态（2026-04-03）
+
+**已完成：**
+- `src-tauri/src/hooks/` 已落地统一 HookRuntime、事件枚举、结构化 payload、顺序分发与 `AuditLogHookHandler`
+- `src-tauri/src/lib.rs` 已在 Tauri setup 阶段注册 `HookRuntime` 到 app state
+- `src-tauri/src/commands/chat.rs` 已接入 `BeforeUserMessage`、`AfterUserMessagePersisted`、`BeforeLlmRequest`、`AfterLlmResponse`
+- `src-tauri/src/actions/executor.rs` 已接入 `BeforeActionInvoke`、`AfterActionInvoke`
+- `src-tauri/src/mods/manager.rs` 已接入 `OnModLoaded`、`OnModUnloaded`
+- 当前实现保持 fail-open；hook 错误只记录，不打断主链路
+
+**未完成：**
+- `deny` / `modify payload` / `fail-closed` 仍未启用
+- `ModManifest` 仍未增加声明式 `hooks` / `capabilities` / `lifecycle`
+- 前端当前不注册 hook，只能作为后续消费层展示 hook trace
+- Telegram、vision、tts、stt 等其他入口尚未统一接入 HookRuntime
+- 当前 Windows 本机测试二进制启动存在 `STATUS_ENTRYPOINT_NOT_FOUND`，因此本阶段验证以 `cargo check` 与测试编译成功为主
+
+**说明：**
+- 本次交付的是 P2 第一版最小可用后端中间层，不代表后续策略与审批能力已完成
+- 后续演进必须继续按本文的 Follow-up Wiring Checklist 推进，不要跳步扩 scope
+
+**Step 2: 跑整体验证**
+
+Run:
+- `npx tsc --noEmit`
+- `cd src-tauri && cargo check`
+- `cd src-tauri && cargo test hooks::tests -- --nocapture`
+- `cd src-tauri && cargo test actions:: -- --nocapture`
+- `cd src-tauri && cargo test mods::manager -- --nocapture`
+- `cd src-tauri && cargo test commands::chat -- --nocapture`
+
+**Step 3: 若通过，再准备进入执行阶段**
+
+不要在这里直接扩 scope。
+
+---
+
+## Follow-up Wiring Checklist（必须写清，避免后续断档）
+
+下面这些**不是第一版范围**，但必须作为后续衔接清单保存在计划里。
+
+### P2.1：接 `deny` 语义
+目标：让 Hook 可以拒绝某次 action / mod / chat 阶段继续执行。
+
+建议接入点：
+- chat：`BeforeUserMessage`、`BeforeLlmRequest`
+- action：`BeforeActionInvoke`
+- mod：未来若新增 `BeforeModLoad`，则在真正 load 前拦截
+
+要求：
+- 先从 action deny 开始，不要先动 chat
+- 所有 deny 必须返回结构化 reason
+- 前端消费前，先日志化和内部可观测
+
+### P2.2：接 `modify payload`
+目标：允许 Hook 修改输入上下文，例如 tool args 或 prompt augment。
+
+建议顺序：
+1. 先支持 `BeforeLlmRequest` 添加 system note / metadata
+2. 再支持 `BeforeActionInvoke` 改参数
+3. 最后才考虑改 user message 原文
+
+要求：
+- 必须保留原始 payload 供审计
+- 修改后 payload 与原始 payload 都要可记录
+
+### P2.3：接 fail-closed 策略
+目标：把部分高风险事件从 fail-open 升级成 fail-closed。
+
+建议只对以下场景启用：
+- 高风险 action
+- 外部 MCP 调用
+- manifest 声明了必须通过审批的 mod capability
+
+要求：
+- fail-closed 不能全局默认打开
+- 需引入风险级别 / 权限标签后再接
+
+### P2.4：接 manifest 生命周期 / 能力声明
+目标：让 mod 明确声明自己订阅哪些 hook、请求哪些能力。
+
+建议给 `ModManifest` 未来增加：
+- `hooks: []`
+- `capabilities: []` 或扩展现有 `permissions`
+- `lifecycle: { on_load, on_unload }`（如仍需显式声明）
+
+要求：
+- 先 schema 扩展，再接运行时
+- 缺失声明时默认不给额外能力
+- 这是后续 fail-closed 的前置条件
+
+### P2.5：接前端消费层
+目标：前端先**消费** hook 结果，而不是自己注册 hook。
+
+建议顺序：
+1. 先在调试面板 / 日志面板展示 hook trace
+2. 再考虑 UI 状态联动（如 tool invoke / mod load 时间线）
+3. 最后才考虑开放前端 hook API
+
+要求：
+- 第一阶段仅展示，不参与决策
+- 避免让 React 层反向侵入后端调度
+
+### P2.6：接 Telegram / 其他入口统一覆盖
+当前第一版重点覆盖 chat + shared executor + mod manager。
+后续应继续核对：
+- `src-tauri/src/telegram/bot.rs`
+- `src-tauri/src/commands/actions.rs`
+- 未来 vision / tts / stt 主链路
+
+目标：所有“before/after 做点什么”的需求最终都汇入 HookRuntime，而不是再散落新回调。
+
+---
+
+## Guardrails
+
+### DRY
+- 不要在 `chat.rs` 和 `executor.rs` 各自发明一套 hook 类型
+- 所有事件名、payload、结果模型都只能从 `hooks/types.rs` 导出
+
+### YAGNI
+- 第一版不要做策略 DSL
+- 第一版不要做数据库持久化 hook trace
+- 第一版不要做前端 hook 注册
+- 第一版不要把每个 delta token 都变成 hook
+
+### TDD
+- 先给 `HookRuntime` 骨架写失败测试
+- 再给 chat / tool / mod 三条接线补最小测试或结构约束测试
+- 没有失败测试或至少失败编译信号，不要直接写实现
+
+### Frequent Commits
+- 每个 Task 一次 commit
+- 不要把 skeleton、chat、tool、mod 全挤在一个大提交里
+
+---
+
+## Verification
+
+### 必跑命令
+- `npx tsc --noEmit`
+- `cd src-tauri && cargo check`
+- `cd src-tauri && cargo test hooks::tests -- --nocapture`
+- `cd src-tauri && cargo test actions:: -- --nocapture`
+- `cd src-tauri && cargo test mods::manager -- --nocapture`
+- `cd src-tauri && cargo test commands::chat -- --nocapture`
+
+### 成功标准
+- 新增 `hooks` 模块后 Rust 编译通过
+- chat、tool、mod 三条主链路都能调用统一 HookRuntime
+- 第一版不改变既有业务行为
+- hook 错误不会打断主链路
+- 计划文档明确写清后续接线清单
+
+---
+
+## Suggested Execution Order
+
+1. Task 1：hooks 模块骨架 + 测试
+2. Task 2：Tauri app 初始化注册 HookRuntime
+3. Task 3：chat 生命周期接线
+4. Task 4：共享 tool executor 接线
+5. Task 5：mod lifecycle 接线
+6. Task 6：全量验证 + 文档收尾
+
+---
+
+## Notes For Future Claude
+
+如果后续继续做 P2 演进，优先顺序必须是：
+1. `deny` on action
+2. `modify` on llm request
+3. 风险标签 / 权限级别
+4. fail-closed
+5. manifest 声明扩展
+6. 前端 hook trace 消费
+
+不要跳过前 3 项直接做“前端可注册 hook”，否则边界会重新变散。
+
 **Step 2: 跑整体验证**
 
 Run:

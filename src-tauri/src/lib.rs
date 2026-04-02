@@ -4,6 +4,7 @@ pub mod commands;
 pub mod config;
 pub mod error;
 pub mod imagegen;
+pub mod hooks;
 pub mod llm;
 pub mod mcp;
 pub mod mods;
@@ -12,6 +13,7 @@ pub mod telegram;
 pub mod tts;
 pub mod utils;
 pub mod vision;
+use crate::hooks::{AuditLogHookHandler, HookRuntime};
 use crate::mods::ModManager;
 use std::sync::Arc;
 use tauri::Manager;
@@ -344,6 +346,10 @@ pub fn run() {
                 crate::stt::SttService::init_from_config(&stt_config).await
             });
             app.manage(stt_service);
+
+            let hook_runtime = HookRuntime::new();
+            hook_runtime.register(Arc::new(AuditLogHookHandler));
+            app.manage(hook_runtime);
 
             // Action Registry
             let mut action_registry = crate::actions::ActionRegistry::new();

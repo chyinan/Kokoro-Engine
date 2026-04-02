@@ -5,6 +5,7 @@ use crate::ai::context::Message;
 use crate::ai::memory_extractor;
 use crate::commands::system::WindowSizeState;
 use crate::error::KokoroError;
+use crate::hooks::{ChatHookPayload, HookEvent, HookPayload, HookRuntime};
 use crate::imagegen::ImageGenService;
 use crate::llm::messages::{
     assistant_tool_calls_message, extract_message_text, history_message_to_chat_message,
@@ -89,6 +90,26 @@ pub struct ChatRequest {
 #[allow(dead_code)]
 struct ChatImageGenEvent {
     prompt: String,
+}
+
+fn build_chat_hook_payload(
+    conversation_id: Option<String>,
+    character_id: &str,
+    turn_id: Option<String>,
+    message: Option<String>,
+    response: Option<String>,
+    tool_round: Option<usize>,
+    hidden: bool,
+) -> HookPayload {
+    HookPayload::Chat(ChatHookPayload {
+        conversation_id,
+        character_id: character_id.to_string(),
+        turn_id,
+        message,
+        response,
+        tool_round,
+        hidden,
+    })
 }
 
 #[cfg(debug_assertions)]
@@ -465,8 +486,27 @@ pub async fn stream_chat(
         .character_id
         .clone()
         .unwrap_or_else(|| "default".to_string());
+    let conversation_id = state.current_conversation_id.lock().await.clone();
+    let hook_runtime = app.try_state::<HookRuntime>();
     // Keep shared character_id in sync for modules that still read it (heartbeat)
     state.set_character_id(char_id.clone()).await;
+
+    if let Some(hooks) = hook_runtime.as_ref() {
+        hooks
+            .emit_best_effort(
+                &HookEvent::BeforeUserMessage,
+                &build_chat_hook_payload(
+                    conversation_id.clone(),
+                    &char_id,
+                    None,
+                    Some(request.message.clone()),
+                    None,
+                    None,
+                    request.hidden,
+                ),
+            )
+            .await;
+    }
 
     // Record user activity
     state.touch_activity().await;
@@ -496,6 +536,23 @@ pub async fn stream_chat(
                 Some(system_provider.clone()),
             )
             .await;
+
+        if let Some(hooks) = hook_runtime.as_ref() {
+            hooks
+                .emit_best_effort(
+                    &HookEvent::AfterUserMessagePersisted,
+                    &build_chat_hook_payload(
+                        conversation_id.clone(),
+                        &char_id,
+                        None,
+                        Some(request.message.clone()),
+                        None,
+                        None,
+                        request.hidden,
+                    ),
+                )
+                .await;
+        }
     }
 
     // ── LAYER 1 & 2: SYSTEM SETUP ───────────────────────────────
@@ -561,6 +618,23 @@ pub async fn stream_chat(
         .collect::<Result<Vec<_>, _>>()
         .map_err(KokoroError::Chat)?;
     let assistant_turn_id = uuid::Uuid::new_v4().to_string();
+
+    if let Some(hooks) = hook_runtime.as_ref() {
+        hooks
+            .emit_best_effort(
+                &HookEvent::BeforeLlmRequest,
+                &build_chat_hook_payload(
+                    conversation_id.clone(),
+                    &char_id,
+                    Some(assistant_turn_id.clone()),
+                    Some(request.message.clone()),
+                    None,
+                    None,
+                    request.hidden,
+                ),
+            )
+            .await;
+    }
     app.emit(
         "chat-turn-start",
         serde_json::json!({
@@ -817,7 +891,7 @@ pub async fn stream_chat(
         let tool_invocations: Vec<ToolInvocation> =
             tool_calls.iter().cloned().map(Into::into).collect();
         let execution_outcomes = execute_tool_calls(
-            &window.app_handle(),
+            window.app_handle(),
             &_action_registry.inner().clone(),
             &tool_settings_state.inner().clone(),
             &char_id,
@@ -1049,6 +1123,23 @@ pub async fn stream_chat(
     }
 
     let full_response = strip_leaked_tags(&all_cleaned_text);
+
+    if let Some(hooks) = hook_runtime.as_ref() {
+        hooks
+            .emit_best_effort(
+                &HookEvent::AfterLlmResponse,
+                &build_chat_hook_payload(
+                    conversation_id.clone(),
+                    &char_id,
+                    Some(assistant_turn_id.clone()),
+                    Some(request.message.clone()),
+                    Some(full_response.clone()),
+                    None,
+                    request.hidden,
+                ),
+            )
+            .await;
+    }
 
     // Fallback translation: if main LLM missed the [TRANSLATE:...] tag, use system LLM to fill in
     if all_translations.is_empty() && !full_response.is_empty() {
@@ -1359,8 +1450,53 @@ pub async fn stream_chat(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::HookPayload;
 
     // ── extract_translate_tags ──────────────────────────────
+
+    #[test]
+    fn test_build_chat_hook_payload_preserves_character_and_hidden() {
+        let payload = build_chat_hook_payload(
+            Some("conv-1".to_string()),
+            "char-1",
+            Some("turn-1".to_string()),
+            Some("hello".to_string()),
+            None,
+            None,
+            true,
+        );
+
+        let HookPayload::Chat(chat) = payload else {
+            panic!("expected chat payload");
+        };
+
+        assert_eq!(chat.conversation_id.as_deref(), Some("conv-1"));
+        assert_eq!(chat.character_id, "char-1");
+        assert_eq!(chat.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(chat.message.as_deref(), Some("hello"));
+        assert!(chat.hidden);
+    }
+
+    #[test]
+    fn test_build_chat_hook_payload_keeps_final_response_only() {
+        let payload = build_chat_hook_payload(
+            None,
+            "char-2",
+            Some("turn-2".to_string()),
+            Some("user".to_string()),
+            Some("final response".to_string()),
+            None,
+            false,
+        );
+
+        let HookPayload::Chat(chat) = payload else {
+            panic!("expected chat payload");
+        };
+
+        assert_eq!(chat.response.as_deref(), Some("final response"));
+        assert_eq!(chat.tool_round, None);
+        assert!(!chat.hidden);
+    }
 
     #[test]
     fn test_extract_translate_tags_basic() {

@@ -171,7 +171,7 @@ pub async fn unload_mod(
     app_handle: AppHandle,
 ) -> Result<(), KokoroError> {
     let mut manager = mod_manager.lock().await;
-    manager.unload_mod(&app_handle);
+    manager.unload_mod(&app_handle).await;
     Ok(())
 }
 

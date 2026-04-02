@@ -48,6 +48,8 @@ pub async fn execute_action(
     let ctx = ActionContext {
         app: app.clone(),
         character_id: character_id.unwrap_or_else(|| "default".to_string()),
+        conversation_id: None,
+        source: Some("direct_execute".to_string()),
     };
     registry
         .execute(&action.id, args, ctx)

@@ -1,3 +1,4 @@
+use crate::hooks::{HookEvent, HookPayload, HookRuntime, ModHookPayload};
 use crate::mods::api::ScriptEvent;
 use crate::mods::manifest::ModManifest;
 use crate::mods::theme::ModThemeJson;
@@ -5,7 +6,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, oneshot};
 
 /// 验证 `file_path` 在规范化后仍位于 `base_dir` 内，防止路径遍历攻击。
@@ -62,6 +63,25 @@ struct UiMessagePayload {
 #[derive(serde::Serialize, Clone)]
 struct CuePayload {
     cue: String,
+}
+
+fn build_mod_hook_payload(manifest: &ModManifest, stage: &str) -> HookPayload {
+    let script_count = if !manifest.scripts.is_empty() {
+        manifest.scripts.len()
+    } else if manifest.entry.is_some() {
+        1
+    } else {
+        0
+    };
+
+    HookPayload::Mod(ModHookPayload {
+        mod_id: manifest.id.clone(),
+        stage: stage.to_string(),
+        has_theme: manifest.theme.is_some(),
+        has_layout: manifest.layout.is_some(),
+        component_count: manifest.components.len(),
+        script_count,
+    })
 }
 
 /// ModManager handles mod discovery, metadata, theme/layout loading, and script execution.
@@ -390,6 +410,12 @@ impl ModManager {
             );
         }
 
+        if let Some(hooks) = app_handle.try_state::<HookRuntime>() {
+            hooks
+                .emit_best_effort(&HookEvent::OnModLoaded, &build_mod_hook_payload(&manifest, "loaded"))
+                .await;
+        }
+
         Ok(())
     }
 
@@ -420,10 +446,16 @@ impl ModManager {
     }
 
     /// 卸载当前活跃的 Mod（清除主题、布局、组件），恢复原生模式
-    pub fn unload_mod<R: tauri::Runtime>(&mut self, app_handle: &tauri::AppHandle<R>) {
+    pub async fn unload_mod<R: tauri::Runtime>(&mut self, app_handle: &tauri::AppHandle<R>) {
+        let manifest = self.loaded_mods.values().next().cloned();
         self.active_theme = None;
         self.active_layout = None;
         let _ = app_handle.emit("mod:unload", ());
+        if let (Some(hooks), Some(manifest)) = (app_handle.try_state::<HookRuntime>(), manifest) {
+            hooks
+                .emit_best_effort(&HookEvent::OnModUnloaded, &build_mod_hook_payload(&manifest, "unloaded"))
+                .await;
+        }
         println!("[ModManager] Active mod unloaded, native mode restored");
     }
 }
@@ -431,6 +463,7 @@ impl ModManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::HookPayload;
     use std::fs;
     use tempfile::TempDir;
 
@@ -456,6 +489,35 @@ mod tests {
         .unwrap();
 
         (tmp, mods_path)
+    }
+
+    #[test]
+    fn build_mod_hook_payload_reflects_manifest_shape() {
+        let manifest = ModManifest {
+            id: "test-mod".to_string(),
+            name: "Test Mod".to_string(),
+            version: "0.1.0".to_string(),
+            description: "A test mod".to_string(),
+            engine_version: None,
+            layout: Some("layout.json".to_string()),
+            theme: Some("theme.json".to_string()),
+            components: HashMap::from([("TestPanel".to_string(), "components/TestPanel.html".to_string())]),
+            scripts: vec!["scripts/main.js".to_string()],
+            permissions: vec![],
+            entry: None,
+            ui_entry: None,
+        };
+
+        let HookPayload::Mod(payload) = build_mod_hook_payload(&manifest, "loaded") else {
+            panic!("expected mod payload");
+        };
+
+        assert_eq!(payload.mod_id, "test-mod");
+        assert_eq!(payload.stage, "loaded");
+        assert!(payload.has_theme);
+        assert!(payload.has_layout);
+        assert_eq!(payload.component_count, 1);
+        assert_eq!(payload.script_count, 1);
     }
 
     #[test]

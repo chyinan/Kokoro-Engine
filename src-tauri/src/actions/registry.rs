@@ -69,6 +69,8 @@ impl std::error::Error for ActionError {}
 pub struct ActionContext {
     pub app: AppHandle,
     pub character_id: String,
+    pub conversation_id: Option<String>,
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
