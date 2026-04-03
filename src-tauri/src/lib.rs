@@ -18,6 +18,22 @@ use crate::mods::ModManager;
 use std::sync::Arc;
 use tauri::Manager;
 
+async fn auto_start_pet_on_launch<F, Fut>(pet_enabled: bool, delay: std::time::Duration, show_pet: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), crate::error::KokoroError>>,
+{
+    if !pet_enabled {
+        return;
+    }
+
+    tokio::time::sleep(delay).await;
+
+    if let Err(e) = show_pet().await {
+        eprintln!("[pet] auto-start failed: {}", e);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Pin the ONNX Runtime dylib to the copy we ship, so the ort crate
@@ -580,12 +596,12 @@ pub fn run() {
                 if pet_enabled {
                     let pet_app = app.handle().clone();
                     tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        if let Some(win) = pet_app.get_webview_window("pet") {
-                            let cfg = crate::commands::pet::load_pet_config();
-                            let _ = win.set_position(tauri::PhysicalPosition::new(cfg.position_x, cfg.position_y));
-                            let _ = win.show();
-                        }
+                        auto_start_pet_on_launch(
+                            true,
+                            std::time::Duration::from_millis(500),
+                            move || async move { crate::commands::pet::show_pet_window(pet_app).await },
+                        )
+                        .await;
                     });
                 }
             }
@@ -613,4 +629,47 @@ fn copy_dir_all(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auto_start_pet_on_launch;
+    use crate::error::KokoroError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn auto_start_pet_on_launch_calls_show_when_enabled() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_closure = calls.clone();
+
+        auto_start_pet_on_launch(true, Duration::from_millis(0), move || {
+            let calls_for_closure = calls_for_closure.clone();
+            async move {
+                calls_for_closure.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), KokoroError>(())
+            }
+        })
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_start_pet_on_launch_skips_show_when_disabled() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_closure = calls.clone();
+
+        auto_start_pet_on_launch(false, Duration::from_millis(0), move || {
+            let calls_for_closure = calls_for_closure.clone();
+            async move {
+                calls_for_closure.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), KokoroError>(())
+            }
+        })
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
 }
