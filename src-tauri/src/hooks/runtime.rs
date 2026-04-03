@@ -1,5 +1,7 @@
 // pattern: Imperative Shell
-use crate::hooks::types::{HookEvent, HookOutcome, HookPayload};
+use crate::hooks::types::{
+    BeforeLlmRequestPayload, HookEvent, HookOutcome, HookPayload,
+};
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock};
 
@@ -12,6 +14,13 @@ pub trait HookHandler: Send + Sync {
         event: &HookEvent,
         payload: &HookPayload,
     ) -> Result<HookOutcome, String>;
+
+    async fn modify_before_llm_request(
+        &self,
+        _payload: &mut BeforeLlmRequestPayload,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -85,5 +94,29 @@ impl HookRuntime {
             }
         }
         HookOutcome::Continue
+    }
+
+    pub async fn emit_before_llm_request_modify(
+        &self,
+        payload: &mut BeforeLlmRequestPayload,
+    ) {
+        let handlers = self.handlers.read().unwrap().clone();
+        for handler in handlers {
+            if !handler
+                .events()
+                .iter()
+                .any(|candidate| candidate == &HookEvent::BeforeLlmRequest)
+            {
+                continue;
+            }
+            if let Err(error) = handler.modify_before_llm_request(payload).await {
+                eprintln!(
+                    "[Hook] handler={} event={:?} error={}",
+                    handler.id(),
+                    HookEvent::BeforeLlmRequest,
+                    error
+                );
+            }
+        }
     }
 }

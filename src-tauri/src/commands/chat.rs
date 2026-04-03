@@ -1,3 +1,5 @@
+// pattern: Mixed (needs refactoring)
+// Reason: 该命令文件同时承担 Tauri IPC 编排、流式对话副作用与少量 payload 整形；本次只在现有边界内最小接入 BeforeLlmRequest modify。
 use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{builtin_tool_id, execute_tool_calls, ToolInvocation};
 use crate::ai::context::AIOrchestrator;
@@ -5,7 +7,10 @@ use crate::ai::context::Message;
 use crate::ai::memory_extractor;
 use crate::commands::system::WindowSizeState;
 use crate::error::KokoroError;
-use crate::hooks::{ChatHookPayload, HookEvent, HookPayload, HookRuntime};
+use crate::hooks::{
+    BeforeLlmRequestMessage, BeforeLlmRequestPayload, ChatHookPayload, HookEvent, HookPayload,
+    HookRuntime,
+};
 use crate::imagegen::ImageGenService;
 use crate::llm::messages::{
     assistant_tool_calls_message, extract_message_text, history_message_to_chat_message,
@@ -110,6 +115,70 @@ fn build_chat_hook_payload(
         tool_round,
         hidden,
     })
+}
+
+fn build_before_llm_request_payload(
+    conversation_id: Option<String>,
+    character_id: &str,
+    turn_id: Option<String>,
+    request_message: String,
+    hidden: bool,
+    prompt_messages: &[Message],
+) -> BeforeLlmRequestPayload {
+    BeforeLlmRequestPayload {
+        conversation_id,
+        character_id: character_id.to_string(),
+        turn_id,
+        hidden,
+        request_message,
+        messages: prompt_messages
+            .iter()
+            .map(|message| BeforeLlmRequestMessage {
+                role: message.role.clone(),
+                content: message.content.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn apply_before_llm_request_payload(
+    payload: BeforeLlmRequestPayload,
+    original_prompt_messages: &[Message],
+) -> Result<(String, Vec<async_openai::types::chat::ChatCompletionRequestMessage>), String> {
+    let request_message = payload.request_message;
+    let messages = payload
+        .messages
+        .into_iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let metadata = original_prompt_messages
+                .get(index)
+                .filter(|original| original.role == message.role)
+                .and_then(|original| original.metadata.as_ref());
+            history_message_to_chat_message(&message.role, message.content, metadata)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((request_message, messages))
+}
+
+#[cfg(test)]
+fn build_effective_before_llm_request(
+    conversation_id: Option<String>,
+    character_id: &str,
+    turn_id: Option<String>,
+    request_message: String,
+    hidden: bool,
+    prompt_messages: &[Message],
+) -> Result<(String, Vec<async_openai::types::chat::ChatCompletionRequestMessage>), String> {
+    let payload = build_before_llm_request_payload(
+        conversation_id,
+        character_id,
+        turn_id,
+        request_message,
+        hidden,
+        prompt_messages,
+    );
+    apply_before_llm_request_payload(payload, prompt_messages)
 }
 
 #[cfg(debug_assertions)]
@@ -612,12 +681,27 @@ pub async fn stream_chat(
         .await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
-    let mut client_messages = prompt_messages
-        .into_iter()
-        .map(|m| history_message_to_chat_message(&m.role, m.content, m.metadata.as_ref()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(KokoroError::Chat)?;
     let assistant_turn_id = uuid::Uuid::new_v4().to_string();
+    let mut before_llm_request_payload = build_before_llm_request_payload(
+        conversation_id.clone(),
+        &char_id,
+        Some(assistant_turn_id.clone()),
+        request.message.clone(),
+        request.hidden,
+        &prompt_messages,
+    );
+
+    if let Some(hooks) = hook_runtime.as_ref() {
+        hooks
+            .emit_before_llm_request_modify(&mut before_llm_request_payload)
+            .await;
+    }
+
+    let (effective_request_message, mut client_messages) = apply_before_llm_request_payload(
+        before_llm_request_payload,
+        &prompt_messages,
+    )
+    .map_err(KokoroError::Chat)?;
 
     if let Some(hooks) = hook_runtime.as_ref() {
         hooks
@@ -627,7 +711,7 @@ pub async fn stream_chat(
                     conversation_id.clone(),
                     &char_id,
                     Some(assistant_turn_id.clone()),
-                    Some(request.message.clone()),
+                    Some(effective_request_message.clone()),
                     None,
                     None,
                     request.hidden,
@@ -701,7 +785,7 @@ pub async fn stream_chat(
     // For hidden messages (touch interactions), the user message wasn't added to
     // history, so we must explicitly include it in the context for the LLM to see.
     if request.hidden {
-        client_messages.push(user_text_message(request.message.clone()));
+        client_messages.push(user_text_message(effective_request_message.clone()));
     }
 
     #[cfg(debug_assertions)]
@@ -1496,6 +1580,82 @@ mod tests {
         assert_eq!(chat.response.as_deref(), Some("final response"));
         assert_eq!(chat.tool_round, None);
         assert!(!chat.hidden);
+    }
+
+    #[test]
+    fn test_apply_before_llm_request_payload_uses_modified_request_for_hidden_message() {
+        let payload = BeforeLlmRequestPayload {
+            conversation_id: Some("conv-1".to_string()),
+            character_id: "char-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            hidden: true,
+            request_message: "modified hidden".to_string(),
+            messages: vec![
+                BeforeLlmRequestMessage {
+                    role: "system".to_string(),
+                    content: "system prompt".to_string(),
+                },
+                BeforeLlmRequestMessage {
+                    role: "user".to_string(),
+                    content: "modified user".to_string(),
+                },
+            ],
+        };
+
+        let original_prompt_messages = vec![
+            Message {
+                role: "system".to_string(),
+                content: "system prompt".to_string(),
+                metadata: None,
+            },
+            Message {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                metadata: None,
+            },
+        ];
+
+        let (request_message, client_messages) = apply_before_llm_request_payload(
+            payload,
+            &original_prompt_messages,
+        )
+        .expect("payload should convert");
+
+        assert_eq!(request_message, "modified hidden");
+        assert_eq!(client_messages.len(), 2);
+        assert_eq!(extract_message_text(&client_messages[0]), "system prompt");
+        assert_eq!(extract_message_text(&client_messages[1]), "modified user");
+    }
+
+    #[test]
+    fn test_build_effective_before_llm_request_preserves_prompt_order() {
+        let prompt_messages = vec![
+            Message {
+                role: "system".to_string(),
+                content: "system prompt".to_string(),
+                metadata: None,
+            },
+            Message {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                metadata: None,
+            },
+        ];
+
+        let (request_message, client_messages) = build_effective_before_llm_request(
+            Some("conv-1".to_string()),
+            "char-1",
+            Some("turn-1".to_string()),
+            "hello".to_string(),
+            false,
+            &prompt_messages,
+        )
+        .expect("payload should convert");
+
+        assert_eq!(request_message, "hello");
+        assert_eq!(client_messages.len(), 2);
+        assert_eq!(extract_message_text(&client_messages[0]), "system prompt");
+        assert_eq!(extract_message_text(&client_messages[1]), "hello");
     }
 
     #[test]

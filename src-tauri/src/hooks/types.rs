@@ -49,6 +49,22 @@ pub struct ModHookPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeforeLlmRequestMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeforeLlmRequestPayload {
+    pub conversation_id: Option<String>,
+    pub character_id: String,
+    pub turn_id: Option<String>,
+    pub hidden: bool,
+    pub request_message: String,
+    pub messages: Vec<BeforeLlmRequestMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HookPayload {
     Chat(ChatHookPayload),
     Action(ActionHookPayload),

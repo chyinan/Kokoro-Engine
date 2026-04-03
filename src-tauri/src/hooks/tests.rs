@@ -1,5 +1,8 @@
 // pattern: Imperative Shell
-use super::{ChatHookPayload, HookEvent, HookHandler, HookOutcome, HookPayload, HookRuntime};
+use super::{
+    BeforeLlmRequestMessage, BeforeLlmRequestPayload, ChatHookPayload, HookEvent, HookHandler,
+    HookOutcome, HookPayload, HookRuntime,
+};
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
@@ -8,7 +11,12 @@ struct RecordingHandler {
     events: &'static [HookEvent],
     calls: Arc<Mutex<Vec<String>>>,
     outcome: Result<HookOutcome, &'static str>,
+    before_llm_request_modifier: Option<BeforeLlmRequestModifier>,
 }
+
+type BeforeLlmRequestModifier = Arc<
+    dyn Fn(&mut BeforeLlmRequestPayload) -> Result<(), &'static str> + Send + Sync,
+>;
 
 #[async_trait]
 impl HookHandler for RecordingHandler {
@@ -35,6 +43,21 @@ impl HookHandler for RecordingHandler {
             Err(error) => Err(format!("{} failed: {}", self.id, error)),
         }
     }
+
+    async fn modify_before_llm_request(
+        &self,
+        payload: &mut BeforeLlmRequestPayload,
+    ) -> Result<(), String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("{}:BeforeLlmRequestModify", self.id));
+
+        match self.before_llm_request_modifier.as_ref() {
+            Some(modifier) => modifier(payload).map_err(|error| format!("{} failed: {}", self.id, error)),
+            None => Ok(()),
+        }
+    }
 }
 
 fn continue_handler(
@@ -47,6 +70,7 @@ fn continue_handler(
         events,
         calls,
         outcome: Ok(HookOutcome::Continue),
+        before_llm_request_modifier: None,
     }
 }
 
@@ -63,6 +87,7 @@ fn deny_handler(
         outcome: Ok(HookOutcome::Deny {
             reason: reason.to_string(),
         }),
+        before_llm_request_modifier: None,
     }
 }
 
@@ -77,6 +102,7 @@ fn error_handler(
         events,
         calls,
         outcome: Err(error),
+        before_llm_request_modifier: None,
     }
 }
 
@@ -90,6 +116,56 @@ fn sample_payload() -> HookPayload {
         tool_round: None,
         hidden: false,
     })
+}
+
+fn sample_before_llm_request_payload() -> BeforeLlmRequestPayload {
+    BeforeLlmRequestPayload {
+        conversation_id: Some("conv-1".to_string()),
+        character_id: "default".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        hidden: false,
+        request_message: "hello".to_string(),
+        messages: vec![
+            BeforeLlmRequestMessage {
+                role: "system".to_string(),
+                content: "system prompt".to_string(),
+            },
+            BeforeLlmRequestMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+            },
+        ],
+    }
+}
+
+fn append_modifier(suffix: &'static str) -> BeforeLlmRequestModifier {
+    Arc::new(move |payload| {
+        payload.request_message.push_str(suffix);
+        payload.messages.push(BeforeLlmRequestMessage {
+            role: "assistant".to_string(),
+            content: suffix.trim().to_string(),
+        });
+        Ok(())
+    })
+}
+
+fn error_modifier(error: &'static str) -> BeforeLlmRequestModifier {
+    Arc::new(move |_payload| Err(error))
+}
+
+fn modify_handler(
+    id: &'static str,
+    events: &'static [HookEvent],
+    calls: Arc<Mutex<Vec<String>>>,
+    modifier: BeforeLlmRequestModifier,
+) -> RecordingHandler {
+    RecordingHandler {
+        id,
+        events,
+        calls,
+        outcome: Ok(HookOutcome::Continue),
+        before_llm_request_modifier: Some(modifier),
+    }
 }
 
 #[tokio::test]
@@ -267,5 +343,68 @@ async fn action_gate_continues_after_handler_error() {
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         ["error:BeforeActionInvoke", "next:BeforeActionInvoke"]
+    );
+}
+
+#[tokio::test]
+async fn before_llm_request_modify_preserves_request_message_and_messages() {
+    let runtime = HookRuntime::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut payload = sample_before_llm_request_payload();
+
+    runtime.register(Arc::new(modify_handler(
+        "first",
+        &[HookEvent::BeforeLlmRequest],
+        calls.clone(),
+        append_modifier(" +first"),
+    )));
+    runtime.register(Arc::new(modify_handler(
+        "second",
+        &[HookEvent::BeforeLlmRequest],
+        calls.clone(),
+        append_modifier(" +second"),
+    )));
+
+    runtime.emit_before_llm_request_modify(&mut payload).await;
+
+    assert_eq!(payload.request_message, "hello +first +second");
+    assert_eq!(payload.messages.len(), 4);
+    assert_eq!(payload.messages[0].role, "system");
+    assert_eq!(payload.messages[1].content, "hello");
+    assert_eq!(payload.messages[2].content, "+first");
+    assert_eq!(payload.messages[3].content, "+second");
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["first:BeforeLlmRequestModify", "second:BeforeLlmRequestModify"]
+    );
+}
+
+#[tokio::test]
+async fn before_llm_request_modify_continues_after_handler_error() {
+    let runtime = HookRuntime::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut payload = sample_before_llm_request_payload();
+
+    runtime.register(Arc::new(modify_handler(
+        "failing",
+        &[HookEvent::BeforeLlmRequest],
+        calls.clone(),
+        error_modifier("boom"),
+    )));
+    runtime.register(Arc::new(modify_handler(
+        "next",
+        &[HookEvent::BeforeLlmRequest],
+        calls.clone(),
+        append_modifier(" +next"),
+    )));
+
+    runtime.emit_before_llm_request_modify(&mut payload).await;
+
+    assert_eq!(payload.request_message, "hello +next");
+    assert_eq!(payload.messages.len(), 3);
+    assert_eq!(payload.messages[2].content, "+next");
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["failing:BeforeLlmRequestModify", "next:BeforeLlmRequestModify"]
     );
 }

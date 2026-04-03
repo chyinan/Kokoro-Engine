@@ -5,7 +5,8 @@ pub mod types;
 pub use handlers::AuditLogHookHandler;
 pub use runtime::{HookHandler, HookRuntime};
 pub use types::{
-    ActionHookPayload, ChatHookPayload, HookEvent, HookOutcome, HookPayload, ModHookPayload,
+    ActionHookPayload, BeforeLlmRequestMessage, BeforeLlmRequestPayload, ChatHookPayload,
+    HookEvent, HookOutcome, HookPayload, ModHookPayload,
 };
 
 #[cfg(test)]
