@@ -65,6 +65,17 @@ pub struct BeforeLlmRequestPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeforeActionArgsPayload {
+    pub conversation_id: Option<String>,
+    pub character_id: String,
+    pub tool_call_id: Option<String>,
+    pub action_id: String,
+    pub action_name: String,
+    pub args: HashMap<String, String>,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HookPayload {
     Chat(ChatHookPayload),
     Action(ActionHookPayload),

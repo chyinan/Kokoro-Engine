@@ -1,3 +1,5 @@
+// pattern: Mixed (needs refactoring)
+// Reason: 该文件同时承载 action 元数据、LLM prompt 生成与执行 handler trait；当前阶段只在现有中心点上最小增补 metadata。
 //! Tool Registry — core framework for tool calling.
 //!
 //! Provides a registry of actions that the LLM can invoke via `[TOOL_CALL:name|args]` tags.
@@ -80,6 +82,22 @@ pub enum ActionSource {
     Mcp,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionRiskTag {
+    Read,
+    Write,
+    External,
+    Sensitive,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionPermissionLevel {
+    Safe,
+    Elevated,
+}
+
 /// Metadata for a registered action (returned to frontend / LLM prompt).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionInfo {
@@ -91,6 +109,8 @@ pub struct ActionInfo {
     pub description: String,
     pub parameters: Vec<ActionParam>,
     pub needs_feedback: bool,
+    pub risk_tags: Vec<ActionRiskTag>,
+    pub permission_level: ActionPermissionLevel,
 }
 
 #[derive(Clone)]
@@ -117,6 +137,14 @@ pub trait ActionHandler: Send + Sync {
     /// Return `false` (default) for side-effect tools (play_cue, set_background, etc.).
     fn needs_feedback(&self) -> bool {
         false
+    }
+
+    fn risk_tags(&self) -> Vec<ActionRiskTag> {
+        vec![ActionRiskTag::Read]
+    }
+
+    fn permission_level(&self) -> ActionPermissionLevel {
+        ActionPermissionLevel::Safe
     }
 
     /// Execute the action with the given arguments
@@ -190,6 +218,8 @@ impl ActionRegistry {
             description: handler.description().to_string(),
             parameters: handler.parameters(),
             needs_feedback: handler.needs_feedback(),
+            risk_tags: handler.risk_tags(),
+            permission_level: handler.permission_level(),
         }
     }
 
@@ -260,7 +290,11 @@ impl ActionRegistry {
     }
 
     /// Register an MCP tool handler (tracked separately for cleanup).
-    pub fn register_mcp(&mut self, server_name: impl Into<String>, handler: impl ActionHandler + 'static) {
+    pub fn register_mcp(
+        &mut self,
+        server_name: impl Into<String>,
+        handler: impl ActionHandler + 'static,
+    ) {
         let info = Self::make_action_info(ActionSource::Mcp, Some(server_name.into()), &handler);
         self.insert_entry(info, Arc::new(handler));
     }
@@ -580,6 +614,22 @@ mod tests {
         }
     }
 
+    fn sample_builtin_action() -> TestAction {
+        TestAction {
+            name: "search_memory",
+            description: "Search memory",
+            needs_feedback: true,
+        }
+    }
+
+    fn sample_mcp_action() -> TestAction {
+        TestAction {
+            name: "read_file",
+            description: "Read file",
+            needs_feedback: true,
+        }
+    }
+
     // ── ActionResult constructors ─────────────────────────
 
     #[test]
@@ -602,6 +652,55 @@ mod tests {
         let r = ActionResult::err("oops");
         assert!(!r.success);
         assert_eq!(r.message, "oops");
+    }
+
+    // ── Metadata defaults ────────────────────────────────
+
+    #[test]
+    fn test_make_action_info_sets_default_metadata_for_builtin() {
+        let action = ActionRegistry::make_action_info(ActionSource::Builtin, None, &sample_builtin_action());
+
+        assert_eq!(action.risk_tags, vec![ActionRiskTag::Read]);
+        assert_eq!(action.permission_level, ActionPermissionLevel::Safe);
+        assert_eq!(action.source, ActionSource::Builtin);
+        assert_eq!(action.server_name, None);
+    }
+
+    #[test]
+    fn test_make_action_info_sets_default_metadata_for_mcp() {
+        let action = ActionRegistry::make_action_info(
+            ActionSource::Mcp,
+            Some("filesystem".to_string()),
+            &sample_mcp_action(),
+        );
+
+        assert_eq!(action.risk_tags, vec![ActionRiskTag::Read]);
+        assert_eq!(action.permission_level, ActionPermissionLevel::Safe);
+        assert_eq!(action.source, ActionSource::Mcp);
+        assert_eq!(action.server_name.as_deref(), Some("filesystem"));
+    }
+
+    #[test]
+    fn test_action_info_serialization_includes_metadata_fields() {
+        let action = ActionRegistry::make_action_info(ActionSource::Builtin, None, &sample_builtin_action());
+        let value = serde_json::to_value(&action).expect("action info should serialize");
+
+        assert_eq!(value.get("risk_tags"), Some(&serde_json::json!(["read"])));
+        assert_eq!(value.get("permission_level"), Some(&serde_json::json!("safe")));
+    }
+
+    #[test]
+    fn test_builtin_action_metadata_can_differentiate_read_and_side_effect_tools() {
+        let mut reg = ActionRegistry::new();
+        crate::actions::builtin::register_builtins(&mut reg);
+
+        let search_memory = reg.resolve_action("search_memory").unwrap();
+        let play_cue = reg.resolve_action("play_cue").unwrap();
+
+        assert_eq!(search_memory.risk_tags, vec![ActionRiskTag::Read]);
+        assert_eq!(search_memory.permission_level, ActionPermissionLevel::Safe);
+        assert_eq!(play_cue.risk_tags, vec![ActionRiskTag::Write]);
+        assert_eq!(play_cue.permission_level, ActionPermissionLevel::Elevated);
     }
 
     // ── Registry without handlers ─────────────────────────
@@ -636,6 +735,8 @@ mod tests {
         let action = reg.resolve_action("get_time").unwrap();
         assert_eq!(action.id, "builtin__get_time");
         assert_eq!(action.source, ActionSource::Builtin);
+        assert_eq!(action.risk_tags, vec![ActionRiskTag::Read]);
+        assert_eq!(action.permission_level, ActionPermissionLevel::Safe);
     }
 
     #[test]
@@ -654,6 +755,8 @@ mod tests {
         assert_eq!(action.id, "mcp__filesystem__read_file");
         assert_eq!(action.source, ActionSource::Mcp);
         assert_eq!(action.server_name.as_deref(), Some("filesystem"));
+        assert_eq!(action.risk_tags, vec![ActionRiskTag::Read]);
+        assert_eq!(action.permission_level, ActionPermissionLevel::Safe);
     }
 
     #[test]
@@ -729,6 +832,8 @@ mod tests {
         let mut settings = ToolSettings {
             max_tool_rounds: 10,
             enabled_tools: HashMap::from([("get_time".to_string(), false)]),
+            max_permission_level: ActionPermissionLevel::Elevated,
+            blocked_risk_tags: Vec::new(),
         };
 
         let changed = reg.migrate_tool_settings(&mut settings);

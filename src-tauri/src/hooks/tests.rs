@@ -1,9 +1,10 @@
 // pattern: Imperative Shell
 use super::{
-    BeforeLlmRequestMessage, BeforeLlmRequestPayload, ChatHookPayload, HookEvent, HookHandler,
-    HookOutcome, HookPayload, HookRuntime,
+    BeforeActionArgsPayload, BeforeLlmRequestMessage, BeforeLlmRequestPayload, ChatHookPayload,
+    HookEvent, HookHandler, HookOutcome, HookPayload, HookRuntime,
 };
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 struct RecordingHandler {
@@ -12,10 +13,15 @@ struct RecordingHandler {
     calls: Arc<Mutex<Vec<String>>>,
     outcome: Result<HookOutcome, &'static str>,
     before_llm_request_modifier: Option<BeforeLlmRequestModifier>,
+    before_action_args_modifier: Option<BeforeActionArgsModifier>,
 }
 
 type BeforeLlmRequestModifier = Arc<
     dyn Fn(&mut BeforeLlmRequestPayload) -> Result<(), &'static str> + Send + Sync,
+>;
+
+type BeforeActionArgsModifier = Arc<
+    dyn Fn(&mut BeforeActionArgsPayload) -> Result<(), &'static str> + Send + Sync,
 >;
 
 #[async_trait]
@@ -54,7 +60,26 @@ impl HookHandler for RecordingHandler {
             .push(format!("{}:BeforeLlmRequestModify", self.id));
 
         match self.before_llm_request_modifier.as_ref() {
-            Some(modifier) => modifier(payload).map_err(|error| format!("{} failed: {}", self.id, error)),
+            Some(modifier) => {
+                modifier(payload).map_err(|error| format!("{} failed: {}", self.id, error))
+            }
+            None => Ok(()),
+        }
+    }
+
+    async fn modify_before_action_args(
+        &self,
+        payload: &mut BeforeActionArgsPayload,
+    ) -> Result<(), String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("{}:BeforeActionArgsModify", self.id));
+
+        match self.before_action_args_modifier.as_ref() {
+            Some(modifier) => {
+                modifier(payload).map_err(|error| format!("{} failed: {}", self.id, error))
+            }
             None => Ok(()),
         }
     }
@@ -71,6 +96,7 @@ fn continue_handler(
         calls,
         outcome: Ok(HookOutcome::Continue),
         before_llm_request_modifier: None,
+        before_action_args_modifier: None,
     }
 }
 
@@ -88,6 +114,7 @@ fn deny_handler(
             reason: reason.to_string(),
         }),
         before_llm_request_modifier: None,
+        before_action_args_modifier: None,
     }
 }
 
@@ -103,6 +130,7 @@ fn error_handler(
         calls,
         outcome: Err(error),
         before_llm_request_modifier: None,
+        before_action_args_modifier: None,
     }
 }
 
@@ -138,6 +166,18 @@ fn sample_before_llm_request_payload() -> BeforeLlmRequestPayload {
     }
 }
 
+fn sample_before_action_args_payload() -> BeforeActionArgsPayload {
+    BeforeActionArgsPayload {
+        conversation_id: Some("conv-1".to_string()),
+        character_id: "default".to_string(),
+        tool_call_id: Some("tool-call-1".to_string()),
+        action_id: "builtin__search_memory".to_string(),
+        action_name: "search_memory".to_string(),
+        args: HashMap::from([("query".to_string(), "kokoro".to_string())]),
+        source: Some("chat".to_string()),
+    }
+}
+
 fn append_modifier(suffix: &'static str) -> BeforeLlmRequestModifier {
     Arc::new(move |payload| {
         payload.request_message.push_str(suffix);
@@ -165,6 +205,37 @@ fn modify_handler(
         calls,
         outcome: Ok(HookOutcome::Continue),
         before_llm_request_modifier: Some(modifier),
+        before_action_args_modifier: None,
+    }
+}
+
+fn append_action_arg_modifier(
+    key: &'static str,
+    value: &'static str,
+) -> BeforeActionArgsModifier {
+    Arc::new(move |payload| {
+        payload.args.insert(key.to_string(), value.to_string());
+        Ok(())
+    })
+}
+
+fn action_arg_error_modifier(error: &'static str) -> BeforeActionArgsModifier {
+    Arc::new(move |_payload| Err(error))
+}
+
+fn action_args_modify_handler(
+    id: &'static str,
+    events: &'static [HookEvent],
+    calls: Arc<Mutex<Vec<String>>>,
+    modifier: BeforeActionArgsModifier,
+) -> RecordingHandler {
+    RecordingHandler {
+        id,
+        events,
+        calls,
+        outcome: Ok(HookOutcome::Continue),
+        before_llm_request_modifier: None,
+        before_action_args_modifier: Some(modifier),
     }
 }
 
@@ -407,4 +478,124 @@ async fn before_llm_request_modify_continues_after_handler_error() {
         calls.lock().unwrap().as_slice(),
         ["failing:BeforeLlmRequestModify", "next:BeforeLlmRequestModify"]
     );
+}
+
+#[tokio::test]
+async fn before_action_args_payload_carries_canonical_action_id() {
+    let payload = sample_before_action_args_payload();
+
+    assert_eq!(payload.action_id, "builtin__search_memory");
+    assert_eq!(payload.action_name, "search_memory");
+    assert_eq!(payload.tool_call_id.as_deref(), Some("tool-call-1"));
+    assert_eq!(payload.source.as_deref(), Some("chat"));
+    assert_eq!(payload.args.get("query"), Some(&"kokoro".to_string()));
+}
+
+#[tokio::test]
+async fn before_action_args_modify_applies_in_registration_order() {
+    let runtime = HookRuntime::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut payload = sample_before_action_args_payload();
+
+    runtime.register(Arc::new(action_args_modify_handler(
+        "first",
+        &[HookEvent::BeforeActionInvoke],
+        calls.clone(),
+        append_action_arg_modifier("query", "kokoro refined"),
+    )));
+    runtime.register(Arc::new(action_args_modify_handler(
+        "second",
+        &[HookEvent::BeforeActionInvoke],
+        calls.clone(),
+        append_action_arg_modifier("limit", "5"),
+    )));
+
+    runtime.emit_before_action_args_modify(&mut payload).await;
+
+    assert_eq!(payload.action_id, "builtin__search_memory");
+    assert_eq!(payload.args.get("query"), Some(&"kokoro refined".to_string()));
+    assert_eq!(payload.args.get("limit"), Some(&"5".to_string()));
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["first:BeforeActionArgsModify", "second:BeforeActionArgsModify"]
+    );
+}
+
+#[tokio::test]
+async fn before_action_args_modify_continues_after_handler_error() {
+    let runtime = HookRuntime::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut payload = sample_before_action_args_payload();
+
+    runtime.register(Arc::new(action_args_modify_handler(
+        "failing",
+        &[HookEvent::BeforeActionInvoke],
+        calls.clone(),
+        action_arg_error_modifier("boom"),
+    )));
+    runtime.register(Arc::new(action_args_modify_handler(
+        "next",
+        &[HookEvent::BeforeActionInvoke],
+        calls.clone(),
+        append_action_arg_modifier("limit", "3"),
+    )));
+
+    runtime.emit_before_action_args_modify(&mut payload).await;
+
+    assert_eq!(payload.args.get("query"), Some(&"kokoro".to_string()));
+    assert_eq!(payload.args.get("limit"), Some(&"3".to_string()));
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["failing:BeforeActionArgsModify", "next:BeforeActionArgsModify"]
+    );
+}
+
+#[tokio::test]
+async fn before_action_args_modify_skips_handlers_without_matching_event() {
+    let runtime = HookRuntime::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut payload = sample_before_action_args_payload();
+
+    runtime.register(Arc::new(action_args_modify_handler(
+        "other",
+        &[HookEvent::BeforeLlmRequest],
+        calls.clone(),
+        append_action_arg_modifier("query", "changed"),
+    )));
+
+    runtime.emit_before_action_args_modify(&mut payload).await;
+
+    assert_eq!(payload.args.get("query"), Some(&"kokoro".to_string()));
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn action_gate_deny_still_short_circuits_with_action_args_modify_available() {
+    let runtime = HookRuntime::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+
+    runtime.register(Arc::new(deny_handler(
+        "deny",
+        &[HookEvent::BeforeActionInvoke],
+        calls.clone(),
+        "blocked",
+    )));
+    runtime.register(Arc::new(action_args_modify_handler(
+        "modifier",
+        &[HookEvent::BeforeActionInvoke],
+        calls.clone(),
+        append_action_arg_modifier("query", "changed"),
+    )));
+
+    let outcome = runtime
+        .emit_action_gate(&HookEvent::BeforeActionInvoke, &sample_payload())
+        .await;
+
+    assert_eq!(
+        outcome,
+        HookOutcome::Deny {
+            reason: "blocked".to_string(),
+        }
+    );
+    assert_eq!(calls.lock().unwrap().as_slice(), ["deny:BeforeActionInvoke"]);
 }

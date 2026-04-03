@@ -710,6 +710,8 @@ export interface ActionInfo {
     description: string;
     parameters: { name: string; description: string; required: boolean }[];
     needs_feedback: boolean;
+    risk_tags: ("read" | "write" | "external" | "sensitive")[];
+    permission_level: "safe" | "elevated";
 }
 
 export interface ActionResult {
@@ -728,6 +730,8 @@ export interface ToolCallEvent {
 export interface ToolSettings {
     max_tool_rounds: number;
     enabled_tools: Record<string, boolean>;
+    max_permission_level: "safe" | "elevated";
+    blocked_risk_tags: ("read" | "write" | "external" | "sensitive")[];
 }
 
 export async function listActions(): Promise<ActionInfo[]> {

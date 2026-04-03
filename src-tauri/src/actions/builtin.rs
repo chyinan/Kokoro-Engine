@@ -1,6 +1,9 @@
 //! Built-in tool handlers for the Tool Registry.
 
-use super::registry::{ActionContext, ActionError, ActionHandler, ActionParam, ActionResult};
+use super::registry::{
+    ActionContext, ActionError, ActionHandler, ActionParam, ActionPermissionLevel,
+    ActionResult, ActionRiskTag,
+};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use tauri::Emitter;
@@ -65,6 +68,14 @@ impl ActionHandler for PlayCueAction {
         }]
     }
 
+    fn risk_tags(&self) -> Vec<ActionRiskTag> {
+        vec![ActionRiskTag::Write]
+    }
+
+    fn permission_level(&self) -> ActionPermissionLevel {
+        ActionPermissionLevel::Elevated
+    }
+
     async fn execute(
         &self,
         args: HashMap<String, String>,
@@ -126,6 +137,14 @@ impl ActionHandler for SetBackgroundAction {
             description: "English description of the desired background scene".to_string(),
             required: true,
         }]
+    }
+
+    fn risk_tags(&self) -> Vec<ActionRiskTag> {
+        vec![ActionRiskTag::Write]
+    }
+
+    fn permission_level(&self) -> ActionPermissionLevel {
+        ActionPermissionLevel::Elevated
     }
 
     async fn execute(

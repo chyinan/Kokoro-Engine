@@ -91,7 +91,12 @@ export default function McpTab() {
     const [removingName, setRemovingName] = useState<string | null>(null);
     const [successMsg, setSuccessMsg] = useState<string | null>(null);
     const [tools, setTools] = useState<ActionInfo[]>([]);
-    const [toolSettings, setToolSettings] = useState<ToolSettings>({ max_tool_rounds: 10, enabled_tools: {} });
+    const [toolSettings, setToolSettings] = useState<ToolSettings>({
+        max_tool_rounds: 10,
+        enabled_tools: {},
+        max_permission_level: "elevated",
+        blocked_risk_tags: [],
+    });
     const [savingToolSettings, setSavingToolSettings] = useState(false);
 
     const fetchServers = useCallback(async () => {
