@@ -52,6 +52,12 @@ pub struct PendingToolApprovalState {
     pending: Mutex<HashMap<String, PendingToolApproval>>,
 }
 
+impl Default for PendingToolApprovalState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PendingToolApprovalState {
     pub fn new() -> Self {
         Self {
