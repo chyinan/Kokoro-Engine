@@ -120,10 +120,14 @@ pub(crate) fn policy_denial_reason(
     action: &ActionInfo,
     settings: &ToolSettings,
 ) -> Option<String> {
+    if exceeds_safe_permission_ceiling(action, settings) {
+        return Some(denied_by_policy_message(
+            "permission level 'elevated' exceeds max allowed 'safe'",
+        ));
+    }
+
     for tag in &action.risk_tags {
-        if settings.blocked_risk_tags.contains(tag)
-            && matches!(tag, ActionRiskTag::Read | ActionRiskTag::External)
-        {
+        if settings.blocked_risk_tags.contains(tag) {
             return Some(denied_by_policy_message(&format!(
                 "blocked risk tag '{}'",
                 risk_tag_label(tag)
@@ -133,6 +137,7 @@ pub(crate) fn policy_denial_reason(
 
     None
 }
+
 
 pub(crate) fn approval_pending_reason(
     action: &ActionInfo,
@@ -177,10 +182,7 @@ pub(crate) fn high_risk_fail_closed_reason(
     }
 
     for tag in &action.risk_tags {
-        if settings.blocked_risk_tags.contains(tag)
-            && *tag == ActionRiskTag::Sensitive
-            && action.permission_level == ActionPermissionLevel::Elevated
-        {
+        if settings.blocked_risk_tags.contains(tag) && *tag == ActionRiskTag::Sensitive {
             return Some(format!(
                 "Denied by fail-closed policy: blocked risk tag '{}'",
                 risk_tag_label(tag)
