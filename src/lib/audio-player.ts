@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 export interface AudioAnalysis {
     /** RMS volume amplitude (0-1) */
     amplitude: number;
@@ -7,17 +9,48 @@ export interface AudioAnalysis {
     highFreqEnergy: number;
 }
 
+export type AudioContainer = "mp3" | "wav" | "unknown";
+
+export function detectAudioContainer(chunk: Uint8Array): AudioContainer {
+    if (chunk.byteLength >= 12) {
+        const isRiff = chunk[0] === 0x52 && chunk[1] === 0x49 && chunk[2] === 0x46 && chunk[3] === 0x46;
+        const isWave = chunk[8] === 0x57 && chunk[9] === 0x41 && chunk[10] === 0x56 && chunk[11] === 0x45;
+        if (isRiff && isWave) {
+            return "wav";
+        }
+    }
+
+    if (chunk.byteLength >= 3) {
+        const hasId3 = chunk[0] === 0x49 && chunk[1] === 0x44 && chunk[2] === 0x33;
+        if (hasId3) {
+            return "mp3";
+        }
+    }
+
+    if (chunk.byteLength >= 2) {
+        const hasMpegSync = chunk[0] === 0xff && (chunk[1] & 0xe0) === 0xe0;
+        if (hasMpegSync) {
+            return "mp3";
+        }
+    }
+
+    return "unknown";
+}
+
 export class AudioStreamManager {
     private audioContext: AudioContext;
     private analyser: AnalyserNode;
     private audioElement: HTMLAudioElement;
     private mediaElementSource: MediaElementAudioSourceNode;
     private appendQueue: Uint8Array[] = [];
+    private wavQueue: AudioBuffer[] = [];
     private mediaSource: MediaSource | null = null;
     private sourceBuffer: SourceBuffer | null = null;
     private objectUrl: string | null = null;
     private streamEnded = false;
     private playbackStarted = false;
+    private currentSource: AudioBufferSourceNode | null = null;
+    private streamMode: AudioContainer | null = null;
     private _isPlaying = false;
     private analysisListeners: ((data: AudioAnalysis) => void)[] = [];
     private playStateListeners: ((playing: boolean) => void)[] = [];
@@ -73,13 +106,33 @@ export class AudioStreamManager {
             return;
         }
 
-        this.ensureStream();
+        if (!this.streamMode) {
+            this.streamMode = detectAudioContainer(chunk);
+        }
+
+        if (this.streamMode === "wav") {
+            await this.queueWavChunk(chunk);
+            return;
+        }
+
+        this.ensureMpegStream();
         this.appendQueue.push(chunk);
         this.flushAppendQueue();
     }
 
     public finishStream() {
         this.streamEnded = true;
+
+        if (this.streamMode === "wav") {
+            if (!this.currentSource && this.wavQueue.length === 0) {
+                this._isPlaying = false;
+                this.stopAnalysis();
+                this.broadcastAnalysis({ amplitude: 0, lowFreqEnergy: 0, highFreqEnergy: 0 });
+                this.broadcastPlayState(false);
+            }
+            return;
+        }
+
         this.tryEndStream();
     }
 
@@ -121,11 +174,23 @@ export class AudioStreamManager {
             }
         }
 
+        if (this.currentSource) {
+            try {
+                this.currentSource.stop();
+                this.currentSource.disconnect();
+            } catch {
+                // Ignore source teardown errors.
+            }
+            this.currentSource = null;
+        }
+
         this.mediaSource = null;
         this.sourceBuffer = null;
         this.appendQueue = [];
+        this.wavQueue = [];
         this.streamEnded = false;
         this.playbackStarted = false;
+        this.streamMode = null;
         this._isPlaying = false;
 
         this.stopAnalysis();
@@ -138,7 +203,7 @@ export class AudioStreamManager {
         this.stop();
     }
 
-    private ensureStream() {
+    private ensureMpegStream() {
         if (this.mediaSource || !("MediaSource" in window)) {
             return;
         }
@@ -164,6 +229,55 @@ export class AudioStreamManager {
             });
             this.flushAppendQueue();
         }, { once: true });
+    }
+
+    private async queueWavChunk(chunk: Uint8Array) {
+        try {
+            const buffer = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+            const decoded = await this.audioContext.decodeAudioData(buffer);
+            this.wavQueue.push(decoded);
+            this.playNextWav();
+        } catch (error) {
+            console.error("[Audio] Failed to decode WAV chunk:", error);
+            this.stop();
+        }
+    }
+
+    private playNextWav() {
+        if (this.currentSource || this.wavQueue.length === 0) {
+            return;
+        }
+
+        const buffer = this.wavQueue.shift();
+        if (!buffer) {
+            return;
+        }
+
+        const source = this.audioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(this.analyser);
+
+        this.currentSource = source;
+        this._isPlaying = true;
+        this.broadcastPlayState(true);
+        this.startAnalysis();
+
+        source.onended = () => {
+            if (this.currentSource === source) {
+                this.currentSource = null;
+            }
+            if (this.wavQueue.length > 0) {
+                this.playNextWav();
+                return;
+            }
+
+            this._isPlaying = false;
+            this.broadcastPlayState(false);
+            this.stopAnalysis();
+            this.broadcastAnalysis({ amplitude: 0, lowFreqEnergy: 0, highFreqEnergy: 0 });
+        };
+
+        source.start();
     }
 
     private flushAppendQueue() {
