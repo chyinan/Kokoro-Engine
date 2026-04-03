@@ -629,10 +629,12 @@
                 "max_rounds": "Max Tool Rounds"
             },
             "builtin_tools": {
-                "title": "Built-in Tools",
-                "desc": "Choose which built-in tools the model may call.",
+                "title": "Service List",
+                "desc": "Choose which tool services the model may call.",
                 "saving": "Saving...",
                 "saved_auto": "Saved automatically",
+                "source_mcp": "MCP",
+                "source_builtin": "Built-in",
                 "items": {
                     "get_time": {
                         "description": "Get the current date and time."
@@ -654,6 +656,16 @@
                     },
                     "send_notification": {
                         "description": "Show a desktop notification to the user."
+                    }
+                }
+            },
+            "mcp_tools": {
+                "items": {
+                    "mcp__time__convert_time": {
+                        "description": "Convert time between timezones."
+                    },
+                    "mcp__time__get_current_time": {
+                        "description": "Get current time in a specific timezone."
                     }
                 }
             },
@@ -808,6 +820,30 @@
             "rename": "Rename",
             "empty": "No conversations yet",
             "confirmDelete": "Delete this conversation?"
+        },
+        "tools": {
+            "header": "Tools ({{count}})",
+            "actions": {
+                "approve": "Approve",
+                "reject": "Reject"
+            },
+            "request_label": "Request",
+            "status": {
+                "allowed": "Allowed",
+                "approved": "Approved",
+                "rejected": "Rejected",
+                "pending_approval": "Pending approval",
+                "fail_closed": "Fail-closed",
+                "policy_denied": "Policy denied",
+                "hook_denied": "Hook denied",
+                "execution_error": "Error"
+            },
+            "detail": {
+                "waiting_approval": "Waiting for user approval before continuing."
+            },
+            "result": {
+                "cue_triggered": "Cue triggered: {{cue}}"
+            }
         }
     },
     "header": {

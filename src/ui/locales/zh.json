@@ -629,10 +629,12 @@
                 "max_rounds": "最大工具轮次"
             },
             "builtin_tools": {
-                "title": "内置工具",
-                "desc": "选择允许模型调用哪些内置工具。",
+                "title": "服务列表",
+                "desc": "选择允许模型调用哪些工具服务。",
                 "saving": "保存中...",
                 "saved_auto": "已自动保存",
+                "source_mcp": "MCP",
+                "source_builtin": "内置",
                 "items": {
                     "get_time": {
                         "description": "获取当前日期和时间。"
@@ -654,6 +656,16 @@
                     },
                     "send_notification": {
                         "description": "向用户显示桌面通知。"
+                    }
+                }
+            },
+            "mcp_tools": {
+                "items": {
+                    "mcp__time__convert_time": {
+                        "description": "在时区之间转换时间。"
+                    },
+                    "mcp__time__get_current_time": {
+                        "description": "获取指定时区的当前时间。"
                     }
                 }
             },
@@ -808,6 +820,30 @@
             "rename": "重命名",
             "empty": "暂无对话记录",
             "confirmDelete": "确定删除这条对话记录吗？"
+        },
+        "tools": {
+            "header": "工具 ({{count}})",
+            "actions": {
+                "approve": "批准",
+                "reject": "拒绝"
+            },
+            "request_label": "请求",
+            "status": {
+                "allowed": "允许",
+                "approved": "已批准",
+                "rejected": "已拒绝",
+                "pending_approval": "等待审批",
+                "fail_closed": "失败关闭",
+                "policy_denied": "策略拒绝",
+                "hook_denied": "Hook 拒绝",
+                "execution_error": "错误"
+            },
+            "detail": {
+                "waiting_approval": "等待用户审批后继续。"
+            },
+            "result": {
+                "cue_triggered": "已触发 Cue：{{cue}}"
+            }
         }
     },
     "header": {

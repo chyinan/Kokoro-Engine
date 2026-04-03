@@ -5,6 +5,36 @@ use std::sync::Arc;
 use tauri::State;
 use tokio::sync::{Mutex, RwLock};
 
+fn format_connection_error(error: &KokoroError) -> String {
+    match error {
+        KokoroError::Config(message)
+        | KokoroError::Database(message)
+        | KokoroError::Llm(message)
+        | KokoroError::Tts(message)
+        | KokoroError::Stt(message)
+        | KokoroError::Io(message)
+        | KokoroError::ExternalService(message)
+        | KokoroError::Mod(message)
+        | KokoroError::NotFound(message)
+        | KokoroError::Unauthorized(message)
+        | KokoroError::Internal(message)
+        | KokoroError::Chat(message)
+        | KokoroError::Validation(message) => message.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_connection_error;
+    use crate::error::KokoroError;
+
+    #[test]
+    fn strips_internal_prefix_for_connection_errors() {
+        let raw = KokoroError::Internal("MCP server process exited".to_string());
+        assert_eq!(format_connection_error(&raw), "MCP server process exited");
+    }
+}
+
 /// List all configured MCP servers and their connection status.
 #[tauri::command]
 pub async fn list_mcp_servers(
@@ -48,7 +78,7 @@ pub async fn add_mcp_server(
                         Ok(())
                     }
                     Err(e) => {
-                        mgr.set_connection_error(&cfg.name, e.to_string());
+                        mgr.set_connection_error(&cfg.name, format_connection_error(&e));
                         Err(e)
                     }
                 }
@@ -119,7 +149,7 @@ pub async fn reconnect_mcp_server(
                     Ok(())
                 }
                 Err(e) => {
-                    mgr.set_connection_error(&cfg.name, e.to_string());
+                    mgr.set_connection_error(&cfg.name, format_connection_error(&e));
                     Err(e)
                 }
             }
@@ -177,7 +207,7 @@ pub async fn toggle_mcp_server(
                         Ok(())
                     }
                     Err(e) => {
-                        mgr.set_connection_error(&cfg.name, e.to_string());
+                        mgr.set_connection_error(&cfg.name, format_connection_error(&e));
                         Err(e)
                     }
                 }

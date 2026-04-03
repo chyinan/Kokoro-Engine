@@ -629,10 +629,12 @@
                 "max_rounds": "最大ツールラウンド"
             },
             "builtin_tools": {
-                "title": "内蔵ツール",
-                "desc": "モデルが呼び出せる内蔵ツールを選択します。",
+                "title": "サービス一覧",
+                "desc": "モデルが呼び出せるツールサービスを選択します。",
                 "saving": "保存中...",
                 "saved_auto": "自動保存済み",
+                "source_mcp": "MCP",
+                "source_builtin": "内蔵",
                 "items": {
                     "get_time": {
                         "description": "現在の日付と時刻を取得します。"
@@ -654,6 +656,16 @@
                     },
                     "send_notification": {
                         "description": "ユーザーにデスクトップ通知を表示します。"
+                    }
+                }
+            },
+            "mcp_tools": {
+                "items": {
+                    "mcp__time__convert_time": {
+                        "description": "タイムゾーン間で時刻を変換します。"
+                    },
+                    "mcp__time__get_current_time": {
+                        "description": "指定したタイムゾーンの現在時刻を取得します。"
                     }
                 }
             },
@@ -808,6 +820,30 @@
             "rename": "名前を変更",
             "empty": "会話履歴はありません",
             "confirmDelete": "この会話を削除しますか？"
+        },
+        "tools": {
+            "header": "ツール ({{count}})",
+            "actions": {
+                "approve": "承認",
+                "reject": "拒否"
+            },
+            "request_label": "リクエスト",
+            "status": {
+                "allowed": "許可",
+                "approved": "承認済み",
+                "rejected": "拒否済み",
+                "pending_approval": "承認待ち",
+                "fail_closed": "フェイルクローズ",
+                "policy_denied": "ポリシー拒否",
+                "hook_denied": "Hook 拒否",
+                "execution_error": "エラー"
+            },
+            "detail": {
+                "waiting_approval": "ユーザー承認後に続行します。"
+            },
+            "result": {
+                "cue_triggered": "Cue をトリガーしました：{{cue}}"
+            }
         }
     },
     "header": {

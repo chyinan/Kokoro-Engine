@@ -32,14 +32,20 @@ function canResolvePendingTool(tool: ToolTraceItem): boolean {
         && tool.approvalRequestId.length > 0;
 }
 
-function getToolStatusLabel(tool: ToolTraceItem): string {
+type TranslateFn = (key: string, options?: Record<string, unknown>) => string;
+
+function getToolStatusLabel(tool: ToolTraceItem, t: TranslateFn): string {
     if (tool.approvalStatus === "approved") {
-        return "Approved";
+        return t("chat.tools.status.approved", { defaultValue: "Approved" });
     }
     if (tool.approvalStatus === "rejected") {
-        return "Rejected";
+        return t("chat.tools.status.rejected", { defaultValue: "Rejected" });
     }
-    return tool.denyKind ? toolStatusLabel[tool.denyKind] : "Allowed";
+    if (tool.denyKind) {
+        const entry = toolStatusLabel[tool.denyKind];
+        return t(entry.key, { defaultValue: entry.defaultValue });
+    }
+    return t("chat.tools.status.allowed", { defaultValue: "Allowed" });
 }
 
 function getToolStatusClassName(tool: ToolTraceItem): string {
@@ -67,10 +73,19 @@ function getToolStatusClassName(tool: ToolTraceItem): string {
     return "bg-emerald-500/15 text-emerald-300";
 }
 
-function renderToolDetail(tool: ToolTraceItem): string {
+function renderToolDetail(tool: ToolTraceItem, t: TranslateFn): string {
     if (tool.approvalStatus === "requested") {
-        return `${tool.text}\n等待用户审批后继续。`;
+        return `${tool.text}\n${t("chat.tools.detail.waiting_approval", { defaultValue: "等待用户审批后继续。" })}`;
     }
+
+    if (tool.text.startsWith("Cue triggered:")) {
+        const cueName = tool.text.slice("Cue triggered:".length).trim();
+        return t("chat.tools.result.cue_triggered", {
+            cue: cueName,
+            defaultValue: `Cue triggered: ${cueName}`,
+        });
+    }
+
     return tool.text;
 }
 
@@ -106,12 +121,15 @@ function getToolTextClassName(tool: ToolTraceItem): string {
     return isToolTextError(tool) ? "text-red-300" : "";
 }
 
-const toolStatusLabel: Record<NonNullable<ToolTraceItem["denyKind"]>, string> = {
-    pending_approval: "Pending approval",
-    fail_closed: "Fail-closed",
-    policy_denied: "Policy denied",
-    hook_denied: "Hook denied",
-    execution_error: "Error",
+const toolStatusLabel: Record<
+    NonNullable<ToolTraceItem["denyKind"]>,
+    { key: string; defaultValue: string }
+> = {
+    pending_approval: { key: "chat.tools.status.pending_approval", defaultValue: "Pending approval" },
+    fail_closed: { key: "chat.tools.status.fail_closed", defaultValue: "Fail-closed" },
+    policy_denied: { key: "chat.tools.status.policy_denied", defaultValue: "Policy denied" },
+    hook_denied: { key: "chat.tools.status.hook_denied", defaultValue: "Hook denied" },
+    execution_error: { key: "chat.tools.status.execution_error", defaultValue: "Error" },
 };
 
 export const ChatMessage = memo(function ChatMessage({
@@ -296,7 +314,7 @@ export const ChatMessage = memo(function ChatMessage({
                         className="flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
                     >
                         <Wrench size={11} strokeWidth={1.5} />
-                        {`Tools (${msg.tools.length})`}
+                        {t("chat.tools.header", { count: msg.tools.length, defaultValue: `Tools (${msg.tools.length})` })}
                         <ChevronDown
                             size={11}
                             strokeWidth={1.5}
@@ -324,7 +342,7 @@ export const ChatMessage = memo(function ChatMessage({
                                                         "rounded px-1.5 py-0.5 font-medium",
                                                         getToolStatusClassName(tool)
                                                     )}>
-                                                        {getToolStatusLabel(tool)}
+                                                        {getToolStatusLabel(tool, t)}
                                                     </span>
                                                     <span className="text-slate-500">{tool.tool}</span>
                                                 </div>
@@ -336,7 +354,7 @@ export const ChatMessage = memo(function ChatMessage({
                                                             disabled={isToolActionDisabled(isStreaming, tool)}
                                                             className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-300 transition-colors hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-50"
                                                         >
-                                                            Approve
+                                                            {t("chat.tools.actions.approve", { defaultValue: "Approve" })}
                                                         </button>
                                                         <button
                                                             type="button"
@@ -344,17 +362,17 @@ export const ChatMessage = memo(function ChatMessage({
                                                             disabled={isToolActionDisabled(isStreaming, tool)}
                                                             className="rounded bg-rose-500/15 px-1.5 py-0.5 text-rose-300 transition-colors hover:bg-rose-500/25 disabled:cursor-not-allowed disabled:opacity-50"
                                                         >
-                                                            Reject
+                                                            {t("chat.tools.actions.reject", { defaultValue: "Reject" })}
                                                         </button>
                                                     </div>
                                                 )}
                                             </div>
                                             <div className={clsx("whitespace-pre-wrap break-words", getToolTextClassName(tool))}>
-                                                {renderToolDetail(tool)}
+                                                {renderToolDetail(tool, t)}
                                             </div>
                                             {isPendingApprovalTrace(tool) && tool.approvalRequestId && (
                                                 <div className="mt-1 text-[10px] text-slate-500">
-                                                    Request: {tool.approvalRequestId}
+                                                    {t("chat.tools.request_label", { defaultValue: "Request" })}: {tool.approvalRequestId}
                                                 </div>
                                             )}
                                         </div>

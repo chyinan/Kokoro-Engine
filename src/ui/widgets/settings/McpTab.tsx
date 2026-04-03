@@ -11,6 +11,7 @@ import {
     listActions, getToolSettings, saveToolSettings
 } from "../../../lib/kokoro-bridge";
 import type { ActionInfo, McpServerConfig, McpServerStatus, ToolSettings } from "../../../lib/kokoro-bridge";
+import { getToolDisplayDescription, getToolSourceLabel } from "./mcpToolDisplay";
 
 // ── Helpers ─────────────────────────────────────────────
 
@@ -316,9 +317,8 @@ export default function McpTab() {
                 <div className="space-y-2">
                     {tools.map((tool) => {
                         const enabled = toolSettings.enabled_tools[tool.id] ?? true;
-                        const sourceLabel = tool.source === "mcp"
-                            ? `MCP${tool.server_name ? ` · ${tool.server_name}` : ""}`
-                            : "Built-in";
+                        const sourceLabel = getToolSourceLabel(tool, t);
+                        const displayDescription = getToolDisplayDescription(tool, t);
                         return (
                             <div
                                 key={tool.id}
@@ -337,7 +337,7 @@ export default function McpTab() {
                                         {tool.id}
                                     </div>
                                     <div className="mt-1 text-xs text-[var(--color-text-muted)]">
-                                        {tool.description}
+                                        {displayDescription}
                                     </div>
                                 </div>
                                 <button

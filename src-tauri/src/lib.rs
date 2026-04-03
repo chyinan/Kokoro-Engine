@@ -414,7 +414,22 @@ pub fn run() {
                                     Ok(())
                                 }
                                 Err(e) => {
-                                    mgr.set_connection_error(&cfg.name, e.to_string());
+                                    let display_error = match &e {
+                                        crate::error::KokoroError::Config(message)
+                                        | crate::error::KokoroError::Database(message)
+                                        | crate::error::KokoroError::Llm(message)
+                                        | crate::error::KokoroError::Tts(message)
+                                        | crate::error::KokoroError::Stt(message)
+                                        | crate::error::KokoroError::Io(message)
+                                        | crate::error::KokoroError::ExternalService(message)
+                                        | crate::error::KokoroError::Mod(message)
+                                        | crate::error::KokoroError::NotFound(message)
+                                        | crate::error::KokoroError::Unauthorized(message)
+                                        | crate::error::KokoroError::Internal(message)
+                                        | crate::error::KokoroError::Chat(message)
+                                        | crate::error::KokoroError::Validation(message) => message.clone(),
+                                    };
+                                    mgr.set_connection_error(&cfg.name, display_error);
                                     Err(e)
                                 }
                             }
