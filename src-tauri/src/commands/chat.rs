@@ -1,7 +1,12 @@
 // pattern: Mixed (needs refactoring)
 // Reason: 该命令文件同时承担 Tauri IPC 编排、流式对话副作用与少量 payload 整形；本次只在现有边界内最小接入 BeforeLlmRequest modify。
+use crate::actions::executor::{
+    apply_before_action_args_payload, build_action_hook_payload, build_before_action_args_payload,
+};
 use crate::actions::tool_settings::ToolSettings;
-use crate::actions::{builtin_tool_id, execute_tool_calls, ToolInvocation};
+use crate::actions::{
+    builtin_tool_id, execute_tool_calls, ActionContext, ActionRegistry, ActionResult, ToolInvocation,
+};
 use crate::ai::context::AIOrchestrator;
 use crate::ai::context::Message;
 use crate::ai::memory_extractor;
@@ -21,8 +26,136 @@ use crate::llm::service::LlmService;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tauri::{Emitter, Manager, State, Window};
-use tokio::sync::RwLock;
+use std::sync::Arc;
+use tauri::{command, Emitter, Manager, State, Window};
+use tokio::sync::{oneshot, Mutex, RwLock};
+use uuid::Uuid;
+
+#[derive(Debug)]
+enum ToolApprovalDecision {
+    Approved,
+    Rejected { reason: Option<String> },
+}
+
+#[derive(Debug)]
+struct PendingToolApproval {
+    approval_request_id: String,
+    turn_id: String,
+    tool_id: String,
+    tool_name: String,
+    args: HashMap<String, String>,
+    decision_tx: Option<oneshot::Sender<ToolApprovalDecision>>,
+    decision_rx: Option<oneshot::Receiver<ToolApprovalDecision>>,
+}
+
+pub struct PendingToolApprovalState {
+    pending: Mutex<HashMap<String, PendingToolApproval>>,
+}
+
+impl PendingToolApprovalState {
+    pub fn new() -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn register(
+        &self,
+        turn_id: String,
+        tool_id: String,
+        tool_name: String,
+        args: HashMap<String, String>,
+    ) -> String {
+        let approval_request_id = Uuid::new_v4().to_string();
+        let (decision_tx, decision_rx) = oneshot::channel();
+        self.pending.lock().await.insert(
+            approval_request_id.clone(),
+            PendingToolApproval {
+                approval_request_id: approval_request_id.clone(),
+                turn_id,
+                tool_id,
+                tool_name,
+                args,
+                decision_tx: Some(decision_tx),
+                decision_rx: Some(decision_rx),
+            },
+        );
+        approval_request_id
+    }
+
+    async fn take_receiver(
+        &self,
+        approval_request_id: &str,
+    ) -> Option<oneshot::Receiver<ToolApprovalDecision>> {
+        self.pending
+            .lock()
+            .await
+            .get_mut(approval_request_id)
+            .and_then(|entry| entry.decision_rx.take())
+    }
+
+    async fn resolve(
+        &self,
+        approval_request_id: &str,
+        decision: ToolApprovalDecision,
+    ) -> Result<(), KokoroError> {
+        let mut entry = self
+            .pending
+            .lock()
+            .await
+            .remove(approval_request_id)
+            .ok_or_else(|| KokoroError::Validation(format!("Unknown approval request '{}'", approval_request_id)))?;
+        let sender = entry.decision_tx.take().ok_or_else(|| {
+            KokoroError::Validation(format!(
+                "Approval request '{}' for tool '{}' is no longer pending",
+                entry.approval_request_id, entry.tool_name
+            ))
+        })?;
+        let _ = (&entry.turn_id, &entry.tool_id, &entry.args, &entry.decision_rx);
+        sender.send(decision).map_err(|_| {
+            KokoroError::Validation(format!(
+                "Approval request '{}' for tool '{}' is no longer pending",
+                entry.approval_request_id, entry.tool_name
+            ))
+        })
+    }
+}
+
+async fn approve_tool_approval_inner(
+    approval_state: &PendingToolApprovalState,
+    approval_request_id: String,
+) -> Result<(), KokoroError> {
+    approval_state
+        .resolve(&approval_request_id, ToolApprovalDecision::Approved)
+        .await
+}
+
+async fn reject_tool_approval_inner(
+    approval_state: &PendingToolApprovalState,
+    approval_request_id: String,
+    reason: Option<String>,
+) -> Result<(), KokoroError> {
+    approval_state
+        .resolve(&approval_request_id, ToolApprovalDecision::Rejected { reason })
+        .await
+}
+
+#[command]
+pub async fn approve_tool_approval(
+    approval_request_id: String,
+    approval_state: State<'_, Arc<PendingToolApprovalState>>,
+) -> Result<(), KokoroError> {
+    approve_tool_approval_inner(approval_state.inner().as_ref(), approval_request_id).await
+}
+
+#[command]
+pub async fn reject_tool_approval(
+    approval_request_id: String,
+    reason: Option<String>,
+    approval_state: State<'_, Arc<PendingToolApprovalState>>,
+) -> Result<(), KokoroError> {
+    reject_tool_approval_inner(approval_state.inner().as_ref(), approval_request_id, reason).await
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct ContextSettings {
@@ -305,6 +438,92 @@ fn tool_success_payload(
     })
 }
 
+fn pending_tool_trace_payload(
+    turn_id: &str,
+    tool: &str,
+    tool_id: &str,
+    error: &str,
+    approval_request_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "turn_id": turn_id,
+        "tool": tool,
+        "tool_id": tool_id,
+        "error": error,
+        "deny_kind": deny_kind_for_tool_error(error),
+        "approval_request_id": approval_request_id,
+        "approval_status": "requested",
+    })
+}
+
+fn approved_tool_trace_payload(
+    turn_id: &str,
+    tool: &str,
+    tool_id: &str,
+    result: &crate::actions::ActionResult,
+    approval_request_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "turn_id": turn_id,
+        "tool": tool,
+        "tool_id": tool_id,
+        "result": result,
+        "approval_request_id": approval_request_id,
+        "approval_status": "approved",
+    })
+}
+
+fn rejected_tool_trace_payload(
+    turn_id: &str,
+    tool: &str,
+    tool_id: &str,
+    error: &str,
+    approval_request_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "turn_id": turn_id,
+        "tool": tool,
+        "tool_id": tool_id,
+        "error": error,
+        "deny_kind": deny_kind_for_tool_error(error),
+        "approval_request_id": approval_request_id,
+        "approval_status": "rejected",
+    })
+}
+
+#[cfg(test)]
+fn pending_tool_trace_payload_for_test(
+    turn_id: &str,
+    tool: &str,
+    tool_id: &str,
+    error: &str,
+    approval_request_id: &str,
+) -> serde_json::Value {
+    pending_tool_trace_payload(turn_id, tool, tool_id, error, approval_request_id)
+}
+
+#[cfg(test)]
+fn approved_tool_trace_payload_for_test(
+    turn_id: &str,
+    tool: &str,
+    tool_id: &str,
+    result: &crate::actions::ActionResult,
+    approval_request_id: &str,
+) -> serde_json::Value {
+    approved_tool_trace_payload(turn_id, tool, tool_id, result, approval_request_id)
+}
+
+#[cfg(test)]
+fn rejected_tool_trace_payload_for_test(
+    turn_id: &str,
+    tool: &str,
+    tool_id: &str,
+    error: &str,
+    approval_request_id: &str,
+) -> serde_json::Value {
+    rejected_tool_trace_payload(turn_id, tool, tool_id, error, approval_request_id)
+}
+
 fn emit_tool_trace_event(
     app: &tauri::AppHandle,
     turn_id: &str,
@@ -322,6 +541,158 @@ fn emit_tool_trace_event(
                 "chat-turn-tool",
                 tool_error_payload(outcome.tool_name(), outcome.tool_id(), turn_id, error),
             );
+        }
+    }
+}
+
+async fn execute_single_tool_after_approval(
+    app: &tauri::AppHandle,
+    registry_state: &std::sync::Arc<RwLock<ActionRegistry>>,
+    character_id: &str,
+    tool_call: &ToolInvocation,
+) -> Result<ActionResult, String> {
+    let hook_runtime = app.try_state::<HookRuntime>();
+    let resolved = {
+        let registry = registry_state.read().await;
+        registry.resolve_action_for_execution(&tool_call.name)
+    };
+    let (action, handler) = resolved.map_err(|error| error.0.clone())?;
+    let mut args_payload = build_before_action_args_payload(
+        None,
+        character_id,
+        Some("chat".to_string()),
+        tool_call,
+        &action,
+    );
+    if let Some(hooks) = hook_runtime.as_ref() {
+        hooks.emit_before_action_args_modify(&mut args_payload).await;
+    }
+    let effective_args = apply_before_action_args_payload(args_payload);
+    let ctx = ActionContext {
+        app: app.clone(),
+        character_id: character_id.to_string(),
+        conversation_id: None,
+        source: Some("chat".to_string()),
+    };
+    let result = handler.execute(effective_args, ctx).await.map_err(|e| e.0);
+    if let Some(hooks) = hook_runtime.as_ref() {
+        hooks
+            .emit_best_effort(
+                &HookEvent::AfterActionInvoke,
+                &build_action_hook_payload(
+                    None,
+                    character_id,
+                    Some("chat".to_string()),
+                    tool_call,
+                    Some(&action),
+                    Some(result.is_ok()),
+                    Some(match &result {
+                        Ok(value) => value.message.clone(),
+                        Err(error) => error.clone(),
+                    }),
+                ),
+            )
+            .await;
+    }
+    result
+}
+
+fn rejected_pending_approval_message(reason: Option<String>) -> String {
+    match reason {
+        Some(reason) if !reason.trim().is_empty() => format!("Denied pending approval: {}", reason),
+        _ => "Denied pending approval: rejected by user".to_string(),
+    }
+}
+
+fn is_pending_approval_error(error: &str) -> bool {
+    error.starts_with("Denied pending approval:")
+}
+
+fn approved_tool_error_payload(
+    turn_id: &str,
+    tool: &str,
+    tool_id: &str,
+    error: &str,
+    approval_request_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "turn_id": turn_id,
+        "tool": tool,
+        "tool_id": tool_id,
+        "error": error,
+        "deny_kind": deny_kind_for_tool_error(error),
+        "approval_request_id": approval_request_id,
+        "approval_status": "approved",
+    })
+}
+
+async fn wait_for_tool_approval_and_execute(
+    app: &tauri::AppHandle,
+    approval_state: &PendingToolApprovalState,
+    registry_state: &std::sync::Arc<RwLock<ActionRegistry>>,
+    character_id: &str,
+    turn_id: &str,
+    outcome: &crate::actions::ToolExecutionOutcome,
+    pending_error: &str,
+) -> Result<(Result<ActionResult, String>, serde_json::Value), KokoroError> {
+    let approval_request_id = approval_state
+        .register(
+            turn_id.to_string(),
+            outcome.tool_id().to_string(),
+            outcome.tool_name().to_string(),
+            outcome.invocation.args.clone(),
+        )
+        .await;
+    let requested_payload = pending_tool_trace_payload(
+        turn_id,
+        outcome.tool_name(),
+        outcome.tool_id(),
+        pending_error,
+        &approval_request_id,
+    );
+    let receiver = approval_state
+        .take_receiver(&approval_request_id)
+        .await
+        .ok_or_else(|| KokoroError::Internal("Missing approval receiver after registration".to_string()))?;
+
+    app.emit("chat-turn-tool", requested_payload.clone())
+        .map_err(|e| KokoroError::Chat(e.to_string()))?;
+
+    let decision = receiver
+        .await
+        .map_err(|_| KokoroError::Validation(format!("Approval request '{}' was dropped", approval_request_id)))?;
+
+    match decision {
+        ToolApprovalDecision::Approved => {
+            let result = execute_single_tool_after_approval(app, registry_state, character_id, &outcome.invocation).await;
+            let payload = match &result {
+                Ok(value) => approved_tool_trace_payload(
+                    turn_id,
+                    outcome.tool_name(),
+                    outcome.tool_id(),
+                    value,
+                    &approval_request_id,
+                ),
+                Err(error) => approved_tool_error_payload(
+                    turn_id,
+                    outcome.tool_name(),
+                    outcome.tool_id(),
+                    error,
+                    &approval_request_id,
+                ),
+            };
+            Ok((result, payload))
+        }
+        ToolApprovalDecision::Rejected { reason } => {
+            let rejected_message = rejected_pending_approval_message(reason);
+            let payload = rejected_tool_trace_payload(
+                turn_id,
+                outcome.tool_name(),
+                outcome.tool_id(),
+                &rejected_message,
+                &approval_request_id,
+            );
+            Ok((Err(rejected_message), payload))
         }
     }
 }
@@ -652,6 +1023,7 @@ pub async fn stream_chat(
     llm_state: State<'_, LlmService>,
     _action_registry: State<'_, std::sync::Arc<RwLock<crate::actions::ActionRegistry>>>,
     tool_settings_state: State<'_, std::sync::Arc<RwLock<ToolSettings>>>,
+    approval_state: State<'_, Arc<PendingToolApprovalState>>,
     _vision_watcher: State<'_, crate::vision::watcher::VisionWatcher>,
     window_size_state: State<'_, WindowSizeState>,
     vision_server: State<
@@ -1110,17 +1482,46 @@ pub async fn stream_chat(
                 cue_set_by_tool = true;
             }
 
-            match &outcome.result {
-                Ok(result) => {
-                    println!("[ToolCall] {} => {}", outcome.tool_name(), result.message);
-                }
-                Err(error) => {
+            let result = if let Err(error) = &outcome.result {
+                if is_pending_approval_error(error) {
+                    let (resolved_result, resolved_payload) = wait_for_tool_approval_and_execute(
+                        &app,
+                        approval_state.inner().as_ref(),
+                        &_action_registry.inner().clone(),
+                        &char_id,
+                        &assistant_turn_id,
+                        &outcome,
+                        error,
+                    )
+                    .await?;
+                    match &resolved_result {
+                        Ok(result) => {
+                            println!("[ToolCall] {} approved => {}", outcome.tool_name(), result.message);
+                        }
+                        Err(error) => {
+                            eprintln!("[ToolCall] {} rejected/failed after approval flow: {}", outcome.tool_name(), error);
+                        }
+                    }
+                    app.emit("chat-turn-tool", resolved_payload)
+                        .map_err(|e| KokoroError::Chat(e.to_string()))?;
+                    resolved_result
+                } else {
                     eprintln!("[ToolCall] {} failed: {}", outcome.tool_name(), error);
+                    emit_tool_trace_event(&app, &assistant_turn_id, &outcome);
+                    outcome.result.clone()
                 }
-            }
-            emit_tool_trace_event(&app, &assistant_turn_id, &outcome);
+            } else {
+                if let Ok(success) = &outcome.result {
+                    println!("[ToolCall] {} => {}", outcome.tool_name(), success.message);
+                }
+                emit_tool_trace_event(&app, &assistant_turn_id, &outcome);
+                outcome.result.clone()
+            };
 
-            tool_results.push(outcome.result_line());
+            tool_results.push(match &result {
+                Ok(value) => format!("- {}: {}", outcome.tool_id(), value.message),
+                Err(error) => format!("- {}: Error: {}", outcome.tool_id(), error),
+            });
 
             if let Some(tool_call_id) = &outcome.invocation.tool_call_id {
                 continuation_tool_calls.push((
@@ -1129,7 +1530,7 @@ pub async fn stream_chat(
                     serde_json::to_string(&outcome.invocation.args)
                         .unwrap_or_else(|_| "{}".to_string()),
                 ));
-                let message_text = match &outcome.result {
+                let message_text = match &result {
                     Ok(result) => result.message.clone(),
                     Err(error) => format!("Error: {}", error),
                 };
@@ -1845,6 +2246,93 @@ mod tests {
     fn test_tool_success_payload_keeps_result_without_deny_kind() {
         assert!(tool_trace_success_has_no_deny_kind());
         assert_eq!(tool_trace_success_message(), Some("ok".to_string()));
+    }
+
+    #[test]
+    fn test_pending_approval_trace_payload_includes_request_id_and_requested_status() {
+        let payload = pending_tool_trace_payload_for_test(
+            "turn-1",
+            "write_note",
+            "builtin__write_note",
+            "Denied pending approval: risk tag 'write' requires approval",
+            "req-1",
+        );
+        assert_eq!(payload.get("approval_request_id").and_then(|v| v.as_str()), Some("req-1"));
+        assert_eq!(payload.get("approval_status").and_then(|v| v.as_str()), Some("requested"));
+        assert_eq!(payload.get("deny_kind").and_then(|v| v.as_str()), Some("pending_approval"));
+    }
+
+    #[test]
+    fn test_approval_result_payloads_include_resolved_status() {
+        let approved = approved_tool_trace_payload_for_test(
+            "turn-1",
+            "write_note",
+            "builtin__write_note",
+            &sample_action_result("ok"),
+            "req-1",
+        );
+        assert_eq!(approved.get("approval_status").and_then(|v| v.as_str()), Some("approved"));
+        assert_eq!(approved.get("approval_request_id").and_then(|v| v.as_str()), Some("req-1"));
+
+        let rejected = rejected_tool_trace_payload_for_test(
+            "turn-1",
+            "write_note",
+            "builtin__write_note",
+            "Denied pending approval: rejected by user",
+            "req-1",
+        );
+        assert_eq!(rejected.get("approval_status").and_then(|v| v.as_str()), Some("rejected"));
+        assert_eq!(rejected.get("approval_request_id").and_then(|v| v.as_str()), Some("req-1"));
+    }
+
+    #[tokio::test]
+    async fn test_pending_tool_approval_state_generates_request_id_and_resolves_approve() {
+        let state = PendingToolApprovalState::new();
+        let request_id = state
+            .register(
+                "turn-1".to_string(),
+                "builtin__write_note".to_string(),
+                "write_note".to_string(),
+                HashMap::from([("query".to_string(), "kokoro".to_string())]),
+            )
+            .await;
+
+        assert!(!request_id.is_empty());
+        let receiver = state.take_receiver(&request_id).await.expect("receiver should exist");
+        approve_tool_approval_inner(&state, request_id.clone())
+            .await
+            .expect("approve should succeed");
+        match receiver.await.expect("decision should resolve") {
+            ToolApprovalDecision::Approved => {}
+            other => panic!("expected approved decision, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pending_tool_approval_state_resolves_reject_and_unknown_id_errors() {
+        let state = PendingToolApprovalState::new();
+        let request_id = state
+            .register(
+                "turn-2".to_string(),
+                "builtin__write_note".to_string(),
+                "write_note".to_string(),
+                HashMap::new(),
+            )
+            .await;
+
+        let receiver = state.take_receiver(&request_id).await.expect("receiver should exist");
+        reject_tool_approval_inner(&state, request_id.clone(), Some("user rejected".to_string()))
+            .await
+            .expect("reject should succeed");
+        match receiver.await.expect("decision should resolve") {
+            ToolApprovalDecision::Rejected { reason } => {
+                assert_eq!(reason.as_deref(), Some("user rejected"));
+            }
+            other => panic!("expected rejected decision, got {other:?}"),
+        }
+
+        let missing = approve_tool_approval_inner(&state, "missing".to_string()).await;
+        assert!(missing.is_err());
     }
 
     // ── strip_leaked_tags ───────────────────────────────────

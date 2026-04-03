@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, useDeferredValue, memo } from
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
-import { streamChat, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatError, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages } from "../../lib/kokoro-bridge";
+import { streamChat, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatError, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages, approveToolApproval, rejectToolApproval } from "../../lib/kokoro-bridge";
 import type { ToolTraceItem } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen } from "@tauri-apps/api/event";
@@ -79,6 +79,446 @@ const updateTurnMessage = (
     return next;
 };
 
+function mergeToolTraceItems(existing: ReadonlyArray<ToolTraceItem>, incoming: ToolTraceItem): Array<ToolTraceItem> {
+    if (incoming.approvalRequestId) {
+        const targetIndex = existing.findIndex(tool => tool.approvalRequestId === incoming.approvalRequestId);
+        if (targetIndex >= 0) {
+            const next = [...existing];
+            next[targetIndex] = incoming;
+            return next;
+        }
+    }
+    return [...existing, incoming];
+}
+
+function buildToolTraceItem(event: {
+    tool: string;
+    result?: { message: string };
+    error?: string;
+    deny_kind?: ToolTraceItem["denyKind"];
+    approval_request_id?: string;
+    approval_status?: ToolTraceItem["approvalStatus"];
+}): ToolTraceItem {
+    return event.result
+        ? {
+            tool: event.tool,
+            text: event.result.message,
+            isError: false,
+            approvalRequestId: event.approval_request_id,
+            approvalStatus: event.approval_status,
+        }
+        : {
+            tool: event.tool,
+            text: event.error || "",
+            isError: true,
+            denyKind: event.deny_kind,
+            approvalRequestId: event.approval_request_id,
+            approvalStatus: event.approval_status,
+        };
+}
+
+function getApprovalErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+function getApprovalRequestId(tool: ToolTraceItem): string | null {
+    return typeof tool.approvalRequestId === "string" && tool.approvalRequestId.length > 0
+        ? tool.approvalRequestId
+        : null;
+}
+
+function updateMessageTools(messages: Array<ChatMessage>, globalIndex: number, updater: (tools: Array<ToolTraceItem>) => Array<ToolTraceItem>): Array<ChatMessage> {
+    if (globalIndex < 0 || globalIndex >= messages.length) {
+        return messages;
+    }
+    const current = messages[globalIndex];
+    const nextTools = updater(current.tools ? [...current.tools] : []);
+    const next = [...messages];
+    next[globalIndex] = {
+        ...current,
+        tools: nextTools.length > 0 ? nextTools : undefined,
+    };
+    return next;
+}
+
+function removePendingApprovalHint(text: string): string {
+    return text.replace(/\n等待用户审批后继续。$/, "");
+}
+
+function createRejectedToolTrace(tool: ToolTraceItem): ToolTraceItem {
+    return {
+        ...tool,
+        text: removePendingApprovalHint(tool.text),
+        isError: true,
+        approvalStatus: "rejected",
+    };
+}
+
+function createApprovedToolTrace(tool: ToolTraceItem): ToolTraceItem {
+    return {
+        ...tool,
+        text: removePendingApprovalHint(tool.text),
+        isError: false,
+        approvalStatus: "approved",
+    };
+}
+
+function getResolvedToolText(tool: ToolTraceItem, fallback: string): string {
+    return fallback || removePendingApprovalHint(tool.text);
+}
+
+function isApprovalRequested(event: { approval_status?: ToolTraceItem["approvalStatus"] }): boolean {
+    return event.approval_status === "requested";
+}
+
+function isApprovalResolved(event: { approval_status?: ToolTraceItem["approvalStatus"] }): boolean {
+    return event.approval_status === "approved" || event.approval_status === "rejected";
+}
+
+function shouldKeepToolEntryVisible(_tool: ToolTraceItem): boolean {
+    return true;
+}
+
+function filterVisibleTools(tools: Array<ToolTraceItem>): Array<ToolTraceItem> {
+    return tools.filter(shouldKeepToolEntryVisible);
+}
+
+function normalizeToolList(tools: Array<ToolTraceItem>): Array<ToolTraceItem> {
+    return filterVisibleTools(tools);
+}
+
+function mergeToolIntoTurn(turn: PendingTurnState, incoming: ToolTraceItem): void {
+    turn.tools = normalizeToolList(mergeToolTraceItems(turn.tools, incoming));
+}
+
+function updateTurnToolsInMessages(prev: Array<ChatMessage>, turn: PendingTurnState, incoming: ToolTraceItem): Array<ChatMessage> {
+    const ensured = ensureTurnMessage(prev, turn);
+    return updateTurnMessage(ensured, turn, (current) => ({
+        ...current,
+        tools: normalizeToolList(mergeToolTraceItems(current.tools || [], incoming)),
+    }));
+}
+
+function isToolApprovalPending(tool: ToolTraceItem): boolean {
+    return tool.denyKind === "pending_approval" && tool.approvalStatus === "requested";
+}
+
+function findPendingToolIndex(message: ChatMessage, approvalRequestId: string): number {
+    return (message.tools || []).findIndex(tool => tool.approvalRequestId === approvalRequestId);
+}
+
+function replaceToolAtIndex(tools: Array<ToolTraceItem>, index: number, replacement: ToolTraceItem): Array<ToolTraceItem> {
+    if (index < 0 || index >= tools.length) {
+        return tools;
+    }
+    const next = [...tools];
+    next[index] = replacement;
+    return next;
+}
+
+function updatePendingToolStatus(messages: Array<ChatMessage>, globalIndex: number, approvalRequestId: string, replacement: ToolTraceItem): Array<ChatMessage> {
+    return updateMessageTools(messages, globalIndex, (tools) => {
+        const targetIndex = tools.findIndex(tool => tool.approvalRequestId === approvalRequestId);
+        return targetIndex >= 0 ? replaceToolAtIndex(tools, targetIndex, replacement) : tools;
+    });
+}
+
+function findToolMessageIndexByApprovalRequestId(messages: ReadonlyArray<ChatMessage>, approvalRequestId: string): number {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if ((message.tools || []).some(tool => tool.approvalRequestId === approvalRequestId)) {
+            return index;
+        }
+    }
+    return -1;
+}
+
+function isKokoroMessage(message: ChatMessage | undefined): boolean {
+    return message?.role === "kokoro";
+}
+
+function shouldAppendEmptyKokoroBubble(messages: ReadonlyArray<ChatMessage>): boolean {
+    const last = messages[messages.length - 1];
+    return !isKokoroMessage(last);
+}
+
+function appendPendingApprovalBubble(messages: Array<ChatMessage>, tool: ToolTraceItem): Array<ChatMessage> {
+    if (shouldAppendEmptyKokoroBubble(messages)) {
+        return [...messages, { role: "kokoro", text: "", tools: [tool] }];
+    }
+    const next = [...messages];
+    const last = next[next.length - 1];
+    next[next.length - 1] = {
+        ...last,
+        tools: normalizeToolList(mergeToolTraceItems(last.tools || [], tool)),
+    };
+    return next;
+}
+
+function setPendingApprovalOnLatestMessage(messages: Array<ChatMessage>, tool: ToolTraceItem): Array<ChatMessage> {
+    const approvalRequestId = getApprovalRequestId(tool);
+    if (approvalRequestId) {
+        const existingIndex = findToolMessageIndexByApprovalRequestId(messages, approvalRequestId);
+        if (existingIndex >= 0) {
+            return updateMessageTools(messages, existingIndex, (tools) => normalizeToolList(mergeToolTraceItems(tools, tool)));
+        }
+    }
+    return appendPendingApprovalBubble(messages, tool);
+}
+
+function isToolResolvedStatus(status: ToolTraceItem["approvalStatus"] | undefined): boolean {
+    return status === "approved" || status === "rejected";
+}
+
+function getResolvedToolReplacement(event: { result?: { message: string }; error?: string; approval_status?: ToolTraceItem["approvalStatus"] }, current: ToolTraceItem): ToolTraceItem {
+    if (event.approval_status === "approved") {
+        if (event.error) {
+            return {
+                ...current,
+                text: getResolvedToolText(current, event.error),
+                isError: true,
+                denyKind: "execution_error",
+                approvalStatus: "approved",
+            };
+        }
+        return {
+            ...createApprovedToolTrace(current),
+            text: getResolvedToolText(current, event.result?.message || current.text),
+        };
+    }
+    return {
+        ...createRejectedToolTrace(current),
+        text: getResolvedToolText(current, event.error || current.text),
+    };
+}
+
+function updateLatestPendingApproval(messages: Array<ChatMessage>, event: {
+    approval_request_id?: string;
+    approval_status?: ToolTraceItem["approvalStatus"];
+    result?: { message: string };
+    error?: string;
+}): Array<ChatMessage> {
+    const approvalRequestId = typeof event.approval_request_id === "string" ? event.approval_request_id : null;
+    if (!approvalRequestId) {
+        return messages;
+    }
+
+    const targetMessageIndex = findToolMessageIndexByApprovalRequestId(messages, approvalRequestId);
+    if (targetMessageIndex < 0) {
+        return messages;
+    }
+
+    const targetMessage = messages[targetMessageIndex];
+    const toolIndex = findPendingToolIndex(targetMessage, approvalRequestId);
+    if (toolIndex < 0) {
+        return messages;
+    }
+
+    const currentTool = targetMessage.tools?.[toolIndex];
+    if (!currentTool) {
+        return messages;
+    }
+
+    const replacement = getResolvedToolReplacement(event, currentTool);
+    return updatePendingToolStatus(messages, targetMessageIndex, approvalRequestId, replacement);
+}
+
+function resolveApprovalEvent(messages: Array<ChatMessage>, toolEntry: ToolTraceItem, event: {
+    approval_status?: ToolTraceItem["approvalStatus"];
+    approval_request_id?: string;
+    result?: { message: string };
+    error?: string;
+}): Array<ChatMessage> {
+    if (isApprovalRequested(event)) {
+        return setPendingApprovalOnLatestMessage(messages, toolEntry);
+    }
+    if (isApprovalResolved(event)) {
+        return updateLatestPendingApproval(messages, event);
+    }
+    return messages;
+}
+
+function isLiveTurn(turn: PendingTurnState | null, turnId: string): turn is PendingTurnState {
+    return Boolean(turn && turn.turnId === turnId);
+}
+
+function shouldLogToolEventError(event: { result?: { message: string }; error?: string }): boolean {
+    return !event.result && Boolean(event.error);
+}
+
+function shouldLogToolEventSuccess(event: { result?: { message: string } }): boolean {
+    return Boolean(event.result);
+}
+
+function getToolEventErrorMessage(event: { error?: string }): string {
+    return event.error || "";
+}
+
+function getToolEventSuccessMessage(event: { result?: { message: string } }): string {
+    return event.result?.message || "";
+}
+
+function shouldHandleAsApprovalEvent(event: { approval_status?: ToolTraceItem["approvalStatus"] }): boolean {
+    return event.approval_status === "requested" || event.approval_status === "approved" || event.approval_status === "rejected";
+}
+
+function toolRequiresApprovalAction(tool: ToolTraceItem): boolean {
+    return isToolApprovalPending(tool);
+}
+
+function canSubmitApproval(tool: ToolTraceItem): boolean {
+    return toolRequiresApprovalAction(tool) && getApprovalRequestId(tool) !== null;
+}
+
+function clearApprovalWaitingSuffix(tool: ToolTraceItem): ToolTraceItem {
+    return {
+        ...tool,
+        text: removePendingApprovalHint(tool.text),
+    };
+}
+
+function setToolPendingResolutionState(messages: Array<ChatMessage>, globalIndex: number, tool: ToolTraceItem, approvalStatus: "approved" | "rejected"): Array<ChatMessage> {
+    const approvalRequestId = getApprovalRequestId(tool);
+    if (!approvalRequestId) {
+        return messages;
+    }
+    const replacement = approvalStatus === "approved"
+        ? createApprovedToolTrace(clearApprovalWaitingSuffix(tool))
+        : createRejectedToolTrace(clearApprovalWaitingSuffix(tool));
+    return updatePendingToolStatus(messages, globalIndex, approvalRequestId, replacement);
+}
+
+function getToolEntryFromEvent(event: {
+    tool: string;
+    result?: { message: string };
+    error?: string;
+    deny_kind?: ToolTraceItem["denyKind"];
+    approval_request_id?: string;
+    approval_status?: ToolTraceItem["approvalStatus"];
+}): ToolTraceItem {
+    return buildToolTraceItem(event);
+}
+
+function updateMessagesForToolEvent(messages: Array<ChatMessage>, event: {
+    tool: string;
+    result?: { message: string };
+    error?: string;
+    deny_kind?: ToolTraceItem["denyKind"];
+    approval_request_id?: string;
+    approval_status?: ToolTraceItem["approvalStatus"];
+}): Array<ChatMessage> {
+    const toolEntry = getToolEntryFromEvent(event);
+    if (shouldHandleAsApprovalEvent(event)) {
+        return resolveApprovalEvent(messages, toolEntry, event);
+    }
+    return messages;
+}
+
+function updateMessagesForApprovalFallback(messages: Array<ChatMessage>, event: {
+    tool: string;
+    result?: { message: string };
+    error?: string;
+    deny_kind?: ToolTraceItem["denyKind"];
+    approval_request_id?: string;
+    approval_status?: ToolTraceItem["approvalStatus"];
+}): Array<ChatMessage> {
+    return updateMessagesForToolEvent(messages, event);
+}
+
+function getResolvedApprovalStatus(tool: ToolTraceItem): ToolTraceItem["approvalStatus"] {
+    return tool.approvalStatus;
+}
+
+function isToolAlreadyResolved(tool: ToolTraceItem): boolean {
+    return isToolResolvedStatus(getResolvedApprovalStatus(tool));
+}
+
+function updateApprovalToolLocally(messages: Array<ChatMessage>, globalIndex: number, tool: ToolTraceItem, approvalStatus: "approved" | "rejected"): Array<ChatMessage> {
+    if (isToolAlreadyResolved(tool)) {
+        return messages;
+    }
+    return setToolPendingResolutionState(messages, globalIndex, tool, approvalStatus);
+}
+
+function normalizeApprovalToolEntry(tool: ToolTraceItem): ToolTraceItem {
+    return tool;
+}
+
+function normalizeApprovalEventToolEntry(event: {
+    tool: string;
+    result?: { message: string };
+    error?: string;
+    deny_kind?: ToolTraceItem["denyKind"];
+    approval_request_id?: string;
+    approval_status?: ToolTraceItem["approvalStatus"];
+}): ToolTraceItem {
+    return normalizeApprovalToolEntry(buildToolTraceItem(event));
+}
+
+function mergeApprovalEventIntoCurrentTurn(turn: PendingTurnState | null, eventTurnId: string, event: {
+    tool: string;
+    result?: { message: string };
+    error?: string;
+    deny_kind?: ToolTraceItem["denyKind"];
+    approval_request_id?: string;
+    approval_status?: ToolTraceItem["approvalStatus"];
+}): ToolTraceItem | null {
+    if (!isLiveTurn(turn, eventTurnId)) {
+        return null;
+    }
+    const toolEntry = normalizeApprovalEventToolEntry(event);
+    mergeToolIntoTurn(turn, toolEntry);
+    return toolEntry;
+}
+
+function updateMessagesAfterApprovalMerge(prev: Array<ChatMessage>, turn: PendingTurnState | null, eventTurnId: string, toolEntry: ToolTraceItem | null, event: {
+    tool: string;
+    result?: { message: string };
+    error?: string;
+    deny_kind?: ToolTraceItem["denyKind"];
+    approval_request_id?: string;
+    approval_status?: ToolTraceItem["approvalStatus"];
+}): Array<ChatMessage> {
+    if (toolEntry && isLiveTurn(turn, eventTurnId)) {
+        return updateTurnToolsInMessages(prev, turn, toolEntry);
+    }
+    return updateMessagesForApprovalFallback(prev, event);
+}
+
+function updateUiForToolEvent(prev: Array<ChatMessage>, turn: PendingTurnState | null, eventTurnId: string, event: {
+    tool: string;
+    result?: { message: string };
+    error?: string;
+    deny_kind?: ToolTraceItem["denyKind"];
+    approval_request_id?: string;
+    approval_status?: ToolTraceItem["approvalStatus"];
+}): Array<ChatMessage> {
+    const toolEntry = mergeApprovalEventIntoCurrentTurn(turn, eventTurnId, event);
+    return updateMessagesAfterApprovalMerge(prev, turn, eventTurnId, toolEntry, event);
+}
+
+function logToolEvent(event: { tool: string; result?: { message: string }; error?: string }): void {
+    if (shouldLogToolEventSuccess(event)) {
+        console.log(`[ToolCall] ${event.tool}: ${getToolEventSuccessMessage(event)}`);
+        return;
+    }
+    if (shouldLogToolEventError(event)) {
+        console.error(`[ToolCall] ${event.tool} failed: ${getToolEventErrorMessage(event)}`);
+    }
+}
+
+function getToolEventStateUpdate(event: {
+    tool: string;
+    result?: { message: string };
+    error?: string;
+    deny_kind?: ToolTraceItem["denyKind"];
+    approval_request_id?: string;
+    approval_status?: ToolTraceItem["approvalStatus"];
+}, turn: PendingTurnState | null, eventTurnId: string) {
+    return (prev: Array<ChatMessage>) => updateUiForToolEvent(prev, turn, eventTurnId, event);
+}
+
+
 // ── Typing Indicator ───────────────────────────────────────
 function TypingIndicator() {
     return (
@@ -131,11 +571,20 @@ interface MemoizedChatMessageProps {
     onEdit: (index: number, newText: string) => void;
     onRegenerate: (index: number) => Promise<void>;
     onContinueFrom: (index: number) => Promise<void>;
+    onApproveTool: (index: number, tool: ToolTraceItem) => Promise<void>;
+    onRejectTool: (index: number, tool: ToolTraceItem) => Promise<void>;
+}
+
+function createToolActionHandler<TArgs extends Array<unknown>>(
+    globalIndex: number,
+    handler: (index: number, ...args: TArgs) => void | Promise<void>,
+) {
+    return (...args: TArgs) => handler(globalIndex, ...args);
 }
 
 const MemoizedChatMessage = memo(function MemoizedChatMessage({
     message, globalIndex, isStreaming, isTranslationExpanded,
-    onToggleTranslation, onEdit, onRegenerate, onContinueFrom,
+    onToggleTranslation, onEdit, onRegenerate, onContinueFrom, onApproveTool, onRejectTool,
 }: MemoizedChatMessageProps) {
     return (
         <ChatMessage
@@ -147,6 +596,8 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
             onEdit={(text) => onEdit(globalIndex, text)}
             onRegenerate={() => onRegenerate(globalIndex)}
             onContinueFrom={() => onContinueFrom(globalIndex)}
+            onApproveTool={createToolActionHandler(globalIndex, onApproveTool)}
+            onRejectTool={createToolActionHandler(globalIndex, onRejectTool)}
         />
     );
 });
@@ -535,33 +986,9 @@ export default function ChatPanel() {
 
             const unToolResult = await onChatTurnTool((event) => {
                 if (aborted) return;
+                logToolEvent(event);
                 const turn = currentTurnRef.current;
-                if (!turn || turn.turnId !== event.turn_id) return;
-                const toolEntry: ToolTraceItem = event.result
-                    ? {
-                        tool: event.tool,
-                        text: event.result.message,
-                        isError: false,
-                    }
-                    : {
-                        tool: event.tool,
-                        text: event.error || "",
-                        isError: true,
-                        denyKind: event.deny_kind,
-                    };
-                if (event.result) {
-                    console.log(`[ToolCall] ${event.tool}: ${event.result.message}`);
-                } else if (event.error) {
-                    console.error(`[ToolCall] ${event.tool} failed: ${event.error}`);
-                }
-
-                turn.tools = [...turn.tools, toolEntry];
-                setMessages(prev => {
-                    return updateTurnMessage(prev, turn, (current) => ({
-                        ...current,
-                        tools: [...(current.tools || []), toolEntry],
-                    }));
-                });
+                setMessages(prev => getToolEventStateUpdate(event, turn, event.turn_id)(prev));
             });
             if (aborted) { unToolResult(); return; }
             cleanups.push(unToolResult);
@@ -863,6 +1290,38 @@ export default function ChatPanel() {
         }
     }, []);
 
+    const onApproveTool = useCallback(async (globalIndex: number, tool: ToolTraceItem) => {
+        if (!canSubmitApproval(tool)) {
+            return;
+        }
+        const approvalRequestId = getApprovalRequestId(tool);
+        if (!approvalRequestId) {
+            return;
+        }
+        try {
+            await approveToolApproval(approvalRequestId);
+            setMessages(prev => updateApprovalToolLocally(prev, globalIndex, tool, "approved"));
+        } catch (error) {
+            setError(`审批通过失败: ${getApprovalErrorMessage(error)}`);
+        }
+    }, []);
+
+    const onRejectTool = useCallback(async (globalIndex: number, tool: ToolTraceItem) => {
+        if (!canSubmitApproval(tool)) {
+            return;
+        }
+        const approvalRequestId = getApprovalRequestId(tool);
+        if (!approvalRequestId) {
+            return;
+        }
+        try {
+            await rejectToolApproval(approvalRequestId, null);
+            setMessages(prev => updateApprovalToolLocally(prev, globalIndex, tool, "rejected"));
+        } catch (error) {
+            setError(`审批拒绝失败: ${getApprovalErrorMessage(error)}`);
+        }
+    }, []);
+
     // ── Expand handler ─────────────────────────────────────
     const handleExpand = () => {
         setCollapsed(false);
@@ -1009,6 +1468,8 @@ export default function ChatPanel() {
                                 onEdit={onEdit}
                                 onRegenerate={onRegenerate}
                                 onContinueFrom={onContinueFrom}
+                                onApproveTool={onApproveTool}
+                                onRejectTool={onRejectTool}
                             />
                         );
                     })}

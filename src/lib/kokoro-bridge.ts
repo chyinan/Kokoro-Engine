@@ -244,6 +244,8 @@ export interface ToolTraceItem {
     text: string;
     isError?: boolean;
     denyKind?: "hook_denied" | "policy_denied" | "fail_closed" | "pending_approval" | "execution_error";
+    approvalRequestId?: string;
+    approvalStatus?: "requested" | "approved" | "rejected";
 }
 
 export interface ChatTurnToolEvent {
@@ -255,6 +257,8 @@ export interface ChatTurnToolEvent {
     };
     error?: string;
     deny_kind?: ToolTraceItem["denyKind"];
+    approval_request_id?: string;
+    approval_status?: ToolTraceItem["approvalStatus"];
 }
 
 export async function onChatTurnStart(callback: (event: ChatTurnStartEvent) => void): Promise<UnlistenFn> {
@@ -765,6 +769,14 @@ export async function getToolSettings(): Promise<ToolSettings> {
 
 export async function saveToolSettings(settings: ToolSettings): Promise<void> {
     return invoke("save_tool_settings", { settings });
+}
+
+export async function approveToolApproval(approvalRequestId: string): Promise<void> {
+    return invoke("approve_tool_approval", { approvalRequestId });
+}
+
+export async function rejectToolApproval(approvalRequestId: string, reason: string | null = null): Promise<void> {
+    return invoke("reject_tool_approval", { approvalRequestId, reason });
 }
 
 // ── MCP (Model Context Protocol) ──────────────────────────

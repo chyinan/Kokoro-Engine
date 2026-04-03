@@ -21,6 +21,89 @@ interface ChatMessageProps {
     onEdit: (newText: string) => void;
     onRegenerate: () => void;
     onContinueFrom: () => void;
+    onApproveTool: (tool: ToolTraceItem) => void;
+    onRejectTool: (tool: ToolTraceItem) => void;
+}
+
+function canResolvePendingTool(tool: ToolTraceItem): boolean {
+    return tool.denyKind === "pending_approval"
+        && tool.approvalStatus === "requested"
+        && typeof tool.approvalRequestId === "string"
+        && tool.approvalRequestId.length > 0;
+}
+
+function getToolStatusLabel(tool: ToolTraceItem): string {
+    if (tool.approvalStatus === "approved") {
+        return "Approved";
+    }
+    if (tool.approvalStatus === "rejected") {
+        return "Rejected";
+    }
+    return tool.denyKind ? toolStatusLabel[tool.denyKind] : "Allowed";
+}
+
+function getToolStatusClassName(tool: ToolTraceItem): string {
+    if (tool.approvalStatus === "approved") {
+        return "bg-emerald-500/15 text-emerald-300";
+    }
+    if (tool.approvalStatus === "rejected") {
+        return "bg-rose-500/15 text-rose-300";
+    }
+    if (tool.denyKind === "pending_approval") {
+        return "bg-amber-500/15 text-amber-300";
+    }
+    if (tool.denyKind === "fail_closed") {
+        return "bg-red-500/15 text-red-300";
+    }
+    if (tool.denyKind === "policy_denied") {
+        return "bg-orange-500/15 text-orange-300";
+    }
+    if (tool.denyKind === "hook_denied") {
+        return "bg-fuchsia-500/15 text-fuchsia-300";
+    }
+    if (tool.denyKind === "execution_error") {
+        return "bg-red-500/15 text-red-300";
+    }
+    return "bg-emerald-500/15 text-emerald-300";
+}
+
+function renderToolDetail(tool: ToolTraceItem): string {
+    if (tool.approvalStatus === "requested") {
+        return `${tool.text}\n等待用户审批后继续。`;
+    }
+    return tool.text;
+}
+
+function getToolItemKey(tool: ToolTraceItem, idx: number): string {
+    return [tool.tool, tool.approvalRequestId ?? "none", tool.approvalStatus ?? "none", idx].join(":");
+}
+
+function isToolTextError(tool: ToolTraceItem): boolean {
+    return tool.isError === true && tool.approvalStatus !== "approved";
+}
+
+function isToolActionDisabled(_isStreaming: boolean, tool: ToolTraceItem): boolean {
+    return !canResolvePendingTool(tool);
+}
+
+function isPendingToolWaiting(tool: ToolTraceItem): boolean {
+    return canResolvePendingTool(tool);
+}
+
+function isPendingApprovalTrace(tool: ToolTraceItem): boolean {
+    return tool.denyKind === "pending_approval";
+}
+
+function isToolSuccessful(tool: ToolTraceItem): boolean {
+    return tool.isError !== true || tool.approvalStatus === "approved";
+}
+
+function getToolBorderClassName(tool: ToolTraceItem): string {
+    return isToolSuccessful(tool) ? "border-slate-800/70" : "border-red-900/60";
+}
+
+function getToolTextClassName(tool: ToolTraceItem): string {
+    return isToolTextError(tool) ? "text-red-300" : "";
 }
 
 const toolStatusLabel: Record<NonNullable<ToolTraceItem["denyKind"]>, string> = {
@@ -39,6 +122,8 @@ export const ChatMessage = memo(function ChatMessage({
     onEdit,
     onRegenerate,
     onContinueFrom,
+    onApproveTool,
+    onRejectTool,
 }: ChatMessageProps) {
     const { t } = useTranslation();
     const [isEditing, setIsEditing] = useState(false);
@@ -230,26 +315,48 @@ export const ChatMessage = memo(function ChatMessage({
                                 <div className="mt-1.5 rounded-md border border-slate-700/40 bg-slate-950/40 px-2 py-2 text-[11px] text-slate-400 space-y-1">
                                     {msg.tools.map((tool, idx) => (
                                         <div
-                                            key={`${tool.tool}-${tool.text}-${idx}`}
-                                            className={clsx("rounded border border-slate-800/70 bg-slate-950/40 px-2 py-1.5", tool.isError && "border-red-900/60")}
+                                            key={getToolItemKey(tool, idx)}
+                                            className={clsx("rounded border bg-slate-950/40 px-2 py-1.5", getToolBorderClassName(tool))}
                                         >
-                                            <div className="mb-1 flex items-center gap-2 text-[10px]">
-                                                <span className={clsx(
-                                                    "rounded px-1.5 py-0.5 font-medium",
-                                                    tool.denyKind === "pending_approval" && "bg-amber-500/15 text-amber-300",
-                                                    tool.denyKind === "fail_closed" && "bg-red-500/15 text-red-300",
-                                                    tool.denyKind === "policy_denied" && "bg-orange-500/15 text-orange-300",
-                                                    tool.denyKind === "hook_denied" && "bg-fuchsia-500/15 text-fuchsia-300",
-                                                    tool.denyKind === "execution_error" && "bg-red-500/15 text-red-300",
-                                                    !tool.denyKind && "bg-emerald-500/15 text-emerald-300"
-                                                )}>
-                                                    {tool.denyKind ? toolStatusLabel[tool.denyKind] : "Allowed"}
-                                                </span>
-                                                <span className="text-slate-500">{tool.tool}</span>
+                                            <div className="mb-1 flex items-center justify-between gap-2 text-[10px]">
+                                                <div className="flex items-center gap-2">
+                                                    <span className={clsx(
+                                                        "rounded px-1.5 py-0.5 font-medium",
+                                                        getToolStatusClassName(tool)
+                                                    )}>
+                                                        {getToolStatusLabel(tool)}
+                                                    </span>
+                                                    <span className="text-slate-500">{tool.tool}</span>
+                                                </div>
+                                                {isPendingToolWaiting(tool) && (
+                                                    <div className="flex items-center gap-1">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => onApproveTool(tool)}
+                                                            disabled={isToolActionDisabled(isStreaming, tool)}
+                                                            className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-300 transition-colors hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+                                                        >
+                                                            Approve
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => onRejectTool(tool)}
+                                                            disabled={isToolActionDisabled(isStreaming, tool)}
+                                                            className="rounded bg-rose-500/15 px-1.5 py-0.5 text-rose-300 transition-colors hover:bg-rose-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+                                                        >
+                                                            Reject
+                                                        </button>
+                                                    </div>
+                                                )}
                                             </div>
-                                            <div className={clsx("whitespace-pre-wrap break-words", tool.isError && "text-red-300")}>
-                                                {tool.text}
+                                            <div className={clsx("whitespace-pre-wrap break-words", getToolTextClassName(tool))}>
+                                                {renderToolDetail(tool)}
                                             </div>
+                                            {isPendingApprovalTrace(tool) && tool.approvalRequestId && (
+                                                <div className="mt-1 text-[10px] text-slate-500">
+                                                    Request: {tool.approvalRequestId}
+                                                </div>
+                                            )}
                                         </div>
                                     ))}
                                 </div>

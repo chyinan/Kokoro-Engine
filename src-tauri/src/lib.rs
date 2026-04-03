@@ -67,6 +67,8 @@ pub fn run() {
             commands::chat::stream_chat,
             commands::chat::get_context_settings,
             commands::chat::set_context_settings,
+            commands::chat::approve_tool_approval,
+            commands::chat::reject_tool_approval,
             commands::context::set_persona,
             commands::context::set_character_name,
             commands::context::set_active_character_id,
@@ -350,6 +352,7 @@ pub fn run() {
             let hook_runtime = HookRuntime::new();
             hook_runtime.register(Arc::new(AuditLogHookHandler));
             app.manage(hook_runtime);
+            app.manage(Arc::new(crate::commands::chat::PendingToolApprovalState::new()));
 
             // Action Registry
             let mut action_registry = crate::actions::ActionRegistry::new();
