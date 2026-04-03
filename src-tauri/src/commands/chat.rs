@@ -257,6 +257,115 @@ fn strip_leaked_tags(text: &str) -> String {
     result.trim().to_string()
 }
 
+fn deny_kind_for_tool_error(error: &str) -> &'static str {
+    if error.starts_with("Denied pending approval:") {
+        "pending_approval"
+    } else if error.starts_with("Denied by fail-closed policy:") {
+        "fail_closed"
+    } else if error.starts_with("Denied by policy:") {
+        "policy_denied"
+    } else if error.starts_with("Denied by hook:") {
+        "hook_denied"
+    } else {
+        "execution_error"
+    }
+}
+
+#[cfg(test)]
+fn tool_error_payload_for_test(tool: &str, turn_id: &str, error: &str) -> serde_json::Value {
+    serde_json::json!({
+        "turn_id": turn_id,
+        "tool": tool,
+        "error": error,
+        "deny_kind": deny_kind_for_tool_error(error),
+    })
+}
+
+fn tool_error_payload(tool: &str, tool_id: &str, turn_id: &str, error: &str) -> serde_json::Value {
+    serde_json::json!({
+        "turn_id": turn_id,
+        "tool": tool,
+        "tool_id": tool_id,
+        "error": error,
+        "deny_kind": deny_kind_for_tool_error(error),
+    })
+}
+
+fn tool_success_payload(
+    tool: &str,
+    tool_id: &str,
+    turn_id: &str,
+    result: &crate::actions::ActionResult,
+) -> serde_json::Value {
+    serde_json::json!({
+        "turn_id": turn_id,
+        "tool": tool,
+        "tool_id": tool_id,
+        "result": result,
+    })
+}
+
+fn emit_tool_trace_event(
+    app: &tauri::AppHandle,
+    turn_id: &str,
+    outcome: &crate::actions::ToolExecutionOutcome,
+) {
+    match &outcome.result {
+        Ok(result) => {
+            let _ = app.emit(
+                "chat-turn-tool",
+                tool_success_payload(outcome.tool_name(), outcome.tool_id(), turn_id, result),
+            );
+        }
+        Err(error) => {
+            let _ = app.emit(
+                "chat-turn-tool",
+                tool_error_payload(outcome.tool_name(), outcome.tool_id(), turn_id, error),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+fn sample_action_result(message: &str) -> crate::actions::ActionResult {
+    crate::actions::ActionResult {
+        success: true,
+        message: message.to_string(),
+        data: None,
+    }
+}
+
+#[cfg(test)]
+fn tool_trace_error_deny_kind(error: &str) -> Option<String> {
+    tool_error_payload_for_test("tool", "turn-1", error)
+        .get("deny_kind")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+}
+
+#[cfg(test)]
+fn tool_trace_error_message(error: &str) -> Option<String> {
+    tool_error_payload_for_test("tool", "turn-1", error)
+        .get("error")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+}
+
+#[cfg(test)]
+fn tool_trace_success_has_no_deny_kind() -> bool {
+    tool_success_payload("tool", "builtin__tool", "turn-1", &sample_action_result("ok"))
+        .get("deny_kind")
+        .is_none()
+}
+
+#[cfg(test)]
+fn tool_trace_success_message() -> Option<String> {
+    tool_success_payload("tool", "builtin__tool", "turn-1", &sample_action_result("ok"))
+        .get("result")
+        .and_then(|value| value.get("message"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+}
 
 /// Strip `[TRANSLATE:...]` tags from text.
 fn strip_translate_tags(text: &str) -> String {
@@ -1004,29 +1113,12 @@ pub async fn stream_chat(
             match &outcome.result {
                 Ok(result) => {
                     println!("[ToolCall] {} => {}", outcome.tool_name(), result.message);
-                    let _ = app.emit(
-                        "chat-turn-tool",
-                        serde_json::json!({
-                            "turn_id": assistant_turn_id,
-                            "tool": outcome.tool_name(),
-                            "tool_id": outcome.tool_id(),
-                            "result": result,
-                        }),
-                    );
                 }
                 Err(error) => {
                     eprintln!("[ToolCall] {} failed: {}", outcome.tool_name(), error);
-                    let _ = app.emit(
-                        "chat-turn-tool",
-                        serde_json::json!({
-                            "turn_id": assistant_turn_id,
-                            "tool": outcome.tool_name(),
-                            "tool_id": outcome.tool_id(),
-                            "error": error,
-                        }),
-                    );
                 }
             }
+            emit_tool_trace_event(&app, &assistant_turn_id, &outcome);
 
             tool_results.push(outcome.result_line());
 
@@ -1710,6 +1802,49 @@ mod tests {
     fn test_strip_translate_tags_no_tag() {
         let input = "こんにちは";
         assert_eq!(strip_translate_tags(input), "こんにちは");
+    }
+
+    #[test]
+    fn test_deny_kind_for_tool_error_maps_known_prefixes() {
+        assert_eq!(
+            deny_kind_for_tool_error("Denied pending approval: permission level 'elevated' requires approval"),
+            "pending_approval"
+        );
+        assert_eq!(
+            deny_kind_for_tool_error("Denied by fail-closed policy: blocked risk tag 'sensitive'"),
+            "fail_closed"
+        );
+        assert_eq!(
+            deny_kind_for_tool_error("Denied by policy: blocked risk tag 'read'"),
+            "policy_denied"
+        );
+        assert_eq!(
+            deny_kind_for_tool_error("Denied by hook: blocked"),
+            "hook_denied"
+        );
+    }
+
+    #[test]
+    fn test_deny_kind_for_tool_error_defaults_to_execution_error() {
+        assert_eq!(deny_kind_for_tool_error("database timeout"), "execution_error");
+    }
+
+    #[test]
+    fn test_tool_error_payload_includes_deny_kind_and_original_error() {
+        assert_eq!(
+            tool_trace_error_deny_kind("Denied by policy: blocked risk tag 'read'"),
+            Some("policy_denied".to_string())
+        );
+        assert_eq!(
+            tool_trace_error_message("Denied by policy: blocked risk tag 'read'"),
+            Some("Denied by policy: blocked risk tag 'read'".to_string())
+        );
+    }
+
+    #[test]
+    fn test_tool_success_payload_keeps_result_without_deny_kind() {
+        assert!(tool_trace_success_has_no_deny_kind());
+        assert_eq!(tool_trace_success_message(), Some("ok".to_string()));
     }
 
     // ── strip_leaked_tags ───────────────────────────────────

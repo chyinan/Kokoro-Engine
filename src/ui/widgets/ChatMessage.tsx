@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import type { ToolTraceItem } from "../../lib/kokoro-bridge";
 
 interface ChatMessageProps {
     message: {
@@ -11,7 +12,7 @@ interface ChatMessageProps {
         images?: string[];
         translation?: string;
         isError?: boolean;
-        tools?: { text: string; isError?: boolean }[];
+        tools?: ToolTraceItem[];
     };
     index: number;
     isStreaming: boolean;
@@ -21,6 +22,14 @@ interface ChatMessageProps {
     onRegenerate: () => void;
     onContinueFrom: () => void;
 }
+
+const toolStatusLabel: Record<NonNullable<ToolTraceItem["denyKind"]>, string> = {
+    pending_approval: "Pending approval",
+    fail_closed: "Fail-closed",
+    policy_denied: "Policy denied",
+    hook_denied: "Hook denied",
+    execution_error: "Error",
+};
 
 export const ChatMessage = memo(function ChatMessage({
     message: msg,
@@ -221,10 +230,26 @@ export const ChatMessage = memo(function ChatMessage({
                                 <div className="mt-1.5 rounded-md border border-slate-700/40 bg-slate-950/40 px-2 py-2 text-[11px] text-slate-400 space-y-1">
                                     {msg.tools.map((tool, idx) => (
                                         <div
-                                            key={`${tool.text}-${idx}`}
-                                            className={clsx("whitespace-pre-wrap break-words", tool.isError && "text-red-300")}
+                                            key={`${tool.tool}-${tool.text}-${idx}`}
+                                            className={clsx("rounded border border-slate-800/70 bg-slate-950/40 px-2 py-1.5", tool.isError && "border-red-900/60")}
                                         >
-                                            {tool.text}
+                                            <div className="mb-1 flex items-center gap-2 text-[10px]">
+                                                <span className={clsx(
+                                                    "rounded px-1.5 py-0.5 font-medium",
+                                                    tool.denyKind === "pending_approval" && "bg-amber-500/15 text-amber-300",
+                                                    tool.denyKind === "fail_closed" && "bg-red-500/15 text-red-300",
+                                                    tool.denyKind === "policy_denied" && "bg-orange-500/15 text-orange-300",
+                                                    tool.denyKind === "hook_denied" && "bg-fuchsia-500/15 text-fuchsia-300",
+                                                    tool.denyKind === "execution_error" && "bg-red-500/15 text-red-300",
+                                                    !tool.denyKind && "bg-emerald-500/15 text-emerald-300"
+                                                )}>
+                                                    {tool.denyKind ? toolStatusLabel[tool.denyKind] : "Allowed"}
+                                                </span>
+                                                <span className="text-slate-500">{tool.tool}</span>
+                                            </div>
+                                            <div className={clsx("whitespace-pre-wrap break-words", tool.isError && "text-red-300")}>
+                                                {tool.text}
+                                            </div>
                                         </div>
                                     ))}
                                 </div>

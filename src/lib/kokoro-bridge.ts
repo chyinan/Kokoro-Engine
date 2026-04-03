@@ -239,13 +239,22 @@ export interface ChatTurnTranslationEvent {
     translation: string;
 }
 
+export interface ToolTraceItem {
+    tool: string;
+    text: string;
+    isError?: boolean;
+    denyKind?: "hook_denied" | "policy_denied" | "fail_closed" | "pending_approval" | "execution_error";
+}
+
 export interface ChatTurnToolEvent {
     turn_id: string;
     tool: string;
+    tool_id?: string;
     result?: {
         message: string;
     };
     error?: string;
+    deny_kind?: ToolTraceItem["denyKind"];
 }
 
 export async function onChatTurnStart(callback: (event: ChatTurnStartEvent) => void): Promise<UnlistenFn> {

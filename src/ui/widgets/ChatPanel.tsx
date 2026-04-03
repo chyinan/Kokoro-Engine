@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
 import { streamChat, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatError, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages } from "../../lib/kokoro-bridge";
+import type { ToolTraceItem } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal, useWakeWord } from "../hooks";
@@ -18,7 +19,7 @@ interface ChatMessage {
     images?: string[];
     translation?: string;
     isError?: boolean;
-    tools?: { text: string; isError?: boolean }[];
+    tools?: ToolTraceItem[];
 }
 
 interface PendingTurnState {
@@ -26,8 +27,10 @@ interface PendingTurnState {
     messageIndex: number | null;
     rawText: string;
     translation?: string;
-    tools: { text: string; isError?: boolean }[];
+    tools: ToolTraceItem[];
 }
+
+export type { ChatMessage as ChatPanelMessage };
 
 const stripStreamingMarkup = (text: string) =>
     text
@@ -120,7 +123,7 @@ function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => 
 // ── Main Component ─────────────────────────────────────────
 // ── MemoizedChatMessage wrapper ───────────────────────────
 interface MemoizedChatMessageProps {
-    message: { role: "user" | "kokoro" | "tool"; text: string; images?: string[]; translation?: string; isError?: boolean; tools?: { text: string; isError?: boolean }[] };
+    message: ChatMessage;
     globalIndex: number;
     isStreaming: boolean;
     isTranslationExpanded: boolean;
@@ -534,9 +537,18 @@ export default function ChatPanel() {
                 if (aborted) return;
                 const turn = currentTurnRef.current;
                 if (!turn || turn.turnId !== event.turn_id) return;
-                const toolEntry = event.result
-                    ? { text: `${event.tool}: ${event.result.message}` }
-                    : { text: `${event.tool} failed: ${event.error}`, isError: true };
+                const toolEntry: ToolTraceItem = event.result
+                    ? {
+                        tool: event.tool,
+                        text: event.result.message,
+                        isError: false,
+                    }
+                    : {
+                        tool: event.tool,
+                        text: event.error || "",
+                        isError: true,
+                        denyKind: event.deny_kind,
+                    };
                 if (event.result) {
                     console.log(`[ToolCall] ${event.tool}: ${event.result.message}`);
                 } else if (event.error) {

@@ -1,17 +1,17 @@
-import type { ConversationMessage } from "../../lib/kokoro-bridge";
+import type { ConversationMessage, ToolTraceItem } from "../../lib/kokoro-bridge";
 
 export interface ChatHistoryMessage {
     role: "user" | "kokoro";
     text: string;
     images?: string[];
     translation?: string;
-    tools?: { text: string; isError?: boolean }[];
+    tools?: ToolTraceItem[];
 }
 
 export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): ChatHistoryMessage[] {
     const chatMsgs: ChatHistoryMessage[] = [];
     const turnToAssistantIndex = new Map<string, number>();
-    const pendingToolsByTurn = new Map<string, { text: string; isError?: boolean }[]>();
+    const pendingToolsByTurn = new Map<string, ToolTraceItem[]>();
     const pendingTurnOrder: string[] = [];
 
     for (const m of msgs) {
@@ -29,9 +29,23 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
 
         if (m.role === "tool" || technicalType === "tool_result") {
             const toolName = typeof meta?.tool_name === "string" ? meta.tool_name : "tool";
-            const toolEntry = {
-                text: `${toolName}: ${m.content}`,
+            const errorText = m.content.startsWith("Error:") ? m.content.replace(/^Error:\s*/, "") : m.content;
+            const denyKind: ToolTraceItem["denyKind"] = errorText.startsWith("Denied pending approval:")
+                ? "pending_approval"
+                : errorText.startsWith("Denied by fail-closed policy:")
+                    ? "fail_closed"
+                    : errorText.startsWith("Denied by policy:")
+                        ? "policy_denied"
+                        : errorText.startsWith("Denied by hook:")
+                            ? "hook_denied"
+                            : m.content.startsWith("Error:")
+                                ? "execution_error"
+                                : undefined;
+            const toolEntry: ToolTraceItem = {
+                tool: toolName,
+                text: errorText,
                 isError: m.content.startsWith("Error:"),
+                denyKind,
             };
             const targetIndex = turnId ? turnToAssistantIndex.get(turnId) : undefined;
 
