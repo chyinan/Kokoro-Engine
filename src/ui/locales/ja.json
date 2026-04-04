@@ -356,7 +356,6 @@
                 "actions": {
                     "save_cue": "Cue を保存",
                     "save_interaction": "インタラクションマッピングを保存",
-                    "save_semantic": "意味イベントマッピングを保存",
                     "clear": "クリア",
                     "exclude_from_prompt": "プロンプトから除外",
                     "include_in_prompt": "プロンプトに含める"
@@ -374,12 +373,6 @@
                     "desc": "ジェスチャーと部位の意味イベントを cue にマッピングします。優先順は完全一致、ジェスチャーワイルドカード、部位ワイルドカード、全体ワイルドカードです。",
                     "configured": "設定済みインタラクションルール ({{count}})",
                     "empty": "インタラクション cue マッピングはまだありません。"
-                },
-                "semantic": {
-                    "title": "意味イベントマッピング",
-                    "desc": "非インタラクションの意味イベントを cue にマッピングします。これらは感情イベントやその他のモデル非依存ロジックで使われます。",
-                    "configured": "設定済み意味ルール ({{count}})",
-                    "empty": "意味 cue マッピングはまだありません。"
                 },
                 "summary": {
                     "expression": "表情: {{value}}",
@@ -415,15 +408,6 @@
                     "skirt": "スカート",
                     "accessory": "アクセサリー",
                     "any": "任意の部位"
-                },
-                "semantic_keys": {
-                    "emotion": {
-                        "ecstatic": "感情: 有頂天",
-                        "very_happy": "感情: とても嬉しい",
-                        "sulking": "感情: すねている",
-                        "very_sad": "感情: とても悲しい",
-                        "mood_swing": "感情: 気分の揺れ"
-                    }
                 }
             }
         },

@@ -356,7 +356,6 @@
                 "actions": {
                     "save_cue": "Save Cue",
                     "save_interaction": "Save Interaction Mapping",
-                    "save_semantic": "Save Semantic Mapping",
                     "clear": "Clear",
                     "exclude_from_prompt": "Hide From Prompt",
                     "include_in_prompt": "Show In Prompt"
@@ -374,12 +373,6 @@
                     "desc": "Map gesture and body area semantic events to a cue. Matching order is exact, then gesture wildcard, then area wildcard, then global wildcard.",
                     "configured": "Configured Interaction Rules ({{count}})",
                     "empty": "No interaction cue mappings yet."
-                },
-                "semantic": {
-                    "title": "Semantic Event Mapping",
-                    "desc": "Map non-interaction semantic events to cues. These mappings are used by emotion events and other model-agnostic logic.",
-                    "configured": "Configured Semantic Rules ({{count}})",
-                    "empty": "No semantic cue mappings yet."
                 },
                 "summary": {
                     "expression": "expr: {{value}}",
@@ -415,15 +408,6 @@
                     "skirt": "Skirt",
                     "accessory": "Accessory",
                     "any": "Any Area"
-                },
-                "semantic_keys": {
-                    "emotion": {
-                        "ecstatic": "Emotion: Ecstatic",
-                        "very_happy": "Emotion: Very Happy",
-                        "sulking": "Emotion: Sulking",
-                        "very_sad": "Emotion: Very Sad",
-                        "mood_swing": "Emotion: Mood Swing"
-                    }
                 }
             }
         },

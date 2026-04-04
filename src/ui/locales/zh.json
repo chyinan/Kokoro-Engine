@@ -356,7 +356,6 @@
                 "actions": {
                     "save_cue": "保存 Cue",
                     "save_interaction": "保存交互映射",
-                    "save_semantic": "保存语义映射",
                     "clear": "清空",
                     "exclude_from_prompt": "排除出提示词",
                     "include_in_prompt": "加入提示词"
@@ -374,12 +373,6 @@
                     "desc": "将手势和身体部位语义事件映射到 cue。匹配顺序为精确匹配、手势通配、部位通配、全局通配。",
                     "configured": "已配置交互规则 ({{count}})",
                     "empty": "还没有交互 cue 映射。"
-                },
-                "semantic": {
-                    "title": "语义事件映射",
-                    "desc": "将非交互语义事件映射到 cue。这些映射用于情绪事件以及其他与模型无关的逻辑。",
-                    "configured": "已配置语义规则 ({{count}})",
-                    "empty": "还没有语义 cue 映射。"
                 },
                 "summary": {
                     "expression": "表情: {{value}}",
@@ -415,15 +408,6 @@
                     "skirt": "裙子",
                     "accessory": "饰品",
                     "any": "任意部位"
-                },
-                "semantic_keys": {
-                    "emotion": {
-                        "ecstatic": "情绪: 狂喜",
-                        "very_happy": "情绪: 非常开心",
-                        "sulking": "情绪: 闷闷不乐",
-                        "very_sad": "情绪: 非常难过",
-                        "mood_swing": "情绪: 情绪波动"
-                    }
                 }
             }
         },

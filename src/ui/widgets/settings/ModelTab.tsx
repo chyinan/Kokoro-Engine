@@ -46,13 +46,11 @@ const INTERACTION_AREAS = [
 
 const PRESET_INTERACTION_AREA_VALUES = INTERACTION_AREAS.map((area) => area.value);
 
-const SEMANTIC_KEYS = [
-    { value: "emotion:ecstatic" },
-    { value: "emotion:very_happy" },
-    { value: "emotion:sulking" },
-    { value: "emotion:very_sad" },
-    { value: "emotion:mood_swing" },
-] as const;
+export function sanitizeSemanticCueMap(input: Record<string, string>): Record<string, string> {
+    return Object.fromEntries(
+        Object.entries(input).filter(([key]) => key.startsWith("interaction:")),
+    );
+}
 
 const buildInteractionSemanticKey = (gesture: string, area: string) =>
     `interaction:${gesture.toLowerCase()}_${area.toLowerCase()}`;
@@ -88,7 +86,6 @@ export default function ModelTab({
         const translated = t(`settings.model.mapping.areas.${key}`);
         return translated === `settings.model.mapping.areas.${key}` ? value : translated;
     };
-    const semanticKeyLabel = (value: string) => t(`settings.model.mapping.semantic_keys.${value.replace(":", ".")}`);
     const [isImporting, setIsImporting] = useState(false);
     const [isExporting, setIsExporting] = useState(false);
     const [models, setModels] = useState<Live2dModelInfo[]>([]);
@@ -107,9 +104,6 @@ export default function ModelTab({
     const [interactionArea, setInteractionArea] = useState("face");
     const [interactionCue, setInteractionCue] = useState("");
     const [editingInteractionKey, setEditingInteractionKey] = useState<string | null>(null);
-    const [semanticKey, setSemanticKey] = useState<(typeof SEMANTIC_KEYS)[number]["value"]>("emotion:ecstatic");
-    const [semanticCue, setSemanticCue] = useState("");
-    const [editingSemanticKey, setEditingSemanticKey] = useState<string | null>(null);
     const effectiveModelPath = customModelPath ?? BUILTIN_LIVE2D_MODEL_PATH;
 
     // Fetch available models on mount
@@ -120,7 +114,19 @@ export default function ModelTab({
     useEffect(() => {
         setIsProfileLoading(true);
         getLive2dModelProfile(effectiveModelPath)
-            .then((profile) => {
+            .then(async (profile) => {
+                const originalSemanticMap = profile.semantic_cue_map ?? {};
+                const sanitizedSemanticMap = sanitizeSemanticCueMap(originalSemanticMap);
+
+                if (Object.keys(sanitizedSemanticMap).length !== Object.keys(originalSemanticMap).length) {
+                    const saved = await saveLive2dModelProfile({
+                        ...profile,
+                        semantic_cue_map: sanitizedSemanticMap,
+                    });
+                    setModelProfile(saved);
+                    return;
+                }
+
                 setModelProfile(profile);
             })
             .catch((error) => {
@@ -252,11 +258,6 @@ export default function ModelTab({
         setInteractionCue("");
     };
 
-    const resetSemanticDraft = () => {
-        setEditingSemanticKey(null);
-        setSemanticKey("emotion:ecstatic");
-        setSemanticCue("");
-    };
 
     const persistCueMap = async (cueMap: Record<string, Live2dCueBinding>) => {
         if (!modelProfile) return;
@@ -375,30 +376,6 @@ export default function ModelTab({
         }
     };
 
-    const handleSaveSemanticMapping = async () => {
-        if (!modelProfile) return;
-        const cue = semanticCue.trim();
-        if (!cue) return;
-        const nextMap = { ...modelProfile.semantic_cue_map, [semanticKey]: cue };
-        if (editingSemanticKey && editingSemanticKey !== semanticKey) {
-            delete nextMap[editingSemanticKey];
-        }
-        await persistSemanticMap(nextMap);
-        resetSemanticDraft();
-    };
-
-    const handleEditSemanticMapping = (key: string, cue: string) => {
-        setEditingSemanticKey(key);
-        setSemanticKey((SEMANTIC_KEYS.some((item) => item.value === key) ? key : "emotion:ecstatic") as (typeof SEMANTIC_KEYS)[number]["value"]);
-        setSemanticCue(cue);
-    };
-
-    const handleDeleteSemanticMapping = async (key: string) => {
-        if (!modelProfile) return;
-        const nextMap = { ...modelProfile.semantic_cue_map };
-        delete nextMap[key];
-        await persistSemanticMap(nextMap);
-    };
 
     const displayModes = [
         { mode: "full" as Live2DDisplayMode, label: t("settings.model.display_mode.full"), desc: t("settings.model.display_mode.full_desc") },
@@ -426,9 +403,6 @@ export default function ModelTab({
 
     const interactionEntries = modelProfile
         ? Object.entries(modelProfile.semantic_cue_map).filter(([key]) => key.startsWith("interaction:"))
-        : [];
-    const generalSemanticEntries = modelProfile
-        ? Object.entries(modelProfile.semantic_cue_map).filter(([key]) => !key.startsWith("interaction:"))
         : [];
     const availableCueNames = modelProfile
         ? Object.keys(modelProfile.cue_map).sort((a, b) => a.localeCompare(b))
@@ -1001,82 +975,6 @@ export default function ModelTab({
                             </div>
                         </div>
 
-                        <div className="space-y-3 rounded-lg border border-[var(--color-border)] p-3">
-                            <div>
-                                <p className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-                                    {t("settings.model.mapping.semantic.title")}
-                                </p>
-                                <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-                                    {t("settings.model.mapping.semantic.desc")}
-                                </p>
-                            </div>
-
-                            <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr]">
-                                <Select
-                                    value={semanticKey}
-                                    onChange={(v) => setSemanticKey(v as (typeof SEMANTIC_KEYS)[number]["value"])}
-                                    options={SEMANTIC_KEYS.map((item) => ({ value: item.value, label: semanticKeyLabel(item.value) }))}
-                                />
-                                <Select
-                                    value={semanticCue}
-                                    onChange={setSemanticCue}
-                                    options={[
-                                        { value: "", label: t("settings.model.mapping.options.select_cue") },
-                                        ...availableCueNames.map((cue) => ({ value: cue, label: cue })),
-                                    ]}
-                                />
-                            </div>
-
-                            <div className="flex items-center gap-2">
-                                <button
-                                    onClick={handleSaveSemanticMapping}
-                                    disabled={!semanticCue.trim()}
-                                    className="rounded-lg bg-[var(--color-accent)] px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-                                >
-                                    {t("settings.model.mapping.actions.save_semantic")}
-                                </button>
-                                <button
-                                    onClick={resetSemanticDraft}
-                                    className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm text-[var(--color-text-secondary)]"
-                                >
-                                    {t("settings.model.mapping.actions.clear")}
-                                </button>
-                            </div>
-
-                            <div className="space-y-2">
-                                <p className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-                                    {t("settings.model.mapping.semantic.configured", { count: generalSemanticEntries.length })}
-                                </p>
-                                {generalSemanticEntries.length === 0 && (
-                                    <p className="text-sm text-[var(--color-text-muted)]">{t("settings.model.mapping.semantic.empty")}</p>
-                                )}
-                                {generalSemanticEntries.map(([key, cue]) => (
-                                    <div
-                                        key={key}
-                                        className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] bg-black/10 px-3 py-2"
-                                    >
-                                        <div className="min-w-0">
-                                            <p className="font-mono text-sm text-[var(--color-text-primary)]">{key}</p>
-                                            <p className="text-xs text-[var(--color-text-muted)]">{t("settings.model.mapping.summary.cue", { value: cue })}</p>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <button
-                                                onClick={() => handleEditSemanticMapping(key, cue)}
-                                                className="rounded-md border border-[var(--color-border)] px-2 py-1 text-xs text-[var(--color-text-secondary)]"
-                                            >
-                                                {t("common.actions.edit")}
-                                            </button>
-                                            <button
-                                                onClick={() => handleDeleteSemanticMapping(key)}
-                                                className="rounded-md border border-red-500/40 px-2 py-1 text-xs text-red-300"
-                                            >
-                                                {t("common.actions.delete")}
-                                            </button>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
                     </>
                 )}
             </div>

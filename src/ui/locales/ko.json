@@ -356,7 +356,6 @@
                 "actions": {
                     "save_cue": "Cue 저장",
                     "save_interaction": "상호작용 매핑 저장",
-                    "save_semantic": "시맨틱 매핑 저장",
                     "clear": "지우기",
                     "exclude_from_prompt": "프롬프트에서 제외",
                     "include_in_prompt": "프롬프트에 포함"
@@ -374,12 +373,6 @@
                     "desc": "제스처와 신체 부위 시맨틱 이벤트를 cue 에 매핑합니다. 일치 순서는 정확 일치, 제스처 와일드카드, 부위 와일드카드, 전역 와일드카드입니다.",
                     "configured": "설정된 상호작용 규칙 ({{count}})",
                     "empty": "상호작용 cue 매핑이 아직 없습니다."
-                },
-                "semantic": {
-                    "title": "시맨틱 이벤트 매핑",
-                    "desc": "비상호작용 시맨틱 이벤트를 cue 에 매핑합니다. 이 매핑은 감정 이벤트와 기타 모델 비종속 로직에 사용됩니다.",
-                    "configured": "설정된 시맨틱 규칙 ({{count}})",
-                    "empty": "시맨틱 cue 매핑이 아직 없습니다."
                 },
                 "summary": {
                     "expression": "표정: {{value}}",
@@ -415,15 +408,6 @@
                     "skirt": "치마",
                     "accessory": "장식품",
                     "any": "모든 부위"
-                },
-                "semantic_keys": {
-                    "emotion": {
-                        "ecstatic": "감정: 황홀함",
-                        "very_happy": "감정: 매우 기쁨",
-                        "sulking": "감정: 토라짐",
-                        "very_sad": "감정: 매우 슬픔",
-                        "mood_swing": "감정: 기분 변화"
-                    }
                 }
             }
         },
