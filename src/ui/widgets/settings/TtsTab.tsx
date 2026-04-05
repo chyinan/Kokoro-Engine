@@ -150,7 +150,11 @@ export default function TtsTab({
             provider_type: type,
             enabled: true,
             api_key: "",
-            extra: {}
+            extra: {},
+            // Seed a sensible default voice so normalizeTtsVoice never has to
+            // fall back to the first alphabetical entry in the voice list.
+            ...(type === "edge_tts" && { default_voice: "zh-CN-XiaoyiNeural" }),
+            ...(type === "openai"   && { default_voice: "alloy" }),
         };
         onTtsConfigChange({
             ...ttsConfig,
