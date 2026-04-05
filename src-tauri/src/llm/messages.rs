@@ -54,8 +54,9 @@ pub fn history_message_to_chat_message(
                     .and_then(|value| value.as_str())
                     .ok_or_else(|| "Tool call history missing id".to_string())?;
                 let name = tool_call
-                    .get("name")
+                    .get("tool_name")
                     .and_then(|value| value.as_str())
+                    .or_else(|| tool_call.get("name").and_then(|value| value.as_str()))
                     .ok_or_else(|| "Tool call history missing name".to_string())?;
                 let arguments = tool_call
                     .get("arguments")
@@ -165,6 +166,76 @@ pub fn tool_result_message(
         .build()
         .expect("tool result message build should not fail");
     ChatCompletionRequestMessage::Tool(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_tool_call_history_prefers_tool_name_and_keeps_backward_compatibility() {
+        let metadata = serde_json::json!({
+            "type": "assistant_tool_calls",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "tool_id": "mcp__filesystem__read_file",
+                    "tool_name": "read_file",
+                    "source": "mcp",
+                    "server_name": "filesystem",
+                    "needs_feedback": true,
+                    "arguments": "{\"path\":\"README.md\"}",
+                }
+            ]
+        });
+
+        let message = history_message_to_chat_message("assistant", "", Some(&metadata))
+            .expect("assistant tool history should deserialize");
+
+        match message {
+            ChatCompletionRequestMessage::Assistant(assistant) => {
+                let tool_calls = assistant.tool_calls.expect("tool calls should exist");
+                assert_eq!(tool_calls.len(), 1);
+                let ChatCompletionMessageToolCalls::Function(tool_call) = &tool_calls[0] else {
+                    panic!("expected function tool call");
+                };
+                assert_eq!(tool_call.id, "call-1");
+                assert_eq!(tool_call.function.name, "read_file");
+                assert_eq!(tool_call.function.arguments, "{\"path\":\"README.md\"}");
+            }
+            other => panic!("expected assistant tool-call message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_tool_call_history_falls_back_to_legacy_name_field() {
+        let metadata = serde_json::json!({
+            "type": "assistant_tool_calls",
+            "tool_calls": [
+                {
+                    "id": "call-legacy",
+                    "name": "legacy_lookup",
+                    "arguments": "{}",
+                }
+            ]
+        });
+
+        let message = history_message_to_chat_message("assistant", "", Some(&metadata))
+            .expect("legacy assistant tool history should deserialize");
+
+        match message {
+            ChatCompletionRequestMessage::Assistant(assistant) => {
+                let tool_calls = assistant.tool_calls.expect("tool calls should exist");
+                let ChatCompletionMessageToolCalls::Function(tool_call) = &tool_calls[0] else {
+                    panic!("expected function tool call");
+                };
+                assert_eq!(tool_call.id, "call-legacy");
+                assert_eq!(tool_call.function.name, "legacy_lookup");
+                assert_eq!(tool_call.function.arguments, "{}");
+            }
+            other => panic!("expected assistant tool-call message, got {other:?}"),
+        }
+    }
 }
 
 pub fn is_user_message(message: &ChatCompletionRequestMessage) -> bool {

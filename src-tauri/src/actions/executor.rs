@@ -888,12 +888,99 @@ impl ToolExecutionOutcome {
             .unwrap_or(self.invocation.name.as_str())
     }
 
+    pub fn tool_source(&self) -> Option<&str> {
+        self.action.as_ref().map(|action| match action.source {
+            crate::actions::registry::ActionSource::Builtin => "builtin",
+            crate::actions::registry::ActionSource::Mcp => "mcp",
+        })
+    }
+
+    pub fn tool_server_name(&self) -> Option<&str> {
+        self.action
+            .as_ref()
+            .and_then(|action| action.server_name.as_deref())
+    }
+
+    pub fn tool_permission_level(&self) -> Option<&str> {
+        self.action.as_ref().map(|action| match action.permission_level {
+            crate::actions::registry::ActionPermissionLevel::Safe => "safe",
+            crate::actions::registry::ActionPermissionLevel::Elevated => "elevated",
+        })
+    }
+
+    pub fn tool_risk_tags(&self) -> Vec<&'static str> {
+        self.action
+            .as_ref()
+            .map(|action| {
+                action
+                    .risk_tags
+                    .iter()
+                    .map(risk_tag_label)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn result_line(&self) -> String {
         match &self.result {
             Ok(result) => format!("- {}: {}", self.tool_id(), result.message),
             Err(error) => format!("- {}: Error: {}", self.tool_id(), error),
         }
     }
+}
+
+pub(crate) fn tool_metadata_value(
+    outcome: &ToolExecutionOutcome,
+    tool_call_id: &str,
+    turn_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "tool_result",
+        "turn_id": turn_id,
+        "tool_call_id": tool_call_id,
+        "tool_id": outcome.tool_id(),
+        "tool_name": outcome.tool_name(),
+        "source": outcome.tool_source(),
+        "server_name": outcome.tool_server_name(),
+        "needs_feedback": outcome.needs_feedback,
+        "permission_level": outcome.tool_permission_level(),
+        "risk_tags": outcome.tool_risk_tags(),
+    })
+}
+
+pub(crate) fn assistant_tool_call_metadata_value(
+    outcome: &ToolExecutionOutcome,
+    tool_call_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": tool_call_id,
+        "tool_id": outcome.tool_id(),
+        "tool_name": outcome.tool_name(),
+        "source": outcome.tool_source(),
+        "server_name": outcome.tool_server_name(),
+        "needs_feedback": outcome.needs_feedback,
+        "permission_level": outcome.tool_permission_level(),
+        "risk_tags": outcome.tool_risk_tags(),
+        "arguments": serde_json::to_string(&outcome.invocation.args)
+            .unwrap_or_else(|_| "{}".to_string()),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn tool_metadata_value_for_test(
+    outcome: &ToolExecutionOutcome,
+    tool_call_id: &str,
+    turn_id: &str,
+) -> serde_json::Value {
+    tool_metadata_value(outcome, tool_call_id, turn_id)
+}
+
+#[cfg(test)]
+pub(crate) fn assistant_tool_call_metadata_value_for_test(
+    outcome: &ToolExecutionOutcome,
+    tool_call_id: &str,
+) -> serde_json::Value {
+    assistant_tool_call_metadata_value(outcome, tool_call_id)
 }
 
 pub async fn execute_tool_calls(

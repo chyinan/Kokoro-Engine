@@ -1,7 +1,8 @@
 // pattern: Mixed (needs refactoring)
 // Reason: 该命令文件同时承担 Tauri IPC 编排、流式对话副作用与少量 payload 整形；本次只在现有边界内最小接入 BeforeLlmRequest modify。
 use crate::actions::executor::{
-    apply_before_action_args_payload, build_action_hook_payload, build_before_action_args_payload,
+    apply_before_action_args_payload, assistant_tool_call_metadata_value,
+    build_action_hook_payload, build_before_action_args_payload, tool_metadata_value,
 };
 use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{
@@ -1471,8 +1472,9 @@ pub async fn stream_chat(
         .await;
         let mut tool_results = Vec::new();
         let mut tool_result_messages = Vec::new();
-        let mut continuation_tool_calls = Vec::new();
-        let mut persisted_native_tool_results = Vec::new();
+        let mut continuation_tool_calls: Vec<serde_json::Value> = Vec::new();
+        let mut continuation_tool_call_messages = Vec::new();
+        let mut persisted_native_tool_results: Vec<(serde_json::Value, async_openai::types::chat::ChatCompletionRequestMessage)> = Vec::new();
         let any_needs_feedback = execution_outcomes.iter().any(|outcome| outcome.needs_feedback);
         let has_native_tool_calls = tool_calls.iter().any(|tc| tc.tool_call_id.is_some());
 
@@ -1530,9 +1532,10 @@ pub async fn stream_chat(
             });
 
             if let Some(tool_call_id) = &outcome.invocation.tool_call_id {
-                continuation_tool_calls.push((
+                continuation_tool_calls.push(assistant_tool_call_metadata_value(&outcome, tool_call_id));
+                continuation_tool_call_messages.push((
                     tool_call_id.clone(),
-                    outcome.tool_id().to_string(),
+                    outcome.tool_name().to_string(),
                     serde_json::to_string(&outcome.invocation.args)
                         .unwrap_or_else(|_| "{}".to_string()),
                 ));
@@ -1543,8 +1546,7 @@ pub async fn stream_chat(
                 let tool_result_msg = tool_result_message(tool_call_id.clone(), message_text);
                 tool_result_messages.push(tool_result_msg.clone());
                 persisted_native_tool_results.push((
-                    tool_call_id.clone(),
-                    outcome.tool_id().to_string(),
+                    tool_metadata_value(&outcome, tool_call_id, &assistant_turn_id),
                     tool_result_msg,
                 ));
             }
@@ -1554,14 +1556,7 @@ pub async fn stream_chat(
             let assistant_tool_call_metadata = serde_json::json!({
                 "type": "assistant_tool_calls",
                 "turn_id": assistant_turn_id,
-                "tool_calls": continuation_tool_calls
-                    .iter()
-                    .map(|(id, name, arguments)| serde_json::json!({
-                        "id": id,
-                        "name": name,
-                        "arguments": arguments,
-                    }))
-                    .collect::<Vec<_>>(),
+                "tool_calls": continuation_tool_calls,
             })
             .to_string();
             state
@@ -1573,20 +1568,13 @@ pub async fn stream_chat(
                     None,
                 )
                 .await;
-            for (tool_call_id, tool_name, tool_message) in &persisted_native_tool_results {
+            for (tool_metadata, tool_message) in &persisted_native_tool_results {
                 let tool_content = extract_message_text(tool_message);
-                let tool_metadata = serde_json::json!({
-                    "type": "tool_result",
-                    "turn_id": assistant_turn_id,
-                    "tool_call_id": tool_call_id,
-                    "tool_name": tool_name,
-                })
-                .to_string();
                 state
                     .add_message_with_metadata(
                         "tool".to_string(),
                         tool_content,
-                        Some(tool_metadata),
+                        Some(tool_metadata.to_string()),
                         &char_id,
                         None,
                     )
@@ -1598,7 +1586,7 @@ pub async fn stream_chat(
                 } else {
                     Some(cleaned_text.clone())
                 },
-                continuation_tool_calls,
+                continuation_tool_call_messages,
             ));
             client_messages.extend(tool_result_messages);
 
@@ -2033,6 +2021,8 @@ pub async fn stream_chat(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actions::registry::{ActionInfo, ActionPermissionLevel, ActionRiskTag, ActionSource};
+    use crate::actions::executor::{assistant_tool_call_metadata_value_for_test, tool_metadata_value_for_test, ToolExecutionOutcome, ToolInvocation};
     use crate::hooks::HookPayload;
 
     // ── extract_translate_tags ──────────────────────────────
@@ -2289,6 +2279,69 @@ mod tests {
         );
         assert_eq!(rejected.get("approval_status").and_then(|v| v.as_str()), Some("rejected"));
         assert_eq!(rejected.get("approval_request_id").and_then(|v| v.as_str()), Some("req-1"));
+    }
+
+    fn sample_metadata_outcome() -> ToolExecutionOutcome {
+        ToolExecutionOutcome {
+            invocation: ToolInvocation {
+                tool_call_id: Some("call-1".to_string()),
+                name: "read_file".to_string(),
+                args: HashMap::from([("path".to_string(), "README.md".to_string())]),
+            },
+            action: Some(ActionInfo {
+                id: "mcp__filesystem__read_file".to_string(),
+                name: "read_file".to_string(),
+                source: ActionSource::Mcp,
+                server_name: Some("filesystem".to_string()),
+                description: "Read file".to_string(),
+                parameters: vec![],
+                needs_feedback: true,
+                risk_tags: vec![ActionRiskTag::Read],
+                permission_level: ActionPermissionLevel::Safe,
+            }),
+            result: Ok(sample_action_result("ok")),
+            needs_feedback: true,
+        }
+    }
+
+    #[test]
+    fn test_assistant_tool_call_metadata_includes_canonical_identity_fields() {
+        let outcome = sample_metadata_outcome();
+        let assistant_tool_call_metadata = serde_json::json!({
+            "type": "assistant_tool_calls",
+            "turn_id": "turn-1",
+            "tool_calls": [assistant_tool_call_metadata_value_for_test(&outcome, "call-1")],
+        });
+
+        let tool_call = &assistant_tool_call_metadata["tool_calls"][0];
+        assert_eq!(assistant_tool_call_metadata.get("type").and_then(|v| v.as_str()), Some("assistant_tool_calls"));
+        assert_eq!(assistant_tool_call_metadata.get("turn_id").and_then(|v| v.as_str()), Some("turn-1"));
+        assert_eq!(tool_call.get("id").and_then(|v| v.as_str()), Some("call-1"));
+        assert_eq!(tool_call.get("tool_id").and_then(|v| v.as_str()), Some("mcp__filesystem__read_file"));
+        assert_eq!(tool_call.get("tool_name").and_then(|v| v.as_str()), Some("read_file"));
+        assert_eq!(tool_call.get("source").and_then(|v| v.as_str()), Some("mcp"));
+        assert_eq!(tool_call.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
+        assert_eq!(tool_call.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(tool_call.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
+        assert_eq!(tool_call.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
+        assert_eq!(tool_call.get("arguments").and_then(|v| v.as_str()), Some("{\"path\":\"README.md\"}"));
+    }
+
+    #[test]
+    fn test_tool_result_metadata_includes_canonical_identity_fields() {
+        let outcome = sample_metadata_outcome();
+        let tool_metadata = tool_metadata_value_for_test(&outcome, "call-1", "turn-1");
+
+        assert_eq!(tool_metadata.get("type").and_then(|v| v.as_str()), Some("tool_result"));
+        assert_eq!(tool_metadata.get("turn_id").and_then(|v| v.as_str()), Some("turn-1"));
+        assert_eq!(tool_metadata.get("tool_call_id").and_then(|v| v.as_str()), Some("call-1"));
+        assert_eq!(tool_metadata.get("tool_id").and_then(|v| v.as_str()), Some("mcp__filesystem__read_file"));
+        assert_eq!(tool_metadata.get("tool_name").and_then(|v| v.as_str()), Some("read_file"));
+        assert_eq!(tool_metadata.get("source").and_then(|v| v.as_str()), Some("mcp"));
+        assert_eq!(tool_metadata.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
+        assert_eq!(tool_metadata.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(tool_metadata.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
+        assert_eq!(tool_metadata.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
     }
 
     #[tokio::test]
