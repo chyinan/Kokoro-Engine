@@ -619,6 +619,30 @@
                 "saved_auto": "自動保存済み",
                 "source_mcp": "MCP",
                 "source_builtin": "内蔵",
+                "source_label": "ソース",
+                "server_label": "サーバー",
+                "risk_tags_label": "リスク",
+                "permission_label": "権限",
+                "enable": "ツールを有効化",
+                "disable": "ツールを無効化",
+                "groups": {
+                    "builtin": "内蔵ツール",
+                    "builtin_desc": "Kokoro に内蔵されたツール",
+                    "unnamed_mcp": "名前未設定の MCP サーバー",
+                    "mcp_server": "MCP サーバー",
+                    "count": "{{count}} 個のツール"
+                },
+                "risk_tags": {
+                    "none": "なし",
+                    "read": "読み取り",
+                    "write": "書き込み",
+                    "external": "外部",
+                    "sensitive": "機密"
+                },
+                "permission_levels": {
+                    "safe": "安全",
+                    "elevated": "高権限"
+                },
                 "items": {
                     "get_time": {
                         "description": "現在の日付と時刻を取得します。"

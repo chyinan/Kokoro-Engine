@@ -619,6 +619,30 @@
                 "saved_auto": "자동 저장됨",
                 "source_mcp": "MCP",
                 "source_builtin": "내장",
+                "source_label": "출처",
+                "server_label": "서버",
+                "risk_tags_label": "위험",
+                "permission_label": "권한",
+                "enable": "도구 활성화",
+                "disable": "도구 비활성화",
+                "groups": {
+                    "builtin": "내장 도구",
+                    "builtin_desc": "Kokoro 내장 도구",
+                    "unnamed_mcp": "이름 없는 MCP 서버",
+                    "mcp_server": "MCP 서버",
+                    "count": "도구 {{count}}개"
+                },
+                "risk_tags": {
+                    "none": "없음",
+                    "read": "읽기",
+                    "write": "쓰기",
+                    "external": "외부",
+                    "sensitive": "민감"
+                },
+                "permission_levels": {
+                    "safe": "안전",
+                    "elevated": "고권한"
+                },
                 "items": {
                     "get_time": {
                         "description": "현재 날짜와 시간을 가져옵니다."

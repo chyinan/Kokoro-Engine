@@ -619,6 +619,30 @@
                 "saved_auto": "已自动保存",
                 "source_mcp": "MCP",
                 "source_builtin": "内置",
+                "source_label": "来源",
+                "server_label": "服务",
+                "risk_tags_label": "风险",
+                "permission_label": "权限",
+                "enable": "启用工具",
+                "disable": "禁用工具",
+                "groups": {
+                    "builtin": "内置工具",
+                    "builtin_desc": "Kokoro 内置工具",
+                    "unnamed_mcp": "未命名 MCP 服务",
+                    "mcp_server": "MCP 服务",
+                    "count": "{{count}} 个工具"
+                },
+                "risk_tags": {
+                    "none": "无",
+                    "read": "读取",
+                    "write": "写入",
+                    "external": "外部",
+                    "sensitive": "敏感"
+                },
+                "permission_levels": {
+                    "safe": "安全",
+                    "elevated": "高权限"
+                },
                 "items": {
                     "get_time": {
                         "description": "获取当前日期和时间。"

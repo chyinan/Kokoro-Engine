@@ -11,7 +11,29 @@ import {
     listActions, getToolSettings, saveToolSettings
 } from "../../../lib/kokoro-bridge";
 import type { ActionInfo, McpServerConfig, McpServerStatus, ToolSettings } from "../../../lib/kokoro-bridge";
-import { getToolDisplayDescription, getToolSourceLabel } from "./mcpToolDisplay";
+import {
+    buildSortedToolGroups,
+    getToolBadgeClass,
+    getToolBadgeRowClass,
+    getToolCardContainerClass,
+    getToolCardHeaderTitleClass,
+    getToolDescriptionClass,
+    getToolDisplayDescription,
+    getToolEnabled,
+    getToolGroupDescription,
+    getToolGroupTitle,
+    getToolMetaTextClass,
+    getToolPermissionBadgeClass,
+    getToolPermissionLevelLabel,
+    getToolRiskBadgeClass,
+    getToolRiskTagsLabel,
+    getToolSourceBadgeClass,
+    getToolSourceLabel,
+    getToolSwitchEnabledClass,
+    getToolSwitchThumbClass,
+    getToolSwitchThumbX,
+    getToolToggleTitle,
+} from "./mcpToolDisplay";
 
 // ── Helpers ─────────────────────────────────────────────
 
@@ -314,49 +336,80 @@ export default function McpTab() {
                     </div>
                 </div>
 
-                <div className="space-y-2">
-                    {tools.map((tool) => {
-                        const enabled = toolSettings.enabled_tools[tool.id] ?? true;
-                        const sourceLabel = getToolSourceLabel(tool, t);
-                        const displayDescription = getToolDisplayDescription(tool, t);
-                        return (
-                            <div
-                                key={tool.id}
-                                className="flex items-start justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-1)]/80 px-3 py-3"
-                            >
-                                <div className="min-w-0">
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                        <div className="text-sm font-medium text-[var(--color-text-primary)]">
-                                            {tool.name}
-                                        </div>
-                                        <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">
-                                            {sourceLabel}
-                                        </span>
-                                    </div>
-                                    <div className="mt-1 text-[11px] text-[var(--color-text-muted)] break-all">
-                                        {tool.id}
-                                    </div>
-                                    <div className="mt-1 text-xs text-[var(--color-text-muted)]">
-                                        {displayDescription}
-                                    </div>
+                <div className="space-y-4">
+                    {buildSortedToolGroups(tools).map((group) => (
+                        <div key={group.key} className="space-y-2">
+                            <div>
+                                <div className="text-xs font-heading font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
+                                    {getToolGroupTitle(group, t)}
                                 </div>
-                                <button
-                                    onClick={() => { void handleToolToggle(tool.id, !enabled); }}
-                                    aria-checked={enabled}
-                                    aria-label={tool.id}
-                                    className={clsx(
-                                        "w-10 h-5 rounded-full transition-colors relative shrink-0",
-                                        enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
-                                    )}
-                                >
-                                    <motion.div
-                                        animate={{ x: enabled ? 20 : 2 }}
-                                        className="absolute top-0.5 w-4 h-4 rounded-full bg-white"
-                                    />
-                                </button>
+                                {getToolGroupDescription(group, t) && (
+                                    <div className="text-[11px] text-[var(--color-text-muted)]">
+                                        {getToolGroupDescription(group, t)}
+                                    </div>
+                                )}
                             </div>
-                        );
-                    })}
+
+                            {group.tools.map((tool) => {
+                                const enabled = getToolEnabled(tool.id, toolSettings.enabled_tools);
+                                const sourceLabel = getToolSourceLabel(tool, t);
+                                const riskTagsLabel = getToolRiskTagsLabel(tool, t);
+                                const permissionLabel = getToolPermissionLevelLabel(tool, t);
+                                const displayDescription = getToolDisplayDescription(tool, t);
+                                return (
+                                    <div
+                                        key={tool.id}
+                                        className={getToolCardContainerClass()}
+                                    >
+                                        <div className="flex items-start justify-between gap-4">
+                                            <div className="min-w-0">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    <div className={getToolCardHeaderTitleClass()}>
+                                                        {tool.name}
+                                                    </div>
+                                                    <span className={clsx(getToolBadgeClass(), getToolSourceBadgeClass(tool))}>
+                                                        {sourceLabel}
+                                                    </span>
+                                                    <span className={clsx(getToolBadgeClass(), getToolPermissionBadgeClass(tool))}>
+                                                        {permissionLabel}
+                                                    </span>
+                                                </div>
+                                                <div className={getToolMetaTextClass()}>
+                                                    {tool.id}
+                                                </div>
+                                                <div className={getToolDescriptionClass()}>
+                                                    {displayDescription}
+                                                </div>
+                                                <div className={getToolBadgeRowClass()}>
+                                                    <span className={clsx(getToolBadgeClass(), getToolRiskBadgeClass())}>
+                                                        {t('settings.mcp.builtin_tools.risk_tags_label', { defaultValue: '风险' })}: {riskTagsLabel}
+                                                    </span>
+                                                    <span className={clsx(getToolBadgeClass(), getToolRiskBadgeClass())}>
+                                                        {t('settings.mcp.builtin_tools.permission_label', { defaultValue: '权限' })}: {permissionLabel}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            <button
+                                                onClick={() => { void handleToolToggle(tool.id, !enabled); }}
+                                                aria-checked={enabled}
+                                                aria-label={tool.id}
+                                                title={getToolToggleTitle(enabled, t)}
+                                                className={clsx(
+                                                    "w-10 h-5 rounded-full transition-colors relative shrink-0",
+                                                    getToolSwitchEnabledClass(enabled)
+                                                )}
+                                            >
+                                                <motion.div
+                                                    animate={{ x: getToolSwitchThumbX(enabled) }}
+                                                    className={getToolSwitchThumbClass()}
+                                                />
+                                            </button>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    ))}
                 </div>
             </div>
 

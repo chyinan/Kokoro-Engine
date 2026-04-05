@@ -619,6 +619,30 @@
                 "saved_auto": "Saved automatically",
                 "source_mcp": "MCP",
                 "source_builtin": "Built-in",
+                "source_label": "Source",
+                "server_label": "Server",
+                "risk_tags_label": "Risk",
+                "permission_label": "Permission",
+                "enable": "Enable tool",
+                "disable": "Disable tool",
+                "groups": {
+                    "builtin": "Built-in Tools",
+                    "builtin_desc": "Built-in tools provided by Kokoro",
+                    "unnamed_mcp": "Unnamed MCP Server",
+                    "mcp_server": "MCP Server",
+                    "count": "{{count}} tools"
+                },
+                "risk_tags": {
+                    "none": "None",
+                    "read": "Read",
+                    "write": "Write",
+                    "external": "External",
+                    "sensitive": "Sensitive"
+                },
+                "permission_levels": {
+                    "safe": "Safe",
+                    "elevated": "Elevated"
+                },
                 "items": {
                     "get_time": {
                         "description": "Get the current date and time."

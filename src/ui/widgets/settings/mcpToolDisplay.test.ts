@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { ActionInfo } from '../../../lib/kokoro-bridge';
-import { getToolDisplayDescription, getToolSourceLabel } from './mcpToolDisplay';
+import { getToolDisplayDescription, getToolPermissionLevelLabel, getToolRiskTagsLabel, getToolSourceLabel, groupToolsForDisplay } from './mcpToolDisplay';
 
 function buildAction(overrides: Partial<ActionInfo>): ActionInfo {
     return {
@@ -84,5 +84,52 @@ describe('mcpToolDisplay', () => {
         };
 
         expect(getToolSourceLabel(tool, t)).toBe('MCP · filesystem');
+    });
+
+    it('groups built-in tools separately and MCP tools by server', () => {
+        const groups = groupToolsForDisplay([
+            buildAction({ id: 'builtin__get_time', name: 'get_time', source: 'builtin' }),
+            buildAction({ id: 'mcp__filesystem__read_file', name: 'read_file', source: 'mcp', server_name: 'filesystem' }),
+            buildAction({ id: 'mcp__filesystem__write_file', name: 'write_file', source: 'mcp', server_name: 'filesystem' }),
+            buildAction({ id: 'mcp__memory__search', name: 'search', source: 'mcp', server_name: 'memory' }),
+        ]);
+
+        expect(groups.map((group) => group.key)).toEqual([
+            'builtin',
+            'mcp:filesystem',
+            'mcp:memory',
+        ]);
+        expect(groups[0]?.tools.map((tool) => tool.id)).toEqual(['builtin__get_time']);
+        expect(groups[1]?.tools.map((tool) => tool.id)).toEqual([
+            'mcp__filesystem__read_file',
+            'mcp__filesystem__write_file',
+        ]);
+        expect(groups[2]?.tools.map((tool) => tool.id)).toEqual(['mcp__memory__search']);
+    });
+
+    it('falls back to unnamed label when MCP server name is missing', () => {
+        const groups = groupToolsForDisplay([
+            buildAction({ id: 'mcp__unknown__lookup', name: 'lookup', source: 'mcp', server_name: undefined }),
+        ]);
+
+        expect(groups).toHaveLength(1);
+        expect(groups[0]?.key).toBe('mcp:unnamed');
+    });
+
+    it('renders localized risk tags and permission labels', () => {
+        const tool = buildAction({
+            source: 'mcp',
+            risk_tags: ['read', 'external'],
+            permission_level: 'elevated',
+        });
+        const t: MockT = (key, options) => {
+            if (key === 'settings.mcp.builtin_tools.risk_tags.read') return '读取';
+            if (key === 'settings.mcp.builtin_tools.risk_tags.external') return '外部';
+            if (key === 'settings.mcp.builtin_tools.permission_levels.elevated') return '高权限';
+            return options?.defaultValue ?? key;
+        };
+
+        expect(getToolRiskTagsLabel(tool, t)).toBe('读取 · 外部');
+        expect(getToolPermissionLevelLabel(tool, t)).toBe('高权限');
     });
 });
