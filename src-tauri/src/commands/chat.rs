@@ -421,114 +421,103 @@ fn tool_error_payload_for_test(tool: &str, turn_id: &str, error: &str) -> serde_
     })
 }
 
-fn tool_error_payload(tool: &str, tool_id: &str, turn_id: &str, error: &str) -> serde_json::Value {
+fn base_tool_trace_payload(
+    outcome: &crate::actions::ToolExecutionOutcome,
+    turn_id: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "turn_id": turn_id,
-        "tool": tool,
-        "tool_id": tool_id,
-        "error": error,
-        "deny_kind": deny_kind_for_tool_error(error),
+        "tool": outcome.tool_name(),
+        "tool_id": outcome.tool_id(),
+        "source": outcome.tool_source(),
+        "server_name": outcome.tool_server_name(),
+        "needs_feedback": outcome.tool_needs_feedback(),
+        "permission_level": outcome.tool_permission_level(),
+        "risk_tags": outcome.tool_risk_tags(),
     })
+}
+
+fn tool_error_payload(outcome: &crate::actions::ToolExecutionOutcome, turn_id: &str, error: &str) -> serde_json::Value {
+    let mut payload = base_tool_trace_payload(outcome, turn_id);
+    payload["error"] = serde_json::Value::String(error.to_string());
+    payload["deny_kind"] = serde_json::Value::String(deny_kind_for_tool_error(error).to_string());
+    payload
 }
 
 fn tool_success_payload(
-    tool: &str,
-    tool_id: &str,
+    outcome: &crate::actions::ToolExecutionOutcome,
     turn_id: &str,
     result: &crate::actions::ActionResult,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "turn_id": turn_id,
-        "tool": tool,
-        "tool_id": tool_id,
-        "result": result,
-    })
+    let mut payload = base_tool_trace_payload(outcome, turn_id);
+    payload["result"] = serde_json::to_value(result).expect("action result should serialize");
+    payload
 }
 
 fn pending_tool_trace_payload(
+    outcome: &crate::actions::ToolExecutionOutcome,
     turn_id: &str,
-    tool: &str,
-    tool_id: &str,
     error: &str,
     approval_request_id: &str,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "turn_id": turn_id,
-        "tool": tool,
-        "tool_id": tool_id,
-        "error": error,
-        "deny_kind": deny_kind_for_tool_error(error),
-        "approval_request_id": approval_request_id,
-        "approval_status": "requested",
-    })
+    let mut payload = tool_error_payload(outcome, turn_id, error);
+    payload["approval_request_id"] = serde_json::Value::String(approval_request_id.to_string());
+    payload["approval_status"] = serde_json::Value::String("requested".to_string());
+    payload
 }
 
 fn approved_tool_trace_payload(
+    outcome: &crate::actions::ToolExecutionOutcome,
     turn_id: &str,
-    tool: &str,
-    tool_id: &str,
     result: &crate::actions::ActionResult,
     approval_request_id: &str,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "turn_id": turn_id,
-        "tool": tool,
-        "tool_id": tool_id,
-        "result": result,
-        "approval_request_id": approval_request_id,
-        "approval_status": "approved",
-    })
+    let mut payload = tool_success_payload(outcome, turn_id, result);
+    payload["approval_request_id"] = serde_json::Value::String(approval_request_id.to_string());
+    payload["approval_status"] = serde_json::Value::String("approved".to_string());
+    payload
 }
 
 fn rejected_tool_trace_payload(
+    outcome: &crate::actions::ToolExecutionOutcome,
     turn_id: &str,
-    tool: &str,
-    tool_id: &str,
     error: &str,
     approval_request_id: &str,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "turn_id": turn_id,
-        "tool": tool,
-        "tool_id": tool_id,
-        "error": error,
-        "deny_kind": deny_kind_for_tool_error(error),
-        "approval_request_id": approval_request_id,
-        "approval_status": "rejected",
-    })
+    let mut payload = tool_error_payload(outcome, turn_id, error);
+    payload["approval_request_id"] = serde_json::Value::String(approval_request_id.to_string());
+    payload["approval_status"] = serde_json::Value::String("rejected".to_string());
+    payload
 }
 
 #[cfg(test)]
 fn pending_tool_trace_payload_for_test(
+    outcome: &crate::actions::ToolExecutionOutcome,
     turn_id: &str,
-    tool: &str,
-    tool_id: &str,
     error: &str,
     approval_request_id: &str,
 ) -> serde_json::Value {
-    pending_tool_trace_payload(turn_id, tool, tool_id, error, approval_request_id)
+    pending_tool_trace_payload(outcome, turn_id, error, approval_request_id)
 }
 
 #[cfg(test)]
 fn approved_tool_trace_payload_for_test(
+    outcome: &crate::actions::ToolExecutionOutcome,
     turn_id: &str,
-    tool: &str,
-    tool_id: &str,
     result: &crate::actions::ActionResult,
     approval_request_id: &str,
 ) -> serde_json::Value {
-    approved_tool_trace_payload(turn_id, tool, tool_id, result, approval_request_id)
+    approved_tool_trace_payload(outcome, turn_id, result, approval_request_id)
 }
 
 #[cfg(test)]
 fn rejected_tool_trace_payload_for_test(
+    outcome: &crate::actions::ToolExecutionOutcome,
     turn_id: &str,
-    tool: &str,
-    tool_id: &str,
     error: &str,
     approval_request_id: &str,
 ) -> serde_json::Value {
-    rejected_tool_trace_payload(turn_id, tool, tool_id, error, approval_request_id)
+    rejected_tool_trace_payload(outcome, turn_id, error, approval_request_id)
 }
 
 fn emit_tool_trace_event(
@@ -540,13 +529,13 @@ fn emit_tool_trace_event(
         Ok(result) => {
             let _ = app.emit(
                 "chat-turn-tool",
-                tool_success_payload(outcome.tool_name(), outcome.tool_id(), turn_id, result),
+                tool_success_payload(outcome, turn_id, result),
             );
         }
         Err(error) => {
             let _ = app.emit(
                 "chat-turn-tool",
-                tool_error_payload(outcome.tool_name(), outcome.tool_id(), turn_id, error),
+                tool_error_payload(outcome, turn_id, error),
             );
         }
     }
@@ -616,21 +605,15 @@ fn is_pending_approval_error(error: &str) -> bool {
 }
 
 fn approved_tool_error_payload(
+    outcome: &crate::actions::ToolExecutionOutcome,
     turn_id: &str,
-    tool: &str,
-    tool_id: &str,
     error: &str,
     approval_request_id: &str,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "turn_id": turn_id,
-        "tool": tool,
-        "tool_id": tool_id,
-        "error": error,
-        "deny_kind": deny_kind_for_tool_error(error),
-        "approval_request_id": approval_request_id,
-        "approval_status": "approved",
-    })
+    let mut payload = tool_error_payload(outcome, turn_id, error);
+    payload["approval_request_id"] = serde_json::Value::String(approval_request_id.to_string());
+    payload["approval_status"] = serde_json::Value::String("approved".to_string());
+    payload
 }
 
 async fn wait_for_tool_approval_and_execute(
@@ -651,9 +634,8 @@ async fn wait_for_tool_approval_and_execute(
         )
         .await;
     let requested_payload = pending_tool_trace_payload(
+        outcome,
         turn_id,
-        outcome.tool_name(),
-        outcome.tool_id(),
         pending_error,
         &approval_request_id,
     );
@@ -674,16 +656,14 @@ async fn wait_for_tool_approval_and_execute(
             let result = execute_single_tool_after_approval(app, registry_state, character_id, &outcome.invocation).await;
             let payload = match &result {
                 Ok(value) => approved_tool_trace_payload(
+                    outcome,
                     turn_id,
-                    outcome.tool_name(),
-                    outcome.tool_id(),
                     value,
                     &approval_request_id,
                 ),
                 Err(error) => approved_tool_error_payload(
+                    outcome,
                     turn_id,
-                    outcome.tool_name(),
-                    outcome.tool_id(),
                     error,
                     &approval_request_id,
                 ),
@@ -693,9 +673,8 @@ async fn wait_for_tool_approval_and_execute(
         ToolApprovalDecision::Rejected { reason } => {
             let rejected_message = rejected_pending_approval_message(reason);
             let payload = rejected_tool_trace_payload(
+                outcome,
                 turn_id,
-                outcome.tool_name(),
-                outcome.tool_id(),
                 &rejected_message,
                 &approval_request_id,
             );
@@ -730,15 +709,39 @@ fn tool_trace_error_message(error: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+fn sample_tool_trace_outcome_for_test() -> crate::actions::ToolExecutionOutcome {
+    crate::actions::ToolExecutionOutcome {
+        invocation: crate::actions::ToolInvocation {
+            tool_call_id: Some("call-1".to_string()),
+            name: "read_file".to_string(),
+            args: HashMap::from([("path".to_string(), "README.md".to_string())]),
+        },
+        action: Some(crate::actions::ActionInfo {
+            id: "mcp__filesystem__read_file".to_string(),
+            name: "read_file".to_string(),
+            source: crate::actions::ActionSource::Mcp,
+            server_name: Some("filesystem".to_string()),
+            description: "Read file".to_string(),
+            parameters: vec![],
+            needs_feedback: true,
+            risk_tags: vec![crate::actions::registry::ActionRiskTag::Read],
+            permission_level: crate::actions::registry::ActionPermissionLevel::Safe,
+        }),
+        result: Ok(sample_action_result("ok")),
+        needs_feedback: true,
+    }
+}
+
+#[cfg(test)]
 fn tool_trace_success_has_no_deny_kind() -> bool {
-    tool_success_payload("tool", "builtin__tool", "turn-1", &sample_action_result("ok"))
+    tool_success_payload(&sample_tool_trace_outcome_for_test(), "turn-1", &sample_action_result("ok"))
         .get("deny_kind")
         .is_none()
 }
 
 #[cfg(test)]
 fn tool_trace_success_message() -> Option<String> {
-    tool_success_payload("tool", "builtin__tool", "turn-1", &sample_action_result("ok"))
+    tool_success_payload(&sample_tool_trace_outcome_for_test(), "turn-1", &sample_action_result("ok"))
         .get("result")
         .and_then(|value| value.get("message"))
         .and_then(|value| value.as_str())
@@ -2247,9 +2250,8 @@ mod tests {
     #[test]
     fn test_pending_approval_trace_payload_includes_request_id_and_requested_status() {
         let payload = pending_tool_trace_payload_for_test(
+            &sample_tool_trace_outcome_for_test(),
             "turn-1",
-            "write_note",
-            "builtin__write_note",
             "Denied pending approval: risk tag 'write' requires approval",
             "req-1",
         );
@@ -2260,10 +2262,10 @@ mod tests {
 
     #[test]
     fn test_approval_result_payloads_include_resolved_status() {
+        let outcome = sample_tool_trace_outcome_for_test();
         let approved = approved_tool_trace_payload_for_test(
+            &outcome,
             "turn-1",
-            "write_note",
-            "builtin__write_note",
             &sample_action_result("ok"),
             "req-1",
         );
@@ -2271,9 +2273,8 @@ mod tests {
         assert_eq!(approved.get("approval_request_id").and_then(|v| v.as_str()), Some("req-1"));
 
         let rejected = rejected_tool_trace_payload_for_test(
+            &outcome,
             "turn-1",
-            "write_note",
-            "builtin__write_note",
             "Denied pending approval: rejected by user",
             "req-1",
         );
@@ -2342,6 +2343,71 @@ mod tests {
         assert_eq!(tool_metadata.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
         assert_eq!(tool_metadata.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
         assert_eq!(tool_metadata.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
+    }
+
+    #[test]
+    fn test_tool_trace_payloads_include_identity_and_permission_fields() {
+        let outcome = sample_metadata_outcome();
+        let success = tool_success_payload(&outcome, "turn-1", &sample_action_result("ok"));
+        assert_eq!(success.get("tool").and_then(|v| v.as_str()), Some("read_file"));
+        assert_eq!(success.get("tool_id").and_then(|v| v.as_str()), Some("mcp__filesystem__read_file"));
+        assert_eq!(success.get("source").and_then(|v| v.as_str()), Some("mcp"));
+        assert_eq!(success.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
+        assert_eq!(success.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(success.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
+        assert_eq!(success.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
+
+        let pending = pending_tool_trace_payload_for_test(
+            &outcome,
+            "turn-1",
+            "Denied pending approval: permission level 'elevated' requires approval",
+            "req-1",
+        );
+        assert_eq!(pending.get("source").and_then(|v| v.as_str()), Some("mcp"));
+        assert_eq!(pending.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
+        assert_eq!(pending.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(pending.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
+        assert_eq!(pending.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
+        assert_eq!(pending.get("approval_request_id").and_then(|v| v.as_str()), Some("req-1"));
+        assert_eq!(pending.get("approval_status").and_then(|v| v.as_str()), Some("requested"));
+
+        let approved = approved_tool_trace_payload_for_test(
+            &outcome,
+            "turn-1",
+            &sample_action_result("ok"),
+            "req-1",
+        );        assert_eq!(approved.get("source").and_then(|v| v.as_str()), Some("mcp"));
+        assert_eq!(approved.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
+        assert_eq!(approved.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(approved.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
+        assert_eq!(approved.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
+        assert_eq!(approved.get("approval_status").and_then(|v| v.as_str()), Some("approved"));
+
+        let rejected = rejected_tool_trace_payload_for_test(
+            &outcome,
+            "turn-1",
+            "Denied pending approval: rejected by user",
+            "req-1",
+        );
+        assert_eq!(rejected.get("source").and_then(|v| v.as_str()), Some("mcp"));
+        assert_eq!(rejected.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
+        assert_eq!(rejected.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(rejected.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
+        assert_eq!(rejected.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
+        assert_eq!(rejected.get("approval_status").and_then(|v| v.as_str()), Some("rejected"));
+
+        let approved_error = approved_tool_error_payload(
+            &outcome,
+            "turn-1",
+            "execution failed",
+            "req-1",
+        );
+        assert_eq!(approved_error.get("source").and_then(|v| v.as_str()), Some("mcp"));
+        assert_eq!(approved_error.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
+        assert_eq!(approved_error.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(approved_error.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
+        assert_eq!(approved_error.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
+        assert_eq!(approved_error.get("approval_status").and_then(|v| v.as_str()), Some("approved"));
     }
 
     #[tokio::test]

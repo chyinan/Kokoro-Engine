@@ -901,6 +901,10 @@ impl ToolExecutionOutcome {
             .and_then(|action| action.server_name.as_deref())
     }
 
+    pub fn tool_needs_feedback(&self) -> bool {
+        self.needs_feedback
+    }
+
     pub fn tool_permission_level(&self) -> Option<&str> {
         self.action.as_ref().map(|action| match action.permission_level {
             crate::actions::registry::ActionPermissionLevel::Safe => "safe",
