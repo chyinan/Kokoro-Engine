@@ -111,6 +111,24 @@ const Select = React.forwardRef<HTMLDivElement, SelectProps>(
 
         const handleToggle = () => {
             if (disabled) return;
+            // Compute coords synchronously *before* opening so the portal's first
+            // render already has the correct position.  Without this, `coords`
+            // starts at {0,0} and gets updated only after the effect runs on the
+            // next tick – causing the dropdown to briefly appear at the top-left
+            // and triggering the entry animation from there.  On macOS WebKit the
+            // GPU compositor renders that stale frame visibly; Windows/Linux
+            // WebView2 tends to swallow it.
+            if (!open && containerRef.current) {
+                const rect = containerRef.current.getBoundingClientRect();
+                const spaceBelow = window.innerHeight - rect.bottom;
+                const shouldDropUp = spaceBelow < 300;
+                setDropUp(shouldDropUp);
+                setCoords({
+                    top: shouldDropUp ? rect.top : rect.bottom,
+                    left: rect.left,
+                    width: rect.width,
+                });
+            }
             setOpen(v => !v);
         };
 
