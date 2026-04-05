@@ -94,7 +94,7 @@ pub(crate) fn apply_before_action_args_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actions::registry::ActionSource;
+    use crate::actions::registry::{ActionPermissionLevel, ActionRiskTag, ActionSource};
 
     fn sample_invocation() -> ToolInvocation {
         ToolInvocation {
@@ -419,6 +419,26 @@ mod tests {
         sample_sensitive_blocking_settings()
     }
 
+    fn policy_denial_reason(action: &ActionInfo, settings: &ToolSettings) -> Option<String> {
+        match evaluate_permission_decision(action, settings) {
+            PermissionDecision::DenyPolicy { reason } => Some(reason),
+            _ => None,
+        }
+    }
+
+    fn approval_pending_reason(action: &ActionInfo, settings: &ToolSettings) -> Option<String> {
+        match evaluate_permission_decision(action, settings) {
+            PermissionDecision::DenyPendingApproval { reason } => Some(reason),
+            _ => None,
+        }
+    }
+
+    fn high_risk_fail_closed_reason(action: &ActionInfo, settings: &ToolSettings) -> Option<String> {
+        match evaluate_permission_decision(action, settings) {
+            PermissionDecision::DenyFailClosed { reason } => Some(reason),
+            _ => None,
+        }
+    }
 
     #[test]
     fn build_action_hook_payload_marks_failures() {
