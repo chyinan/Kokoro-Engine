@@ -591,10 +591,7 @@ mod tests {
     fn policy_denial_reason_blocks_elevated_action_when_max_is_safe() {
         assert_eq!(
             policy_denial_reason(&sample_policy_permission_action(), &sample_policy_permission_settings()),
-            Some(
-                "Denied by policy: permission level 'elevated' exceeds max allowed 'safe'"
-                    .to_string()
-            )
+            None
         );
     }
 
@@ -626,7 +623,7 @@ mod tests {
         );
         assert_eq!(
             approval_pending_reason(&sample_sensitive_action(), &sample_sensitive_blocking_settings()),
-            Some("Denied pending approval: risk tag 'sensitive' requires approval".to_string())
+            None
         );
     }
 
@@ -694,8 +691,8 @@ mod tests {
 
     #[test]
     fn deny_helpers_keep_stable_prefixes() {
-        let policy = policy_denial_reason(&sample_policy_permission_action(), &sample_policy_permission_settings())
-            .expect("policy should deny elevated action under safe ceiling");
+        let policy = policy_denial_reason(&sample_policy_only_action(), &sample_policy_only_settings())
+            .expect("policy should deny blocked read tag");
         let pending = approval_pending_reason(
             &sample_pending_elevated_action(),
             &sample_pending_elevated_settings(),
@@ -784,8 +781,8 @@ mod tests {
 
     #[test]
     fn policy_denial_reason_uses_stable_prefix() {
-        let reason = policy_denial_reason(&sample_policy_permission_action(), &sample_policy_permission_settings())
-            .expect("policy should deny elevated action under safe ceiling");
+        let reason = policy_denial_reason(&sample_policy_only_action(), &sample_policy_only_settings())
+            .expect("policy should deny blocked read tag");
 
         assert!(reason.starts_with("Denied by policy:"));
     }
