@@ -584,20 +584,47 @@ export default function TtsTab({
                                             </div>
                                         )}
 
-                                        {(provider.provider_type === "openai" || provider.provider_type === "edge_tts") && provider.id !== ttsProviderId && (
-                                            <div>
-                                                <label className={labelClasses}>{t("settings.tts.active_settings.voice")}</label>
-                                                <Select
-                                                    value={provider.default_voice || ""}
-                                                    onChange={v => updateProviderConfig(index, { default_voice: v })}
-                                                    options={getVoiceOptions(provider.id, voices)}
-                                                    searchable={voices.filter(v => v.provider_id === provider.id).length > 8}
-                                                    placeholder={provider.provider_type === "edge_tts" ? "zh-CN-XiaoyiNeural" : "alloy"}
-                                                    searchPlaceholder={t("settings.tts.active_settings.voice_search")}
-                                                    emptyMessage={t("settings.tts.active_settings.voice_no_match")}
-                                                />
-                                            </div>
-                                        )}
+                                        {(provider.provider_type === "openai" || provider.provider_type === "edge_tts") && (() => {
+                                            const isActive = provider.id === ttsProviderId;
+                                            const providerVoices = voices.filter(v => v.provider_id === provider.id);
+                                            const voiceOptions = getVoiceOptions(provider.id, voices);
+                                            const hasVoices = providerVoices.length > 0;
+                                            return (
+                                                <div>
+                                                    <label className={labelClasses}>
+                                                        {t("settings.tts.active_settings.voice")}
+                                                        {isActive && (
+                                                            <span className="ml-1.5 text-[10px] text-[var(--color-accent)] uppercase tracking-wider">
+                                                                {t("settings.tts.manage_providers.active")}
+                                                            </span>
+                                                        )}
+                                                    </label>
+                                                    {hasVoices ? (
+                                                        <Select
+                                                            value={isActive
+                                                                ? toVoiceOptionValue(provider.id, ttsVoice)
+                                                                : (provider.default_voice || "")}
+                                                            onChange={v => {
+                                                                if (isActive) {
+                                                                    onTtsVoiceChange(v);
+                                                                } else {
+                                                                    updateProviderConfig(index, { default_voice: v });
+                                                                }
+                                                            }}
+                                                            options={voiceOptions}
+                                                            searchable={providerVoices.length > 8}
+                                                            placeholder={provider.provider_type === "edge_tts" ? "zh-CN-XiaoyiNeural" : "alloy"}
+                                                            searchPlaceholder={t("settings.tts.active_settings.voice_search")}
+                                                            emptyMessage={t("settings.tts.active_settings.voice_no_match")}
+                                                        />
+                                                    ) : (
+                                                        <p className="text-xs text-[var(--color-text-muted)] italic py-1">
+                                                            {t("settings.tts.manage_providers.voices_after_save")}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            );
+                                        })()}
 
                                         {/* Model Path (Local) */}
                                         {(provider.provider_type.includes("local")) && (
