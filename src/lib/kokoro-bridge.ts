@@ -241,8 +241,15 @@ export interface ChatTurnTranslationEvent {
 
 export interface ToolTraceItem {
     tool: string;
+    toolName?: string;
+    toolId?: string;
     text: string;
     isError?: boolean;
+    source?: "builtin" | "mcp";
+    serverName?: string;
+    needsFeedback?: boolean;
+    permissionLevel?: "safe" | "elevated";
+    riskTags?: Array<"read" | "write" | "external" | "sensitive">;
     denyKind?: "hook_denied" | "policy_denied" | "fail_closed" | "pending_approval" | "execution_error";
     approvalRequestId?: string;
     approvalStatus?: "requested" | "approved" | "rejected";
@@ -251,7 +258,13 @@ export interface ToolTraceItem {
 export interface ChatTurnToolEvent {
     turn_id: string;
     tool: string;
+    tool_name?: string;
     tool_id?: string;
+    source?: "builtin" | "mcp";
+    server_name?: string;
+    needs_feedback?: boolean;
+    permission_level?: "safe" | "elevated";
+    risk_tags?: Array<"read" | "write" | "external" | "sensitive">;
     result?: {
         message: string;
     };

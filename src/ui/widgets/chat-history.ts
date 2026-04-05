@@ -28,7 +28,11 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
         const turnId = typeof meta?.turn_id === "string" ? meta.turn_id : undefined;
 
         if (m.role === "tool" || technicalType === "tool_result") {
-            const toolName = typeof meta?.tool_name === "string" ? meta.tool_name : "tool";
+            const toolName = typeof meta?.tool_name === "string"
+                ? meta.tool_name
+                : typeof meta?.tool === "string"
+                    ? meta.tool
+                    : "tool";
             const errorText = m.content.startsWith("Error:") ? m.content.replace(/^Error:\s*/, "") : m.content;
             const denyKind: ToolTraceItem["denyKind"] = errorText.startsWith("Denied pending approval:")
                 ? "pending_approval"
@@ -43,8 +47,20 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
                                 : undefined;
             const toolEntry: ToolTraceItem = {
                 tool: toolName,
+                toolName,
+                toolId: typeof meta?.tool_id === "string" ? meta.tool_id : undefined,
                 text: errorText,
                 isError: m.content.startsWith("Error:"),
+                source: meta?.source === "builtin" || meta?.source === "mcp" ? meta.source : undefined,
+                serverName: typeof meta?.server_name === "string" ? meta.server_name : undefined,
+                needsFeedback: typeof meta?.needs_feedback === "boolean" ? meta.needs_feedback : undefined,
+                permissionLevel: meta?.permission_level === "safe" || meta?.permission_level === "elevated" ? meta.permission_level : undefined,
+                riskTags: Array.isArray(meta?.risk_tags)
+                    ? meta.risk_tags.filter(
+                        (tag): tag is NonNullable<ToolTraceItem["riskTags"]>[number] =>
+                            tag === "read" || tag === "write" || tag === "external" || tag === "sensitive"
+                    )
+                    : undefined,
                 denyKind,
             };
             const targetIndex = turnId ? turnToAssistantIndex.get(turnId) : undefined;

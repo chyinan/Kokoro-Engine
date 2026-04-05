@@ -93,27 +93,43 @@ function mergeToolTraceItems(existing: ReadonlyArray<ToolTraceItem>, incoming: T
 
 function buildToolTraceItem(event: {
     tool: string;
+    tool_name?: string;
+    tool_id?: string;
+    source?: ToolTraceItem["source"];
+    server_name?: string;
+    needs_feedback?: boolean;
+    permission_level?: ToolTraceItem["permissionLevel"];
+    risk_tags?: ToolTraceItem["riskTags"];
     result?: { message: string };
     error?: string;
     deny_kind?: ToolTraceItem["denyKind"];
     approval_request_id?: string;
     approval_status?: ToolTraceItem["approvalStatus"];
 }): ToolTraceItem {
+    const baseTool = {
+        tool: event.tool,
+        toolName: event.tool_name ?? event.tool,
+        toolId: event.tool_id,
+        source: event.source,
+        serverName: event.server_name,
+        needsFeedback: event.needs_feedback,
+        permissionLevel: event.permission_level,
+        riskTags: event.risk_tags,
+        approvalRequestId: event.approval_request_id,
+        approvalStatus: event.approval_status,
+    } satisfies Omit<ToolTraceItem, "text">;
+
     return event.result
         ? {
-            tool: event.tool,
+            ...baseTool,
             text: event.result.message,
             isError: false,
-            approvalRequestId: event.approval_request_id,
-            approvalStatus: event.approval_status,
         }
         : {
-            tool: event.tool,
+            ...baseTool,
             text: event.error || "",
             isError: true,
             denyKind: event.deny_kind,
-            approvalRequestId: event.approval_request_id,
-            approvalStatus: event.approval_status,
         };
 }
 

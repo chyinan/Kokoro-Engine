@@ -89,8 +89,23 @@ function renderToolDetail(tool: ToolTraceItem, t: TranslateFn): string {
     return tool.text;
 }
 
+function getToolPrimaryName(tool: ToolTraceItem): string {
+    return tool.toolName || tool.tool;
+}
+
+function getToolIdentityLabel(tool: ToolTraceItem): string | null {
+    return tool.toolId ?? null;
+}
+
+function getToolSourceLabel(tool: ToolTraceItem): string | null {
+    if (!tool.source) {
+        return null;
+    }
+    return tool.serverName ? `${tool.source} · ${tool.serverName}` : tool.source;
+}
+
 function getToolItemKey(tool: ToolTraceItem, idx: number): string {
-    return [tool.tool, tool.approvalRequestId ?? "none", tool.approvalStatus ?? "none", idx].join(":");
+    return [tool.toolId ?? tool.tool, tool.approvalRequestId ?? "none", tool.approvalStatus ?? "none", idx].join(":");
 }
 
 function isToolTextError(tool: ToolTraceItem): boolean {
@@ -344,7 +359,7 @@ export const ChatMessage = memo(function ChatMessage({
                                                     )}>
                                                         {getToolStatusLabel(tool, t)}
                                                     </span>
-                                                    <span className="text-slate-500">{tool.tool}</span>
+                                                    <span className="text-slate-500">{getToolPrimaryName(tool)}</span>
                                                 </div>
                                                 {isPendingToolWaiting(tool) && (
                                                     <div className="flex items-center gap-1">
@@ -367,14 +382,20 @@ export const ChatMessage = memo(function ChatMessage({
                                                     </div>
                                                 )}
                                             </div>
+                                            <div className="mb-1 space-y-0.5 text-[10px] text-slate-500">
+                                                {getToolIdentityLabel(tool) && (
+                                                    <div>{t("chat.tools.identity_label", { defaultValue: "ID" })}: {getToolIdentityLabel(tool)}</div>
+                                                )}
+                                                {getToolSourceLabel(tool) && (
+                                                    <div>{t("chat.tools.source_label", { defaultValue: "Source" })}: {getToolSourceLabel(tool)}</div>
+                                                )}
+                                                {isPendingApprovalTrace(tool) && tool.approvalRequestId && (
+                                                    <div>{t("chat.tools.request_label", { defaultValue: "Request" })}: {tool.approvalRequestId}</div>
+                                                )}
+                                            </div>
                                             <div className={clsx("whitespace-pre-wrap break-words", getToolTextClassName(tool))}>
                                                 {renderToolDetail(tool, t)}
                                             </div>
-                                            {isPendingApprovalTrace(tool) && tool.approvalRequestId && (
-                                                <div className="mt-1 text-[10px] text-slate-500">
-                                                    {t("chat.tools.request_label", { defaultValue: "Request" })}: {tool.approvalRequestId}
-                                                </div>
-                                            )}
                                         </div>
                                     ))}
                                 </div>
