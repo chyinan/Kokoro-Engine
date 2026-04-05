@@ -309,6 +309,10 @@ impl ActionRegistry {
         }
     }
 
+    pub fn resolve_action_id_for_input(&self, input: &str) -> Result<String, ActionError> {
+        Ok(self.resolve_entry(input)?.info.id.clone())
+    }
+
     pub fn resolve_action(&self, name_or_id: &str) -> Result<ActionInfo, ActionError> {
         Ok(self.resolve_entry(name_or_id)?.info.clone())
     }
@@ -317,7 +321,11 @@ impl ActionRegistry {
         &self,
         name_or_id: &str,
     ) -> Result<(ActionInfo, Arc<dyn ActionHandler>), ActionError> {
-        let entry = self.resolve_entry(name_or_id)?;
+        let action_id = self.resolve_action_id_for_input(name_or_id)?;
+        let entry = self
+            .entries_by_id
+            .get(&action_id)
+            .ok_or_else(|| ActionError(format!("Unknown tool: {}", name_or_id)))?;
         Ok((entry.info.clone(), Arc::clone(&entry.handler)))
     }
 
@@ -818,6 +826,81 @@ mod tests {
         assert!(err.0.contains("Ambiguous tool 'search'"));
         assert!(err.0.contains("builtin__search"));
         assert!(err.0.contains("mcp__server_a__search"));
+    }
+
+    #[test]
+    fn test_resolve_action_id_for_input_accepts_canonical_id() {
+        let mut reg = ActionRegistry::new();
+        reg.register(TestAction {
+            name: "send_notification",
+            description: "Notify",
+            needs_feedback: false,
+        });
+
+        let resolved = reg.resolve_action_id_for_input("builtin__send_notification").unwrap();
+        assert_eq!(resolved, "builtin__send_notification");
+    }
+
+    #[test]
+    fn test_resolve_action_id_for_input_accepts_unique_alias() {
+        let mut reg = ActionRegistry::new();
+        reg.register(TestAction {
+            name: "send_notification",
+            description: "Notify",
+            needs_feedback: false,
+        });
+
+        let resolved = reg.resolve_action_id_for_input("send_notification").unwrap();
+        assert_eq!(resolved, "builtin__send_notification");
+    }
+
+    #[test]
+    fn test_resolve_action_id_for_input_rejects_ambiguous_alias() {
+        let mut reg = ActionRegistry::new();
+        reg.register(TestAction {
+            name: "search",
+            description: "Builtin search",
+            needs_feedback: true,
+        });
+        reg.register_mcp(
+            "server_a",
+            TestAction {
+                name: "search",
+                description: "Server A search",
+                needs_feedback: true,
+            },
+        );
+
+        let err = reg.resolve_action_id_for_input("search").unwrap_err();
+        assert!(err.0.contains("Ambiguous tool 'search'"));
+    }
+
+    #[test]
+    fn test_resolve_action_id_for_input_prefers_exact_canonical_match_over_alias() {
+        let mut reg = ActionRegistry::new();
+        reg.register(TestAction {
+            name: "search",
+            description: "Builtin search",
+            needs_feedback: true,
+        });
+        reg.register_mcp(
+            "server_a",
+            TestAction {
+                name: "search",
+                description: "Server A search",
+                needs_feedback: true,
+            },
+        );
+
+        let resolved = reg.resolve_action_id_for_input("mcp__server_a__search").unwrap();
+        assert_eq!(resolved, "mcp__server_a__search");
+    }
+
+    #[test]
+    fn test_resolve_action_id_for_input_rejects_unknown_tool() {
+        let reg = ActionRegistry::new();
+        let err = reg.resolve_action_id_for_input("missing_tool").unwrap_err();
+        assert!(err.0.contains("Unknown tool: missing_tool"));
     }
 
     #[test]

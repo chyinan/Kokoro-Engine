@@ -389,8 +389,21 @@ async fn handle_text(
             break;
         }
 
-        let tool_invocations: Vec<ToolInvocation> =
-            tool_calls.iter().cloned().map(Into::into).collect();
+        let tool_invocations = {
+            let registry = action_registry.read().await;
+            tool_calls
+                .iter()
+                .map(|tool_call| {
+                    crate::commands::actions::build_tool_invocation_from_input(
+                        &registry,
+                        &tool_call.name,
+                        tool_call.args.clone(),
+                        None,
+                    )
+                    .map_err(|error| format!("Tool resolution error: {}", error.0))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
         let execution_outcomes = execute_tool_calls(
             app,
             &action_registry,
@@ -768,8 +781,21 @@ async fn handle_photo(
             break;
         }
 
-        let tool_invocations: Vec<ToolInvocation> =
-            tool_calls.iter().cloned().map(Into::into).collect();
+        let tool_invocations = {
+            let registry = action_registry.read().await;
+            tool_calls
+                .iter()
+                .map(|tool_call| {
+                    crate::commands::actions::build_tool_invocation_from_input(
+                        &registry,
+                        &tool_call.name,
+                        tool_call.args.clone(),
+                        None,
+                    )
+                    .map_err(|error| format!("Tool resolution error: {}", error.0))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
         let execution_outcomes = execute_tool_calls(
             app,
             &action_registry,

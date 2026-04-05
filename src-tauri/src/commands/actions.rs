@@ -293,6 +293,76 @@ mod tests {
         assert!(reason.starts_with("Denied by fail-closed policy:"));
         assert!(reason.contains("blocked risk tag 'sensitive'"));
     }
+
+    #[test]
+    fn build_tool_invocation_from_input_accepts_unique_alias() {
+        let mut registry = ActionRegistry::new();
+        registry.register(crate::actions::builtin::GetTimeAction);
+
+        let invocation = build_tool_invocation_from_input(
+            &registry,
+            "get_time",
+            HashMap::from([("tz".to_string(), "UTC".to_string())]),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(invocation.name, "builtin__get_time");
+        assert_eq!(invocation.args.get("tz"), Some(&"UTC".to_string()));
+    }
+
+    #[test]
+    fn build_tool_invocation_from_input_accepts_canonical_id() {
+        let mut registry = ActionRegistry::new();
+        registry.register(crate::actions::builtin::GetTimeAction);
+
+        let invocation = build_tool_invocation_from_input(
+            &registry,
+            "builtin__get_time",
+            HashMap::new(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(invocation.name, "builtin__get_time");
+    }
+
+    #[test]
+    fn build_tool_invocation_from_input_rejects_ambiguous_alias() {
+        struct SearchAction;
+
+        #[async_trait::async_trait]
+        impl crate::actions::registry::ActionHandler for SearchAction {
+            fn name(&self) -> &str { "search" }
+            fn description(&self) -> &str { "search" }
+            fn parameters(&self) -> Vec<crate::actions::registry::ActionParam> { vec![] }
+            async fn execute(
+                &self,
+                _args: HashMap<String, String>,
+                _ctx: ActionContext,
+            ) -> Result<ActionResult, crate::actions::registry::ActionError> {
+                Ok(ActionResult::ok("ok"))
+            }
+        }
+
+        let mut registry = ActionRegistry::new();
+        registry.register(SearchAction);
+        registry.register_mcp("server_a", SearchAction);
+
+        let err = build_tool_invocation_from_input(&registry, "search", HashMap::new(), None).unwrap_err();
+        assert!(err.0.contains("Ambiguous tool 'search'"));
+    }
+
+    #[test]
+    fn build_direct_invocation_keeps_raw_name_until_boundary_resolves() {
+        let invocation = build_direct_invocation(
+            "get_time",
+            &HashMap::from([("tz".to_string(), "UTC".to_string())]),
+        );
+
+        assert_eq!(invocation.name, "get_time");
+        assert_eq!(invocation.args.get("tz"), Some(&"UTC".to_string()));
+    }
 }
 
 fn deny_hook_validation_error(reason: &str) -> KokoroError {
@@ -396,6 +466,38 @@ fn build_direct_invocation(name: &str, args: &HashMap<String, String>) -> ToolIn
     }
 }
 
+fn build_resolved_direct_invocation(action_id: &str, args: &HashMap<String, String>) -> ToolInvocation {
+    ToolInvocation {
+        tool_call_id: None,
+        name: action_id.to_string(),
+        args: args.clone(),
+    }
+}
+
+pub(crate) fn build_tool_invocation_from_input(
+    registry: &ActionRegistry,
+    input: &str,
+    args: HashMap<String, String>,
+    tool_call_id: Option<String>,
+) -> Result<ToolInvocation, crate::actions::registry::ActionError> {
+    let action_id = registry.resolve_action_id_for_input(input)?;
+    Ok(ToolInvocation {
+        tool_call_id,
+        name: action_id,
+        args,
+    })
+}
+
+async fn resolve_action_id_at_boundary(
+    registry_state: &State<'_, Arc<RwLock<ActionRegistry>>>,
+    input: &str,
+) -> Result<String, KokoroError> {
+    let registry = registry_state.read().await;
+    registry
+        .resolve_action_id_for_input(input)
+        .map_err(|error| KokoroError::Validation(error.0))
+}
+
 #[cfg(test)]
 fn apply_direct_action_args_modification(
     character_id: &str,
@@ -463,23 +565,32 @@ pub async fn execute_action(
     character_id: Option<String>,
 ) -> Result<ActionResult, KokoroError> {
     let character_id = character_id.unwrap_or_else(|| "default".to_string());
-    let invocation = build_direct_invocation(&name, &args);
+    let raw_invocation = build_direct_invocation(&name, &args);
 
-    if let Err(error) = gate_direct_action(&app, &character_id, &invocation).await {
-        emit_after_action_hook(&app, &character_id, &invocation, None, &Err(error.clone())).await;
+    if let Err(error) = gate_direct_action(&app, &character_id, &raw_invocation).await {
+        emit_after_action_hook(&app, &character_id, &raw_invocation, None, &Err(error.clone())).await;
         return Err(error);
     }
+
+    let action_id = match resolve_action_id_at_boundary(&registry_state, &name).await {
+        Ok(action_id) => action_id,
+        Err(error) => {
+            emit_after_action_hook(&app, &character_id, &raw_invocation, None, &Err(error.clone())).await;
+            return Err(error);
+        }
+    };
+    let invocation = build_resolved_direct_invocation(&action_id, &args);
 
     let action = {
         let registry = registry_state.read().await;
         registry
-            .resolve_action(&name)
+            .resolve_action(&action_id)
             .map_err(|e| KokoroError::Validation(e.to_string()))
     };
     let action = match action {
         Ok(action) => action,
         Err(error) => {
-            emit_after_action_hook(&app, &character_id, &invocation, None, &Err(error.clone())).await;
+            emit_after_action_hook(&app, &character_id, &raw_invocation, None, &Err(error.clone())).await;
             return Err(error);
         }
     };
@@ -493,7 +604,7 @@ pub async fn execute_action(
         emit_after_action_hook(
             &app,
             &character_id,
-            &invocation,
+            &raw_invocation,
             Some(&action),
             &Err(error.clone()),
         )
@@ -514,7 +625,7 @@ pub async fn execute_action(
         emit_after_action_hook(
             &app,
             &character_id,
-            &invocation,
+            &raw_invocation,
             Some(&action),
             &Err(error.clone()),
         )
@@ -526,7 +637,7 @@ pub async fn execute_action(
         emit_after_action_hook(
             &app,
             &character_id,
-            &invocation,
+            &raw_invocation,
             Some(&action),
             &Err(error.clone()),
         )
@@ -538,7 +649,7 @@ pub async fn execute_action(
         emit_after_action_hook(
             &app,
             &character_id,
-            &invocation,
+            &raw_invocation,
             Some(&action),
             &Err(error.clone()),
         )
@@ -569,6 +680,6 @@ pub async fn execute_action(
             .map_err(|e| KokoroError::Internal(e.to_string()))
     };
 
-    emit_after_action_hook(&app, &character_id, &invocation, Some(&action), &result).await;
+    emit_after_action_hook(&app, &character_id, &raw_invocation, Some(&action), &result).await;
     result
 }

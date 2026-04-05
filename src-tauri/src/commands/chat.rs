@@ -843,7 +843,7 @@ fn extract_translate_tags(text: &str) -> (String, Option<String>) {
 
 /// Parsed tool call from `[TOOL_CALL:name|key=val|key=val]`
 #[derive(Debug, Clone, Serialize)]
-struct ToolCall {
+pub(crate) struct ToolCall {
     tool_call_id: Option<String>,
     name: String,
     args: HashMap<String, String>,
@@ -1463,8 +1463,21 @@ pub async fn stream_chat(
         }
 
         // Execute tool calls and collect results
-        let tool_invocations: Vec<ToolInvocation> =
-            tool_calls.iter().cloned().map(Into::into).collect();
+        let tool_invocations = {
+            let registry = _action_registry.inner().read().await;
+            tool_calls
+                .iter()
+                .map(|tool_call| {
+                    crate::commands::actions::build_tool_invocation_from_input(
+                        &registry,
+                        &tool_call.name,
+                        tool_call.args.clone(),
+                        tool_call.tool_call_id.clone(),
+                    )
+                    .map_err(|error| KokoroError::Validation(error.0))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
         let execution_outcomes = execute_tool_calls(
             window.app_handle(),
             &_action_registry.inner().clone(),
