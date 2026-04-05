@@ -191,6 +191,9 @@
                 "browser": "ブラウザ (Browser)",
                 "voice": "音声/声質",
                 "no_voices": "利用可能な音声がありません",
+                "voice_search": "音声名、言語、ID で検索",
+                "voice_no_match": "一致する音声がありません",
+                "voice_count_hint": "{{count}} 件の音声があります。ドロップダウン内で検索できます。",
                 "speed": "速度",
                 "pitch": "ピッチ",
                 "test": "▶ テスト発話"

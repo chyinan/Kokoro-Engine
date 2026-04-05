@@ -2,6 +2,7 @@ use super::browser::BrowserTTSProvider;
 use super::cache::{CacheKey, TtsCache};
 use super::cloud_base::CloudTTSProvider;
 use super::config::{ProviderConfig, TtsSystemConfig};
+use super::edge::EdgeTtsProvider;
 use super::interface::{ProviderCapabilities, TtsError, TtsParams, TtsProvider, VoiceProfile};
 use super::local_gpt_sovits::LocalGPTSoVITSProvider;
 use super::local_rvc::LocalRVCProvider;
@@ -103,7 +104,7 @@ impl TtsService {
                 continue;
             }
 
-            match Self::build_provider(provider_config) {
+            match Self::build_provider(provider_config).await {
                 Some(provider) => {
                     println!("[TTS] Registering provider: {}", provider_config.id);
                     service.register_provider(provider).await;
@@ -121,11 +122,14 @@ impl TtsService {
     }
 
     /// Build a provider from config.
-    fn build_provider(config: &ProviderConfig) -> Option<Box<dyn TtsProvider>> {
+    async fn build_provider(config: &ProviderConfig) -> Option<Box<dyn TtsProvider>> {
         match config.provider_type.as_str() {
             "openai" => {
                 OpenAITtsProvider::from_config(config).map(|p| Box::new(p) as Box<dyn TtsProvider>)
             }
+            "edge_tts" => EdgeTtsProvider::from_config(config)
+                .await
+                .map(|p| Box::new(p) as Box<dyn TtsProvider>),
             "browser" => {
                 BrowserTTSProvider::from_config(config).map(|p| Box::new(p) as Box<dyn TtsProvider>)
             }
@@ -394,7 +398,7 @@ impl TtsService {
                 println!("[TTS] Skipping disabled provider: {}", provider_config.id);
                 continue;
             }
-            match Self::build_provider(provider_config) {
+            match Self::build_provider(provider_config).await {
                 Some(provider) => {
                     println!("[TTS] Registering provider: {}", provider_config.id);
                     self.register_provider(provider).await;

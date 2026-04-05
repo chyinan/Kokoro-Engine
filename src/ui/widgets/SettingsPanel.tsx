@@ -122,6 +122,15 @@ function getDefaultTtsVoice(providerId: string, voices: VoiceProfile[]): string 
     return providerVoice?.voice_id || "";
 }
 
+function stripProviderVoiceId(providerId: string, voiceId: string): string {
+    return voiceId.startsWith(`${providerId}_`) ? voiceId.slice(providerId.length + 1) : voiceId;
+}
+
+function usesShortTtsVoiceId(providerId: string, ttsConfig?: TtsSystemConfig | null): boolean {
+    const provider = ttsConfig?.providers.find(p => p.id === providerId);
+    return provider?.provider_type === "edge_tts";
+}
+
 function normalizeTtsVoice(
     providerId: string,
     voice: string,
@@ -133,6 +142,16 @@ function normalizeTtsVoice(
             const provider = ttsConfig?.providers.find(p => p.id === providerId);
             return provider?.default_voice || "alloy";
         }
+
+        if (usesShortTtsVoiceId(providerId, ttsConfig)) {
+            const provider = ttsConfig?.providers.find(p => p.id === providerId);
+            if (provider?.default_voice) {
+                return provider.default_voice;
+            }
+            const providerVoice = voices.find(v => v.provider_id === providerId);
+            return providerVoice ? stripProviderVoiceId(providerId, providerVoice.voice_id) : "";
+        }
+
         return getDefaultTtsVoice(providerId, voices);
     }
 
@@ -144,11 +163,26 @@ function normalizeTtsVoice(
         return voice;
     }
 
-    const matchesProvider = voices.some(
-        v => v.provider_id === providerId && v.voice_id === voice
-    );
+    const matchesProvider = voices.some(v => {
+        if (v.provider_id !== providerId) return false;
+        if (usesShortTtsVoiceId(providerId, ttsConfig)) {
+            return stripProviderVoiceId(providerId, v.voice_id) === voice;
+        }
+        return v.voice_id === voice;
+    });
 
-    return matchesProvider ? voice : getDefaultTtsVoice(providerId, voices);
+    if (matchesProvider) {
+        return voice;
+    }
+
+    if (usesShortTtsVoiceId(providerId, ttsConfig)) {
+        const provider = ttsConfig?.providers.find(p => p.id === providerId);
+        if (provider?.default_voice) {
+            return provider.default_voice;
+        }
+    }
+
+    return getDefaultTtsVoice(providerId, voices);
 }
 
 export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: _telegramConfigProp, onVisionConfigChange }: SettingsPanelProps) {
@@ -359,8 +393,25 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
 
         // Persist TTS Config
         if (localTtsConfig) {
+            const ttsConfigToSave: TtsSystemConfig = {
+                ...localTtsConfig,
+                providers: localTtsConfig.providers.map((provider) => {
+                    if (
+                        provider.id === ttsProviderId
+                        && (provider.provider_type === "openai" || provider.provider_type === "edge_tts")
+                    ) {
+                        return {
+                            ...provider,
+                            default_voice: ttsVoice || null,
+                        };
+                    }
+                    return provider;
+                }),
+            };
+
             try {
-                await saveTtsConfig(localTtsConfig);
+                await saveTtsConfig(ttsConfigToSave);
+                setLocalTtsConfig(ttsConfigToSave);
                 // Refresh provider status after saving config
                 const [providers, voices] = await Promise.all([
                     listTtsProviders(),

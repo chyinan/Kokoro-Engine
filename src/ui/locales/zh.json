@@ -191,6 +191,9 @@
                 "browser": "浏览器自带 (Browser)",
                 "voice": "语音/音色",
                 "no_voices": "无可用语音",
+                "voice_search": "搜索语音名称、语言或 ID",
+                "voice_no_match": "没有匹配的语音",
+                "voice_count_hint": "已加载 {{count}} 个语音，可在下拉框中搜索",
                 "speed": "语速",
                 "pitch": "音调",
                 "test": "▶ 测试语音"

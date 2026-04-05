@@ -191,6 +191,9 @@
                 "browser": "BROWSER",
                 "voice": "Voice",
                 "no_voices": "No voices available",
+                "voice_search": "Search voice name, language, or ID",
+                "voice_no_match": "No matching voices",
+                "voice_count_hint": "{{count}} voices loaded. Use search in the dropdown.",
                 "speed": "Speed",
                 "pitch": "Pitch",
                 "test": "▶ Test Voice"
