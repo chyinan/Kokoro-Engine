@@ -8,7 +8,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub id: String,
-    pub provider_type: String, // "openai", "local_vits", "local_rvc", "azure", "elevenlabs", "browser"
+    pub provider_type: String, // "openai", "edge_tts", "local_vits", "local_rvc", "azure", "elevenlabs", "browser"
     #[serde(default = "default_true")]
     pub enabled: bool,
 

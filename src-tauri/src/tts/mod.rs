@@ -2,6 +2,7 @@ pub mod browser;
 pub mod cache;
 pub mod cloud_base;
 pub mod config;
+pub mod edge;
 pub mod emotion_tts;
 pub mod interface;
 pub mod local_gpt_sovits;

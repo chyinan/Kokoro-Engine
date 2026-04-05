@@ -4,7 +4,7 @@
  *
  * Extracted from SettingsPanel lines 502–798.
  */
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { clsx } from "clsx";
 import { Trash2, RefreshCw } from "lucide-react";
@@ -15,6 +15,9 @@ import { synthesize, listGptSovitsModels } from "../../../lib/kokoro-bridge";
 import type { GptSovitsModels } from "../../../lib/kokoro-bridge";
 import type { ProviderStatus, VoiceProfile, TtsSystemConfig } from "../../../lib/kokoro-bridge";
 import type { ProviderConfigData } from "../../../core/types/mod";
+
+const stripProviderVoiceId = (providerId: string, voiceId: string) =>
+    voiceId.startsWith(`${providerId}_`) ? voiceId.slice(providerId.length + 1) : voiceId;
 
 export interface TtsTabProps {
     ttsConfig: TtsSystemConfig | null;
@@ -52,12 +55,57 @@ export default function TtsTab({
     const isActiveGptSovits = activeProvider?.provider_type === "gpt_sovits";
     const isActiveOpenAI = activeProvider?.provider_type === "openai";
     const activeVoices = voices.filter(v => v.provider_id === ttsProviderId);
-    const activeVoiceOptions = activeVoices.length === 0
-        ? [{ value: "", label: t("settings.tts.active_settings.no_voices") }]
-        : activeVoices.map(v => ({
-            value: v.voice_id,
-            label: `${v.name} (${v.gender} · ${v.language})`,
+    const shouldUseShortVoiceId = useCallback((providerId: string) => {
+        const provider = ttsConfig?.providers.find(p => p.id === providerId);
+        return provider?.provider_type === "openai" || provider?.provider_type === "edge_tts";
+    }, [ttsConfig]);
+
+    const toVoiceOptionValue = useCallback((providerId: string, voiceId: string) => {
+        return shouldUseShortVoiceId(providerId)
+            ? stripProviderVoiceId(providerId, voiceId)
+            : voiceId;
+    }, [shouldUseShortVoiceId]);
+
+    // Helper to get grouped voice options for any provider
+    const getVoiceOptions = useCallback((providerId: string, voiceList: VoiceProfile[]) => {
+        const filtered = voiceList.filter(v => v.provider_id === providerId);
+        if (filtered.length === 0) {
+            return [{ value: "", label: t("settings.tts.active_settings.no_voices") }];
+        }
+
+        const languages = new Set(filtered.map(v => v.language).filter(l => l && l !== "unknown"));
+        const shouldGroup = ttsConfig?.providers.find(p => p.id === providerId)?.provider_type === "edge_tts" || languages.size > 1;
+
+        if (shouldGroup) {
+            const groups: Record<string, VoiceProfile[]> = {};
+            filtered.forEach(v => {
+                const lang = v.language || "Other";
+                if (!groups[lang]) groups[lang] = [];
+                groups[lang].push(v);
+            });
+
+            return Object.entries(groups)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([lang, items]) => ({
+                    label: lang.toUpperCase(),
+                    options: items.map(v => ({
+                        value: toVoiceOptionValue(providerId, v.voice_id),
+                        label: v.name,
+                        description: `${v.gender} · ${v.engine}`
+                    }))
+                }));
+        }
+
+        return filtered.map(v => ({
+            value: toVoiceOptionValue(providerId, v.voice_id),
+            label: v.name,
+            description: v.language ? `${v.gender} · ${v.language}` : v.gender
         }));
+    }, [t, toVoiceOptionValue, ttsConfig]);
+
+    // Simple memo for active settings voices
+    const activeVoiceOptions = useMemo(() => getVoiceOptions(ttsProviderId, voices), [ttsProviderId, voices, getVoiceOptions]);
+    const isVoiceSearchable = activeVoices.length > 8;
 
     // Scan for GPT-SoVITS models when install_path changes
     const scanModels = useCallback(async (providerId: string, installPath: string) => {
@@ -114,17 +162,8 @@ export default function TtsTab({
     const updateProviderConfig = (index: number, update: Partial<ProviderConfigData>) => {
         if (!ttsConfig) return;
         const newProviders = [...ttsConfig.providers];
-        const previousProvider = newProviders[index];
-        newProviders[index] = { ...previousProvider, ...update };
+        newProviders[index] = { ...newProviders[index], ...update };
         onTtsConfigChange({ ...ttsConfig, providers: newProviders });
-
-        if (
-            previousProvider.id === ttsProviderId &&
-            previousProvider.provider_type === "openai" &&
-            update.default_voice !== undefined
-        ) {
-            onTtsVoiceChange(update.default_voice || "");
-        }
     };
 
     const removeProvider = (index: number) => {
@@ -137,6 +176,7 @@ export default function TtsTab({
             setEditingProviderId(null);
         }
     };
+
 
     return (
         <div className="space-y-6">
@@ -196,11 +236,16 @@ export default function TtsTab({
                                 className={clsx(inputClasses, "font-mono text-xs")}
                             />
                         ) : (
-                            <Select
-                                value={ttsVoice}
-                                onChange={onTtsVoiceChange}
-                                options={activeVoiceOptions}
-                            />
+                            <div className="space-y-2">
+                                <Select
+                                    value={ttsVoice}
+                                    onChange={onTtsVoiceChange}
+                                    options={activeVoiceOptions}
+                                    searchable={isVoiceSearchable}
+                                    searchPlaceholder={t("settings.tts.active_settings.voice_search")}
+                                    emptyMessage={t("settings.tts.active_settings.voice_no_match")}
+                                />
+                            </div>
                         )}
                     </div>
                 )}
@@ -539,15 +584,17 @@ export default function TtsTab({
                                             </div>
                                         )}
 
-                                        {provider.provider_type === "openai" && (
+                                        {(provider.provider_type === "openai" || provider.provider_type === "edge_tts") && provider.id !== ttsProviderId && (
                                             <div>
                                                 <label className={labelClasses}>{t("settings.tts.active_settings.voice")}</label>
-                                                <input
-                                                    type="text"
+                                                <Select
                                                     value={provider.default_voice || ""}
-                                                    onChange={e => updateProviderConfig(index, { default_voice: e.target.value })}
-                                                    placeholder="alloy"
-                                                    className={clsx(inputClasses, "font-mono text-xs")}
+                                                    onChange={v => updateProviderConfig(index, { default_voice: v })}
+                                                    options={getVoiceOptions(provider.id, voices)}
+                                                    searchable={voices.filter(v => v.provider_id === provider.id).length > 8}
+                                                    placeholder={provider.provider_type === "edge_tts" ? "zh-CN-XiaoyiNeural" : "alloy"}
+                                                    searchPlaceholder={t("settings.tts.active_settings.voice_search")}
+                                                    emptyMessage={t("settings.tts.active_settings.voice_no_match")}
                                                 />
                                             </div>
                                         )}
@@ -579,7 +626,7 @@ export default function TtsTab({
                 {/* Add Provider Dropdown */}
                 <div className="pt-2">
                     <div className="grid grid-cols-2 gap-2">
-                        {["openai", "local_vits", "gpt_sovits", "azure", "elevenlabs"].map(type => (
+                        {["openai", "edge_tts", "local_vits", "gpt_sovits", "azure", "elevenlabs"].map(type => (
                             <button
                                 key={type}
                                 onClick={() => addProvider(type)}
