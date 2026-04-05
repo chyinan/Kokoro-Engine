@@ -85,4 +85,43 @@ describe("buildChatMessagesFromConversation", () => {
             }),
         ]);
     });
+
+    it("审批结果历史回放保留工具身份字段", () => {
+        const messages: Array<ConversationMessage> = [
+            createMessage({
+                role: "assistant",
+                content: "等待审批。",
+                metadata: JSON.stringify({ turn_id: "turn-approval" }),
+            }),
+            createMessage({
+                role: "tool",
+                content: "Error: Denied pending approval: permission level 'elevated' requires approval",
+                metadata: JSON.stringify({
+                    type: "tool_result",
+                    turn_id: "turn-approval",
+                    tool_call_id: "call-approval",
+                    tool_id: "builtin__write_note",
+                    tool_name: "write_note",
+                    source: "builtin",
+                    needs_feedback: false,
+                    permission_level: "elevated",
+                    risk_tags: ["write"],
+                }),
+            }),
+        ];
+
+        const chatMessages = buildChatMessagesFromConversation(messages);
+
+        expect(chatMessages).toHaveLength(1);
+        expect(chatMessages[0]?.tools).toEqual([
+            expect.objectContaining({
+                tool: "write_note",
+                toolId: "builtin__write_note",
+                source: "builtin",
+                permissionLevel: "elevated",
+                riskTags: ["write"],
+                denyKind: "pending_approval",
+            }),
+        ]);
+    });
 });

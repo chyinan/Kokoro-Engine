@@ -601,10 +601,6 @@ fn rejected_pending_approval_message(reason: Option<String>) -> String {
     }
 }
 
-fn is_pending_approval_error(error: &str) -> bool {
-    error.starts_with("Denied pending approval:")
-}
-
 fn approved_tool_error_payload(
     outcome: &crate::actions::ToolExecutionOutcome,
     turn_id: &str,

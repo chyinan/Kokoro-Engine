@@ -14,13 +14,36 @@
 - 已抽取共享工具执行器：`src-tauri/src/actions/executor.rs`
 - `chat.rs` 与 `telegram/bot.rs` 已接入共享执行器
 - `commands/actions.rs` 已按 canonical tool id 解析、校验和执行工具
-- 前端 bridge 的 `ActionInfo` / `ToolCallEvent` 类型已补充：
+- 前端 bridge 的 `ActionInfo` / `ToolCallEvent` / `ToolTraceItem` 类型已补充：
   - `id`
   - `source`
   - `server_name`
   - `needs_feedback`
   - `tool_id`
+  - `permission_level`
+  - `risk_tags`
+- 聊天实时 trace、历史回放、tool result metadata 已贯通：
+  - `tool_id`
+  - `tool_name`
+  - `source`
+  - `server_name`
+  - `needs_feedback`
+  - `permission_level`
+  - `risk_tags`
+- `assistant_tool_calls` / `tool_result` 持久化 metadata 已补齐 canonical tool identity 字段
 - `McpTab.tsx` 已切换为读取统一工具目录 `listActions()`，并按 `tool.id` 保存开关状态
+- 现有 MCP 设置页已按 builtin / MCP / server_name 分组展示工具，并显示来源、风险标签、权限级别
+- direct action / chat / Telegram 输入边界已统一解析到 canonical `tool_id`，执行核心不再依赖裸 `name`
+- 已新增统一权限决策模块：`src-tauri/src/actions/permission.rs`
+- `executor.rs` / `commands/actions.rs` / `chat.rs` 已开始消费结构化 `PermissionDecision`
+- pending approval 触发已不再依赖纯字符串前缀，改为读取执行结果上的结构化权限决策
+- 已完成提交：
+  - `0d99ad7` `test: add tool identity coverage for chat history`
+  - `e4e8721` `feat: persist canonical tool identity metadata`
+  - `ba38da5` `feat: enrich chat tool trace payloads with identity`
+  - `d1ba65d` `feat: group tool directory in MCP settings`
+  - `eff5228` `refactor: resolve tool inputs to canonical ids at boundaries`
+  - `25ea9fe` `refactor: centralize tool permission decisions`
 
 ## 关键决策
 - 真实工具身份使用 canonical tool id，而不是裸 `name`
@@ -30,13 +53,23 @@
 - 旧工具开关配置只自动迁移 builtin 裸名，不对冲突 alias 做隐式猜测
 
 ## 已验证
+- `npx vitest run src/ui/widgets/chat-history.test.ts`
+- `npx vitest run src/ui/widgets/chat-history.test.ts src/ui/widgets/settings/mcpToolDisplay.test.ts`
+- `npx vitest run src/ui/widgets/settings/mcpToolDisplay.test.ts`
+- `npx tsc --noEmit`
 - `cd src-tauri && cargo check`
 - `cd src-tauri && cargo check --tests`
+- `cd src-tauri && cargo test commands::chat --no-run`
+- `cd src-tauri && cargo test llm::messages --no-run`
+- `cd src-tauri && cargo test commands::actions --no-run`
+- `cd src-tauri && cargo test telegram::bot --no-run`
+- `cd src-tauri && cargo test actions::permission --no-run`
+- `cd src-tauri && cargo test actions::executor --no-run`
 - `cd src-tauri && cargo test --lib --no-run`
-- `npx tsc --noEmit`
 
 ## 验证备注
-- `cargo test actions::registry -- --nocapture` 在当前 Windows 环境运行测试二进制时出现 `STATUS_ENTRYPOINT_NOT_FOUND`，但测试编译本身通过；这更像是本地运行时 / DLL 环境问题，不是当前改动导致的编译错误。
+- 运行级 Rust 单测在当前 Windows 环境仍可能触发 `STATUS_ENTRYPOINT_NOT_FOUND`；本轮以编译级验证与前端单测为主。
+- `cargo check` 与各目标 `--no-run` 均已通过，说明本轮代码与测试编译链路稳定。
 
 ## 如需继续下一阶段
 1. 为 `assistant_tool_calls` / `tool_result` metadata 补充 `tool_id`、`source`、`server_name`

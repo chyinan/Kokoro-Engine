@@ -32,3 +32,6 @@
 
 ## 备注
 - 目前 P2 主链路已收口，后续若扩展审批策略（如批量审批、超时策略、审计视图），建议在 P3 独立规划。
+- 2026-04-05 起，UTC Phase 1 已开始接管 deny / pending approval / fail-closed 的内部判定语义。
+- `PermissionDecision` 已成为统一权限决策结构，`chat.rs` 的 pending approval 触发开始读取结构化决策，而不是继续只依赖文本前缀。
+- 现有前缀文案仍暂时保留，用于兼容历史 trace、旧消息回放与过渡期展示。
