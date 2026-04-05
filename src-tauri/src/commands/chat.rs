@@ -6,8 +6,8 @@ use crate::actions::executor::{
 };
 use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{
-    builtin_tool_id, execute_tool_calls, ActionContext, ActionRegistry, ActionResult,
-    PermissionDecision, ToolInvocation,
+    build_tool_audit_event, builtin_tool_id, execute_tool_calls, ActionContext, ActionRegistry,
+    ActionResult, PermissionDecision, ToolInvocation,
 };
 use crate::ai::context::AIOrchestrator;
 use crate::ai::context::Message;
@@ -1503,6 +1503,24 @@ pub async fn stream_chat(
             if outcome.tool_id() == builtin_tool_id("play_cue") {
                 cue_set_by_tool = true;
             }
+
+            let audit_event = build_tool_audit_event(
+                outcome.tool_id(),
+                outcome.tool_name(),
+                outcome.tool_source().unwrap_or("builtin"),
+                outcome.tool_server_name(),
+                "chat",
+                &outcome.tool_risk_tags(),
+                outcome.tool_permission_level().unwrap_or("safe"),
+                outcome
+                    .permission_decision
+                    .as_ref()
+                    .unwrap_or(&PermissionDecision::Allow),
+                None,
+                None,
+                Some(&char_id),
+            );
+            println!("[ToolAudit] {:?}", audit_event);
 
             let result = if let Err(error) = &outcome.result {
                 if matches!(
