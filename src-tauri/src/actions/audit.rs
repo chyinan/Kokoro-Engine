@@ -25,6 +25,20 @@ pub struct ToolAuditEvent {
     pub character_id: Option<String>,
 }
 
+pub struct ToolAuditInput<'a> {
+    pub tool_id: &'a str,
+    pub tool_name: &'a str,
+    pub source: &'a str,
+    pub server_name: Option<&'a str>,
+    pub invocation_source: &'a str,
+    pub risk_tags: &'a [&'a str],
+    pub permission_level: &'a str,
+    pub decision: &'a PermissionDecision,
+    pub approved_by_user: Option<bool>,
+    pub conversation_id: Option<&'a str>,
+    pub character_id: Option<&'a str>,
+}
+
 fn tool_audit_decision_from_permission(
     decision: &PermissionDecision,
     approved_by_user: Option<bool>,
@@ -32,28 +46,16 @@ fn tool_audit_decision_from_permission(
     match (decision, approved_by_user) {
         (PermissionDecision::Allow, _) => ToolAuditDecision::Allow,
         (PermissionDecision::DenyPolicy { .. }, _) => ToolAuditDecision::PolicyDeny,
-        (PermissionDecision::DenyPendingApproval { .. }, Some(true)) => ToolAuditDecision::ApprovedAfterPending,
+        (PermissionDecision::DenyPendingApproval { .. }, Some(true)) => {
+            ToolAuditDecision::ApprovedAfterPending
+        }
         (PermissionDecision::DenyPendingApproval { .. }, _) => ToolAuditDecision::PendingApproval,
         (PermissionDecision::DenyFailClosed { .. }, _) => ToolAuditDecision::FailClosed,
     }
 }
 
-pub fn build_tool_audit_event(
-    tool_id: &str,
-    tool_name: &str,
-    source: &str,
-    server_name: Option<&str>,
-    invocation_source: &str,
-    risk_tags: &[&str],
-    permission_level: &str,
-    decision: &PermissionDecision,
-    approved_by_user: Option<bool>,
-    conversation_id: Option<&str>,
-    character_id: Option<&str>,
-) -> ToolAuditEvent {
-    let audit_decision = tool_audit_decision_from_permission(decision, approved_by_user);
-
-    let reason = match decision {
+pub fn build_tool_audit_event(input: ToolAuditInput<'_>) -> ToolAuditEvent {
+    let reason = match input.decision {
         PermissionDecision::Allow => None,
         PermissionDecision::DenyPolicy { reason }
         | PermissionDecision::DenyPendingApproval { reason }
@@ -61,18 +63,18 @@ pub fn build_tool_audit_event(
     };
 
     ToolAuditEvent {
-        tool_id: tool_id.to_string(),
-        tool_name: tool_name.to_string(),
-        source: source.to_string(),
-        server_name: server_name.map(ToString::to_string),
-        invocation_source: invocation_source.to_string(),
-        risk_tags: risk_tags.iter().map(|tag| (*tag).to_string()).collect(),
-        permission_level: permission_level.to_string(),
-        decision: audit_decision,
+        tool_id: input.tool_id.to_string(),
+        tool_name: input.tool_name.to_string(),
+        source: input.source.to_string(),
+        server_name: input.server_name.map(ToString::to_string),
+        invocation_source: input.invocation_source.to_string(),
+        risk_tags: input.risk_tags.iter().map(|tag| (*tag).to_string()).collect(),
+        permission_level: input.permission_level.to_string(),
+        decision: tool_audit_decision_from_permission(input.decision, input.approved_by_user),
         reason,
-        approved_by_user,
-        conversation_id: conversation_id.map(ToString::to_string),
-        character_id: character_id.map(ToString::to_string),
+        approved_by_user: input.approved_by_user,
+        conversation_id: input.conversation_id.map(ToString::to_string),
+        character_id: input.character_id.map(ToString::to_string),
     }
 }
 
@@ -81,19 +83,19 @@ mod tests {
     use super::*;
 
     fn event(decision: PermissionDecision, approved_by_user: Option<bool>) -> ToolAuditEvent {
-        build_tool_audit_event(
-            "builtin__write_note",
-            "write_note",
-            "builtin",
-            None,
-            "chat",
-            &["write"],
-            "safe",
-            &decision,
+        build_tool_audit_event(ToolAuditInput {
+            tool_id: "builtin__write_note",
+            tool_name: "write_note",
+            source: "builtin",
+            server_name: None,
+            invocation_source: "chat",
+            risk_tags: &["write"],
+            permission_level: "safe",
+            decision: &decision,
             approved_by_user,
-            Some("conv-1"),
-            Some("char-1"),
-        )
+            conversation_id: Some("conv-1"),
+            character_id: Some("char-1"),
+        })
     }
 
     #[test]
@@ -113,7 +115,10 @@ mod tests {
             None,
         );
         assert_eq!(audit.decision, ToolAuditDecision::PolicyDeny);
-        assert_eq!(audit.reason.as_deref(), Some("Denied by policy: blocked risk tag 'read'"));
+        assert_eq!(
+            audit.reason.as_deref(),
+            Some("Denied by policy: blocked risk tag 'read'"),
+        );
     }
 
     #[test]
@@ -142,7 +147,8 @@ mod tests {
     fn builds_approved_after_pending_audit_event() {
         let audit = event(
             PermissionDecision::DenyPendingApproval {
-                reason: "Denied pending approval: permission level 'elevated' requires approval".to_string(),
+                reason: "Denied pending approval: permission level 'elevated' requires approval"
+                    .to_string(),
             },
             Some(true),
         );

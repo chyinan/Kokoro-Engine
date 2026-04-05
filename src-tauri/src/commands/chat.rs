@@ -7,7 +7,7 @@ use crate::actions::executor::{
 use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{
     build_tool_audit_event, builtin_tool_id, execute_tool_calls, ActionContext, ActionRegistry,
-    ActionResult, PermissionDecision, ToolInvocation,
+    ActionResult, PermissionDecision, ToolAuditInput, ToolInvocation,
 };
 use crate::ai::context::AIOrchestrator;
 use crate::ai::context::Message;
@@ -1504,22 +1504,22 @@ pub async fn stream_chat(
                 cue_set_by_tool = true;
             }
 
-            let audit_event = build_tool_audit_event(
-                outcome.tool_id(),
-                outcome.tool_name(),
-                outcome.tool_source().unwrap_or("builtin"),
-                outcome.tool_server_name(),
-                "chat",
-                &outcome.tool_risk_tags(),
-                outcome.tool_permission_level().unwrap_or("safe"),
-                outcome
+            let audit_event = build_tool_audit_event(ToolAuditInput {
+                tool_id: outcome.tool_id(),
+                tool_name: outcome.tool_name(),
+                source: outcome.tool_source().unwrap_or("builtin"),
+                server_name: outcome.tool_server_name(),
+                invocation_source: "chat",
+                risk_tags: &outcome.tool_risk_tags(),
+                permission_level: outcome.tool_permission_level().unwrap_or("safe"),
+                decision: outcome
                     .permission_decision
                     .as_ref()
                     .unwrap_or(&PermissionDecision::Allow),
-                None,
-                None,
-                Some(&char_id),
-            );
+                approved_by_user: None,
+                conversation_id: None,
+                character_id: Some(&char_id),
+            });
             println!("[ToolAudit] {:?}", audit_event);
 
             let result = if let Err(error) = &outcome.result {

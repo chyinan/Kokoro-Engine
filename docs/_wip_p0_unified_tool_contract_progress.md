@@ -37,13 +37,17 @@
 - 已新增统一权限决策模块：`src-tauri/src/actions/permission.rs`
 - `executor.rs` / `commands/actions.rs` / `chat.rs` 已开始消费结构化 `PermissionDecision`
 - pending approval 触发已不再依赖纯字符串前缀，改为读取执行结果上的结构化权限决策
+- 已新增第一版审计结构：`src-tauri/src/actions/audit.rs`
+- 审计事件已最小接入 chat 工具执行链，当前先以日志输出为主，尚未持久化入库
 - 已完成提交：
-  - `0d99ad7` `test: add tool identity coverage for chat history`
-  - `e4e8721` `feat: persist canonical tool identity metadata`
-  - `ba38da5` `feat: enrich chat tool trace payloads with identity`
-  - `d1ba65d` `feat: group tool directory in MCP settings`
-  - `eff5228` `refactor: resolve tool inputs to canonical ids at boundaries`
-  - `25ea9fe` `refactor: centralize tool permission decisions`
+    - `a33061c` `feat: add tool audit model and permission visibility`
+    - `5c81d14` `refactor: drive approval flow from permission decisions`
+    - `25ea9fe` `refactor: centralize tool permission decisions`
+    - `eff5228` `refactor: resolve tool inputs to canonical ids at boundaries`
+    - `d1ba65d` `feat: group tool directory in MCP settings`
+    - `ba38da5` `feat: enrich chat tool trace payloads with identity`
+    - `e4e8721` `feat: persist canonical tool identity metadata`
+    - `0d99ad7` `test: add tool identity coverage for chat history`
 
 ## 关键决策
 - 真实工具身份使用 canonical tool id，而不是裸 `name`
@@ -70,6 +74,26 @@
 ## 验证备注
 - 运行级 Rust 单测在当前 Windows 环境仍可能触发 `STATUS_ENTRYPOINT_NOT_FOUND`；本轮以编译级验证与前端单测为主。
 - `cargo check` 与各目标 `--no-run` 均已通过，说明本轮代码与测试编译链路稳定。
+- 最终收口验证已通过：
+  - `npx tsc --noEmit`
+  - `cd src-tauri && cargo check`
+  - `cd src-tauri && cargo check --tests`
+  - `cd src-tauri && cargo test --lib --no-run`
+  - `cd src-tauri && cargo clippy -- -D warnings`
+- 最终阶段补充完成：
+  - 第一版 `ToolAuditEvent` 结构已落地
+  - 审计事件已最小接入 chat 工具执行链（当前先日志输出，不入库）
+  - 现有 MCP 设置页已满足 Phase 1 最小权限可视化目标
+  - 进度文档已与当前代码状态对齐
+  - 最近新增提交：
+    - `a33061c` `feat: add tool audit model and permission visibility`
+    - `5c81d14` `refactor: drive approval flow from permission decisions`
+    - `25ea9fe` `refactor: centralize tool permission decisions`
+    - `eff5228` `refactor: resolve tool inputs to canonical ids at boundaries`
+    - `d1ba65d` `feat: group tool directory in MCP settings`
+    - `ba38da5` `feat: enrich chat tool trace payloads with identity`
+    - `e4e8721` `feat: persist canonical tool identity metadata`
+    - `0d99ad7` `test: add tool identity coverage for chat history`
 
 ## 如需继续下一阶段
 1. 为 `assistant_tool_calls` / `tool_result` metadata 补充 `tool_id`、`source`、`server_name`

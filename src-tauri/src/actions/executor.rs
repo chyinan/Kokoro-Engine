@@ -1,9 +1,9 @@
 // pattern: Mixed (needs refactoring)
 // Reason: P2.1 需要把 action deny 的纯结果整形与 executor 编排保持最小范围共置，避免额外扩散模块边界。
-use crate::actions::permission::{evaluate_permission_decision, PermissionDecision};
-use crate::actions::registry::{
-    ActionContext, ActionInfo, ActionPermissionLevel, ActionRegistry, ActionResult, ActionRiskTag,
+use crate::actions::permission::{
+    evaluate_permission_decision, risk_tag_label, PermissionDecision,
 };
+use crate::actions::registry::{ActionContext, ActionInfo, ActionRegistry, ActionResult};
 use crate::actions::tool_settings::ToolSettings;
 use crate::hooks::{
     ActionHookPayload, BeforeActionArgsPayload, HookEvent, HookOutcome, HookPayload, HookRuntime,
@@ -31,10 +31,6 @@ pub struct ToolExecutionOutcome {
 
 pub(crate) fn denied_by_hook_message(reason: &str) -> String {
     format!("Denied by hook: {}", reason)
-}
-
-pub(crate) fn denied_by_policy_message(reason: &str) -> String {
-    format!("Denied by policy: {}", reason)
 }
 
 pub(crate) fn continue_unless_denied<T>(
@@ -93,106 +89,6 @@ pub(crate) fn apply_before_action_args_payload(
     payload: BeforeActionArgsPayload,
 ) -> HashMap<String, String> {
     payload.args
-}
-
-fn risk_tag_label(tag: &ActionRiskTag) -> &'static str {
-    match tag {
-        ActionRiskTag::Read => "read",
-        ActionRiskTag::Write => "write",
-        ActionRiskTag::External => "external",
-        ActionRiskTag::Sensitive => "sensitive",
-    }
-}
-
-fn exceeds_safe_permission_ceiling(
-    action: &ActionInfo,
-    settings: &ToolSettings,
-) -> bool {
-    matches!(
-        (action.permission_level, settings.max_permission_level),
-        (ActionPermissionLevel::Elevated, ActionPermissionLevel::Safe)
-    )
-}
-
-fn has_risk_tag(action: &ActionInfo, expected: ActionRiskTag) -> bool {
-    action.risk_tags.contains(&expected)
-}
-
-pub(crate) fn policy_denial_reason(
-    action: &ActionInfo,
-    settings: &ToolSettings,
-) -> Option<String> {
-    if exceeds_safe_permission_ceiling(action, settings) {
-        return Some(denied_by_policy_message(
-            "permission level 'elevated' exceeds max allowed 'safe'",
-        ));
-    }
-
-    for tag in &action.risk_tags {
-        if settings.blocked_risk_tags.contains(tag) {
-            return Some(denied_by_policy_message(&format!(
-                "blocked risk tag '{}'",
-                risk_tag_label(tag)
-            )));
-        }
-    }
-
-    None
-}
-
-
-pub(crate) fn approval_pending_reason(
-    action: &ActionInfo,
-    settings: &ToolSettings,
-) -> Option<String> {
-    if exceeds_safe_permission_ceiling(action, settings) && !has_risk_tag(action, ActionRiskTag::Sensitive)
-    {
-        return Some(
-            "Denied pending approval: permission level 'elevated' requires approval".to_string(),
-        );
-    }
-
-    for tag in &action.risk_tags {
-        if !settings.blocked_risk_tags.contains(tag) {
-            continue;
-        }
-
-        if matches!(tag, ActionRiskTag::Write)
-            || (*tag == ActionRiskTag::Sensitive
-                && action.permission_level == ActionPermissionLevel::Safe)
-        {
-            return Some(format!(
-                "Denied pending approval: risk tag '{}' requires approval",
-                risk_tag_label(tag)
-            ));
-        }
-    }
-
-    None
-}
-
-pub(crate) fn high_risk_fail_closed_reason(
-    action: &ActionInfo,
-    settings: &ToolSettings,
-) -> Option<String> {
-    if exceeds_safe_permission_ceiling(action, settings) && has_risk_tag(action, ActionRiskTag::Sensitive)
-    {
-        return Some(
-            "Denied by fail-closed policy: permission level 'elevated' exceeds max allowed 'safe'"
-                .to_string(),
-        );
-    }
-
-    for tag in &action.risk_tags {
-        if settings.blocked_risk_tags.contains(tag) && *tag == ActionRiskTag::Sensitive {
-            return Some(format!(
-                "Denied by fail-closed policy: blocked risk tag '{}'",
-                risk_tag_label(tag)
-            ));
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]
