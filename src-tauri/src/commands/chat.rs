@@ -6,7 +6,8 @@ use crate::actions::executor::{
 };
 use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{
-    builtin_tool_id, execute_tool_calls, ActionContext, ActionRegistry, ActionResult, ToolInvocation,
+    builtin_tool_id, execute_tool_calls, ActionContext, ActionRegistry, ActionResult,
+    PermissionDecision, ToolInvocation,
 };
 use crate::ai::context::AIOrchestrator;
 use crate::ai::context::Message;
@@ -729,6 +730,7 @@ fn sample_tool_trace_outcome_for_test() -> crate::actions::ToolExecutionOutcome 
         }),
         result: Ok(sample_action_result("ok")),
         needs_feedback: true,
+        permission_decision: Some(crate::actions::PermissionDecision::Allow),
     }
 }
 
@@ -1507,7 +1509,10 @@ pub async fn stream_chat(
             }
 
             let result = if let Err(error) = &outcome.result {
-                if is_pending_approval_error(error) {
+                if matches!(
+                    outcome.permission_decision,
+                    Some(PermissionDecision::DenyPendingApproval { .. })
+                ) {
                     let (resolved_result, resolved_payload) = wait_for_tool_approval_and_execute(
                         &app,
                         approval_state.inner().as_ref(),
@@ -2315,6 +2320,7 @@ mod tests {
             }),
             result: Ok(sample_action_result("ok")),
             needs_feedback: true,
+            permission_decision: Some(crate::actions::PermissionDecision::Allow),
         }
     }
 

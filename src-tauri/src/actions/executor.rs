@@ -1,5 +1,6 @@
 // pattern: Mixed (needs refactoring)
 // Reason: P2.1 需要把 action deny 的纯结果整形与 executor 编排保持最小范围共置，避免额外扩散模块边界。
+use crate::actions::permission::{evaluate_permission_decision, PermissionDecision};
 use crate::actions::registry::{
     ActionContext, ActionInfo, ActionPermissionLevel, ActionRegistry, ActionResult, ActionRiskTag,
 };
@@ -25,6 +26,7 @@ pub struct ToolExecutionOutcome {
     pub action: Option<ActionInfo>,
     pub result: Result<ActionResult, String>,
     pub needs_feedback: bool,
+    pub permission_decision: Option<PermissionDecision>,
 }
 
 pub(crate) fn denied_by_hook_message(reason: &str) -> String {
@@ -1018,8 +1020,8 @@ pub async fn execute_tool_calls(
         };
 
         let gated = continue_unless_denied(gate, || ());
-        let (action, needs_feedback, result) = match gated {
-            Err(error) => (None, true, Err(error)),
+        let (action, needs_feedback, permission_decision, result) = match gated {
+            Err(error) => (None, true, None, Err(error)),
             Ok(()) => {
                 let resolved = {
                     let registry = registry_state.read().await;
@@ -1031,7 +1033,7 @@ pub async fn execute_tool_calls(
                     .unwrap_or(true);
 
                 let action = resolved.as_ref().ok().map(|(action, _)| action.clone());
-                let result = match &resolved {
+                let (permission_decision, result) = match &resolved {
                     Ok((action, handler)) => {
                         let enabled = {
                             let tool_settings = tool_settings_state.read().await;
@@ -1039,48 +1041,45 @@ pub async fn execute_tool_calls(
                         };
 
                         if !enabled {
-                            Err(format!("Tool '{}' is disabled", action.id))
+                            (None, Err(format!("Tool '{}' is disabled", action.id)))
                         } else {
-                            let (fail_closed_reason, approval_pending_reason, policy_reason) = {
+                            let permission_decision = {
                                 let tool_settings = tool_settings_state.read().await;
-                                (
-                                    high_risk_fail_closed_reason(action, &tool_settings),
-                                    approval_pending_reason(action, &tool_settings),
-                                    policy_denial_reason(action, &tool_settings),
-                                )
+                                evaluate_permission_decision(action, &tool_settings)
                             };
-                            if let Some(reason) = fail_closed_reason {
-                                Err(reason)
-                            } else if let Some(reason) = approval_pending_reason {
-                                Err(reason)
-                            } else if let Some(reason) = policy_reason {
-                                Err(reason)
-                            } else {
-                                let mut args_payload = build_before_action_args_payload(
-                                    None,
-                                    character_id,
-                                    Some("chat".to_string()),
-                                    tool_call,
-                                    action,
-                                );
-                                if let Some(hooks) = hook_runtime.as_ref() {
-                                    hooks.emit_before_action_args_modify(&mut args_payload).await;
+                            match permission_decision.clone() {
+                                PermissionDecision::Allow => {
+                                    let mut args_payload = build_before_action_args_payload(
+                                        None,
+                                        character_id,
+                                        Some("chat".to_string()),
+                                        tool_call,
+                                        action,
+                                    );
+                                    if let Some(hooks) = hook_runtime.as_ref() {
+                                        hooks.emit_before_action_args_modify(&mut args_payload).await;
+                                    }
+                                    let effective_args = apply_before_action_args_payload(args_payload);
+                                    let ctx = ActionContext {
+                                        app: app.clone(),
+                                        character_id: character_id.to_string(),
+                                        conversation_id: None,
+                                        source: Some("chat".to_string()),
+                                    };
+                                    (Some(permission_decision), handler.execute(effective_args, ctx).await.map_err(|e| e.0))
                                 }
-                                let effective_args = apply_before_action_args_payload(args_payload);
-                                let ctx = ActionContext {
-                                    app: app.clone(),
-                                    character_id: character_id.to_string(),
-                                    conversation_id: None,
-                                    source: Some("chat".to_string()),
-                                };
-                                handler.execute(effective_args, ctx).await.map_err(|e| e.0)
+                                PermissionDecision::DenyPolicy { reason }
+                                | PermissionDecision::DenyPendingApproval { reason }
+                                | PermissionDecision::DenyFailClosed { reason } => {
+                                    (Some(permission_decision), Err(reason))
+                                }
                             }
                         }
                     }
-                    Err(error) => Err(error.0.clone()),
+                    Err(error) => (None, Err(error.0.clone())),
                 };
 
-                (action, needs_feedback, result)
+                (action, needs_feedback, permission_decision, result)
             }
         };
 
@@ -1110,7 +1109,9 @@ pub async fn execute_tool_calls(
             action,
             result,
             needs_feedback,
+            permission_decision,
         });
+        continue;
     }
 
     outcomes

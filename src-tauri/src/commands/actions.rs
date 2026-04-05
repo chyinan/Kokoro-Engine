@@ -1,10 +1,11 @@
 // pattern: Mixed (needs refactoring)
 // Reason: 该命令文件同时承担 Tauri 命令编排与最小 hook 接线；本次只做直调 action deny 对齐，不额外拆分命令层。
 use crate::actions::executor::{
-    apply_before_action_args_payload, approval_pending_reason, build_action_hook_payload,
+    apply_before_action_args_payload, build_action_hook_payload,
     build_before_action_args_payload, continue_unless_denied, denied_by_hook_message,
-    high_risk_fail_closed_reason, policy_denial_reason, ToolInvocation,
+    ToolInvocation,
 };
+use crate::actions::permission::{evaluate_permission_decision, PermissionDecision};
 use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{ActionContext, ActionInfo, ActionRegistry, ActionResult};
 use crate::error::KokoroError;
@@ -221,77 +222,65 @@ mod tests {
 
     #[test]
     fn direct_execute_policy_denial_uses_shared_helper_message() {
-        let reason = policy_denial_reason(&sample_elevated_action(), &sample_safe_policy_settings())
-            .expect("policy should deny elevated action under safe settings");
+        let decision = evaluate_permission_decision(&sample_read_action(), &sample_read_blocking_policy_settings());
 
-        match KokoroError::Validation(reason.clone()) {
-            KokoroError::Validation(message) => {
-                assert_eq!(message, reason);
-                assert!(message.starts_with("Denied by policy:"));
-                assert!(message.contains("permission level 'elevated'"));
+        assert_eq!(
+            decision,
+            PermissionDecision::DenyPolicy {
+                reason: "Denied by policy: blocked risk tag 'read'".to_string(),
             }
-            other => panic!("expected validation error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn direct_execute_policy_denial_can_block_low_risk_tag() {
-        let reason = policy_denial_reason(&sample_read_action(), &sample_read_blocking_policy_settings())
-            .expect("policy should deny blocked read tag");
-
-        assert!(reason.starts_with("Denied by policy:"));
-        assert!(reason.contains("blocked risk tag 'read'"));
+        );
     }
 
     #[test]
     fn direct_execute_pending_approval_uses_shared_helper_message() {
-        let reason = approval_pending_reason(&sample_elevated_action(), &sample_safe_policy_settings())
-            .expect("pending approval should deny elevated action under safe settings");
+        let decision = evaluate_permission_decision(&sample_elevated_action(), &sample_safe_policy_settings());
 
-        match KokoroError::Validation(reason.clone()) {
-            KokoroError::Validation(message) => {
-                assert_eq!(message, reason);
-                assert!(message.starts_with("Denied pending approval:"));
-                assert!(message.contains("permission level 'elevated'"));
+        assert_eq!(
+            decision,
+            PermissionDecision::DenyPendingApproval {
+                reason: "Denied pending approval: permission level 'elevated' requires approval".to_string(),
             }
-            other => panic!("expected validation error, got {other:?}"),
-        }
+        );
     }
 
     #[test]
     fn direct_execute_pending_approval_can_block_write_tag() {
-        let reason = approval_pending_reason(&sample_write_action(), &sample_write_blocking_policy_settings())
-            .expect("pending approval should deny blocked write tag");
+        let decision = evaluate_permission_decision(&sample_write_action(), &sample_write_blocking_policy_settings());
 
-        assert!(reason.starts_with("Denied pending approval:"));
-        assert!(reason.contains("risk tag 'write' requires approval"));
+        assert_eq!(
+            decision,
+            PermissionDecision::DenyPendingApproval {
+                reason: "Denied pending approval: risk tag 'write' requires approval".to_string(),
+            }
+        );
     }
 
     #[test]
     fn direct_execute_fail_closed_uses_shared_helper_message() {
-        let reason = high_risk_fail_closed_reason(
+        let decision = evaluate_permission_decision(
             &sample_sensitive_elevated_action(),
             &sample_safe_blocked_sensitive_settings(),
-        )
-        .expect("fail-closed should deny elevated sensitive action under safe settings");
+        );
 
-        match KokoroError::Validation(reason.clone()) {
-            KokoroError::Validation(message) => {
-                assert_eq!(message, reason);
-                assert!(message.starts_with("Denied by fail-closed policy:"));
-                assert!(message.contains("permission level 'elevated'"));
+        assert_eq!(
+            decision,
+            PermissionDecision::DenyFailClosed {
+                reason: "Denied by fail-closed policy: permission level 'elevated' exceeds max allowed 'safe'".to_string(),
             }
-            other => panic!("expected validation error, got {other:?}"),
-        }
+        );
     }
 
     #[test]
     fn direct_execute_fail_closed_can_block_sensitive_tag() {
-        let reason = high_risk_fail_closed_reason(&sample_sensitive_action(), &sample_sensitive_blocking_policy_settings())
-            .expect("fail-closed should deny blocked sensitive tag");
+        let decision = evaluate_permission_decision(&sample_sensitive_action(), &sample_sensitive_blocking_policy_settings());
 
-        assert!(reason.starts_with("Denied by fail-closed policy:"));
-        assert!(reason.contains("blocked risk tag 'sensitive'"));
+        assert_eq!(
+            decision,
+            PermissionDecision::DenyFailClosed {
+                reason: "Denied by fail-closed policy: blocked risk tag 'sensitive'".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -612,39 +601,14 @@ pub async fn execute_action(
         return Err(error);
     }
 
-    let (fail_closed_reason, approval_pending_reason, policy_reason) = {
+    let permission_decision = {
         let tool_settings = tool_settings_state.read().await;
-        (
-            high_risk_fail_closed_reason(&action, &tool_settings),
-            approval_pending_reason(&action, &tool_settings),
-            policy_denial_reason(&action, &tool_settings),
-        )
+        evaluate_permission_decision(&action, &tool_settings)
     };
-    if let Some(reason) = fail_closed_reason {
-        let error = KokoroError::Validation(reason);
-        emit_after_action_hook(
-            &app,
-            &character_id,
-            &raw_invocation,
-            Some(&action),
-            &Err(error.clone()),
-        )
-        .await;
-        return Err(error);
-    }
-    if let Some(reason) = approval_pending_reason {
-        let error = KokoroError::Validation(reason);
-        emit_after_action_hook(
-            &app,
-            &character_id,
-            &raw_invocation,
-            Some(&action),
-            &Err(error.clone()),
-        )
-        .await;
-        return Err(error);
-    }
-    if let Some(reason) = policy_reason {
+    if let PermissionDecision::DenyPolicy { reason }
+        | PermissionDecision::DenyPendingApproval { reason }
+        | PermissionDecision::DenyFailClosed { reason } = permission_decision
+    {
         let error = KokoroError::Validation(reason);
         emit_after_action_hook(
             &app,
