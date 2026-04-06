@@ -23,7 +23,7 @@ pub fn handle_live2d_request() -> impl Fn(
         let models_dir = match ctx.app_handle().path().app_data_dir() {
             Ok(app_data) => app_data.join("live2d_models"),
             Err(e) => {
-                eprintln!("[live2d protocol] Cannot resolve app data dir: {}", e);
+                tracing::error!(target: "live2d", "[live2d protocol] Cannot resolve app data dir: {}", e);
                 return tauri::http::Response::builder()
                     .status(500)
                     .body(b"Internal Server Error".to_vec())
@@ -57,9 +57,11 @@ pub fn handle_live2d_request() -> impl Fn(
         }
 
         if !file_path.exists() || !file_path.is_file() {
-            eprintln!(
+            tracing::error!(
+                target: "live2d",
                 "[live2d protocol] 404 Not Found: {} (resolved to {:?})",
-                clean_path, file_path
+                clean_path,
+                file_path
             );
             return tauri::http::Response::builder()
                 .status(404)
@@ -83,7 +85,7 @@ pub fn handle_live2d_request() -> impl Fn(
                 .body(content)
                 .unwrap(),
             Err(e) => {
-                eprintln!("[live2d protocol] Read error for {:?}: {}", file_path, e);
+                tracing::error!(target: "live2d", "[live2d protocol] Read error for {:?}: {}", file_path, e);
                 tauri::http::Response::builder()
                     .status(500)
                     .body(b"Internal Server Error".to_vec())

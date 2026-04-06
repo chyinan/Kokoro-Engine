@@ -112,14 +112,24 @@ impl PendingToolApprovalState {
             .lock()
             .await
             .remove(approval_request_id)
-            .ok_or_else(|| KokoroError::Validation(format!("Unknown approval request '{}'", approval_request_id)))?;
+            .ok_or_else(|| {
+                KokoroError::Validation(format!(
+                    "Unknown approval request '{}'",
+                    approval_request_id
+                ))
+            })?;
         let sender = entry.decision_tx.take().ok_or_else(|| {
             KokoroError::Validation(format!(
                 "Approval request '{}' for tool '{}' is no longer pending",
                 entry.approval_request_id, entry.tool_name
             ))
         })?;
-        let _ = (&entry.turn_id, &entry.tool_id, &entry.args, &entry.decision_rx);
+        let _ = (
+            &entry.turn_id,
+            &entry.tool_id,
+            &entry.args,
+            &entry.decision_rx,
+        );
         sender.send(decision).map_err(|_| {
             KokoroError::Validation(format!(
                 "Approval request '{}' for tool '{}' is no longer pending",
@@ -144,7 +154,10 @@ async fn reject_tool_approval_inner(
     reason: Option<String>,
 ) -> Result<(), KokoroError> {
     approval_state
-        .resolve(&approval_request_id, ToolApprovalDecision::Rejected { reason })
+        .resolve(
+            &approval_request_id,
+            ToolApprovalDecision::Rejected { reason },
+        )
         .await
 }
 
@@ -211,7 +224,7 @@ pub async fn set_context_settings(
         "max_message_chars": max_chars,
     });
     if let Err(e) = std::fs::write(&path, json.to_string()) {
-        eprintln!("[Context] Failed to persist context_settings: {}", e);
+        tracing::error!(target: "context", "[Context] Failed to persist context_settings: {}", e);
     }
 
     Ok(())
@@ -285,7 +298,13 @@ fn build_before_llm_request_payload(
 fn apply_before_llm_request_payload(
     payload: BeforeLlmRequestPayload,
     original_prompt_messages: &[Message],
-) -> Result<(String, Vec<async_openai::types::chat::ChatCompletionRequestMessage>), String> {
+) -> Result<
+    (
+        String,
+        Vec<async_openai::types::chat::ChatCompletionRequestMessage>,
+    ),
+    String,
+> {
     let request_message = payload.request_message;
     let messages = payload
         .messages
@@ -310,7 +329,13 @@ fn build_effective_before_llm_request(
     request_message: String,
     hidden: bool,
     prompt_messages: &[Message],
-) -> Result<(String, Vec<async_openai::types::chat::ChatCompletionRequestMessage>), String> {
+) -> Result<
+    (
+        String,
+        Vec<async_openai::types::chat::ChatCompletionRequestMessage>,
+    ),
+    String,
+> {
     let payload = build_before_llm_request_payload(
         conversation_id,
         character_id,
@@ -327,7 +352,7 @@ fn debug_log_llm_messages(
     label: &str,
     messages: &[async_openai::types::chat::ChatCompletionRequestMessage],
 ) {
-    println!("[LLM/Debug] {} ({} messages)", label, messages.len());
+    tracing::info!(target: "llm", "[LLM/Debug] {} ({} messages)", label, messages.len());
     for (index, message) in messages.iter().enumerate() {
         let role = match message {
             async_openai::types::chat::ChatCompletionRequestMessage::Developer(_) => "developer",
@@ -344,7 +369,7 @@ fn debug_log_llm_messages(
         } else {
             compact
         };
-        println!("[LLM/Debug]   #{} role={} text={}", index, role, preview);
+        tracing::info!(target: "llm", "[LLM/Debug]   #{} role={} text={}", index, role, preview);
     }
 }
 
@@ -438,7 +463,11 @@ fn base_tool_trace_payload(
     })
 }
 
-fn tool_error_payload(outcome: &crate::actions::ToolExecutionOutcome, turn_id: &str, error: &str) -> serde_json::Value {
+fn tool_error_payload(
+    outcome: &crate::actions::ToolExecutionOutcome,
+    turn_id: &str,
+    error: &str,
+) -> serde_json::Value {
     let mut payload = base_tool_trace_payload(outcome, turn_id);
     payload["error"] = serde_json::Value::String(error.to_string());
     payload["deny_kind"] = serde_json::Value::String(deny_kind_for_tool_error(error).to_string());
@@ -562,7 +591,9 @@ async fn execute_single_tool_after_approval(
         &action,
     );
     if let Some(hooks) = hook_runtime.as_ref() {
-        hooks.emit_before_action_args_modify(&mut args_payload).await;
+        hooks
+            .emit_before_action_args_modify(&mut args_payload)
+            .await;
     }
     let effective_args = apply_before_action_args_payload(args_payload);
     let ctx = ActionContext {
@@ -630,40 +661,41 @@ async fn wait_for_tool_approval_and_execute(
             outcome.invocation.args.clone(),
         )
         .await;
-    let requested_payload = pending_tool_trace_payload(
-        outcome,
-        turn_id,
-        pending_error,
-        &approval_request_id,
-    );
+    let requested_payload =
+        pending_tool_trace_payload(outcome, turn_id, pending_error, &approval_request_id);
     let receiver = approval_state
         .take_receiver(&approval_request_id)
         .await
-        .ok_or_else(|| KokoroError::Internal("Missing approval receiver after registration".to_string()))?;
+        .ok_or_else(|| {
+            KokoroError::Internal("Missing approval receiver after registration".to_string())
+        })?;
 
     app.emit("chat-turn-tool", requested_payload.clone())
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
-    let decision = receiver
-        .await
-        .map_err(|_| KokoroError::Validation(format!("Approval request '{}' was dropped", approval_request_id)))?;
+    let decision = receiver.await.map_err(|_| {
+        KokoroError::Validation(format!(
+            "Approval request '{}' was dropped",
+            approval_request_id
+        ))
+    })?;
 
     match decision {
         ToolApprovalDecision::Approved => {
-            let result = execute_single_tool_after_approval(app, registry_state, character_id, &outcome.invocation).await;
+            let result = execute_single_tool_after_approval(
+                app,
+                registry_state,
+                character_id,
+                &outcome.invocation,
+            )
+            .await;
             let payload = match &result {
-                Ok(value) => approved_tool_trace_payload(
-                    outcome,
-                    turn_id,
-                    value,
-                    &approval_request_id,
-                ),
-                Err(error) => approved_tool_error_payload(
-                    outcome,
-                    turn_id,
-                    error,
-                    &approval_request_id,
-                ),
+                Ok(value) => {
+                    approved_tool_trace_payload(outcome, turn_id, value, &approval_request_id)
+                }
+                Err(error) => {
+                    approved_tool_error_payload(outcome, turn_id, error, &approval_request_id)
+                }
             };
             Ok((result, payload))
         }
@@ -732,18 +764,26 @@ fn sample_tool_trace_outcome_for_test() -> crate::actions::ToolExecutionOutcome 
 
 #[cfg(test)]
 fn tool_trace_success_has_no_deny_kind() -> bool {
-    tool_success_payload(&sample_tool_trace_outcome_for_test(), "turn-1", &sample_action_result("ok"))
-        .get("deny_kind")
-        .is_none()
+    tool_success_payload(
+        &sample_tool_trace_outcome_for_test(),
+        "turn-1",
+        &sample_action_result("ok"),
+    )
+    .get("deny_kind")
+    .is_none()
 }
 
 #[cfg(test)]
 fn tool_trace_success_message() -> Option<String> {
-    tool_success_payload(&sample_tool_trace_outcome_for_test(), "turn-1", &sample_action_result("ok"))
-        .get("result")
-        .and_then(|value| value.get("message"))
-        .and_then(|value| value.as_str())
-        .map(ToString::to_string)
+    tool_success_payload(
+        &sample_tool_trace_outcome_for_test(),
+        "turn-1",
+        &sample_action_result("ok"),
+    )
+    .get("result")
+    .and_then(|value| value.get("message"))
+    .and_then(|value| value.as_str())
+    .map(ToString::to_string)
 }
 
 /// Strip `[TRANSLATE:...]` tags from text.
@@ -1127,7 +1167,8 @@ pub async fn stream_chat(
         .find(|provider| provider.id == llm_config.active_provider)
         .map(|provider| provider.supports_native_tools)
         .unwrap_or(true);
-    println!(
+    tracing::info!(
+        target: "chat",
         "[Chat] active_provider={}, native_tools_enabled={}",
         llm_config.active_provider, native_tools_enabled
     );
@@ -1186,11 +1227,9 @@ pub async fn stream_chat(
             .await;
     }
 
-    let (effective_request_message, mut client_messages) = apply_before_llm_request_payload(
-        before_llm_request_payload,
-        &prompt_messages,
-    )
-    .map_err(KokoroError::Chat)?;
+    let (effective_request_message, mut client_messages) =
+        apply_before_llm_request_payload(before_llm_request_payload, &prompt_messages)
+            .map_err(KokoroError::Chat)?;
 
     if let Some(hooks) = hook_runtime.as_ref() {
         hooks
@@ -1266,7 +1305,7 @@ pub async fn stream_chat(
                 // Create multimodal content
                 replace_user_message_with_images(last_user_msg, text_content, processed_images)
                     .map_err(KokoroError::Chat)?;
-                println!("[Chat] Attached {} images to user message", images.len());
+                tracing::info!(target: "chat", "[Chat] Attached {} images to user message", images.len());
             }
         }
     }
@@ -1279,7 +1318,8 @@ pub async fn stream_chat(
 
     #[cfg(debug_assertions)]
     {
-        println!(
+        tracing::info!(
+            target: "llm",
             "[LLM/Debug] active_provider={} native_tools_enabled={} tool_count={}",
             llm_config.active_provider,
             native_tools_enabled,
@@ -1304,7 +1344,7 @@ pub async fn stream_chat(
     let mut force_text_only_round = false;
 
     for round in 0..max_tool_rounds {
-        println!("[Chat] Tool loop round {}", round + 1);
+        tracing::info!(target: "chat", "[Chat] Tool loop round {}", round + 1);
 
         let mut stream: std::pin::Pin<
             Box<dyn futures::Stream<Item = Result<LlmStreamEvent, String>> + Send>,
@@ -1363,7 +1403,8 @@ pub async fn stream_chat(
                         app.emit("chat-error", e)
                             .map_err(|e| KokoroError::Chat(e.to_string()))?;
                     } else {
-                        eprintln!(
+                        tracing::error!(
+                            target: "chat",
                             "[Chat] Ignoring trailing stream error after partial response: {}",
                             e
                         );
@@ -1393,7 +1434,8 @@ pub async fn stream_chat(
         let (cleaned_text, round_translation) = extract_translate_tags(&cleaned_text);
         tool_calls.extend(native_tool_calls);
 
-        println!(
+        tracing::info!(
+            target: "chat",
             "[Chat] Round {} raw response ({} chars): ...{}",
             round + 1,
             round_response.len(),
@@ -1406,12 +1448,14 @@ pub async fn stream_chat(
                 .rev()
                 .collect::<String>()
         );
-        println!(
+        tracing::info!(
+            target: "chat",
             "[Chat] Round {} translation: {:?}",
             round + 1,
             round_translation
         );
-        println!(
+        tracing::info!(
+            target: "chat::tools",
             "[Chat] Round {} tool_calls: {}",
             round + 1,
             tool_calls.len()
@@ -1440,7 +1484,7 @@ pub async fn stream_chat(
                                 draft_row_id = Some(id);
                             }
                             Err(e) => {
-                                eprintln!("[Chat] Failed to persist streaming draft: {}", e);
+                                tracing::error!(target: "chat", "[Chat] Failed to persist streaming draft: {}", e);
                             }
                         }
                     }
@@ -1448,7 +1492,7 @@ pub async fn stream_chat(
                         // Subsequent rounds: update draft row
                         if let Err(e) = state.update_streaming_draft(id, &draft_content, None).await
                         {
-                            eprintln!("[Chat] Failed to update streaming draft: {}", e);
+                            tracing::error!(target: "chat", "[Chat] Failed to update streaming draft: {}", e);
                         }
                     }
                 }
@@ -1488,12 +1532,18 @@ pub async fn stream_chat(
         let mut tool_result_messages = Vec::new();
         let mut continuation_tool_calls: Vec<serde_json::Value> = Vec::new();
         let mut continuation_tool_call_messages = Vec::new();
-        let mut persisted_native_tool_results: Vec<(serde_json::Value, async_openai::types::chat::ChatCompletionRequestMessage)> = Vec::new();
-        let any_needs_feedback = execution_outcomes.iter().any(|outcome| outcome.needs_feedback);
+        let mut persisted_native_tool_results: Vec<(
+            serde_json::Value,
+            async_openai::types::chat::ChatCompletionRequestMessage,
+        )> = Vec::new();
+        let any_needs_feedback = execution_outcomes
+            .iter()
+            .any(|outcome| outcome.needs_feedback);
         let has_native_tool_calls = tool_calls.iter().any(|tc| tc.tool_call_id.is_some());
 
         for outcome in execution_outcomes {
-            println!(
+            tracing::info!(
+                target: "tools",
                 "[ToolCall] Executing: {} with args {:?}",
                 outcome.invocation.name, outcome.invocation.args
             );
@@ -1520,7 +1570,7 @@ pub async fn stream_chat(
                 conversation_id: None,
                 character_id: Some(&char_id),
             });
-            println!("[ToolAudit] {:?}", audit_event);
+            tracing::info!(target: "tools", "[ToolAudit] {:?}", audit_event);
 
             let result = if let Err(error) = &outcome.result {
                 if matches!(
@@ -1539,23 +1589,23 @@ pub async fn stream_chat(
                     .await?;
                     match &resolved_result {
                         Ok(result) => {
-                            println!("[ToolCall] {} approved => {}", outcome.tool_name(), result.message);
+                            tracing::info!(target: "tools", "[ToolCall] {} approved => {}", outcome.tool_name(), result.message);
                         }
                         Err(error) => {
-                            eprintln!("[ToolCall] {} rejected/failed after approval flow: {}", outcome.tool_name(), error);
+                            tracing::error!(target: "tools", "[ToolCall] {} rejected/failed after approval flow: {}", outcome.tool_name(), error);
                         }
                     }
                     app.emit("chat-turn-tool", resolved_payload)
                         .map_err(|e| KokoroError::Chat(e.to_string()))?;
                     resolved_result
                 } else {
-                    eprintln!("[ToolCall] {} failed: {}", outcome.tool_name(), error);
+                    tracing::error!(target: "tools", "[ToolCall] {} failed: {}", outcome.tool_name(), error);
                     emit_tool_trace_event(&app, &assistant_turn_id, &outcome);
                     outcome.result.clone()
                 }
             } else {
                 if let Ok(success) = &outcome.result {
-                    println!("[ToolCall] {} => {}", outcome.tool_name(), success.message);
+                    tracing::info!(target: "tools", "[ToolCall] {} => {}", outcome.tool_name(), success.message);
                 }
                 emit_tool_trace_event(&app, &assistant_turn_id, &outcome);
                 outcome.result.clone()
@@ -1567,7 +1617,8 @@ pub async fn stream_chat(
             });
 
             if let Some(tool_call_id) = &outcome.invocation.tool_call_id {
-                continuation_tool_calls.push(assistant_tool_call_metadata_value(&outcome, tool_call_id));
+                continuation_tool_calls
+                    .push(assistant_tool_call_metadata_value(&outcome, tool_call_id));
                 continuation_tool_call_messages.push((
                     tool_call_id.clone(),
                     outcome.tool_name().to_string(),
@@ -1630,7 +1681,7 @@ pub async fn stream_chat(
             // without any dialogue text.
             if !any_needs_feedback {
                 if all_cleaned_text.trim().is_empty() && !forced_text_after_side_effect {
-                    println!("[Chat] Native side-effect tools ran without text, forcing one follow-up text round");
+                    tracing::info!(target: "chat", "[Chat] Native side-effect tools ran without text, forcing one follow-up text round");
                     forced_text_after_side_effect = true;
                     client_messages.push(system_message(
                         "The tool has already been executed successfully. \
@@ -1644,7 +1695,7 @@ pub async fn stream_chat(
                         text_retry_count += 1;
                         forced_text_after_side_effect = false;
                         force_text_only_round = true;
-                        println!("[Chat] Native tool loop: no text after forced round, retrying without tools ({}/3)", text_retry_count);
+                        tracing::info!(target: "chat", "[Chat] Native tool loop: no text after forced round, retrying without tools ({}/3)", text_retry_count);
                         // Strip trailing tool/system/empty-assistant messages to avoid poisoning the context
                         while client_messages.len() > 1 {
                             let should_pop = match client_messages.last() {
@@ -1669,7 +1720,8 @@ pub async fn stream_chat(
                         ));
                         continue;
                     }
-                    println!(
+                    tracing::info!(
+                        target: "chat::tools",
                         "[Chat] Native tool loop: still no text after {} retries, ending loop",
                         text_retry_count
                     );
@@ -1678,7 +1730,8 @@ pub async fn stream_chat(
                 // If there IS text, fall through to continue normally
             }
 
-            println!(
+            tracing::info!(
+                target: "chat::tools",
                 "[Chat] Continuing after native tool calls with assistant/tool result messages"
             );
             #[cfg(debug_assertions)]
@@ -1692,7 +1745,7 @@ pub async fn stream_chat(
         // Only continue the loop if at least one tool needs its result fed back to the LLM
         if !any_needs_feedback {
             if all_cleaned_text.trim().is_empty() && !forced_text_after_side_effect {
-                println!("[Chat] Side-effect tools ran without any text reply, forcing one follow-up text round");
+                tracing::info!(target: "chat", "[Chat] Side-effect tools ran without any text reply, forcing one follow-up text round");
                 forced_text_after_side_effect = true;
                 client_messages.push(system_message(format!(
                     "[Tool results]\n\
@@ -1710,7 +1763,7 @@ pub async fn stream_chat(
                 continue;
             }
 
-            println!("[Chat] No feedback-requiring tools, ending loop");
+            tracing::info!(target: "chat", "[Chat] No feedback-requiring tools, ending loop");
             break;
         }
 
@@ -1751,12 +1804,14 @@ pub async fn stream_chat(
     if all_translations.is_empty() && !full_response.is_empty() {
         let user_lang = state.user_language.lock().await.clone();
         let resp_lang = state.response_language.lock().await.clone();
-        println!(
+        tracing::info!(
+            target: "chat",
             "[Chat] Fallback check: user_lang={:?}, resp_lang={:?}",
             user_lang, resp_lang
         );
         if !user_lang.is_empty() && !resp_lang.is_empty() && user_lang != resp_lang {
-            println!(
+            tracing::info!(
+                target: "chat",
                 "[Chat] Translation missing, triggering fallback translation into {}",
                 user_lang
             );
@@ -1771,12 +1826,12 @@ pub async fn stream_chat(
                 Ok(translation) => {
                     let t = translation.trim().to_string();
                     if !t.is_empty() {
-                        println!("[Chat] Fallback translation succeeded ({} chars)", t.len());
+                        tracing::info!(target: "chat", "[Chat] Fallback translation succeeded ({} chars)", t.len());
                         all_translations.push(t);
                     }
                 }
                 Err(e) => {
-                    eprintln!("[Chat] Fallback translation failed: {}", e);
+                    tracing::error!(target: "chat", "[Chat] Fallback translation failed: {}", e);
                 }
             }
         }
@@ -1784,7 +1839,7 @@ pub async fn stream_chat(
 
     // Fallback cue: if main LLM never called play_cue, infer via system LLM
     if !cue_set_by_tool && !full_response.is_empty() {
-        println!("[Chat] Cue not set by tool, triggering fallback cue analysis");
+        tracing::info!(target: "chat", "[Chat] Cue not set by tool, triggering fallback cue analysis");
         let mut emotion_messages = vec![system_message(
             crate::ai::prompts::EMOTION_ANALYZER_PROMPT.to_string(),
         )];
@@ -1824,19 +1879,19 @@ pub async fn stream_chat(
                             .map(|cues| cues.contains(trimmed))
                             .unwrap_or(false);
                         if is_valid {
-                            println!("[Chat] Fallback cue: {}", trimmed);
+                            tracing::info!(target: "chat", "[Chat] Fallback cue: {}", trimmed);
                             let _ = app.emit(
                                 "chat-cue",
                                 serde_json::json!({ "cue": trimmed, "source": "fallback-cue" }),
                             );
                         } else {
-                            println!("[Chat] Ignoring invalid fallback cue: {}", trimmed);
+                            tracing::info!(target: "chat", "[Chat] Ignoring invalid fallback cue: {}", trimmed);
                         }
                     }
                 }
             }
             Err(e) => {
-                eprintln!("[Chat] Fallback cue analysis failed: {}", e);
+                tracing::error!(target: "chat", "[Chat] Fallback cue analysis failed: {}", e);
             }
         }
     }
@@ -1880,7 +1935,7 @@ pub async fn stream_chat(
                 .update_streaming_draft(row_id, &full_response, metadata.as_deref())
                 .await
             {
-                eprintln!("[Chat] Failed to finalize streaming draft: {}", e);
+                tracing::error!(target: "chat", "[Chat] Failed to finalize streaming draft: {}", e);
             }
         }
 
@@ -1906,12 +1961,14 @@ pub async fn stream_chat(
     // Periodic memory extraction
     let msg_count = state.get_message_count().await;
     let memory_msg_count = state.get_memory_trigger_count().await;
-    println!(
+    tracing::info!(
+        target: "memory",
         "[Memory] User message count: {}, memory trigger count: {}",
         msg_count, memory_msg_count
     );
     if state.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        println!(
+        tracing::info!(
+            target: "memory",
             "[Memory] Triggering memory extraction (count={})",
             msg_count
         );
@@ -1949,10 +2006,10 @@ pub async fn stream_chat(
                 .await
             {
                 Ok(count) if count > 0 => {
-                    println!("[Memory] Consolidated {} memory clusters", count);
+                    tracing::info!(target: "memory", "[Memory] Consolidated {} memory clusters", count);
                 }
                 Err(e) => {
-                    eprintln!("[Memory] Consolidation failed: {}", e);
+                    tracing::error!(target: "memory", "[Memory] Consolidation failed: {}", e);
                 }
                 _ => {}
             }
@@ -1980,7 +2037,7 @@ pub async fn stream_chat(
             let json_str = match system_provider.chat(analyze_messages, None).await {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("[ImageGen] BG analyzer LLM failed: {}", e);
+                    tracing::error!(target: "imagegen", "[ImageGen] BG analyzer LLM failed: {}", e);
                     return;
                 }
             };
@@ -2000,7 +2057,8 @@ pub async fn stream_chat(
             let analysis: BgAnalysis = match serde_json::from_str(clean) {
                 Ok(a) => a,
                 Err(e) => {
-                    eprintln!(
+                    tracing::error!(
+                        target: "imagegen",
                         "[ImageGen] BG analyzer parse failed: {} | raw: {}",
                         e, json_str
                     );
@@ -2009,7 +2067,7 @@ pub async fn stream_chat(
             };
 
             if !analysis.should_generate {
-                println!("[ImageGen] BG analyzer: no image needed");
+                tracing::info!(target: "imagegen", "[ImageGen] BG analyzer: no image needed");
                 return;
             }
 
@@ -2018,7 +2076,7 @@ pub async fn stream_chat(
                 _ => return,
             };
 
-            println!("[ImageGen] BG analyzer triggered generation: {}", prompt);
+            tracing::info!(target: "imagegen", "[ImageGen] BG analyzer triggered generation: {}", prompt);
 
             match imagegen_svc
                 .generate(prompt.clone(), None, None, Some(window_size))
@@ -2026,10 +2084,10 @@ pub async fn stream_chat(
             {
                 Ok(result) => {
                     let _ = window_for_img.emit("imagegen:done", &result);
-                    println!("[ImageGen] BG image generated: {}", result.image_url);
+                    tracing::info!(target: "imagegen", "[ImageGen] BG image generated: {}", result.image_url);
                 }
                 Err(e) => {
-                    eprintln!("[ImageGen] BG generation failed: {}", e);
+                    tracing::error!(target: "imagegen", "[ImageGen] BG generation failed: {}", e);
                     let _ = window_for_img.emit("imagegen:error", e.to_string());
                 }
             }
@@ -2056,8 +2114,13 @@ pub async fn stream_chat(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actions::registry::{ActionInfo, ActionPermissionLevel, ActionRiskTag, ActionSource};
-    use crate::actions::executor::{assistant_tool_call_metadata_value_for_test, tool_metadata_value_for_test, ToolExecutionOutcome, ToolInvocation};
+    use crate::actions::executor::{
+        assistant_tool_call_metadata_value_for_test, tool_metadata_value_for_test,
+        ToolExecutionOutcome, ToolInvocation,
+    };
+    use crate::actions::registry::{
+        ActionInfo, ActionPermissionLevel, ActionRiskTag, ActionSource,
+    };
     use crate::hooks::HookPayload;
 
     // ── extract_translate_tags ──────────────────────────────
@@ -2139,11 +2202,9 @@ mod tests {
             },
         ];
 
-        let (request_message, client_messages) = apply_before_llm_request_payload(
-            payload,
-            &original_prompt_messages,
-        )
-        .expect("payload should convert");
+        let (request_message, client_messages) =
+            apply_before_llm_request_payload(payload, &original_prompt_messages)
+                .expect("payload should convert");
 
         assert_eq!(request_message, "modified hidden");
         assert_eq!(client_messages.len(), 2);
@@ -2239,7 +2300,9 @@ mod tests {
     #[test]
     fn test_deny_kind_for_tool_error_maps_known_prefixes() {
         assert_eq!(
-            deny_kind_for_tool_error("Denied pending approval: permission level 'elevated' requires approval"),
+            deny_kind_for_tool_error(
+                "Denied pending approval: permission level 'elevated' requires approval"
+            ),
             "pending_approval"
         );
         assert_eq!(
@@ -2258,7 +2321,10 @@ mod tests {
 
     #[test]
     fn test_deny_kind_for_tool_error_defaults_to_execution_error() {
-        assert_eq!(deny_kind_for_tool_error("database timeout"), "execution_error");
+        assert_eq!(
+            deny_kind_for_tool_error("database timeout"),
+            "execution_error"
+        );
     }
 
     #[test]
@@ -2287,9 +2353,18 @@ mod tests {
             "Denied pending approval: risk tag 'write' requires approval",
             "req-1",
         );
-        assert_eq!(payload.get("approval_request_id").and_then(|v| v.as_str()), Some("req-1"));
-        assert_eq!(payload.get("approval_status").and_then(|v| v.as_str()), Some("requested"));
-        assert_eq!(payload.get("deny_kind").and_then(|v| v.as_str()), Some("pending_approval"));
+        assert_eq!(
+            payload.get("approval_request_id").and_then(|v| v.as_str()),
+            Some("req-1")
+        );
+        assert_eq!(
+            payload.get("approval_status").and_then(|v| v.as_str()),
+            Some("requested")
+        );
+        assert_eq!(
+            payload.get("deny_kind").and_then(|v| v.as_str()),
+            Some("pending_approval")
+        );
     }
 
     #[test]
@@ -2301,8 +2376,14 @@ mod tests {
             &sample_action_result("ok"),
             "req-1",
         );
-        assert_eq!(approved.get("approval_status").and_then(|v| v.as_str()), Some("approved"));
-        assert_eq!(approved.get("approval_request_id").and_then(|v| v.as_str()), Some("req-1"));
+        assert_eq!(
+            approved.get("approval_status").and_then(|v| v.as_str()),
+            Some("approved")
+        );
+        assert_eq!(
+            approved.get("approval_request_id").and_then(|v| v.as_str()),
+            Some("req-1")
+        );
 
         let rejected = rejected_tool_trace_payload_for_test(
             &outcome,
@@ -2310,8 +2391,14 @@ mod tests {
             "Denied pending approval: rejected by user",
             "req-1",
         );
-        assert_eq!(rejected.get("approval_status").and_then(|v| v.as_str()), Some("rejected"));
-        assert_eq!(rejected.get("approval_request_id").and_then(|v| v.as_str()), Some("req-1"));
+        assert_eq!(
+            rejected.get("approval_status").and_then(|v| v.as_str()),
+            Some("rejected")
+        );
+        assert_eq!(
+            rejected.get("approval_request_id").and_then(|v| v.as_str()),
+            Some("req-1")
+        );
     }
 
     fn sample_metadata_outcome() -> ToolExecutionOutcome {
@@ -2348,17 +2435,54 @@ mod tests {
         });
 
         let tool_call = &assistant_tool_call_metadata["tool_calls"][0];
-        assert_eq!(assistant_tool_call_metadata.get("type").and_then(|v| v.as_str()), Some("assistant_tool_calls"));
-        assert_eq!(assistant_tool_call_metadata.get("turn_id").and_then(|v| v.as_str()), Some("turn-1"));
+        assert_eq!(
+            assistant_tool_call_metadata
+                .get("type")
+                .and_then(|v| v.as_str()),
+            Some("assistant_tool_calls")
+        );
+        assert_eq!(
+            assistant_tool_call_metadata
+                .get("turn_id")
+                .and_then(|v| v.as_str()),
+            Some("turn-1")
+        );
         assert_eq!(tool_call.get("id").and_then(|v| v.as_str()), Some("call-1"));
-        assert_eq!(tool_call.get("tool_id").and_then(|v| v.as_str()), Some("mcp__filesystem__read_file"));
-        assert_eq!(tool_call.get("tool_name").and_then(|v| v.as_str()), Some("read_file"));
-        assert_eq!(tool_call.get("source").and_then(|v| v.as_str()), Some("mcp"));
-        assert_eq!(tool_call.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
-        assert_eq!(tool_call.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(tool_call.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
-        assert_eq!(tool_call.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
-        assert_eq!(tool_call.get("arguments").and_then(|v| v.as_str()), Some("{\"path\":\"README.md\"}"));
+        assert_eq!(
+            tool_call.get("tool_id").and_then(|v| v.as_str()),
+            Some("mcp__filesystem__read_file")
+        );
+        assert_eq!(
+            tool_call.get("tool_name").and_then(|v| v.as_str()),
+            Some("read_file")
+        );
+        assert_eq!(
+            tool_call.get("source").and_then(|v| v.as_str()),
+            Some("mcp")
+        );
+        assert_eq!(
+            tool_call.get("server_name").and_then(|v| v.as_str()),
+            Some("filesystem")
+        );
+        assert_eq!(
+            tool_call.get("needs_feedback").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            tool_call.get("permission_level").and_then(|v| v.as_str()),
+            Some("safe")
+        );
+        assert_eq!(
+            tool_call
+                .get("risk_tags")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len()),
+            Some(1)
+        );
+        assert_eq!(
+            tool_call.get("arguments").and_then(|v| v.as_str()),
+            Some("{\"path\":\"README.md\"}")
+        );
     }
 
     #[test]
@@ -2366,29 +2490,87 @@ mod tests {
         let outcome = sample_metadata_outcome();
         let tool_metadata = tool_metadata_value_for_test(&outcome, "call-1", "turn-1");
 
-        assert_eq!(tool_metadata.get("type").and_then(|v| v.as_str()), Some("tool_result"));
-        assert_eq!(tool_metadata.get("turn_id").and_then(|v| v.as_str()), Some("turn-1"));
-        assert_eq!(tool_metadata.get("tool_call_id").and_then(|v| v.as_str()), Some("call-1"));
-        assert_eq!(tool_metadata.get("tool_id").and_then(|v| v.as_str()), Some("mcp__filesystem__read_file"));
-        assert_eq!(tool_metadata.get("tool_name").and_then(|v| v.as_str()), Some("read_file"));
-        assert_eq!(tool_metadata.get("source").and_then(|v| v.as_str()), Some("mcp"));
-        assert_eq!(tool_metadata.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
-        assert_eq!(tool_metadata.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(tool_metadata.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
-        assert_eq!(tool_metadata.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
+        assert_eq!(
+            tool_metadata.get("type").and_then(|v| v.as_str()),
+            Some("tool_result")
+        );
+        assert_eq!(
+            tool_metadata.get("turn_id").and_then(|v| v.as_str()),
+            Some("turn-1")
+        );
+        assert_eq!(
+            tool_metadata.get("tool_call_id").and_then(|v| v.as_str()),
+            Some("call-1")
+        );
+        assert_eq!(
+            tool_metadata.get("tool_id").and_then(|v| v.as_str()),
+            Some("mcp__filesystem__read_file")
+        );
+        assert_eq!(
+            tool_metadata.get("tool_name").and_then(|v| v.as_str()),
+            Some("read_file")
+        );
+        assert_eq!(
+            tool_metadata.get("source").and_then(|v| v.as_str()),
+            Some("mcp")
+        );
+        assert_eq!(
+            tool_metadata.get("server_name").and_then(|v| v.as_str()),
+            Some("filesystem")
+        );
+        assert_eq!(
+            tool_metadata
+                .get("needs_feedback")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            tool_metadata
+                .get("permission_level")
+                .and_then(|v| v.as_str()),
+            Some("safe")
+        );
+        assert_eq!(
+            tool_metadata
+                .get("risk_tags")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len()),
+            Some(1)
+        );
     }
 
     #[test]
     fn test_tool_trace_payloads_include_identity_and_permission_fields() {
         let outcome = sample_metadata_outcome();
         let success = tool_success_payload(&outcome, "turn-1", &sample_action_result("ok"));
-        assert_eq!(success.get("tool").and_then(|v| v.as_str()), Some("read_file"));
-        assert_eq!(success.get("tool_id").and_then(|v| v.as_str()), Some("mcp__filesystem__read_file"));
+        assert_eq!(
+            success.get("tool").and_then(|v| v.as_str()),
+            Some("read_file")
+        );
+        assert_eq!(
+            success.get("tool_id").and_then(|v| v.as_str()),
+            Some("mcp__filesystem__read_file")
+        );
         assert_eq!(success.get("source").and_then(|v| v.as_str()), Some("mcp"));
-        assert_eq!(success.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
-        assert_eq!(success.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(success.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
-        assert_eq!(success.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
+        assert_eq!(
+            success.get("server_name").and_then(|v| v.as_str()),
+            Some("filesystem")
+        );
+        assert_eq!(
+            success.get("needs_feedback").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            success.get("permission_level").and_then(|v| v.as_str()),
+            Some("safe")
+        );
+        assert_eq!(
+            success
+                .get("risk_tags")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len()),
+            Some(1)
+        );
 
         let pending = pending_tool_trace_payload_for_test(
             &outcome,
@@ -2397,24 +2579,64 @@ mod tests {
             "req-1",
         );
         assert_eq!(pending.get("source").and_then(|v| v.as_str()), Some("mcp"));
-        assert_eq!(pending.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
-        assert_eq!(pending.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(pending.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
-        assert_eq!(pending.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
-        assert_eq!(pending.get("approval_request_id").and_then(|v| v.as_str()), Some("req-1"));
-        assert_eq!(pending.get("approval_status").and_then(|v| v.as_str()), Some("requested"));
+        assert_eq!(
+            pending.get("server_name").and_then(|v| v.as_str()),
+            Some("filesystem")
+        );
+        assert_eq!(
+            pending.get("needs_feedback").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            pending.get("permission_level").and_then(|v| v.as_str()),
+            Some("safe")
+        );
+        assert_eq!(
+            pending
+                .get("risk_tags")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len()),
+            Some(1)
+        );
+        assert_eq!(
+            pending.get("approval_request_id").and_then(|v| v.as_str()),
+            Some("req-1")
+        );
+        assert_eq!(
+            pending.get("approval_status").and_then(|v| v.as_str()),
+            Some("requested")
+        );
 
         let approved = approved_tool_trace_payload_for_test(
             &outcome,
             "turn-1",
             &sample_action_result("ok"),
             "req-1",
-        );        assert_eq!(approved.get("source").and_then(|v| v.as_str()), Some("mcp"));
-        assert_eq!(approved.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
-        assert_eq!(approved.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(approved.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
-        assert_eq!(approved.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
-        assert_eq!(approved.get("approval_status").and_then(|v| v.as_str()), Some("approved"));
+        );
+        assert_eq!(approved.get("source").and_then(|v| v.as_str()), Some("mcp"));
+        assert_eq!(
+            approved.get("server_name").and_then(|v| v.as_str()),
+            Some("filesystem")
+        );
+        assert_eq!(
+            approved.get("needs_feedback").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            approved.get("permission_level").and_then(|v| v.as_str()),
+            Some("safe")
+        );
+        assert_eq!(
+            approved
+                .get("risk_tags")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len()),
+            Some(1)
+        );
+        assert_eq!(
+            approved.get("approval_status").and_then(|v| v.as_str()),
+            Some("approved")
+        );
 
         let rejected = rejected_tool_trace_payload_for_test(
             &outcome,
@@ -2423,24 +2645,65 @@ mod tests {
             "req-1",
         );
         assert_eq!(rejected.get("source").and_then(|v| v.as_str()), Some("mcp"));
-        assert_eq!(rejected.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
-        assert_eq!(rejected.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(rejected.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
-        assert_eq!(rejected.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
-        assert_eq!(rejected.get("approval_status").and_then(|v| v.as_str()), Some("rejected"));
-
-        let approved_error = approved_tool_error_payload(
-            &outcome,
-            "turn-1",
-            "execution failed",
-            "req-1",
+        assert_eq!(
+            rejected.get("server_name").and_then(|v| v.as_str()),
+            Some("filesystem")
         );
-        assert_eq!(approved_error.get("source").and_then(|v| v.as_str()), Some("mcp"));
-        assert_eq!(approved_error.get("server_name").and_then(|v| v.as_str()), Some("filesystem"));
-        assert_eq!(approved_error.get("needs_feedback").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(approved_error.get("permission_level").and_then(|v| v.as_str()), Some("safe"));
-        assert_eq!(approved_error.get("risk_tags").and_then(|v| v.as_array()).map(|v| v.len()), Some(1));
-        assert_eq!(approved_error.get("approval_status").and_then(|v| v.as_str()), Some("approved"));
+        assert_eq!(
+            rejected.get("needs_feedback").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            rejected.get("permission_level").and_then(|v| v.as_str()),
+            Some("safe")
+        );
+        assert_eq!(
+            rejected
+                .get("risk_tags")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len()),
+            Some(1)
+        );
+        assert_eq!(
+            rejected.get("approval_status").and_then(|v| v.as_str()),
+            Some("rejected")
+        );
+
+        let approved_error =
+            approved_tool_error_payload(&outcome, "turn-1", "execution failed", "req-1");
+        assert_eq!(
+            approved_error.get("source").and_then(|v| v.as_str()),
+            Some("mcp")
+        );
+        assert_eq!(
+            approved_error.get("server_name").and_then(|v| v.as_str()),
+            Some("filesystem")
+        );
+        assert_eq!(
+            approved_error
+                .get("needs_feedback")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            approved_error
+                .get("permission_level")
+                .and_then(|v| v.as_str()),
+            Some("safe")
+        );
+        assert_eq!(
+            approved_error
+                .get("risk_tags")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len()),
+            Some(1)
+        );
+        assert_eq!(
+            approved_error
+                .get("approval_status")
+                .and_then(|v| v.as_str()),
+            Some("approved")
+        );
     }
 
     #[tokio::test]
@@ -2456,7 +2719,10 @@ mod tests {
             .await;
 
         assert!(!request_id.is_empty());
-        let receiver = state.take_receiver(&request_id).await.expect("receiver should exist");
+        let receiver = state
+            .take_receiver(&request_id)
+            .await
+            .expect("receiver should exist");
         approve_tool_approval_inner(&state, request_id.clone())
             .await
             .expect("approve should succeed");
@@ -2478,10 +2744,17 @@ mod tests {
             )
             .await;
 
-        let receiver = state.take_receiver(&request_id).await.expect("receiver should exist");
-        reject_tool_approval_inner(&state, request_id.clone(), Some("user rejected".to_string()))
+        let receiver = state
+            .take_receiver(&request_id)
             .await
-            .expect("reject should succeed");
+            .expect("receiver should exist");
+        reject_tool_approval_inner(
+            &state,
+            request_id.clone(),
+            Some("user rejected".to_string()),
+        )
+        .await
+        .expect("reject should succeed");
         match receiver.await.expect("decision should resolve") {
             ToolApprovalDecision::Rejected { reason } => {
                 assert_eq!(reason.as_deref(), Some("user rejected"));

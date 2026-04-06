@@ -3,8 +3,8 @@ pub mod ai;
 pub mod commands;
 pub mod config;
 pub mod error;
-pub mod imagegen;
 pub mod hooks;
+pub mod imagegen;
 pub mod llm;
 pub mod mcp;
 pub mod mods;
@@ -19,8 +19,11 @@ use crate::utils::logging::init_logging;
 use std::sync::Arc;
 use tauri::Manager;
 
-async fn auto_start_pet_on_launch<F, Fut>(pet_enabled: bool, delay: std::time::Duration, show_pet: F)
-where
+async fn auto_start_pet_on_launch<F, Fut>(
+    pet_enabled: bool,
+    delay: std::time::Duration,
+    show_pet: F,
+) where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<(), crate::error::KokoroError>>,
 {
@@ -31,7 +34,7 @@ where
     tokio::time::sleep(delay).await;
 
     if let Err(e) = show_pet().await {
-        tracing::error!(target = "pet", "auto-start failed: {}", e);
+        tracing::error!(target: "pet", "auto-start failed: {}", e);
     }
 }
 
@@ -59,7 +62,7 @@ pub fn run() {
         for root in search_roots.into_iter().flatten() {
             let candidate = root.join(ORT_LIB_NAME);
             if candidate.exists() {
-                tracing::info!(target = "tools", "Using bundled ONNX Runtime: {}", candidate.display());
+                tracing::info!(target: "tools", "Using bundled ONNX Runtime: {}", candidate.display());
                 std::env::set_var("ORT_DYLIB_PATH", &candidate);
                 break;
             }
@@ -232,7 +235,7 @@ pub fn run() {
                             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                                 if let Some(enabled) = val.get("enabled").and_then(|v| v.as_bool()) {
                                     orchestrator.set_proactive_enabled(enabled);
-                                    tracing::info!(target = "ai", "Restored proactive_enabled={}", enabled);
+                                    tracing::info!(target: "ai", "Restored proactive_enabled={}", enabled);
                                 }
                             }
                         }
@@ -248,7 +251,7 @@ pub fn run() {
                             .and_then(|v| v.as_bool())
                             .unwrap_or(true);
                         orchestrator.set_memory_enabled(memory_enabled).await;
-                        tracing::info!(target = "ai", "Restored memory_enabled={}", memory_enabled);
+                        tracing::info!(target: "ai", "Restored memory_enabled={}", memory_enabled);
 
                         // Restore jailbreak_prompt from disk
                         let jailbreak_path = app_data_dir.join("jailbreak_prompt.json");
@@ -256,7 +259,7 @@ pub fn run() {
                             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                                 if let Some(prompt) = val.get("prompt").and_then(|v| v.as_str()) {
                                     orchestrator.set_jailbreak_prompt(prompt.to_string()).await;
-                                    tracing::info!(target = "ai", "Restored jailbreak_prompt ({} chars)", prompt.len());
+                                    tracing::info!(target: "ai", "Restored jailbreak_prompt ({} chars)", prompt.len());
                                 }
                             }
                         }
@@ -273,7 +276,7 @@ pub fn run() {
                                     .and_then(|v| v.as_u64())
                                     .unwrap_or(2000) as usize;
                                 orchestrator.set_context_settings(strategy.clone(), max_chars).await;
-                                tracing::info!(target = "ai", "Restored context_settings: strategy={}, max_chars={}", strategy, max_chars);
+                                tracing::info!(target: "ai", "Restored context_settings: strategy={}, max_chars={}", strategy, max_chars);
                             }
                         }
 
@@ -304,7 +307,7 @@ pub fn run() {
                                                     .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
                                             });
                                         }
-                                        tracing::info!(target = "ai", "Restored current_conversation_id: {} ({} messages)", id, rows.len());
+                                        tracing::info!(target: "ai", "Restored current_conversation_id: {} ({} messages)", id, rows.len());
                                     }
                                 }
                             }
@@ -316,12 +319,12 @@ pub fn run() {
                         if let Some(char_id) = crate::ai::context::AIOrchestrator::load_active_character_id() {
                             let orch = app_handle.state::<crate::ai::context::AIOrchestrator>();
                             orch.set_character_id(char_id.clone()).await;
-                            tracing::info!(target = "ai", "Restored active_character_id: {}", char_id);
+                            tracing::info!(target: "ai", "Restored active_character_id: {}", char_id);
                         }
 
                     }
                     Err(e) => {
-                        tracing::error!(target = "ai", "AI Orchestrator init failed (will run without AI): {}", e);
+                        tracing::error!(target: "ai", "AI Orchestrator init failed (will run without AI): {}", e);
                         // Do NOT panic — allow app to continue running
                     }
                 }
@@ -381,7 +384,7 @@ pub fn run() {
             let mut tool_settings = crate::actions::tool_settings::load_config(&tool_settings_path);
             if action_registry.migrate_tool_settings(&mut tool_settings) {
                 if let Err(e) = crate::actions::tool_settings::save_config(&tool_settings_path, &tool_settings) {
-                    tracing::error!(target = "tools", "Failed to persist migrated tool settings: {}", e);
+                    tracing::error!(target: "tools", "Failed to persist migrated tool settings: {}", e);
                 }
             }
 
@@ -455,14 +458,14 @@ pub fn run() {
                         };
 
                         if let Ok(()) = connect_result {
-                            tracing::info!(target = "mcp", "Connected '{}', registering tools...", cfg.name);
+                            tracing::info!(target: "mcp", "Connected '{}', registering tools...", cfg.name);
                             if let Some(registry) =
                                 app_handle.try_state::<std::sync::Arc<tokio::sync::RwLock<crate::actions::ActionRegistry>>>()
                             {
                                 crate::mcp::bridge::register_mcp_tools(&mgr_arc, registry.inner()).await;
                             }
                         } else if let Err(e) = connect_result {
-                            tracing::error!(target = "mcp", "Failed to connect '{}': {}", cfg.name, e);
+                            tracing::error!(target: "mcp", "Failed to connect '{}': {}", cfg.name, e);
                         }
                     }));
                 }
@@ -515,9 +518,9 @@ pub fn run() {
                             let target = mods_path.join(entry.file_name());
                             if !target.exists() {
                                 if let Err(e) = copy_dir_all(entry.path(), &target) {
-                                    eprintln!("[Mods] Failed to copy bundled mod {:?}: {}", entry.file_name(), e);
+                                    tracing::error!(target: "mods", "[Mods] Failed to copy bundled mod {:?}: {}", entry.file_name(), e);
                                 } else {
-                                    println!("[Mods] Installed bundled mod {:?}", entry.file_name());
+                                    tracing::info!(target: "mods", "[Mods] Installed bundled mod {:?}", entry.file_name());
                                 }
                             }
                         }
@@ -572,7 +575,7 @@ pub fn run() {
                     // Delay to let all services initialize
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     if let Err(e) = telegram_service.start(tg_app).await {
-                        eprintln!("[Telegram] Auto-start failed: {}", e);
+                        tracing::error!(target: "telegram", "[Telegram] Auto-start failed: {}", e);
                     }
                 });
             }

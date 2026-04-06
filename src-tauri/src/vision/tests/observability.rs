@@ -134,7 +134,8 @@ async fn test_upload_latency_tracking() {
         "upload latency {} us seems too high",
         snap.upload_latency_us
     );
-    println!(
+    tracing::info!(
+        target: "vision",
         "[observability] Upload latency: {} µs",
         snap.upload_latency_us
     );

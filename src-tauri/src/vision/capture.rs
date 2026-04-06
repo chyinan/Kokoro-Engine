@@ -63,7 +63,8 @@ pub fn has_significant_change(prev: &[u8], curr: &[u8], threshold: f64) -> bool 
 
     let rms = (total_diff / pixel_count).sqrt();
 
-    println!(
+    tracing::info!(
+        target: "vision",
         "[Vision] Change detection: RMS={:.4}, threshold={:.4}",
         rms, threshold
     );

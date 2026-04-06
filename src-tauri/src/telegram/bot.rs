@@ -112,14 +112,14 @@ async fn handle_message(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let chat_id = msg.chat.id;
     // 不记录消息内容，避免敏感信息泄露到日志
-    println!("[Telegram] Received message from chat_id={}", chat_id.0);
+    tracing::info!(target: "telegram", "[Telegram] Received message from chat_id={}", chat_id.0);
 
     // Snapshot config for this request
     let config = Arc::new(config.read().await.clone());
 
     // Access control: check whitelist
     if !config.allowed_chat_ids.is_empty() && !config.allowed_chat_ids.contains(&chat_id.0) {
-        println!("[Telegram] Chat {} not in whitelist, ignoring", chat_id.0);
+        tracing::info!(target: "telegram", "[Telegram] Chat {} not in whitelist, ignoring", chat_id.0);
         return Ok(());
     }
 
@@ -136,7 +136,7 @@ async fn handle_message(
         }
         state.count += 1;
         if state.count > RATE_LIMIT_MAX {
-            println!("[Telegram] Rate limit exceeded for chat_id={}", chat_id.0);
+            tracing::info!(target: "telegram", "[Telegram] Rate limit exceeded for chat_id={}", chat_id.0);
             bot.send_message(chat_id, "⚠️ Too many messages. Please wait a moment.")
                 .await
                 .ok();
@@ -190,7 +190,7 @@ async fn handle_command(
                 /status — Show current session info\n\n\
                 Just send a text or voice message to chat!";
             if let Err(e) = bot.send_message(chat_id, text).await {
-                eprintln!("[Telegram] Failed to send /start reply: {}", e);
+                tracing::error!(target: "telegram", "[Telegram] Failed to send /start reply: {}", e);
             }
         }
         "/new" => {
@@ -286,7 +286,7 @@ async fn handle_text(
             }
         }
     };
-    println!("[Telegram] Resolved char_id='{}' for this request", char_id);
+    tracing::info!(target: "telegram", "[Telegram] Resolved char_id='{}' for this request", char_id);
     orchestrator
         .add_message("user".to_string(), text.to_string(), &char_id)
         .await;
@@ -355,7 +355,7 @@ async fn handle_text(
             match result {
                 Ok(delta) => response.push_str(&delta),
                 Err(e) => {
-                    eprintln!("[Telegram] LLM stream error: {}", e);
+                    tracing::error!(target: "telegram", "[Telegram] LLM stream error: {}", e);
                     break;
                 }
             }
@@ -369,7 +369,8 @@ async fn handle_text(
         let (cleaned, round_translation) = extract_translate_tags(&cleaned);
         let cleaned = strip_leaked_tags(&cleaned);
 
-        println!(
+        tracing::info!(
+            target: "telegram",
             "[Telegram] Tool loop round: {} tool_calls found, char_id='{}'",
             tool_calls.len(),
             char_id
@@ -415,22 +416,25 @@ async fn handle_text(
         let tool_results: Vec<String> = execution_outcomes
             .iter()
             .map(|outcome| {
-                println!(
+                tracing::info!(
+                    target: "telegram::tools",
                     "[Telegram/ToolCall] Executing: {} with args {:?}",
                     outcome.invocation.name, outcome.invocation.args
                 );
                 match &outcome.result {
                     Ok(result) => {
-                        println!("[Telegram/ToolCall] {} => {}", outcome.tool_name(), result.message);
+                        tracing::info!(target: "telegram::tools", "[Telegram/ToolCall] {} => {}", outcome.tool_name(), result.message);
                     }
                     Err(error) => {
-                        eprintln!("[Telegram/ToolCall] {} failed: {}", outcome.tool_name(), error);
+                        tracing::error!(target: "telegram::tools", "[Telegram/ToolCall] {} failed: {}", outcome.tool_name(), error);
                     }
                 }
                 outcome.result_line()
             })
             .collect();
-        let any_needs_feedback = execution_outcomes.iter().any(|outcome| outcome.needs_feedback);
+        let any_needs_feedback = execution_outcomes
+            .iter()
+            .any(|outcome| outcome.needs_feedback);
 
         if !any_needs_feedback {
             break;
@@ -474,12 +478,14 @@ async fn handle_text(
     // Trigger periodic memory extraction (every 5 user messages)
     let msg_count = orchestrator.get_message_count().await;
     let memory_msg_count = orchestrator.get_memory_trigger_count().await;
-    println!(
+    tracing::info!(
+        target: "telegram::memory",
         "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
         msg_count, memory_msg_count, char_id
     );
     if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        println!(
+        tracing::info!(
+            target: "telegram::memory",
             "[Telegram/Memory] Triggering memory extraction (count={})",
             msg_count
         );
@@ -515,10 +521,10 @@ async fn handle_text(
                 .await
             {
                 Ok(count) if count > 0 => {
-                    println!("[Telegram/Memory] Consolidated {} memory clusters", count);
+                    tracing::info!(target: "telegram::memory", "[Telegram/Memory] Consolidated {} memory clusters", count);
                 }
                 Err(e) => {
-                    eprintln!("[Telegram/Memory] Consolidation failed: {}", e);
+                    tracing::error!(target: "telegram::memory", "[Telegram/Memory] Consolidation failed: {}", e);
                 }
                 _ => {}
             }
@@ -590,7 +596,7 @@ async fn handle_voice(
     let transcription = match stt_service.transcribe(&audio_source, None).await {
         Ok(result) => result.text,
         Err(e) => {
-            eprintln!("[Telegram] STT error: {}", e);
+            tracing::error!(target: "telegram", "[Telegram] STT error: {}", e);
             bot.send_message(chat_id, "⚠️ Failed to transcribe voice message.")
                 .await
                 .ok();
@@ -656,7 +662,7 @@ async fn handle_photo(
         .unwrap_or("The user sent you a photo:")
         .to_string();
 
-    println!("[Telegram] Photo received, caption: {}", caption);
+    tracing::info!(target: "telegram", "[Telegram] Photo received, caption: {}", caption);
 
     // 1. Record user message
     // char_id 解析优先级：config 指定 > orchestrator 内存状态 > 磁盘文件 > "default"
@@ -672,7 +678,8 @@ async fn handle_photo(
             }
         }
     };
-    println!(
+    tracing::info!(
+        target: "telegram",
         "[Telegram] Resolved char_id='{}' for photo request",
         char_id
     );
@@ -747,7 +754,7 @@ async fn handle_photo(
             match result {
                 Ok(delta) => round_response.push_str(&delta),
                 Err(e) => {
-                    eprintln!("[Telegram] LLM stream error: {}", e);
+                    tracing::error!(target: "telegram", "[Telegram] LLM stream error: {}", e);
                     break;
                 }
             }
@@ -761,7 +768,8 @@ async fn handle_photo(
         let (cleaned, round_translation) = extract_translate_tags(&cleaned);
         let cleaned = strip_leaked_tags(&cleaned);
 
-        println!(
+        tracing::info!(
+            target: "telegram",
             "[Telegram/Photo] Tool loop round: {} tool_calls found, char_id='{}'",
             tool_calls.len(),
             char_id
@@ -807,22 +815,25 @@ async fn handle_photo(
         let tool_results: Vec<String> = execution_outcomes
             .iter()
             .map(|outcome| {
-                println!(
+                tracing::info!(
+                    target: "telegram::tools",
                     "[Telegram/ToolCall] Executing: {} with args {:?}",
                     outcome.invocation.name, outcome.invocation.args
                 );
                 match &outcome.result {
                     Ok(result) => {
-                        println!("[Telegram/ToolCall] {} => {}", outcome.tool_name(), result.message);
+                        tracing::info!(target: "telegram::tools", "[Telegram/ToolCall] {} => {}", outcome.tool_name(), result.message);
                     }
                     Err(error) => {
-                        eprintln!("[Telegram/ToolCall] {} failed: {}", outcome.tool_name(), error);
+                        tracing::error!(target: "telegram::tools", "[Telegram/ToolCall] {} failed: {}", outcome.tool_name(), error);
                     }
                 }
                 outcome.result_line()
             })
             .collect();
-        let any_needs_feedback = execution_outcomes.iter().any(|outcome| outcome.needs_feedback);
+        let any_needs_feedback = execution_outcomes
+            .iter()
+            .any(|outcome| outcome.needs_feedback);
 
         if !any_needs_feedback {
             break;
@@ -866,12 +877,14 @@ async fn handle_photo(
     // Trigger periodic memory extraction (every 5 user messages)
     let msg_count = orchestrator.get_message_count().await;
     let memory_msg_count = orchestrator.get_memory_trigger_count().await;
-    println!(
+    tracing::info!(
+        target: "telegram::memory",
         "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
         msg_count, memory_msg_count, char_id
     );
     if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        println!(
+        tracing::info!(
+            target: "telegram::memory",
             "[Telegram/Memory] Triggering memory extraction (count={})",
             msg_count
         );
@@ -907,10 +920,10 @@ async fn handle_photo(
                 .await
             {
                 Ok(count) if count > 0 => {
-                    println!("[Telegram/Memory] Consolidated {} memory clusters", count);
+                    tracing::info!(target: "telegram::memory", "[Telegram/Memory] Consolidated {} memory clusters", count);
                 }
                 Err(e) => {
-                    eprintln!("[Telegram/Memory] Consolidation failed: {}", e);
+                    tracing::error!(target: "telegram::memory", "[Telegram/Memory] Consolidation failed: {}", e);
                 }
                 _ => {}
             }
@@ -954,12 +967,12 @@ async fn send_voice_reply(bot: &Bot, chat_id: ChatId, text: &str, app: &tauri::A
         Ok(audio_bytes) if !audio_bytes.is_empty() => {
             let input = InputFile::memory(audio_bytes).file_name("reply.ogg");
             if let Err(e) = bot.send_voice(chat_id, input).await {
-                eprintln!("[Telegram] Failed to send voice: {}", e);
+                tracing::error!(target: "telegram", "[Telegram] Failed to send voice: {}", e);
             }
         }
         Ok(_) => {} // Empty audio, skip
         Err(e) => {
-            eprintln!("[Telegram] TTS synthesis error: {}", e);
+            tracing::error!(target: "telegram", "[Telegram] TTS synthesis error: {}", e);
         }
     }
 }
@@ -1005,16 +1018,16 @@ async fn handle_image_tags(bot: &Bot, chat_id: ChatId, response: &str, app: &tau
                     Ok(data) => {
                         let input = InputFile::memory(data).file_name("image.png");
                         if let Err(e) = bot.send_photo(chat_id, input).await {
-                            eprintln!("[Telegram] Failed to send photo: {}", e);
+                            tracing::error!(target: "telegram", "[Telegram] Failed to send photo: {}", e);
                         }
                     }
                     Err(e) => {
-                        eprintln!("[Telegram] Failed to read generated image: {}", e);
+                        tracing::error!(target: "telegram", "[Telegram] Failed to read generated image: {}", e);
                     }
                 }
             }
             Err(e) => {
-                eprintln!("[Telegram] Image generation failed: {}", e);
+                tracing::error!(target: "telegram", "[Telegram] Image generation failed: {}", e);
                 bot.send_message(chat_id, format!("⚠️ Image generation failed: {}", e))
                     .await
                     .ok();

@@ -433,7 +433,10 @@ mod tests {
         }
     }
 
-    fn high_risk_fail_closed_reason(action: &ActionInfo, settings: &ToolSettings) -> Option<String> {
+    fn high_risk_fail_closed_reason(
+        action: &ActionInfo,
+        settings: &ToolSettings,
+    ) -> Option<String> {
         match evaluate_permission_decision(action, settings) {
             PermissionDecision::DenyFailClosed { reason } => Some(reason),
             _ => None,
@@ -590,7 +593,10 @@ mod tests {
     #[test]
     fn policy_denial_reason_blocks_elevated_action_when_max_is_safe() {
         assert_eq!(
-            policy_denial_reason(&sample_policy_permission_action(), &sample_policy_permission_settings()),
+            policy_denial_reason(
+                &sample_policy_permission_action(),
+                &sample_policy_permission_settings()
+            ),
             None
         );
     }
@@ -602,7 +608,10 @@ mod tests {
             Some("Denied by policy: blocked risk tag 'read'".to_string())
         );
         assert_eq!(
-            policy_denial_reason(&sample_policy_external_action(), &sample_policy_external_settings()),
+            policy_denial_reason(
+                &sample_policy_external_action(),
+                &sample_policy_external_settings()
+            ),
             Some("Denied by policy: blocked risk tag 'external'".to_string())
         );
     }
@@ -610,38 +619,57 @@ mod tests {
     #[test]
     fn approval_pending_reason_requires_approval_for_elevated_action() {
         assert_eq!(
-            approval_pending_reason(&sample_pending_elevated_action(), &sample_pending_elevated_settings()),
-            Some("Denied pending approval: permission level 'elevated' requires approval".to_string())
+            approval_pending_reason(
+                &sample_pending_elevated_action(),
+                &sample_pending_elevated_settings()
+            ),
+            Some(
+                "Denied pending approval: permission level 'elevated' requires approval"
+                    .to_string()
+            )
         );
     }
 
     #[test]
     fn approval_pending_reason_requires_approval_for_write_and_sensitive_tags() {
         assert_eq!(
-            approval_pending_reason(&sample_pending_write_action(), &sample_pending_write_settings()),
+            approval_pending_reason(
+                &sample_pending_write_action(),
+                &sample_pending_write_settings()
+            ),
             Some("Denied pending approval: risk tag 'write' requires approval".to_string())
         );
         assert_eq!(
-            approval_pending_reason(&sample_sensitive_action(), &sample_sensitive_blocking_settings()),
+            approval_pending_reason(
+                &sample_sensitive_action(),
+                &sample_sensitive_blocking_settings()
+            ),
             None
         );
     }
 
     #[test]
-    fn approval_pending_reason_prefers_permission_message_when_permission_and_tag_both_require_approval() {
+    fn approval_pending_reason_prefers_permission_message_when_permission_and_tag_both_require_approval(
+    ) {
         assert_eq!(
             approval_pending_reason(
                 &sample_pending_prefers_permission_action(),
                 &sample_pending_prefers_permission_settings(),
             ),
-            Some("Denied pending approval: permission level 'elevated' requires approval".to_string())
+            Some(
+                "Denied pending approval: permission level 'elevated' requires approval"
+                    .to_string()
+            )
         );
     }
 
     #[test]
     fn approval_pending_reason_allows_default_safe_action() {
         assert_eq!(
-            approval_pending_reason(&sample_default_allow_action(), &sample_default_allow_settings()),
+            approval_pending_reason(
+                &sample_default_allow_action(),
+                &sample_default_allow_settings()
+            ),
             None
         );
     }
@@ -691,8 +719,9 @@ mod tests {
 
     #[test]
     fn deny_helpers_keep_stable_prefixes() {
-        let policy = policy_denial_reason(&sample_policy_only_action(), &sample_policy_only_settings())
-            .expect("policy should deny blocked read tag");
+        let policy =
+            policy_denial_reason(&sample_policy_only_action(), &sample_policy_only_settings())
+                .expect("policy should deny blocked read tag");
         let pending = approval_pending_reason(
             &sample_pending_elevated_action(),
             &sample_pending_elevated_settings(),
@@ -711,8 +740,14 @@ mod tests {
 
     #[test]
     fn deny_helpers_allow_default_policy_when_no_rule_matches() {
-        assert_eq!(policy_denial_reason(&sample_no_denial_action(), &sample_no_denial_settings()), None);
-        assert_eq!(approval_pending_reason(&sample_no_denial_action(), &sample_no_denial_settings()), None);
+        assert_eq!(
+            policy_denial_reason(&sample_no_denial_action(), &sample_no_denial_settings()),
+            None
+        );
+        assert_eq!(
+            approval_pending_reason(&sample_no_denial_action(), &sample_no_denial_settings()),
+            None
+        );
         assert_eq!(
             high_risk_fail_closed_reason(&sample_no_denial_action(), &sample_no_denial_settings()),
             None
@@ -726,7 +761,10 @@ mod tests {
             Some("Denied by policy: blocked risk tag 'read'".to_string())
         );
         assert_eq!(
-            approval_pending_reason(&sample_pending_write_only_action(), &sample_pending_write_only_settings()),
+            approval_pending_reason(
+                &sample_pending_write_only_action(),
+                &sample_pending_write_only_settings()
+            ),
             Some("Denied pending approval: risk tag 'write' requires approval".to_string())
         );
         assert_eq!(
@@ -741,7 +779,10 @@ mod tests {
     #[test]
     fn approval_pending_reason_does_not_handle_read_only_blocks() {
         assert_eq!(
-            approval_pending_reason(&sample_pending_read_only_action(), &sample_pending_read_only_settings()),
+            approval_pending_reason(
+                &sample_pending_read_only_action(),
+                &sample_pending_read_only_settings()
+            ),
             None
         );
     }
@@ -781,8 +822,9 @@ mod tests {
 
     #[test]
     fn policy_denial_reason_uses_stable_prefix() {
-        let reason = policy_denial_reason(&sample_policy_only_action(), &sample_policy_only_settings())
-            .expect("policy should deny blocked read tag");
+        let reason =
+            policy_denial_reason(&sample_policy_only_action(), &sample_policy_only_settings())
+                .expect("policy should deny blocked read tag");
 
         assert!(reason.starts_with("Denied by policy:"));
     }
@@ -821,10 +863,12 @@ impl ToolExecutionOutcome {
     }
 
     pub fn tool_permission_level(&self) -> Option<&str> {
-        self.action.as_ref().map(|action| match action.permission_level {
-            crate::actions::registry::ActionPermissionLevel::Safe => "safe",
-            crate::actions::registry::ActionPermissionLevel::Elevated => "elevated",
-        })
+        self.action
+            .as_ref()
+            .map(|action| match action.permission_level {
+                crate::actions::registry::ActionPermissionLevel::Safe => "safe",
+                crate::actions::registry::ActionPermissionLevel::Elevated => "elevated",
+            })
     }
 
     pub fn tool_risk_tags(&self) -> Vec<&'static str> {
@@ -970,16 +1014,22 @@ pub async fn execute_tool_calls(
                                         action,
                                     );
                                     if let Some(hooks) = hook_runtime.as_ref() {
-                                        hooks.emit_before_action_args_modify(&mut args_payload).await;
+                                        hooks
+                                            .emit_before_action_args_modify(&mut args_payload)
+                                            .await;
                                     }
-                                    let effective_args = apply_before_action_args_payload(args_payload);
+                                    let effective_args =
+                                        apply_before_action_args_payload(args_payload);
                                     let ctx = ActionContext {
                                         app: app.clone(),
                                         character_id: character_id.to_string(),
                                         conversation_id: None,
                                         source: Some("chat".to_string()),
                                     };
-                                    (Some(permission_decision), handler.execute(effective_args, ctx).await.map_err(|e| e.0))
+                                    (
+                                        Some(permission_decision),
+                                        handler.execute(effective_args, ctx).await.map_err(|e| e.0),
+                                    )
                                 }
                                 PermissionDecision::DenyPolicy { reason }
                                 | PermissionDecision::DenyPendingApproval { reason }

@@ -1,9 +1,8 @@
 // pattern: Mixed (needs refactoring)
 // Reason: 该命令文件同时承担 Tauri 命令编排与最小 hook 接线；本次只做直调 action deny 对齐，不额外拆分命令层。
 use crate::actions::executor::{
-    apply_before_action_args_payload, build_action_hook_payload,
-    build_before_action_args_payload, continue_unless_denied, denied_by_hook_message,
-    ToolInvocation,
+    apply_before_action_args_payload, build_action_hook_payload, build_before_action_args_payload,
+    continue_unless_denied, denied_by_hook_message, ToolInvocation,
 };
 use crate::actions::permission::{evaluate_permission_decision, PermissionDecision};
 use crate::actions::tool_settings::ToolSettings;
@@ -189,7 +188,9 @@ mod tests {
             &invocation,
             &action,
         );
-        payload.args.insert("query".to_string(), "refined".to_string());
+        payload
+            .args
+            .insert("query".to_string(), "refined".to_string());
         payload.args.insert("limit".to_string(), "2".to_string());
 
         let args = apply_before_action_args_payload(payload);
@@ -222,7 +223,10 @@ mod tests {
 
     #[test]
     fn direct_execute_policy_denial_uses_shared_helper_message() {
-        let decision = evaluate_permission_decision(&sample_read_action(), &sample_read_blocking_policy_settings());
+        let decision = evaluate_permission_decision(
+            &sample_read_action(),
+            &sample_read_blocking_policy_settings(),
+        );
 
         assert_eq!(
             decision,
@@ -234,19 +238,24 @@ mod tests {
 
     #[test]
     fn direct_execute_pending_approval_uses_shared_helper_message() {
-        let decision = evaluate_permission_decision(&sample_elevated_action(), &sample_safe_policy_settings());
+        let decision =
+            evaluate_permission_decision(&sample_elevated_action(), &sample_safe_policy_settings());
 
         assert_eq!(
             decision,
             PermissionDecision::DenyPendingApproval {
-                reason: "Denied pending approval: permission level 'elevated' requires approval".to_string(),
+                reason: "Denied pending approval: permission level 'elevated' requires approval"
+                    .to_string(),
             }
         );
     }
 
     #[test]
     fn direct_execute_pending_approval_can_block_write_tag() {
-        let decision = evaluate_permission_decision(&sample_write_action(), &sample_write_blocking_policy_settings());
+        let decision = evaluate_permission_decision(
+            &sample_write_action(),
+            &sample_write_blocking_policy_settings(),
+        );
 
         assert_eq!(
             decision,
@@ -273,7 +282,10 @@ mod tests {
 
     #[test]
     fn direct_execute_fail_closed_can_block_sensitive_tag() {
-        let decision = evaluate_permission_decision(&sample_sensitive_action(), &sample_sensitive_blocking_policy_settings());
+        let decision = evaluate_permission_decision(
+            &sample_sensitive_action(),
+            &sample_sensitive_blocking_policy_settings(),
+        );
 
         assert_eq!(
             decision,
@@ -305,13 +317,9 @@ mod tests {
         let mut registry = ActionRegistry::new();
         registry.register(crate::actions::builtin::GetTimeAction);
 
-        let invocation = build_tool_invocation_from_input(
-            &registry,
-            "builtin__get_time",
-            HashMap::new(),
-            None,
-        )
-        .unwrap();
+        let invocation =
+            build_tool_invocation_from_input(&registry, "builtin__get_time", HashMap::new(), None)
+                .unwrap();
 
         assert_eq!(invocation.name, "builtin__get_time");
     }
@@ -322,9 +330,15 @@ mod tests {
 
         #[async_trait::async_trait]
         impl crate::actions::registry::ActionHandler for SearchAction {
-            fn name(&self) -> &str { "search" }
-            fn description(&self) -> &str { "search" }
-            fn parameters(&self) -> Vec<crate::actions::registry::ActionParam> { vec![] }
+            fn name(&self) -> &str {
+                "search"
+            }
+            fn description(&self) -> &str {
+                "search"
+            }
+            fn parameters(&self) -> Vec<crate::actions::registry::ActionParam> {
+                vec![]
+            }
             async fn execute(
                 &self,
                 _args: HashMap<String, String>,
@@ -338,7 +352,8 @@ mod tests {
         registry.register(SearchAction);
         registry.register_mcp("server_a", SearchAction);
 
-        let err = build_tool_invocation_from_input(&registry, "search", HashMap::new(), None).unwrap_err();
+        let err = build_tool_invocation_from_input(&registry, "search", HashMap::new(), None)
+            .unwrap_err();
         assert!(err.0.contains("Ambiguous tool 'search'"));
     }
 
@@ -455,7 +470,10 @@ fn build_direct_invocation(name: &str, args: &HashMap<String, String>) -> ToolIn
     }
 }
 
-fn build_resolved_direct_invocation(action_id: &str, args: &HashMap<String, String>) -> ToolInvocation {
+fn build_resolved_direct_invocation(
+    action_id: &str,
+    args: &HashMap<String, String>,
+) -> ToolInvocation {
     ToolInvocation {
         tool_call_id: None,
         name: action_id.to_string(),
@@ -557,14 +575,28 @@ pub async fn execute_action(
     let raw_invocation = build_direct_invocation(&name, &args);
 
     if let Err(error) = gate_direct_action(&app, &character_id, &raw_invocation).await {
-        emit_after_action_hook(&app, &character_id, &raw_invocation, None, &Err(error.clone())).await;
+        emit_after_action_hook(
+            &app,
+            &character_id,
+            &raw_invocation,
+            None,
+            &Err(error.clone()),
+        )
+        .await;
         return Err(error);
     }
 
     let action_id = match resolve_action_id_at_boundary(&registry_state, &name).await {
         Ok(action_id) => action_id,
         Err(error) => {
-            emit_after_action_hook(&app, &character_id, &raw_invocation, None, &Err(error.clone())).await;
+            emit_after_action_hook(
+                &app,
+                &character_id,
+                &raw_invocation,
+                None,
+                &Err(error.clone()),
+            )
+            .await;
             return Err(error);
         }
     };
@@ -579,7 +611,14 @@ pub async fn execute_action(
     let action = match action {
         Ok(action) => action,
         Err(error) => {
-            emit_after_action_hook(&app, &character_id, &raw_invocation, None, &Err(error.clone())).await;
+            emit_after_action_hook(
+                &app,
+                &character_id,
+                &raw_invocation,
+                None,
+                &Err(error.clone()),
+            )
+            .await;
             return Err(error);
         }
     };
@@ -606,8 +645,8 @@ pub async fn execute_action(
         evaluate_permission_decision(&action, &tool_settings)
     };
     if let PermissionDecision::DenyPolicy { reason }
-        | PermissionDecision::DenyPendingApproval { reason }
-        | PermissionDecision::DenyFailClosed { reason } = permission_decision
+    | PermissionDecision::DenyPendingApproval { reason }
+    | PermissionDecision::DenyFailClosed { reason } = permission_decision
     {
         let error = KokoroError::Validation(reason);
         emit_after_action_hook(
@@ -621,14 +660,8 @@ pub async fn execute_action(
         return Err(error);
     }
 
-    let effective_args = modify_direct_action_args(
-        &app,
-        &character_id,
-        &invocation,
-        &action,
-        args,
-    )
-    .await;
+    let effective_args =
+        modify_direct_action_args(&app, &character_id, &invocation, &action, args).await;
 
     let ctx = ActionContext {
         app: app.clone(),

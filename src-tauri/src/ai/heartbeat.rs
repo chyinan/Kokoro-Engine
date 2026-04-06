@@ -157,7 +157,8 @@ async fn trigger_proactive_message(
         instruction
     );
 
-    println!(
+    tracing::info!(
+        target: "chat",
         "[Heartbeat] Trigger '{}' fired: {}",
         trigger_type, instruction
     );

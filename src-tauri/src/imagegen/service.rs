@@ -36,7 +36,7 @@ impl ImageGenService {
         let output_dir = app_data.join("generated_images");
 
         if let Err(e) = fs::create_dir_all(&output_dir) {
-            tracing::error!(target = "imagegen", "Failed to create output directory: {}", e);
+            tracing::error!(target: "imagegen", "Failed to create output directory: {}", e);
         }
 
         let service = Self {
@@ -48,7 +48,7 @@ impl ImageGenService {
         };
 
         if !config.enabled {
-            tracing::info!(target = "imagegen", "Service is disabled in config");
+            tracing::info!(target: "imagegen", "Service is disabled in config");
             return service;
         }
 
@@ -59,14 +59,14 @@ impl ImageGenService {
 
             match Self::build_provider(provider_config) {
                 Some(provider) => {
-                    tracing::info!(target = "imagegen", "Registering provider: {}", provider.id());
+                    tracing::info!(target: "imagegen", "Registering provider: {}", provider.id());
                     service
                         .register_provider(provider, provider_config.clone())
                         .await;
                 }
                 None => {
                     tracing::error!(
-                        target = "imagegen",
+                        target: "imagegen",
                         "Failed to build provider '{}' (type: {})",
                         provider_config.id, provider_config.provider_type
                     );
@@ -95,7 +95,7 @@ impl ImageGenService {
             ))),
             "google" => Some(Box::new(GoogleImageGenProvider::new(config).ok()?)),
             other => {
-                tracing::error!(target = "imagegen", "Unknown provider type: {}", other);
+                tracing::error!(target: "imagegen", "Unknown provider type: {}", other);
                 None
             }
         }
@@ -199,7 +199,7 @@ impl ImageGenService {
         }
 
         tracing::info!(
-            target = "imagegen",
+            target: "imagegen",
             "Generating with provider '{}': {}",
             target_id, prompt
         );
@@ -262,6 +262,6 @@ impl ImageGenService {
                 }
             }
         }
-        tracing::info!(target = "imagegen", "Reloaded {} providers", providers.len());
+        tracing::info!(target: "imagegen", "Reloaded {} providers", providers.len());
     }
 }

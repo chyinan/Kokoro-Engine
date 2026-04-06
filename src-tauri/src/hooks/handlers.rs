@@ -29,7 +29,7 @@ impl HookHandler for AuditLogHookHandler {
         event: &HookEvent,
         payload: &HookPayload,
     ) -> Result<HookOutcome, String> {
-        println!("[Hook] event={:?} payload={:?}", event, payload);
+        tracing::info!(target: "hooks", "[Hook] event={:?} payload={:?}", event, payload);
         Ok(HookOutcome::Continue)
     }
 }

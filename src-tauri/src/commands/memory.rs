@@ -27,7 +27,8 @@ pub async fn list_memories(
     request: ListMemoriesRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<ListMemoriesResponse, KokoroError> {
-    println!(
+    tracing::info!(
+        target: "memory",
         "[Memory] list_memories called for character_id='{}', limit={}, offset={}",
         request.character_id, request.limit, request.offset
     );

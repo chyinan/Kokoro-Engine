@@ -278,7 +278,8 @@ impl AIOrchestrator {
                         Ok(Some(task)) => task,
                         Ok(None) => return,
                         Err(e) => {
-                            eprintln!(
+                            tracing::error!(
+                                target: "context",
                                 "[Context] Failed to prepare conversation summary task for '{}': {}",
                                 conversation_id, e
                             );
@@ -290,7 +291,8 @@ impl AIOrchestrator {
                         .mark_conversation_summary_running(task.record_id)
                         .await
                     {
-                        eprintln!(
+                        tracing::error!(
+                            target: "context",
                             "[Context] Failed to mark summary task running for '{}': {}",
                             conversation_id, e
                         );
@@ -309,7 +311,8 @@ impl AIOrchestrator {
                                 .complete_conversation_summary(task.record_id, &summary)
                                 .await
                             {
-                                eprintln!(
+                                tracing::error!(
+                                    target: "context",
                                     "[Context] Failed to persist conversation summary for '{}': {}",
                                     conversation_id, e
                                 );
@@ -411,7 +414,7 @@ impl AIOrchestrator {
         let path = app_data.join("current_conversation_id.json");
         let json = serde_json::json!({ "conversation_id": id });
         if let Err(e) = std::fs::write(&path, json.to_string()) {
-            eprintln!("[Context] Failed to persist conversation_id: {}", e);
+            tracing::error!(target: "context", "[Context] Failed to persist conversation_id: {}", e);
         }
     }
 
@@ -424,7 +427,7 @@ impl AIOrchestrator {
         let path = app_data.join("active_character_id.json");
         let json = serde_json::json!({ "character_id": id });
         if let Err(e) = std::fs::write(&path, json.to_string()) {
-            eprintln!("[Context] Failed to persist active_character_id: {}", e);
+            tracing::error!(target: "context", "[Context] Failed to persist active_character_id: {}", e);
         }
     }
 
@@ -687,10 +690,7 @@ impl AIOrchestrator {
         };
 
         // Emotion state hint — subtly colors tone without overriding character persona
-        system_parts.push(format!(
-            "<character>\n{}\n</character>",
-            character_block
-        ));
+        system_parts.push(format!("<character>\n{}\n</character>", character_block));
 
         // Section 3: Long-term memory (higher priority than summaries)
         if let Some(ref mems) = memories {

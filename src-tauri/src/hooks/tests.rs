@@ -16,13 +16,11 @@ struct RecordingHandler {
     before_action_args_modifier: Option<BeforeActionArgsModifier>,
 }
 
-type BeforeLlmRequestModifier = Arc<
-    dyn Fn(&mut BeforeLlmRequestPayload) -> Result<(), &'static str> + Send + Sync,
->;
+type BeforeLlmRequestModifier =
+    Arc<dyn Fn(&mut BeforeLlmRequestPayload) -> Result<(), &'static str> + Send + Sync>;
 
-type BeforeActionArgsModifier = Arc<
-    dyn Fn(&mut BeforeActionArgsPayload) -> Result<(), &'static str> + Send + Sync,
->;
+type BeforeActionArgsModifier =
+    Arc<dyn Fn(&mut BeforeActionArgsPayload) -> Result<(), &'static str> + Send + Sync>;
 
 #[async_trait]
 impl HookHandler for RecordingHandler {
@@ -209,10 +207,7 @@ fn modify_handler(
     }
 }
 
-fn append_action_arg_modifier(
-    key: &'static str,
-    value: &'static str,
-) -> BeforeActionArgsModifier {
+fn append_action_arg_modifier(key: &'static str, value: &'static str) -> BeforeActionArgsModifier {
     Arc::new(move |payload| {
         payload.args.insert(key.to_string(), value.to_string());
         Ok(())
@@ -255,7 +250,10 @@ async fn emit_calls_registered_handler_once() {
         .unwrap();
 
     assert_eq!(outcome, HookOutcome::Continue);
-    assert_eq!(calls.lock().unwrap().as_slice(), ["first:BeforeUserMessage"]);
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["first:BeforeUserMessage"]
+    );
 }
 
 #[tokio::test]
@@ -386,7 +384,10 @@ async fn action_gate_returns_deny_and_stops_later_handlers() {
             reason: "blocked".to_string(),
         }
     );
-    assert_eq!(calls.lock().unwrap().as_slice(), ["deny:BeforeActionInvoke"]);
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["deny:BeforeActionInvoke"]
+    );
 }
 
 #[tokio::test]
@@ -446,7 +447,10 @@ async fn before_llm_request_modify_preserves_request_message_and_messages() {
     assert_eq!(payload.messages[3].content, "+second");
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        ["first:BeforeLlmRequestModify", "second:BeforeLlmRequestModify"]
+        [
+            "first:BeforeLlmRequestModify",
+            "second:BeforeLlmRequestModify"
+        ]
     );
 }
 
@@ -476,7 +480,10 @@ async fn before_llm_request_modify_continues_after_handler_error() {
     assert_eq!(payload.messages[2].content, "+next");
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        ["failing:BeforeLlmRequestModify", "next:BeforeLlmRequestModify"]
+        [
+            "failing:BeforeLlmRequestModify",
+            "next:BeforeLlmRequestModify"
+        ]
     );
 }
 
@@ -513,11 +520,17 @@ async fn before_action_args_modify_applies_in_registration_order() {
     runtime.emit_before_action_args_modify(&mut payload).await;
 
     assert_eq!(payload.action_id, "builtin__search_memory");
-    assert_eq!(payload.args.get("query"), Some(&"kokoro refined".to_string()));
+    assert_eq!(
+        payload.args.get("query"),
+        Some(&"kokoro refined".to_string())
+    );
     assert_eq!(payload.args.get("limit"), Some(&"5".to_string()));
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        ["first:BeforeActionArgsModify", "second:BeforeActionArgsModify"]
+        [
+            "first:BeforeActionArgsModify",
+            "second:BeforeActionArgsModify"
+        ]
     );
 }
 
@@ -546,7 +559,10 @@ async fn before_action_args_modify_continues_after_handler_error() {
     assert_eq!(payload.args.get("limit"), Some(&"3".to_string()));
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        ["failing:BeforeActionArgsModify", "next:BeforeActionArgsModify"]
+        [
+            "failing:BeforeActionArgsModify",
+            "next:BeforeActionArgsModify"
+        ]
     );
 }
 
@@ -597,5 +613,8 @@ async fn action_gate_deny_still_short_circuits_with_action_args_modify_available
             reason: "blocked".to_string(),
         }
     );
-    assert_eq!(calls.lock().unwrap().as_slice(), ["deny:BeforeActionInvoke"]);
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["deny:BeforeActionInvoke"]
+    );
 }

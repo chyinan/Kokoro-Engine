@@ -33,13 +33,17 @@ pub fn evaluate_permission_decision(
     action: &ActionInfo,
     settings: &ToolSettings,
 ) -> PermissionDecision {
-    if exceeds_safe_permission_ceiling(action, settings) && has_risk_tag(action, ActionRiskTag::Sensitive) {
+    if exceeds_safe_permission_ceiling(action, settings)
+        && has_risk_tag(action, ActionRiskTag::Sensitive)
+    {
         return PermissionDecision::DenyFailClosed {
             reason: "Denied by fail-closed policy: permission level 'elevated' exceeds max allowed 'safe'".to_string(),
         };
     }
 
-    if settings.blocked_risk_tags.contains(&ActionRiskTag::Sensitive)
+    if settings
+        .blocked_risk_tags
+        .contains(&ActionRiskTag::Sensitive)
         && action.risk_tags.contains(&ActionRiskTag::Sensitive)
     {
         return PermissionDecision::DenyFailClosed {
@@ -49,7 +53,8 @@ pub fn evaluate_permission_decision(
 
     if exceeds_safe_permission_ceiling(action, settings) {
         return PermissionDecision::DenyPendingApproval {
-            reason: "Denied pending approval: permission level 'elevated' requires approval".to_string(),
+            reason: "Denied pending approval: permission level 'elevated' requires approval"
+                .to_string(),
         };
     }
 
@@ -63,12 +68,18 @@ pub fn evaluate_permission_decision(
                 && action.permission_level == ActionPermissionLevel::Safe)
         {
             return PermissionDecision::DenyPendingApproval {
-                reason: format!("Denied pending approval: risk tag '{}' requires approval", risk_tag_label(tag)),
+                reason: format!(
+                    "Denied pending approval: risk tag '{}' requires approval",
+                    risk_tag_label(tag)
+                ),
             };
         }
 
         return PermissionDecision::DenyPolicy {
-            reason: format!("Denied by policy: blocked risk tag '{}'", risk_tag_label(tag)),
+            reason: format!(
+                "Denied by policy: blocked risk tag '{}'",
+                risk_tag_label(tag)
+            ),
         };
     }
 
@@ -90,7 +101,10 @@ mod tests {
     use crate::actions::ActionSource;
     use std::collections::HashMap;
 
-    fn action(permission_level: ActionPermissionLevel, risk_tags: Vec<ActionRiskTag>) -> ActionInfo {
+    fn action(
+        permission_level: ActionPermissionLevel,
+        risk_tags: Vec<ActionRiskTag>,
+    ) -> ActionInfo {
         ActionInfo {
             id: "builtin__test_tool".to_string(),
             name: "test_tool".to_string(),
@@ -104,7 +118,10 @@ mod tests {
         }
     }
 
-    fn settings(max_permission_level: ActionPermissionLevel, blocked_risk_tags: Vec<ActionRiskTag>) -> ToolSettings {
+    fn settings(
+        max_permission_level: ActionPermissionLevel,
+        blocked_risk_tags: Vec<ActionRiskTag>,
+    ) -> ToolSettings {
         ToolSettings {
             max_tool_rounds: 10,
             enabled_tools: HashMap::new(),
@@ -131,7 +148,10 @@ mod tests {
         );
         let external_decision = evaluate_permission_decision(
             &action(ActionPermissionLevel::Safe, vec![ActionRiskTag::External]),
-            &settings(ActionPermissionLevel::Elevated, vec![ActionRiskTag::External]),
+            &settings(
+                ActionPermissionLevel::Elevated,
+                vec![ActionRiskTag::External],
+            ),
         );
 
         assert_eq!(
@@ -162,7 +182,8 @@ mod tests {
         assert_eq!(
             elevated_decision,
             PermissionDecision::DenyPendingApproval {
-                reason: "Denied pending approval: permission level 'elevated' requires approval".to_string(),
+                reason: "Denied pending approval: permission level 'elevated' requires approval"
+                    .to_string(),
             }
         );
         assert_eq!(
@@ -176,12 +197,18 @@ mod tests {
     #[test]
     fn denies_fail_closed_for_elevated_sensitive_and_blocked_sensitive() {
         let elevated_sensitive = evaluate_permission_decision(
-            &action(ActionPermissionLevel::Elevated, vec![ActionRiskTag::Sensitive]),
+            &action(
+                ActionPermissionLevel::Elevated,
+                vec![ActionRiskTag::Sensitive],
+            ),
             &settings(ActionPermissionLevel::Safe, vec![]),
         );
         let blocked_sensitive = evaluate_permission_decision(
             &action(ActionPermissionLevel::Safe, vec![ActionRiskTag::Sensitive]),
-            &settings(ActionPermissionLevel::Elevated, vec![ActionRiskTag::Sensitive]),
+            &settings(
+                ActionPermissionLevel::Elevated,
+                vec![ActionRiskTag::Sensitive],
+            ),
         );
 
         assert_eq!(
@@ -201,8 +228,14 @@ mod tests {
     #[test]
     fn prioritizes_fail_closed_over_pending_and_policy_when_multiple_conditions_match() {
         let decision = evaluate_permission_decision(
-            &action(ActionPermissionLevel::Elevated, vec![ActionRiskTag::Sensitive, ActionRiskTag::Write]),
-            &settings(ActionPermissionLevel::Safe, vec![ActionRiskTag::Sensitive, ActionRiskTag::Write]),
+            &action(
+                ActionPermissionLevel::Elevated,
+                vec![ActionRiskTag::Sensitive, ActionRiskTag::Write],
+            ),
+            &settings(
+                ActionPermissionLevel::Safe,
+                vec![ActionRiskTag::Sensitive, ActionRiskTag::Write],
+            ),
         );
 
         assert_eq!(

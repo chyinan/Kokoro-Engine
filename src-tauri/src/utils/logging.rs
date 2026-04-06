@@ -1,3 +1,10 @@
+use std::fmt;
+
+use tracing::field::{Field, Visit};
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::registry::LookupSpan;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModulePalette {
     Ai,
@@ -66,14 +73,94 @@ pub fn format_log_line(level: &str, target: &str, message: &str, with_color: boo
     }
 }
 
+struct LogLineFormatter {
+    with_color: bool,
+}
+
+#[derive(Default)]
+struct MessageVisitor {
+    message: Option<String>,
+    extra: Vec<(String, String)>,
+}
+
+impl MessageVisitor {
+    fn normalize_debug_value(value: String) -> String {
+        if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+            value[1..value.len() - 1].to_string()
+        } else {
+            value
+        }
+    }
+
+    fn into_message(self) -> String {
+        if let Some(msg) = self.message {
+            if self.extra.is_empty() {
+                msg
+            } else {
+                let extras = self
+                    .extra
+                    .into_iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("{} {}", msg, extras)
+            }
+        } else if self.extra.is_empty() {
+            String::new()
+        } else {
+            self.extra
+                .into_iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+    }
+}
+
+impl Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        let raw = format!("{:?}", value);
+        let normalized = Self::normalize_debug_value(raw);
+        if field.name() == "message" {
+            self.message = Some(normalized);
+        } else {
+            self.extra.push((field.name().to_string(), normalized));
+        }
+    }
+}
+
+impl<S, N> FormatEvent<S, N> for LogLineFormatter
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        _ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> fmt::Result {
+        let meta = event.metadata();
+        let level = meta.level().as_str();
+        let target = meta.target();
+
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
+        let message = visitor.into_message();
+
+        let line = format_log_line(level, target, &message, self.with_color);
+        writeln!(writer, "{}", line)
+    }
+}
+
 pub fn init_logging() {
     let with_color = color_enabled();
 
     let subscriber = tracing_subscriber::fmt()
-        .with_ansi(with_color)
-        .with_target(true)
-        .with_level(true)
-        .event_format(tracing_subscriber::fmt::format().compact())
+        .with_ansi(false)
+        .with_target(false)
+        .with_level(false)
+        .event_format(LogLineFormatter { with_color })
         .finish();
 
     let _ = tracing::subscriber::set_global_default(subscriber);

@@ -30,7 +30,7 @@ pub fn register_api(ctx: &Ctx<'_>, event_tx: Sender<ScriptEvent>) -> Result<()> 
     kokoro.set(
         "log",
         Function::new(ctx.clone(), |msg: String| {
-            println!("[Kokoro JS] {}", msg);
+            tracing::info!(target: "mods", "[Kokoro JS] {}", msg);
         })?,
     )?;
 

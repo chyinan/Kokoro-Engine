@@ -144,10 +144,10 @@ impl WakeWordFrameProcessor {
             match self.segment_tx.try_send(clip) {
                 Ok(()) => {}
                 Err(tokio_mpsc::error::TrySendError::Full(_)) => {
-                    eprintln!("[WakeWord][native] segment dropped: transcription is busy");
+                    tracing::error!(target: "stt", "[WakeWord][native] segment dropped: transcription is busy");
                 }
                 Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
-                    eprintln!("[WakeWord][native] transcription worker disconnected");
+                    tracing::error!(target: "stt", "[WakeWord][native] transcription worker disconnected");
                 }
             }
         }
@@ -427,16 +427,16 @@ where
                     match frame_tx.try_send(frame) {
                         Ok(()) => {}
                         Err(TrySendError::Full(_)) => {
-                            eprintln!("[WakeWord][native] frame dropped: processor is lagging");
+                            tracing::error!(target: "stt", "[WakeWord][native] frame dropped: processor is lagging");
                         }
                         Err(TrySendError::Disconnected(_)) => {
-                            eprintln!("[WakeWord][native] frame processor disconnected");
+                            tracing::error!(target: "stt", "[WakeWord][native] frame processor disconnected");
                         }
                     }
                 }
             },
             move |err| {
-                eprintln!("[WakeWord][native] microphone stream error: {err}");
+                tracing::error!(target: "stt", "[WakeWord][native] microphone stream error: {err}");
                 let _ = err_app.emit(
                     "stt:wake-word-error",
                     format!("Native wake word stream error: {err}"),
@@ -461,7 +461,7 @@ fn spawn_frame_processor(
         let mut processor = match WakeWordFrameProcessor::new(segment_tx) {
             Ok(processor) => processor,
             Err(err) => {
-                eprintln!("[WakeWord][native] frame processor init failed: {err}");
+                tracing::error!(target: "stt", "[WakeWord][native] frame processor init failed: {err}");
                 return;
             }
         };
@@ -484,7 +484,7 @@ fn spawn_transcription_worker(
         let mut transcriber = WakeWordTranscriber::new(app, wake_word, trigger_on_speech);
         while let Some(segment) = segment_rx.recv().await {
             if let Err(err) = transcriber.check_segment(segment).await {
-                eprintln!("[WakeWord][native] Segment transcription failed: {err}");
+                tracing::error!(target: "stt", "[WakeWord][native] Segment transcription failed: {err}");
             }
         }
     });
@@ -543,7 +543,7 @@ fn resample_mono_chunk(
                 }
             }
             Err(err) => {
-                eprintln!("[WakeWord][native] resampling failed: {err}");
+                tracing::error!(target: "stt", "[WakeWord][native] resampling failed: {err}");
                 break;
             }
         }

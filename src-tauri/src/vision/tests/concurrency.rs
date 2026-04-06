@@ -28,7 +28,7 @@ async fn test_burst_upload_1000_images() {
             }
             Err(e) => {
                 failures += 1;
-                eprintln!("[stress] upload failed: {}", e);
+                tracing::error!(target: "vision", "[stress] upload failed: {}", e);
             }
         }
     }
@@ -197,13 +197,15 @@ async fn test_ipc_flood_5000() {
     let elapsed = start.elapsed();
     let throughput = 5000.0 / elapsed.as_secs_f64();
 
-    println!(
+    tracing::info!(
+        target: "vision",
         "[stress] IPC flood: {} uploads in {:.2?} ({:.0} uploads/sec)",
         metrics.total(),
         elapsed,
         throughput
     );
-    println!(
+    tracing::info!(
+        target: "vision",
         "[stress] Total bytes: {:.2} MB",
         metrics
             .bytes_uploaded

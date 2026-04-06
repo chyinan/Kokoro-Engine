@@ -44,7 +44,8 @@ where
                         .map(Duration::from_secs)
                         .unwrap_or(delay);
 
-                    eprintln!(
+                    tracing::error!(
+                        target: "tools",
                         "[HTTP] Request failed with status {}, retrying in {:?} (attempt {}/{})",
                         status, retry_delay, attempt, max_retries
                     );
@@ -63,7 +64,8 @@ where
                         max_retries, e
                     ));
                 }
-                eprintln!(
+                tracing::error!(
+                    target: "tools",
                     "[HTTP] Network error: {}, retrying in {:?} (attempt {}/{})",
                     e, delay, attempt, max_retries
                 );

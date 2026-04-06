@@ -160,7 +160,7 @@ impl ModManager {
                     ScriptCommand::Shutdown => break,
                 }
             }
-            println!("[ModManager] Script thread shut down.");
+            tracing::info!(target: "mods", "[ModManager] Script thread shut down.");
         });
 
         // ── Event relay task: forward ScriptEvents to Tauri event bus ──
@@ -176,7 +176,8 @@ impl ModManager {
                                 payload: payload.clone(),
                             },
                         );
-                        println!(
+                        tracing::info!(
+                            target: "mods",
                             "[ModManager] Script event '{}' forwarded to frontend",
                             event
                         );
@@ -189,24 +190,25 @@ impl ModManager {
                                 payload: data.clone(),
                             },
                         );
-                        println!("[ModManager] UI message sent to component '{}'", component);
+                        tracing::info!(target: "mods", "[ModManager] UI message sent to component '{}'", component);
                     }
                     ScriptEvent::PlayCue { cue } => {
                         let _ = handle.emit("chat-cue", CuePayload { cue: cue.clone() });
-                        println!("[ModManager] Cue triggered '{}'", cue);
+                        tracing::info!(target: "mods", "[ModManager] Cue triggered '{}'", cue);
                     }
                 }
             }
-            println!("[ModManager] Event relay shut down.");
+            tracing::info!(target: "mods", "[ModManager] Event relay shut down.");
         });
     }
 
     pub fn scan_mods(&mut self) -> Vec<ModManifest> {
-        println!(
+        tracing::info!(
+            target: "mods",
             "[ModManager] Current Working Directory: {:?}",
             std::env::current_dir()
         );
-        println!("[ModManager] Scanning mods from: {:?}", self.mods_path);
+        tracing::info!(target: "mods", "[ModManager] Scanning mods from: {:?}", self.mods_path);
         let mut mods = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.mods_path) {
             for entry in entries.flatten() {
@@ -214,11 +216,12 @@ impl ModManager {
                 if path.is_dir() {
                     let manifest_path = path.join("mod.json");
                     if manifest_path.exists() {
-                        println!("[ModManager] Found manifest at: {:?}", manifest_path);
+                        tracing::info!(target: "mods", "[ModManager] Found manifest at: {:?}", manifest_path);
                         if let Ok(content) = fs::read_to_string(&manifest_path) {
                             match serde_json::from_str::<ModManifest>(&content) {
                                 Ok(manifest) => {
-                                    println!(
+                                    tracing::info!(
+                                        target: "mods",
                                         "[ModManager] Successfully loaded mod: {}",
                                         manifest.id
                                     );
@@ -227,7 +230,8 @@ impl ModManager {
                                 }
                                 Err(e) => {
                                     eprintln!("Failed to parse mod.json in {:?}: {}", path, e);
-                                    println!(
+                                    tracing::error!(
+                                        target: "mods",
                                         "[ModManager] ERROR parsing mod.json in {:?}: {}",
                                         path, e
                                     );
@@ -235,17 +239,18 @@ impl ModManager {
                             }
                         }
                     } else {
-                        println!("[ModManager] No mod.json in check: {:?}", path);
+                        tracing::info!(target: "mods", "[ModManager] No mod.json in check: {:?}", path);
                     }
                 }
             }
         } else {
-            println!(
+            tracing::error!(
+                target: "mods",
                 "[ModManager] Failed to read mods directory: {:?}",
                 self.mods_path
             );
         }
-        println!("[ModManager] Total mods loaded: {}", mods.len());
+        tracing::info!(target: "mods", "[ModManager] Total mods loaded: {}", mods.len());
         mods
     }
 
@@ -268,7 +273,7 @@ impl ModManager {
             let full_path = match safe_join(&mod_dir, theme_path) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("[ModManager] Rejected theme path '{}': {}", theme_path, e);
+                    tracing::error!(target: "mods", "[ModManager] Rejected theme path '{}': {}", theme_path, e);
                     return Err(e);
                 }
             };
@@ -293,11 +298,15 @@ impl ModManager {
 
                         self.active_theme = Some(theme.clone());
                         let _ = app_handle.emit("mod:theme-override", &theme);
-                        println!("[ModManager] Theme loaded for mod '{}'", mod_id);
+                        tracing::info!(target: "mods", "[ModManager] Theme loaded for mod '{}'", mod_id);
                     }
-                    Err(e) => eprintln!("[ModManager] Failed to parse theme.json: {}", e),
+                    Err(e) => {
+                        tracing::error!(target: "mods", "[ModManager] Failed to parse theme.json: {}", e)
+                    }
                 },
-                Err(e) => eprintln!("[ModManager] Failed to read theme.json: {}", e),
+                Err(e) => {
+                    tracing::error!(target: "mods", "[ModManager] Failed to read theme.json: {}", e)
+                }
             }
         }
 
@@ -306,7 +315,7 @@ impl ModManager {
             let full_path = match safe_join(&mod_dir, layout_path) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("[ModManager] Rejected layout path '{}': {}", layout_path, e);
+                    tracing::error!(target: "mods", "[ModManager] Rejected layout path '{}': {}", layout_path, e);
                     return Err(e);
                 }
             };
@@ -315,11 +324,15 @@ impl ModManager {
                     Ok(layout) => {
                         self.active_layout = Some(layout.clone());
                         let _ = app_handle.emit("mod:layout-override", &layout);
-                        println!("[ModManager] Layout loaded for mod '{}'", mod_id);
+                        tracing::info!(target: "mods", "[ModManager] Layout loaded for mod '{}'", mod_id);
                     }
-                    Err(e) => eprintln!("[ModManager] Failed to parse layout.json: {}", e),
+                    Err(e) => {
+                        tracing::error!(target: "mods", "[ModManager] Failed to parse layout.json: {}", e)
+                    }
                 },
-                Err(e) => eprintln!("[ModManager] Failed to read layout.json: {}", e),
+                Err(e) => {
+                    tracing::error!(target: "mods", "[ModManager] Failed to read layout.json: {}", e)
+                }
             }
         }
 
@@ -331,7 +344,8 @@ impl ModManager {
                 .map(|(slot, path)| (slot.clone(), format!("mod://{}/{}", mod_id, path)))
                 .collect();
             let _ = app_handle.emit("mod:components-register", &component_map);
-            println!(
+            tracing::info!(
+                target: "mods",
                 "[ModManager] Registered {} components for mod '{}'",
                 component_map.len(),
                 mod_id
@@ -351,7 +365,7 @@ impl ModManager {
             let full_path = match safe_join(&mod_dir, script_path) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("[ModManager] Rejected script path '{}': {}", script_path, e);
+                    tracing::error!(target: "mods", "[ModManager] Rejected script path '{}': {}", script_path, e);
                     continue;
                 }
             };
@@ -366,29 +380,31 @@ impl ModManager {
                             })
                             .await
                         {
-                            eprintln!("[ModManager] Failed to send script to runtime: {}", e);
+                            tracing::error!(target: "mods", "[ModManager] Failed to send script to runtime: {}", e);
                             continue;
                         }
                         match reply_rx.await {
                             Ok(Ok(())) => {
-                                println!(
+                                tracing::info!(
+                                    target: "mods",
                                     "[ModManager] Script '{}' executed for mod '{}'",
                                     script_path, mod_id
                                 );
                             }
                             Ok(Err(e)) => {
-                                eprintln!("[ModManager] Script '{}' error: {}", script_path, e);
+                                tracing::error!(target: "mods", "[ModManager] Script '{}' error: {}", script_path, e);
                             }
                             Err(e) => {
-                                eprintln!("[ModManager] Script thread dropped: {}", e);
+                                tracing::error!(target: "mods", "[ModManager] Script thread dropped: {}", e);
                             }
                         }
                     } else {
-                        eprintln!("[ModManager] Script runtime not initialized");
+                        tracing::error!(target: "mods", "[ModManager] Script runtime not initialized");
                     }
                 }
                 Err(e) => {
-                    eprintln!(
+                    tracing::error!(
+                        target: "mods",
                         "[ModManager] Failed to read script '{}': {}",
                         script_path, e
                     );
@@ -404,7 +420,8 @@ impl ModManager {
                     payload: serde_json::json!({ "modId": mod_id }),
                 })
                 .await;
-            println!(
+            tracing::info!(
+                target: "mods",
                 "[ModManager] Dispatched 'init' lifecycle event for mod '{}'",
                 mod_id
             );
@@ -412,7 +429,10 @@ impl ModManager {
 
         if let Some(hooks) = app_handle.try_state::<HookRuntime>() {
             hooks
-                .emit_best_effort(&HookEvent::OnModLoaded, &build_mod_hook_payload(&manifest, "loaded"))
+                .emit_best_effort(
+                    &HookEvent::OnModLoaded,
+                    &build_mod_hook_payload(&manifest, "loaded"),
+                )
                 .await;
         }
 
@@ -453,10 +473,13 @@ impl ModManager {
         let _ = app_handle.emit("mod:unload", ());
         if let (Some(hooks), Some(manifest)) = (app_handle.try_state::<HookRuntime>(), manifest) {
             hooks
-                .emit_best_effort(&HookEvent::OnModUnloaded, &build_mod_hook_payload(&manifest, "unloaded"))
+                .emit_best_effort(
+                    &HookEvent::OnModUnloaded,
+                    &build_mod_hook_payload(&manifest, "unloaded"),
+                )
                 .await;
         }
-        println!("[ModManager] Active mod unloaded, native mode restored");
+        tracing::info!(target: "mods", "[ModManager] Active mod unloaded, native mode restored");
     }
 }
 
@@ -501,7 +524,10 @@ mod tests {
             engine_version: None,
             layout: Some("layout.json".to_string()),
             theme: Some("theme.json".to_string()),
-            components: HashMap::from([("TestPanel".to_string(), "components/TestPanel.html".to_string())]),
+            components: HashMap::from([(
+                "TestPanel".to_string(),
+                "components/TestPanel.html".to_string(),
+            )]),
             scripts: vec!["scripts/main.js".to_string()],
             permissions: vec![],
             entry: None,

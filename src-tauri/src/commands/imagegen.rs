@@ -50,7 +50,7 @@ pub async fn test_sd_connection(base_url: String) -> Result<Vec<String>, KokoroE
     }
 
     let url = format!("{}/sdapi/v1/sd-models", url_str);
-    tracing::info!(target = "imagegen", "Testing SD connection: {}", url);
+    tracing::info!(target: "imagegen", "Testing SD connection: {}", url);
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -83,7 +83,7 @@ pub async fn test_sd_connection(base_url: String) -> Result<Vec<String>, KokoroE
         .collect();
 
     tracing::info!(
-        target = "imagegen",
+        target: "imagegen",
         "SD connection OK, {} models found",
         model_names.len()
     );

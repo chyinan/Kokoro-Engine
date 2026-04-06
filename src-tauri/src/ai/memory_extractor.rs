@@ -47,11 +47,12 @@ pub async fn extract_and_store_memories(
     character_id: String,
 ) {
     if recent_history.is_empty() {
-        println!("[Memory] extract_and_store_memories called but history is empty");
+        tracing::info!(target: "memory", "[Memory] extract_and_store_memories called but history is empty");
         return;
     }
 
-    println!(
+    tracing::info!(
+        target: "memory",
         "[Memory] Starting extraction for '{}' with {} history messages",
         character_id,
         recent_history.len()
@@ -61,7 +62,7 @@ pub async fn extract_and_store_memories(
     let existing_memories = match memory_manager.get_all_memory_contents(&character_id).await {
         Ok(mems) => mems,
         Err(e) => {
-            eprintln!("[Memory] Failed to fetch existing memories: {}", e);
+            tracing::error!(target: "memory", "[Memory] Failed to fetch existing memories: {}", e);
             Vec::new()
         }
     };
@@ -100,16 +101,17 @@ pub async fn extract_and_store_memories(
                 // Fallback: try parsing as plain string array
                 let plain = parse_plain_response(&response);
                 if plain.is_empty() {
-                    println!("[Memory] No noteworthy facts extracted this round.");
+                    tracing::info!(target: "memory", "[Memory] No noteworthy facts extracted this round.");
                     return;
                 }
                 let count = plain.len();
                 for memory in plain {
                     if let Err(e) = memory_manager.add_memory(&memory, &character_id).await {
-                        eprintln!("[Memory] Failed to store memory '{}': {}", memory, e);
+                        tracing::error!(target: "memory", "[Memory] Failed to store memory '{}': {}", memory, e);
                     }
                 }
-                println!(
+                tracing::info!(
+                    target: "memory",
                     "[Memory] Extracted {} memories (plain format) for '{}'.",
                     count, character_id
                 );
@@ -120,20 +122,22 @@ pub async fn extract_and_store_memories(
                         .add_memory_with_importance(&sf.fact, &character_id, sf.importance)
                         .await
                     {
-                        eprintln!(
+                        tracing::error!(
+                            target: "memory",
                             "[Memory] Failed to store scored memory '{}': {}",
                             sf.fact, e
                         );
                     }
                 }
-                println!(
+                tracing::info!(
+                    target: "memory",
                     "[Memory] Extracted {} scored memories for '{}'.",
                     count, character_id
                 );
             }
         }
         Err(e) => {
-            eprintln!("[Memory] Extraction LLM call failed: {}", e);
+            tracing::error!(target: "memory", "[Memory] Extraction LLM call failed: {}", e);
         }
     }
 }
@@ -156,7 +160,8 @@ fn parse_plain_response(response: &str) -> Vec<String> {
     match serde_json::from_str::<Vec<String>>(json_str) {
         Ok(items) => items.into_iter().filter(|s| !s.trim().is_empty()).collect(),
         Err(e) => {
-            eprintln!(
+            tracing::error!(
+                target: "memory",
                 "[Memory] Failed to parse extraction response: {}. Raw: {}",
                 e,
                 &response[..response.len().min(200)]

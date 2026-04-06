@@ -100,18 +100,18 @@ impl TtsService {
 
         for provider_config in &config.providers {
             if !provider_config.enabled {
-                tracing::info!(target = "tts", "Skipping disabled provider: {}", provider_config.id);
+                tracing::info!(target: "tts", "Skipping disabled provider: {}", provider_config.id);
                 continue;
             }
 
             match Self::build_provider(provider_config).await {
                 Some(provider) => {
-                    tracing::info!(target = "tts", "Registering provider: {}", provider_config.id);
+                    tracing::info!(target: "tts", "Registering provider: {}", provider_config.id);
                     service.register_provider(provider).await;
                 }
                 None => {
                     tracing::error!(
-                        target = "tts",
+                        target: "tts",
                         "Failed to build provider '{}' (type: {}). Check config and API keys.",
                         provider_config.id, provider_config.provider_type
                     );
@@ -148,7 +148,7 @@ impl TtsService {
             "elevenlabs" => CloudTTSProvider::elevenlabs_style(config)
                 .map(|p| Box::new(p) as Box<dyn TtsProvider>),
             other => {
-                tracing::error!(target = "tts", "Unknown provider type: {}", other);
+                tracing::error!(target: "tts", "Unknown provider type: {}", other);
                 None
             }
         }
@@ -297,7 +297,7 @@ impl TtsService {
                                     .map_err(|e| e.to_string())?;
                             }
                             Err(e) => {
-                                tracing::error!(target = "tts", "Stream error for '{}': {}", sentence, e);
+                                tracing::error!(target: "tts", "Stream error for '{}': {}", sentence, e);
                                 failed = true;
                                 break;
                             }
@@ -329,7 +329,7 @@ impl TtsService {
                 }
                 Ok(_) => {} // Should not happen
                 Err(e) => {
-                    tracing::error!(target = "tts", "{}", e);
+                    tracing::error!(target: "tts", "{}", e);
                 }
             }
         }
@@ -396,17 +396,17 @@ impl TtsService {
         // Re-register enabled providers
         for provider_config in &config.providers {
             if !provider_config.enabled {
-                tracing::info!(target = "tts", "Skipping disabled provider: {}", provider_config.id);
+                tracing::info!(target: "tts", "Skipping disabled provider: {}", provider_config.id);
                 continue;
             }
             match Self::build_provider(provider_config).await {
                 Some(provider) => {
-                    tracing::info!(target = "tts", "Registering provider: {}", provider_config.id);
+                    tracing::info!(target: "tts", "Registering provider: {}", provider_config.id);
                     self.register_provider(provider).await;
                 }
                 None => {
                     tracing::error!(
-                        target = "tts",
+                        target: "tts",
                         "Failed to build provider '{}' (type: {})",
                         provider_config.id, provider_config.provider_type
                     );
@@ -417,7 +417,7 @@ impl TtsService {
         // Clear cache since providers changed
         self.clear_cache().await;
         tracing::info!(
-            target = "tts",
+            target: "tts",
             "Reloaded {} providers from config",
             self.providers.read().await.len()
         );

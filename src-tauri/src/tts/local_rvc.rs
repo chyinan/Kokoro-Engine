@@ -251,7 +251,7 @@ impl LocalRVCProvider {
 
         // Step 1: Upload audio to Gradio temp dir
         let temp_path = self.upload_to_gradio(audio_data, filename).await?;
-        println!("[RVC] Uploaded audio → {}", temp_path);
+        tracing::info!(target: "tts", "[RVC] Uploaded audio → {}", temp_path);
 
         // Step 2: Resolve parameters (per-request overrides > provider defaults)
         let f0_up_key = params.pitch_shift.unwrap_or(0.0) as i32;
@@ -285,7 +285,8 @@ impl LocalRVCProvider {
             ]
         });
 
-        println!(
+        tracing::info!(
+            target: "tts",
             "[RVC] Calling {} with pitch={}, f0={}, index_rate={}",
             api_url, f0_up_key, f0_method, index_rate
         );
@@ -317,7 +318,7 @@ impl LocalRVCProvider {
 
         // Log the info message from RVC
         if let Some(info) = api_response.data[0].as_str() {
-            println!("[RVC] Result info: {}", info);
+            tracing::info!(target: "tts", "[RVC] Result info: {}", info);
         }
 
         // The second element contains the audio — either as a file reference or inline data

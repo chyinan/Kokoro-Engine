@@ -83,7 +83,10 @@ mod tests {
         let settings = ToolSettings::default();
 
         assert_eq!(settings.max_tool_rounds, DEFAULT_MAX_TOOL_ROUNDS);
-        assert_eq!(settings.max_permission_level, ActionPermissionLevel::Elevated);
+        assert_eq!(
+            settings.max_permission_level,
+            ActionPermissionLevel::Elevated
+        );
         assert!(settings.blocked_risk_tags.is_empty());
         assert!(settings.enabled_tools.is_empty());
     }

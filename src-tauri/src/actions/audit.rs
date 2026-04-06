@@ -68,7 +68,11 @@ pub fn build_tool_audit_event(input: ToolAuditInput<'_>) -> ToolAuditEvent {
         source: input.source.to_string(),
         server_name: input.server_name.map(ToString::to_string),
         invocation_source: input.invocation_source.to_string(),
-        risk_tags: input.risk_tags.iter().map(|tag| (*tag).to_string()).collect(),
+        risk_tags: input
+            .risk_tags
+            .iter()
+            .map(|tag| (*tag).to_string())
+            .collect(),
         permission_level: input.permission_level.to_string(),
         decision: tool_audit_decision_from_permission(input.decision, input.approved_by_user),
         reason,

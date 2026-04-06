@@ -182,7 +182,7 @@ impl NativeFrameProcessor {
 
         let audio_buffer = self.app.state::<AudioBuffer>();
         if let Err(err) = audio_buffer.append_samples(frame.samples) {
-            eprintln!("[STT] Native mic append failed: {err}");
+            tracing::error!(target: "stt", "[STT] Native mic append failed: {err}");
         }
     }
 }
@@ -401,16 +401,16 @@ where
                     match frame_tx.try_send(frame) {
                         Ok(()) => {}
                         Err(TrySendError::Full(_)) => {
-                            eprintln!("[STT] Native mic frame dropped: processor is lagging");
+                            tracing::error!(target: "stt", "[STT] Native mic frame dropped: processor is lagging");
                         }
                         Err(TrySendError::Disconnected(_)) => {
-                            eprintln!("[STT] Native mic frame processor disconnected");
+                            tracing::error!(target: "stt", "[STT] Native mic frame processor disconnected");
                         }
                     }
                 }
             },
             move |err| {
-                eprintln!("[STT] Native microphone stream error: {err}");
+                tracing::error!(target: "stt", "[STT] Native microphone stream error: {err}");
                 let _ = err_app.emit(
                     "stt:mic-volume",
                     MicVolumeEvent {
@@ -436,7 +436,7 @@ fn spawn_frame_processor(
         let mut processor = match NativeFrameProcessor::new(app, auto_stop_on_silence) {
             Ok(processor) => processor,
             Err(err) => {
-                eprintln!("[STT] Native mic frame processor init failed: {err}");
+                tracing::error!(target: "stt", "[STT] Native mic frame processor init failed: {err}");
                 return;
             }
         };
@@ -541,7 +541,7 @@ fn resample_mono_chunk(
                 }
             }
             Err(err) => {
-                eprintln!("[STT] Native microphone resampling failed: {err}");
+                tracing::error!(target: "stt", "[STT] Native microphone resampling failed: {err}");
                 break;
             }
         }

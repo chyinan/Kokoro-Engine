@@ -73,14 +73,16 @@ pub async fn list_conversations(
     Ok(rows
         .into_iter()
         .map(
-            |(id, character_id, title, topic, pinned_state, created_at, updated_at)| ConversationInfo {
-                id,
-                character_id,
-                title,
-                topic,
-                pinned_state,
-                created_at,
-                updated_at,
+            |(id, character_id, title, topic, pinned_state, created_at, updated_at)| {
+                ConversationInfo {
+                    id,
+                    character_id,
+                    title,
+                    topic,
+                    pinned_state,
+                    created_at,
+                    updated_at,
+                }
             },
         )
         .collect())
@@ -241,14 +243,16 @@ pub async fn update_conversation_state(
     let pinned_state = request.pinned_state.unwrap_or(current.1);
     let now = chrono::Utc::now().to_rfc3339();
 
-    sqlx::query("UPDATE conversations SET topic = ?, pinned_state = ?, updated_at = ? WHERE id = ?")
-        .bind(&topic)
-        .bind(&pinned_state)
-        .bind(&now)
-        .bind(&request.id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| KokoroError::Database(e.to_string()))?;
+    sqlx::query(
+        "UPDATE conversations SET topic = ?, pinned_state = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(&topic)
+    .bind(&pinned_state)
+    .bind(&now)
+    .bind(&request.id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| KokoroError::Database(e.to_string()))?;
 
     Ok(())
 }

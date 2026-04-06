@@ -110,7 +110,7 @@ fn build_provider(config: &LlmConfig) -> Box<dyn LlmProvider> {
     match provider_cfg {
         Some(cfg) => build_from_provider_config(cfg),
         None => {
-            eprintln!("[LLM] No provider configured, falling back to OpenAI defaults");
+            tracing::warn!(target: "llm", "No provider configured, falling back to OpenAI defaults");
             Box::new(OpenAIProvider::new(
                 String::new(),
                 Some("https://api.openai.com/v1".to_string()),
@@ -124,15 +124,16 @@ fn build_from_provider_config(cfg: &LlmProviderConfig) -> Box<dyn LlmProvider> {
     match cfg.provider_type.as_str() {
         "ollama" => {
             let model = cfg.model.clone().unwrap_or_else(|| "llama3".to_string());
-            println!("[LLM] Initializing Ollama provider: model={}", model);
+            tracing::info!(target: "llm", "Initializing Ollama provider: model={}", model);
             Box::new(OllamaProvider::new(cfg.base_url.clone(), model))
         }
         _ => {
             // "openai" or any OpenAI-compatible provider
             let api_key = cfg.resolve_api_key().unwrap_or_default();
             let model = cfg.model.clone().unwrap_or_else(|| "gpt-4".to_string());
-            println!(
-                "[LLM] Initializing OpenAI provider: base_url={}, model={}",
+            tracing::info!(
+                target: "llm",
+                "Initializing OpenAI provider: base_url={}, model={}",
                 cfg.base_url
                     .as_deref()
                     .unwrap_or("https://api.openai.com/v1"),

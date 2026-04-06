@@ -1,8 +1,8 @@
 //! Built-in tool handlers for the Tool Registry.
 
 use super::registry::{
-    ActionContext, ActionError, ActionHandler, ActionParam, ActionPermissionLevel,
-    ActionResult, ActionRiskTag,
+    ActionContext, ActionError, ActionHandler, ActionParam, ActionPermissionLevel, ActionResult,
+    ActionRiskTag,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -287,7 +287,8 @@ impl ActionHandler for StoreMemoryAction {
             .await
             .map_err(|e| ActionError(format!("Failed to store memory: {}", e)))?;
 
-        println!(
+        tracing::info!(
+            target: "tools",
             "[Memory] Tool stored: '{}' (importance={:.1}) for '{}'",
             fact.chars().take(60).collect::<String>(),
             importance,
@@ -358,7 +359,8 @@ impl ActionHandler for ForgetMemoryAction {
                 .await
                 .map_err(|e| ActionError(format!("Failed to delete memory: {}", e)))?;
 
-            println!(
+            tracing::info!(
+                target: "tools",
                 "[Memory] Tool forgot: '{}' for '{}'",
                 &content[..content.len().min(60)],
                 char_id

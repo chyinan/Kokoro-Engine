@@ -22,7 +22,7 @@ impl EdgeTtsProvider {
         let client = match EdgeTtsClient::new() {
             Ok(client) => client,
             Err(err) => {
-                eprintln!("[TTS] Failed to initialize edge-tts-rust client: {}", err);
+                tracing::error!(target: "tts", "[TTS] Failed to initialize edge-tts-rust client: {}", err);
                 return None;
             }
         };
@@ -46,7 +46,7 @@ impl EdgeTtsProvider {
                 }
             }
             Err(err) => {
-                eprintln!("[TTS] Failed to fetch Edge TTS voices: {}", err);
+                tracing::error!(target: "tts", "[TTS] Failed to fetch Edge TTS voices: {}", err);
                 vec![fallback_voice_profile(&provider_id, &default_voice)]
             }
         };

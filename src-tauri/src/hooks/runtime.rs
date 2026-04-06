@@ -9,11 +9,8 @@ use std::sync::{Arc, RwLock};
 pub trait HookHandler: Send + Sync {
     fn id(&self) -> &str;
     fn events(&self) -> &'static [HookEvent];
-    async fn handle(
-        &self,
-        event: &HookEvent,
-        payload: &HookPayload,
-    ) -> Result<HookOutcome, String>;
+    async fn handle(&self, event: &HookEvent, payload: &HookPayload)
+        -> Result<HookOutcome, String>;
 
     async fn modify_before_llm_request(
         &self,
@@ -68,7 +65,8 @@ impl HookRuntime {
                 continue;
             }
             if let Err(error) = handler.handle(event, payload).await {
-                eprintln!(
+                tracing::error!(
+                    target: "hooks",
                     "[Hook] handler={} event={:?} error={}",
                     handler.id(),
                     event,
@@ -91,7 +89,8 @@ impl HookRuntime {
                     return HookOutcome::Deny { reason };
                 }
                 Err(error) => {
-                    eprintln!(
+                    tracing::error!(
+                        target: "hooks",
                         "[Hook] handler={} event={:?} error={}",
                         handler.id(),
                         event,
@@ -103,10 +102,7 @@ impl HookRuntime {
         HookOutcome::Continue
     }
 
-    pub async fn emit_before_llm_request_modify(
-        &self,
-        payload: &mut BeforeLlmRequestPayload,
-    ) {
+    pub async fn emit_before_llm_request_modify(&self, payload: &mut BeforeLlmRequestPayload) {
         let handlers = self.handlers.read().unwrap().clone();
         for handler in handlers {
             if !handler
@@ -117,7 +113,8 @@ impl HookRuntime {
                 continue;
             }
             if let Err(error) = handler.modify_before_llm_request(payload).await {
-                eprintln!(
+                tracing::error!(
+                    target: "hooks",
                     "[Hook] handler={} event={:?} error={}",
                     handler.id(),
                     HookEvent::BeforeLlmRequest,
@@ -127,10 +124,7 @@ impl HookRuntime {
         }
     }
 
-    pub async fn emit_before_action_args_modify(
-        &self,
-        payload: &mut BeforeActionArgsPayload,
-    ) {
+    pub async fn emit_before_action_args_modify(&self, payload: &mut BeforeActionArgsPayload) {
         let handlers = self.handlers.read().unwrap().clone();
         for handler in handlers {
             if !handler
@@ -141,7 +135,8 @@ impl HookRuntime {
                 continue;
             }
             if let Err(error) = handler.modify_before_action_args(payload).await {
-                eprintln!(
+                tracing::error!(
+                    target: "hooks",
                     "[Hook] handler={} event={:?} error={}",
                     handler.id(),
                     HookEvent::BeforeActionInvoke,

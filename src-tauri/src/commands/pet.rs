@@ -65,12 +65,12 @@ fn save_pet_config_to_disk(config: &PetConfig) -> Result<(), KokoroError> {
 
 #[tauri::command]
 pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
-    tracing::info!(target = "pet", "show_pet_window called");
+    tracing::info!(target: "pet", "show_pet_window called");
     let windows: Vec<String> = app.webview_windows().keys().cloned().collect();
-    tracing::info!(target = "pet", "available windows: {:?}", windows);
+    tracing::info!(target: "pet", "available windows: {:?}", windows);
 
     if let Some(win) = app.get_webview_window("pet") {
-        tracing::info!(target = "pet", "found existing pet window, showing...");
+        tracing::info!(target: "pet", "found existing pet window, showing...");
         let cfg = load_pet_config();
         let x = if cfg.position_x != 0 {
             cfg.position_x
@@ -100,9 +100,9 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
         win.set_focus()
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
-        tracing::info!(target = "pet", "pet window shown successfully");
+        tracing::info!(target: "pet", "pet window shown successfully");
     } else {
-        tracing::info!(target = "pet", "pet window not found, creating new one...");
+        tracing::info!(target: "pet", "pet window not found, creating new one...");
         let cfg = load_pet_config();
         let x = if cfg.position_x != 0 {
             cfg.position_x
@@ -152,7 +152,7 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
         win.set_focus()
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
-        tracing::info!(target = "pet", "pet window created and shown successfully");
+        tracing::info!(target: "pet", "pet window created and shown successfully");
     }
     Ok(())
 }

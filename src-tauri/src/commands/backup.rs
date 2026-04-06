@@ -274,7 +274,8 @@ pub async fn export_data(
     let size_bytes = fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
     stats.configs = config_count;
 
-    println!(
+    tracing::info!(
+        target: "backup",
         "[Backup] Exported to {} ({} bytes, {} memories, {} conversations, {} configs)",
         export_path, size_bytes, stats.memories, stats.conversations, stats.configs
     );
@@ -538,7 +539,7 @@ pub async fn import_data(
         })?;
 
         let attach_path = tmp_db.to_string_lossy().replace('\\', "/");
-        println!("[Backup] Attaching import DB from: {}", attach_path);
+        tracing::info!(target: "backup", "[Backup] Attaching import DB from: {}", attach_path);
         // 使用参数绑定防止 SQL 注入
         sqlx::query("ATTACH DATABASE ? AS import_db")
             .bind(&attach_path)
@@ -553,7 +554,7 @@ pub async fn import_data(
             .map_err(|e| {
                 KokoroError::Database(format!("Failed to count import_db.memories: {}", e))
             })?;
-        println!("[Backup] import_db.memories count: {}", import_count);
+        tracing::info!(target: "backup", "[Backup] import_db.memories count: {}", import_count);
         result
             .debug_log
             .push(format!("import_db.memories count: {}", import_count));
@@ -564,7 +565,7 @@ pub async fn import_data(
                 .fetch_all(&mut *conn)
                 .await
                 .unwrap_or_default();
-        println!("[Backup] import_db.memories character_ids: {:?}", char_ids);
+        tracing::info!(target: "backup", "[Backup] import_db.memories character_ids: {:?}", char_ids);
         result
             .debug_log
             .push(format!("import_db character_ids: {:?}", char_ids));
@@ -573,13 +574,14 @@ pub async fn import_data(
             options.target_character_id
         ));
 
-        let import_conversation_columns: Vec<String> = sqlx::query("PRAGMA import_db.table_info(conversations)")
-            .fetch_all(&mut *conn)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|row| row.get::<String, _>("name"))
-            .collect();
+        let import_conversation_columns: Vec<String> =
+            sqlx::query("PRAGMA import_db.table_info(conversations)")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|row| row.get::<String, _>("name"))
+                .collect();
         let import_has_topic = import_conversation_columns.iter().any(|col| col == "topic");
         let import_has_pinned_state = import_conversation_columns
             .iter()
@@ -647,7 +649,7 @@ pub async fn import_data(
                 .await
                 .map_err(|e| KokoroError::Database(format!("INSERT memories failed: {}", e)))?;
             result.imported_memories = r.rows_affected() as i64;
-            println!("[Backup] Inserted {} memories", result.imported_memories);
+            tracing::info!(target: "backup", "[Backup] Inserted {} memories", result.imported_memories);
             result
                 .debug_log
                 .push(format!("inserted memories: {}", result.imported_memories));
@@ -695,7 +697,8 @@ pub async fn import_data(
                     KokoroError::Database(format!("INSERT OR IGNORE memories failed: {}", e))
                 })?;
             result.imported_memories = r.rows_affected() as i64;
-            println!(
+            tracing::info!(
+                target: "backup",
                 "[Backup] Inserted {} memories (skip mode)",
                 result.imported_memories
             );
@@ -733,7 +736,7 @@ pub async fn import_data(
 
         // 如果指定了目标 character_id，把所有导入的记忆和对话重映射过去
         if let Some(ref target_id) = options.target_character_id {
-            println!("[Backup] Remapping character_id to '{}'", target_id);
+            tracing::info!(target: "backup", "[Backup] Remapping character_id to '{}'", target_id);
             result
                 .debug_log
                 .push(format!("remapping all character_ids to: {}", target_id));
@@ -780,7 +783,8 @@ pub async fn import_data(
 
     // tmp_dir 由 _tmp_guard 自动清理
 
-    println!(
+    tracing::info!(
+        target: "backup",
         "[Backup] Imported: {} memories, {} conversations, {} configs",
         result.imported_memories, result.imported_conversations, result.imported_configs
     );

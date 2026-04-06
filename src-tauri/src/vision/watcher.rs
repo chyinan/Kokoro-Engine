@@ -50,13 +50,13 @@ impl VisionWatcher {
             )
             .is_err()
         {
-            tracing::info!(target = "vision", "Watcher already running");
+            tracing::info!(target: "vision", "Watcher already running");
             return;
         }
         let watcher = self.clone();
 
         tokio::spawn(async move {
-            tracing::info!(target = "vision", "Watcher started");
+            tracing::info!(target: "vision", "Watcher started");
             let _ = app_handle.emit("vision-status", "active");
 
             let client = watcher.client.clone();
@@ -80,7 +80,7 @@ impl VisionWatcher {
                 let screenshot = match capture_screen() {
                     Ok(bytes) => bytes,
                     Err(e) => {
-                        tracing::error!(target = "vision", "Capture failed: {}", e);
+                        tracing::error!(target: "vision", "Capture failed: {}", e);
                         tokio::time::sleep(std::time::Duration::from_secs(
                             config.interval_secs as u64,
                         ))
@@ -98,7 +98,7 @@ impl VisionWatcher {
                 };
 
                 if changed {
-                    tracing::info!(target = "vision", "Screen changed, analyzing with VLM...");
+                    tracing::info!(target: "vision", "Screen changed, analyzing with VLM...");
 
                     // 3. Send to VLM for analysis
                     match analyze_screenshot(
@@ -111,7 +111,7 @@ impl VisionWatcher {
                     {
                         Ok(description) => {
                             tracing::info!(
-                                target = "vision",
+                                target: "vision",
                                 "Observation: {}",
                                 &description[..description.len().min(100)]
                             );
@@ -142,13 +142,13 @@ impl VisionWatcher {
                             }
                         }
                         Err(e) => {
-                            tracing::error!(target = "vision", "VLM analysis failed: {}", e);
+                            tracing::error!(target: "vision", "VLM analysis failed: {}", e);
                         }
                     }
 
                     prev_screenshot = Some(screenshot);
                 } else {
-                    tracing::info!(target = "vision", "No significant change, skipping analysis");
+                    tracing::info!(target: "vision", "No significant change, skipping analysis");
                 }
 
                 // 4. Sleep for the configured interval
@@ -156,7 +156,7 @@ impl VisionWatcher {
                     .await;
             }
 
-            tracing::info!(target = "vision", "Watcher stopped");
+            tracing::info!(target: "vision", "Watcher stopped");
             let _ = app_handle.emit("vision-status", "inactive");
         });
     }

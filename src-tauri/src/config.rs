@@ -12,11 +12,12 @@ pub fn load_json_config<T: DeserializeOwned + Default>(path: &Path, label: &str)
     match std::fs::read_to_string(path) {
         Ok(content) => match serde_json::from_str::<T>(&content) {
             Ok(config) => {
-                println!("[{}] Loaded config from {}", label, path.display());
+                tracing::info!(target: "config", "[{}] Loaded config from {}", label, path.display());
                 config
             }
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
+                    target: "config",
                     "[{}] Failed to parse config {}: {} — using defaults",
                     label,
                     path.display(),
@@ -26,7 +27,8 @@ pub fn load_json_config<T: DeserializeOwned + Default>(path: &Path, label: &str)
             }
         },
         Err(_) => {
-            println!(
+            tracing::info!(
+                target: "config",
                 "[{}] No config file at {} — using defaults",
                 label,
                 path.display()
@@ -51,7 +53,7 @@ pub fn save_json_config<T: Serialize>(
         .map_err(|e| KokoroError::Config(format!("Failed to serialize config: {}", e)))?;
     std::fs::write(path, json)
         .map_err(|e| KokoroError::Config(format!("Failed to write config file: {}", e)))?;
-    println!("[{}] Saved config to {}", label, path.display());
+    tracing::info!(target: "config", "[{}] Saved config to {}", label, path.display());
     Ok(())
 }
 

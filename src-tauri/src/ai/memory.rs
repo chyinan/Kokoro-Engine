@@ -202,7 +202,8 @@ impl MemoryManager {
             return Ok(false);
         }
 
-        println!(
+        tracing::info!(
+            target: "memory",
             "[Memory] Hydrating missing tokenizer/config files in {}: {:?}",
             snapshot_dir.display(),
             missing
@@ -248,7 +249,7 @@ impl MemoryManager {
             let onnx = dir.join("model.onnx");
 
             if onnx.exists() {
-                println!("[Memory] Found local model at: {}", dir.display());
+                tracing::info!(target: "memory", "[Memory] Found local model at: {}", dir.display());
 
                 let tokenizer = dir.join("tokenizer.json");
                 let config = dir.join("config.json");
@@ -256,7 +257,8 @@ impl MemoryManager {
                 let tok_config = dir.join("tokenizer_config.json");
 
                 if !tokenizer.exists() || !config.exists() {
-                    eprintln!(
+                    tracing::error!(
+                        target: "memory",
                         "[Memory] model.onnx found but tokenizer/config missing in {}, skipping.",
                         dir.display()
                     );
@@ -278,17 +280,18 @@ impl MemoryManager {
                     InitOptionsUserDefined::default(),
                 ) {
                     Ok(model) => {
-                        println!("[Memory] Embedding model loaded successfully from local files.");
+                        tracing::info!(target: "memory", "[Memory] Embedding model loaded successfully from local files.");
                         return Some(model);
                     }
                     Err(e) => {
-                        eprintln!("[Memory] Failed to load local model: {}", e);
+                        tracing::error!(target: "memory", "[Memory] Failed to load local model: {}", e);
                     }
                 }
             }
         }
 
-        println!(
+        tracing::info!(
+            target: "memory",
             "[Memory] No local model found. Searched: {:?}",
             candidates
                 .iter()
@@ -327,7 +330,7 @@ impl MemoryManager {
                 }
 
                 // 2. Fall back to HF download — cache into app data so build can find it next time
-                println!("[Memory] Local model not found, downloading from HuggingFace...");
+                tracing::info!(target: "memory", "[Memory] Local model not found, downloading from HuggingFace...");
                 let cache_dir = dirs_next::data_dir()
                     .map(|d| d.join("com.chyin.kokoro").join("models"))
                     .unwrap_or_else(|| std::path::PathBuf::from("models"));
@@ -345,7 +348,7 @@ impl MemoryManager {
                     let _ = Self::hydrate_missing_local_files(&snapshot_dir).await;
                 }
 
-                println!("[Memory] Embedding model downloaded and loaded successfully.");
+                tracing::info!(target: "memory", "[Memory] Embedding model downloaded and loaded successfully.");
                 Ok(Mutex::new(model))
             })
             .await
@@ -374,7 +377,8 @@ impl MemoryManager {
             .deduplicate_or_refresh(&embedding, character_id, now)
             .await
         {
-            println!(
+            tracing::info!(
+                target: "memory",
                 "[Memory] Deduplicated: refreshed existing memory for '{}'",
                 &content[..content.len().min(50)]
             );
@@ -427,7 +431,8 @@ impl MemoryManager {
             let sim = cosine_similarity(new_embedding, &existing);
             if sim > DEDUP_THRESHOLD {
                 let id: i64 = row.get("id");
-                println!(
+                tracing::info!(
+                    target: "memory",
                     "[Memory] Dedup: similarity={:.3} > {:.3}, refreshing id={}",
                     sim, DEDUP_THRESHOLD, id
                 );
@@ -464,7 +469,8 @@ impl MemoryManager {
             let sim = cosine_similarity(new_embedding, &existing);
             if sim > DEDUP_THRESHOLD {
                 let id: i64 = row.get("id");
-                println!(
+                tracing::info!(
+                    target: "memory",
                     "[Memory] Dedup-upgrade: similarity={:.3} > {:.3}, upgrading id={}",
                     sim, DEDUP_THRESHOLD, id
                 );
@@ -780,7 +786,8 @@ impl MemoryManager {
             .execute(&self.db)
             .await?;
 
-            println!(
+            tracing::info!(
+                target: "context",
                 "[Context] Reopening conversation summary circuit for '{}' after cooldown (failure_count={})",
                 conversation_id, failure_count
             );
@@ -831,7 +838,9 @@ impl MemoryManager {
                 .and_then(|value| value.as_str());
             if matches!(
                 technical_type,
-                Some("assistant_tool_calls") | Some("tool_result") | Some("translation_instruction")
+                Some("assistant_tool_calls")
+                    | Some("tool_result")
+                    | Some("translation_instruction")
             ) {
                 continue;
             }
@@ -952,7 +961,8 @@ impl MemoryManager {
         .execute(&self.db)
         .await?;
 
-        eprintln!(
+        tracing::error!(
+            target: "context",
             "[Context] Conversation summary failed for '{}' (record={}, failures={}): {}",
             conversation_id, record_id, failure_count, error
         );
@@ -1050,7 +1060,8 @@ impl MemoryManager {
                     .execute(&self.db)
                     .await?;
                     invalidated += 1;
-                    println!(
+                    tracing::info!(
+                        target: "memory",
                         "[Memory] Invalidated contradicting memory id={}: '{}'",
                         id,
                         &existing_content[..existing_content.len().min(60)]
@@ -1192,7 +1203,8 @@ impl MemoryManager {
         }
 
         if deleted > 0 {
-            println!(
+            tracing::info!(
+                target: "memory",
                 "[Memory] Pruned {} decayed ephemeral memories for '{}'",
                 deleted, character_id
             );
@@ -1299,7 +1311,7 @@ impl MemoryManager {
             let merged = match merge_facts_via_llm(&facts, &provider).await {
                 Ok(text) => text,
                 Err(e) => {
-                    eprintln!("[Memory] Consolidation LLM call failed: {}", e);
+                    tracing::error!(target: "memory", "[Memory] Consolidation LLM call failed: {}", e);
                     continue;
                 }
             };
@@ -1312,7 +1324,7 @@ impl MemoryManager {
             let embedding = match self.embed(&merged).await {
                 Ok(e) => e,
                 Err(e) => {
-                    eprintln!("[Memory] Failed to embed consolidated memory: {}", e);
+                    tracing::error!(target: "memory", "[Memory] Failed to embed consolidated memory: {}", e);
                     continue;
                 }
             };
@@ -1344,7 +1356,8 @@ impl MemoryManager {
             }
 
             consolidated_count += 1;
-            println!(
+            tracing::info!(
+                target: "memory",
                 "[Memory] Consolidated {} memories into: {}",
                 source_ids.len(),
                 &merged[..merged.len().min(80)]
@@ -1408,9 +1421,27 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// False-positive rate is acceptable — only triggers inside the 0.70–0.95 similarity band.
 fn is_likely_contradiction(a: &str, b: &str) -> bool {
     const NEGATIONS: &[&str] = &[
-        "not", "no", "never", "don't", "dont", "doesn't", "doesnt",
-        "won't", "wont", "can't", "cant", "hate", "dislike",
-        "不", "没", "从不", "不喜欢", "讨厌", "不想", "不会", "没有",
+        "not",
+        "no",
+        "never",
+        "don't",
+        "dont",
+        "doesn't",
+        "doesnt",
+        "won't",
+        "wont",
+        "can't",
+        "cant",
+        "hate",
+        "dislike",
+        "不",
+        "没",
+        "从不",
+        "不喜欢",
+        "讨厌",
+        "不想",
+        "不会",
+        "没有",
     ];
     let a_lower = a.to_lowercase();
     let b_lower = b.to_lowercase();
@@ -1755,10 +1786,7 @@ mod tests {
     #[test]
     fn test_contradiction_one_side_negation_zh() {
         // Chinese negation keyword
-        assert!(is_likely_contradiction(
-            "用户喜欢猫",
-            "用户不喜欢猫"
-        ));
+        assert!(is_likely_contradiction("用户喜欢猫", "用户不喜欢猫"));
     }
 
     #[test]

@@ -154,7 +154,7 @@ impl StdioTransport {
                 line.push('\n');
 
                 if let Err(e) = stdin.write_all(line.as_bytes()).await {
-                    eprintln!("[MCP/Stdio] Write error: {}", e);
+                    tracing::error!(target: "mcp", "[MCP/Stdio] Write error: {}", e);
                     // 清理所有 pending 请求，通知等待者连接已断开
                     let mut pending = pending_cleanup.lock().await;
                     for (_, responder) in pending.drain() {
@@ -164,7 +164,7 @@ impl StdioTransport {
                     break;
                 }
                 if let Err(e) = stdin.flush().await {
-                    eprintln!("[MCP/Stdio] Flush error: {}", e);
+                    tracing::error!(target: "mcp", "[MCP/Stdio] Flush error: {}", e);
                     let mut pending = pending_cleanup.lock().await;
                     for (_, responder) in pending.drain() {
                         let _ = responder
@@ -205,7 +205,8 @@ impl StdioTransport {
                                 // Notifications (id=null) are silently ignored for now
                             }
                             Err(e) => {
-                                eprintln!(
+                                tracing::error!(
+                                    target: "mcp",
                                     "[MCP/Stdio] Parse error: {} — line: {}",
                                     e,
                                     &line[..line.len().min(200)]
@@ -215,7 +216,7 @@ impl StdioTransport {
                     }
                     Ok(None) => {
                         // EOF — process exited, 清理所有 pending 请求
-                        eprintln!("[MCP/Stdio] Server process exited (stdout closed)");
+                        tracing::error!(target: "mcp", "[MCP/Stdio] Server process exited (stdout closed)");
                         connected_clone.store(false, Ordering::SeqCst);
                         let mut pending = pending_reader_cleanup.lock().await;
                         for (_, responder) in pending.drain() {
@@ -224,7 +225,7 @@ impl StdioTransport {
                         break;
                     }
                     Err(e) => {
-                        eprintln!("[MCP/Stdio] Read error: {}", e);
+                        tracing::error!(target: "mcp", "[MCP/Stdio] Read error: {}", e);
                         connected_clone.store(false, Ordering::SeqCst);
                         let mut pending = pending_reader_cleanup.lock().await;
                         for (_, responder) in pending.drain() {
@@ -545,7 +546,7 @@ impl SseTransport {
     /// Establish the SSE connection by GET-ing the configured URL.
     /// Spawns a background task that reads the event stream and dispatches responses.
     pub async fn connect(&self) -> Result<(), String> {
-        println!("[MCP/SSE] Connecting to {}", self.sse_url);
+        tracing::info!(target: "mcp", "[MCP/SSE] Connecting to {}", self.sse_url);
 
         let resp = self
             .client
@@ -579,7 +580,7 @@ impl SseTransport {
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!("[MCP/SSE] Stream read error: {}", e);
+                        tracing::error!(target: "mcp", "[MCP/SSE] Stream read error: {}", e);
                         break;
                     }
                 };
@@ -609,7 +610,7 @@ impl SseTransport {
 
                         match current_event.as_str() {
                             "endpoint" => {
-                                println!("[MCP/SSE] Received endpoint: {}", data);
+                                tracing::info!(target: "mcp", "[MCP/SSE] Received endpoint: {}", data);
                                 *post_endpoint.lock().await = Some(data.to_string());
                             }
                             "message" => {
@@ -636,7 +637,7 @@ impl SseTransport {
             }
 
             // Stream ended — mark disconnected and notify all pending requests
-            eprintln!("[MCP/SSE] Event stream closed");
+            tracing::error!(target: "mcp", "[MCP/SSE] Event stream closed");
             connected.store(false, Ordering::SeqCst);
             let mut pending = pending.lock().await;
             for (_, sender) in pending.drain() {
@@ -648,7 +649,7 @@ impl SseTransport {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             if self.post_endpoint.lock().await.is_some() {
-                println!("[MCP/SSE] Connected successfully");
+                tracing::info!(target: "mcp", "[MCP/SSE] Connected successfully");
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {

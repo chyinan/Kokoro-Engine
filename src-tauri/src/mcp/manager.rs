@@ -103,7 +103,7 @@ impl McpManager {
         let path = Path::new(&self.config_path);
         if !path.exists() {
             tracing::info!(
-                target = "mcp",
+                target: "mcp",
                 "No config file at {}, starting empty",
                 self.config_path
             );
@@ -113,12 +113,12 @@ impl McpManager {
         match std::fs::read_to_string(path) {
             Ok(content) => match serde_json::from_str::<Vec<McpServerConfig>>(&content) {
                 Ok(configs) => {
-                    tracing::info!(target = "mcp", "Loaded {} server configs", configs.len());
+                    tracing::info!(target: "mcp", "Loaded {} server configs", configs.len());
                     self.configs = configs;
                 }
-                Err(e) => tracing::error!(target = "mcp", "Failed to parse config: {}", e),
+                Err(e) => tracing::error!(target: "mcp", "Failed to parse config: {}", e),
             },
-            Err(e) => tracing::error!(target = "mcp", "Failed to read config: {}", e),
+            Err(e) => tracing::error!(target: "mcp", "Failed to read config: {}", e),
         }
     }
 
@@ -139,7 +139,7 @@ impl McpManager {
 
         for config in configs {
             if let Err(e) = self.connect_server(&config).await {
-                tracing::error!(target = "mcp", "Failed to connect '{}': {}", config.name, e);
+                tracing::error!(target: "mcp", "Failed to connect '{}': {}", config.name, e);
             }
         }
     }
@@ -319,7 +319,7 @@ impl McpManager {
 /// happens here so callers can insert the result with only a brief lock.
 pub async fn build_connected_client(config: &McpServerConfig) -> Result<McpClient, KokoroError> {
     tracing::info!(
-        target = "mcp",
+        target: "mcp",
         "Connecting to '{}' (transport: {})...",
         config.name, config.transport_type
     );
@@ -349,13 +349,13 @@ pub async fn build_connected_client(config: &McpServerConfig) -> Result<McpClien
             if config.command.is_empty() {
                 if let Some(ref url) = config.url {
                     if url.trim_end_matches('/').ends_with("/sse") {
-                        tracing::info!(target = "mcp", "Auto-detected SSE transport for '{}'", config.name);
+                        tracing::info!(target: "mcp", "Auto-detected SSE transport for '{}'", config.name);
                         let transport = SseTransport::new(url);
                         transport.connect().await?;
                         Arc::new(transport)
                     } else {
                         tracing::info!(
-                            target = "mcp",
+                            target: "mcp",
                             "Auto-detected Streamable HTTP transport for '{}'",
                             config.name
                         );

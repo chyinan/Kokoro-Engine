@@ -97,7 +97,7 @@ pub async fn do_backup(app_data: &Path, config: &AutoBackupConfig) -> Result<Str
     let filename = format!("kokoro-auto-{}.kokoro", timestamp);
     let out_path = dir.join(&filename);
     export_data_to_path(app_data, &out_path, None).await?;
-    println!("[AutoBackup] Backup saved to {}", out_path.display());
+    tracing::info!(target: "backup", "[AutoBackup] Backup saved to {}", out_path.display());
     if config.auto_cleanup && config.keep_days > 0 {
         cleanup_old_backups(&dir, config.keep_days);
     }
@@ -132,7 +132,7 @@ fn cleanup_old_backups(dir: &PathBuf, keep_days: u32) {
                     .unwrap_or(i64::MAX);
                 if secs < cutoff_ts {
                     let _ = fs::remove_file(&path);
-                    println!("[AutoBackup] Removed old backup: {}", path.display());
+                    tracing::info!(target: "backup", "[AutoBackup] Removed old backup: {}", path.display());
                 }
             }
         }
@@ -166,11 +166,11 @@ pub async fn check_and_run(app_handle: &AppHandle) {
 
     match do_backup(&app_data, &config).await {
         Ok(path) => {
-            println!("[AutoBackup] Auto backup completed: {}", path);
+            tracing::info!(target: "backup", "[AutoBackup] Auto backup completed: {}", path);
             let _ = fs::write(&last_ts_path, now_ts.to_string());
         }
         Err(e) => {
-            eprintln!("[AutoBackup] Auto backup failed: {}", e);
+            tracing::error!(target: "backup", "[AutoBackup] Auto backup failed: {}", e);
         }
     }
 }

@@ -200,14 +200,15 @@ impl TtsProvider for LocalGPTSoVITSProvider {
                         *active = Some(gpt.clone());
                     }
                     Ok(res) => {
-                        eprintln!(
+                        tracing::error!(
+                            target: "tts",
                             "[GPT-SoVITS] Failed to set GPT weights (status {}): {:?}",
                             res.status(),
                             res.text().await
                         );
                     }
                     Err(e) => {
-                        eprintln!("[GPT-SoVITS] Failed to set GPT weights: {}", e);
+                        tracing::error!(target: "tts", "[GPT-SoVITS] Failed to set GPT weights: {}", e);
                     }
                 }
             }
@@ -228,14 +229,15 @@ impl TtsProvider for LocalGPTSoVITSProvider {
                         *active = Some(sovits.clone());
                     }
                     Ok(res) => {
-                        eprintln!(
+                        tracing::error!(
+                            target: "tts",
                             "[GPT-SoVITS] Failed to set SoVITS weights (status {}): {:?}",
                             res.status(),
                             res.text().await
                         );
                     }
                     Err(e) => {
-                        eprintln!("[GPT-SoVITS] Failed to set SoVITS weights: {}", e);
+                        tracing::error!(target: "tts", "[GPT-SoVITS] Failed to set SoVITS weights: {}", e);
                     }
                 }
             }

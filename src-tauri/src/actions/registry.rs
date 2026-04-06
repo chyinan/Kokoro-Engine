@@ -254,7 +254,7 @@ impl ActionRegistry {
             self.mcp_tool_ids.insert(info.id.clone());
         }
 
-        tracing::info!(target = "tools", "Registered: {} ({})", info.id, info.name);
+        tracing::info!(target: "tools", "Registered: {} ({})", info.id, info.name);
         self.entries_by_id
             .insert(info.id.clone(), ActionEntry { info, handler });
     }
@@ -666,7 +666,8 @@ mod tests {
 
     #[test]
     fn test_make_action_info_sets_default_metadata_for_builtin() {
-        let action = ActionRegistry::make_action_info(ActionSource::Builtin, None, &sample_builtin_action());
+        let action =
+            ActionRegistry::make_action_info(ActionSource::Builtin, None, &sample_builtin_action());
 
         assert_eq!(action.risk_tags, vec![ActionRiskTag::Read]);
         assert_eq!(action.permission_level, ActionPermissionLevel::Safe);
@@ -690,11 +691,15 @@ mod tests {
 
     #[test]
     fn test_action_info_serialization_includes_metadata_fields() {
-        let action = ActionRegistry::make_action_info(ActionSource::Builtin, None, &sample_builtin_action());
+        let action =
+            ActionRegistry::make_action_info(ActionSource::Builtin, None, &sample_builtin_action());
         let value = serde_json::to_value(&action).expect("action info should serialize");
 
         assert_eq!(value.get("risk_tags"), Some(&serde_json::json!(["read"])));
-        assert_eq!(value.get("permission_level"), Some(&serde_json::json!("safe")));
+        assert_eq!(
+            value.get("permission_level"),
+            Some(&serde_json::json!("safe"))
+        );
     }
 
     #[test]
@@ -789,7 +794,10 @@ mod tests {
         let builtin = reg.resolve_action("builtin__play_cue").unwrap();
         assert_eq!(builtin.source, ActionSource::Builtin);
         assert!(reg.resolve_action("mcp__server_a__play_cue").is_err());
-        assert_eq!(reg.resolve_action("play_cue").unwrap().id, "builtin__play_cue");
+        assert_eq!(
+            reg.resolve_action("play_cue").unwrap().id,
+            "builtin__play_cue"
+        );
     }
 
     #[test]
@@ -837,7 +845,9 @@ mod tests {
             needs_feedback: false,
         });
 
-        let resolved = reg.resolve_action_id_for_input("builtin__send_notification").unwrap();
+        let resolved = reg
+            .resolve_action_id_for_input("builtin__send_notification")
+            .unwrap();
         assert_eq!(resolved, "builtin__send_notification");
     }
 
@@ -850,7 +860,9 @@ mod tests {
             needs_feedback: false,
         });
 
-        let resolved = reg.resolve_action_id_for_input("send_notification").unwrap();
+        let resolved = reg
+            .resolve_action_id_for_input("send_notification")
+            .unwrap();
         assert_eq!(resolved, "builtin__send_notification");
     }
 
@@ -892,7 +904,9 @@ mod tests {
             },
         );
 
-        let resolved = reg.resolve_action_id_for_input("mcp__server_a__search").unwrap();
+        let resolved = reg
+            .resolve_action_id_for_input("mcp__server_a__search")
+            .unwrap();
         assert_eq!(resolved, "mcp__server_a__search");
     }
 
@@ -921,7 +935,10 @@ mod tests {
 
         let changed = reg.migrate_tool_settings(&mut settings);
         assert!(changed);
-        assert_eq!(settings.enabled_tools.get("builtin__get_time"), Some(&false));
+        assert_eq!(
+            settings.enabled_tools.get("builtin__get_time"),
+            Some(&false)
+        );
         assert!(!settings.enabled_tools.contains_key("get_time"));
     }
 }
