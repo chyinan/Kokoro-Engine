@@ -15,6 +15,7 @@ pub mod utils;
 pub mod vision;
 use crate::hooks::{AuditLogHookHandler, HookRuntime};
 use crate::mods::ModManager;
+use crate::utils::logging::init_logging;
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -36,6 +37,8 @@ where
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    init_logging();
+
     // Pin the ONNX Runtime dylib to the copy we ship, so the ort crate
     // never accidentally loads an incompatible system-wide library
     // (e.g. an older onnxruntime.dll in C:\Windows\System32 on Windows).
@@ -635,6 +638,7 @@ fn copy_dir_all(
 mod tests {
     use super::auto_start_pet_on_launch;
     use crate::error::KokoroError;
+    use crate::utils::logging::format_log_line;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -671,5 +675,11 @@ mod tests {
         .await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn startup_log_line_uses_level_target_structure() {
+        let line = format_log_line("INFO", "ai", "startup", false);
+        assert!(line.starts_with("[INFO][ai] "));
     }
 }
