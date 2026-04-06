@@ -46,7 +46,7 @@ impl SttService {
         }
 
         let count = service.providers.read().await.len();
-        println!("[STT] Initialized with {} provider(s)", count);
+        tracing::info!(target = "stt", "Initialized with {} provider(s)", count);
         service
     }
 
@@ -69,7 +69,7 @@ impl SttService {
             ))),
             "sensevoice_local" => Some(Arc::new(SenseVoiceLocalProvider::new(config, None))),
             other => {
-                eprintln!("[STT] Unknown provider type: {}", other);
+                tracing::error!(target = "stt", "Unknown provider type: {}", other);
                 None
             }
         }
@@ -130,6 +130,6 @@ impl SttService {
             }
         }
 
-        println!("[STT] Reloaded with {} provider(s)", providers.len());
+        tracing::info!(target = "stt", "Reloaded with {} provider(s)", providers.len());
     }
 }

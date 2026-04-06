@@ -109,8 +109,9 @@ impl McpClient {
             .map_err(|e| format!("Failed to parse initialize response: {}", e))?;
 
         self.server_info = Some(init.server_info.clone());
-        println!(
-            "[MCP] Connected to {} v{}",
+        tracing::info!(
+            target = "mcp",
+            "Connected to {} v{}",
             init.server_info.name,
             init.server_info.version.as_deref().unwrap_or("?")
         );
@@ -144,7 +145,7 @@ impl McpClient {
         let list: ToolListResult = serde_json::from_value(result)
             .map_err(|e| format!("Failed to parse tools/list: {}", e))?;
 
-        println!("[MCP] Discovered {} tools", list.tools.len());
+        tracing::info!(target = "mcp", "Discovered {} tools", list.tools.len());
 
         self.tools = list.tools;
         Ok(())

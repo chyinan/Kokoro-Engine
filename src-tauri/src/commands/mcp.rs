@@ -67,7 +67,7 @@ pub async fn add_mcp_server(
     if config.enabled {
         let cfg = config.clone();
         tauri::async_runtime::spawn(async move {
-            println!("[MCP] Background connecting to '{}'...", cfg.name);
+            tracing::info!(target = "mcp", "Background connecting to '{}'...", cfg.name);
             let build_result = crate::mcp::manager::build_connected_client(&cfg).await;
             let connect_result = {
                 let mut mgr = mgr_arc.lock().await;
@@ -85,10 +85,10 @@ pub async fn add_mcp_server(
             };
             match connect_result {
                 Ok(()) => {
-                    println!("[MCP] Connected '{}', refreshing tools...", cfg.name);
+                    tracing::info!(target = "mcp", "Connected '{}', refreshing tools...", cfg.name);
                     crate::mcp::bridge::register_mcp_tools(&mgr_arc, &reg_arc).await;
                 }
-                Err(e) => eprintln!("[MCP] Connection failed for '{}': {}", cfg.name, e),
+                Err(e) => tracing::error!(target = "mcp", "Connection failed for '{}': {}", cfg.name, e),
             }
         });
     }
@@ -138,7 +138,7 @@ pub async fn reconnect_mcp_server(
     };
 
     tauri::async_runtime::spawn(async move {
-        println!("[MCP] Retrying connection to '{}'...", cfg.name);
+        tracing::info!(target = "mcp", "Retrying connection to '{}'...", cfg.name);
         let build_result = crate::mcp::manager::build_connected_client(&cfg).await;
         let connect_result = {
             let mut mgr = mgr_arc.lock().await;
@@ -159,7 +159,7 @@ pub async fn reconnect_mcp_server(
                 println!("[MCP] Reconnected '{}', refreshing tools...", cfg.name);
                 crate::mcp::bridge::register_mcp_tools(&mgr_arc, &reg_arc).await;
             }
-            Err(e) => eprintln!("[MCP] Reconnection failed for '{}': {}", cfg.name, e),
+            Err(e) => tracing::error!(target = "mcp", "Reconnection failed for '{}': {}", cfg.name, e),
         }
     });
 
@@ -196,7 +196,7 @@ pub async fn toggle_mcp_server(
     if let Some(cfg) = cfg {
         // Enable: spawn background connection
         tauri::async_runtime::spawn(async move {
-            println!("[MCP] Enabling and connecting '{}'...", cfg.name);
+            tracing::info!(target = "mcp", "Enabling and connecting '{}'...", cfg.name);
             let build_result = crate::mcp::manager::build_connected_client(&cfg).await;
             let connect_result = {
                 let mut mgr = mgr_arc.lock().await;
@@ -214,10 +214,10 @@ pub async fn toggle_mcp_server(
             };
             match connect_result {
                 Ok(()) => {
-                    println!("[MCP] Connected '{}', refreshing tools...", cfg.name);
+                    tracing::info!(target = "mcp", "Connected '{}', refreshing tools...", cfg.name);
                     crate::mcp::bridge::register_mcp_tools(&mgr_arc, &reg_arc).await;
                 }
-                Err(e) => eprintln!("[MCP] Connection failed for '{}': {}", cfg.name, e),
+                Err(e) => tracing::error!(target = "mcp", "Connection failed for '{}': {}", cfg.name, e),
             }
         });
     } else {
