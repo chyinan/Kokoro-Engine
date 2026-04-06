@@ -115,6 +115,14 @@ mod tests {
     }
 
     #[test]
+    fn module_palette_maps_vision_imagegen_pet_tools_targets() {
+        assert_eq!(module_palette("vision"), ModulePalette::Vision);
+        assert_eq!(module_palette("imagegen"), ModulePalette::ImageGen);
+        assert_eq!(module_palette("pet"), ModulePalette::Pet);
+        assert_eq!(module_palette("tools"), ModulePalette::Tools);
+    }
+
+    #[test]
     fn format_line_contains_ansi_when_color_enabled() {
         let line = format_log_line("ERROR", "mcp", "connection failed", true);
         assert!(line.contains("\u{1b}["));

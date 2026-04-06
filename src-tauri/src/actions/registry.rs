@@ -254,7 +254,7 @@ impl ActionRegistry {
             self.mcp_tool_ids.insert(info.id.clone());
         }
 
-        println!("[Tools] Registered: {} ({})", info.id, info.name);
+        tracing::info!(target = "tools", "Registered: {} ({})", info.id, info.name);
         self.entries_by_id
             .insert(info.id.clone(), ActionEntry { info, handler });
     }

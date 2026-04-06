@@ -52,8 +52,9 @@ impl VisionServer {
 
         self.port = addr.port();
 
-        println!(
-            "[Vision] Static file server started on http://127.0.0.1:{}",
+        tracing::info!(
+            target = "vision",
+            "Static file server started on http://127.0.0.1:{}",
             self.port
         );
 
@@ -73,7 +74,7 @@ impl VisionServer {
                             if let Ok(modified) = meta.modified() {
                                 if modified < cutoff {
                                     let _ = std::fs::remove_file(entry.path());
-                                    println!("[Vision] TTL cleanup: removed {:?}", entry.path());
+                                    tracing::info!(target = "vision", "TTL cleanup: removed {:?}", entry.path());
                                 }
                             }
                         }
@@ -114,7 +115,7 @@ impl VisionServer {
             .map_err(|e| format!("Failed to write file: {}", e))?;
 
         let url = format!("http://127.0.0.1:{}/vision/{}", self.port, filename);
-        println!("[Vision] Uploaded {} -> {}", original_filename, url);
+        tracing::info!(target = "vision", "Uploaded {} -> {}", original_filename, url);
 
         Ok(url)
     }
