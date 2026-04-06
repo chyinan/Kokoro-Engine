@@ -205,7 +205,9 @@
                 "edit": "编辑",
                 "done": "完成",
                 "add": "+ 添加",
-                "save_hint": "修改将在点击下方的 \"保存\" 按钮后生效。"
+                "save_hint": "修改将在点击下方的 \"保存\" 按钮后生效。",
+                "active": "当前使用",
+                "voices_after_save": "保存并刷新后可选择语音。"
             },
             "fields": {
                 "api_key": "API 密钥",

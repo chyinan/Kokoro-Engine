@@ -148,6 +148,13 @@ function normalizeTtsVoice(
             if (provider?.default_voice) {
                 return provider.default_voice;
             }
+            // No default_voice configured — prefer the well-known zh-CN default
+            // that the Rust backend uses, rather than grabbing the first
+            // alphabetical voice (which would be Afrikaans / Arabic / Spanish…).
+            const zhVoice = voices.find(
+                v => v.provider_id === providerId && v.voice_id.includes("zh-CN-XiaoyiNeural")
+            );
+            if (zhVoice) return stripProviderVoiceId(providerId, zhVoice.voice_id);
             const providerVoice = voices.find(v => v.provider_id === providerId);
             return providerVoice ? stripProviderVoiceId(providerId, providerVoice.voice_id) : "";
         }
@@ -180,6 +187,11 @@ function normalizeTtsVoice(
         if (provider?.default_voice) {
             return provider.default_voice;
         }
+        // Same zh-CN preference as above for the "voice doesn't match" branch.
+        const zhVoice = voices.find(
+            v => v.provider_id === providerId && v.voice_id.includes("zh-CN-XiaoyiNeural")
+        );
+        if (zhVoice) return stripProviderVoiceId(providerId, zhVoice.voice_id);
     }
 
     return getDefaultTtsVoice(providerId, voices);

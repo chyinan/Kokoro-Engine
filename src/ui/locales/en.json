@@ -205,7 +205,9 @@
                 "edit": "Edit",
                 "done": "Done",
                 "add": "+ Add",
-                "save_hint": "Changes are applied after clicking \"SAVE\" below."
+                "save_hint": "Changes are applied after clicking \"SAVE\" below.",
+                "active": "active",
+                "voices_after_save": "Save and refresh to load available voices."
             },
             "fields": {
                 "api_key": "API Key",
