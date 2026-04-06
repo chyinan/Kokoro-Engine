@@ -64,6 +64,8 @@ async-openai = { version = "0.34.0", features = ["rustls", "chat-completion", "m
 ndarray = "0.17"
 ort = { version = "2.0.0-rc.9", default-features = false, features = ["ndarray", "load-dynamic"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [features]
 stress = []
