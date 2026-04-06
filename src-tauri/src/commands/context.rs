@@ -99,8 +99,9 @@ pub async fn set_proactive_enabled(
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
     state.set_proactive_enabled(enabled);
-    println!(
-        "[AI] Proactive messages {}",
+    tracing::info!(
+        target = "ai",
+        "Proactive messages {}",
         if enabled { "enabled" } else { "disabled" }
     );
 
@@ -156,8 +157,9 @@ pub async fn delete_last_messages(
     }
 
     history.truncate(current_len - to_remove);
-    println!(
-        "[AI] Deleted last {} message(s) from history (now {} messages)",
+    tracing::info!(
+        target = "ai",
+        "Deleted last {} message(s) from history (now {} messages)",
         to_remove,
         history.len()
     );
@@ -219,8 +221,9 @@ pub async fn delete_last_messages(
             tx.commit()
                 .await
                 .map_err(|e| KokoroError::Database(e.to_string()))?;
-            println!(
-                "[AI] Deleted {} DB row(s) for {} visible message(s)",
+            tracing::info!(
+                target = "ai",
+                "Deleted {} DB row(s) for {} visible message(s)",
                 ids_to_delete.len(),
                 visible_deleted
             );
@@ -288,14 +291,15 @@ pub async fn end_session(
                     let summary = summary.trim().to_string();
                     if !summary.is_empty() {
                         if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                            println!("[Session] Skip saving summary because memory is disabled");
+                            tracing::info!(target = "ai", "Skip saving summary because memory is disabled");
                             return;
                         }
                         if let Err(e) = memory_mgr.save_session_summary(&char_id, &summary).await {
-                            eprintln!("[Session] Failed to save summary: {}", e);
+                            tracing::error!(target = "ai", "Failed to save summary: {}", e);
                         } else {
-                            println!(
-                                "[Session] Saved summary for '{}': {}",
+                            tracing::info!(
+                                target = "ai",
+                                "Saved summary for '{}': {}",
                                 char_id,
                                 &summary[..summary.len().min(80)]
                             );
@@ -303,7 +307,7 @@ pub async fn end_session(
                     }
                 }
                 Err(e) => {
-                    eprintln!("[Session] Summary generation failed: {}", e);
+                    tracing::error!(target = "ai", "Summary generation failed: {}", e);
                 }
             }
         });

@@ -31,7 +31,7 @@ where
     tokio::time::sleep(delay).await;
 
     if let Err(e) = show_pet().await {
-        eprintln!("[pet] auto-start failed: {}", e);
+        tracing::error!(target = "pet", "auto-start failed: {}", e);
     }
 }
 
@@ -59,7 +59,7 @@ pub fn run() {
         for root in search_roots.into_iter().flatten() {
             let candidate = root.join(ORT_LIB_NAME);
             if candidate.exists() {
-                println!("[ORT] Using bundled ONNX Runtime: {}", candidate.display());
+                tracing::info!(target = "tools", "Using bundled ONNX Runtime: {}", candidate.display());
                 std::env::set_var("ORT_DYLIB_PATH", &candidate);
                 break;
             }
@@ -232,7 +232,7 @@ pub fn run() {
                             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                                 if let Some(enabled) = val.get("enabled").and_then(|v| v.as_bool()) {
                                     orchestrator.set_proactive_enabled(enabled);
-                                    println!("[AI] Restored proactive_enabled={}", enabled);
+                                    tracing::info!(target = "ai", "Restored proactive_enabled={}", enabled);
                                 }
                             }
                         }
@@ -248,7 +248,7 @@ pub fn run() {
                             .and_then(|v| v.as_bool())
                             .unwrap_or(true);
                         orchestrator.set_memory_enabled(memory_enabled).await;
-                        println!("[AI] Restored memory_enabled={}", memory_enabled);
+                        tracing::info!(target = "ai", "Restored memory_enabled={}", memory_enabled);
 
                         // Restore jailbreak_prompt from disk
                         let jailbreak_path = app_data_dir.join("jailbreak_prompt.json");
@@ -256,7 +256,7 @@ pub fn run() {
                             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                                 if let Some(prompt) = val.get("prompt").and_then(|v| v.as_str()) {
                                     orchestrator.set_jailbreak_prompt(prompt.to_string()).await;
-                                    println!("[AI] Restored jailbreak_prompt ({} chars)", prompt.len());
+                                    tracing::info!(target = "ai", "Restored jailbreak_prompt ({} chars)", prompt.len());
                                 }
                             }
                         }
@@ -273,7 +273,7 @@ pub fn run() {
                                     .and_then(|v| v.as_u64())
                                     .unwrap_or(2000) as usize;
                                 orchestrator.set_context_settings(strategy.clone(), max_chars).await;
-                                println!("[AI] Restored context_settings: strategy={}, max_chars={}", strategy, max_chars);
+                                tracing::info!(target = "ai", "Restored context_settings: strategy={}, max_chars={}", strategy, max_chars);
                             }
                         }
 
@@ -304,7 +304,7 @@ pub fn run() {
                                                     .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
                                             });
                                         }
-                                        println!("[AI] Restored current_conversation_id: {} ({} messages)", id, rows.len());
+                                        tracing::info!(target = "ai", "Restored current_conversation_id: {} ({} messages)", id, rows.len());
                                     }
                                 }
                             }
@@ -316,12 +316,12 @@ pub fn run() {
                         if let Some(char_id) = crate::ai::context::AIOrchestrator::load_active_character_id() {
                             let orch = app_handle.state::<crate::ai::context::AIOrchestrator>();
                             orch.set_character_id(char_id.clone()).await;
-                            println!("[AI] Restored active_character_id: {}", char_id);
+                            tracing::info!(target = "ai", "Restored active_character_id: {}", char_id);
                         }
 
                     }
                     Err(e) => {
-                        eprintln!("AI Orchestrator init failed (will run without AI): {}", e);
+                        tracing::error!(target = "ai", "AI Orchestrator init failed (will run without AI): {}", e);
                         // Do NOT panic — allow app to continue running
                     }
                 }
@@ -381,7 +381,7 @@ pub fn run() {
             let mut tool_settings = crate::actions::tool_settings::load_config(&tool_settings_path);
             if action_registry.migrate_tool_settings(&mut tool_settings) {
                 if let Err(e) = crate::actions::tool_settings::save_config(&tool_settings_path, &tool_settings) {
-                    eprintln!("[Tools] Failed to persist migrated tool settings: {}", e);
+                    tracing::error!(target = "tools", "Failed to persist migrated tool settings: {}", e);
                 }
             }
 
@@ -455,14 +455,14 @@ pub fn run() {
                         };
 
                         if let Ok(()) = connect_result {
-                            println!("[MCP] Connected '{}', registering tools...", cfg.name);
+                            tracing::info!(target = "mcp", "Connected '{}', registering tools...", cfg.name);
                             if let Some(registry) =
                                 app_handle.try_state::<std::sync::Arc<tokio::sync::RwLock<crate::actions::ActionRegistry>>>()
                             {
                                 crate::mcp::bridge::register_mcp_tools(&mgr_arc, registry.inner()).await;
                             }
                         } else if let Err(e) = connect_result {
-                            eprintln!("[MCP] Failed to connect '{}': {}", cfg.name, e);
+                            tracing::error!(target = "mcp", "Failed to connect '{}': {}", cfg.name, e);
                         }
                     }));
                 }
