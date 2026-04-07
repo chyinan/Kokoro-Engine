@@ -4,7 +4,9 @@ use crate::actions::executor::{
     apply_before_action_args_payload, build_action_hook_payload, build_before_action_args_payload,
     continue_unless_denied, denied_by_hook_message, ToolInvocation,
 };
-use crate::actions::permission::{evaluate_permission_decision, PermissionDecision};
+use crate::actions::permission::{
+    decision_reason, evaluate_permission_decision, PermissionDecision,
+};
 use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{ActionContext, ActionInfo, ActionRegistry, ActionResult};
 use crate::error::KokoroError;
@@ -296,6 +298,22 @@ mod tests {
     }
 
     #[test]
+    fn execute_action_denial_uses_permission_decision_reason() {
+        let decision = PermissionDecision::DenyPendingApproval {
+            reason: "custom message without prefix".to_string(),
+        };
+
+        let error = direct_denial_error(&decision).expect("deny decision should map to error");
+
+        match error {
+            KokoroError::Validation(message) => {
+                assert_eq!(message, "custom message without prefix");
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn build_tool_invocation_from_input_accepts_unique_alias() {
         let mut registry = ActionRegistry::new();
         registry.register(crate::actions::builtin::GetTimeAction);
@@ -387,6 +405,10 @@ fn result_message_for_hook(result: &Result<ActionResult, KokoroError>) -> String
         Ok(value) => value.message.clone(),
         Err(error) => hook_error_message(error),
     }
+}
+
+fn direct_denial_error(decision: &PermissionDecision) -> Option<KokoroError> {
+    decision_reason(decision).map(|reason| KokoroError::Validation(reason.to_string()))
 }
 
 fn hook_error_message(error: &KokoroError) -> String {
@@ -644,11 +666,7 @@ pub async fn execute_action(
         let tool_settings = tool_settings_state.read().await;
         evaluate_permission_decision(&action, &tool_settings)
     };
-    if let PermissionDecision::DenyPolicy { reason }
-    | PermissionDecision::DenyPendingApproval { reason }
-    | PermissionDecision::DenyFailClosed { reason } = permission_decision
-    {
-        let error = KokoroError::Validation(reason);
+    if let Some(error) = direct_denial_error(&permission_decision) {
         emit_after_action_hook(
             &app,
             &character_id,
