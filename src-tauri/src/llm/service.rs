@@ -71,46 +71,34 @@ impl LlmService {
     }
     /// Get the system provider (or fallback to active).
     pub async fn system_provider(&self) -> Arc<dyn LlmProvider> {
-        let config = self.config.read().await;
-        let system_id = config
+        let config = self.config.read().await.clone();
+        let active_id = self.active_provider_id.read().await.clone();
+        let providers = self.providers.read().await;
+
+        let resolved_provider = config
             .system_provider
             .as_ref()
-            .unwrap_or(&config.active_provider);
+            .and_then(|system_id| providers.get(system_id).cloned())
+            .or_else(|| providers.get(&active_id).cloned())
+            .or_else(|| providers.values().next().cloned())
+            .unwrap_or_else(default_provider);
 
-        // We can't easily reuse `build_provider` here without cloning config or restructuring.
-        // For simplicity, we'll re-implement lookup logic or better yet, store all providers in a map.
-        // BUT `LlmService` currently only holds the *active* provider instance.
-        // To support multi-provider efficiently, we should probably refactor LlmService to hold a map of providers.
-        // For now, let's just rebuild it on demand if it's different, OR (better) updated LlmService to hold a map.
+        if let Some(model_override) = config.system_model {
+            let resolved_id = config
+                .system_provider
+                .as_ref()
+                .filter(|system_id| providers.contains_key(*system_id))
+                .cloned()
+                .unwrap_or(active_id);
 
-        // Wait, `LlmService` struct:
-        // provider: Arc<RwLock<Arc<dyn LlmProvider>>>,
-        // This only holds ONE.
-
-        // Refactoring LlmService to hold strict "active" is limiting.
-        // Let's change `LlmService` to hold the config and build providers on-the-fly OR hold a cache.
-        // Given the code structure, I will instantiate a new provider if `system_provider` is requested.
-        // This is safe because `build_provider` is cheap (just struct creation).
-
-        let provider_cfg = config
-            .providers
-            .iter()
-            .find(|p| p.id == *system_id)
-            .or_else(|| config.providers.iter().find(|p| p.enabled))
-            .or_else(|| config.providers.first());
-
-        if let Some(cfg) = provider_cfg {
-            // Apply system_model override if present
-            if let Some(ref model_override) = config.system_model {
-                let mut overlaid_cfg = cfg.clone();
-                overlaid_cfg.model = Some(model_override.clone());
-                return Arc::from(build_from_provider_config(&overlaid_cfg));
+            if let Some(provider_config) = config.providers.iter().find(|cfg| cfg.id == resolved_id) {
+                let mut temporary_provider_config = provider_config.clone();
+                temporary_provider_config.model = Some(model_override);
+                return Arc::from(build_from_provider_config(&temporary_provider_config));
             }
-            return Arc::from(build_from_provider_config(cfg));
         }
 
-        // Fallback
-        self.provider().await
+        resolved_provider
     }
 }
 
@@ -191,6 +179,92 @@ mod tests {
 
         let active_provider_id = service.active_provider_id.read().await.clone();
         assert_eq!(active_provider_id, config.active_provider);
+    }
+
+    #[tokio::test]
+    async fn system_provider_prefers_system_provider_id_when_present() {
+        let service = make_service_with_active_and_system_provider();
+        let expected = {
+            let providers = service.providers.read().await;
+            providers.get("system-provider").cloned().unwrap()
+        };
+
+        let provider = service.system_provider().await;
+
+        assert_eq!(provider.id(), "system-provider");
+        assert!(Arc::ptr_eq(&provider, &expected));
+    }
+
+    #[tokio::test]
+    async fn system_provider_falls_back_to_active_when_system_missing() {
+        let service = make_service_with_missing_system_provider();
+        let expected_active = {
+            let providers = service.providers.read().await;
+            providers.get("active-provider").cloned().unwrap()
+        };
+
+        let provider = service.system_provider().await;
+
+        assert_eq!(provider.id(), "active-provider");
+        assert!(Arc::ptr_eq(&provider, &expected_active));
+    }
+
+    fn make_service_with_active_and_system_provider() -> LlmService {
+        let mut config = test_config_with_named_providers();
+        config.active_provider = "active-provider".to_string();
+        config.system_provider = Some("system-provider".to_string());
+        LlmService::from_config(config, PathBuf::from("llm_config.test.json"))
+    }
+
+    fn make_service_with_missing_system_provider() -> LlmService {
+        let mut config = test_config_with_named_providers();
+        config.active_provider = "active-provider".to_string();
+        config.system_provider = Some("missing-system-provider".to_string());
+        LlmService::from_config(config, PathBuf::from("llm_config.test.json"))
+    }
+
+    fn test_config_with_named_providers() -> LlmConfig {
+        LlmConfig {
+            active_provider: "active-provider".to_string(),
+            system_provider: None,
+            system_model: None,
+            providers: vec![
+                LlmProviderConfig {
+                    id: "other-provider".to_string(),
+                    provider_type: "openai".to_string(),
+                    enabled: true,
+                    supports_native_tools: true,
+                    api_key: Some("test-key-other".to_string()),
+                    api_key_env: None,
+                    base_url: Some("https://api.openai.com/v1".to_string()),
+                    model: Some("gpt-4o-mini".to_string()),
+                    extra: std::collections::HashMap::new(),
+                },
+                LlmProviderConfig {
+                    id: "active-provider".to_string(),
+                    provider_type: "openai".to_string(),
+                    enabled: true,
+                    supports_native_tools: true,
+                    api_key: Some("test-key-active".to_string()),
+                    api_key_env: None,
+                    base_url: Some("https://api.openai.com/v1".to_string()),
+                    model: Some("gpt-4o".to_string()),
+                    extra: std::collections::HashMap::new(),
+                },
+                LlmProviderConfig {
+                    id: "system-provider".to_string(),
+                    provider_type: "openai".to_string(),
+                    enabled: true,
+                    supports_native_tools: true,
+                    api_key: Some("test-key-system".to_string()),
+                    api_key_env: None,
+                    base_url: Some("https://api.openai.com/v1".to_string()),
+                    model: Some("gpt-4.1-mini".to_string()),
+                    extra: std::collections::HashMap::new(),
+                },
+            ],
+            presets: vec![],
+        }
     }
 
     fn test_llm_config_with_two_enabled_providers() -> (LlmConfig, PathBuf) {
