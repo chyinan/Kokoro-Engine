@@ -437,6 +437,15 @@ fn deny_kind_for_tool_error(error: &str) -> &'static str {
     }
 }
 
+fn deny_kind_for_outcome(outcome: &crate::actions::ToolExecutionOutcome, error: &str) -> &'static str {
+    if let Some(decision) = outcome.permission_decision.as_ref() {
+        if let Some(kind) = crate::actions::permission::deny_kind(decision) {
+            return kind;
+        }
+    }
+    deny_kind_for_tool_error(error)
+}
+
 #[cfg(test)]
 fn tool_error_payload_for_test(tool: &str, turn_id: &str, error: &str) -> serde_json::Value {
     serde_json::json!({
@@ -470,7 +479,8 @@ fn tool_error_payload(
 ) -> serde_json::Value {
     let mut payload = base_tool_trace_payload(outcome, turn_id);
     payload["error"] = serde_json::Value::String(error.to_string());
-    payload["deny_kind"] = serde_json::Value::String(deny_kind_for_tool_error(error).to_string());
+    payload["deny_kind"] =
+        serde_json::Value::String(deny_kind_for_outcome(outcome, error).to_string());
     payload
 }
 
@@ -759,6 +769,34 @@ fn sample_tool_trace_outcome_for_test() -> crate::actions::ToolExecutionOutcome 
         result: Ok(sample_action_result("ok")),
         needs_feedback: true,
         permission_decision: Some(crate::actions::PermissionDecision::Allow),
+    }
+}
+
+#[cfg(test)]
+fn sample_tool_outcome_with_decision(
+    permission_decision: crate::actions::PermissionDecision,
+    result: Result<crate::actions::ActionResult, String>,
+) -> crate::actions::ToolExecutionOutcome {
+    crate::actions::ToolExecutionOutcome {
+        invocation: crate::actions::ToolInvocation {
+            tool_call_id: Some("call-1".to_string()),
+            name: "read_file".to_string(),
+            args: HashMap::new(),
+        },
+        action: Some(crate::actions::ActionInfo {
+            id: "mcp__filesystem__read_file".to_string(),
+            name: "read_file".to_string(),
+            source: crate::actions::ActionSource::Mcp,
+            server_name: Some("filesystem".to_string()),
+            description: "Read file".to_string(),
+            parameters: vec![],
+            needs_feedback: true,
+            risk_tags: vec![crate::actions::registry::ActionRiskTag::Read],
+            permission_level: crate::actions::registry::ActionPermissionLevel::Safe,
+        }),
+        result,
+        needs_feedback: true,
+        permission_decision: Some(permission_decision),
     }
 }
 
@@ -2336,6 +2374,21 @@ mod tests {
         assert_eq!(
             tool_trace_error_message("Denied by policy: blocked risk tag 'read'"),
             Some("Denied by policy: blocked risk tag 'read'".to_string())
+        );
+    }
+
+    #[test]
+    fn tool_error_payload_prefers_permission_decision_over_error_prefix() {
+        let outcome = sample_tool_outcome_with_decision(
+            crate::actions::PermissionDecision::DenyFailClosed {
+                reason: "boom".into(),
+            },
+            Err("custom message without prefix".to_string()),
+        );
+        let payload = tool_error_payload(&outcome, "turn-1", "custom message without prefix");
+        assert_eq!(
+            payload.get("deny_kind").and_then(|v| v.as_str()),
+            Some("fail_closed")
         );
     }
 
