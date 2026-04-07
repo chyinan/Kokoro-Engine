@@ -8,6 +8,26 @@ export interface ChatHistoryMessage {
     tools?: ToolTraceItem[];
 }
 
+function parseDenyKind(meta: Record<string, unknown> | null, errorText: string, rawContent: string): ToolTraceItem["denyKind"] {
+    const denyKindFromMetadata = meta?.deny_kind;
+    if (
+        denyKindFromMetadata === "pending_approval"
+        || denyKindFromMetadata === "fail_closed"
+        || denyKindFromMetadata === "policy_denied"
+        || denyKindFromMetadata === "hook_denied"
+        || denyKindFromMetadata === "execution_error"
+    ) {
+        return denyKindFromMetadata;
+    }
+
+    if (errorText.startsWith("Denied pending approval:")) return "pending_approval";
+    if (errorText.startsWith("Denied by fail-closed policy:")) return "fail_closed";
+    if (errorText.startsWith("Denied by policy:")) return "policy_denied";
+    if (errorText.startsWith("Denied by hook:")) return "hook_denied";
+    if (rawContent.startsWith("Error:")) return "execution_error";
+    return undefined;
+}
+
 export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): ChatHistoryMessage[] {
     const chatMsgs: ChatHistoryMessage[] = [];
     const turnToAssistantIndex = new Map<string, number>();
@@ -34,24 +54,7 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
                     ? meta.tool
                     : "tool";
             const errorText = m.content.startsWith("Error:") ? m.content.replace(/^Error:\s*/, "") : m.content;
-            const denyKindFromMetadata = meta?.deny_kind;
-            const denyKind: ToolTraceItem["denyKind"] = denyKindFromMetadata === "pending_approval"
-                || denyKindFromMetadata === "fail_closed"
-                || denyKindFromMetadata === "policy_denied"
-                || denyKindFromMetadata === "hook_denied"
-                || denyKindFromMetadata === "execution_error"
-                ? denyKindFromMetadata
-                : errorText.startsWith("Denied pending approval:")
-                    ? "pending_approval"
-                    : errorText.startsWith("Denied by fail-closed policy:")
-                        ? "fail_closed"
-                        : errorText.startsWith("Denied by policy:")
-                            ? "policy_denied"
-                            : errorText.startsWith("Denied by hook:")
-                                ? "hook_denied"
-                                : m.content.startsWith("Error:")
-                                    ? "execution_error"
-                                    : undefined;
+            const denyKind = parseDenyKind(meta, errorText, m.content);
             const toolEntry: ToolTraceItem = {
                 tool: toolName,
                 toolName,

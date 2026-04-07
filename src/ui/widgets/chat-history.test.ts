@@ -149,4 +149,29 @@ describe("buildChatMessagesFromConversation", () => {
         expect(chatMessages).toHaveLength(1);
         expect(chatMessages[0]?.tools?.[0]?.denyKind).toBe("fail_closed");
     });
+
+    it("metadata.deny_kind 优先于 error 前缀推断", () => {
+        const messages: Array<ConversationMessage> = [
+            createMessage({
+                role: "assistant",
+                content: "处理工具错误。",
+                metadata: JSON.stringify({ turn_id: "turn-deny-priority" }),
+            }),
+            createMessage({
+                role: "tool",
+                content: "Error: Denied pending approval: permission level 'elevated' requires approval",
+                metadata: JSON.stringify({
+                    type: "tool_result",
+                    turn_id: "turn-deny-priority",
+                    tool_name: "write_note",
+                    deny_kind: "fail_closed",
+                }),
+            }),
+        ];
+
+        const chatMessages = buildChatMessagesFromConversation(messages);
+
+        expect(chatMessages).toHaveLength(1);
+        expect(chatMessages[0]?.tools?.[0]?.denyKind).toBe("fail_closed");
+    });
 });

@@ -2413,6 +2413,22 @@ mod tests {
     }
 
     #[test]
+    fn tool_trace_error_deny_kind_prefers_outcome_decision_when_available() {
+        let outcome = sample_tool_outcome_with_decision(
+            crate::actions::PermissionDecision::DenyPolicy {
+                reason: "blocked risk tag 'read'".into(),
+            },
+            Err("random message without prefix".to_string()),
+        );
+        let payload = tool_error_payload(&outcome, "turn-1", "random message without prefix");
+
+        assert_eq!(
+            payload.get("deny_kind").and_then(|v| v.as_str()),
+            Some("policy_denied")
+        );
+    }
+
+    #[test]
     fn test_tool_success_payload_keeps_result_without_deny_kind() {
         assert!(tool_trace_success_has_no_deny_kind());
         assert_eq!(tool_trace_success_message(), Some("ok".to_string()));
