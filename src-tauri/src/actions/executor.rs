@@ -5,6 +5,7 @@ use crate::actions::permission::{
 };
 use crate::actions::registry::{ActionContext, ActionInfo, ActionRegistry, ActionResult};
 use crate::actions::tool_settings::ToolSettings;
+use crate::hooks::types::HookModifyPolicy;
 use crate::hooks::{
     ActionHookPayload, BeforeActionArgsPayload, HookEvent, HookOutcome, HookPayload, HookRuntime,
 };
@@ -1014,22 +1015,41 @@ pub async fn execute_tool_calls(
                                         action,
                                     );
                                     if let Some(hooks) = hook_runtime.as_ref() {
-                                        hooks
-                                            .emit_before_action_args_modify(&mut args_payload)
-                                            .await;
+                                        if let Err(error) = hooks
+                                            .emit_before_action_args_modify(
+                                                &mut args_payload,
+                                                HookModifyPolicy::Strict,
+                                            )
+                                            .await
+                                        {
+                                            (Some(permission_decision), Err(error))
+                                        } else {
+                                            let effective_args =
+                                                apply_before_action_args_payload(args_payload);
+                                            let ctx = ActionContext {
+                                                app: app.clone(),
+                                                character_id: character_id.to_string(),
+                                                conversation_id: None,
+                                                source: Some("chat".to_string()),
+                                            };
+                                            (
+                                                Some(permission_decision),
+                                                handler.execute(effective_args, ctx).await.map_err(|e| e.0),
+                                            )
+                                        }
+                                    } else {
+                                        let effective_args = apply_before_action_args_payload(args_payload);
+                                        let ctx = ActionContext {
+                                            app: app.clone(),
+                                            character_id: character_id.to_string(),
+                                            conversation_id: None,
+                                            source: Some("chat".to_string()),
+                                        };
+                                        (
+                                            Some(permission_decision),
+                                            handler.execute(effective_args, ctx).await.map_err(|e| e.0),
+                                        )
                                     }
-                                    let effective_args =
-                                        apply_before_action_args_payload(args_payload);
-                                    let ctx = ActionContext {
-                                        app: app.clone(),
-                                        character_id: character_id.to_string(),
-                                        conversation_id: None,
-                                        source: Some("chat".to_string()),
-                                    };
-                                    (
-                                        Some(permission_decision),
-                                        handler.execute(effective_args, ctx).await.map_err(|e| e.0),
-                                    )
                                 }
                                 PermissionDecision::DenyPolicy { reason }
                                 | PermissionDecision::DenyPendingApproval { reason }

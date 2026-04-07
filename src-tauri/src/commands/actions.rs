@@ -10,6 +10,7 @@ use crate::actions::permission::{
 use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{ActionContext, ActionInfo, ActionRegistry, ActionResult};
 use crate::error::KokoroError;
+use crate::hooks::types::HookModifyPolicy;
 use crate::hooks::{HookEvent, HookOutcome, HookRuntime};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -551,7 +552,7 @@ async fn modify_direct_action_args(
     invocation: &ToolInvocation,
     action: &ActionInfo,
     args: HashMap<String, String>,
-) -> HashMap<String, String> {
+) -> Result<HashMap<String, String>, KokoroError> {
     let mut payload = build_before_action_args_payload(
         None,
         character_id,
@@ -559,13 +560,16 @@ async fn modify_direct_action_args(
         invocation,
         action,
     );
-    payload.args = args;
+    payload.args = args.clone();
 
     if let Some(hooks) = app.try_state::<HookRuntime>() {
-        hooks.emit_before_action_args_modify(&mut payload).await;
+        hooks
+            .emit_before_action_args_modify(&mut payload, HookModifyPolicy::Strict)
+            .await
+            .map_err(KokoroError::Validation)?;
     }
 
-    apply_before_action_args_payload(payload)
+    Ok(apply_before_action_args_payload(payload))
 }
 
 #[command]
@@ -679,7 +683,7 @@ pub async fn execute_action(
     }
 
     let effective_args =
-        modify_direct_action_args(&app, &character_id, &invocation, &action, args).await;
+        modify_direct_action_args(&app, &character_id, &invocation, &action, args).await?;
 
     let ctx = ActionContext {
         app: app.clone(),

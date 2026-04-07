@@ -14,6 +14,7 @@ use crate::ai::context::Message;
 use crate::ai::memory_extractor;
 use crate::commands::system::WindowSizeState;
 use crate::error::KokoroError;
+use crate::hooks::types::HookModifyPolicy;
 use crate::hooks::{
     BeforeLlmRequestMessage, BeforeLlmRequestPayload, ChatHookPayload, HookEvent, HookPayload,
     HookRuntime,
@@ -617,8 +618,8 @@ async fn execute_single_tool_after_approval(
     );
     if let Some(hooks) = hook_runtime.as_ref() {
         hooks
-            .emit_before_action_args_modify(&mut args_payload)
-            .await;
+            .emit_before_action_args_modify(&mut args_payload, HookModifyPolicy::Strict)
+            .await?;
     }
     let effective_args = apply_before_action_args_payload(args_payload);
     let ctx = ActionContext {
@@ -1276,8 +1277,12 @@ pub async fn stream_chat(
 
     if let Some(hooks) = hook_runtime.as_ref() {
         hooks
-            .emit_before_llm_request_modify(&mut before_llm_request_payload)
-            .await;
+            .emit_before_llm_request_modify(
+                &mut before_llm_request_payload,
+                HookModifyPolicy::Strict,
+            )
+            .await
+            .map_err(KokoroError::Chat)?;
     }
 
     let (effective_request_message, mut client_messages) =

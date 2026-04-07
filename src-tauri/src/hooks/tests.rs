@@ -3,6 +3,7 @@ use super::{
     BeforeActionArgsPayload, BeforeLlmRequestMessage, BeforeLlmRequestPayload, ChatHookPayload,
     HookEvent, HookHandler, HookOutcome, HookPayload, HookRuntime,
 };
+use crate::hooks::types::HookModifyPolicy;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -437,7 +438,10 @@ async fn before_llm_request_modify_preserves_request_message_and_messages() {
         append_modifier(" +second"),
     )));
 
-    runtime.emit_before_llm_request_modify(&mut payload).await;
+    runtime
+        .emit_before_llm_request_modify(&mut payload, HookModifyPolicy::Permissive)
+        .await
+        .unwrap();
 
     assert_eq!(payload.request_message, "hello +first +second");
     assert_eq!(payload.messages.len(), 4);
@@ -450,6 +454,73 @@ async fn before_llm_request_modify_preserves_request_message_and_messages() {
         [
             "first:BeforeLlmRequestModify",
             "second:BeforeLlmRequestModify"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn before_llm_modify_strict_mode_returns_err_when_handler_fails() {
+    let runtime = HookRuntime::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut payload = sample_before_llm_request_payload();
+
+    runtime.register(Arc::new(modify_handler(
+        "failing",
+        &[HookEvent::BeforeLlmRequest],
+        calls.clone(),
+        error_modifier("boom"),
+    )));
+    runtime.register(Arc::new(modify_handler(
+        "next",
+        &[HookEvent::BeforeLlmRequest],
+        calls.clone(),
+        append_modifier(" +next"),
+    )));
+
+    let result = runtime
+        .emit_before_llm_request_modify(&mut payload, HookModifyPolicy::Strict)
+        .await;
+
+    assert!(result.is_err());
+    let error = result.err().unwrap();
+    assert!(error.contains("failing failed: boom"));
+    assert_eq!(payload.request_message, "hello");
+    assert_eq!(payload.messages.len(), 2);
+    assert_eq!(calls.lock().unwrap().as_slice(), ["failing:BeforeLlmRequestModify"]);
+}
+
+#[tokio::test]
+async fn before_llm_modify_permissive_mode_keeps_current_best_effort_behavior() {
+    let runtime = HookRuntime::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut payload = sample_before_llm_request_payload();
+
+    runtime.register(Arc::new(modify_handler(
+        "failing",
+        &[HookEvent::BeforeLlmRequest],
+        calls.clone(),
+        error_modifier("boom"),
+    )));
+    runtime.register(Arc::new(modify_handler(
+        "next",
+        &[HookEvent::BeforeLlmRequest],
+        calls.clone(),
+        append_modifier(" +next"),
+    )));
+
+    let result = runtime
+        .emit_before_llm_request_modify(&mut payload, HookModifyPolicy::Permissive)
+        .await;
+
+    assert!(result.is_ok());
+    assert_eq!(payload.request_message, "hello +next");
+    assert_eq!(payload.messages.len(), 3);
+    assert_eq!(payload.messages[2].content, "+next");
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [
+            "failing:BeforeLlmRequestModify",
+            "next:BeforeLlmRequestModify"
         ]
     );
 }
@@ -473,7 +544,10 @@ async fn before_llm_request_modify_continues_after_handler_error() {
         append_modifier(" +next"),
     )));
 
-    runtime.emit_before_llm_request_modify(&mut payload).await;
+    runtime
+        .emit_before_llm_request_modify(&mut payload, HookModifyPolicy::Permissive)
+        .await
+        .unwrap();
 
     assert_eq!(payload.request_message, "hello +next");
     assert_eq!(payload.messages.len(), 3);
@@ -517,7 +591,10 @@ async fn before_action_args_modify_applies_in_registration_order() {
         append_action_arg_modifier("limit", "5"),
     )));
 
-    runtime.emit_before_action_args_modify(&mut payload).await;
+    runtime
+        .emit_before_action_args_modify(&mut payload, HookModifyPolicy::Permissive)
+        .await
+        .unwrap();
 
     assert_eq!(payload.action_id, "builtin__search_memory");
     assert_eq!(
@@ -553,7 +630,10 @@ async fn before_action_args_modify_continues_after_handler_error() {
         append_action_arg_modifier("limit", "3"),
     )));
 
-    runtime.emit_before_action_args_modify(&mut payload).await;
+    runtime
+        .emit_before_action_args_modify(&mut payload, HookModifyPolicy::Permissive)
+        .await
+        .unwrap();
 
     assert_eq!(payload.args.get("query"), Some(&"kokoro".to_string()));
     assert_eq!(payload.args.get("limit"), Some(&"3".to_string()));
@@ -579,7 +659,10 @@ async fn before_action_args_modify_skips_handlers_without_matching_event() {
         append_action_arg_modifier("query", "changed"),
     )));
 
-    runtime.emit_before_action_args_modify(&mut payload).await;
+    runtime
+        .emit_before_action_args_modify(&mut payload, HookModifyPolicy::Permissive)
+        .await
+        .unwrap();
 
     assert_eq!(payload.args.get("query"), Some(&"kokoro".to_string()));
     assert!(calls.lock().unwrap().is_empty());

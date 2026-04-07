@@ -1,6 +1,7 @@
 // pattern: Imperative Shell
 use crate::hooks::types::{
-    BeforeActionArgsPayload, BeforeLlmRequestPayload, HookEvent, HookOutcome, HookPayload,
+    BeforeActionArgsPayload, BeforeLlmRequestPayload, HookEvent, HookModifyPolicy, HookOutcome,
+    HookPayload,
 };
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock};
@@ -102,7 +103,11 @@ impl HookRuntime {
         HookOutcome::Continue
     }
 
-    pub async fn emit_before_llm_request_modify(&self, payload: &mut BeforeLlmRequestPayload) {
+    pub async fn emit_before_llm_request_modify(
+        &self,
+        payload: &mut BeforeLlmRequestPayload,
+        policy: HookModifyPolicy,
+    ) -> Result<(), String> {
         let handlers = self.handlers.read().unwrap().clone();
         for handler in handlers {
             if !handler
@@ -120,11 +125,19 @@ impl HookRuntime {
                     HookEvent::BeforeLlmRequest,
                     error
                 );
+                if policy == HookModifyPolicy::Strict {
+                    return Err(error);
+                }
             }
         }
+        Ok(())
     }
 
-    pub async fn emit_before_action_args_modify(&self, payload: &mut BeforeActionArgsPayload) {
+    pub async fn emit_before_action_args_modify(
+        &self,
+        payload: &mut BeforeActionArgsPayload,
+        policy: HookModifyPolicy,
+    ) -> Result<(), String> {
         let handlers = self.handlers.read().unwrap().clone();
         for handler in handlers {
             if !handler
@@ -142,7 +155,11 @@ impl HookRuntime {
                     HookEvent::BeforeActionInvoke,
                     error
                 );
+                if policy == HookModifyPolicy::Strict {
+                    return Err(error);
+                }
             }
         }
+        Ok(())
     }
 }

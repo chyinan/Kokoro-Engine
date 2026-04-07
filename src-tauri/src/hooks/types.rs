@@ -82,6 +82,12 @@ pub enum HookPayload {
     Mod(ModHookPayload),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookModifyPolicy {
+    Permissive,
+    Strict,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HookOutcome {
     Continue,
