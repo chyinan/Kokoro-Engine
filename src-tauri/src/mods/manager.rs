@@ -65,6 +65,18 @@ struct CuePayload {
     cue: String,
 }
 
+fn validate_manifest_capabilities(manifest: &ModManifest) -> Result<(), String> {
+    for capability in &manifest.capabilities {
+        if capability.name.trim().is_empty() {
+            return Err(format!(
+                "Invalid capability in mod '{}': capability name cannot be empty",
+                manifest.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn build_mod_hook_payload(manifest: &ModManifest, stage: &str) -> HookPayload {
     let script_count = if !manifest.scripts.is_empty() {
         manifest.scripts.len()
@@ -220,6 +232,16 @@ impl ModManager {
                         if let Ok(content) = fs::read_to_string(&manifest_path) {
                             match serde_json::from_str::<ModManifest>(&content) {
                                 Ok(manifest) => {
+                                    if let Err(error) = validate_manifest_capabilities(&manifest) {
+                                        eprintln!("Failed to validate mod.json in {:?}: {}", path, error);
+                                        tracing::error!(
+                                            target: "mods",
+                                            "[ModManager] ERROR validating mod.json in {:?}: {}",
+                                            path,
+                                            error
+                                        );
+                                        continue;
+                                    }
                                     tracing::info!(
                                         target: "mods",
                                         "[ModManager] Successfully loaded mod: {}",
@@ -530,6 +552,7 @@ mod tests {
             )]),
             scripts: vec!["scripts/main.js".to_string()],
             permissions: vec![],
+            capabilities: vec![],
             entry: None,
             ui_entry: None,
         };
