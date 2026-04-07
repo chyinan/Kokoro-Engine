@@ -183,7 +183,13 @@
 
 ---
 
-## 11. 实现完成状态
+## 11. Claude Code 精髓最小收口检查项
+
+- [x] Hook modify strict/permissive 策略已落地
+- [x] MOD 声明式 capabilities 最小模型已落地
+- [x] chat deny kind 结构化优先已收口
+
+## 12. 实现完成状态
 
 - [x] chat deny kind 结构化优先
 - [x] pending approval 幂等
