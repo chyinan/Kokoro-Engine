@@ -27,7 +27,7 @@ use crate::llm::provider::LlmStreamEvent;
 use crate::llm::service::LlmService;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tauri::{command, Emitter, Manager, State, Window};
 use tokio::sync::{oneshot, Mutex, RwLock};
@@ -52,6 +52,7 @@ struct PendingToolApproval {
 
 pub struct PendingToolApprovalState {
     pending: Mutex<HashMap<String, PendingToolApproval>>,
+    resolved: Mutex<HashSet<String>>,
 }
 
 impl Default for PendingToolApprovalState {
@@ -64,6 +65,7 @@ impl PendingToolApprovalState {
     pub fn new() -> Self {
         Self {
             pending: Mutex::new(HashMap::new()),
+            resolved: Mutex::new(HashSet::new()),
         }
     }
 
@@ -107,6 +109,13 @@ impl PendingToolApprovalState {
         approval_request_id: &str,
         decision: ToolApprovalDecision,
     ) -> Result<(), KokoroError> {
+        if self.resolved.lock().await.contains(approval_request_id) {
+            return Err(KokoroError::Validation(format!(
+                "Approval request '{}' already resolved",
+                approval_request_id
+            )));
+        }
+
         let mut entry = self
             .pending
             .lock()
@@ -135,7 +144,13 @@ impl PendingToolApprovalState {
                 "Approval request '{}' for tool '{}' is no longer pending",
                 entry.approval_request_id, entry.tool_name
             ))
-        })
+        })?;
+
+        self.resolved
+            .lock()
+            .await
+            .insert(approval_request_id.to_string());
+        Ok(())
     }
 }
 
@@ -2817,6 +2832,43 @@ mod tests {
 
         let missing = approve_tool_approval_inner(&state, "missing".to_string()).await;
         assert!(missing.is_err());
+    }
+
+    #[tokio::test]
+    async fn pending_tool_approval_state_rejects_second_resolution() {
+        let state = PendingToolApprovalState::new();
+        let request_id = state
+            .register(
+                "turn-1".into(),
+                "tool-1".into(),
+                "tool".into(),
+                HashMap::new(),
+            )
+            .await;
+
+        let first = approve_tool_approval_inner(&state, request_id.clone()).await;
+        assert!(first.is_ok());
+
+        let second =
+            reject_tool_approval_inner(&state, request_id.clone(), Some("late reject".into())).await;
+        match second {
+            Err(KokoroError::Validation(message)) => {
+                assert!(message.contains("already resolved"));
+            }
+            other => panic!("expected already-resolved validation error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_tool_approval_state_keeps_unknown_id_error_distinct() {
+        let state = PendingToolApprovalState::new();
+        let missing = approve_tool_approval_inner(&state, "missing".to_string()).await;
+        match missing {
+            Err(KokoroError::Validation(message)) => {
+                assert!(message.contains("Unknown approval request"));
+            }
+            other => panic!("expected unknown-request validation error, got {other:?}"),
+        }
     }
 
     // ── strip_leaked_tags ───────────────────────────────────
