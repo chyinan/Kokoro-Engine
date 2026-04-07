@@ -52,7 +52,7 @@ struct PendingToolApproval {
 }
 
 #[derive(Default)]
-struct TurnCancellationState {
+pub struct TurnCancellationState {
     cancelled: RwLock<HashMap<String, Option<String>>>,
 }
 
@@ -64,6 +64,25 @@ impl TurnCancellationState {
     async fn register_turn(&self, turn_id: &str) {
         let mut map = self.cancelled.write().await;
         map.entry(turn_id.to_string()).or_insert(None);
+    }
+
+    async fn ensure_turn_not_cancelled(&self, turn_id: &str) -> Result<(), String> {
+        if self.is_cancelled(turn_id).await {
+            return Err("turn cancelled by user".to_string());
+        }
+        Ok(())
+    }
+
+    async fn build_turn_delta_payload_if_not_cancelled(
+        &self,
+        turn_id: &str,
+        delta: String,
+    ) -> Result<serde_json::Value, String> {
+        self.ensure_turn_not_cancelled(turn_id).await?;
+        Ok(serde_json::json!({
+            "turn_id": turn_id,
+            "delta": delta,
+        }))
     }
 
     async fn cancel_turn(&self, turn_id: &str, reason: Option<String>) -> Result<(), String> {
@@ -88,6 +107,41 @@ impl TurnCancellationState {
 
     async fn clear_turn(&self, turn_id: &str) {
         self.cancelled.write().await.remove(turn_id);
+    }
+}
+
+async fn ensure_turn_not_cancelled(state: &TurnCancellationState, turn_id: &str) -> Result<(), String> {
+    state.ensure_turn_not_cancelled(turn_id).await
+}
+
+async fn build_turn_delta_payload_if_not_cancelled(
+    state: &TurnCancellationState,
+    turn_id: &str,
+    delta: String,
+) -> Result<serde_json::Value, String> {
+    state
+        .build_turn_delta_payload_if_not_cancelled(turn_id, delta)
+        .await
+}
+
+struct TurnCancellationGuard {
+    state: Arc<TurnCancellationState>,
+    turn_id: String,
+}
+
+impl TurnCancellationGuard {
+    fn new(state: Arc<TurnCancellationState>, turn_id: String) -> Self {
+        Self { state, turn_id }
+    }
+}
+
+impl Drop for TurnCancellationGuard {
+    fn drop(&mut self) {
+        let state = Arc::clone(&self.state);
+        let turn_id = self.turn_id.clone();
+        tauri::async_runtime::spawn(async move {
+            state.clear_turn(&turn_id).await;
+        });
     }
 }
 
@@ -1166,6 +1220,7 @@ pub async fn stream_chat(
     _action_registry: State<'_, std::sync::Arc<RwLock<crate::actions::ActionRegistry>>>,
     tool_settings_state: State<'_, std::sync::Arc<RwLock<ToolSettings>>>,
     approval_state: State<'_, Arc<PendingToolApprovalState>>,
+    cancel_state: State<'_, Arc<TurnCancellationState>>,
     _vision_watcher: State<'_, crate::vision::watcher::VisionWatcher>,
     window_size_state: State<'_, WindowSizeState>,
     vision_server: State<
@@ -1306,6 +1361,9 @@ pub async fn stream_chat(
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
     let assistant_turn_id = uuid::Uuid::new_v4().to_string();
+    cancel_state.register_turn(&assistant_turn_id).await;
+    let _turn_guard = TurnCancellationGuard::new(cancel_state.inner().clone(), assistant_turn_id.clone());
+
     let mut before_llm_request_payload = build_before_llm_request_payload(
         conversation_id.clone(),
         &char_id,
@@ -1443,6 +1501,9 @@ pub async fn stream_chat(
 
     for round in 0..max_tool_rounds {
         tracing::info!(target: "chat", "[Chat] Tool loop round {}", round + 1);
+        ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
+            .await
+            .map_err(KokoroError::Chat)?;
 
         let mut stream: std::pin::Pin<
             Box<dyn futures::Stream<Item = Result<LlmStreamEvent, String>> + Send>,
@@ -1476,14 +1537,15 @@ pub async fn stream_chat(
                             if safe > 0 {
                                 let to_emit = emit_buffer[..safe].to_string();
                                 emit_buffer = emit_buffer[safe..].to_string();
-                                app.emit(
-                                    "chat-turn-delta",
-                                    serde_json::json!({
-                                        "turn_id": assistant_turn_id,
-                                        "delta": to_emit,
-                                    }),
+                                let payload = build_turn_delta_payload_if_not_cancelled(
+                                    cancel_state.inner().as_ref(),
+                                    &assistant_turn_id,
+                                    to_emit,
                                 )
-                                .map_err(|e| KokoroError::Chat(e.to_string()))?;
+                                .await
+                                .map_err(KokoroError::Chat)?;
+                                app.emit("chat-turn-delta", payload)
+                                    .map_err(|e| KokoroError::Chat(e.to_string()))?;
                             }
                         }
                         LlmStreamEvent::ToolCall(tool_call) => {
@@ -1517,14 +1579,15 @@ pub async fn stream_chat(
             let (cleaned_remainder, _) = parse_tool_call_tags(&emit_buffer);
             let cleaned_remainder = strip_translate_tags(&cleaned_remainder);
             if !cleaned_remainder.is_empty() {
-                app.emit(
-                    "chat-turn-delta",
-                    serde_json::json!({
-                        "turn_id": assistant_turn_id,
-                        "delta": cleaned_remainder,
-                    }),
+                let payload = build_turn_delta_payload_if_not_cancelled(
+                    cancel_state.inner().as_ref(),
+                    &assistant_turn_id,
+                    cleaned_remainder,
                 )
-                .map_err(|e| KokoroError::Chat(e.to_string()))?;
+                .await
+                .map_err(KokoroError::Chat)?;
+                app.emit("chat-turn-delta", payload)
+                    .map_err(|e| KokoroError::Chat(e.to_string()))?;
             }
         }
 
@@ -1618,6 +1681,9 @@ pub async fn stream_chat(
                 })
                 .collect::<Result<Vec<_>, _>>()?
         };
+        ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
+            .await
+            .map_err(KokoroError::Chat)?;
         let execution_outcomes = execute_tool_calls(
             window.app_handle(),
             &_action_registry.inner().clone(),
@@ -1626,6 +1692,9 @@ pub async fn stream_chat(
             &tool_invocations,
         )
         .await;
+        ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
+            .await
+            .map_err(KokoroError::Chat)?;
         let mut tool_results = Vec::new();
         let mut tool_result_messages = Vec::new();
         let mut continuation_tool_calls: Vec<serde_json::Value> = Vec::new();
@@ -2950,6 +3019,39 @@ mod tests {
             .await
             .is_ok());
         assert!(state.is_cancelled("turn-1").await);
+    }
+
+    #[tokio::test]
+    async fn cancelled_turn_stops_before_tool_execution() {
+        let state = TurnCancellationState::new();
+        state.register_turn("turn-1").await;
+        state
+            .cancel_turn("turn-1", Some("user".into()))
+            .await
+            .expect("cancel should succeed");
+
+        let mut tool_execute_count = 0usize;
+        let result = ensure_turn_not_cancelled(&state, "turn-1").await;
+        if result.is_ok() {
+            tool_execute_count += 1;
+        }
+
+        assert!(result.is_err());
+        assert_eq!(tool_execute_count, 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_turn_skips_delta_emit_payload_generation() {
+        let state = TurnCancellationState::new();
+        state.register_turn("turn-1").await;
+        state
+            .cancel_turn("turn-1", Some("user".into()))
+            .await
+            .expect("cancel should succeed");
+
+        let payload = build_turn_delta_payload_if_not_cancelled(&state, "turn-1", "hello".into())
+            .await;
+        assert!(payload.is_err());
     }
 
     // ── strip_leaked_tags ───────────────────────────────────
