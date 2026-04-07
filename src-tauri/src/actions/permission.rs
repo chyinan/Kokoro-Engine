@@ -95,6 +95,15 @@ pub fn decision_reason(decision: &PermissionDecision) -> Option<&str> {
     }
 }
 
+pub fn deny_kind(decision: &PermissionDecision) -> Option<&'static str> {
+    match decision {
+        PermissionDecision::Allow => None,
+        PermissionDecision::DenyPolicy { .. } => Some("policy_denied"),
+        PermissionDecision::DenyPendingApproval { .. } => Some("pending_approval"),
+        PermissionDecision::DenyFailClosed { .. } => Some("fail_closed"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +253,22 @@ mod tests {
                 reason: "Denied by fail-closed policy: permission level 'elevated' exceeds max allowed 'safe'".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn decision_deny_kind_maps_each_denial_variant() {
+        assert_eq!(
+            deny_kind(&PermissionDecision::DenyPolicy { reason: "x".into() }),
+            Some("policy_denied")
+        );
+        assert_eq!(
+            deny_kind(&PermissionDecision::DenyPendingApproval { reason: "x".into() }),
+            Some("pending_approval")
+        );
+        assert_eq!(
+            deny_kind(&PermissionDecision::DenyFailClosed { reason: "x".into() }),
+            Some("fail_closed")
+        );
+        assert_eq!(deny_kind(&PermissionDecision::Allow), None);
     }
 }
