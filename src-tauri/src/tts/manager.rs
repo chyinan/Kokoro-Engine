@@ -12,13 +12,14 @@ use super::queue::TtsQueue;
 use super::router::TtsRouter;
 use super::voice_registry::VoiceRegistry;
 
+use crate::hooks::{HookEvent, HookPayload, HookRuntime, TtsHookPayload};
 use futures::StreamExt;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
-use tokio::sync::RwLock; // Add this
+use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::RwLock;
 
 // ── Tauri Event Payloads ───────────────────────────────
 
@@ -190,6 +191,8 @@ impl TtsService {
     ) -> Result<(), String> {
         let params = params.unwrap_or_default();
 
+        let hook_runtime = app.try_state::<HookRuntime>();
+
         // Route to the best provider
         let router = TtsRouter::new(self.providers.clone(), self.default_provider.clone());
         let route = router
@@ -199,6 +202,18 @@ impl TtsService {
             )
             .await
             .map_err(|e| e.to_string())?;
+
+        if let Some(hooks) = hook_runtime.as_ref() {
+            hooks
+                .emit_best_effort(
+                    &HookEvent::BeforeTtsPlay,
+                    &HookPayload::Tts(TtsHookPayload {
+                        text: text.clone(),
+                        provider_id: Some(route.provider_id.clone()),
+                    }),
+                )
+                .await;
+        }
 
         // Emit Start
         app.emit("tts:start", TtsStartEvent { text: text.clone() })
@@ -335,8 +350,20 @@ impl TtsService {
         }
 
         // Emit End
-        app.emit("tts:end", TtsEndEvent { text })
+        app.emit("tts:end", TtsEndEvent { text: text.clone() })
             .map_err(|e| e.to_string())?;
+
+        if let Some(hooks) = hook_runtime.as_ref() {
+            hooks
+                .emit_best_effort(
+                    &HookEvent::AfterTtsPlay,
+                    &HookPayload::Tts(TtsHookPayload {
+                        text,
+                        provider_id: Some(route.provider_id.clone()),
+                    }),
+                )
+                .await;
+        }
 
         Ok(())
     }

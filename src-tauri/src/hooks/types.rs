@@ -10,6 +10,8 @@ pub enum HookEvent {
     AfterLlmResponse,
     BeforeActionInvoke,
     AfterActionInvoke,
+    BeforeTtsPlay,
+    AfterTtsPlay,
     OnModLoaded,
     OnModUnloaded,
 }
@@ -49,6 +51,12 @@ pub struct ModHookPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TtsHookPayload {
+    pub text: String,
+    pub provider_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeforeLlmRequestMessage {
     pub role: String,
     pub content: String,
@@ -80,6 +88,7 @@ pub enum HookPayload {
     Chat(ChatHookPayload),
     Action(ActionHookPayload),
     Mod(ModHookPayload),
+    Tts(TtsHookPayload),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

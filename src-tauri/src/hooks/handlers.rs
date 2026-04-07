@@ -18,6 +18,8 @@ impl HookHandler for AuditLogHookHandler {
             HookEvent::AfterLlmResponse,
             HookEvent::BeforeActionInvoke,
             HookEvent::AfterActionInvoke,
+            HookEvent::BeforeTtsPlay,
+            HookEvent::AfterTtsPlay,
             HookEvent::OnModLoaded,
             HookEvent::OnModUnloaded,
         ];

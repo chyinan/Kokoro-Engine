@@ -701,3 +701,32 @@ async fn action_gate_deny_still_short_circuits_with_action_args_modify_available
         ["deny:BeforeActionInvoke"]
     );
 }
+
+#[tokio::test]
+async fn audit_handler_subscribes_new_tts_events() {
+    use crate::hooks::handlers::AuditLogHookHandler;
+
+    let handler = AuditLogHookHandler;
+    let events = handler.events();
+
+    assert!(events.contains(&HookEvent::BeforeTtsPlay));
+    assert!(events.contains(&HookEvent::AfterTtsPlay));
+}
+
+#[tokio::test]
+async fn runtime_dispatches_before_tts_play_event_to_registered_handler() {
+    let runtime = HookRuntime::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+
+    runtime.register(Arc::new(continue_handler(
+        "tts",
+        &[HookEvent::BeforeTtsPlay],
+        calls.clone(),
+    )));
+
+    runtime
+        .emit_best_effort(&HookEvent::BeforeTtsPlay, &sample_payload())
+        .await;
+
+    assert_eq!(calls.lock().unwrap().as_slice(), ["tts:BeforeTtsPlay"]);
+}
