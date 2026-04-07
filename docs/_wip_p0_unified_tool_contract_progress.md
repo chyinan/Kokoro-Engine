@@ -100,10 +100,13 @@
 2. 将前端设置页继续细化为按 `source` / `server_name` 分组展示
 3. 继续把 pseudo/native 输入适配进一步收口
 
-## Claude Code 精髓最小收口检查项
-- [x] Hook modify strict/permissive 策略已落地
-- [x] MOD 声明式 capabilities 最小模型已落地
-- [x] chat deny kind 结构化优先已收口
+## UTC 稳定性优先最小收口检查项
+- [x] deny kind 结构化优先已落地
+- [x] pending approval 幂等已落地
+- [x] direct action 语义与 PermissionDecision 一致
+- [x] 前端 deny_kind 最小兼容已落地
+- [x] hook strict/permissive 已接线
+- [x] mod capabilities 最小模型已落地
 
 ## 备注
 - 这是当前实现过程专用的临时进度文件，后续每个关键里程碑都要更新。
