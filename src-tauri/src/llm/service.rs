@@ -34,16 +34,30 @@ impl LlmService {
         }
     }
 
-    /// Get a clone of the active provider (Arc'd for async use).
-    pub async fn provider(&self) -> Arc<dyn LlmProvider> {
+    /// Try get a clone of the active provider (Arc'd for async use).
+    pub async fn try_provider(&self) -> Result<Arc<dyn LlmProvider>, KokoroError> {
         let active_id = self.active_provider_id.read().await.clone();
         let providers = self.providers.read().await;
 
-        providers
-            .get(&active_id)
-            .cloned()
-            .or_else(|| providers.values().next().cloned())
-            .unwrap_or_else(default_provider)
+        if providers.is_empty() {
+            return Err(KokoroError::Config(
+                "No available LLM provider: provider map is empty".to_string(),
+            ));
+        }
+
+        providers.get(&active_id).cloned().ok_or_else(|| {
+            KokoroError::Config(format!(
+                "No available LLM provider: active provider '{}' is not configured",
+                active_id
+            ))
+        })
+    }
+
+    /// Get a clone of the active provider (Arc'd for async use).
+    pub async fn provider(&self) -> Arc<dyn LlmProvider> {
+        self.try_provider().await.unwrap_or_else(|error| {
+            panic!("{}", error);
+        })
     }
 
     /// Get a clone of the current config.
@@ -75,22 +89,18 @@ impl LlmService {
         let active_id = self.active_provider_id.read().await.clone();
         let providers = self.providers.read().await;
 
-        let resolved_provider = config
+        let resolved_id = config
             .system_provider
             .as_ref()
-            .and_then(|system_id| providers.get(system_id).cloned())
-            .or_else(|| providers.get(&active_id).cloned())
-            .or_else(|| providers.values().next().cloned())
-            .unwrap_or_else(default_provider);
+            .filter(|system_id| providers.contains_key(*system_id))
+            .cloned()
+            .unwrap_or(active_id);
+
+        let resolved_provider = try_provider_by_id(&providers, &resolved_id).unwrap_or_else(|error| {
+            panic!("{}", error);
+        });
 
         if let Some(model_override) = config.system_model {
-            let resolved_id = config
-                .system_provider
-                .as_ref()
-                .filter(|system_id| providers.contains_key(*system_id))
-                .cloned()
-                .unwrap_or(active_id);
-
             if let Some(provider_config) = config.providers.iter().find(|cfg| cfg.id == resolved_id) {
                 let mut temporary_provider_config = provider_config.clone();
                 temporary_provider_config.model = Some(model_override);
@@ -101,6 +111,25 @@ impl LlmService {
         resolved_provider
     }
 }
+
+fn try_provider_by_id(
+    providers: &HashMap<String, Arc<dyn LlmProvider>>,
+    provider_id: &str,
+) -> Result<Arc<dyn LlmProvider>, KokoroError> {
+    if providers.is_empty() {
+        return Err(KokoroError::Config(
+            "No available LLM provider: provider map is empty".to_string(),
+        ));
+    }
+
+    providers.get(provider_id).cloned().ok_or_else(|| {
+        KokoroError::Config(format!(
+            "No available LLM provider: target provider '{}' is not configured",
+            provider_id
+        ))
+    })
+}
+
 
 fn resolve_active_provider_id(config: &LlmConfig) -> Option<&str> {
     if config.providers.iter().any(|p| p.id == config.active_provider) {
@@ -138,15 +167,6 @@ fn try_build_provider_map(
             ))
         })
         .collect()
-}
-
-fn default_provider() -> Arc<dyn LlmProvider> {
-    tracing::warn!(target: "llm", "No provider configured, falling back to OpenAI defaults");
-    Arc::new(OpenAIProvider::new(
-        String::new(),
-        Some("https://api.openai.com/v1".to_string()),
-        Some("gpt-4".to_string()),
-    ))
 }
 
 fn build_from_provider_config(cfg: &LlmProviderConfig) -> Box<dyn LlmProvider> {
@@ -245,6 +265,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn returns_explicit_error_when_no_available_provider() {
+        let service = make_service_with_no_enabled_provider();
+
+        let result = service.try_provider().await;
+
+        assert!(result.is_err());
+        let error_message = result.err().unwrap().to_string();
+        assert!(error_message.contains("No available LLM provider"));
+    }
+
+    #[tokio::test]
     async fn update_config_rebuilds_provider_map_and_switches_active_consistently() {
         let config_path = std::env::temp_dir().join(format!(
             "llm_config_update_config_atomic_{}.json",
@@ -316,6 +347,18 @@ mod tests {
         let mut config = test_config_with_named_providers();
         config.active_provider = "active-provider".to_string();
         config.system_provider = Some("missing-system-provider".to_string());
+        LlmService::from_config(config, PathBuf::from("llm_config.test.json"))
+    }
+
+    fn make_service_with_no_enabled_provider() -> LlmService {
+        let config = LlmConfig {
+            active_provider: "missing-provider".to_string(),
+            system_provider: None,
+            system_model: None,
+            providers: vec![],
+            presets: vec![],
+        };
+
         LlmService::from_config(config, PathBuf::from("llm_config.test.json"))
     }
 
