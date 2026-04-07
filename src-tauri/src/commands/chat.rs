@@ -57,7 +57,7 @@ pub struct TurnCancellationState {
 }
 
 impl TurnCancellationState {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
@@ -271,6 +271,14 @@ async fn reject_tool_approval_inner(
         .await
 }
 
+async fn cancel_chat_turn_inner(
+    turn_id: String,
+    reason: Option<String>,
+    cancel_state: Arc<TurnCancellationState>,
+) -> Result<(), String> {
+    cancel_state.cancel_turn(&turn_id, reason).await
+}
+
 #[command]
 pub async fn approve_tool_approval(
     approval_request_id: String,
@@ -286,6 +294,15 @@ pub async fn reject_tool_approval(
     approval_state: State<'_, Arc<PendingToolApprovalState>>,
 ) -> Result<(), KokoroError> {
     reject_tool_approval_inner(approval_state.inner().as_ref(), approval_request_id, reason).await
+}
+
+#[tauri::command]
+pub async fn cancel_chat_turn(
+    turn_id: String,
+    reason: Option<String>,
+    cancel_state: State<'_, Arc<TurnCancellationState>>,
+) -> Result<(), String> {
+    cancel_chat_turn_inner(turn_id, reason, cancel_state.inner().clone()).await
 }
 
 #[derive(Serialize, Deserialize)]
@@ -3052,6 +3069,14 @@ mod tests {
         let payload = build_turn_delta_payload_if_not_cancelled(&state, "turn-1", "hello".into())
             .await;
         assert!(payload.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancel_chat_turn_returns_error_for_unknown_turn_id() {
+        let state = Arc::new(TurnCancellationState::new());
+        let result = cancel_chat_turn_inner("not-exists".to_string(), Some("user".into()), state).await;
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("unknown turn_id"));
     }
 
     // ── strip_leaked_tags ───────────────────────────────────

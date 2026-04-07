@@ -216,6 +216,10 @@ export async function streamChat(request: ChatRequest): Promise<void> {
     return invoke("stream_chat", { request });
 }
 
+export async function cancelChatTurn(turnId: string, reason?: string): Promise<void> {
+    return invoke("cancel_chat_turn", { turnId, reason: reason ?? null });
+}
+
 export async function onChatError(callback: (error: string) => void): Promise<UnlistenFn> {
     return listen<string>("chat-error", (event) => callback(event.payload));
 }
