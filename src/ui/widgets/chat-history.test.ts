@@ -124,4 +124,29 @@ describe("buildChatMessagesFromConversation", () => {
             }),
         ]);
     });
+
+    it("优先使用后端 deny_kind，仅在缺失时回退前缀推断", () => {
+        const messages: Array<ConversationMessage> = [
+            createMessage({
+                role: "assistant",
+                content: "处理工具错误。",
+                metadata: JSON.stringify({ turn_id: "turn-deny-kind" }),
+            }),
+            createMessage({
+                role: "tool",
+                content: "Error: custom message without prefix",
+                metadata: JSON.stringify({
+                    type: "tool_result",
+                    turn_id: "turn-deny-kind",
+                    tool_name: "write_note",
+                    deny_kind: "fail_closed",
+                }),
+            }),
+        ];
+
+        const chatMessages = buildChatMessagesFromConversation(messages);
+
+        expect(chatMessages).toHaveLength(1);
+        expect(chatMessages[0]?.tools?.[0]?.denyKind).toBe("fail_closed");
+    });
 });

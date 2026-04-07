@@ -34,17 +34,24 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
                     ? meta.tool
                     : "tool";
             const errorText = m.content.startsWith("Error:") ? m.content.replace(/^Error:\s*/, "") : m.content;
-            const denyKind: ToolTraceItem["denyKind"] = errorText.startsWith("Denied pending approval:")
-                ? "pending_approval"
-                : errorText.startsWith("Denied by fail-closed policy:")
-                    ? "fail_closed"
-                    : errorText.startsWith("Denied by policy:")
-                        ? "policy_denied"
-                        : errorText.startsWith("Denied by hook:")
-                            ? "hook_denied"
-                            : m.content.startsWith("Error:")
-                                ? "execution_error"
-                                : undefined;
+            const denyKindFromMetadata = meta?.deny_kind;
+            const denyKind: ToolTraceItem["denyKind"] = denyKindFromMetadata === "pending_approval"
+                || denyKindFromMetadata === "fail_closed"
+                || denyKindFromMetadata === "policy_denied"
+                || denyKindFromMetadata === "hook_denied"
+                || denyKindFromMetadata === "execution_error"
+                ? denyKindFromMetadata
+                : errorText.startsWith("Denied pending approval:")
+                    ? "pending_approval"
+                    : errorText.startsWith("Denied by fail-closed policy:")
+                        ? "fail_closed"
+                        : errorText.startsWith("Denied by policy:")
+                            ? "policy_denied"
+                            : errorText.startsWith("Denied by hook:")
+                                ? "hook_denied"
+                                : m.content.startsWith("Error:")
+                                    ? "execution_error"
+                                    : undefined;
             const toolEntry: ToolTraceItem = {
                 tool: toolName,
                 toolName,
