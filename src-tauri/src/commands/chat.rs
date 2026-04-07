@@ -51,6 +51,46 @@ struct PendingToolApproval {
     decision_rx: Option<oneshot::Receiver<ToolApprovalDecision>>,
 }
 
+#[derive(Default)]
+struct TurnCancellationState {
+    cancelled: RwLock<HashMap<String, Option<String>>>,
+}
+
+impl TurnCancellationState {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    async fn register_turn(&self, turn_id: &str) {
+        let mut map = self.cancelled.write().await;
+        map.entry(turn_id.to_string()).or_insert(None);
+    }
+
+    async fn cancel_turn(&self, turn_id: &str, reason: Option<String>) -> Result<(), String> {
+        let mut map = self.cancelled.write().await;
+        if let Some(entry) = map.get_mut(turn_id) {
+            if entry.is_none() {
+                *entry = reason;
+            }
+            return Ok(());
+        }
+        Err(format!("unknown turn_id: {}", turn_id))
+    }
+
+    async fn is_cancelled(&self, turn_id: &str) -> bool {
+        self.cancelled
+            .read()
+            .await
+            .get(turn_id)
+            .map(|v| v.is_some())
+            .unwrap_or(false)
+    }
+
+    async fn clear_turn(&self, turn_id: &str) {
+        self.cancelled.write().await.remove(turn_id);
+    }
+}
+
 pub struct PendingToolApprovalState {
     pending: Mutex<HashMap<String, PendingToolApproval>>,
     resolved: Mutex<HashSet<String>>,
@@ -2890,6 +2930,26 @@ mod tests {
             }
             other => panic!("expected unknown-request validation error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn turn_cancellation_state_register_cancel_and_idempotent() {
+        let state = TurnCancellationState::new();
+
+        state.register_turn("turn-1").await;
+        assert!(!state.is_cancelled("turn-1").await);
+
+        assert!(state
+            .cancel_turn("turn-1", Some("user".into()))
+            .await
+            .is_ok());
+        assert!(state.is_cancelled("turn-1").await);
+
+        assert!(state
+            .cancel_turn("turn-1", Some("again".into()))
+            .await
+            .is_ok());
+        assert!(state.is_cancelled("turn-1").await);
     }
 
     // ── strip_leaked_tags ───────────────────────────────────
