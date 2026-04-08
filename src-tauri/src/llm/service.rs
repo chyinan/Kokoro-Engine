@@ -108,7 +108,11 @@ impl LlmService {
         });
 
         if let Some(model_override) = config.system_model {
-            if let Some(provider_config) = config.providers.iter().find(|cfg| cfg.id == resolved_id) {
+            if let Some(provider_config) = config
+                .providers
+                .iter()
+                .find(|cfg| cfg.id == resolved_id && cfg.enabled)
+            {
                 let mut temporary_provider_config = provider_config.clone();
                 temporary_provider_config.model = Some(model_override);
                 return Arc::from(build_from_provider_config(&temporary_provider_config));
@@ -139,7 +143,11 @@ fn try_provider_by_id(
 
 
 fn resolve_active_provider_id(config: &LlmConfig) -> Option<&str> {
-    if config.providers.iter().any(|p| p.id == config.active_provider) {
+    if config
+        .providers
+        .iter()
+        .any(|p| p.id == config.active_provider && p.enabled)
+    {
         Some(config.active_provider.as_str())
     } else if let Some(provider) = config.providers.iter().find(|p| p.enabled) {
         Some(provider.id.as_str())

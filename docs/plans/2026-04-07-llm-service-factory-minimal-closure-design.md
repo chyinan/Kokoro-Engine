@@ -49,8 +49,20 @@
 ## 实现状态
 - [x] LlmService provider map 模型落地
 - [x] provider/system_provider 统一选路
-- [x] update_config 原子重建与替换
-- [x] 无可用 provider 错误语义明确
+- [x] update_config 原子重建与替换（先构建，成功后持久化与替换）
+- [x] 无可用 provider 错误语义明确（provider/system_provider 避免 panic，改为日志+默认回退）
+- [x] provider map 仅纳入 enabled provider（含 active/system 解析一致性）
+
+## 最新进度（2026-04-08）
+- 已完成阻断修复：缺失 provider 不再触发 panic。
+- 已完成时序修复：`update_config` 先构建，再落盘并替换运行态，避免失败时磁盘/内存分裂。
+- 已完成一致性修复：active/system 覆盖路径遵循 enabled 过滤，不再绕过禁用项。
+- 测试运行受当前环境 `0xc0000139 (STATUS_ENTRYPOINT_NOT_FOUND)` 阻断；已通过 `cargo test --no-run` 与 `cargo check --tests` 完成编译级验证。
+
+## 关联提交
+- `fd5f779` fix(llm): avoid panic on missing provider resolution
+- `9a3875c` fix(llm): make config update ordering safer and skip disabled providers
+
 
 ## 测试与验收
 
