@@ -29,8 +29,6 @@ It integrates technologies such as Live2D, LLM, TTS, and STT to build a highly m
 
 ## ✅ Features
 
-Features currently verified mainly in a local environment (RTX 4060 Laptop):
-
 ### 🎭 Core Interaction
 - **Live2D Models**: Full support for Live2D Cubism SDK, supporting eye tracking and motion triggering.
 - **Model Hot-Switching**: Supports real-time import and switching of different Live2D models and viewing angles within the app.

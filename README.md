@@ -29,8 +29,6 @@
 
 ## ✅ 已完善功能 (Features)
 
-目前主要在本地环境（RTX 4060 Laptop）下验证通过的功能：
-
 ### 🎭 核心交互
 - **Live2D 模型**: 完整支持 Live2D Cubism SDK，支持视线追踪、动作触发。
 - **模型热切换**: 支持在应用内实时导入和切换不同的 Live2D 模型和观赏视角。
@@ -149,16 +147,16 @@ npm run tauri dev
 > 需要先启用 Nix Flakes。`nix build` / `nix run` 及 NixOS/Home Manager 声明式安装方式见 [docs/nix.md](docs/nix.md)。
 
 ## 🤝 参与贡献 (Contributing)
- 
+
 **Kokoro Engine** 极其欢迎社区的贡献！
 由于作者精力和资源有限，项目的发展离不开开发者的支持。如果您对这个项目感兴趣，欢迎：
- 
+
 1. **Pull Requests**: 直接提交代码修复 Bug 或添加新功能。
 2. **Issues**: 报告您发现的问题或提出改进建议。
 3. **Discussions**: 在讨论区分享您的想法。
 4. **Logo Design**: 如果您擅长设计，欢迎为 Kokoro Engine 设计一个 Logo！目前的 Logo 只是临时的。
 
- 
+
 您的每一份贡献（哪怕只是修改一个错别字）都能让 Kokoro Engine 变得更好！让我们一起打造最棒的桌面虚拟伙伴。
 
 ## 💬 社区交流
