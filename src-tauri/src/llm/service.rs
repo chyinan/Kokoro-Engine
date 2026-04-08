@@ -56,7 +56,8 @@ impl LlmService {
     /// Get a clone of the active provider (Arc'd for async use).
     pub async fn provider(&self) -> Arc<dyn LlmProvider> {
         self.try_provider().await.unwrap_or_else(|error| {
-            panic!("{}", error);
+            tracing::error!(target: "llm", "Failed to resolve active provider: {}", error);
+            default_provider()
         })
     }
 
@@ -97,7 +98,13 @@ impl LlmService {
             .unwrap_or(active_id);
 
         let resolved_provider = try_provider_by_id(&providers, &resolved_id).unwrap_or_else(|error| {
-            panic!("{}", error);
+            tracing::error!(
+                target: "llm",
+                "Failed to resolve system provider {}: {}",
+                resolved_id,
+                error
+            );
+            default_provider()
         });
 
         if let Some(model_override) = config.system_model {
@@ -152,6 +159,14 @@ fn build_provider_map(config: &LlmConfig) -> HashMap<String, Arc<dyn LlmProvider
             )
         })
         .collect()
+}
+
+fn default_provider() -> Arc<dyn LlmProvider> {
+    Arc::new(OpenAIProvider::new(
+        String::new(),
+        Some("https://api.openai.com/v1".to_string()),
+        Some("gpt-4".to_string()),
+    ))
 }
 
 fn try_build_provider_map(
@@ -273,6 +288,24 @@ mod tests {
         assert!(result.is_err());
         let error_message = result.err().unwrap().to_string();
         assert!(error_message.contains("No available LLM provider"));
+    }
+
+    #[tokio::test]
+    async fn provider_falls_back_to_default_when_no_available_provider() {
+        let service = make_service_with_no_enabled_provider();
+
+        let provider = service.provider().await;
+
+        assert_eq!(provider.id(), "openai");
+    }
+
+    #[tokio::test]
+    async fn system_provider_falls_back_to_default_when_no_available_provider() {
+        let service = make_service_with_no_enabled_provider();
+
+        let provider = service.system_provider().await;
+
+        assert_eq!(provider.id(), "openai");
     }
 
     #[tokio::test]
