@@ -2,6 +2,10 @@
   <a href="README.md">简体中文</a> | <a href="README_EN.md">English</a> | <a href="README_JA.md">日本語</a> | <a href="README_KO.md">한국어</a> | <a href="README_RU.md">Русский</a>
 </div>
 
+<p align="center">
+  <img src="pictures/Poster_Girl.png" alt="Kokoro Engine banner" width="100%" />
+</p>
+
 <h1 align="center">Kokoro Engine</h1>
 <p align="center"><strong>Open-source immersive character engine for desktop AI companions.</strong></p>
 <p align="center">専用の AI チャット伴侶を求めるユーザー向けの、クロスプラットフォーム仮想キャラクター対話エンジン。</p>

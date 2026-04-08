@@ -1,6 +1,11 @@
 <div align="center">
   <a href="README.md">简体中文</a> | <a href="README_EN.md">English</a> | <a href="README_JA.md">日本語</a> | <a href="README_KO.md">한국어</a> | <a href="README_RU.md">Русский</a>
 </div>
+
+<p align="center">
+  <img src="pictures/Poster_Girl.png" alt="Kokoro Engine banner" width="100%" />
+</p>
+
 <h1 align="center">Kokoro Engine</h1>
 <p align="center"><strong>Open-source immersive character engine for desktop AI companions.</strong></p>
 <p align="center">为每一位想拥有专属AI聊天伴侣的用户打造的跨平台虚拟角色交互引擎。</p>
@@ -12,13 +17,13 @@
   <img src="https://img.shields.io/badge/Rust-Stable-000000?logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/License-MIT-2EA44F" alt="MIT License" />
 </p>
-
 <p align="center">
   <a href="#-快速开始">快速开始</a> ·
   <a href="https://github.com/chyinan/Kokoro-Engine/releases">下载发布版</a> ·
-  <a href="#-面向开发者的架构">架构</a> ·
+  <a href="#-技术架构">架构</a> ·
   <a href="#-参与贡献">贡献</a>
 </p>
+
 
 ---
 
