@@ -21,10 +21,11 @@
 </p>
 <p align="center">
   <a href="#-快速开始">快速开始</a> ·
-  <a href="https://github.com/chyinan/Kokoro-Engine/releases">下载发布版</a> ·
+  <a href="https://github.com/chyinan/Kokoro-Engine/releases">下载安装</a> ·
   <a href="#-技术架构">架构</a> ·
   <a href="#-参与贡献">贡献</a>
 </p>
+
 
 
 ---
@@ -95,43 +96,43 @@ npm run tauri dev
 
 ## ✨ 核心能力
 
-### Character runtime
+### 交互引擎
 
 - Live2D 渲染、视线追踪、动作触发、桌面浮窗
-- 模型热切换与交互状态恢复
+- 模型热切换、帧率自定义
 
-### AI brain
+### 多维架构
 
 - 支持 Ollama 与 OpenAI 兼容接口
 - 支持多模态输入、上下文回溯、长期记忆与情感状态
 
-### Voice stack
+### 音频交互
 
 - TTS（文本转语音）：GPT-SoVITS、VITS、OpenAI、Azure、ElevenLabs、Edge TTS、Browser TTS
 - STT（语音转文本）：Whisper / faster-whisper / whisper.cpp / SenseVoice
 - 支持 VAD 自动停录与唤醒词链路
 
-### Extensibility
+### 可拓展性
 
-- MOD 框架：HTML/CSS/JS UI 替换 + QuickJS 脚本沙箱
+- MOD 框架：HTML/CSS/JS 超高自由度 UI 主题替换 + QuickJS 脚本沙箱
 - MCP 支持：连接 MCP Server 并调用外部工具
 - 内置官方示范 MOD：`mods/genshin-theme`
 
-### Remote interaction
+### 远程连接
 
 - 内置 Telegram Bot 服务
-- 支持文字、语音、图片消息桥接到完整 AI 管线
+- 文字、语音、图片消息完整桥接到 AI 管线流
 
 ## 🏗️ 技术架构
 
 ```text
 Frontend (React + TypeScript)
-      <-> Typed IPC Bridge (kokoro-bridge.ts)
+<-> Typed IPC Bridge (kokoro-bridge.ts)
 Backend (Rust / Tauri v2)
 ```
 
 - 前端：声明式布局、组件注册、主题系统、MOD UI 注入
-- 后端：命令模块 + AI 编排（LLM/TTS/STT/Vision/ImageGen/MCP）
+- 后端：命令模块 + 多模态编排（LLM/TTS/STT/Vision/ImageGen/MCP）
 - 数据层：SQLite + 本地向量检索
 
 详细设计见 [docs/architecture.md](docs/architecture.md)。

@@ -1,7 +1,7 @@
 # Kokoro Engine — Architecture
 
-> **Version:** 2.1
-> **Last Updated:** 2026-03-29
+> **Version:** 2.2
+> **Last Updated:** 2026-04-09
 > **Companion Document:** [PRD.md](PRD.md) · [API Specification](API%20specification.md) · [MOD System Design](MOD_system_design.md)
 
 ---
@@ -90,7 +90,7 @@ src/
 │   ├── widgets/                   # UI components
 │   │   ├── ChatPanel.tsx          # Chat interface (streaming + tool calls)
 │   │   ├── ChatMessage.tsx        # Chat message bubble (edit, continue-from, regenerate)
-│   │   ├── SettingsPanel.tsx      # Settings modal (12 tabs)
+│   │   ├── SettingsPanel.tsx      # Settings modal (persona/model/TTS/STT/vision/MCP/Telegram/pet/backup etc.)
 │   │   ├── HeaderBar.tsx          # Top bar
 │   │   ├── FooterBar.tsx          # Bottom bar (emotion display, real-time sync)
 │   │   ├── BackgroundLayer.tsx    # Background rendering
@@ -129,6 +129,11 @@ src/
 │
 └── components/ui/                 # Radix UI primitives
     └── button.tsx
+
+Settings panel tabs currently include:
+- persona, model, tts, stt, bg, imagegen
+- vision, memory, mcp, mods, sing, telegram
+- api, jailbreak, pet, backup
 ```
 
 ### 2.2 Backend (`src-tauri/src/`)
@@ -138,24 +143,29 @@ src-tauri/src/
 ├── main.rs                        # Tauri entry point
 ├── lib.rs                         # Module exports & Tauri setup
 │
-├── commands/                      # 20 IPC command modules
-│   ├── chat.rs                    # stream_chat (SSE streaming + tool feedback loop)
-│   ├── context.rs                 # set_persona, set_language, proactive control, emotion state
-│   ├── character.rs               # Character state management
+├── commands/                      # IPC command modules (chat/system/config/media/integration)
+│   ├── chat.rs                    # stream_chat + cancellation + tool approval flow
+│   ├── context.rs                 # persona/language/proactive/session controls
+│   ├── character.rs               # Runtime character state & cue control
+│   ├── characters.rs              # Character CRUD
 │   ├── conversation.rs            # Conversation history CRUD
-│   ├── database.rs                # DB initialization & vector store
-│   ├── tts.rs                     # TTS synthesis & config
-│   ├── stt.rs                     # Speech-to-text transcription
+│   ├── database.rs                # DB initialization & vector store test
+│   ├── tts.rs                     # TTS synthesis/provider config/cache ops
+│   ├── stt.rs                     # Speech-to-text + native mic/wake-word control
 │   ├── llm.rs                     # LLM config & model listing
-│   ├── vision.rs                  # Screen capture & VLM analysis
-│   ├── imagegen.rs                # Image generation
-│   ├── mcp.rs                     # MCP server management
+│   ├── vision.rs                  # Vision upload/watcher/capture controls
+│   ├── imagegen.rs                # Image generation config + invocation
+│   ├── mcp.rs                     # MCP server lifecycle & tool refresh
 │   ├── mods.rs                    # MOD loading & lifecycle
-│   ├── live2d.rs                  # Live2D model management
+│   ├── live2d.rs                  # Live2D model import/export/profile
 │   ├── live2d_protocol.rs         # live2d:// protocol handler
 │   ├── memory.rs                  # Memory CRUD & tiering
 │   ├── singing.rs                 # RVC voice conversion
 │   ├── actions.rs                 # Action registry & execution
+│   ├── tool_settings.rs           # Tool enablement + max feedback rounds
+│   ├── backup.rs                  # Data export/import
+│   ├── auto_backup.rs             # Scheduled backup config + trigger
+│   ├── pet.rs                     # Desktop pet & bubble window control
 │   ├── system.rs                  # Engine info & system status
 │   ├── telegram.rs                # Telegram Bot config & control
 │   └── mod.rs
@@ -187,7 +197,7 @@ src-tauri/src/
 │   ├── llm_config.rs              # Config persistence
 │   └── mod.rs
 │
-├── tts/                           # Text-to-speech (15+ providers)
+├── tts/                           # Text-to-speech (router + provider adapters)
 │   ├── manager.rs                 # TtsService (main interface)
 │   ├── interface.rs               # TtsProvider trait & types
 │   ├── router.rs                  # Provider routing logic
@@ -404,7 +414,7 @@ graph TD
 | Pattern | Implementation |
 |---|---|
 | **Pluggable LLM** | OpenAI-compatible + Ollama adapters; Fast/Smart/Cheap model routing |
-| **Pluggable TTS** | `TtsProvider` trait — 15+ providers with emotion-aware synthesis |
+| **Pluggable TTS** | `TtsProvider` trait + capability router + fallback chain (preferred/default/browser) |
 | **Pluggable ImageGen** | `ImageGenProvider` trait — Stable Diffusion, DALL-E, Gemini |
 | **Tool calling** | `ActionHandler` trait with `needs_feedback()` for feedback loop control |
 | **MCP integration** | MCP tools auto-registered into `ActionRegistry` via `bridge.rs` |
@@ -420,52 +430,50 @@ All frontend ↔ backend communication flows through **`kokoro-bridge.ts`** (fro
 
 ### Commands (invoke-based)
 
-| Command | Module | Purpose |
-|---|---|---|
-| `stream_chat` | chat.rs | Start streaming chat with tool feedback loop |
-| `set_persona` | context.rs | Set character system prompt |
-| `set_response_language` | context.rs | Set response language |
-| `set_proactive_enabled` | context.rs | Toggle proactive (idle) messages |
-| `clear_history` | context.rs | Reset conversation history |
-| `set_character_name` | context.rs | Set character name for placeholder mapping |
-| `set_user_name` | context.rs | Set user name for placeholder mapping |
-| `get_emotion_state` | context.rs | Get current emotion and mood |
-| `get_emotion_settings` / `save_emotion_settings` | emotion_settings.rs | Enable or disable emotion updates |
-| `get_character_state` | character.rs | Character name, current cue |
-| `play_cue` | character.rs | Trigger character cue |
-| `get_tool_settings` / `save_tool_settings` | tool_settings.rs | Tool enablement and max tool rounds |
-| `list_conversations` | conversation.rs | List conversation history |
-| `load_conversation` | conversation.rs | Load specific conversation |
-| `init_db` | database.rs | Initialize SQLite database |
-| `synthesize` | tts.rs | TTS synthesis → audio bytes |
-| `get_tts_config` / `set_tts_config` | tts.rs | TTS provider configuration |
-| `transcribe` | stt.rs | Speech-to-text transcription |
-| `get_llm_config` / `set_llm_config` | llm.rs | LLM provider configuration |
-| `capture_screen` | vision.rs | Screen capture for VLM |
-| `generate_image` | imagegen.rs | Image generation |
-| `list_mcp_servers` | mcp.rs | Enumerate MCP servers |
-| `connect_mcp_server` | mcp.rs | Connect to MCP server |
-| `list_mods` / `load_mod` | mods.rs | MOD discovery & loading |
-| `list_live2d_models` | live2d.rs | Available Live2D models |
-| `search_memories` | memory.rs | Hybrid memory search |
-| `get_engine_info` | system.rs | Engine name, version, platform |
-| `get_telegram_config` / `save_telegram_config` | telegram.rs | Telegram Bot configuration |
-| `start_telegram_bot` / `stop_telegram_bot` | telegram.rs | Telegram Bot lifecycle control |
-| `get_telegram_status` | telegram.rs | Telegram Bot running status |
+The command set is defined by `tauri::generate_handler![]` in `src-tauri/src/lib.rs`.
 
-### Events (streaming)
-
-| Event | Direction | Payload |
+| Domain | Commands | Module |
 |---|---|---|
-| `chat-turn-start` | BE → FE | `{turn_id}` — assistant turn started |
-| `chat-turn-delta` | BE → FE | `{turn_id, delta}` — incremental text chunk |
-| `chat-turn-finish` | BE → FE | `{turn_id, status}` — assistant turn completed or failed |
-| `chat-error` | BE → FE | `string` — error message |
-| `chat-turn-translation` | BE → FE | `{turn_id, translation}` — combined translation for the turn |
-| `chat-turn-tool` | BE → FE | `{turn_id, tool, result|error}` — tool execution result |
-| `chat-cue` | BE → FE | `{cue, source}` — Live2D cue playback |
-| `chat-image-gen` | BE → FE | Image generation event |
-| `proactive-trigger` | BE → FE | Proactive message trigger |
+| Chat turn | `stream_chat`, `cancel_chat_turn`, `approve_tool_approval`, `reject_tool_approval`, `get_context_settings`, `set_context_settings` | `chat.rs` |
+| Context | `set_persona`, `set_character_name`, `set_active_character_id`, `set_user_name`, `set_response_language`, `set_user_language`, `set_jailbreak_prompt`, `get_jailbreak_prompt`, `set_proactive_enabled`, `get_proactive_enabled`, `set_memory_enabled`, `get_memory_enabled`, `clear_history`, `delete_last_messages`, `end_session` | `context.rs` |
+| System + character | `get_engine_info`, `get_system_status`, `set_window_size`, `get_character_state`, `play_cue`, `send_message` | `system.rs`, `character.rs` |
+| Database | `init_db`, `test_vector_store` | `database.rs` |
+| TTS | `synthesize`, `list_tts_providers`, `list_tts_voices`, `get_tts_provider_status`, `clear_tts_cache`, `get_tts_config`, `save_tts_config`, `list_gpt_sovits_models` | `tts.rs` |
+| STT | `transcribe_audio`, `get_stt_config`, `save_stt_config`, `transcribe_wake_word_audio`, `start_native_mic`, `stop_native_mic`, `start_native_wake_word`, `stop_native_wake_word`, `get_sensevoice_local_status`, `download_sensevoice_local_model` | `stt.rs` |
+| STT streaming buffer | `process_audio_chunk`, `complete_audio_stream`, `discard_audio_stream`, `snapshot_audio_stream`, `prune_audio_buffer` | `stt/stream.rs` |
+| LLM | `get_llm_config`, `save_llm_config`, `list_ollama_models` | `llm.rs` |
+| Vision | `upload_vision_image`, `get_vision_config`, `save_vision_config`, `start_vision_watcher`, `stop_vision_watcher`, `capture_screen_now` | `vision.rs` |
+| Image generation | `generate_image`, `get_imagegen_config`, `save_imagegen_config`, `test_sd_connection` | `imagegen.rs` |
+| Memory | `list_memories`, `update_memory`, `delete_memory`, `update_memory_tier` | `memory.rs` |
+| Character CRUD | `list_characters`, `create_character`, `update_character`, `delete_character`, `list_character_ids` | `characters.rs`, `conversation.rs` |
+| Conversation CRUD | `list_conversations`, `load_conversation`, `delete_conversation`, `create_conversation`, `rename_conversation`, `update_conversation_state` | `conversation.rs` |
+| Action / tooling | `list_actions`, `list_builtin_tools`, `execute_action`, `get_tool_settings`, `save_tool_settings` | `actions.rs`, `tool_settings.rs` |
+| MCP | `list_mcp_servers`, `add_mcp_server`, `remove_mcp_server`, `refresh_mcp_tools`, `reconnect_mcp_server`, `toggle_mcp_server` | `mcp.rs` |
+| MOD | `list_mods`, `load_mod`, `install_mod`, `get_mod_theme`, `get_mod_layout`, `dispatch_mod_event`, `unload_mod` | `mods.rs` |
+| Live2D assets | `import_live2d_zip`, `import_live2d_folder`, `export_live2d_model`, `list_live2d_models`, `delete_live2d_model`, `rename_live2d_model`, `get_live2d_model_profile`, `save_live2d_model_profile`, `set_active_live2d_model` | `live2d.rs` |
+| Singing | `check_rvc_status`, `list_rvc_models`, `convert_singing` | `singing.rs` |
+| Telegram | `get_telegram_config`, `save_telegram_config`, `start_telegram_bot`, `stop_telegram_bot`, `get_telegram_status` | `telegram.rs` |
+| Backup | `export_data`, `preview_import`, `import_data`, `get_auto_backup_config`, `save_auto_backup_config`, `run_auto_backup_now` | `backup.rs`, `auto_backup.rs` |
+| Pet window | `show_pet_window`, `hide_pet_window`, `set_pet_drag_mode`, `get_pet_config`, `save_pet_config`, `move_pet_window`, `resize_pet_window`, `show_bubble_window`, `update_bubble_text`, `hide_bubble_window` | `pet.rs` |
+
+### Events (runtime)
+
+| Event | Direction | Purpose |
+|---|---|---|
+| `chat-turn-start` / `chat-turn-delta` / `chat-turn-finish` / `chat-turn-translation` | BE → FE | Turn-scoped streaming lifecycle. |
+| `chat-turn-tool` | BE → FE | Tool execution trace, result/error, approval metadata. |
+| `chat-error` | BE → FE | Chat pipeline error surface. |
+| `chat-cue` | BE → FE | Cue playback trigger from chat/tool/MOD paths. |
+| `chat-imagegen`, `imagegen:done`, `imagegen:error` | BE → FE | Image generation request + completion/failure. |
+| `chat-typing` | BE → FE | Typing simulation events. |
+| `vision-observation`, `vision-status`, `camera-observation` | BE → FE | Vision watcher observations and status. |
+| `tts:start`, `tts:audio`, `tts:browser-delegate`, `tts:end` | BE → FE | TTS playback lifecycle and browser delegation. |
+| `stt:sensevoice-local-progress`, `stt:mic-auto-stop`, `stt:wake-word-detected` | BE → FE | STT model download and microphone/wake-word events. |
+| `memory:updated` | BE → FE | Memory panel refresh trigger after write/delete operations. |
+| `mod:theme-override`, `mod:layout-override`, `mod:components-register`, `mod:unload`, `mod:script-event`, `mod:ui-message` | BE ↔ FE | MOD UI/script synchronization channel. |
+| `idle-behavior` | BE → FE | Heartbeat-driven idle behavior signal. |
+| `live2d-profile-updated` | BE → FE | Active model profile changed. |
+| `pet-window-closed`, `bubble-text-update`, `toggle-chat-input` | BE → FE | Pet window/bubble UI state synchronization. |
 
 ---
 
@@ -515,7 +523,7 @@ User message
 3. Parse `[TOOL_CALL:name|args]` tags from response
 4. If no tool calls → break (final round)
 5. Execute tools via `ActionRegistry`
-6. Check `needs_feedback()` — info-retrieval tools (get_time, search_memory, MCP tools) return `true`; side-effect tools (play_cue, play_sound) return `false`
+6. Check `needs_feedback()` — info-retrieval tools (get_time, search_memory, forget_memory, MCP tools) return `true`; side-effect tools (play_cue, set_background, send_notification, store_memory) return `false`
 7. If any tool needs feedback → inject assistant message + tool results into context → next round
 8. If no tool needs feedback → break
 9. Emit `chat-turn-finish`, plus `chat-turn-translation` / `chat-cue` when applicable
@@ -538,8 +546,7 @@ ActionRegistry
 │   ├── store_memory        (needs_feedback: false)
 │   ├── play_cue            (needs_feedback: false)
 │   ├── set_background      (needs_feedback: false)
-│   ├── send_notification   (needs_feedback: false)
-│   └── play_sound          (needs_feedback: false)
+│   └── send_notification   (needs_feedback: false)
 │
 └── MCP Tools (bridge.rs)       (needs_feedback: true, always)
     └── Dynamically registered from connected MCP servers
@@ -577,21 +584,26 @@ Triggers are time-based (idle duration) and context-aware (time of day, conversa
 ### 5.5 TTS Pipeline
 
 ```
-Text ──▶ TtsService ──▶ TtsProvider::synthesize() ──▶ Audio bytes
+Text ──▶ TtsService ──▶ TtsRouter::select_provider() ──▶ TtsProvider::synthesize() ──▶ Audio bytes/events
+              │                         │
+              │                         ├─ preferred provider (if available)
+              │                         ├─ capability score ranking
+              │                         ├─ default provider fallback
+              │                         └─ browser fallback
               │
-              ├─▶ GPT-SoVITS (local, emotion-aware)
-              ├─▶ VITS (local, vits-simple-api compatible)
-              ├─▶ OpenAI TTS
-              ├─▶ Azure TTS (Cognitive Services)
-              ├─▶ ElevenLabs (voice cloning)
-              ├─▶ Browser TTS (Web Speech API)
-              └─▶ RVC (voice conversion post-processing)
+              ├─ local_gpt_sovits.rs
+              ├─ local_vits.rs
+              ├─ openai.rs
+              ├─ edge.rs
+              ├─ browser.rs
+              └─ local_rvc.rs
 ```
 
-- **`TtsProvider` trait** — `synthesize(text, params) → Vec<u8>`
-- **Emotion-aware**: `emotion_tts.rs` adjusts voice parameters based on character emotion
-- **Caching**: `cache.rs` caches synthesized audio
-- **Queue**: `queue.rs` manages sequential playback
+- **`TtsProvider` trait** — provider abstraction for synth and capabilities.
+- **Router-driven selection** — `router.rs` picks providers by preference + capability score.
+- **Emotion-aware adaptation** — `emotion_tts.rs` adjusts runtime voice parameters.
+- **Caching + queue** — `cache.rs` avoids duplicate synthesis; `queue.rs` serializes playback.
+- **Runtime events** — `tts:start`, `tts:audio`, `tts:browser-delegate`, `tts:end`.
 
 ### 5.6 MCP Protocol
 
@@ -777,7 +789,7 @@ sequenceDiagram
 | Frontend files | ~60 TypeScript/TSX |
 | Backend files | ~110 Rust |
 | Languages | 5 (zh, en, ja, ko, ru) |
-| TTS providers | 6 (GPT-SoVITS, VITS, OpenAI, Azure, ElevenLabs, Browser) |
+| TTS architecture | provider adapters + capability router + fallback chain |
 | LLM support | OpenAI-compatible + Ollama (multi-provider with presets) |
 | Built-in actions | 8 |
 | MCP transport | stdio + Streamable HTTP |
