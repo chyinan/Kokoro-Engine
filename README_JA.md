@@ -2,141 +2,76 @@
   <a href="README.md">简体中文</a> | <a href="README_EN.md">English</a> | <a href="README_JA.md">日本語</a> | <a href="README_KO.md">한국어</a> | <a href="README_RU.md">Русский</a>
 </div>
 
+<h1 align="center">Kokoro Engine</h1>
+<p align="center"><strong>Open-source immersive character engine for desktop AI companions.</strong></p>
+<p align="center">専用の AI チャット伴侶を求めるユーザー向けの、クロスプラットフォーム仮想キャラクター対話エンジン。</p>
+
+<p align="center"><code>Windows</code> <code>Linux</code> <code>macOS</code> <code>Tauri v2</code> <code>React</code> <code>Rust</code> <code>MIT</code></p>
+
 <p align="center">
-  <h1 align="center">Kokoro Engine</h1>
-  <p align="center">
-    クロスプラットフォーム仮想キャラクター没入型インタラクションエンジン<br/>
-    <em>High freedom · Modular · Offline-first · Creator-friendly</em>
-  </p>
+  <a href="#-クイックスタート">クイックスタート</a> ·
+  <a href="https://github.com/chyinan/Kokoro-Engine/releases">リリースをダウンロード</a> ·
+  <a href="#-技術アーキテクチャ">アーキテクチャ</a> ·
+  <a href="#-コントリビューション">コントリビューション</a>
 </p>
 
 ---
 
-## ✨ プロジェクト紹介
+## Kokoro Engine の独自性
 
-**Kokoro Engine** は、誰もがデスクトップ上に「心」を持った仮想パートナーを持てるようにすることを目的とした、クロスプラットフォームの仮想キャラクター没入型インタラクションエンジンです（Neuro-sama に触発されました）。
-Live2D、LLM、TTS、STT などの技術を統合し、高度にモジュール化され、カスタマイズ可能なインタラクションシステムを構築しています。
+Kokoro Engine は「チャット UI + デスクトップペットの見た目」ではありません。完全なデスクトップキャラクター実行環境です。
 
-## 📸 スクリーンショット (Screenshots)
+- **All-in-one**：Live2D、LLM、TTS、STT を 1 つの実行ループに統合。
+- **Built for extensibility**：高自由度の MOD システム + MCP プロトコル。
+- **Local-first**：ローカル記憶、オフライン優先、制御しやすいデータ経路。
+
+## 一覧
+
+| 項目 | 内容 |
+|---|---|
+| 対象ユーザー | 仮想キャラクター制作者、開発者、一般ユーザー |
+| 交互作用 | テキスト、音声、画像、ビジョン入力、マルチモーダル対話 |
+| 拡張方式 | MOD（HTML/CSS/JS + QuickJS）、MCP Servers |
+| 技術スタック | React + TypeScript + Rust + Tauri v2 + SQLite |
+
+## 📸 UIスクリーンショット
 
 <div align="center">
   <img src="pictures/Homepage.png" alt="Homepage" width="800" />
-  <p><em>ホーム画面プレビュー</em></p>
+  <p><em>メイン画面</em></p>
   <img src="pictures/Settings.png" alt="Settings" width="800" />
-  <p><em>設定画面プレビュー</em></p>
+  <p><em>設定画面</em></p>
 </div>
-
-
-## ✅ 実装済み機能 (Features)
-
-### 🎭 コアインタラクション
-- **Live2D モデル**: Live2D Cubism SDK を完全サポートし、視線追跡、モーションリガーに対応。
-- **モデルのホットスイッチ**: アプリ内での異なる Live2D モデルのリアルタイムインポートと切り替え、視点変更をサポート。
-- **多言語インターフェース**: 完全な国際化 (I18n) サポート。現在、**簡体字中国語**、**英語**、**日本語**、**韓国語** をサポートしています。
-- **デスクトップ浮動モード**: Live2D モデルを透明な浮動ウィンドウとしてデスクトップに表示——常に最前面、ボーダーレス、完全透明。
-  - 右クリックドラッグでウィンドウ移動、右クリックメニューでリサイズモードに入り、端をドラッグして自由にサイズ変更。
-  - Ctrl + スクロールホイールでモデルのスケールを細かく調整。
-  - グローバルショートカット（キー録音でカスタマイズ可能）でチャット入力を呼び出し、AI の返答はモデルの上に独立したバブルウィンドウで表示。
-  - 位置、ウィンドウサイズ、モデルスケールは再起動後も自動的に復元。
-
-### 🧠 AI ブレイン
-- **マルチモーダル会話**: **Ollama** (ローカル) および **OpenAI 互換インターフェース** (クラウド) を会話のコアとしてサポート。
-- **マルチモーダル能力**: Vision モデルを統合可能。**スクリーンショット**、**画像アップロード**、または **ウェブカメラリアルタイムビジョン** をサポートし、キャラクターは内容をリアルタイムで「見て」説明できます。ウェブカメラビジョンは複数デバイスの選択とライブプレビューに対応し、チャットメッセージごとに最新のカメラフレームを自動添付します。
-- **テキストからの画像生成 (Text-to-Image)**: Stable Diffusion WebUI またはオンライン API インターフェースを統合可能。会話による画像生成や、会話の文脈に基づいたリアルタイムの背景画像生成をサポート。
-- **階層型記憶システム**: 三層の記憶アーキテクチャを搭載——階層型記憶（コア事実は永久保持、一時記憶は自然減衰）、セマンティック＋キーワードのハイブリッド検索（Embedding コサイン類似度 + FTS5 BM25、RRF ランク融合）、および LLM 駆動の自動記憶統合（類似する断片記憶をクラスタリングして統合）。会話から重要な事実を自動的に抽出して長期保存 (SQLite) し、リアルタイムな文脈回想と感情の永続化をサポート。
-
-### 🗣️ 音声インタラクション
-- **音声合成 (TTS)**:
-    - **GPT-SoVITS**: 優れた感情表現、カスタムキャラクターボイス、豊富なエコシステム。
-    - **VITS**: vits-simple-api などのローカル VITS 推論サーバーと互換。
-    - **OpenAI TTS**: OpenAI 互換のクラウド音声合成 API をサポート。
-    - **Azure TTS**: Microsoft Azure Cognitive Services 音声合成。
-    - **ElevenLabs**: 高品質 AI 音声合成、ボイスクローニング対応。
-    - **Browser TTS**: ブラウザネイティブの軽量 TTS。
-- **ボイスチェンジャー (RVC)**: RVC (Retrieval-based Voice Conversion) インターフェースをサポートし、キャラクターの歌唱などを実現。
-- **音声認識 (STT)**: OpenAI Whisper/faster-whisper/whisper.cpp/SenseVoice マルチエンジン対応、ウェイクワード検出と VAD 自動停止を内蔵。
-
-### 🔌 拡張能力
-- **MOD システム**: 内蔵のモジュール式 MOD フレームワークにより、チャットパネルや設定パネルなどのコア UI コンポーネントを HTML/CSS/JS でカスタム置換可能。カスタムテーマと QuickJS スクリプトサンドボックスをサポート。
-- **MCP プロトコルサポート**: **Model Context Protocol (MCP)** クライアントを実装。
-    - 任意の MCP Server に接続可能（stdio インタラクション経由）。
-    - キャラクターは MCP Server が提供するツール（ファイルシステム、ウェブ検索、データベースなど）を使用して能力を拡張できます。
-    - UI を介して MCP Server を管理可能。
-- **Telegram Bot リモートインタラクション**: 内蔵の Telegram Bot サービスにより、パブリック IP 不要でスマートフォンからキャラクターとチャット可能。
-    - テキスト、音声、写真メッセージに対応し、LLM/TTS/STT/ImageGen パイプラインにブリッジ。
-    - Chat ID ホワイトリストによるアクセス制御、セッションコマンド (`/new`, `/continue`, `/status`)。
-    - デスクトップのチャット UI に Telegram メッセージをリアルタイム同期。
-
-### 🎮 公式デモ MOD：原神スタイル UI
-
-プロジェクトには、原神のビジュアルスタイルでチャットと設定インターフェースを再デザインした完全な公式デモ MOD（`mods/genshin-theme`）が含まれています：
-
-- チャットパネルと設定パネルを完全に置換し、ネイティブ機能と完全に同等
-- キャラクター管理、LLM/TTS/STT/Vision/ImageGen 設定、MCP 管理、背景設定、記憶管理など、すべての設定項目を含む
-- コミュニティ開発者がカスタム UI MOD を作成するための参考テンプレートとして利用可能
-
-## 📝 TODO / 開発中
-
-以下の機能は計画中、開発中、または **デバイスや資金の制限により未テスト/未検証** の状態です：
-
-- [ ] **Linux と macOS のサポート**: 現在、Windows でのみ十分なテストが行われています。Linux と macOS での完全な機能検証と最適化が必要です。
-- [ ] **オンラインサービスの詳細テスト**: LLM 以外の多くの商用 API（Azure TTS、Google STT など）の検証。
-- [ ] **モバイルサポート**: iOS / Android クライアントアプリ。
-- [x] **階層型記憶システム**: 階層型記憶（core/ephemeral）、ハイブリッド検索（セマンティック + BM25 RRF 融合）、LLM 駆動の記憶統合。
-- [x] **MOD プラグインシステム**: コミュニティ開発者が MOD モジュールを作成して機能を拡張できるようにする（HTML/CSS/JS + QuickJS スクリプトサンドボックス）。
-- [x] **Live2D モデルインタラクション**: Live2D モデルとのリアルタイムな相互作用フィードバック（視線追跡、モーショントリガー、表情同期）。
-- [ ] **キャラクターマーケット/ワークショップ**: キャラクタープリセットの共有とダウンロードを容易にする。
-
-## 🛠️ 技術スタック
-
-| レイヤー | 技術 |
-|---|---|
-| **フロントエンド** | React + TypeScript + Tailwind CSS + shadcn/ui |
-| **バックエンド** | Rust (Tauri v2) |
-| **レンダリング** | PixiJS + Live2D Cubism SDK |
-| **データ** | SQLite (ローカルストレージ) |
-
-> **🚀 なぜ Rust なのか？**
->
-> Rust 言語の驚異的なパフォーマンスのおかげで、Kokoro Engine は **極めて低いメモリ使用量** と **極めて高い実行効率** を実現しています。
-> バックグラウンドで 24 時間 365 日実行してもシステムを遅くすることはなく、真に「軽量」なパートナーを実現します。
 
 ## 🚀 クイックスタート
 
-### 方法1：プリビルド版をダウンロード（推奨）
+### パス 1：リリース版をダウンロード（推奨）
 
-[Releases ページ](https://github.com/chyinan/Kokoro-Engine/releases)からお使いのプラットフォーム用のインストーラーをダウンロードして、直接実行してください。
+[Releases ページ](https://github.com/chyinan/Kokoro-Engine/releases) から対象プラットフォームのインストーラーを取得して実行します。
 
-### 方法2：ソースからビルド
+### パス 2：ソースからビルド
 
-#### 前提条件
+#### 必要環境
 
-- [Node.js](https://nodejs.org/) (v18+)
-- [Rust](https://www.rust-lang.org/tools/install) (stable)
+- [Node.js](https://nodejs.org/)（v18+）
+- [Rust](https://www.rust-lang.org/tools/install)（stable）
 
-#### インストールと実行
+#### インストールと起動
 
 ```bash
-# リポジトリをクローン
 git clone https://github.com/chyinan/kokoro-engine.git
 cd kokoro-engine
-
-# 依存関係をインストール
 npm install
-
-# 開発サーバーを起動 (フロントエンド + Tauri)
 npm run tauri dev
 ```
 
-#### 配布用ビルド
+#### リリースビルド
 
 ```bash
 npm run tauri build
 ```
 
-### 方法3：Nix / Flakes を使用する（Linux のみ）
-
-NixOS または Flakes が有効な Linux 環境で開発している場合、リポジトリ内蔵の flake を使って依存環境を一括セットアップできます：
+### パス 3：Nix / Flakes（Linux のみ）
 
 ```bash
 nix develop
@@ -144,49 +79,96 @@ npm install
 npm run tauri dev
 ```
 
-> 事前に Nix Flakes を有効にする必要があります。`nix build` / `nix run` および NixOS/Home Manager での宣言的インストール方法は [docs/nix.md](docs/nix.md) を参照してください。
+Nix の詳細は [docs/nix.md](docs/nix.md) を参照してください。
 
-## 🤝 貢献 (Contributing)
+## ✨ コア機能
 
-**Kokoro Engine** はコミュニティからの貢献を大歓迎します！
-作者のエネルギーとリソースが限られているため、プロジェクトの発展には開発者の皆様のサポートが不可欠です。このプロジェクトに興味がある方は、以下のような貢献を歓迎します：
+### キャラクターランタイム
 
-1. **Pull Requests**: バグ修正や新機能の追加コードを直接送信してください。
-2. **Issues**: 見つけた問題を報告したり、改善案を提案してください。
-3. **Discussions**: ディスカッションエリアでアイデアを共有してください。
-4. **ロゴデザイン**: デザインが得意な方は、Kokoro Engine のロゴをデザインしてみませんか！現在のロゴは一時的なものです。
+- Live2D 描画、視線追跡、モーショントリガー、デスクトップ浮遊。
+- モデルのホットスイッチと対話状態の復元。
 
-どんな貢献（誤字の修正だけでも）も Kokoro Engine をより良くします！一緒に最高のデスクトップ仮想パートナーを作りましょう。
+### AI ブレイン
+
+- Ollama と OpenAI 互換プロバイダをサポート。
+- マルチモーダル入力、文脈回想、長期記憶、感情状態の継続。
+
+### 音声スタック
+
+- TTS（テキスト読み上げ）：GPT-SoVITS、VITS、OpenAI、Azure、ElevenLabs、Edge TTS、Browser TTS。
+- STT（音声認識）：Whisper / faster-whisper / whisper.cpp / SenseVoice。
+- VAD 自動停止とウェイクワード連携をサポート。
+
+### 拡張性
+
+- MOD フレームワーク：HTML/CSS/JS UI 差し替え + QuickJS スクリプトサンドボックス。
+- MCP サポート：MCP Server 接続と外部ツール呼び出し。
+- 公式デモ MOD：`mods/genshin-theme` を同梱。
+
+### リモート連携
+
+- Telegram Bot サービスを内蔵。
+- テキスト、音声、画像メッセージをフル AI パイプラインへ橋渡し。
+
+## 🏗️ 技術アーキテクチャ
+
+```text
+Frontend (React + TypeScript)
+      <-> Typed IPC Bridge (kokoro-bridge.ts)
+Backend (Rust / Tauri v2)
+```
+
+- フロントエンド：宣言的レイアウト、コンポーネント登録、テーマシステム、MOD UI 注入。
+- バックエンド：コマンドモジュール + AI オーケストレーション（LLM/TTS/STT/Vision/ImageGen/MCP）。
+- データ層：SQLite + ローカルベクトル検索。
+
+詳細は [docs/architecture.md](docs/architecture.md) を参照してください。
+
+## 🗺️ ロードマップ
+
+### 現在
+
+- クロスプラットフォーム安定性・互換性の検証（Windows / Linux / macOS）。
+- オンラインサービス連携の深度テスト。
+- 記憶システムとマルチモーダル体験の継続最適化。
+
+### 次の段階
+
+- キャラクターマーケット / ワークショップ。
+- モバイル対応探索（iOS / Android）。
+- 開発者向け拡張エコシステムの強化。
+
+## 🤝 コントリビューション
+
+以下の形で参加できます。
+
+1. **Pull requests**：不具合修正・機能追加。
+2. **Issues**：問題報告と改善提案。
+3. **Discussions**：アイデアや実践知の共有。
+4. **Design contributions**：ロゴやビジュアル素材の提供。
 
 ## 💬 コミュニティ
 
-公式 Telegram ディスカッショングループに参加して、他のユーザーと交流し、最新情報を入手しましょう：
-
-👉 [**Kokoro Engine 公式ディスカッショングループ**](https://t.me/+U39dgiUspCo2NDNh)
+👉 [**Kokoro Engine 公式 Telegram グループ**](https://t.me/+U39dgiUspCo2NDNh)
 
 ## ❤️ スポンサー
 
-Kokoro Engine が役に立つと感じたら、プロジェクトの継続的な開発を支援するスポンサーをご検討ください。
+👉 [**スポンサー方法 / Sponsor**](SPONSOR.md)
 
-👉 [**スポンサー方法を見る**](SPONSOR.md)
+## 📄 ライセンス
 
-## 📄 ライセンス (License)
+コアコードは **MIT License** で公開されています。
 
-このプロジェクトのコアコードは **MIT ライセンス** の下でオープンソース化されています。
+### ⚠️ Live2D Cubism SDK に関する注意
 
-### ⚠️ Live2D Cubism SDK 免責事項
+本プロジェクトは **Live2D Cubism SDK** を使用しており、関連部分は Live2D Inc. に帰属します。コンパイル、配布、改変時は以下のライセンスを遵守してください。
 
-このプロジェクトは、Live2D Inc. が所有する **Live2D Cubism SDK** を使用しています。
-このプロジェクトを使用（コンパイル、配布、変更を含む）する場合、Live2D のライセンス契約に同意する必要があります：
+- [Live2D Proprietary Software License Agreement](https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html)
+- [Live2D Open Software License Agreement](https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html)
 
-- **Live2D Proprietary Software License Agreement**: [https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html](https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html)
-- **Live2D Open Software License Agreement**: [https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html](https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html)
-
-> 本オープンソースプロジェクトは、非営利または小規模使用のための「個人/小規模事業者」のカテゴリーに該当します。
-> 年間売上高が 1,000 万円を超える中大規模事業者の場合、本プロジェクトの使用には Live2D Inc. との別途商用ライセンス契約が必要になる場合があります。
+> 年間売上高が 1,000 万円を超える中・大規模企業は、Live2D Inc. との別途商用ライセンス契約が必要になる場合があります。
 
 ---
 
 **Kokoro Engine** is an open-source project.
-The specific Live2D libraries and models included or downloaded are subject to the **Live2D Proprietary Software License Agreement**.
 Live2D is a registered trademark of Live2D Inc.

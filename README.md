@@ -1,130 +1,66 @@
 <div align="center">
   <a href="README.md">简体中文</a> | <a href="README_EN.md">English</a> | <a href="README_JA.md">日本語</a> | <a href="README_KO.md">한국어</a> | <a href="README_RU.md">Русский</a>
 </div>
+<h1 align="center">Kokoro Engine</h1>
+<p align="center"><strong>Open-source immersive character engine for desktop AI companions.</strong></p>
+<p align="center">为每一位想拥有专属AI聊天伴侣的用户打造的跨平台虚拟角色交互引擎。</p>
+
+<p align="center"><code>Windows</code> <code>Linux</code> <code>macOS</code> <code>Tauri v2</code> <code>React</code> <code>Rust</code> <code>MIT</code></p>
 
 <p align="center">
-  <h1 align="center">Kokoro Engine</h1>
-  <p align="center">
-    跨平台虚拟角色沉浸交互引擎<br/>
-    <em>High freedom · Modular · Offline-first · Creator-friendly</em>
-  </p>
+  <a href="#-快速开始">快速开始</a> ·
+  <a href="https://github.com/chyinan/Kokoro-Engine/releases">下载发布版</a> ·
+  <a href="#-面向开发者的架构">架构</a> ·
+  <a href="#-参与贡献">贡献</a>
 </p>
 
 ---
 
-## ✨ 项目简介
+##  Kokoro Engine 的独到之处
 
-**Kokoro Engine** 是一个跨平台虚拟角色沉浸交互引擎，旨在让每个人都能在桌面上拥有一个“有心”的虚拟伙伴（灵感来源于 Neuro-sama）。
-它整合了 Live2D、LLM、TTS 和 STT 等技术，构建了一个高度模块化、可定制的交互系统。
+Kokoro Engine 不是“聊天壳子 + 桌宠皮肤”。它是一个完整的桌面角色运行时：
 
-## 📸 截图 (Screenshots)
+- **All-in-one**：Live2D、LLM、TTS、STT等技术集成在一个运行时闭环。
+- **Built for extensibility**：高自由度 MOD 系统 + MCP 协议，天然面向扩展。
+- **Local-first**：本地存储记忆、离线优先、数据链路可控。
+
+## 一览
+
+| 维度 | 内容 |
+|---|---|
+| 面向用户 | 虚拟角色创作者、开发者、普通用户 |
+| 交互能力 | 文本、语音、图片、视觉输入、多模态对话 |
+| 扩展方式 | MOD（HTML/CSS/JS + QuickJS）、MCP Servers |
+| 技术栈 | React + TypeScript + Rust + Tauri v2 + SQLite |
+
+## 📸 UI截图
 
 <div align="center">
   <img src="pictures/Homepage.png" alt="Homepage" width="800" />
-  <p><em>主界面预览</em></p>
+  <p><em>主界面</em></p>
   <img src="pictures/Settings.png" alt="Settings" width="800" />
-  <p><em>设置界面预览</em></p>
+  <p><em>设置界面</em></p>
 </div>
-
-
-## ✅ 已完善功能 (Features)
-
-### 🎭 核心交互
-- **Live2D 模型**: 完整支持 Live2D Cubism SDK，支持视线追踪、动作触发。
-- **模型热切换**: 支持在应用内实时导入和切换不同的 Live2D 模型和观赏视角。
-- **多语言界面**: 完整的国际化支持 (I18n)，目前支持 **简体中文**、**English**、**日本語**、**한국어**。
-- **桌面悬浮模式**: 支持将 Live2D 模型以透明悬浮窗形式显示在桌面上，始终置顶、无边框、背景透明。
-  - 右键拖动移动窗口位置，右键菜单进入调整大小模式，拖拽边缘自由缩放窗口。
-  - Ctrl + 滚轮精细调整模型缩放比例。
-  - 全局快捷键（可自定义录制）呼出对话输入框，AI 回复以独立气泡窗口显示在模型上方。
-  - 位置、窗口大小、模型缩放比例重启后自动恢复。
-
-### 🧠 AI 大脑
-- **多模态对话**: 支持 **Ollama** (本地) 和 **OpenAI 兼容接口** (云端) 作为对话核心。
-- **多模态能力**: 可接入 Vision 模型，支持 **屏幕截图**、**图片上传** 或 **摄像头实时视觉**，角色可以实时”看到”并描述内容。摄像头视觉支持多设备选择与实时预览，每次对话自动附带最新摄像头帧。
-- **文生图**: 可接入 Stable Diffusion WebUI 或在线API接口，支持通过对话让LLM生成图片或者根据对话场景生成实时的页面背景图片。
-- **分层记忆系统**: 拥有三层记忆架构——分层记忆（核心事实永不遗忘，临时记忆自然衰减）、语义+关键词混合检索（Embedding 余弦相似度 + FTS5 BM25，RRF 融合排序）、以及 LLM 驱动的自动记忆整合（相似碎片记忆聚类合并）。支持从对话中自动提取关键事实并长期存储 (SQLite)，实时上下文回溯与情感持久化。
-
-### 🗣️ 语音交互
-- **语音合成 (TTS)**:
-    - **GPT-SoVITS**: 情感表现力极佳，自定义角色声线，生态更加丰富。
-    - **VITS**: 兼容 vits-simple-api 等本地 VITS 推理服务器。
-    - **OpenAI TTS**: 支持 OpenAI 兼容的云端语音合成接口。
-    - **Azure TTS**: 微软 Azure 认知服务语音合成。
-    - **ElevenLabs**: 高质量 AI 语音合成，支持语音克隆。
-    - **Browser TTS**: 浏览器原生轻量级 TTS。
-- **声音转换 (RVC)**: 支持 RVC (Retrieval-based Voice Conversion) 变声器接口，用于实现角色演唱歌曲。
-- **语音交互 (STT)**: 支持 OpenAI Whisper/faster-whisper/whisper.cpp/SenseVoice 多引擎，内置唤醒词检测与 VAD 自动停止。
-
-### 🔌 扩展能力
-- **MOD 系统**: 内置模块化 MOD 框架，支持通过 HTML/CSS/JS 替换聊天面板、设置面板等核心 UI 组件，支持自定义主题和 QuickJS 脚本沙箱。
-- **MCP 协议支持**: 实现了 **Model Context Protocol (MCP)** 客户端。
-    - 支持连接任意 MCP Server (通过 stdio 交互)。
-    - 角色可以调用 MCP Server 提供的工具（如文件系统、Web 搜索、数据库等）来增强能力。
-    - 支持通过 UI 来管理 MCP Server。
-- **Telegram Bot 远程交互**: 内置 Telegram Bot 服务，无需公网 IP 即可通过手机远程与角色对话。
-    - 支持文字、语音、图片消息，桥接到完整的 LLM/TTS/STT/ImageGen 管线。
-    - Chat ID 白名单访问控制，会话命令 (`/new`, `/continue`, `/status`)。
-    - 桌面端聊天框实时同步 Telegram 消息。
-
-### 🎮 官方示范 MOD：原神风格 UI
-
-项目内置了一个完整的官方示范 MOD（`mods/genshin-theme`），以原神游戏的视觉风格重新设计了聊天和设置界面：
-
-- 完整替换聊天面板和设置面板，与原生功能完全对等
-- 包含角色管理、LLM/TTS/STT/Vision/ImageGen 配置、MCP 管理、背景设置、记忆管理等全部设置项
-- 可作为社区开发者创建自定义 UI MOD 的参考模板
-
-## 📝 待办事项 / 开发中 (TODO)
-
-以下功能处于计划中、开发中或**因设备或资金限制尚未经过测试或验证**的状态：
-
-- [ ] **Linux 和 macOS 支持**: 目前仅在 Windows 上进行了充分测试。需要在 Linux 和 macOS 上进行完整的功能验证和优化。
-- [ ] **在线服务深度测试**: 验证除 LLM 外的更多商业 API（如 Azure TTS, Google STT 等）。
-- [ ] **移动端支持**: iOS / Android 客户端应用。
-- [x] **分层记忆系统**: 分层记忆（core/ephemeral）、混合检索（语义 + BM25 RRF 融合）、LLM 驱动的记忆整合。
-- [x] **MOD 插件系统**: 允许社区开发者编写 MOD 模块来扩展功能（HTML/CSS/JS + QuickJS 脚本沙箱）。
-- [x] **Live2D 模型交互**: 与 Live2D 模型的实时交互反馈功能（视线追踪、动作触发、表情同步）。
-- [ ] **角色市场/工坊**: 方便分享和下载角色预设。
-
-## 🛠️ 技术栈
-
-| 层级 | 技术 |
-|---|---|
-| **前端** | React + TypeScript + Tailwind CSS + shadcn/ui |
-| **后端** | Rust (Tauri v2) |
-| **渲染** | PixiJS + Live2D Cubism SDK |
-| **数据** | SQLite (本地存储) |
-
-> **🚀 为什么选择 Rust?**
->
-> 得益于 Rust 语言的惊人性能，Kokoro Engine 拥有**极低的内存占用**和**极高的运行效率**。
-> 即使在后台全天候运行，也不会拖慢您的系统，真正做到“轻量级”陪伴。
 
 ## 🚀 快速开始
 
-### 方式一：下载发行版（推荐）
+### 路径一：下载发布版（推荐）
 
-前往 [Releases 页面](https://github.com/chyinan/Kokoro-Engine/releases) 下载对应平台的安装包后直接运行。
+前往 [Releases 页面](https://github.com/chyinan/Kokoro-Engine/releases) 下载对应平台安装包后直接运行。
 
-### 方式二：从源码构建
+### 路径二：从源码构建
 
 #### 环境要求
 
-- [Node.js](https://nodejs.org/) (v18+)
-- [Rust](https://www.rust-lang.org/tools/install) (stable)
+- [Node.js](https://nodejs.org/)（v18+）
+- [Rust](https://www.rust-lang.org/tools/install)（stable）
 
 #### 安装与运行
 
 ```bash
-# 克隆仓库
 git clone https://github.com/chyinan/kokoro-engine.git
 cd kokoro-engine
-
-# 安装依赖
 npm install
-
-# 启动开发服务器 (前端 + Tauri)
 npm run tauri dev
 ```
 
@@ -134,9 +70,7 @@ npm run tauri dev
 npm run tauri build
 ```
 
-### 方式三：使用 Nix / Flakes（仅 Linux）
-
-如果你在 NixOS 或其他启用了 Flakes 的 Linux 环境中开发，可以使用仓库内置的 flake 一键配置依赖环境：
+### 路径三：Nix / Flakes（仅 Linux）
 
 ```bash
 nix develop
@@ -144,50 +78,96 @@ npm install
 npm run tauri dev
 ```
 
-> 需要先启用 Nix Flakes。`nix build` / `nix run` 及 NixOS/Home Manager 声明式安装方式见 [docs/nix.md](docs/nix.md)。
+更多 Nix 用法见 [docs/nix.md](docs/nix.md)。
 
-## 🤝 参与贡献 (Contributing)
+## ✨ 核心能力
 
-**Kokoro Engine** 极其欢迎社区的贡献！
-由于作者精力和资源有限，项目的发展离不开开发者的支持。如果您对这个项目感兴趣，欢迎：
+### Character runtime
 
-1. **Pull Requests**: 直接提交代码修复 Bug 或添加新功能。
-2. **Issues**: 报告您发现的问题或提出改进建议。
-3. **Discussions**: 在讨论区分享您的想法。
-4. **Logo Design**: 如果您擅长设计，欢迎为 Kokoro Engine 设计一个 Logo！目前的 Logo 只是临时的。
+- Live2D 渲染、视线追踪、动作触发、桌面浮窗
+- 模型热切换与交互状态恢复
 
+### AI brain
 
-您的每一份贡献（哪怕只是修改一个错别字）都能让 Kokoro Engine 变得更好！让我们一起打造最棒的桌面虚拟伙伴。
+- 支持 Ollama 与 OpenAI 兼容接口
+- 支持多模态输入、上下文回溯、长期记忆与情感状态
 
-## 💬 社区交流
+### Voice stack
 
-欢迎加入官方 Telegram 讨论群，与其他用户交流使用心得、获取最新动态：
+- TTS（文本转语音）：GPT-SoVITS、VITS、OpenAI、Azure、ElevenLabs、Edge TTS、Browser TTS
+- STT（语音转文本）：Whisper / faster-whisper / whisper.cpp / SenseVoice
+- 支持 VAD 自动停录与唤醒词链路
 
-👉 [**Kokoro Engine 官方讨论群**](https://t.me/+U39dgiUspCo2NDNh)
+### Extensibility
 
-## ❤️ 赞助支持
+- MOD 框架：HTML/CSS/JS UI 替换 + QuickJS 脚本沙箱
+- MCP 支持：连接 MCP Server 并调用外部工具
+- 内置官方示范 MOD：`mods/genshin-theme`
 
-如果你觉得 Kokoro Engine 对你有帮助，欢迎通过赞助支持项目的持续开发。
+### Remote interaction
+
+- 内置 Telegram Bot 服务
+- 支持文字、语音、图片消息桥接到完整 AI 管线
+
+## 🏗️ 技术架构
+
+```text
+Frontend (React + TypeScript)
+      <-> Typed IPC Bridge (kokoro-bridge.ts)
+Backend (Rust / Tauri v2)
+```
+
+- 前端：声明式布局、组件注册、主题系统、MOD UI 注入
+- 后端：命令模块 + AI 编排（LLM/TTS/STT/Vision/ImageGen/MCP）
+- 数据层：SQLite + 本地向量检索
+
+详细设计见 [docs/architecture.md](docs/architecture.md)。
+
+## 🗺️ 路线图
+
+### 现在
+
+- 跨平台稳定性与兼容性验证（Windows / Linux / macOS）
+- 在线服务链路深度测试
+- 记忆系统与多模态体验持续优化
+
+### 下一步
+
+- 角色市场 / 工坊
+- 移动端支持探索（iOS / Android）
+- 开发者扩展生态增强
+
+## 🤝 参与贡献
+
+欢迎通过以下方式参与：
+
+1. **Pull Requests**：修复问题或新增功能。
+2. **Issues**：提交问题与改进建议。
+3. **Discussions**：分享想法与实践。
+4. **Design contributions**：欢迎提供 Logo / 视觉资产。
+
+## 💬 社区
+
+👉 [**Kokoro Engine 官方讨论群（Telegram）**](https://t.me/+U39dgiUspCo2NDNh)
+
+## ❤️ 赞助
 
 👉 [**查看赞助方式 / Sponsor**](SPONSOR.md)
 
-## 📄 License (许可协议)
+## 📄 许可协议
 
-本项目核心代码遵循 **MIT 协议** 开源。
+本项目核心代码遵循 **MIT License**。
 
 ### ⚠️ Live2D Cubism SDK 声明
 
-本项目使用了 **Live2D Cubism SDK**，该部分归 Live2D Inc. 所有。
-使用本项目（包括编译、分发或修改）时，您必须同意 Live2D 的许可协议：
+本项目使用 **Live2D Cubism SDK**，相关部分归 Live2D Inc. 所有。使用本项目（包括编译、分发、修改）时，请遵守 Live2D 许可协议：
 
-- **Live2D Proprietary Software License Agreement**: [https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html](https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html)
-- **Live2D Open Software License Agreement**: [https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html](https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html)
+- [Live2D Proprietary Software License Agreement](https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html)
+- [Live2D Open Software License Agreement](https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html)
 
-> 本开源项目属于“个人/小规模企业”范畴的非营利性或小规模使用。
-> 如果您是年营业额超过 1000 万日元的中大型企业，使用本项目可能需要单独与 Live2D Inc. 签署商业授权协议。
+> 若您属于年营业额超过 1000 万日元的中大型企业，可能需要与 Live2D Inc. 签署单独商业授权协议。
 
 ---
 
 **Kokoro Engine** is an open-source project.
-The specific Live2D libraries and models included or downloaded are subject to the **Live2D Proprietary Software License Agreement**.
 Live2D is a registered trademark of Live2D Inc.
