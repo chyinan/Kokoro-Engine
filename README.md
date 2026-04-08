@@ -5,7 +5,16 @@
 <p align="center"><strong>Open-source immersive character engine for desktop AI companions.</strong></p>
 <p align="center">为每一位想拥有专属AI聊天伴侣的用户打造的跨平台虚拟角色交互引擎。</p>
 
-<p align="center"><code>Windows</code> <code>Linux</code> <code>macOS</code> <code>Tauri v2</code> <code>React</code> <code>Rust</code> <code>MIT</code></p>
+<p align="center">
+  <a href="https://t.me/+U39dgiUspCo2NDNh"><img src="https://img.shields.io/badge/Telegram-Community-26A5E4?logo=telegram&logoColor=white" alt="Telegram community" /></a>
+  <img src="https://img.shields.io/badge/Windows-Supported-0078D6?logo=windows&logoColor=white" alt="Windows" />
+  <img src="https://img.shields.io/badge/Linux-Supported-FCC624?logo=linux&logoColor=black" alt="Linux" />
+  <img src="https://img.shields.io/badge/macOS-Supported-000000?logo=apple&logoColor=white" alt="macOS" />
+  <img src="https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white" alt="Tauri v2" />
+  <img src="https://img.shields.io/badge/React-18%2B-61DAFB?logo=react&logoColor=0A0A0A" alt="React" />
+  <img src="https://img.shields.io/badge/Rust-Stable-000000?logo=rust&logoColor=white" alt="Rust" />
+  <img src="https://img.shields.io/badge/License-MIT-2EA44F" alt="MIT License" />
+</p>
 
 <p align="center">
   <a href="#-快速开始">快速开始</a> ·
