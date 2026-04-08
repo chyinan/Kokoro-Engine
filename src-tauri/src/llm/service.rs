@@ -68,16 +68,16 @@ impl LlmService {
 
     /// Update config, persist to disk, and hot-swap the active provider.
     pub async fn update_config(&self, new_config: LlmConfig) -> Result<(), KokoroError> {
-        // Save to disk
-        crate::llm::llm_config::save_config(&self.config_path, &new_config)?;
-
         // Rebuild providers + active id first
         let rebuilt_providers = try_build_provider_map(&new_config)?;
         let rebuilt_active_provider_id = resolve_active_provider_id(&new_config)
             .map(str::to_owned)
             .unwrap_or_else(|| "openai".to_string());
 
-        // Swap only after successful rebuild
+        // Persist only after successful rebuild
+        crate::llm::llm_config::save_config(&self.config_path, &new_config)?;
+
+        // Swap only after successful rebuild + persistence
         *self.providers.write().await = rebuilt_providers;
         *self.active_provider_id.write().await = rebuilt_active_provider_id;
         *self.config.write().await = new_config;
@@ -152,6 +152,7 @@ fn build_provider_map(config: &LlmConfig) -> HashMap<String, Arc<dyn LlmProvider
     config
         .providers
         .iter()
+        .filter(|cfg| cfg.enabled)
         .map(|cfg| {
             (
                 cfg.id.clone(),
@@ -175,6 +176,7 @@ fn try_build_provider_map(
     config
         .providers
         .iter()
+        .filter(|cfg| cfg.enabled)
         .map(|cfg| {
             Ok((
                 cfg.id.clone(),
@@ -249,6 +251,125 @@ mod tests {
 
         let active_provider_id = service.active_provider_id.read().await.clone();
         assert_eq!(active_provider_id, config.active_provider);
+    }
+
+    #[tokio::test]
+    async fn from_config_skips_disabled_active_provider_and_uses_first_enabled() {
+        let config = LlmConfig {
+            active_provider: "disabled-provider".to_string(),
+            system_provider: None,
+            system_model: None,
+            providers: vec![
+                LlmProviderConfig {
+                    id: "disabled-provider".to_string(),
+                    provider_type: "openai".to_string(),
+                    enabled: false,
+                    supports_native_tools: true,
+                    api_key: Some("test-key-disabled".to_string()),
+                    api_key_env: None,
+                    base_url: Some("https://api.openai.com/v1".to_string()),
+                    model: Some("gpt-4o-mini".to_string()),
+                    extra: std::collections::HashMap::new(),
+                },
+                LlmProviderConfig {
+                    id: "enabled-provider".to_string(),
+                    provider_type: "openai".to_string(),
+                    enabled: true,
+                    supports_native_tools: true,
+                    api_key: Some("test-key-enabled".to_string()),
+                    api_key_env: None,
+                    base_url: Some("https://api.openai.com/v1".to_string()),
+                    model: Some("gpt-4o".to_string()),
+                    extra: std::collections::HashMap::new(),
+                },
+            ],
+            presets: vec![],
+        };
+
+        let service = LlmService::from_config(config, PathBuf::from("llm_config.test.json"));
+
+        let provider = service.provider().await;
+        assert_eq!(provider.id(), "enabled-provider");
+    }
+
+    #[tokio::test]
+    async fn build_provider_map_excludes_disabled_providers() {
+        let config = LlmConfig {
+            active_provider: "enabled-provider".to_string(),
+            system_provider: None,
+            system_model: None,
+            providers: vec![
+                LlmProviderConfig {
+                    id: "disabled-provider".to_string(),
+                    provider_type: "openai".to_string(),
+                    enabled: false,
+                    supports_native_tools: true,
+                    api_key: Some("test-key-disabled".to_string()),
+                    api_key_env: None,
+                    base_url: Some("https://api.openai.com/v1".to_string()),
+                    model: Some("gpt-4o-mini".to_string()),
+                    extra: std::collections::HashMap::new(),
+                },
+                LlmProviderConfig {
+                    id: "enabled-provider".to_string(),
+                    provider_type: "openai".to_string(),
+                    enabled: true,
+                    supports_native_tools: true,
+                    api_key: Some("test-key-enabled".to_string()),
+                    api_key_env: None,
+                    base_url: Some("https://api.openai.com/v1".to_string()),
+                    model: Some("gpt-4o".to_string()),
+                    extra: std::collections::HashMap::new(),
+                },
+            ],
+            presets: vec![],
+        };
+
+        let providers = build_provider_map(&config);
+
+        assert_eq!(providers.len(), 1);
+        assert!(providers.contains_key("enabled-provider"));
+        assert!(!providers.contains_key("disabled-provider"));
+    }
+
+    #[tokio::test]
+    async fn try_build_provider_map_excludes_disabled_providers() {
+        let config = LlmConfig {
+            active_provider: "enabled-provider".to_string(),
+            system_provider: None,
+            system_model: None,
+            providers: vec![
+                LlmProviderConfig {
+                    id: "disabled-provider".to_string(),
+                    provider_type: "unsupported-provider".to_string(),
+                    enabled: false,
+                    supports_native_tools: true,
+                    api_key: None,
+                    api_key_env: None,
+                    base_url: None,
+                    model: None,
+                    extra: std::collections::HashMap::new(),
+                },
+                LlmProviderConfig {
+                    id: "enabled-provider".to_string(),
+                    provider_type: "openai".to_string(),
+                    enabled: true,
+                    supports_native_tools: true,
+                    api_key: Some("test-key-enabled".to_string()),
+                    api_key_env: None,
+                    base_url: Some("https://api.openai.com/v1".to_string()),
+                    model: Some("gpt-4o".to_string()),
+                    extra: std::collections::HashMap::new(),
+                },
+            ],
+            presets: vec![],
+        };
+
+        let providers = try_build_provider_map(&config).unwrap();
+
+        assert_eq!(providers.len(), 1);
+        assert!(providers.contains_key("enabled-provider"));
+        assert!(!providers.contains_key("disabled-provider"));
     }
 
     #[tokio::test]
@@ -365,6 +486,9 @@ mod tests {
         assert_eq!(providers_after_failed_update.len(), 2);
         assert!(providers_after_failed_update.contains_key("system-provider"));
         assert!(!providers_after_failed_update.contains_key("broken-provider"));
+
+        let persisted_config = crate::llm::llm_config::load_config(&config_path);
+        assert_eq!(persisted_config.active_provider, "system-provider");
 
         let _ = std::fs::remove_file(config_path);
     }
