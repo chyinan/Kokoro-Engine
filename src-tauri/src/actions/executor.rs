@@ -1034,11 +1034,15 @@ pub async fn execute_tool_calls(
                                             };
                                             (
                                                 Some(permission_decision),
-                                                handler.execute(effective_args, ctx).await.map_err(|e| e.0),
+                                                handler
+                                                    .execute(effective_args, ctx)
+                                                    .await
+                                                    .map_err(|e| e.0),
                                             )
                                         }
                                     } else {
-                                        let effective_args = apply_before_action_args_payload(args_payload);
+                                        let effective_args =
+                                            apply_before_action_args_payload(args_payload);
                                         let ctx = ActionContext {
                                             app: app.clone(),
                                             character_id: character_id.to_string(),
@@ -1047,7 +1051,10 @@ pub async fn execute_tool_calls(
                                         };
                                         (
                                             Some(permission_decision),
-                                            handler.execute(effective_args, ctx).await.map_err(|e| e.0),
+                                            handler
+                                                .execute(effective_args, ctx)
+                                                .await
+                                                .map_err(|e| e.0),
                                         )
                                     }
                                 }

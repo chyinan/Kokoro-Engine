@@ -486,7 +486,10 @@ async fn before_llm_modify_strict_mode_returns_err_when_handler_fails() {
     assert!(error.contains("failing failed: boom"));
     assert_eq!(payload.request_message, "hello");
     assert_eq!(payload.messages.len(), 2);
-    assert_eq!(calls.lock().unwrap().as_slice(), ["failing:BeforeLlmRequestModify"]);
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["failing:BeforeLlmRequestModify"]
+    );
 }
 
 #[tokio::test]

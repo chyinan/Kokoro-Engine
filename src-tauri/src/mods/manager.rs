@@ -233,7 +233,10 @@ impl ModManager {
                             match serde_json::from_str::<ModManifest>(&content) {
                                 Ok(manifest) => {
                                     if let Err(error) = validate_manifest_capabilities(&manifest) {
-                                        eprintln!("Failed to validate mod.json in {:?}: {}", path, error);
+                                        eprintln!(
+                                            "Failed to validate mod.json in {:?}: {}",
+                                            path, error
+                                        );
                                         tracing::error!(
                                             target: "mods",
                                             "[ModManager] ERROR validating mod.json in {:?}: {}",

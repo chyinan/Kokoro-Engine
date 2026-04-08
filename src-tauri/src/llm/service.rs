@@ -97,15 +97,16 @@ impl LlmService {
             .cloned()
             .unwrap_or(active_id);
 
-        let resolved_provider = try_provider_by_id(&providers, &resolved_id).unwrap_or_else(|error| {
-            tracing::error!(
-                target: "llm",
-                "Failed to resolve system provider {}: {}",
-                resolved_id,
-                error
-            );
-            default_provider()
-        });
+        let resolved_provider =
+            try_provider_by_id(&providers, &resolved_id).unwrap_or_else(|error| {
+                tracing::error!(
+                    target: "llm",
+                    "Failed to resolve system provider {}: {}",
+                    resolved_id,
+                    error
+                );
+                default_provider()
+            });
 
         if let Some(model_override) = config.system_model {
             if let Some(provider_config) = config
@@ -140,7 +141,6 @@ fn try_provider_by_id(
         ))
     })
 }
-
 
 fn resolve_active_provider_id(config: &LlmConfig) -> Option<&str> {
     if config
@@ -211,7 +211,9 @@ fn build_from_provider_config(cfg: &LlmProviderConfig) -> Box<dyn LlmProvider> {
     })
 }
 
-fn try_build_from_provider_config(cfg: &LlmProviderConfig) -> Result<Box<dyn LlmProvider>, KokoroError> {
+fn try_build_from_provider_config(
+    cfg: &LlmProviderConfig,
+) -> Result<Box<dyn LlmProvider>, KokoroError> {
     match cfg.provider_type.as_str() {
         "ollama" => {
             let model = cfg.model.clone().unwrap_or_else(|| "llama3".to_string());
@@ -447,7 +449,8 @@ mod tests {
                 .as_nanos()
         ));
 
-        let service = LlmService::from_config(test_config_with_named_providers(), config_path.clone());
+        let service =
+            LlmService::from_config(test_config_with_named_providers(), config_path.clone());
 
         let mut new_config = test_config_with_named_providers();
         new_config.active_provider = "system-provider".to_string();
@@ -488,7 +491,10 @@ mod tests {
         assert_eq!(provider_after_failed_update.id(), "system-provider");
 
         let config_after_failed_update = service.config().await;
-        assert_eq!(config_after_failed_update.active_provider, "system-provider");
+        assert_eq!(
+            config_after_failed_update.active_provider,
+            "system-provider"
+        );
 
         let providers_after_failed_update = service.providers.read().await;
         assert_eq!(providers_after_failed_update.len(), 2);

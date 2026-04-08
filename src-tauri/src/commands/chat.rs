@@ -110,7 +110,10 @@ impl TurnCancellationState {
     }
 }
 
-async fn ensure_turn_not_cancelled(state: &TurnCancellationState, turn_id: &str) -> Result<(), String> {
+async fn ensure_turn_not_cancelled(
+    state: &TurnCancellationState,
+    turn_id: &str,
+) -> Result<(), String> {
     state.ensure_turn_not_cancelled(turn_id).await
 }
 
@@ -564,7 +567,10 @@ fn deny_kind_for_tool_error(error: &str) -> &'static str {
     }
 }
 
-fn deny_kind_for_outcome(outcome: &crate::actions::ToolExecutionOutcome, error: &str) -> &'static str {
+fn deny_kind_for_outcome(
+    outcome: &crate::actions::ToolExecutionOutcome,
+    error: &str,
+) -> &'static str {
     if let Some(decision) = outcome.permission_decision.as_ref() {
         if let Some(kind) = crate::actions::permission::deny_kind(decision) {
             return kind;
@@ -1379,7 +1385,8 @@ pub async fn stream_chat(
 
     let assistant_turn_id = uuid::Uuid::new_v4().to_string();
     cancel_state.register_turn(&assistant_turn_id).await;
-    let _turn_guard = TurnCancellationGuard::new(cancel_state.inner().clone(), assistant_turn_id.clone());
+    let _turn_guard =
+        TurnCancellationGuard::new(cancel_state.inner().clone(), assistant_turn_id.clone());
 
     let mut before_llm_request_payload = build_before_llm_request_payload(
         conversation_id.clone(),
@@ -2997,7 +3004,8 @@ mod tests {
         assert!(first.is_ok());
 
         let second =
-            reject_tool_approval_inner(&state, request_id.clone(), Some("late reject".into())).await;
+            reject_tool_approval_inner(&state, request_id.clone(), Some("late reject".into()))
+                .await;
         match second {
             Err(KokoroError::Validation(message)) => {
                 assert!(message.contains("already resolved"));
@@ -3066,15 +3074,16 @@ mod tests {
             .await
             .expect("cancel should succeed");
 
-        let payload = build_turn_delta_payload_if_not_cancelled(&state, "turn-1", "hello".into())
-            .await;
+        let payload =
+            build_turn_delta_payload_if_not_cancelled(&state, "turn-1", "hello".into()).await;
         assert!(payload.is_err());
     }
 
     #[tokio::test]
     async fn cancel_chat_turn_returns_error_for_unknown_turn_id() {
         let state = Arc::new(TurnCancellationState::new());
-        let result = cancel_chat_turn_inner("not-exists".to_string(), Some("user".into()), state).await;
+        let result =
+            cancel_chat_turn_inner("not-exists".to_string(), Some("user".into()), state).await;
         assert!(result.is_err());
         assert!(result.err().unwrap().contains("unknown turn_id"));
     }
