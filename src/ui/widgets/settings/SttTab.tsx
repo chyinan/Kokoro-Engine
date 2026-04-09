@@ -186,7 +186,10 @@ function SenseVoiceLocalPanel({ config, onUpdate }: {
                         max={32}
                         value={config.num_threads ?? 2}
                         onChange={(e) => onUpdate({ num_threads: parseInt(e.target.value) || 2 })}
-                        className={inputClass}
+                        className={clsx(
+                            inputClass,
+                            "appearance-none [appearance:textfield] [-moz-appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                        )}
                     />
                 </div>
 
