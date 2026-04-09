@@ -6,6 +6,7 @@ import en from './locales/en.json';
 import zh from './locales/zh.json';
 import ja from './locales/ja.json';
 import ko from './locales/ko.json';
+import ru from './locales/ru.json';
 
 i18n
     // detect user language
@@ -21,6 +22,7 @@ i18n
             zh: { translation: zh },
             ja: { translation: ja },
             ko: { translation: ko },
+            ru: { translation: ru },
         },
         fallbackLng: 'en',
         debug: import.meta.env.DEV,

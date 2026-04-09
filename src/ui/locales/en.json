@@ -150,7 +150,8 @@
             "user_lang": {
                 "label": "User Language",
                 "desc": "Your preferred language. When different from Response Language, a translation will be attached to each message. Effectiveness depends on model capability; some models may not fully comply.",
-                "auto": "Auto (no translation)"
+                "auto": "Auto (no translation)",
+                "custom": "Custom…"
             },
             "proactive": {
                 "label": "Idle Auto-Talk",

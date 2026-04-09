@@ -46,6 +46,7 @@ Kokoro Engine 不是“聊天壳子 + 桌宠皮肤”。它是一个完整的桌
 | 交互能力 | 文本、语音、图片、视觉输入、多模态对话 |
 | 扩展方式 | MOD（HTML/CSS/JS + QuickJS）、MCP Servers |
 | 技术栈 | React + TypeScript + Rust + Tauri v2 + SQLite |
+| 语言支持 | 简体中文 / English / 日本語 / 한국어 / Русский |
 
 ## 📸 UI截图
 

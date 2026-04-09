@@ -1,7 +1,7 @@
 # Kokoro Engine — Product Requirements Document
 
-> **Version:** 1.1
-> **Last Updated:** 2026-03-01
+> **Version:** 1.2
+> **Last Updated:** 2026-04-09
 > **Status:** Active Development
 
 ---
@@ -29,7 +29,7 @@
 |---|---|
 | Virtual Companion | VTuber-style interactive character on desktop |
 | Roleplay & Storytelling | AI-driven narrative interactions with rich personality |
-| Character Simulation | AI characters with personality presets and emotional states |
+| Character Simulation | AI characters with personality presets, persistent state, and cue-driven reactions |
 
 ### Secondary
 
@@ -54,12 +54,12 @@
 
 ### Must Have (All Completed ✅)
 
-- [x] Live2D model viewer with interaction (gaze, expressions, hit areas, drawable-level hit testing)
+- [x] Live2D model viewer with interaction (gaze, expressions, hit areas, drawable-level hit testing, cue-driven reactions)
 - [x] Chat system (text input / output, streaming, message editing, continue-from)
 - [x] Pluggable LLM API adapter (OpenAI-compatible + Ollama, multi-provider with presets)
 - [x] Pluggable TTS system (GPT-SoVITS, VITS, OpenAI, Azure, ElevenLabs, Browser TTS)
 - [x] Context manager (conversation history, prompt assembly, jailbreak prompts with {{char}}/{{user}} placeholders)
-- [x] Character state (emotion system with persistence across restarts, expression sync)
+- [x] Character state and cue mapping (persistent state across restarts, semantic cue routing, expression/motion sync)
 
 ### Post-MVP (Completed ✅)
 
@@ -96,7 +96,7 @@
 ├─────────────────────────────────────┤
 │  3. Conversation History            │  ← Rolling window
 ├─────────────────────────────────────┤
-│  4. Dynamic State                   │  ← Mood, events, triggers
+│  4. Runtime State                   │  ← Character state, events, cue triggers
 └─────────────────────────────────────┘
 ```
 
@@ -122,7 +122,7 @@
 | Capability | Description |
 |---|---|
 | Personality Presets | Define character personality cards |
-| Expression Mapping | Map emotions → Live2D expressions |
+| Semantic Cue Mapping | Map semantic events → Live2D cues |
 | Event Triggers | Customize reactions to user actions |
 
 ### Engine Plugins *(future)*

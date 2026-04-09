@@ -45,6 +45,7 @@ Kokoro Engine は「チャット UI + デスクトップペットの見た目」
 | 交互作用 | テキスト、音声、画像、ビジョン入力、マルチモーダル対話 |
 | 拡張方式 | MOD（HTML/CSS/JS + QuickJS）、MCP Servers |
 | 技術スタック | React + TypeScript + Rust + Tauri v2 + SQLite |
+| 言語サポート | 简体中文 / English / 日本語 / 한국어 / Русский |
 
 ## 📸 UIスクリーンショット
 

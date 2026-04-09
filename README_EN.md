@@ -45,6 +45,7 @@ Kokoro Engine is not just a chat shell with a desktop pet skin. It is a complete
 | Interaction modes | text, voice, image, vision input, multimodal dialogue |
 | Extension model | MOD (HTML/CSS/JS + QuickJS), MCP servers |
 | Tech stack | React + TypeScript + Rust + Tauri v2 + SQLite |
+| Language support | 简体中文 / English / 日本語 / 한국어 / Русский |
 
 ## 📸 UI screenshots
 

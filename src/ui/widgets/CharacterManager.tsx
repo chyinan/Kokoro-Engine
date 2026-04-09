@@ -16,6 +16,29 @@ import { Languages, MessageCircle } from "lucide-react";
 import { Select } from "@/components/ui/select";
 import { useTranslation, Trans } from "react-i18next";
 
+export const RESPONSE_LANGUAGE_PRESETS = ["日本語", "English", "中文", "한국어", "Русский"] as const;
+export const USER_LANGUAGE_PRESETS = ["中文", "English", "日本語", "한국어", "Русский"] as const;
+
+export function getLanguageSelectValue(value: string, presets: readonly string[]) {
+    if (value === "" || value === "auto") {
+        return "auto";
+    }
+
+    return value === "__custom__" || presets.includes(value) ? value : "__custom__";
+}
+
+export function shouldShowCustomLanguageInput(value: string, presets: readonly string[]) {
+    return value === "__custom__" || (value !== "" && value !== "auto" && !presets.includes(value));
+}
+
+function getCustomLanguageInputValue(value: string) {
+    return value === "__custom__" ? "" : value;
+}
+
+function sanitizeCustomLanguageValue(value: string) {
+    return value === "__custom__" ? "" : value;
+}
+
 // ── Shared style tokens (matching SettingsPanel) ───
 
 const inputClasses = clsx(
@@ -360,10 +383,10 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                     {t("settings.persona.response_lang.desc")}
                 </p>
                 <Select
-                    value={["auto", "日本語", "English", "中文", "한국어"].includes(responseLanguage || "auto") ? (responseLanguage || "auto") : "__custom__"}
+                    value={getLanguageSelectValue(responseLanguage || "", RESPONSE_LANGUAGE_PRESETS)}
                     onChange={v => {
                         if (v === "auto") onResponseLanguageChange("");
-                        else if (v === "__custom__") onResponseLanguageChange("");
+                        else if (v === "__custom__") onResponseLanguageChange("__custom__");
                         else onResponseLanguageChange(v);
                     }}
                     options={[
@@ -372,15 +395,16 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                         { value: "English", label: "English" },
                         { value: "中文", label: "中文 (Chinese)" },
                         { value: "한국어", label: "한국어 (Korean)" },
-                        { value: "__custom__", label: t("settings.persona.response_lang.custom") },
+                        { value: "Русский", label: "Русский (Russian)" },
+                        { value: "__custom__", label: t("settings.persona.user_lang.custom") },
                     ]}
                 />
                 {/* Show custom input when language is not in presets */}
-                {responseLanguage && !["日本語", "English", "中文", "한국어"].includes(responseLanguage) && (
+                {shouldShowCustomLanguageInput(responseLanguage, RESPONSE_LANGUAGE_PRESETS) && (
                     <input
                         type="text"
-                        value={responseLanguage}
-                        onChange={e => onResponseLanguageChange(e.target.value)}
+                        value={getCustomLanguageInputValue(responseLanguage)}
+                        onChange={e => onResponseLanguageChange(sanitizeCustomLanguageValue(e.target.value))}
                         placeholder={t("settings.persona.response_lang.placeholder")}
                         className={clsx(inputClasses, "mt-2")}
                     />
@@ -397,10 +421,10 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                     {t("settings.persona.user_lang.desc")}
                 </p>
                 <Select
-                    value={["auto", "中文", "English", "日本語", "한국어"].includes(userLanguage || "auto") ? (userLanguage || "auto") : "__custom__"}
+                    value={getLanguageSelectValue(userLanguage || "", USER_LANGUAGE_PRESETS)}
                     onChange={v => {
                         if (v === "auto") onUserLanguageChange("");
-                        else if (v === "__custom__") onUserLanguageChange("");
+                        else if (v === "__custom__") onUserLanguageChange("__custom__");
                         else onUserLanguageChange(v);
                     }}
                     options={[
@@ -409,14 +433,15 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                         { value: "English", label: "English" },
                         { value: "日本語", label: "日本語 (Japanese)" },
                         { value: "한국어", label: "한국어 (Korean)" },
-                        { value: "__custom__", label: t("settings.persona.response_lang.custom") },
+                        { value: "Русский", label: "Русский (Russian)" },
+                        { value: "__custom__", label: t("settings.persona.user_lang.custom") },
                     ]}
                 />
-                {userLanguage && !["中文", "English", "日本語", "한국어"].includes(userLanguage) && (
+                {shouldShowCustomLanguageInput(userLanguage, USER_LANGUAGE_PRESETS) && (
                     <input
                         type="text"
-                        value={userLanguage}
-                        onChange={e => onUserLanguageChange(e.target.value)}
+                        value={getCustomLanguageInputValue(userLanguage)}
+                        onChange={e => onUserLanguageChange(sanitizeCustomLanguageValue(e.target.value))}
                         placeholder={t("settings.persona.response_lang.placeholder")}
                         className={clsx(inputClasses, "mt-2")}
                     />

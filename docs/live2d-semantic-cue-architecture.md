@@ -6,7 +6,7 @@ Live2D playback must follow a single chain:
 
 `semantic event -> cue -> model resources`
 
-There is no direct playback path from emotion names, intent names, interaction names, expressions, or motion groups.
+There is no direct playback path from raw resource names, intent names, interaction names, expressions, or motion groups.
 
 ## Layers
 
@@ -16,13 +16,12 @@ Semantic events are model-agnostic meanings produced by upper-layer systems.
 
 Current namespaces:
 
-- `emotion:*`
 - `interaction:*`
 
 Examples:
 
-- `emotion:very_happy`
 - `interaction:tap_face`
+- `interaction:tap_body`
 
 Semantic events do not reference concrete Live2D resources.
 
@@ -68,12 +67,12 @@ Each imported model profile stores:
 
 ## Current Producers
 
-- emotion system emits `emotion:*`
 - touch interaction resolves to `interaction:*`
+- UI or other upper-layer systems may emit additional `interaction:*` keys as needed
 
 ## Non-Goals
 
 - No automatic guessing from raw resource names to semantic meaning
-- No direct `emotion -> expression` or `action -> motion` path
+- No direct `semantic event -> expression` or `semantic event -> motion` path
 - No compatibility aliases for legacy `set_expression`, `change_expression`, or `interaction_cue_map`
 - No `sequence` layer until single-cue mappings are proven insufficient

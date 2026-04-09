@@ -666,6 +666,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                                         { value: "zh", label: "中文" },
                                         { value: "ja", label: "日本語" },
                                         { value: "ko", label: "한국어" },
+                                        { value: "ru", label: "Русский" },
                                     ]}
                                 />
                             </div>

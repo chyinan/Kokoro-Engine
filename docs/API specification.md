@@ -106,6 +106,8 @@ interface CharacterState {
 }
 ```
 
+Note: `mood` is a legacy numeric runtime signal used by the current bridge, not the old emotion system.
+
 ### `ChatResponse`
 
 ```ts
@@ -115,6 +117,8 @@ interface ChatResponse {
   mood_delta: number;
 }
 ```
+
+Note: `mood_delta` is still part of the public bridge surface, but it should be treated as runtime state adjustment rather than an emotion subsystem API.
 
 ### `ChatRequest`
 
@@ -1019,12 +1023,11 @@ These are local TypeScript helpers and not IPC commands:
 
 The following items in the old document no longer match the current code and should not be treated as current API:
 
-- `get_emotion_settings`
-- `save_emotion_settings`
 - old `ChatRequest` shape without image support
 - old `ToolSettings` shape without permission/risk controls
 - old TTS / STT / ImageGen / MCP return types that no longer match the bridge
 - old quick reference entries that returned `Uint8Array` for streaming APIs
+- other legacy entries that were removed during the bridge cleanup and are no longer exported by `src/lib/kokoro-bridge.ts`
 
 ### Bridge coverage
 
