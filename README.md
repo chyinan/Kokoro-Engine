@@ -169,6 +169,31 @@ Backend (Rust / Tauri v2)
 
 👉 [**查看赞助方式 / Sponsor**](SPONSOR.md)
 
+
+## 🎉 特别鸣谢
+
+感谢所有为 Kokoro Engine 做出贡献的贡献者。
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <a href="https://github.com/aegbirou">
+        <img src="https://github.com/aegbirou.png?size=120" alt="@aegbirou" width="88" height="88" />
+      </a>
+      <br />
+      <sub>@aegbirou</sub>
+    </td>
+    <td align="center">
+      <a href="https://github.com/Initsnow">
+        <img src="https://avatars.githubusercontent.com/u/79002121?s=96&v=4" alt="@Initsnow" width="88" height="88" />
+      </a>
+      <br />
+      <sub>@Initsnow</sub>
+    </td>
+  </tr>
+</table>
+
+
 ## 📄 许可协议
 
 本项目核心代码遵循 **MIT License**。

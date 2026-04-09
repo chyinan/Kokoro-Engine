@@ -168,6 +168,30 @@ Backend (Rust / Tauri v2)
 
 👉 [**スポンサー方法 / Sponsor**](SPONSOR.md)
 
+## 🎉 特別な謝意
+
+Kokoro Engine への貢献に感謝します。
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <a href="https://github.com/aegbirou">
+        <img src="https://github.com/aegbirou.png?size=120" alt="@aegbirou" width="88" height="88" />
+      </a>
+      <br />
+      <sub>@aegbirou</sub>
+    </td>
+    <td align="center">
+      <a href="https://github.com/Initsnow">
+        <img src="https://avatars.githubusercontent.com/u/79002121?s=96&v=4" alt="@Initsnow" width="88" height="88" />
+      </a>
+      <br />
+      <sub>@Initsnow</sub>
+    </td>
+  </tr>
+</table>
+
+
 ## 📄 ライセンス
 
 コアコードは **MIT License** で公開されています。

@@ -168,6 +168,30 @@ You can contribute in these ways:
 
 👉 [**Sponsorship options / Sponsor**](SPONSOR.md)
 
+## 🎉 Special Thanks
+
+Special thanks to all contributors for their contributions to Kokoro Engine.
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <a href="https://github.com/aegbirou">
+        <img src="https://github.com/aegbirou.png?size=120" alt="@aegbirou" width="88" height="88" />
+      </a>
+      <br />
+      <sub>@aegbirou</sub>
+    </td>
+    <td align="center">
+      <a href="https://github.com/Initsnow">
+        <img src="https://avatars.githubusercontent.com/u/79002121?s=96&v=4" alt="@Initsnow" width="88" height="88" />
+      </a>
+      <br />
+      <sub>@Initsnow</sub>
+    </td>
+  </tr>
+</table>
+
+
 ## 📄 License
 
 Core project code is licensed under **MIT License**.
