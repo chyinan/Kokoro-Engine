@@ -4,10 +4,18 @@
  * Typed wrapper around Tauri's invoke API.
  * All backend commands are accessed through this module.
  */
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ModManifest, TtsConfig, ProviderStatus, VoiceProfile, TtsSystemConfig, ModThemeJson } from "../core/types/mod";
 export type { ModManifest, TtsConfig, ProviderStatus, VoiceProfile, TtsSystemConfig, ModThemeJson };
+
+async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+    try {
+        return await tauriInvoke<T>(cmd, args);
+    } catch (error) {
+        throw parseKokoroError(error);
+    }
+}
 
 // ── Types ──────────────────────────────────────────
 
@@ -1172,12 +1180,7 @@ export function parseKokoroError(error: unknown): KokoroErrorObject | string {
  * @returns Promise，错误时拒绝并包含结构化错误信息
  */
 export async function safeInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-    try {
-        return await invoke<T>(cmd, args);
-    } catch (error) {
-        const parsed = parseKokoroError(error);
-        throw parsed;
-    }
+    return invoke<T>(cmd, args);
 }
 
 /**
