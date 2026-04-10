@@ -125,10 +125,56 @@ Nix 상세 내용은 [docs/nix.md](docs/nix.md)를 참고하세요.
 
 ## 🏗️ 기술 아키텍처
 
-```text
-Frontend (React + TypeScript)
-      <-> Typed IPC Bridge (kokoro-bridge.ts)
-Backend (Rust / Tauri v2)
+```mermaid
+flowchart LR
+  subgraph FE["Frontend (React + TypeScript)"]
+    FE_UI["UI Layout Engine"]
+    FE_REG["Component Registry"]
+    FE_THEME["Theme & MOD UI"]
+    FE_BRIDGE["kokoro-bridge.ts"]
+    FE_UI --> FE_REG
+    FE_REG --> FE_THEME
+    FE_THEME --> FE_BRIDGE
+  end
+
+  subgraph IPC["Tauri Typed IPC"]
+    IPC_INVOKE["invoke / events"]
+  end
+
+  subgraph BE["Backend (Rust / Tauri v2)"]
+    BE_CMD["Commands Layer"]
+    BE_ORCH["AI Orchestrator"]
+    BE_MULTI["LLM / TTS / STT / Vision / ImageGen / MCP"]
+    BE_MOD["MOD Runtime (QuickJS)"]
+    BE_TG["Telegram Bridge"]
+    BE_CMD --> BE_ORCH
+    BE_ORCH --> BE_MULTI
+    BE_MOD --> BE_CMD
+    BE_TG --> BE_CMD
+  end
+
+  subgraph DATA["Data & Runtime Config"]
+    DB[("SQLite: memories / conversations / characters")]
+    CFG["Config Files: llm/tts/stt/vision/imagegen/mcp/telegram"]
+  end
+
+  subgraph EXT["External Services"]
+    EXT_LLM["OpenAI-Compatible / Ollama"]
+    EXT_TTS["TTS Providers"]
+    EXT_MCP["MCP Servers"]
+    EXT_TG["Telegram"]
+  end
+
+  FE_BRIDGE <--> IPC_INVOKE
+  IPC_INVOKE <--> BE_CMD
+
+  BE_MULTI <--> EXT_LLM
+  BE_MULTI <--> EXT_TTS
+  BE_MULTI <--> EXT_MCP
+  BE_TG <--> EXT_TG
+
+  BE_ORCH <--> DB
+  BE_CMD <--> CFG
 ```
 
 - 프론트엔드: 선언형 레이아웃, 컴포넌트 등록, 테마 시스템, MOD UI 주입.
