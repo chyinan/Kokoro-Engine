@@ -104,7 +104,7 @@ npm run tauri dev
 
 ### 多维架构
 
-- 支持 Ollama 与 OpenAI 兼容接口
+- 支持 Ollama 与 OpenAI 兼容协议API接口
 - 支持多模态输入、上下文回溯、长期记忆与情感状态
 
 ### 音频交互

@@ -103,7 +103,7 @@ For more Nix usage, see [docs/nix.md](docs/nix.md).
 
 ### AI brain
 
-- Supports Ollama and OpenAI-compatible providers.
+- Supports Ollama and OpenAI-compatible protocol API interfaces.
 - Supports multimodal input, context recall, long-term memory, and emotional state continuity.
 
 ### Voice stack

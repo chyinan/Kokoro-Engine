@@ -103,7 +103,7 @@ Nix 상세 내용은 [docs/nix.md](docs/nix.md)를 참고하세요.
 
 ### AI 브레인
 
-- Ollama 및 OpenAI 호환 공급자 지원.
+- Ollama 및 OpenAI 호환 프로토콜 API 인터페이스 지원.
 - 멀티모달 입력, 컨텍스트 회수, 장기 기억, 감정 상태 연속성.
 
 ### 음성 스택
