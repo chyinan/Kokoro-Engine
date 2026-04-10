@@ -1610,7 +1610,8 @@ pub async fn stream_chat(
                         stream_failed = true;
                         let err_payload =
                             build_chat_error_event("llm_stream", &e, &assistant_turn_id, true);
-                        let err_json = serde_json::to_string(&err_payload).unwrap_or_else(|_| e.clone());
+                        let err_json =
+                            serde_json::to_string(&err_payload).unwrap_or_else(|_| e.clone());
                         app.emit("chat-error", err_json)
                             .map_err(|e| KokoroError::Chat(e.to_string()))?;
                     } else {
