@@ -21,7 +21,7 @@ import { BackupTab } from "./settings/BackupTab";
 import PetTab from "./settings/PetTab";
 import { useTranslation } from "react-i18next";
 import { setPersona, setResponseLanguage, setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, saveTelegramConfig, getTelegramConfig } from "../../lib/kokoro-bridge";
-import type { ProviderStatus, VoiceProfile, TtsSystemConfig, ImageGenSystemConfig, SttConfig, TelegramConfig } from "../../lib/kokoro-bridge";
+import type { ProviderStatus, VoiceProfile, TtsSystemConfig, ImageGenSystemConfig, SttConfig, TelegramConfig, TelegramStatus } from "../../lib/kokoro-bridge";
 import type { BackgroundConfig } from "../hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "../../features/live2d/Live2DViewer";
 
@@ -84,6 +84,7 @@ interface SettingsPanelProps {
     userName?: string;
     userPersona?: string;
     proactiveEnabled?: boolean;
+    initialTelegramStatus?: TelegramStatus | null;
 }
 
 const tabs: { id: TabId; label: string; icon: typeof Key }[] = [
@@ -197,7 +198,7 @@ function normalizeTtsVoice(
     return getDefaultTtsVoice(providerId, voices);
 }
 
-export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: _telegramConfigProp, onVisionConfigChange }: SettingsPanelProps) {
+export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: telegramConfigProp, llmConfig: llmConfigProp, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, initialTelegramStatus, onVisionConfigChange }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [activeTab, setActiveTab] = useState<TabId>(() => {
         const saved = localStorage.getItem("kokoro_settings_active_tab");
@@ -234,22 +235,38 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
             setVoiceInterrupt(localStorage.getItem("kokoro_voice_interrupt") === "true");
             setResponseLang(localStorage.getItem("kokoro_response_language") || "");
             setUserLang(localStorage.getItem("kokoro_user_language") || "");
+            setLocalTelegramConfig(telegramConfigProp ?? null);
             fetchData();
         }
-    }, [isOpen]);
+    }, [isOpen, telegramConfigProp]);
+
+    const [mountedTabs, setMountedTabs] = useState<Set<TabId>>(() => new Set([activeTab]));
 
     // Persist active tab selection
     useEffect(() => {
         localStorage.setItem("kokoro_settings_active_tab", activeTab);
     }, [activeTab]);
 
+    // Keep visited tabs mounted to avoid remount flicker/reload on tab switch
+    useEffect(() => {
+        setMountedTabs(prev => {
+            if (prev.has(activeTab)) return prev;
+            const next = new Set(prev);
+            next.add(activeTab);
+            return next;
+        });
+    }, [activeTab]);
+
     // Load Telegram config only when panel first opens, not on every bg.config change
     useEffect(() => {
-        if (isOpen) {
-            setLocalTelegramConfig(null); // reset so fetchTelegramConfig always loads fresh
-            fetchTelegramConfig();
+        if (!isOpen) return;
+        if (telegramConfigProp) {
+            setLocalTelegramConfig(telegramConfigProp);
+            return;
         }
-    }, [isOpen]);
+        setLocalTelegramConfig(null); // reset so fetchTelegramConfig always loads fresh
+        fetchTelegramConfig();
+    }, [isOpen, telegramConfigProp]);
 
     // Update local BG config helper
     const updateBgConfig = (update: Partial<BackgroundConfig>) => {
@@ -535,117 +552,153 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
 
                         {/* Content */}
                         <div className="flex-1 overflow-y-auto p-5 space-y-5 scrollable">
-                            {activeTab === "api" && (
-                                <ApiTab
-                                    visionEnabled={visionEnabled}
-                                    onVisionEnabledChange={setVisionEnabled}
-                                />
+                            {mountedTabs.has("api") && (
+                                <div className={activeTab === "api" ? "block" : "hidden"}>
+                                    <ApiTab
+                                        visionEnabled={visionEnabled}
+                                        onVisionEnabledChange={setVisionEnabled}
+                                        initialConfig={llmConfigProp ?? null}
+                                    />
+                                </div>
                             )}
 
-                            {activeTab === "persona" && (
-                                <CharacterManager
-                                    onPersonaChange={(prompt) => setPersonaText(prompt)}
-                                    responseLanguage={responseLang}
-                                    onResponseLanguageChange={setResponseLang}
-                                    userLanguage={userLang}
-                                    onUserLanguageChange={setUserLang}
-                                />
+                            {mountedTabs.has("persona") && (
+                                <div className={activeTab === "persona" ? "block" : "hidden"}>
+                                    <CharacterManager
+                                        onPersonaChange={(prompt) => setPersonaText(prompt)}
+                                        responseLanguage={responseLang}
+                                        onResponseLanguageChange={setResponseLang}
+                                        userLanguage={userLang}
+                                        onUserLanguageChange={setUserLang}
+                                    />
+                                </div>
                             )}
 
-                            {activeTab === "memory" && (
-                                <MemoryPanel
-                                    characterId={localStorage.getItem("kokoro_active_character_id") || "default"}
-                                />
+                            {mountedTabs.has("memory") && (
+                                <div className={activeTab === "memory" ? "block" : "hidden"}>
+                                    <MemoryPanel
+                                        characterId={localStorage.getItem("kokoro_active_character_id") || "default"}
+                                    />
+                                </div>
                             )}
 
-                            {activeTab === "tts" && (
-                                <TtsTab
-                                    ttsConfig={localTtsConfig}
-                                    onTtsConfigChange={setLocalTtsConfig}
-                                    providers={ttsProviders}
-                                    voices={ttsVoices}
-                                    isTtsLoading={isTtsLoading}
-                                    onRefresh={fetchData}
-                                    ttsEnabled={ttsEnabled}
-                                    onTtsEnabledChange={setTtsEnabled}
-                                    ttsProviderId={ttsProviderId}
-                                    onTtsProviderIdChange={setTtsProviderId}
-                                    ttsVoice={ttsVoice}
-                                    onTtsVoiceChange={setTtsVoice}
-                                    ttsSpeed={ttsSpeed}
-                                    onTtsSpeedChange={setTtsSpeed}
-                                    ttsPitch={ttsPitch}
-                                    onTtsPitchChange={setTtsPitch}
-                                />
+                            {mountedTabs.has("tts") && (
+                                <div className={activeTab === "tts" ? "block" : "hidden"}>
+                                    <TtsTab
+                                        ttsConfig={localTtsConfig}
+                                        onTtsConfigChange={setLocalTtsConfig}
+                                        providers={ttsProviders}
+                                        voices={ttsVoices}
+                                        isTtsLoading={isTtsLoading}
+                                        onRefresh={fetchData}
+                                        ttsEnabled={ttsEnabled}
+                                        onTtsEnabledChange={setTtsEnabled}
+                                        ttsProviderId={ttsProviderId}
+                                        onTtsProviderIdChange={setTtsProviderId}
+                                        ttsVoice={ttsVoice}
+                                        onTtsVoiceChange={setTtsVoice}
+                                        ttsSpeed={ttsSpeed}
+                                        onTtsSpeedChange={setTtsSpeed}
+                                        ttsPitch={ttsPitch}
+                                        onTtsPitchChange={setTtsPitch}
+                                    />
+                                </div>
                             )}
 
-                            {activeTab === "stt" && localSttConfig && (
-                                <SttTab
-                                    sttConfig={localSttConfig}
-                                    onSttConfigChange={setLocalSttConfig}
-                                    voiceInterrupt={voiceInterrupt}
-                                    onVoiceInterruptChange={setVoiceInterrupt}
-                                />
+                            {mountedTabs.has("stt") && localSttConfig && (
+                                <div className={activeTab === "stt" ? "block" : "hidden"}>
+                                    <SttTab
+                                        sttConfig={localSttConfig}
+                                        onSttConfigChange={setLocalSttConfig}
+                                        voiceInterrupt={voiceInterrupt}
+                                        onVoiceInterruptChange={setVoiceInterrupt}
+                                    />
+                                </div>
                             )}
 
-                            {activeTab === "sing" && (
-                                <SingTab />
+                            {mountedTabs.has("sing") && (
+                                <div className={activeTab === "sing" ? "block" : "hidden"}>
+                                    <SingTab />
+                                </div>
                             )}
 
-                            {activeTab === "model" && (
-                                <ModelTab
-                                    displayMode={localDisplayMode}
-                                    onDisplayModeChange={setLocalDisplayMode}
-                                    customModelPath={localCustomModelPath}
-                                    onCustomModelPathChange={setLocalCustomModelPath}
-                                    gazeTracking={localGazeTracking}
-                                    onGazeTrackingChange={setLocalGazeTracking}
-                                    renderFps={renderFps}
-                                    onRenderFpsChange={onRenderFpsChange}
-                                />
+                            {mountedTabs.has("model") && (
+                                <div className={activeTab === "model" ? "block" : "hidden"}>
+                                    <ModelTab
+                                        displayMode={localDisplayMode}
+                                        onDisplayModeChange={setLocalDisplayMode}
+                                        customModelPath={localCustomModelPath}
+                                        onCustomModelPathChange={setLocalCustomModelPath}
+                                        gazeTracking={localGazeTracking}
+                                        onGazeTrackingChange={setLocalGazeTracking}
+                                        renderFps={renderFps}
+                                        onRenderFpsChange={onRenderFpsChange}
+                                    />
+                                </div>
                             )}
 
-                            {activeTab === "imagegen" && localImageGenConfig && (
-                                <ImageGenSettings
-                                    config={localImageGenConfig}
-                                    onChange={setLocalImageGenConfig}
-                                />
+                            {mountedTabs.has("imagegen") && localImageGenConfig && (
+                                <div className={activeTab === "imagegen" ? "block" : "hidden"}>
+                                    <ImageGenSettings
+                                        config={localImageGenConfig}
+                                        onChange={setLocalImageGenConfig}
+                                    />
+                                </div>
                             )}
 
-                            {activeTab === "mods" && (
-                                <div className="h-[400px]">
+                            {mountedTabs.has("mods") && (
+                                <div className={clsx(activeTab === "mods" ? "block" : "hidden", "h-[400px]")}>
                                     <ModList />
                                 </div>
                             )}
 
-                            {activeTab === "bg" && (
-                                <BackgroundTab
-                                    bgConfig={localBgConfig}
-                                    onBgConfigChange={updateBgConfig}
-                                    backgroundControls={bg}
-                                />
+                            {mountedTabs.has("bg") && (
+                                <div className={activeTab === "bg" ? "block" : "hidden"}>
+                                    <BackgroundTab
+                                        bgConfig={localBgConfig}
+                                        onBgConfigChange={updateBgConfig}
+                                        backgroundControls={bg}
+                                    />
+                                </div>
                             )}
 
-                            {activeTab === "vision" && (
-                                <VisionTab onConfigChange={onVisionConfigChange} />
+                            {mountedTabs.has("vision") && (
+                                <div className={activeTab === "vision" ? "block" : "hidden"}>
+                                    <VisionTab
+                                        initialConfig={visionConfigProp ?? null}
+                                        onConfigChange={onVisionConfigChange}
+                                    />
+                                </div>
                             )}
-                            {activeTab === "mcp" && (
-                                <McpTab />
+                            {mountedTabs.has("mcp") && (
+                                <div className={activeTab === "mcp" ? "block" : "hidden"}>
+                                    <McpTab initialServers={mcpServersProp} />
+                                </div>
                             )}
-                            {activeTab === "telegram" && (
-                                <TelegramTab
-                                    config={localTelegramConfig}
-                                    onUpdate={(patch) => setLocalTelegramConfig(prev => prev ? { ...prev, ...patch } : prev)}
-                                />
+                            {mountedTabs.has("telegram") && (
+                                <div className={activeTab === "telegram" ? "block" : "hidden"}>
+                                    <TelegramTab
+                                        config={localTelegramConfig}
+                                        initialStatus={initialTelegramStatus}
+                                        initialCharacters={charactersProp}
+                                        onUpdate={(patch) => setLocalTelegramConfig(prev => prev ? { ...prev, ...patch } : prev)}
+                                    />
+                                </div>
                             )}
-                            {activeTab === "jailbreak" && (
-                                <JailbreakTab />
+                            {mountedTabs.has("jailbreak") && (
+                                <div className={activeTab === "jailbreak" ? "block" : "hidden"}>
+                                    <JailbreakTab />
+                                </div>
                             )}
-                            {activeTab === "backup" && (
-                                <BackupTab />
+                            {mountedTabs.has("backup") && (
+                                <div className={activeTab === "backup" ? "block" : "hidden"}>
+                                    <BackupTab />
+                                </div>
                             )}
-                            {activeTab === "pet" && (
-                                <PetTab />
+                            {mountedTabs.has("pet") && (
+                                <div className={activeTab === "pet" ? "block" : "hidden"}>
+                                    <PetTab />
+                                </div>
                             )}
                         </div>
 

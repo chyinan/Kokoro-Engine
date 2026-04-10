@@ -91,6 +91,7 @@ import {
   getLlmConfig,
   getImageGenConfig,
   getTelegramConfig,
+  getTelegramStatus,
   getVisionConfig,
   getSttConfig,
   listMcpServers,
@@ -150,6 +151,7 @@ import {
   type VoiceProfile,
   type GptSovitsModels,
   type MemoryRecord,
+  type TelegramStatus,
   type RvcModelInfo,
   type SingingProgressEvent,
 } from "./lib/kokoro-bridge";
@@ -205,6 +207,7 @@ function App() {
   const [visionConfig, setVisionConfig] = useState<VisionConfig | undefined>(undefined);
   const [imageGenConfig, setImageGenConfig] = useState<ImageGenSystemConfig | undefined>(undefined);
   const [telegramConfig, setTelegramConfig] = useState<any>(undefined);
+  const [telegramStatus, setTelegramStatus] = useState<TelegramStatus | undefined>(undefined);
 
   // Lists
   const [mcpServers, setMcpServers] = useState<McpServerStatus[]>([]);
@@ -328,7 +331,8 @@ function App() {
       listMods(),
       getProactiveEnabled(),
       getTelegramConfig(),
-    ]).then(([tts, llm, stt, vision, imageGen, mcp, mods, proactive, telegram]) => {
+      getTelegramStatus(),
+    ]).then(([tts, llm, stt, vision, imageGen, mcp, mods, proactive, telegram, telegramStatus]) => {
       setTtsConfig(tts);
       setLlmConfig(llm);
       setSttConfig(stt);
@@ -339,6 +343,7 @@ function App() {
       setProactiveEnabledState(proactive);
       localStorage.setItem("kokoro_proactive_enabled", String(proactive));
       setTelegramConfig(telegram);
+      setTelegramStatus(telegramStatus);
     }).catch(err => console.error("[App] Failed to fetch initial configs:", err));
 
     // Sync language settings to backend on startup
@@ -915,7 +920,7 @@ function App() {
       </motion.button>
 
       {/* SettingsPanel is retrieved from registry to allow mod overrides */}
-      {settingsOpen && (() => {
+      {(() => {
         const SettingsComponent = registry.get("SettingsPanel") || SettingsPanel;
         const isMod = registry.isModComponent("SettingsPanel");
         const component = (
@@ -974,10 +979,12 @@ function App() {
             userName={localStorage.getItem('kokoro_user_name') || ''}
             userPersona={localStorage.getItem('kokoro_user_persona') || ''}
             proactiveEnabled={proactiveEnabled}
+            initialTelegramStatus={telegramStatus}
           />
         );
 
         if (isMod) {
+          if (!settingsOpen) return null;
           return (
             <div style={{
               position: "fixed",

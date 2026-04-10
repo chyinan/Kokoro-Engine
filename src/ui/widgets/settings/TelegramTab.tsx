@@ -13,27 +13,26 @@ import { Select } from "@/components/ui/select";
 
 interface TelegramTabProps {
     config: TelegramConfig | null;
+    initialStatus?: TelegramStatus | null;
+    initialCharacters?: CharacterRecord[];
     onUpdate: (patch: Partial<TelegramConfig>) => void;
 }
 
-export default function TelegramTab({ config, onUpdate }: TelegramTabProps) {
+export default function TelegramTab({
+    config,
+    initialStatus,
+    initialCharacters,
+    onUpdate,
+}: TelegramTabProps) {
     const { t } = useTranslation();
-    const [status, setStatus] = useState<TelegramStatus | null>(null);
-    const [loading, setLoading] = useState(true);
+    const hasInitialStatus = initialStatus !== undefined;
+    const hasInitialCharacters = initialCharacters !== undefined;
+    const [status, setStatus] = useState<TelegramStatus | null>(initialStatus ?? null);
+    const [loading, setLoading] = useState(!(hasInitialStatus && hasInitialCharacters));
     const [dirty, setDirty] = useState(false);
     const [chatIdInput, setChatIdInput] = useState("");
-    const [characters, setCharacters] = useState<CharacterRecord[]>([]);
+    const [characters, setCharacters] = useState<CharacterRecord[]>(initialCharacters ?? []);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-    useEffect(() => {
-        loadStatus();
-        pollRef.current = setInterval(() => {
-            getTelegramStatus().then(setStatus).catch(() => {});
-        }, 5000);
-        return () => {
-            if (pollRef.current) clearInterval(pollRef.current);
-        };
-    }, []);
 
     const loadStatus = async () => {
         try {
@@ -49,6 +48,28 @@ export default function TelegramTab({ config, onUpdate }: TelegramTabProps) {
             setLoading(false);
         }
     };
+
+    useEffect(() => {
+        if (hasInitialStatus) {
+            setStatus(initialStatus ?? null);
+        }
+        if (hasInitialCharacters) {
+            setCharacters(initialCharacters ?? []);
+        }
+        if (hasInitialStatus && hasInitialCharacters) {
+            setLoading(false);
+        }
+
+        void loadStatus();
+
+        pollRef.current = setInterval(() => {
+            getTelegramStatus().then(setStatus).catch(() => {});
+        }, 5000);
+
+        return () => {
+            if (pollRef.current) clearInterval(pollRef.current);
+        };
+    }, [hasInitialStatus, hasInitialCharacters, initialStatus, initialCharacters]);
 
     const update = (patch: Partial<TelegramConfig>) => {
         onUpdate(patch);

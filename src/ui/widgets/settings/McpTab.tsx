@@ -102,10 +102,15 @@ or just a URL (type is auto-detected):
 
 // ── Component ───────────────────────────────────────────
 
-export default function McpTab() {
+interface McpTabProps {
+    initialServers?: McpServerStatus[];
+}
+
+export default function McpTab({ initialServers }: McpTabProps) {
     const { t } = useTranslation();
-    const [servers, setServers] = useState<McpServerStatus[]>([]);
-    const [loading, setLoading] = useState(true);
+    const hasInitialServers = initialServers !== undefined;
+    const [servers, setServers] = useState<McpServerStatus[]>(initialServers ?? []);
+    const [loading, setLoading] = useState(!hasInitialServers);
     const [refreshing, setRefreshing] = useState(false);
     const [showAdd, setShowAdd] = useState(false);
     const [jsonInput, setJsonInput] = useState("");
@@ -151,8 +156,12 @@ export default function McpTab() {
     }, [fetchServers, fetchToolState]);
 
     useEffect(() => {
+        if (hasInitialServers) {
+            setServers(initialServers ?? []);
+            setLoading(false);
+        }
         void reloadAll();
-    }, [reloadAll]);
+    }, [reloadAll, hasInitialServers, initialServers]);
 
     // Auto-poll while any server is in "connecting" state
     useEffect(() => {

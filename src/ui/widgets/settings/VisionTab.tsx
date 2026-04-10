@@ -13,10 +13,10 @@ import {
 import type { VisionConfig, OllamaModelInfo } from "../../../lib/kokoro-bridge";
 import { Select } from "@/components/ui/select";
 
-export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: VisionConfig) => void } = {}) {
+export default function VisionTab({ initialConfig = null, onConfigChange }: { initialConfig?: VisionConfig | null; onConfigChange?: (cfg: VisionConfig) => void } = {}) {
     const { t } = useTranslation();
-    const [config, setConfig] = useState<VisionConfig | null>(null);
-    const [loading, setLoading] = useState(true);
+    const [config, setConfig] = useState<VisionConfig | null>(initialConfig);
+    const [loading, setLoading] = useState(initialConfig === null);
     const [capturing, setCapturing] = useState(false);
     const [captureResult, setCaptureResult] = useState<string | null>(null);
     const [ollamaModels, setOllamaModels] = useState<OllamaModelInfo[]>([]);
@@ -92,11 +92,16 @@ export default function VisionTab({ onConfigChange }: { onConfigChange?: (cfg: V
 
     // Load config on mount
     useEffect(() => {
-        loadConfig();
+        if (initialConfig) {
+            setConfig(initialConfig);
+            setLoading(false);
+        } else {
+            loadConfig();
+        }
         return () => {
             stopPreview();
         };
-    }, []);
+    }, [initialConfig]);
 
     const loadConfig = async () => {
         try {

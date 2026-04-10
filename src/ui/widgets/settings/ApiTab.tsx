@@ -27,12 +27,13 @@ import {
 export interface ApiTabProps {
     visionEnabled: boolean;
     onVisionEnabledChange: (v: boolean) => void;
+    initialConfig?: LlmConfig | null;
 }
 
-export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabProps) {
+export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialConfig = null }: ApiTabProps) {
     const { t } = useTranslation();
-    const [config, setConfig] = useState<LlmConfig | null>(null);
-    const [loading, setLoading] = useState(true);
+    const [config, setConfig] = useState<LlmConfig | null>(initialConfig);
+    const [loading, setLoading] = useState(initialConfig === null);
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -46,20 +47,28 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange }: ApiTabP
 
     // Load config from backend on mount
     useEffect(() => {
-        getLlmConfig()
-            .then((cfg) => {
-                setConfig(cfg);
-                setLoading(false);
-            })
-            .catch((e) => {
-                console.error("Failed to load LLM config:", e);
-                setError(String(e));
-                setLoading(false);
-            });
+        if (initialConfig) {
+            setConfig(initialConfig);
+            setLoading(false);
+        }
+
+        if (!initialConfig) {
+            getLlmConfig()
+                .then((cfg) => {
+                    setConfig(cfg);
+                    setLoading(false);
+                })
+                .catch((e) => {
+                    console.error("Failed to load LLM config:", e);
+                    setError(String(e));
+                    setLoading(false);
+                });
+        }
+
         getContextSettings()
             .then(setContextSettings)
             .catch((e) => console.error("Failed to load context settings:", e));
-    }, []);
+    }, [initialConfig]);
 
     const activeProvider = config
         ? config.providers.find((p) => p.id === config.active_provider) ?? config.providers[0]
