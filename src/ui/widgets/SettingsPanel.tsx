@@ -291,6 +291,12 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
     // Image Gen State — initialize from prop to avoid IPC fetch on every open
     const [localImageGenConfig, setLocalImageGenConfig] = useState<ImageGenSystemConfig | null>(imageGenConfigProp ?? null);
 
+    // Keep local imagegen config synced when App-side preload arrives later.
+    useEffect(() => {
+        if (imageGenConfigProp === undefined) return;
+        setLocalImageGenConfig(imageGenConfigProp ?? null);
+    }, [imageGenConfigProp]);
+
     // Vision Mode
     const [visionEnabled, setVisionEnabled] = useState(() => localStorage.getItem("kokoro_vision_enabled") === "true");
 
