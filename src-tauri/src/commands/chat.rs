@@ -381,6 +381,30 @@ struct ChatImageGenEvent {
     prompt: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ChatErrorEvent {
+    code: String,
+    stage: String,
+    retryable: bool,
+    trace_id: String,
+    message: String,
+}
+
+fn build_chat_error_event(
+    stage: &str,
+    message: &str,
+    trace_id: &str,
+    retryable: bool,
+) -> ChatErrorEvent {
+    ChatErrorEvent {
+        code: "CHAT_STREAM_ERROR".to_string(),
+        stage: stage.to_string(),
+        retryable,
+        trace_id: trace_id.to_string(),
+        message: message.to_string(),
+    }
+}
+
 fn build_chat_hook_payload(
     conversation_id: Option<String>,
     character_id: &str,
@@ -1584,7 +1608,10 @@ pub async fn stream_chat(
                 Err(e) => {
                     if round_response.is_empty() && emit_buffer.is_empty() {
                         stream_failed = true;
-                        app.emit("chat-error", e)
+                        let err_payload =
+                            build_chat_error_event("llm_stream", &e, &assistant_turn_id, true);
+                        let err_json = serde_json::to_string(&err_payload).unwrap_or_else(|_| e.clone());
+                        app.emit("chat-error", err_json)
                             .map_err(|e| KokoroError::Chat(e.to_string()))?;
                     } else {
                         tracing::error!(
@@ -2313,6 +2340,28 @@ mod tests {
         ActionInfo, ActionPermissionLevel, ActionRiskTag, ActionSource,
     };
     use crate::hooks::HookPayload;
+
+    #[test]
+    fn test_build_chat_error_event_contains_observability_fields() {
+        let payload = build_chat_error_event("llm_stream", "provider timeout", "turn-123", true);
+
+        assert_eq!(payload.code, "CHAT_STREAM_ERROR");
+        assert_eq!(payload.stage, "llm_stream");
+        assert_eq!(payload.retryable, true);
+        assert_eq!(payload.trace_id, "turn-123");
+        assert_eq!(payload.message, "provider timeout");
+    }
+
+    #[test]
+    fn test_chat_error_event_serializes_to_json_with_trace_id() {
+        let payload = build_chat_error_event("llm_stream", "provider timeout", "turn-abc", true);
+        let json = serde_json::to_string(&payload).expect("serialize payload");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+
+        assert_eq!(value["trace_id"], "turn-abc");
+        assert_eq!(value["stage"], "llm_stream");
+        assert_eq!(value["code"], "CHAT_STREAM_ERROR");
+    }
 
     // ── extract_translate_tags ──────────────────────────────
 

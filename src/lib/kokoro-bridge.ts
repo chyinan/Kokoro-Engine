@@ -1133,8 +1133,11 @@ export async function runAutoBackupNow(): Promise<string> {
  * 结构化错误对象，对应后端 KokoroError
  */
 export interface KokoroErrorObject {
-    code: "Config" | "Database" | "Llm" | "Tts" | "Stt" | "Io" | "ExternalService" | "Mod" | "NotFound" | "Unauthorized" | "Internal";
+    code: string;
     message: string;
+    stage?: string;
+    retryable?: boolean;
+    trace_id?: string;
 }
 
 /**
