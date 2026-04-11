@@ -764,6 +764,7 @@ mod tests {
     use super::auto_start_pet_on_launch;
     use crate::error::KokoroError;
     use crate::utils::logging::format_log_line;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -817,6 +818,48 @@ mod tests {
         assert_eq!(
             occurrences, 1,
             "expected exactly one registration for `{needle}`, found {occurrences}"
+        );
+    }
+
+    #[test]
+    fn invoke_handler_has_no_duplicate_command_registrations() {
+        let source = include_str!("lib.rs");
+        let handler_start = source
+            .find(".invoke_handler(tauri::generate_handler![")
+            .expect("invoke_handler block should exist");
+        let block_start = handler_start
+            + source[handler_start..]
+                .find('[')
+                .expect("generate_handler should include `[`")
+            + 1;
+        let block_end = source[block_start..]
+            .find("])")
+            .map(|idx| block_start + idx)
+            .expect("generate_handler should include closing `])`");
+
+        let block = &source[block_start..block_end];
+        let mut seen = HashSet::new();
+        let mut duplicates = Vec::new();
+
+        for line in block.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                continue;
+            }
+            let command = trimmed.trim_end_matches(',');
+            if command.is_empty() {
+                continue;
+            }
+
+            if !seen.insert(command.to_string()) {
+                duplicates.push(command.to_string());
+            }
+        }
+
+        assert!(
+            duplicates.is_empty(),
+            "found duplicate Tauri command registrations: {:?}",
+            duplicates
         );
     }
 }
