@@ -218,8 +218,16 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            let startup_begin = std::time::Instant::now();
+            tracing::info!(target: "startup", "setup begin");
+
             let app_handle = app.handle();
             tauri::async_runtime::block_on(async move {
+                tracing::info!(
+                    target: "startup",
+                    "stage=ai.init.start elapsed_ms={}",
+                    startup_begin.elapsed().as_millis()
+                );
                 let app_data_dir = dirs_next::data_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
                     .join("com.chyin.kokoro");
@@ -228,6 +236,11 @@ pub fn run() {
                 let db_url = format!("sqlite:///{}", db_path.to_string_lossy().replace('\\', "/"));
                 match crate::ai::context::AIOrchestrator::new(&db_url).await {
                     Ok(orchestrator) => {
+                        tracing::info!(
+                            target: "startup",
+                            "stage=ai.init.ok elapsed_ms={}",
+                            startup_begin.elapsed().as_millis()
+                        );
 
                         // Restore proactive_enabled from disk
                         let proactive_path = app_data_dir.join("proactive_enabled.json");
@@ -325,10 +338,22 @@ pub fn run() {
                     }
                     Err(e) => {
                         tracing::error!(target: "ai", "AI Orchestrator init failed (will run without AI): {}", e);
+                        tracing::error!(
+                            target: "startup",
+                            "stage=ai.init.err elapsed_ms={} error={}",
+                            startup_begin.elapsed().as_millis(),
+                            e
+                        );
                         // Do NOT panic — allow app to continue running
                     }
                 }
             });
+
+            tracing::info!(
+                target: "startup",
+                "stage=ai.init.done elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
 
             // Initialize TTS Service from config
             let app_data = dirs_next::data_dir()
@@ -339,19 +364,39 @@ pub fn run() {
             let tts_config_path = app_data.join("tts_config.json");
             let tts_config = crate::tts::load_config(&tts_config_path);
 
+            tracing::info!(
+                target: "startup",
+                "stage=tts.init.start elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
             let tts_service = tauri::async_runtime::block_on(async {
                 crate::tts::TtsService::init_from_config(&tts_config).await
             });
             app.manage(tts_service);
+            tracing::info!(
+                target: "startup",
+                "stage=tts.init.done elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
 
             // ImageGen
             let imagegen_config_path = app_data.join("imagegen_config.json");
             let imagegen_config = crate::imagegen::config::load_config(&imagegen_config_path);
 
+            tracing::info!(
+                target: "startup",
+                "stage=imagegen.init.start elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
             let imagegen_service = tauri::async_runtime::block_on(async {
                 crate::imagegen::ImageGenService::init_from_config(&imagegen_config).await
             });
             app.manage(imagegen_service);
+            tracing::info!(
+                target: "startup",
+                "stage=imagegen.init.done elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
 
             // WindowSizeState
             app.manage(crate::commands::system::WindowSizeState::new());
@@ -359,17 +404,37 @@ pub fn run() {
             // LLM
             let llm_config_path = app_data.join("llm_config.json");
             let llm_config = crate::llm::llm_config::load_config(&llm_config_path);
+            tracing::info!(
+                target: "startup",
+                "stage=llm.init.start elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
             let llm_service =
                 crate::llm::service::LlmService::from_config(llm_config, llm_config_path);
             app.manage(llm_service);
+            tracing::info!(
+                target: "startup",
+                "stage=llm.init.done elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
 
             // STT
             let stt_config_path = app_data.join("stt_config.json");
             let stt_config = crate::stt::load_config(&stt_config_path);
+            tracing::info!(
+                target: "startup",
+                "stage=stt.init.start elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
             let stt_service = tauri::async_runtime::block_on(async {
                 crate::stt::SttService::init_from_config(&stt_config).await
             });
             app.manage(stt_service);
+            tracing::info!(
+                target: "startup",
+                "stage=stt.init.done elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
 
             let hook_runtime = HookRuntime::new();
             hook_runtime.register(Arc::new(AuditLogHookHandler));
@@ -396,11 +461,21 @@ pub fn run() {
 
             // MCP Manager
             let mcp_config_path = app_data.join("mcp_servers.json");
+            tracing::info!(
+                target: "startup",
+                "stage=mcp.init.start elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
             let mut mcp_manager =
                 crate::mcp::McpManager::new(mcp_config_path.to_str().unwrap_or("mcp_servers.json"));
             mcp_manager.load_configs();
             let mcp_manager = Arc::new(tokio::sync::Mutex::new(mcp_manager));
             app.manage(mcp_manager.clone());
+            tracing::info!(
+                target: "startup",
+                "stage=mcp.init.done elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
 
             // Connect MCP servers in background — per-server tasks so the
             // manager lock is only held briefly and list_mcp_servers stays responsive.
@@ -478,11 +553,21 @@ pub fn run() {
             });
 
             // Vision Server
+            tracing::info!(
+                target: "startup",
+                "stage=vision.server.start elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
             let mut vision_server = crate::vision::server::VisionServer::new(&app_data);
             tauri::async_runtime::block_on(async {
                 vision_server.start().await;
             });
             app.manage(Arc::new(tokio::sync::Mutex::new(vision_server)));
+            tracing::info!(
+                target: "startup",
+                "stage=vision.server.done elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
 
             // ModManager init: spawns QuickJS thread + event relay
             // In debug (dev) mode, fall back to the project-relative `mods/` directory
@@ -529,9 +614,19 @@ pub fn run() {
                 }
             }
 
+            tracing::info!(
+                target: "startup",
+                "stage=mods.init.start elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
             let mut mod_manager = ModManager::new(mods_path);
             mod_manager.init(app.handle().clone());
             app.manage(tokio::sync::Mutex::new(mod_manager));
+            tracing::info!(
+                target: "startup",
+                "stage=mods.init.done elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
 
             // Heartbeat — proactive behavior background loop
             let heartbeat_handle = app.handle().clone();
@@ -543,9 +638,19 @@ pub fn run() {
             let vision_config_path = app_data.join("vision_config.json");
             let vision_config = crate::vision::config::load_config(&vision_config_path);
             let llm_svc_for_vision = app.state::<crate::llm::service::LlmService>().inner().clone();
+            tracing::info!(
+                target: "startup",
+                "stage=vision.watcher.init.start elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
             let vision_watcher = crate::vision::watcher::VisionWatcher::new(vision_config.clone())
                 .with_llm_service(llm_svc_for_vision);
             app.manage(vision_watcher.clone());
+            tracing::info!(
+                target: "startup",
+                "stage=vision.watcher.init.done elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
 
             // Auto-start vision watcher if previously enabled
             if vision_config.enabled {
@@ -566,8 +671,18 @@ pub fn run() {
             let telegram_config_path = app_data.join("telegram_config.json");
             let telegram_config = crate::telegram::load_config(&telegram_config_path);
             let telegram_enabled = telegram_config.enabled;
+            tracing::info!(
+                target: "startup",
+                "stage=telegram.init.start elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
             let telegram_service = crate::telegram::TelegramService::new(telegram_config);
             app.manage(telegram_service.clone());
+            tracing::info!(
+                target: "startup",
+                "stage=telegram.init.done elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
 
             // Auto-start Telegram bot if enabled
             if telegram_enabled {
@@ -612,6 +727,12 @@ pub fn run() {
                     });
                 }
             }
+
+            tracing::info!(
+                target: "startup",
+                "setup done elapsed_ms={}",
+                startup_begin.elapsed().as_millis()
+            );
 
             Ok(())
         })
