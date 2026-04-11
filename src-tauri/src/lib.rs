@@ -182,7 +182,6 @@ pub fn run() {
             commands::mcp::toggle_mcp_server,
             commands::singing::check_rvc_status,
             commands::singing::list_rvc_models,
-            commands::singing::list_rvc_models,
             commands::singing::convert_singing,
             commands::telegram::get_telegram_config,
             commands::telegram::save_telegram_config,
@@ -686,5 +685,17 @@ mod tests {
     fn startup_log_line_uses_level_target_structure() {
         let line = format_log_line("INFO", "ai", "startup", false);
         assert!(line.starts_with("[INFO][ai] "));
+    }
+
+    #[test]
+    fn invoke_handler_does_not_register_duplicate_rvc_list_command() {
+        let source = include_str!("lib.rs");
+        let needle = "commands::singing::list_rvc_models";
+        let occurrences = source.matches(needle).count();
+
+        assert_eq!(
+            occurrences, 1,
+            "expected exactly one registration for `{needle}`, found {occurrences}"
+        );
     }
 }
