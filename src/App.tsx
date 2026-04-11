@@ -151,9 +151,11 @@ import {
   type VoiceProfile,
   type GptSovitsModels,
   type MemoryRecord,
+  type TelegramConfig,
   type TelegramStatus,
   type RvcModelInfo,
   type SingingProgressEvent,
+  type CharacterRecord,
 } from "./lib/kokoro-bridge";
 import type { ThemeConfig } from "./ui/layout/types";
 import { modMessageBus } from "./ui/mods/ModMessageBus";
@@ -206,7 +208,7 @@ function App() {
   const [sttConfig, setSttConfig] = useState<SttConfig | undefined>(undefined);
   const [visionConfig, setVisionConfig] = useState<VisionConfig | undefined>(undefined);
   const [imageGenConfig, setImageGenConfig] = useState<ImageGenSystemConfig | undefined>(undefined);
-  const [telegramConfig, setTelegramConfig] = useState<any>(undefined);
+  const [telegramConfig, setTelegramConfig] = useState<TelegramConfig | undefined>(undefined);
   const [telegramStatus, setTelegramStatus] = useState<TelegramStatus | undefined>(undefined);
 
   // Lists
@@ -216,7 +218,7 @@ function App() {
   const [ttsVoices, setTtsVoices] = useState<VoiceProfile[]>([]);
 
   // Character list for mod settings
-  const [characters, setCharacters] = useState<any[]>([]);
+  const [characters, setCharacters] = useState<CharacterRecord[]>([]);
 
   // Mod-specific state exposed via props
   const [voiceInterrupt, setVoiceInterrupt] = useState(false);
@@ -797,8 +799,8 @@ function App() {
 
     // ── Character Actions ─────────────────────────
     if (detail.action === 'list_characters') {
-      import('./lib/db').then(async ({ characterDb }) => {
-        const all = await characterDb.getAll();
+      import('./lib/kokoro-bridge').then(async ({ listCharacters }) => {
+        const all = await listCharacters();
         setCharacters(all);
       }).catch(console.error);
     }

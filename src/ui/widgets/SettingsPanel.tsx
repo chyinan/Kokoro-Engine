@@ -21,7 +21,25 @@ import { BackupTab } from "./settings/BackupTab";
 import PetTab from "./settings/PetTab";
 import { useTranslation } from "react-i18next";
 import { setPersona, setResponseLanguage, setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, saveTelegramConfig, getTelegramConfig } from "../../lib/kokoro-bridge";
-import type { ProviderStatus, VoiceProfile, TtsSystemConfig, ImageGenSystemConfig, SttConfig, TelegramConfig, TelegramStatus } from "../../lib/kokoro-bridge";
+import type {
+    ProviderStatus,
+    VoiceProfile,
+    TtsSystemConfig,
+    ImageGenSystemConfig,
+    SttConfig,
+    TelegramConfig,
+    TelegramStatus,
+    Live2dModelInfo,
+    LlmConfig,
+    VisionConfig,
+    McpServerStatus,
+    ModManifest,
+    GptSovitsModels,
+    MemoryRecord,
+    RvcModelInfo,
+    SingingProgressEvent,
+    CharacterRecord,
+} from "../../lib/kokoro-bridge";
 import type { BackgroundConfig } from "../hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "../../features/live2d/Live2DViewer";
 
@@ -50,36 +68,36 @@ interface SettingsPanelProps {
     renderFps: number;
     onRenderFpsChange: (fps: number) => void;
     // Optional props for external state management (Mod support)
-    availableModels?: any[]; // Live2dModelInfo[]
+    availableModels?: Live2dModelInfo[];
     persona?: string;
     responseLanguage?: string;
     ttsConfig?: TtsSystemConfig;
-    llmConfig?: any; // LlmConfig
+    llmConfig?: LlmConfig;
     sttConfig?: SttConfig;
-    visionConfig?: any; // VisionConfig
-    onVisionConfigChange?: (cfg: any) => void;
+    visionConfig?: VisionConfig;
+    onVisionConfigChange?: (cfg: VisionConfig) => void;
     imageGenConfig?: ImageGenSystemConfig;
     telegramConfig?: TelegramConfig;
-    mcpServers?: any[]; // McpServerStatus[]
-    modList?: any[]; // ModManifest[]
+    mcpServers?: McpServerStatus[];
+    modList?: ModManifest[];
     ttsProviders?: ProviderStatus[];
     ttsVoices?: VoiceProfile[];
     // Dynamic State
     voiceInterrupt?: boolean;
     onVoiceInterruptChange?: (v: boolean) => void;
     fetchedLlmModels?: string[];
-    scannedTtsModels?: Record<string, any>; // GptSovitsModels
+    scannedTtsModels?: Record<string, GptSovitsModels>;
     // New: Full Parity Props
-    memoryList?: any[];
+    memoryList?: MemoryRecord[];
     memoryTotal?: number;
     rvcAvailable?: boolean;
-    rvcModels?: any[];
-    singProgress?: any;
+    rvcModels?: RvcModelInfo[];
+    singProgress?: SingingProgressEvent | null;
     sdModels?: string[];
     capturedScreenUrl?: string | null;
     userLanguage?: string;
     activeCharacterId?: string;
-    characters?: any[];
+    characters?: CharacterRecord[];
     // User Profile
     userName?: string;
     userPersona?: string;
