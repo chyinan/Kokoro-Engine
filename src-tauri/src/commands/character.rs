@@ -1,6 +1,8 @@
+use crate::ai::context::AIOrchestrator;
+use crate::commands::live2d::load_active_live2d_profile;
 use crate::error::KokoroError;
 use serde::Serialize;
-use tauri::Emitter;
+use tauri::{Emitter, State};
 
 #[derive(Serialize)]
 pub struct CharacterState {
@@ -17,41 +19,79 @@ pub struct ChatResponse {
     pub mood_delta: f32,
 }
 
+fn resolve_default_cue() -> String {
+    if let Some(profile) = load_active_live2d_profile() {
+        if profile.cue_map.contains_key("neutral") {
+            return "neutral".to_string();
+        }
+        if let Some(first) = profile.cue_map.keys().next() {
+            return first.clone();
+        }
+    }
+    "neutral".to_string()
+}
+
 /// Returns the current character state for Live2D sync.
 #[tauri::command]
-pub fn get_character_state() -> CharacterState {
-    // TODO: Read from actual state manager
-    CharacterState {
-        name: "Kokoro".to_string(),
-        current_cue: "neutral".to_string(),
+pub async fn get_character_state(
+    state: State<'_, AIOrchestrator>,
+) -> Result<CharacterState, KokoroError> {
+    let name = state.get_character_id().await;
+
+    Ok(CharacterState {
+        name,
+        current_cue: resolve_default_cue(),
         mood: 0.5,
         is_speaking: false,
-    }
+    })
 }
 
 #[tauri::command]
-pub fn play_cue(app: tauri::AppHandle, cue: String) -> CharacterState {
+pub async fn play_cue(
+    app: tauri::AppHandle,
+    state: State<'_, AIOrchestrator>,
+    cue: String,
+) -> Result<CharacterState, KokoroError> {
     let trimmed = cue.trim();
-    if !trimmed.is_empty() {
-        let _ = app.emit(
-            "chat-cue",
-            serde_json::json!({
-                "cue": trimmed,
-                "source": "manual",
-            }),
-        );
+    if trimmed.is_empty() {
+        return Err(KokoroError::Validation("Cue cannot be empty".to_string()));
     }
 
-    CharacterState {
-        name: "Kokoro".to_string(),
-        current_cue: cue,
+    let profile = load_active_live2d_profile()
+        .ok_or_else(|| KokoroError::Validation("No active Live2D model profile loaded".to_string()))?;
+
+    if !profile.cue_map.contains_key(trimmed) {
+        let available_cues = profile.cue_map.keys().cloned().collect::<Vec<_>>().join(", ");
+        return Err(KokoroError::Validation(format!(
+            "Unknown cue '{}'. Available configured cues: {}",
+            trimmed,
+            if available_cues.is_empty() {
+                "(none)"
+            } else {
+                &available_cues
+            }
+        )));
+    }
+
+    let _ = app.emit(
+        "chat-cue",
+        serde_json::json!({
+            "cue": trimmed,
+            "source": "manual",
+        }),
+    );
+
+    let name = state.get_character_id().await;
+    Ok(CharacterState {
+        name,
+        current_cue: trimmed.to_string(),
         mood: 0.5,
         is_speaking: false,
-    }
+    })
 }
 
-/// Sends a user message and returns a placeholder AI response.
-/// In Phase 2, this will integrate with the LLM adapter.
+/// Legacy command kept for compatibility.
+/// Real chat flow must use `stream_chat`.
 #[tauri::command]
 pub async fn send_message(message: String) -> Result<ChatResponse, KokoroError> {
     if message.trim().is_empty() {
@@ -59,9 +99,8 @@ pub async fn send_message(message: String) -> Result<ChatResponse, KokoroError> 
             "Message cannot be empty".to_string(),
         ));
     }
-    Ok(ChatResponse {
-        text: format!("Echo from Kokoro Engine: {}", message),
-        cue: "joy".to_string(),
-        mood_delta: 0.1,
-    })
+
+    Err(KokoroError::Validation(
+        "send_message is deprecated. Use stream_chat for real responses.".to_string(),
+    ))
 }

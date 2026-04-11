@@ -1,7 +1,9 @@
+use crate::ai::context::AIOrchestrator;
+use crate::commands::live2d::load_active_live2d_profile;
 use crate::error::KokoroError;
 use serde::Serialize;
 use std::sync::Arc;
-use tauri::{command, State};
+use tauri::{command, Manager, State};
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
@@ -68,10 +70,52 @@ pub fn get_engine_info() -> EngineInfo {
 
 /// Returns the current system status including active modules.
 #[tauri::command]
-pub fn get_system_status() -> SystemStatus {
+pub fn get_system_status(app: tauri::AppHandle, state: State<'_, AIOrchestrator>) -> SystemStatus {
+    let mut active_modules = Vec::new();
+
+    if app.try_state::<AIOrchestrator>().is_some() {
+        active_modules.push("core".to_string());
+    }
+    if app.try_state::<crate::tts::TtsService>().is_some() {
+        active_modules.push("tts".to_string());
+    }
+    if app.try_state::<crate::stt::SttService>().is_some() {
+        active_modules.push("stt".to_string());
+    }
+    if app.try_state::<crate::imagegen::ImageGenService>().is_some() {
+        active_modules.push("imagegen".to_string());
+    }
+    if app
+        .try_state::<std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>()
+        .is_some()
+    {
+        active_modules.push("mcp".to_string());
+    }
+    if app
+        .try_state::<tokio::sync::Mutex<crate::mods::ModManager>>()
+        .is_some()
+    {
+        active_modules.push("mods".to_string());
+    }
+    if app
+        .try_state::<std::sync::Arc<tokio::sync::Mutex<crate::vision::server::VisionServer>>>()
+        .is_some()
+    {
+        active_modules.push("vision".to_string());
+    }
+    if load_active_live2d_profile().is_some() {
+        active_modules.push("live2d".to_string());
+    }
+    if state.is_memory_enabled() {
+        active_modules.push("memory".to_string());
+    }
+    if state.is_proactive_enabled() {
+        active_modules.push("proactive".to_string());
+    }
+
     SystemStatus {
-        engine_running: true,
-        active_modules: vec!["core".to_string(), "ui".to_string()],
-        memory_usage_mb: 0.0, // TODO: implement actual memory tracking
+        engine_running: !active_modules.is_empty(),
+        active_modules,
+        memory_usage_mb: 0.0,
     }
 }

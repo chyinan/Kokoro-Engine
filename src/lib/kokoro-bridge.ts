@@ -232,6 +232,102 @@ export async function onChatError(callback: (error: string) => void): Promise<Un
     return listen<string>("chat-error", (event) => callback(event.payload));
 }
 
+export interface FailureEventContext {
+    deny_kind?: "hook_denied" | "policy_denied" | "fail_closed" | "pending_approval" | "execution_error";
+    approval_status?: "requested" | "approved" | "rejected";
+    [key: string]: unknown;
+}
+
+export interface FailureEvent {
+    event_id: string;
+    timestamp: string;
+    domain: string;
+    stage: string;
+    code: string;
+    message: string;
+    retryable: boolean;
+    trace_id: string;
+    conversation_id?: string | null;
+    turn_id?: string | null;
+    character_id?: string | null;
+    context?: FailureEventContext | null;
+}
+
+export async function onChatFailure(callback: (event: FailureEvent) => void): Promise<UnlistenFn> {
+    return listen<FailureEvent | string>("chat-failure", (event) => {
+        const payload = event.payload;
+        if (typeof payload === "string") {
+            try {
+                const parsed = JSON.parse(payload) as FailureEvent;
+                callback(parsed);
+            } catch {
+                callback({
+                    event_id: "",
+                    timestamp: "",
+                    domain: "chat",
+                    stage: "unknown",
+                    code: "CHAT_FAILURE",
+                    message: payload,
+                    retryable: false,
+                    trace_id: "",
+                });
+            }
+            return;
+        }
+
+        callback(payload);
+    });
+}
+
+export function parseFailureEvent(payload: unknown): FailureEvent | null {
+    if (typeof payload === "string") {
+        try {
+            return JSON.parse(payload) as FailureEvent;
+        } catch {
+            return null;
+        }
+    }
+
+    if (typeof payload === "object" && payload !== null) {
+        const candidate = payload as Partial<FailureEvent>;
+        if (typeof candidate.code === "string" && typeof candidate.message === "string") {
+            return {
+                event_id: candidate.event_id ?? "",
+                timestamp: candidate.timestamp ?? "",
+                domain: candidate.domain ?? "chat",
+                stage: candidate.stage ?? "unknown",
+                code: candidate.code,
+                message: candidate.message,
+                retryable: Boolean(candidate.retryable),
+                trace_id: candidate.trace_id ?? "",
+                conversation_id: candidate.conversation_id ?? null,
+                turn_id: candidate.turn_id ?? null,
+                character_id: candidate.character_id ?? null,
+                context: candidate.context ?? null,
+            };
+        }
+    }
+
+    return null;
+}
+
+export function parseLegacyChatError(payload: unknown): string {
+    if (typeof payload === "string") {
+        return payload;
+    }
+
+    if (payload instanceof Error) {
+        return payload.message;
+    }
+
+    const failure = parseFailureEvent(payload);
+    if (failure) {
+        return failure.message;
+    }
+
+    return String(payload);
+}
+
 export interface ChatTurnStartEvent {
     turn_id: string;
 }

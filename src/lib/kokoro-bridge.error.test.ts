@@ -6,7 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
-import { parseKokoroError, getEngineInfo } from "./kokoro-bridge";
+import { parseKokoroError, parseFailureEvent, parseLegacyChatError, getEngineInfo } from "./kokoro-bridge";
 
 const mockedInvoke = vi.mocked(invoke);
 
@@ -28,6 +28,36 @@ describe("parseKokoroError structured payload", () => {
         expect(parsed.stage).toBe("llm_stream");
         expect(parsed.retryable).toBe(true);
         expect(parsed.trace_id).toBe("turn-xyz");
+    });
+});
+
+describe("failure event parsing", () => {
+    it("parses structured failure event object", () => {
+        const payload = {
+            event_id: "evt-1",
+            timestamp: "2026-04-11T10:00:00Z",
+            domain: "chat",
+            stage: "llm_stream",
+            code: "CHAT_STREAM_ERROR",
+            message: "provider timeout",
+            retryable: true,
+            trace_id: "turn-123",
+            conversation_id: "conv-1",
+            turn_id: "turn-123",
+            character_id: "char-1",
+            context: { deny_kind: "policy_denied" },
+        };
+
+        const parsed = parseFailureEvent(payload);
+        expect(parsed?.code).toBe("CHAT_STREAM_ERROR");
+        expect(parsed?.stage).toBe("llm_stream");
+        expect(parsed?.retryable).toBe(true);
+        expect(parsed?.trace_id).toBe("turn-123");
+    });
+
+    it("keeps legacy string payload via parseLegacyChatError", () => {
+        const parsed = parseLegacyChatError("network unreachable");
+        expect(parsed).toBe("network unreachable");
     });
 });
 

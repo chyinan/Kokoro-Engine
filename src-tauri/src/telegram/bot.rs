@@ -69,7 +69,7 @@ pub async fn run_polling(
     token: String,
     config: Arc<RwLock<TelegramConfig>>,
     app: tauri::AppHandle,
-    shutdown_rx: oneshot::Receiver<()>,
+    mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     let bot = Bot::new(&token);
     let sessions: Sessions = Arc::new(RwLock::new(HashMap::new()));
@@ -88,17 +88,34 @@ pub async fn run_polling(
         .default_handler(|_upd| async {})
         .build();
 
-    // Run dispatcher in a spawned task so we can select on shutdown
+    // Run dispatcher in a spawned task and monitor its lifecycle.
     let shutdown_token = dispatcher.shutdown_token();
-    tauri::async_runtime::spawn(async move {
+    let mut dispatch_task = tauri::async_runtime::spawn(async move {
         dispatcher.dispatch().await;
     });
 
-    // Wait for shutdown signal
-    let _ = shutdown_rx.await;
-    if let Ok(fut) = shutdown_token.shutdown() {
-        fut.await;
-    };
+    tokio::select! {
+        _ = &mut shutdown_rx => {
+            if let Ok(fut) = shutdown_token.shutdown() {
+                fut.await;
+            }
+            let _ = (&mut dispatch_task).await;
+        }
+        dispatch_result = &mut dispatch_task => {
+            match dispatch_result {
+                Ok(_) => {
+                    tracing::error!(target: "telegram", "dispatcher exited unexpectedly");
+                }
+                Err(dispatch_err) => {
+                    tracing::error!(
+                        target: "telegram",
+                        "dispatcher task failed: {}",
+                        dispatch_err
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Central message handler — dispatches commands and regular messages.
@@ -1344,4 +1361,15 @@ mod tests {
         assert_eq!(calls[0].args.get("tz"), Some(&"UTC".to_string()));
         assert!(!text.contains("[TOOL_CALL:"));
     }
+
+    #[test]
+    fn test_telegram_error_log_prefix_format() {
+        let rendered = format!(
+            "[ERROR][Telegram] Dispatcher task failed: {}. 常见原因是网络不可达或未开启代理。",
+            "Network timeout"
+        );
+        assert!(rendered.starts_with("[ERROR][Telegram]"));
+        assert!(rendered.contains("Network timeout"));
+    }
+
 }

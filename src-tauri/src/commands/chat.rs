@@ -13,7 +13,7 @@ use crate::ai::context::AIOrchestrator;
 use crate::ai::context::Message;
 use crate::ai::memory_extractor;
 use crate::commands::system::WindowSizeState;
-use crate::error::KokoroError;
+use crate::error::{ChatErrorEvent, KokoroError};
 use crate::hooks::types::HookModifyPolicy;
 use crate::hooks::{
     BeforeLlmRequestMessage, BeforeLlmRequestPayload, ChatHookPayload, HookEvent, HookPayload,
@@ -29,10 +29,120 @@ use crate::llm::service::LlmService;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{command, Emitter, Manager, State, Window};
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{oneshot, Mutex, RwLock};
 use uuid::Uuid;
+
+const FAILURE_EVENTS_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+fn failure_events_log_path() -> PathBuf {
+    dirs_next::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("com.chyin.kokoro")
+        .join("failure_events.jsonl")
+}
+
+async fn rotate_failure_events_log_if_needed(path: &Path) -> Result<(), std::io::Error> {
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+
+    if metadata.len() < FAILURE_EVENTS_LOG_MAX_BYTES {
+        return Ok(());
+    }
+
+    let rotated_path = path.with_file_name("failure_events.1.jsonl");
+    if tokio::fs::try_exists(&rotated_path).await.unwrap_or(false) {
+        let _ = tokio::fs::remove_file(&rotated_path).await;
+    }
+
+    tokio::fs::rename(path, &rotated_path).await
+}
+
+async fn append_failure_event_jsonl(failure_event: &crate::error::FailureEvent) -> Result<(), std::io::Error> {
+    let path = failure_events_log_path();
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    rotate_failure_events_log_if_needed(&path).await?;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .await?;
+
+    let line = serde_json::to_string(failure_event)
+        .unwrap_or_else(|_| "{\"code\":\"FAILURE_EVENT_SERIALIZE_ERROR\"}".to_string());
+    file.write_all(line.as_bytes()).await?;
+    file.write_all(b"\n").await?;
+    file.flush().await
+}
+
+async fn persist_failure_event_to_conversation(
+    state: &AIOrchestrator,
+    failure_event: &crate::error::FailureEvent,
+) -> Result<(), KokoroError> {
+    let conversation_id = match state.current_conversation_id.lock().await.clone() {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let metadata = serde_json::json!({
+        "type": "failure_event",
+        "event": failure_event,
+    })
+    .to_string();
+
+    sqlx::query(
+        "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)"
+    )
+    .bind(&conversation_id)
+    .bind("system")
+    .bind(&failure_event.message)
+    .bind(&metadata)
+    .bind(&now)
+    .execute(&state.db)
+    .await
+    .map_err(KokoroError::from)?;
+
+    sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
+        .bind(&now)
+        .bind(&conversation_id)
+        .execute(&state.db)
+        .await
+        .map_err(KokoroError::from)?;
+
+    Ok(())
+}
+
+async fn emit_and_persist_failure_event(
+    app: &tauri::AppHandle,
+    state: &AIOrchestrator,
+    failure_event: crate::error::FailureEvent,
+) -> Result<(), KokoroError> {
+    app.emit("chat-failure", failure_event.clone())
+        .map_err(|error| KokoroError::Chat(error.to_string()))?;
+
+    persist_failure_event_to_conversation(state, &failure_event).await?;
+
+    if let Err(error) = append_failure_event_jsonl(&failure_event).await {
+        tracing::error!(
+            target: "chat",
+            "[Chat] failed to append failure_events.jsonl: {}",
+            error
+        );
+    }
+
+    Ok(())
+}
 
 #[derive(Debug)]
 enum ToolApprovalDecision {
@@ -379,15 +489,6 @@ pub struct ChatRequest {
 #[allow(dead_code)]
 struct ChatImageGenEvent {
     prompt: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct ChatErrorEvent {
-    code: String,
-    stage: String,
-    retryable: bool,
-    trace_id: String,
-    message: String,
 }
 
 fn build_chat_error_event(
@@ -1613,7 +1714,15 @@ pub async fn stream_chat(
                         let err_json =
                             serde_json::to_string(&err_payload).unwrap_or_else(|_| e.clone());
                         app.emit("chat-error", err_json)
-                            .map_err(|e| KokoroError::Chat(e.to_string()))?;
+                            .map_err(|emit_error| KokoroError::Chat(emit_error.to_string()))?;
+
+                        let failure_event = err_payload.clone().into_failure_event(
+                            conversation_id.clone(),
+                            Some(assistant_turn_id.clone()),
+                            Some(char_id.clone()),
+                            None,
+                        );
+                        emit_and_persist_failure_event(&app, &state, failure_event).await?;
                     } else {
                         tracing::error!(
                             target: "chat",

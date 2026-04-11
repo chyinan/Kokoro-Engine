@@ -2,8 +2,8 @@ import { useState, useRef, useEffect, useCallback, useDeferredValue, memo } from
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
-import { streamChat, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatError, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages, approveToolApproval, rejectToolApproval } from "../../lib/kokoro-bridge";
-import type { ToolTraceItem } from "../../lib/kokoro-bridge";
+import { streamChat, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatError, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages, approveToolApproval, rejectToolApproval } from "../../lib/kokoro-bridge";
+import type { FailureEvent, ToolTraceItem } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal, useWakeWord } from "../hooks";
@@ -989,6 +989,17 @@ export default function ChatPanel() {
             });
             if (aborted) { unDone(); return; }
             cleanups.push(unDone);
+
+            const unFailure = await onChatFailure((failure: FailureEvent) => {
+                if (aborted) return;
+                stopStreaming();
+                setIsThinking(false);
+                const suffix = failure.stage ? ` (${failure.stage})` : "";
+                setError(`${failure.message}${suffix}`);
+                currentTurnRef.current = null;
+            });
+            if (aborted) { unFailure(); return; }
+            cleanups.push(unFailure);
 
             const unError = await onChatError((err: string) => {
                 if (aborted) return;
