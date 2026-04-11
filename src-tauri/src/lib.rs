@@ -812,8 +812,22 @@ mod tests {
     #[test]
     fn invoke_handler_does_not_register_duplicate_rvc_list_command() {
         let source = include_str!("lib.rs");
+        let handler_start = source
+            .find(".invoke_handler(tauri::generate_handler![")
+            .expect("invoke_handler block should exist");
+        let block_start = handler_start
+            + source[handler_start..]
+                .find('[')
+                .expect("generate_handler should include `[`")
+            + 1;
+        let block_end = source[block_start..]
+            .find("])")
+            .map(|idx| block_start + idx)
+            .expect("generate_handler should include closing `])`");
+
+        let block = &source[block_start..block_end];
         let needle = "commands::singing::list_rvc_models";
-        let occurrences = source.matches(needle).count();
+        let occurrences = block.matches(needle).count();
 
         assert_eq!(
             occurrences, 1,
