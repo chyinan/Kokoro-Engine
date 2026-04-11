@@ -60,14 +60,16 @@ impl GoogleImageGenProvider {
             model
         };
 
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
         Ok(Self {
             id: config.id.clone(),
             api_key,
             model,
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .expect("HTTP client build should not fail"),
+            client,
         })
     }
 }

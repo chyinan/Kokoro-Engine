@@ -18,15 +18,17 @@ pub struct SenseVoiceProvider {
 }
 
 impl SenseVoiceProvider {
-    pub fn new(provider_id: String, base_url: Option<String>) -> Self {
-        Self {
+    pub fn new(provider_id: String, base_url: Option<String>) -> Result<Self, String> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+        Ok(Self {
             provider_id,
             base_url: base_url.unwrap_or_else(|| "http://127.0.0.1:50000".to_string()),
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(120))
-                .build()
-                .expect("HTTP client build should not fail"),
-        }
+            client,
+        })
     }
 }
 

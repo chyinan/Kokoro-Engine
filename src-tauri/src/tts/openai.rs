@@ -34,30 +34,33 @@ impl OpenAITtsProvider {
         base_url: Option<String>,
         model: Option<String>,
         voice: Option<String>,
-    ) -> Self {
-        Self {
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("HTTP client build should not fail"),
+    ) -> Result<Self, String> {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+        Ok(Self {
+            client,
             provider_id,
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             model: model.unwrap_or_else(|| "tts-1".to_string()),
             default_voice: voice.unwrap_or_else(|| "alloy".to_string()),
-        }
+        })
     }
 
     /// Construct from a ProviderConfig entry.
     pub fn from_config(config: &ProviderConfig) -> Option<Self> {
         let api_key = config.resolve_api_key()?;
-        Some(Self::new(
+        Self::new(
             config.id.clone(),
             api_key,
             config.base_url.clone(),
             config.model.clone(),
             config.default_voice.clone(),
-        ))
+        )
+        .ok()
     }
 
     fn normalize_voice_id(&self, raw_voice: &str) -> String {

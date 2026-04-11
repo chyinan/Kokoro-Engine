@@ -55,18 +55,37 @@ impl SttService {
         match config.provider_type.as_str() {
             "openai_whisper" | "faster_whisper" | "local_whisper" => {
                 let api_key = config.resolve_api_key().unwrap_or_default();
-                Some(Arc::new(OpenAIWhisperProvider::new(
+                match OpenAIWhisperProvider::new(
                     config.id.clone(),
                     api_key,
                     config.base_url.clone(),
                     config.model.clone(),
-                )))
+                ) {
+                    Ok(provider) => Some(Arc::new(provider)),
+                    Err(e) => {
+                        tracing::error!(
+                            target: "stt",
+                            "Failed to build OpenAI Whisper provider '{}': {}",
+                            config.id,
+                            e
+                        );
+                        None
+                    }
+                }
             }
             "whisper_cpp" => Some(Arc::new(WhisperCppProvider::new(config.base_url.clone()))),
-            "sensevoice" => Some(Arc::new(SenseVoiceProvider::new(
-                config.id.clone(),
-                config.base_url.clone(),
-            ))),
+            "sensevoice" => match SenseVoiceProvider::new(config.id.clone(), config.base_url.clone()) {
+                Ok(provider) => Some(Arc::new(provider)),
+                Err(e) => {
+                    tracing::error!(
+                        target: "stt",
+                        "Failed to build SenseVoice provider '{}': {}",
+                        config.id,
+                        e
+                    );
+                    None
+                }
+            },
             "sensevoice_local" => Some(Arc::new(SenseVoiceLocalProvider::new(config, None))),
             other => {
                 tracing::error!(target: "stt", "Unknown provider type: {}", other);

@@ -19,18 +19,19 @@ impl OpenAIImageGenProvider {
         api_key: String,
         base_url: Option<String>,
         model: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+        Ok(Self {
             id,
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             model: model.unwrap_or_else(|| "dall-e-3".to_string()),
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .map_err(|e| format!("Failed to build HTTP client: {}", e))
-                .expect("HTTP client build should not fail"),
-        }
+            client,
+        })
     }
 }
 

@@ -51,11 +51,21 @@ impl CloudTTSProvider {
     /// Create an Azure Cognitive Services-style TTS provider.
     pub fn azure_style(config: &ProviderConfig) -> Option<Self> {
         let api_key = config.resolve_api_key()?;
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| {
+                tracing::error!(
+                    target: "tts",
+                    "Failed to build HTTP client for provider '{}': {}",
+                    config.id,
+                    e
+                );
+            })
+            .ok()?;
+
         Some(Self {
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("HTTP client build should not fail"),
+            client,
             provider_id: config.id.clone(),
             api_key,
             base_url: config.base_url.clone().unwrap_or_else(|| {
@@ -81,11 +91,21 @@ impl CloudTTSProvider {
     /// Create an ElevenLabs-style TTS provider.
     pub fn elevenlabs_style(config: &ProviderConfig) -> Option<Self> {
         let api_key = config.resolve_api_key()?;
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| {
+                tracing::error!(
+                    target: "tts",
+                    "Failed to build HTTP client for provider '{}': {}",
+                    config.id,
+                    e
+                );
+            })
+            .ok()?;
+
         Some(Self {
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("HTTP client build should not fail"),
+            client,
             provider_id: config.id.clone(),
             api_key,
             base_url: config

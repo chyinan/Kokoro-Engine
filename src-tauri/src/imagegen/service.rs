@@ -81,19 +81,41 @@ impl ImageGenService {
         match config.provider_type.as_str() {
             "openai" => {
                 let api_key = config.resolve_api_key()?;
-                Some(Box::new(OpenAIImageGenProvider::new(
+                match OpenAIImageGenProvider::new(
                     config.id.clone(),
                     api_key,
                     config.base_url.clone(),
                     config.model.clone(),
-                )))
+                ) {
+                    Ok(provider) => Some(Box::new(provider)),
+                    Err(e) => {
+                        tracing::error!(
+                            target: "imagegen",
+                            "Failed to build OpenAI provider '{}': {}",
+                            config.id,
+                            e
+                        );
+                        None
+                    }
+                }
             }
             "stable_diffusion" => Some(Box::new(StableDiffusionProvider::new(
                 config.id.clone(),
                 config.base_url.clone(),
                 config.model.clone(),
             ))),
-            "google" => Some(Box::new(GoogleImageGenProvider::new(config).ok()?)),
+            "google" => match GoogleImageGenProvider::new(config) {
+                Ok(provider) => Some(Box::new(provider)),
+                Err(e) => {
+                    tracing::error!(
+                        target: "imagegen",
+                        "Failed to build Google provider '{}': {}",
+                        config.id,
+                        e
+                    );
+                    None
+                }
+            },
             other => {
                 tracing::error!(target: "imagegen", "Unknown provider type: {}", other);
                 None
