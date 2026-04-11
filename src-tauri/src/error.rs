@@ -298,8 +298,6 @@ mod tests {
 }
 
 /// 将 KokoroError 序列化为 JSON 字符串，供 Tauri IPC 返回 Result<T, String> 使用。
-
-/// 将 KokoroError 序列化为 JSON 字符串，供 Tauri IPC 返回 Result<T, String> 使用。
 ///
 /// 注意：`.to_string()` 调用 Display，输出人类可读字符串（如 "配置错误: ..."），不是 JSON。
 /// 迁移模块时应使用 `.map_err(Into::into)` 或 `String::from(e)` 以获得结构化 JSON 输出。
