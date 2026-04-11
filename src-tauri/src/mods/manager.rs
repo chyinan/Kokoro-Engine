@@ -131,8 +131,20 @@ impl ModManager {
 
         // ── QuickJS runtime thread ──
         std::thread::spawn(move || {
-            let rt = rquickjs::Runtime::new().expect("Failed to create QuickJS runtime");
-            let ctx = rquickjs::Context::full(&rt).expect("Failed to create QuickJS context");
+            let rt = match rquickjs::Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!(target: "mods", "[ModManager] Failed to create QuickJS runtime: {}", e);
+                    return;
+                }
+            };
+            let ctx = match rquickjs::Context::full(&rt) {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    tracing::error!(target: "mods", "[ModManager] Failed to create QuickJS context: {}", e);
+                    return;
+                }
+            };
 
             // Register the Kokoro API with the event sender
             ctx.with(|ctx| {
@@ -664,6 +676,21 @@ mod tests {
         assert!(manager.script_tx.is_none());
         assert!(manager.active_theme.is_none());
         assert!(manager.active_layout.is_none());
+    }
+
+    #[test]
+    fn production_init_path_avoids_runtime_expect_panics() {
+        let source = include_str!("manager.rs");
+        let production_part = source.split("#[cfg(test)]").next().unwrap_or(source);
+
+        assert!(
+            !production_part.contains("rquickjs::Runtime::new().expect("),
+            "production init path should not panic on runtime creation"
+        );
+        assert!(
+            !production_part.contains("rquickjs::Context::full(&rt).expect("),
+            "production init path should not panic on context creation"
+        );
     }
 
     #[test]
