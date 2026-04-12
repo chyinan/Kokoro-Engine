@@ -478,7 +478,6 @@ pub async fn import_data(
     options: ImportOptions,
 ) -> Result<ImportResult, KokoroError> {
     let app_data = app_data_dir(&app)?;
-    let import_pool = resolve_import_pool(&app, &app_data).await?;
 
     // Phase 1: Extract everything from ZIP synchronously (ZipFile is !Send)
     let tmp_dir = std::env::temp_dir().join("kokoro_import");
@@ -554,6 +553,7 @@ pub async fn import_data(
     };
 
     if has_db {
+        let import_pool = resolve_import_pool(&app, &app_data).await?;
         let tmp_db = tmp_dir.join("import.db");
         // 必须用同一个连接：ATTACH DATABASE 是连接级别的操作
         let mut conn = import_pool.acquire().await.map_err(|e| {
