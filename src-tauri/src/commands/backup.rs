@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tauri::AppHandle;
 use tauri::Manager;
-use tauri::State;
 use zip::write::SimpleFileOptions;
+
+// pattern: Imperative Shell
 
 /// All JSON config filenames we back up.
 const CONFIG_FILES: &[&str] = &[
@@ -118,6 +119,27 @@ async fn open_readonly_pool(path: &Path) -> Result<SqlitePool, KokoroError> {
     SqlitePool::connect_with(options)
         .await
         .map_err(|e| KokoroError::Database(format!("Failed to open DB: {}", e)))
+}
+
+async fn open_import_pool_without_orchestrator(app_data: &Path) -> Result<SqlitePool, KokoroError> {
+    let db = db_path(app_data);
+    let db_url = format!("sqlite:///{}", db.to_string_lossy().replace('\\', "/"));
+    let orchestrator = AIOrchestrator::new(&db_url)
+        .await
+        .map_err(|e| KokoroError::Internal(format!("Failed to init fallback orchestrator DB: {}", e)))?;
+    Ok(orchestrator.db)
+}
+
+async fn resolve_import_pool(app: &AppHandle, app_data: &Path) -> Result<SqlitePool, KokoroError> {
+    if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
+        return Ok(orchestrator.db.clone());
+    }
+
+    tracing::warn!(
+        target: "backup",
+        "AIOrchestrator not managed, using fallback pool for import_data"
+    );
+    open_import_pool_without_orchestrator(app_data).await
 }
 
 /// 受限的表名枚举，防止 count_rows 被传入任意字符串
@@ -452,11 +474,11 @@ pub async fn preview_import(file_path: String) -> Result<ImportPreview, KokoroEr
 #[tauri::command]
 pub async fn import_data(
     app: AppHandle,
-    orchestrator: State<'_, AIOrchestrator>,
     file_path: String,
     options: ImportOptions,
 ) -> Result<ImportResult, KokoroError> {
     let app_data = app_data_dir(&app)?;
+    let import_pool = resolve_import_pool(&app, &app_data).await?;
 
     // Phase 1: Extract everything from ZIP synchronously (ZipFile is !Send)
     let tmp_dir = std::env::temp_dir().join("kokoro_import");
@@ -534,7 +556,7 @@ pub async fn import_data(
     if has_db {
         let tmp_db = tmp_dir.join("import.db");
         // 必须用同一个连接：ATTACH DATABASE 是连接级别的操作
-        let mut conn = orchestrator.db.acquire().await.map_err(|e| {
+        let mut conn = import_pool.acquire().await.map_err(|e| {
             KokoroError::Database(format!("Failed to acquire DB connection: {}", e))
         })?;
 
@@ -790,4 +812,30 @@ pub async fn import_data(
     );
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn open_import_pool_without_orchestrator_creates_usable_db() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let app_data = tmp.path().to_path_buf();
+
+        let pool = open_import_pool_without_orchestrator(&app_data)
+            .await
+            .expect("fallback pool should open");
+
+        let table_exists: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='memories'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("query should succeed");
+
+        assert_eq!(table_exists.as_deref(), Some("memories"));
+
+        pool.close().await;
+    }
 }
