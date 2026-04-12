@@ -49,7 +49,13 @@ pub async fn get_stt_config() -> Result<SttConfig, KokoroError> {
 
     // Write back if we added new providers, so active_provider survives next load
     if changed {
-        let _ = crate::stt::config::save_config(&config_path, &config);
+        if let Err(e) = crate::stt::config::save_config(&config_path, &config) {
+            tracing::warn!(
+                target: "stt",
+                "Failed to persist merged default STT providers: {}",
+                e
+            );
+        }
     }
 
     Ok(config)
