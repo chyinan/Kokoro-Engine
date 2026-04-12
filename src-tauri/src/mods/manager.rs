@@ -6,6 +6,9 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, oneshot};
 
@@ -98,10 +101,52 @@ fn build_mod_hook_payload(manifest: &ModManifest, stage: &str) -> HookPayload {
 
 /// ModManager handles mod discovery, metadata, theme/layout loading, and script execution.
 /// The QuickJS runtime lives on a separate thread and is communicated with via channels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModRuntimeState {
+    Uninitialized,
+    Initializing,
+    Running,
+    Failed,
+    Disconnected,
+}
+
+impl ModRuntimeState {
+    fn as_u8(self) -> u8 {
+        match self {
+            ModRuntimeState::Uninitialized => 0,
+            ModRuntimeState::Initializing => 1,
+            ModRuntimeState::Running => 2,
+            ModRuntimeState::Failed => 3,
+            ModRuntimeState::Disconnected => 4,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => ModRuntimeState::Initializing,
+            2 => ModRuntimeState::Running,
+            3 => ModRuntimeState::Failed,
+            4 => ModRuntimeState::Disconnected,
+            _ => ModRuntimeState::Uninitialized,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModRuntimeState::Uninitialized => "uninitialized",
+            ModRuntimeState::Initializing => "initializing",
+            ModRuntimeState::Running => "running",
+            ModRuntimeState::Failed => "failed",
+            ModRuntimeState::Disconnected => "disconnected",
+        }
+    }
+}
+
 pub struct ModManager {
     pub mods_path: PathBuf,
     pub loaded_mods: HashMap<String, ModManifest>,
     pub script_tx: Option<mpsc::Sender<ScriptCommand>>,
+    runtime_state: Arc<AtomicU8>,
     /// Currently active theme loaded from a mod's theme.json
     pub active_theme: Option<ModThemeJson>,
     /// Currently active layout loaded from a mod's layout.json
@@ -109,11 +154,24 @@ pub struct ModManager {
 }
 
 impl ModManager {
+    pub fn runtime_state(&self) -> ModRuntimeState {
+        ModRuntimeState::from_u8(self.runtime_state.load(Ordering::SeqCst))
+    }
+
+    fn set_runtime_state(&self, state: ModRuntimeState) {
+        self.runtime_state.store(state.as_u8(), Ordering::SeqCst);
+    }
+
+    fn runtime_ready(&self) -> bool {
+        self.runtime_state() == ModRuntimeState::Running && self.script_tx.is_some()
+    }
+
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
             mods_path: path.as_ref().to_path_buf(),
             loaded_mods: HashMap::new(),
             script_tx: None,
+            runtime_state: Arc::new(AtomicU8::new(ModRuntimeState::Uninitialized.as_u8())),
             active_theme: None,
             active_layout: None,
         }
@@ -122,12 +180,16 @@ impl ModManager {
     /// Spawn the QuickJS runtime thread and the event relay task.
     /// The event relay forwards ScriptEvents from QuickJS → Tauri event bus.
     pub fn init<R: tauri::Runtime>(&mut self, app_handle: tauri::AppHandle<R>) {
+        self.set_runtime_state(ModRuntimeState::Initializing);
+
         let (tx, mut rx) = mpsc::channel::<ScriptCommand>(32);
         self.script_tx = Some(tx);
 
         // Outgoing event channel: QuickJS closures → event relay → Tauri
         // Using std::sync::mpsc because QuickJS closures are !Send and run on a std thread
         let (event_tx, event_rx) = std::sync::mpsc::channel::<ScriptEvent>();
+        let state_for_script = self.runtime_state.clone();
+        let state_for_health = self.runtime_state.clone();
 
         // ── QuickJS runtime thread ──
         std::thread::spawn(move || {
@@ -135,6 +197,7 @@ impl ModManager {
                 Ok(rt) => rt,
                 Err(e) => {
                     tracing::error!(target: "mods", "[ModManager] Failed to create QuickJS runtime: {}", e);
+                    state_for_script.store(ModRuntimeState::Failed.as_u8(), Ordering::SeqCst);
                     return;
                 }
             };
@@ -142,6 +205,7 @@ impl ModManager {
                 Ok(ctx) => ctx,
                 Err(e) => {
                     tracing::error!(target: "mods", "[ModManager] Failed to create QuickJS context: {}", e);
+                    state_for_script.store(ModRuntimeState::Failed.as_u8(), Ordering::SeqCst);
                     return;
                 }
             };
@@ -152,6 +216,8 @@ impl ModManager {
                     eprintln!("Failed to register Kokoro API: {}", e);
                 }
             });
+
+            state_for_script.store(ModRuntimeState::Running.as_u8(), Ordering::SeqCst);
 
             // Event loop: process incoming script commands
             while let Some(cmd) = rx.blocking_recv() {
@@ -184,6 +250,8 @@ impl ModManager {
                     ScriptCommand::Shutdown => break,
                 }
             }
+
+            state_for_script.store(ModRuntimeState::Disconnected.as_u8(), Ordering::SeqCst);
             tracing::info!(target: "mods", "[ModManager] Script thread shut down.");
         });
 
@@ -223,6 +291,19 @@ impl ModManager {
                 }
             }
             tracing::info!(target: "mods", "[ModManager] Event relay shut down.");
+        });
+
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            if ModRuntimeState::from_u8(state_for_health.load(Ordering::SeqCst))
+                == ModRuntimeState::Initializing
+            {
+                state_for_health.store(ModRuntimeState::Failed.as_u8(), Ordering::SeqCst);
+                tracing::error!(
+                    target: "mods",
+                    "[ModManager] Runtime health check timed out during initialization"
+                );
+            }
         });
     }
 
@@ -408,7 +489,12 @@ impl ModManager {
             };
             match fs::read_to_string(&full_path) {
                 Ok(code) => {
-                    if let Some(tx) = &self.script_tx {
+                    if self.runtime_ready() {
+                        let Some(tx) = self.script_tx.as_ref() else {
+                            self.set_runtime_state(ModRuntimeState::Disconnected);
+                            tracing::error!(target: "mods", "[ModManager] Script runtime sender missing despite running state");
+                            continue;
+                        };
                         let (reply_tx, reply_rx) = oneshot::channel();
                         if let Err(e) = tx
                             .send(ScriptCommand::Eval {
@@ -417,6 +503,7 @@ impl ModManager {
                             })
                             .await
                         {
+                            self.set_runtime_state(ModRuntimeState::Disconnected);
                             tracing::error!(target: "mods", "[ModManager] Failed to send script to runtime: {}", e);
                             continue;
                         }
@@ -432,11 +519,16 @@ impl ModManager {
                                 tracing::error!(target: "mods", "[ModManager] Script '{}' error: {}", script_path, e);
                             }
                             Err(e) => {
+                                self.set_runtime_state(ModRuntimeState::Disconnected);
                                 tracing::error!(target: "mods", "[ModManager] Script thread dropped: {}", e);
                             }
                         }
                     } else {
-                        tracing::error!(target: "mods", "[ModManager] Script runtime not initialized");
+                        tracing::error!(
+                            target: "mods",
+                            "[ModManager] Script runtime not ready (state={})",
+                            self.runtime_state().as_str()
+                        );
                     }
                 }
                 Err(e) => {
@@ -450,17 +542,42 @@ impl ModManager {
         }
 
         // ── 5. Dispatch lifecycle init event ──
-        if let Some(tx) = &self.script_tx {
-            let _ = tx
+        if self.runtime_ready() {
+            let Some(tx) = &self.script_tx else {
+                self.set_runtime_state(ModRuntimeState::Disconnected);
+                tracing::error!(target: "mods", "[ModManager] Cannot dispatch init lifecycle: script sender missing");
+                return Ok(());
+            };
+            match tx
                 .send(ScriptCommand::DispatchEvent {
                     event: "init".to_string(),
                     payload: serde_json::json!({ "modId": mod_id }),
                 })
-                .await;
-            tracing::info!(
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(
+                        target: "mods",
+                        "[ModManager] Dispatched 'init' lifecycle event for mod '{}'",
+                        mod_id
+                    );
+                }
+                Err(e) => {
+                    self.set_runtime_state(ModRuntimeState::Disconnected);
+                    tracing::error!(
+                        target: "mods",
+                        "[ModManager] Failed to dispatch 'init' lifecycle event for mod '{}': {}",
+                        mod_id,
+                        e
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
                 target: "mods",
-                "[ModManager] Dispatched 'init' lifecycle event for mod '{}'",
-                mod_id
+                "[ModManager] Skip init lifecycle dispatch for mod '{}' because runtime state is '{}'",
+                mod_id,
+                self.runtime_state().as_str()
             );
         }
 
@@ -482,16 +599,54 @@ impl ModManager {
         event: &str,
         payload: serde_json::Value,
     ) -> Result<(), String> {
-        if let Some(tx) = &self.script_tx {
-            tx.send(ScriptCommand::DispatchEvent {
-                event: event.to_string(),
-                payload,
-            })
-            .await
-            .map_err(|e| format!("Failed to dispatch event: {}", e))
-        } else {
-            Err("Script runtime not initialized".into())
+        if !self.runtime_ready() {
+            return Err(format!(
+                "Script runtime not ready (state={})",
+                self.runtime_state().as_str()
+            ));
         }
+
+        let Some(tx) = &self.script_tx else {
+            self.set_runtime_state(ModRuntimeState::Disconnected);
+            return Err("Script runtime sender missing".to_string());
+        };
+
+        tx.send(ScriptCommand::DispatchEvent {
+            event: event.to_string(),
+            payload,
+        })
+        .await
+        .map_err(|e| {
+            self.set_runtime_state(ModRuntimeState::Disconnected);
+            format!("Failed to dispatch event: {}", e)
+        })
+    }
+
+    pub fn runtime_status_module_tag(&self) -> Option<String> {
+        if self.runtime_ready() {
+            Some("mods".to_string())
+        } else {
+            Some(format!("mods:{}", self.runtime_state().as_str()))
+        }
+    }
+
+    pub fn runtime_state_text(&self) -> &'static str {
+        self.runtime_state().as_str()
+    }
+
+    pub fn runtime_status_summary(&self) -> (String, bool, bool) {
+        let state = self.runtime_state();
+        let ready = self.runtime_ready();
+        let degraded = matches!(state, ModRuntimeState::Failed | ModRuntimeState::Disconnected);
+        (state.as_str().to_string(), ready, degraded)
+    }
+
+    pub fn runtime_is_running(&self) -> bool {
+        self.runtime_state() == ModRuntimeState::Running
+    }
+
+    pub fn runtime_is_initialized(&self) -> bool {
+        self.runtime_state() != ModRuntimeState::Uninitialized
     }
 
     pub fn get_active_theme(&self) -> Option<&ModThemeJson> {

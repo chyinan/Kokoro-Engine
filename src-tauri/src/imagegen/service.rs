@@ -148,8 +148,8 @@ impl ImageGenService {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            return Err(ImageGenError::ConfigError(
-                "Generation already in progress, skipping".to_string(),
+            return Err(ImageGenError::Unavailable(
+                "generation already in progress".to_string(),
             ));
         }
 
@@ -220,10 +220,12 @@ impl ImageGenService {
             }
         }
 
+        let prompt_chars = prompt.chars().count();
         tracing::info!(
             target: "imagegen",
-            "Generating with provider '{}': {}",
-            target_id, prompt
+            "Generating with provider '{}' (prompt_chars={})",
+            target_id,
+            prompt_chars
         );
 
         let response = provider.generate(gen_params).await?;
@@ -263,27 +265,68 @@ impl ImageGenService {
         providers.keys().cloned().collect()
     }
 
-    pub async fn reload_from_config(&self, config: &ImageGenSystemConfig) {
-        let mut providers = self.providers.write().await;
-        providers.clear();
-        let mut configs = self.provider_configs.write().await;
-        configs.clear();
+    pub async fn reload_from_config(&self, config: &ImageGenSystemConfig) -> Result<(), ImageGenError> {
+        if !config.enabled {
+            let mut providers = self.providers.write().await;
+            providers.clear();
+            let mut configs = self.provider_configs.write().await;
+            configs.clear();
+            let mut default = self.default_provider.write().await;
+            *default = config.default_provider.clone();
+            tracing::info!(target: "imagegen", "Reloaded 0 providers (service disabled)");
+            return Ok(());
+        }
 
-        let mut default = self.default_provider.write().await;
-        *default = config.default_provider.clone();
+        let mut new_providers: HashMap<String, Box<dyn ImageGenProvider>> = HashMap::new();
+        let mut new_configs: HashMap<String, ImageGenProviderConfig> = HashMap::new();
+        let mut first_provider_id: Option<String> = None;
 
-        if config.enabled {
-            for provider_config in &config.providers {
-                if !provider_config.enabled {
-                    continue;
+        for provider_config in &config.providers {
+            if !provider_config.enabled {
+                continue;
+            }
+            if let Some(provider) = Self::build_provider(provider_config) {
+                let id = provider.id();
+                if first_provider_id.is_none() {
+                    first_provider_id = Some(id.clone());
                 }
-                if let Some(provider) = Self::build_provider(provider_config) {
-                    let id = provider.id();
-                    providers.insert(id.clone(), provider);
-                    configs.insert(id, provider_config.clone());
-                }
+                new_providers.insert(id.clone(), provider);
+                new_configs.insert(id, provider_config.clone());
             }
         }
+
+        if new_providers.is_empty() {
+            tracing::error!(
+                target: "imagegen",
+                "Reload skipped: no valid providers built; keeping existing runtime providers"
+            );
+            return Err(ImageGenError::ConfigError(
+                "no valid imagegen providers built from config; runtime providers unchanged".to_string(),
+            ));
+        }
+
+        let mut new_default = config.default_provider.clone();
+        if let Some(default_id) = new_default.as_ref() {
+            if !new_providers.contains_key(default_id) {
+                tracing::warn!(
+                    target: "imagegen",
+                    "Configured default provider '{}' is unavailable after reload; falling back",
+                    default_id
+                );
+                new_default = first_provider_id.clone();
+            }
+        } else {
+            new_default = first_provider_id.clone();
+        }
+
+        let mut providers = self.providers.write().await;
+        *providers = new_providers;
+        let mut configs = self.provider_configs.write().await;
+        *configs = new_configs;
+        let mut default = self.default_provider.write().await;
+        *default = new_default;
+
         tracing::info!(target: "imagegen", "Reloaded {} providers", providers.len());
+        Ok(())
     }
 }

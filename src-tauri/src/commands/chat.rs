@@ -2404,7 +2404,11 @@ pub async fn stream_chat(
                 _ => return,
             };
 
-            tracing::info!(target: "imagegen", "[ImageGen] BG analyzer triggered generation: {}", prompt);
+            tracing::info!(
+                target: "imagegen",
+                "[ImageGen] BG analyzer triggered generation (prompt_chars={})",
+                prompt.chars().count()
+            );
 
             match imagegen_svc
                 .generate(prompt.clone(), None, None, Some(window_size))

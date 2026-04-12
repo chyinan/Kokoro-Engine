@@ -7,14 +7,9 @@ use reqwest::Client;
 use serde::Serialize;
 use std::collections::HashMap;
 
-/// Generic cloud TTS provider that can be configured for various API styles.
+/// Generic cloud TTS provider for bearer/header-key REST APIs.
 ///
-/// Supports two authentication patterns:
-///   - **Bearer token** (OpenAI, ElevenLabs): `Authorization: Bearer <key>`
-///   - **Subscription key** (Azure): `Ocp-Apim-Subscription-Key: <key>`
-///
-/// Create instances via `CloudTTSProvider::azure_style()` or
-/// `CloudTTSProvider::elevenlabs_style()` factory methods.
+/// Create instances via `CloudTTSProvider::elevenlabs_style()`.
 pub struct CloudTTSProvider {
     client: Client,
     provider_id: String,
@@ -30,7 +25,6 @@ pub struct CloudTTSProvider {
 #[derive(Clone)]
 enum AuthStyle {
     Bearer,               // Authorization: Bearer <key>
-    SubscriptionKey,      // Ocp-Apim-Subscription-Key: <key>
     CustomHeader(String), // Arbitrary header name
 }
 
@@ -48,46 +42,6 @@ struct GenericSynthRequest {
 }
 
 impl CloudTTSProvider {
-    /// Create an Azure Cognitive Services-style TTS provider.
-    pub fn azure_style(config: &ProviderConfig) -> Option<Self> {
-        let api_key = config.resolve_api_key()?;
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| {
-                tracing::error!(
-                    target: "tts",
-                    "Failed to build HTTP client for provider '{}': {}",
-                    config.id,
-                    e
-                );
-            })
-            .ok()?;
-
-        Some(Self {
-            client,
-            provider_id: config.id.clone(),
-            api_key,
-            base_url: config.base_url.clone().unwrap_or_else(|| {
-                "https://eastus.tts.speech.microsoft.com/cognitiveservices/v1".to_string()
-            }),
-            auth_style: AuthStyle::SubscriptionKey,
-            default_voice: config
-                .default_voice
-                .clone()
-                .unwrap_or_else(|| "en-US-JennyNeural".to_string()),
-            model: config.model.clone(),
-            capabilities: ProviderCapabilities {
-                supports_streaming: true,
-                supports_emotions: true,
-                supports_speed: true,
-                supports_pitch: true,
-                supports_cloning: false,
-                supports_ssml: true,
-            },
-        })
-    }
-
     /// Create an ElevenLabs-style TTS provider.
     pub fn elevenlabs_style(config: &ProviderConfig) -> Option<Self> {
         let api_key = config.resolve_api_key()?;
@@ -132,7 +86,6 @@ impl CloudTTSProvider {
     fn build_auth_header(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth_style {
             AuthStyle::Bearer => req.header("Authorization", format!("Bearer {}", self.api_key)),
-            AuthStyle::SubscriptionKey => req.header("Ocp-Apim-Subscription-Key", &self.api_key),
             AuthStyle::CustomHeader(header_name) => req.header(header_name, &self.api_key),
         }
     }
@@ -168,8 +121,7 @@ impl TtsProvider for CloudTTSProvider {
 
     async fn synthesize(&self, text: &str, params: TtsParams) -> Result<Vec<u8>, TtsError> {
         // ElevenLabs-style: POST /text-to-speech/{voice_id}
-        // Azure-style: POST with SSML body
-        // We use a generic JSON approach that works with most REST APIs
+        // Generic JSON approach for header-key/bearer REST APIs
         let voice = params.voice.unwrap_or_else(|| self.default_voice.clone());
         let url = format!("{}/text-to-speech/{}", self.base_url, voice);
 

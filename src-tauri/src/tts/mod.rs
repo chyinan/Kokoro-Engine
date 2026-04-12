@@ -1,3 +1,4 @@
+pub mod azure;
 pub mod browser;
 pub mod cache;
 pub mod cloud_base;

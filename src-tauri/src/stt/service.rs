@@ -131,24 +131,39 @@ impl SttService {
         self.config.read().await.clone()
     }
 
-    /// Hot-reload: update config and rebuild providers.
-    pub async fn reload_from_config(&self, config: &SttConfig) {
+    /// Hot-reload: rebuild providers first, then atomically swap runtime state.
+    pub async fn reload_from_config(&self, config: &SttConfig) -> Result<(), SttError> {
+        let mut new_providers: Vec<Arc<dyn SttEngine>> = Vec::new();
+
+        for provider_cfg in &config.providers {
+            if provider_cfg.enabled {
+                if let Some(provider) = Self::build_provider(provider_cfg) {
+                    new_providers.push(provider);
+                }
+            }
+        }
+
+        if new_providers.is_empty() {
+            tracing::error!(
+                target: "stt",
+                "Reload skipped: no valid providers built; keeping existing runtime providers"
+            );
+            return Err(SttError::ConfigError(
+                "no valid STT providers built from config; runtime providers unchanged".to_string(),
+            ));
+        }
+
+        {
+            let mut providers = self.providers.write().await;
+            *providers = new_providers;
+            tracing::info!(target: "stt", "Reloaded with {} provider(s)", providers.len());
+        }
+
         {
             let mut cfg = self.config.write().await;
             *cfg = config.clone();
         }
 
-        let mut providers = self.providers.write().await;
-        providers.clear();
-
-        for provider_cfg in &config.providers {
-            if provider_cfg.enabled {
-                if let Some(provider) = Self::build_provider(provider_cfg) {
-                    providers.push(provider);
-                }
-            }
-        }
-
-        tracing::info!(target: "stt", "Reloaded with {} provider(s)", providers.len());
+        Ok(())
     }
 }

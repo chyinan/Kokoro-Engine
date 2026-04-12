@@ -87,7 +87,10 @@ pub async fn save_tts_config(
     save_config(&config_path, &config)?;
 
     // Hot-reload providers
-    state.reload_from_config(&config).await;
+    state
+        .reload_from_config(&config)
+        .await
+        .map_err(|e| KokoroError::Tts(format!("failed to reload TTS providers: {}", e)))?;
 
     Ok(())
 }

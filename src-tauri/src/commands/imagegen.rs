@@ -16,7 +16,7 @@ pub async fn generate_image(
     state
         .generate(prompt, provider_id, params, Some(window_size))
         .await
-        .map_err(|e| KokoroError::ExternalService(e.to_string()))
+        .map_err(KokoroError::from)
 }
 
 #[command]
@@ -38,7 +38,10 @@ pub async fn save_imagegen_config(
         .join("com.chyin.kokoro");
     let config_path = app_data.join("imagegen_config.json");
     save_config(&config_path, &config).map_err(|e| KokoroError::Config(e.to_string()))?;
-    state.reload_from_config(&config).await;
+    state
+        .reload_from_config(&config)
+        .await
+        .map_err(|e| KokoroError::Config(format!("failed to reload imagegen providers: {}", e)))?;
     Ok(())
 }
 

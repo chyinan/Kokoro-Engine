@@ -91,11 +91,14 @@ pub fn get_system_status(app: tauri::AppHandle, state: State<'_, AIOrchestrator>
     {
         active_modules.push("mcp".to_string());
     }
-    if app
-        .try_state::<tokio::sync::Mutex<crate::mods::ModManager>>()
-        .is_some()
-    {
-        active_modules.push("mods".to_string());
+    if let Some(mod_manager) = app.try_state::<tokio::sync::Mutex<crate::mods::ModManager>>() {
+        if let Ok(manager) = mod_manager.try_lock() {
+            if let Some(module_tag) = manager.runtime_status_module_tag() {
+                active_modules.push(module_tag);
+            }
+        } else {
+            active_modules.push("mods:unknown".to_string());
+        }
     }
     if app
         .try_state::<std::sync::Arc<tokio::sync::Mutex<crate::vision::server::VisionServer>>>()

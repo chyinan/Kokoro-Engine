@@ -1,3 +1,4 @@
+use super::azure::AzureTtsProvider;
 use super::browser::BrowserTTSProvider;
 use super::cache::{CacheKey, TtsCache};
 use super::cloud_base::CloudTTSProvider;
@@ -144,7 +145,7 @@ impl TtsService {
                 LocalRVCProvider::from_config(config).map(|p| Box::new(p) as Box<dyn TtsProvider>)
             }
             "azure" => {
-                CloudTTSProvider::azure_style(config).map(|p| Box::new(p) as Box<dyn TtsProvider>)
+                AzureTtsProvider::from_config(config).map(|p| Box::new(p) as Box<dyn TtsProvider>)
             }
             "elevenlabs" => CloudTTSProvider::elevenlabs_style(config)
                 .map(|p| Box::new(p) as Box<dyn TtsProvider>),
@@ -404,32 +405,27 @@ impl TtsService {
         }
     }
 
-    /// Hot-reload: clear all providers and re-initialize from a new config.
-    pub async fn reload_from_config(&self, config: &TtsSystemConfig) {
-        // Clear existing providers and voice registry
-        {
-            let mut providers = self.providers.write().await;
-            providers.clear();
-        }
-        {
-            let mut registry = self.voice_registry.write().await;
-            *registry = VoiceRegistry::new();
-        }
-        {
-            let mut default = self.default_provider.write().await;
-            *default = config.default_provider.clone();
-        }
+    /// Hot-reload: rebuild providers first, then atomically swap runtime state.
+    pub async fn reload_from_config(&self, config: &TtsSystemConfig) -> Result<(), TtsError> {
+        let mut new_providers: HashMap<String, Box<dyn TtsProvider>> = HashMap::new();
+        let mut new_registry = VoiceRegistry::new();
+        let mut first_provider_id: Option<String> = None;
 
-        // Re-register enabled providers
         for provider_config in &config.providers {
             if !provider_config.enabled {
                 tracing::info!(target: "tts", "Skipping disabled provider: {}", provider_config.id);
                 continue;
             }
+
             match Self::build_provider(provider_config).await {
                 Some(provider) => {
                     tracing::info!(target: "tts", "Registering provider: {}", provider_config.id);
-                    self.register_provider(provider).await;
+                    let provider_id = provider.id();
+                    if first_provider_id.is_none() {
+                        first_provider_id = Some(provider_id.clone());
+                    }
+                    new_registry.register_all(provider.voices());
+                    new_providers.insert(provider_id, provider);
                 }
                 None => {
                     tracing::error!(
@@ -441,6 +437,43 @@ impl TtsService {
             }
         }
 
+        if new_providers.is_empty() {
+            tracing::error!(
+                target: "tts",
+                "Reload skipped: no valid providers built; keeping existing runtime providers"
+            );
+            return Err(TtsError::ConfigError(
+                "no valid TTS providers built from config; runtime providers unchanged".to_string(),
+            ));
+        }
+
+        let mut new_default = config.default_provider.clone();
+        if let Some(default_id) = new_default.as_ref() {
+            if !new_providers.contains_key(default_id) {
+                tracing::warn!(
+                    target: "tts",
+                    "Configured default provider '{}' is unavailable after reload; falling back",
+                    default_id
+                );
+                new_default = first_provider_id.clone();
+            }
+        } else {
+            new_default = first_provider_id.clone();
+        }
+
+        {
+            let mut providers = self.providers.write().await;
+            *providers = new_providers;
+        }
+        {
+            let mut registry = self.voice_registry.write().await;
+            *registry = new_registry;
+        }
+        {
+            let mut default = self.default_provider.write().await;
+            *default = new_default;
+        }
+
         // Clear cache since providers changed
         self.clear_cache().await;
         tracing::info!(
@@ -448,6 +481,8 @@ impl TtsService {
             "Reloaded {} providers from config",
             self.providers.read().await.len()
         );
+
+        Ok(())
     }
 
     /// Synthesize text to raw audio bytes without requiring an AppHandle.

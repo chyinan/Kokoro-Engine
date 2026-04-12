@@ -66,7 +66,10 @@ pub async fn save_stt_config(
         .join("com.chyin.kokoro");
     let config_path = app_data.join("stt_config.json");
     save_config(&config_path, &config)?;
-    state.reload_from_config(&config).await;
+    state
+        .reload_from_config(&config)
+        .await
+        .map_err(KokoroError::from)?;
     Ok(())
 }
 
