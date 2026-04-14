@@ -8,7 +8,7 @@ use crate::llm::provider::LlmProvider;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -49,6 +49,8 @@ pub struct AIOrchestrator {
     memory_history_boundary: Arc<Mutex<usize>>,
     /// Current character ID for memory isolation.
     character_id: Arc<Mutex<String>>,
+    /// In-memory cooldown map for memory event trigger throttling.
+    memory_event_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
     /// Global toggle for all automatic memory reads/writes/injection.
     memory_enabled: Arc<AtomicBool>,
     /// Timestamp of last user activity (for idle detection).
@@ -102,6 +104,7 @@ impl AIOrchestrator {
             memory_trigger_count: Arc::new(Mutex::new(0)),
             memory_history_boundary: Arc::new(Mutex::new(0)),
             character_id: Arc::new(Mutex::new("default".to_string())),
+            memory_event_cooldowns: Arc::new(Mutex::new(HashMap::new())),
             memory_enabled: Arc::new(AtomicBool::new(true)),
             last_activity: Arc::new(Mutex::new(Instant::now())),
             conversation_count: Arc::new(Mutex::new(0)),
@@ -901,6 +904,20 @@ impl AIOrchestrator {
         *conv_id = None;
         Self::persist_conversation_id(None);
     }
+
+    pub async fn should_trigger_memory_event(&self, cooldown_key: &str, cooldown_secs: u64) -> bool {
+        let now = Instant::now();
+        let mut cooldowns = self.memory_event_cooldowns.lock().await;
+
+        if let Some(last_triggered_at) = cooldowns.get(cooldown_key) {
+            if now.duration_since(*last_triggered_at).as_secs() < cooldown_secs {
+                return false;
+            }
+        }
+
+        cooldowns.insert(cooldown_key.to_string(), now);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -911,6 +928,42 @@ mod tests {
         AIOrchestrator::new("sqlite::memory:")
             .await
             .expect("Failed to create test orchestrator")
+    }
+
+    #[tokio::test]
+    async fn memory_event_cooldown_blocks_same_key_within_window() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        assert!(orchestrator
+            .should_trigger_memory_event("char-1:conv-1:preference", 60)
+            .await);
+        assert!(!orchestrator
+            .should_trigger_memory_event("char-1:conv-1:preference", 60)
+            .await);
+    }
+
+    #[tokio::test]
+    async fn memory_event_cooldown_allows_different_keys() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        assert!(orchestrator
+            .should_trigger_memory_event("char-1:conv-1:preference", 60)
+            .await);
+        assert!(orchestrator
+            .should_trigger_memory_event("char-1:conv-1:plan", 60)
+            .await);
+    }
+
+    #[tokio::test]
+    async fn memory_event_cooldown_allows_zero_window() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        assert!(orchestrator
+            .should_trigger_memory_event("char-1:conv-1:preference", 0)
+            .await);
+        assert!(orchestrator
+            .should_trigger_memory_event("char-1:conv-1:preference", 0)
+            .await);
     }
 
     #[tokio::test]

@@ -4,6 +4,8 @@
  * Typed wrapper around Tauri's invoke API.
  * All backend commands are accessed through this module.
  */
+// pattern: Mixed (unavoidable)
+// Reason: 前端 bridge 同时承担 IPC 副作用封装与类型导出，是前端与 Tauri 边界的集中编排层。
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ModManifest, TtsConfig, ProviderStatus, VoiceProfile, TtsSystemConfig, ModThemeJson } from "../core/types/mod";
@@ -737,6 +739,38 @@ export interface ListMemoriesResponse {
     total: number;
 }
 
+export type MemoryUpgradeConfig = {
+    readonly observability_enabled: boolean;
+    readonly event_trigger_enabled: boolean;
+    readonly event_cooldown_secs: number;
+    readonly structured_memory_enabled: boolean;
+    readonly intent_routing_enabled: boolean;
+    readonly retrieval_eval_enabled: boolean;
+};
+
+export type MemoryObservabilitySummary = {
+    readonly write_event_count: number;
+    readonly retrieval_log_count: number;
+};
+
+export type MemoryWriteEventRecord = {
+    readonly source: string;
+    readonly trigger: string;
+    readonly extracted_count: number;
+    readonly stored_count: number;
+    readonly deduplicated_count: number;
+    readonly invalidated_count: number;
+    readonly duration_ms: number;
+};
+
+export type MemoryRetrievalLogRecord = {
+    readonly query: string;
+    readonly semantic_candidates: number;
+    readonly bm25_candidates: number;
+    readonly fused_candidates: number;
+    readonly injected_count: number;
+};
+
 export async function listMemories(characterId: string, limit = 50, offset = 0): Promise<ListMemoriesResponse> {
     return invoke<ListMemoriesResponse>("list_memories", {
         request: { character_id: characterId, limit, offset },
@@ -759,6 +793,26 @@ export async function updateMemoryTier(id: number, tier: string): Promise<void> 
     return invoke("update_memory_tier", {
         request: { id, tier },
     });
+}
+
+export async function getMemoryUpgradeConfig(): Promise<MemoryUpgradeConfig> {
+    return invoke<MemoryUpgradeConfig>("get_memory_upgrade_config");
+}
+
+export async function setMemoryUpgradeConfig(config: Readonly<MemoryUpgradeConfig>): Promise<void> {
+    return invoke("set_memory_upgrade_config", { config });
+}
+
+export async function getMemoryObservabilitySummary(): Promise<MemoryObservabilitySummary> {
+    return invoke<MemoryObservabilitySummary>("get_memory_observability_summary");
+}
+
+export async function getLatestMemoryWriteEvent(): Promise<MemoryWriteEventRecord | null> {
+    return invoke<MemoryWriteEventRecord | null>("get_latest_memory_write_event");
+}
+
+export async function getLatestMemoryRetrievalLog(): Promise<MemoryRetrievalLogRecord | null> {
+    return invoke<MemoryRetrievalLogRecord | null>("get_latest_memory_retrieval_log");
 }
 
 // ── STT (Speech-to-Text) ──────────────────────────────

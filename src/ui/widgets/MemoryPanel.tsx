@@ -1,3 +1,5 @@
+// pattern: Mixed (unavoidable)
+// Reason: React 组件同时承载展示逻辑、事件订阅、状态更新与 IPC 调用，当前阶段只做最小前端接线。
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
@@ -5,8 +7,8 @@ import { useTranslation } from "react-i18next";
 import { Trash2, Pencil, Check, X, Search, Brain, ChevronDown, List, Calendar, Share2, UserCircle } from "lucide-react";
 import { inputClasses } from "../styles/settings-primitives";
 import { Select } from "@/components/ui/select";
-import { listMemories, updateMemory, deleteMemory, listCharacters, getMemoryEnabled, setMemoryEnabled } from "../../lib/kokoro-bridge";
-import type { MemoryRecord, CharacterRecord } from "../../lib/kokoro-bridge";
+import { listMemories, updateMemory, deleteMemory, listCharacters, getMemoryEnabled, setMemoryEnabled, getMemoryObservabilitySummary } from "../../lib/kokoro-bridge";
+import type { MemoryRecord, CharacterRecord, MemoryObservabilitySummary } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { MemoryTimeline } from "./memory/MemoryTimeline";
 import { MemoryGraph } from "./memory/MemoryGraph";
@@ -31,6 +33,9 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
     const [page, setPage] = useState(0);
     const [memoryEnabled, setMemoryEnabledState] = useState(true);
     const [togglingMemory, setTogglingMemory] = useState(false);
+    const [observability, setObservability] = useState<MemoryObservabilitySummary | null>(null);
+    const [observabilityLoading, setObservabilityLoading] = useState(false);
+    const [observabilityError, setObservabilityError] = useState<string | null>(null);
     const pageSize = 50; // Load more for graph/timeline
 
     // ── Character selector state ──
@@ -52,6 +57,33 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
             .then(setMemoryEnabledState)
             .catch((e) => console.error("[MemoryPanel] Failed to load memory toggle:", e));
     }, []);
+
+    const fetchObservability = useCallback(async () => {
+        setObservabilityLoading(true);
+        setObservabilityError(null);
+        try {
+            const summary = await getMemoryObservabilitySummary();
+            setObservability(summary);
+        } catch (e) {
+            setObservabilityError(e instanceof Error ? e.message : String(e));
+        } finally {
+            setObservabilityLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        fetchObservability();
+    }, [fetchObservability]);
+
+    useEffect(() => {
+        const unlisten = listen<string>("memory:updated", () => {
+            fetchObservability();
+        });
+        return () => {
+            unlisten.then((fn) => fn());
+        };
+    }, [fetchObservability]);
+
 
     // Reset page when switching characters
     useEffect(() => {
@@ -183,6 +215,21 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                 </div>
 
                 <div className="rounded-lg border border-[var(--color-border)] bg-black/20 p-3">
+                    <div className="mb-3 rounded-md border border-[var(--color-border)] bg-black/30 px-3 py-2">
+                        <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                            记忆可观测性（Phase 1）
+                        </div>
+                        {observabilityLoading ? (
+                            <div className="mt-1 text-xs text-[var(--color-text-muted)]">加载中...</div>
+                        ) : observabilityError ? (
+                            <div className="mt-1 text-xs text-red-400">{observabilityError}</div>
+                        ) : (
+                            <div className="mt-1 flex items-center gap-3 text-xs text-[var(--color-text-muted)]">
+                                <span>写入事件: {observability?.write_event_count ?? 0}</span>
+                                <span>检索日志: {observability?.retrieval_log_count ?? 0}</span>
+                            </div>
+                        )}
+                    </div>
                     <div className="flex items-start justify-between gap-4">
                         <div className="space-y-1">
                             <div className="text-sm font-heading font-semibold text-[var(--color-text-primary)]">
