@@ -30,11 +30,61 @@ const EXTRACTION_PROMPT: &str = concat!(
     "IMPORTANT: Output ONLY the JSON array, no explanation or markdown."
 );
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MemoryExtractionOptions {
+    pub structured_memory_enabled: bool,
+}
+
 /// A scored memory fact from the LLM.
 #[derive(serde::Deserialize)]
 struct ScoredFact {
     fact: String,
     importance: f64,
+}
+
+#[derive(serde::Deserialize)]
+struct StructuredFact {
+    fact: String,
+    importance: f64,
+    #[serde(default)]
+    memory_type: Option<String>,
+    #[serde(default)]
+    entity_key: Option<String>,
+}
+
+fn extraction_prompt(options: MemoryExtractionOptions) -> String {
+    if options.structured_memory_enabled {
+        concat!(
+            "You are a memory extraction assistant. Analyze the following conversation and extract noteworthy facts worth remembering.\n\n",
+            "Respond with ONLY a JSON array of objects in this schema:\n",
+            "[{\"fact\":\"...\",\"importance\":0.8,\"memory_type\":\"profile|preference|plan|fact|constraint\",\"entity_key\":\"optional.entity.key\"}]\n",
+            "If nothing noteworthy was said, respond with [].\n",
+            "IMPORTANT: Output ONLY the JSON array, no explanation or markdown."
+        )
+        .to_string()
+    } else {
+        EXTRACTION_PROMPT.to_string()
+    }
+}
+
+fn build_storage_content_from_structured_fact(fact: &StructuredFact) -> String {
+    let mut tags = Vec::new();
+    if let Some(memory_type) = &fact.memory_type {
+        if !memory_type.trim().is_empty() {
+            tags.push(format!("type:{}", memory_type.trim()));
+        }
+    }
+    if let Some(entity_key) = &fact.entity_key {
+        if !entity_key.trim().is_empty() {
+            tags.push(format!("key:{}", entity_key.trim()));
+        }
+    }
+
+    if tags.is_empty() {
+        fact.fact.trim().to_string()
+    } else {
+        format!("[{}] {}", tags.join("|"), fact.fact.trim())
+    }
 }
 
 /// Extracts memories from recent conversation history and stores them.
@@ -45,6 +95,23 @@ pub async fn extract_and_store_memories(
     memory_manager: &Arc<MemoryManager>,
     provider: Arc<dyn LlmProvider>,
     character_id: String,
+) {
+    extract_and_store_memories_with_options(
+        recent_history,
+        memory_manager,
+        provider,
+        character_id,
+        MemoryExtractionOptions::default(),
+    )
+    .await;
+}
+
+pub async fn extract_and_store_memories_with_options(
+    recent_history: &[Message],
+    memory_manager: &Arc<MemoryManager>,
+    provider: Arc<dyn LlmProvider>,
+    character_id: String,
+    options: MemoryExtractionOptions,
 ) {
     if recent_history.is_empty() {
         tracing::info!(target: "memory", "[Memory] extract_and_store_memories called but history is empty");
@@ -89,12 +156,40 @@ pub async fn extract_and_store_memories(
         .join("\n");
 
     let messages = vec![
-        system_message(format!("{}{}", EXTRACTION_PROMPT, existing_block)),
+        system_message(format!("{}{}", extraction_prompt(options), existing_block)),
         user_text_message(format!("Conversation to analyze:\n\n{}", transcript)),
     ];
 
     match provider.chat(messages, None).await {
         Ok(response) => {
+            if options.structured_memory_enabled {
+                let structured = parse_structured_response(&response);
+                if !structured.is_empty() {
+                    let count = structured.len();
+                    for fact in structured {
+                        let content = build_storage_content_from_structured_fact(&fact);
+                        if let Err(e) = memory_manager
+                            .add_memory_with_importance(&content, &character_id, fact.importance)
+                            .await
+                        {
+                            tracing::error!(
+                                target: "memory",
+                                "[Memory] Failed to store structured memory '{}': {}",
+                                content,
+                                e
+                            );
+                        }
+                    }
+                    tracing::info!(
+                        target: "memory",
+                        "[Memory] Extracted {} structured memories for '{}'.",
+                        count,
+                        character_id
+                    );
+                    return;
+                }
+            }
+
             // Try scored format first, fall back to plain string array
             let scored = parse_scored_response(&response);
             if scored.is_empty() {
@@ -139,6 +234,17 @@ pub async fn extract_and_store_memories(
         Err(e) => {
             tracing::error!(target: "memory", "[Memory] Extraction LLM call failed: {}", e);
         }
+    }
+}
+
+fn parse_structured_response(response: &str) -> Vec<StructuredFact> {
+    let json_str = strip_code_fences(response);
+    match serde_json::from_str::<Vec<StructuredFact>>(json_str) {
+        Ok(items) => items
+            .into_iter()
+            .filter(|s| !s.fact.trim().is_empty())
+            .collect(),
+        Err(_) => Vec::new(),
     }
 }
 

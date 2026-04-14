@@ -25,10 +25,17 @@ pub struct MemoryIngressEvent {
     pub cooldown_secs: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryIngressDecision {
+    pub event: MemoryIngressEvent,
+    pub trigger_label: &'static str,
+}
+
 #[derive(Debug, Clone)]
 pub struct MemoryEventIngressOptions {
     pub enabled: bool,
     pub event_cooldown_secs: u64,
+    pub intent_routing_enabled: bool,
 }
 
 impl Default for MemoryEventIngressOptions {
@@ -36,8 +43,95 @@ impl Default for MemoryEventIngressOptions {
         Self {
             enabled: false,
             event_cooldown_secs: 120,
+            intent_routing_enabled: true,
         }
     }
+}
+
+pub fn event_trigger_label(event_type: MemoryEventType) -> &'static str {
+    match event_type {
+        MemoryEventType::Preference => "event_preference",
+        MemoryEventType::Correction => "event_correction",
+        MemoryEventType::Plan => "event_plan",
+        MemoryEventType::Profile => "event_profile",
+    }
+}
+
+pub fn select_memory_ingress_decision(
+    input: &str,
+    options: &MemoryEventIngressOptions,
+) -> Option<MemoryIngressDecision> {
+    if !options.enabled {
+        return None;
+    }
+
+    let events = detect_memory_events(input, options);
+    let event = if options.intent_routing_enabled {
+        prioritized_event(events)
+    } else {
+        events.into_iter().next()
+    }?;
+
+    Some(MemoryIngressDecision {
+        trigger_label: event_trigger_label(event.event_type),
+        event,
+    })
+}
+
+pub fn memory_extraction_structured_enabled(options: &MemoryEventIngressOptions) -> bool {
+    options.enabled && options.intent_routing_enabled
+}
+
+pub fn should_use_structured_extraction(
+    upgrade_enabled: bool,
+    options: &MemoryEventIngressOptions,
+) -> bool {
+    upgrade_enabled && memory_extraction_structured_enabled(options)
+}
+
+pub fn build_memory_ingress_decision_for_test(
+    input: &str,
+    event_trigger_enabled: bool,
+    intent_routing_enabled: bool,
+    cooldown_secs: u64,
+) -> Option<MemoryIngressDecision> {
+    select_memory_ingress_decision(
+        input,
+        &MemoryEventIngressOptions {
+            enabled: event_trigger_enabled,
+            event_cooldown_secs: cooldown_secs,
+            intent_routing_enabled,
+        },
+    )
+}
+
+pub fn build_memory_extraction_options_for_test(
+    structured_memory_enabled: bool,
+    event_trigger_enabled: bool,
+    intent_routing_enabled: bool,
+) -> bool {
+    should_use_structured_extraction(
+        structured_memory_enabled,
+        &MemoryEventIngressOptions {
+            enabled: event_trigger_enabled,
+            event_cooldown_secs: 120,
+            intent_routing_enabled,
+        },
+    )
+}
+
+fn prioritized_event(events: Vec<MemoryIngressEvent>) -> Option<MemoryIngressEvent> {
+    for event_type in [
+        MemoryEventType::Preference,
+        MemoryEventType::Correction,
+        MemoryEventType::Plan,
+        MemoryEventType::Profile,
+    ] {
+        if let Some(event) = events.iter().find(|event| event.event_type == event_type) {
+            return Some(event.clone());
+        }
+    }
+    None
 }
 
 pub fn build_cooldown_key(character_id: &str, conversation_id: &str, event_type: MemoryEventType) -> String {
@@ -198,5 +292,36 @@ mod tests {
     fn builds_cooldown_key_with_event_type() {
         let key = build_cooldown_key("char-1", "conv-1", MemoryEventType::Preference);
         assert_eq!(key, "char-1:conv-1:preference");
+    }
+
+    #[test]
+    fn ingress_decision_respects_disabled_flag() {
+        let decision = build_memory_ingress_decision_for_test(
+            "我是第一次接触这个项目的前端部分",
+            false,
+            true,
+            120,
+        );
+        assert!(decision.is_none());
+    }
+
+    #[test]
+    fn ingress_decision_uses_priority_when_intent_routing_enabled() {
+        let decision = build_memory_ingress_decision_for_test(
+            "不是我喜欢猫，下周我要继续做前端",
+            true,
+            true,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_preference");
+    }
+
+    #[test]
+    fn structured_extraction_requires_both_flags() {
+        assert!(build_memory_extraction_options_for_test(true, true, true));
+        assert!(!build_memory_extraction_options_for_test(true, true, false));
+        assert!(!build_memory_extraction_options_for_test(true, false, true));
+        assert!(!build_memory_extraction_options_for_test(false, true, true));
     }
 }

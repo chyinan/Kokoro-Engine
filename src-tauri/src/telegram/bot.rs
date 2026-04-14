@@ -7,7 +7,8 @@ use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{execute_tool_calls, ToolInvocation};
 use crate::ai::context::AIOrchestrator;
 use crate::ai::memory_event_ingress::{
-    build_cooldown_key, detect_memory_events, MemoryEventIngressOptions, MemoryEventType,
+    build_cooldown_key, select_memory_ingress_decision, should_use_structured_extraction,
+    MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
 use crate::imagegen::ImageGenService;
@@ -506,6 +507,7 @@ async fn handle_text(
     let ingress_options = MemoryEventIngressOptions {
         enabled: upgrade_config.event_trigger_enabled,
         event_cooldown_secs: upgrade_config.event_cooldown_secs,
+        intent_routing_enabled: upgrade_config.intent_routing_enabled,
     };
     tracing::info!(
         target: "telegram::memory",
@@ -513,24 +515,17 @@ async fn handle_text(
         msg_count, memory_msg_count, char_id
     );
 
-    if orchestrator.is_memory_enabled() && ingress_options.enabled {
-        let detected_events = detect_memory_events(text, &ingress_options);
-        if let Some(event) = detected_events.first() {
-            let cooldown_key = build_cooldown_key(&char_id, &chat_id.to_string(), event.event_type);
+    if orchestrator.is_memory_enabled() {
+        if let Some(decision) = select_memory_ingress_decision(text, &ingress_options) {
+            let cooldown_key = build_cooldown_key(&char_id, &chat_id.to_string(), decision.event.event_type);
             if orchestrator
-                .should_trigger_memory_event(&cooldown_key, event.cooldown_secs)
+                .should_trigger_memory_event(&cooldown_key, decision.event.cooldown_secs)
                 .await
             {
-                let trigger_label = match event.event_type {
-                    MemoryEventType::Preference => "event_preference",
-                    MemoryEventType::Correction => "event_correction",
-                    MemoryEventType::Plan => "event_plan",
-                    MemoryEventType::Profile => "event_profile",
-                };
                 tracing::info!(
                     target: "telegram::memory",
                     "[Telegram/Memory] Triggering event-driven extraction (trigger={}, count={})",
-                    trigger_label,
+                    decision.trigger_label,
                     msg_count
                 );
 
@@ -540,7 +535,13 @@ async fn handle_text(
                 let char_id_for_mem = char_id.clone();
                 let memory_enabled = orchestrator.memory_enabled_flag();
                 let observation_started_at = std::time::Instant::now();
-                let trigger_for_observation = trigger_label.to_string();
+                let trigger_for_observation = decision.trigger_label.to_string();
+                let extraction_options = memory_extractor::MemoryExtractionOptions {
+                    structured_memory_enabled: should_use_structured_extraction(
+                        upgrade_config.structured_memory_enabled,
+                        &ingress_options,
+                    ),
+                };
                 tauri::async_runtime::spawn(async move {
                     if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                         return;
@@ -553,11 +554,12 @@ async fn handle_text(
                             observation_started_at,
                         )
                         .await;
-                    memory_extractor::extract_and_store_memories(
+                    memory_extractor::extract_and_store_memories_with_options(
                         &history,
                         &memory_mgr,
                         provider_for_mem,
                         char_id_for_mem,
+                        extraction_options,
                     )
                     .await;
                 });

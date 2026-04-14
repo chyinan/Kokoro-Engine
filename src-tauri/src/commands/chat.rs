@@ -12,7 +12,8 @@ use crate::actions::{
 use crate::ai::context::AIOrchestrator;
 use crate::ai::context::Message;
 use crate::ai::memory_event_ingress::{
-    build_cooldown_key, detect_memory_events, MemoryEventIngressOptions, MemoryEventType,
+    build_cooldown_key, select_memory_ingress_decision, should_use_structured_extraction,
+    MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
 use crate::commands::system::WindowSizeState;
@@ -2298,6 +2299,7 @@ pub async fn stream_chat(
     let ingress_options = MemoryEventIngressOptions {
         enabled: upgrade_config.event_trigger_enabled,
         event_cooldown_secs: upgrade_config.event_cooldown_secs,
+        intent_routing_enabled: upgrade_config.intent_routing_enabled,
     };
     tracing::info!(
         target: "memory",
@@ -2305,28 +2307,21 @@ pub async fn stream_chat(
         msg_count, memory_msg_count
     );
 
-    if state.is_memory_enabled() && ingress_options.enabled {
-        let detected_events = detect_memory_events(&request.message, &ingress_options);
-        if let Some(event) = detected_events.first() {
+    if state.is_memory_enabled() {
+        if let Some(decision) = select_memory_ingress_decision(&request.message, &ingress_options) {
             let conversation_key = conversation_id
                 .as_deref()
                 .unwrap_or("no-conversation")
                 .to_string();
-            let cooldown_key = build_cooldown_key(&char_id, &conversation_key, event.event_type);
+            let cooldown_key = build_cooldown_key(&char_id, &conversation_key, decision.event.event_type);
             if state
-                .should_trigger_memory_event(&cooldown_key, event.cooldown_secs)
+                .should_trigger_memory_event(&cooldown_key, decision.event.cooldown_secs)
                 .await
             {
-                let trigger_label = match event.event_type {
-                    MemoryEventType::Preference => "event_preference",
-                    MemoryEventType::Correction => "event_correction",
-                    MemoryEventType::Plan => "event_plan",
-                    MemoryEventType::Profile => "event_profile",
-                };
                 tracing::info!(
                     target: "memory",
                     "[Memory] Triggering event-driven extraction (trigger={}, count={})",
-                    trigger_label,
+                    decision.trigger_label,
                     msg_count
                 );
 
@@ -2336,7 +2331,13 @@ pub async fn stream_chat(
                 let provider_for_mem = system_provider.clone();
                 let memory_enabled = state.memory_enabled_flag();
                 let observation_started_at = std::time::Instant::now();
-                let trigger_for_observation = trigger_label.to_string();
+                let trigger_for_observation = decision.trigger_label.to_string();
+                let extraction_options = memory_extractor::MemoryExtractionOptions {
+                    structured_memory_enabled: should_use_structured_extraction(
+                        upgrade_config.structured_memory_enabled,
+                        &ingress_options,
+                    ),
+                };
                 tauri::async_runtime::spawn(async move {
                     if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                         return;
@@ -2349,11 +2350,12 @@ pub async fn stream_chat(
                             observation_started_at,
                         )
                         .await;
-                    memory_extractor::extract_and_store_memories(
+                    memory_extractor::extract_and_store_memories_with_options(
                         &history,
                         &memory_mgr,
                         provider_for_mem,
                         char_id_for_mem,
+                        extraction_options,
                     )
                     .await;
                 });
@@ -2532,23 +2534,332 @@ mod tests {
     use crate::actions::registry::{
         ActionInfo, ActionPermissionLevel, ActionRiskTag, ActionSource,
     };
-    use crate::ai::memory_event_ingress::MemoryEventType;
+    use crate::ai::memory_event_ingress::{
+        build_memory_extraction_options_for_test, build_memory_ingress_decision_for_test,
+        MemoryEventType,
+    };
     use crate::hooks::HookPayload;
 
     #[test]
     fn chat_memory_ingress_triggers_immediate_extraction_for_profile_event() {
-        let decision = detect_memory_events(
+        let decision = build_memory_ingress_decision_for_test(
             "我是第一次接触这个项目的前端部分",
-            &MemoryEventIngressOptions {
-                enabled: true,
-                event_cooldown_secs: 120,
-            },
+            true,
+            true,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.event.event_type, MemoryEventType::Profile);
+        assert_eq!(decision.trigger_label, "event_profile");
+    }
+
+    #[test]
+    fn chat_memory_ingress_returns_none_when_event_trigger_disabled() {
+        let decision = build_memory_ingress_decision_for_test(
+            "我是第一次接触这个项目的前端部分",
+            false,
+            true,
+            120,
         );
-        assert!(
-            decision
-                .iter()
-                .any(|event| event.event_type == MemoryEventType::Profile)
+        assert!(decision.is_none());
+    }
+
+    #[test]
+    fn chat_memory_ingress_structured_path_requires_both_flags() {
+        assert!(build_memory_extraction_options_for_test(true, true, true));
+        assert!(!build_memory_extraction_options_for_test(true, true, false));
+        assert!(!build_memory_extraction_options_for_test(true, false, true));
+    }
+
+    #[test]
+    fn chat_memory_ingress_falls_back_to_default_priority_when_intent_routing_disabled() {
+        let decision = build_memory_ingress_decision_for_test(
+            "不是我喜欢猫，下周我要继续做前端",
+            true,
+            false,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_correction");
+    }
+
+    #[test]
+    fn chat_memory_ingress_uses_priority_routing_when_intent_routing_enabled() {
+        let decision = build_memory_ingress_decision_for_test(
+            "不是我喜欢猫，下周我要继续做前端",
+            true,
+            true,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_preference");
+    }
+
+    #[test]
+    fn chat_memory_ingress_keeps_structured_disabled_without_flag() {
+        assert!(!build_memory_extraction_options_for_test(false, true, true));
+    }
+
+    #[test]
+    fn chat_memory_ingress_keeps_structured_disabled_without_event_trigger() {
+        assert!(!build_memory_extraction_options_for_test(true, false, true));
+    }
+
+    #[test]
+    fn chat_memory_ingress_keeps_structured_disabled_without_intent_routing() {
+        assert!(!build_memory_extraction_options_for_test(true, true, false));
+    }
+
+    #[test]
+    fn chat_memory_ingress_enables_structured_when_all_flags_on() {
+        assert!(build_memory_extraction_options_for_test(true, true, true));
+    }
+
+    #[test]
+    fn chat_memory_ingress_prefers_profile_trigger_label_for_profile_event() {
+        let decision = build_memory_ingress_decision_for_test(
+            "我是第一次接触这个项目的前端部分",
+            true,
+            true,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_profile");
+    }
+
+    #[test]
+    fn chat_memory_ingress_prefers_plan_trigger_label_for_plan_event() {
+        let decision = build_memory_ingress_decision_for_test(
+            "下周我要继续做这个记忆系统架构",
+            true,
+            true,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_plan");
+    }
+
+    #[test]
+    fn chat_memory_ingress_prefers_preference_trigger_label_for_preference_event() {
+        let decision = build_memory_ingress_decision_for_test(
+            "我更喜欢 Rust",
+            true,
+            true,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_preference");
+    }
+
+    #[test]
+    fn chat_memory_ingress_prefers_correction_trigger_label_for_correction_event() {
+        let decision = build_memory_ingress_decision_for_test(
+            "不是我喜欢猫，是我以前养过猫",
+            true,
+            true,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_correction");
+    }
+
+    #[test]
+    fn chat_memory_ingress_ignores_small_talk_even_when_flags_on() {
+        let decision = build_memory_ingress_decision_for_test("哈哈好的", true, true, 120);
+        assert!(decision.is_none());
+    }
+
+    #[test]
+    fn chat_memory_ingress_preserves_cooldown_seconds_from_options() {
+        let decision = build_memory_ingress_decision_for_test(
+            "我是第一次接触这个项目的前端部分",
+            true,
+            true,
+            333,
+        )
+        .expect("decision");
+        assert_eq!(decision.event.cooldown_secs, 333);
+    }
+
+    #[test]
+    fn chat_memory_ingress_returns_none_for_blank_input() {
+        let decision = build_memory_ingress_decision_for_test("   ", true, true, 120);
+        assert!(decision.is_none());
+    }
+
+    #[test]
+    fn chat_memory_ingress_detects_profile_event_type_for_profile_input() {
+        let decision = build_memory_ingress_decision_for_test(
+            "我是第一次接触这个项目的前端部分",
+            true,
+            true,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.event.event_type, MemoryEventType::Profile);
+    }
+
+    #[test]
+    fn chat_memory_ingress_detects_plan_event_type_for_plan_input() {
+        let decision = build_memory_ingress_decision_for_test(
+            "下周我要继续做这个记忆系统架构",
+            true,
+            true,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.event.event_type, MemoryEventType::Plan);
+    }
+
+    #[test]
+    fn chat_memory_ingress_detects_preference_event_type_for_preference_input() {
+        let decision = build_memory_ingress_decision_for_test(
+            "我更喜欢 Rust",
+            true,
+            true,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.event.event_type, MemoryEventType::Preference);
+    }
+
+    #[test]
+    fn chat_memory_ingress_detects_correction_event_type_for_correction_input() {
+        let decision = build_memory_ingress_decision_for_test(
+            "不是我喜欢猫，是我以前养过猫",
+            true,
+            true,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.event.event_type, MemoryEventType::Correction);
+    }
+
+    #[test]
+    fn chat_memory_ingress_no_structured_without_enable_flag() {
+        assert!(!build_memory_extraction_options_for_test(false, true, true));
+    }
+
+    #[test]
+    fn chat_memory_ingress_no_structured_without_trigger_flag() {
+        assert!(!build_memory_extraction_options_for_test(true, false, true));
+    }
+
+    #[test]
+    fn chat_memory_ingress_no_structured_without_routing_flag() {
+        assert!(!build_memory_extraction_options_for_test(true, true, false));
+    }
+
+    #[test]
+    fn chat_memory_ingress_structured_enabled_only_when_all_are_enabled() {
+        assert!(build_memory_extraction_options_for_test(true, true, true));
+    }
+
+    #[test]
+    fn chat_memory_ingress_none_for_disabled_event_trigger_on_small_talk() {
+        let decision = build_memory_ingress_decision_for_test("哈哈好的", false, true, 120);
+        assert!(decision.is_none());
+    }
+
+    #[test]
+    fn chat_memory_ingress_none_for_disabled_event_trigger_on_profile_input() {
+        let decision = build_memory_ingress_decision_for_test(
+            "我是第一次接触这个项目的前端部分",
+            false,
+            true,
+            120,
         );
+        assert!(decision.is_none());
+    }
+
+    #[test]
+    fn chat_memory_ingress_none_for_non_matching_text() {
+        let decision = build_memory_ingress_decision_for_test("今天天气不错", true, true, 120);
+        assert!(decision.is_none());
+    }
+
+    #[test]
+    fn chat_memory_ingress_prefers_first_priority_event_under_intent_routing() {
+        let decision = build_memory_ingress_decision_for_test(
+            "我喜欢 Rust，下周我要继续做前端",
+            true,
+            true,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_preference");
+    }
+
+    #[test]
+    fn chat_memory_ingress_returns_first_detected_when_intent_routing_off() {
+        let decision = build_memory_ingress_decision_for_test(
+            "我喜欢 Rust，下周我要继续做前端",
+            true,
+            false,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_preference");
+    }
+
+    #[test]
+    fn chat_memory_ingress_intent_priority_beats_profile() {
+        let decision = build_memory_ingress_decision_for_test(
+            "我是前端开发者，我喜欢 Rust",
+            true,
+            true,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_preference");
+    }
+
+    #[test]
+    fn chat_memory_ingress_default_order_keeps_profile_when_only_profile_matches() {
+        let decision = build_memory_ingress_decision_for_test(
+            "我是第一次接触这个项目的前端部分",
+            true,
+            false,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_profile");
+    }
+
+    #[test]
+    fn chat_memory_ingress_default_order_keeps_plan_when_only_plan_matches() {
+        let decision = build_memory_ingress_decision_for_test(
+            "下周我要继续做这个记忆系统架构",
+            true,
+            false,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_plan");
+    }
+
+    #[test]
+    fn chat_memory_ingress_default_order_keeps_correction_when_only_correction_matches() {
+        let decision = build_memory_ingress_decision_for_test(
+            "不是我喜欢猫，是我以前养过猫",
+            true,
+            false,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_correction");
+    }
+
+    #[test]
+    fn chat_memory_ingress_default_order_keeps_preference_when_only_preference_matches() {
+        let decision = build_memory_ingress_decision_for_test(
+            "我更喜欢 Rust",
+            true,
+            false,
+            120,
+        )
+        .expect("decision");
+        assert_eq!(decision.trigger_label, "event_preference");
     }
 
     #[test]
