@@ -1,8 +1,75 @@
+// pattern: Mixed (unavoidable)
+// Reason: Tauri command 文件天然承担 IPC 输入校验、状态编排与磁盘持久化副作用；Phase 1 仅在现有命令边界上低侵入扩展。
 use crate::ai::context::AIOrchestrator;
 use crate::error::KokoroError;
 use crate::llm::messages::{system_message, user_text_message};
 use crate::llm::provider::{build_openai_client, create_chat};
 use tauri::State;
+
+pub use crate::config::MemoryUpgradeConfig;
+
+fn memory_upgrade_config_path() -> std::path::PathBuf {
+    crate::ai::memory::memory_upgrade_config_path()
+}
+
+#[tauri::command]
+pub async fn set_memory_upgrade_config(
+    config: MemoryUpgradeConfig,
+) -> Result<(), KokoroError> {
+    crate::config::save_memory_upgrade_config(&memory_upgrade_config_path(), &config)
+}
+
+#[tauri::command]
+pub async fn get_memory_upgrade_config() -> Result<MemoryUpgradeConfig, KokoroError> {
+    Ok(crate::config::load_memory_upgrade_config(
+        &memory_upgrade_config_path(),
+    ))
+}
+
+#[tauri::command]
+pub async fn get_memory_observability_summary(
+    state: State<'_, AIOrchestrator>,
+) -> Result<crate::ai::memory::MemoryObservabilitySummary, KokoroError> {
+    state
+        .memory_manager
+        .memory_observability_summary()
+        .await
+        .map_err(|e| KokoroError::Database(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn get_latest_memory_write_event(
+    state: State<'_, AIOrchestrator>,
+) -> Result<Option<crate::ai::memory::MemoryWriteEventRecord>, KokoroError> {
+    state
+        .memory_manager
+        .latest_memory_write_event()
+        .await
+        .map_err(|e| KokoroError::Database(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn get_latest_memory_retrieval_log(
+    state: State<'_, AIOrchestrator>,
+) -> Result<Option<crate::ai::memory::MemoryRetrievalLogRecord>, KokoroError> {
+    state
+        .memory_manager
+        .latest_memory_retrieval_log()
+        .await
+        .map_err(|e| KokoroError::Database(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_upgrade_config_roundtrip_uses_shared_path_rules() {
+        let path = memory_upgrade_config_path();
+        assert!(path.ends_with("com.chyin.kokoro/memory_upgrade_config.json") || path.ends_with("com.chyin.kokoro\\memory_upgrade_config.json"));
+    }
+}
+
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct MemorySystemConfig {

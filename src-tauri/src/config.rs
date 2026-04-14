@@ -1,5 +1,7 @@
 //! Shared config utilities for loading/saving JSON config files
 //! and resolving API keys from fields or environment variables.
+// pattern: Mixed (unavoidable)
+// Reason: 该文件同时承载纯数据配置定义与文件系统读写封装，当前项目已将配置入口集中在这里，Phase 1 先做低侵入扩展。
 
 use crate::error::KokoroError;
 use serde::de::DeserializeOwned;
@@ -73,4 +75,129 @@ pub fn resolve_api_key(api_key: &Option<String>, api_key_env: &Option<String>) -
         }
     }
     None
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MemoryUpgradeConfig {
+    pub observability_enabled: bool,
+    pub event_trigger_enabled: bool,
+    pub structured_memory_enabled: bool,
+    pub intent_routing_enabled: bool,
+    pub retrieval_eval_enabled: bool,
+}
+
+impl Default for MemoryUpgradeConfig {
+    fn default() -> Self {
+        Self {
+            observability_enabled: false,
+            event_trigger_enabled: false,
+            structured_memory_enabled: false,
+            intent_routing_enabled: false,
+            retrieval_eval_enabled: false,
+        }
+    }
+}
+
+pub fn validate_memory_upgrade_config(
+    config: MemoryUpgradeConfig,
+) -> Result<MemoryUpgradeConfig, KokoroError> {
+    if config.retrieval_eval_enabled && !config.observability_enabled {
+        return Err(KokoroError::Validation(
+            "retrieval_eval_enabled requires observability_enabled".to_string(),
+        ));
+    }
+
+    Ok(config)
+}
+
+pub fn load_memory_upgrade_config(path: &Path) -> MemoryUpgradeConfig {
+    let config = load_json_config(path, "MEMORY_UPGRADE");
+    validate_memory_upgrade_config(config).unwrap_or_default()
+}
+
+pub fn save_memory_upgrade_config(
+    path: &Path,
+    config: &MemoryUpgradeConfig,
+) -> Result<(), KokoroError> {
+    let validated = validate_memory_upgrade_config(config.clone())?;
+    save_json_config(path, &validated, "MEMORY_UPGRADE")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_upgrade_config_defaults_disable_all_flags() {
+        let config = MemoryUpgradeConfig::default();
+
+        assert_eq!(
+            config,
+            MemoryUpgradeConfig {
+                observability_enabled: false,
+                event_trigger_enabled: false,
+                structured_memory_enabled: false,
+                intent_routing_enabled: false,
+                retrieval_eval_enabled: false,
+            }
+        );
+    }
+
+    #[test]
+    fn validate_memory_upgrade_config_rejects_eval_without_observability() {
+        let error = validate_memory_upgrade_config(MemoryUpgradeConfig {
+            observability_enabled: false,
+            retrieval_eval_enabled: true,
+            ..MemoryUpgradeConfig::default()
+        })
+        .expect_err("config should be rejected");
+
+        match error {
+            KokoroError::Validation(message) => {
+                assert_eq!(message, "retrieval_eval_enabled requires observability_enabled");
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_memory_upgrade_config_falls_back_to_default_for_invalid_file() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("memory_upgrade_config.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "observability_enabled": false,
+                "retrieval_eval_enabled": true
+            })
+            .to_string(),
+        )
+        .expect("write config");
+
+        let config = load_memory_upgrade_config(&path);
+
+        assert_eq!(config, MemoryUpgradeConfig::default());
+    }
+
+    #[test]
+    fn save_memory_upgrade_config_rejects_invalid_flag_combinations() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("memory_upgrade_config.json");
+        let error = save_memory_upgrade_config(
+            &path,
+            &MemoryUpgradeConfig {
+                observability_enabled: false,
+                retrieval_eval_enabled: true,
+                ..MemoryUpgradeConfig::default()
+            },
+        )
+        .expect_err("save should fail");
+
+        match error {
+            KokoroError::Validation(message) => {
+                assert_eq!(message, "retrieval_eval_enabled requires observability_enabled");
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+    }
 }

@@ -1,3 +1,5 @@
+// pattern: Mixed (unavoidable)
+// Reason: 应用入口文件需要同时声明模块、注册 Tauri 命令、初始化服务与恢复磁盘状态，天然属于编排层。
 pub mod actions;
 pub mod ai;
 pub mod commands;
@@ -104,6 +106,11 @@ pub fn run() {
             commands::context::get_proactive_enabled,
             commands::context::set_memory_enabled,
             commands::context::get_memory_enabled,
+            commands::context::set_memory_upgrade_config,
+            commands::context::get_memory_upgrade_config,
+            commands::context::get_memory_observability_summary,
+            commands::context::get_latest_memory_write_event,
+            commands::context::get_latest_memory_retrieval_log,
             commands::context::clear_history,
             commands::context::delete_last_messages,
             commands::context::end_session,

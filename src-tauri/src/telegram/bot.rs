@@ -1,4 +1,6 @@
 //! Telegram Bot core — message handling, command dispatch, and AI pipeline bridge.
+// pattern: Mixed (unavoidable)
+// Reason: Telegram 机器人处理网络 I/O、消息路由、持久化和异步任务调度，属于编排层。
 
 use super::config::TelegramConfig;
 use crate::actions::tool_settings::ToolSettings;
@@ -511,10 +513,14 @@ async fn handle_text(
         let provider_for_mem = llm_service.provider().await;
         let char_id_for_mem = char_id.clone();
         let memory_enabled = orchestrator.memory_enabled_flag();
+        let observation_started_at = std::time::Instant::now();
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
             }
+            let _ = memory_mgr
+                .periodic_write_observation_for_telegram(&char_id_for_mem, observation_started_at)
+                .await;
             memory_extractor::extract_and_store_memories(
                 &history,
                 &memory_mgr,
@@ -529,10 +535,18 @@ async fn handle_text(
         let char_id_for_consolidation = char_id.clone();
         let provider_for_consolidation = llm_service.provider().await;
         let memory_enabled = orchestrator.memory_enabled_flag();
+        let observation_started_at = std::time::Instant::now();
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
             }
+            let _ = memory_mgr
+                .periodic_consolidation_observation(
+                    &char_id_for_consolidation,
+                    "telegram",
+                    observation_started_at,
+                )
+                .await;
             match memory_mgr
                 .consolidate_memories(&char_id_for_consolidation, provider_for_consolidation)
                 .await
@@ -910,10 +924,14 @@ async fn handle_photo(
         let provider_for_mem = llm_service.provider().await;
         let char_id_for_mem = char_id.clone();
         let memory_enabled = orchestrator.memory_enabled_flag();
+        let observation_started_at = std::time::Instant::now();
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
             }
+            let _ = memory_mgr
+                .periodic_write_observation_for_telegram(&char_id_for_mem, observation_started_at)
+                .await;
             memory_extractor::extract_and_store_memories(
                 &history,
                 &memory_mgr,
@@ -928,10 +946,18 @@ async fn handle_photo(
         let char_id_for_consolidation = char_id.clone();
         let provider_for_consolidation = llm_service.provider().await;
         let memory_enabled = orchestrator.memory_enabled_flag();
+        let observation_started_at = std::time::Instant::now();
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
             }
+            let _ = memory_mgr
+                .periodic_consolidation_observation(
+                    &char_id_for_consolidation,
+                    "telegram",
+                    observation_started_at,
+                )
+                .await;
             match memory_mgr
                 .consolidate_memories(&char_id_for_consolidation, provider_for_consolidation)
                 .await

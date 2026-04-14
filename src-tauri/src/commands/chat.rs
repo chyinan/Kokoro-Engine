@@ -2305,10 +2305,14 @@ pub async fn stream_chat(
         let char_id_for_mem = char_id.clone();
         let provider_for_mem = system_provider.clone();
         let memory_enabled = state.memory_enabled_flag();
+        let observation_started_at = std::time::Instant::now();
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
             }
+            let _ = memory_mgr
+                .periodic_write_observation_for_chat(&char_id_for_mem, observation_started_at)
+                .await;
             memory_extractor::extract_and_store_memories(
                 &history,
                 &memory_mgr,
@@ -2319,16 +2323,25 @@ pub async fn stream_chat(
         });
     }
 
+
     // Periodic memory consolidation (every 20 user messages)
     if state.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
         let memory_mgr = state.memory_manager.clone();
         let char_id_for_consolidation = char_id.clone();
         let provider_for_consolidation = system_provider.clone();
         let memory_enabled = state.memory_enabled_flag();
+        let observation_started_at = std::time::Instant::now();
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
             }
+            let _ = memory_mgr
+                .periodic_consolidation_observation(
+                    &char_id_for_consolidation,
+                    "chat",
+                    observation_started_at,
+                )
+                .await;
             match memory_mgr
                 .consolidate_memories(&char_id_for_consolidation, provider_for_consolidation)
                 .await

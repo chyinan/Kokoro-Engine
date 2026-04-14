@@ -1,3 +1,5 @@
+// pattern: Mixed (unavoidable)
+// Reason: 该文件同时包含记忆领域规则、SQLite 读写、嵌入计算与摘要状态机；Phase 1 先在现有集中实现上做低侵入扩展。
 use anyhow::Result;
 #[cfg(not(test))]
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
@@ -108,6 +110,867 @@ pub struct ConversationSummaryRecord {
     pub status: ConversationSummaryStatus,
     pub failure_count: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryWriteObservation {
+    pub character_id: String,
+    pub source: String,
+    pub trigger: String,
+    pub extracted_count: i64,
+    pub stored_count: i64,
+    pub deduplicated_count: i64,
+    pub invalidated_count: i64,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryRetrievalObservation {
+    pub character_id: String,
+    pub query: String,
+    pub semantic_candidates: i64,
+    pub bm25_candidates: i64,
+    pub fused_candidates: i64,
+    pub injected_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, sqlx::FromRow)]
+pub struct MemoryRetrievalLogRecord {
+    pub query: String,
+    pub semantic_candidates: i64,
+    pub bm25_candidates: i64,
+    pub fused_candidates: i64,
+    pub injected_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryObservabilitySummary {
+    pub write_event_count: i64,
+    pub retrieval_log_count: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RetrievalCandidateStats {
+    pub semantic_candidates: usize,
+    pub bm25_candidates: usize,
+    pub fused_candidates: usize,
+    pub injected_count: usize,
+}
+
+fn build_retrieval_observation(
+    character_id: &str,
+    query: &str,
+    stats: &RetrievalCandidateStats,
+) -> MemoryRetrievalObservation {
+    MemoryRetrievalObservation {
+        character_id: character_id.to_string(),
+        query: query.to_string(),
+        semantic_candidates: stats.semantic_candidates as i64,
+        bm25_candidates: stats.bm25_candidates as i64,
+        fused_candidates: stats.fused_candidates as i64,
+        injected_count: stats.injected_count as i64,
+    }
+}
+
+fn validate_memory_write_observation(
+    observation: &MemoryWriteObservation,
+) -> std::result::Result<(), anyhow::Error> {
+    if observation.source.trim().is_empty() {
+        anyhow::bail!("memory write observation source cannot be empty");
+    }
+    if observation.trigger.trim().is_empty() {
+        anyhow::bail!("memory write observation trigger cannot be empty");
+    }
+    if observation.character_id.trim().is_empty() {
+        anyhow::bail!("memory write observation character_id cannot be empty");
+    }
+    if observation.extracted_count < 0
+        || observation.stored_count < 0
+        || observation.deduplicated_count < 0
+        || observation.invalidated_count < 0
+        || observation.duration_ms < 0
+    {
+        anyhow::bail!("memory write observation counts must be non-negative");
+    }
+
+    Ok(())
+}
+
+fn validate_memory_retrieval_observation(
+    observation: &MemoryRetrievalObservation,
+) -> std::result::Result<(), anyhow::Error> {
+    if observation.character_id.trim().is_empty() {
+        anyhow::bail!("memory retrieval observation character_id cannot be empty");
+    }
+    if observation.query.trim().is_empty() {
+        anyhow::bail!("memory retrieval observation query cannot be empty");
+    }
+    if observation.semantic_candidates < 0
+        || observation.bm25_candidates < 0
+        || observation.fused_candidates < 0
+        || observation.injected_count < 0
+    {
+        anyhow::bail!("memory retrieval observation counts must be non-negative");
+    }
+
+    Ok(())
+}
+
+fn merge_retrieval_candidate_stats(
+    semantic_candidates: usize,
+    bm25_candidates: usize,
+    fused_candidates: usize,
+    injected_count: usize,
+) -> RetrievalCandidateStats {
+    RetrievalCandidateStats {
+        semantic_candidates,
+        bm25_candidates,
+        fused_candidates,
+        injected_count,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SearchMemoriesOutcome {
+    snippets: Vec<MemorySnippet>,
+}
+
+impl SearchMemoriesOutcome {
+    fn new(snippets: Vec<MemorySnippet>) -> Self {
+        Self { snippets }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct MemoryWriteEventRecord {
+    pub source: String,
+    pub trigger: String,
+    pub extracted_count: i64,
+    pub stored_count: i64,
+    pub deduplicated_count: i64,
+    pub invalidated_count: i64,
+    pub duration_ms: i64,
+}
+
+fn is_observability_enabled() -> bool {
+    crate::config::load_memory_upgrade_config(&memory_upgrade_config_path()).observability_enabled
+}
+
+pub fn memory_upgrade_config_path() -> std::path::PathBuf {
+    dirs_next::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("com.chyin.kokoro")
+        .join("memory_upgrade_config.json")
+}
+
+pub fn build_periodic_memory_write_observation(
+    character_id: &str,
+    source: &str,
+    trigger: &str,
+    duration_ms: i64,
+) -> MemoryWriteObservation {
+    MemoryWriteObservation {
+        character_id: character_id.to_string(),
+        source: source.to_string(),
+        trigger: trigger.to_string(),
+        extracted_count: 0,
+        stored_count: 0,
+        deduplicated_count: 0,
+        invalidated_count: 0,
+        duration_ms,
+    }
+}
+
+pub fn build_periodic_retrieval_observation(
+    character_id: &str,
+    query: &str,
+    stats: &RetrievalCandidateStats,
+) -> MemoryRetrievalObservation {
+    build_retrieval_observation(character_id, query, stats)
+}
+
+fn build_memory_observability_summary(
+    write_event_count: i64,
+    retrieval_log_count: i64,
+) -> MemoryObservabilitySummary {
+    MemoryObservabilitySummary {
+        write_event_count,
+        retrieval_log_count,
+    }
+}
+
+fn normalize_trigger_value(trigger: &str) -> String {
+    trigger.trim().to_string()
+}
+
+fn normalize_source_value(source: &str) -> String {
+    source.trim().to_string()
+}
+
+fn normalize_query_value(query: &str) -> String {
+    query.trim().to_string()
+}
+
+fn normalize_character_id_value(character_id: &str) -> String {
+    character_id.trim().to_string()
+}
+
+fn sanitize_write_observation(
+    mut observation: MemoryWriteObservation,
+) -> MemoryWriteObservation {
+    observation.source = normalize_source_value(&observation.source);
+    observation.trigger = normalize_trigger_value(&observation.trigger);
+    observation.character_id = normalize_character_id_value(&observation.character_id);
+    observation
+}
+
+fn sanitize_retrieval_observation(
+    mut observation: MemoryRetrievalObservation,
+) -> MemoryRetrievalObservation {
+    observation.query = normalize_query_value(&observation.query);
+    observation.character_id = normalize_character_id_value(&observation.character_id);
+    observation
+}
+
+fn build_memory_write_event_record(observation: &MemoryWriteObservation) -> MemoryWriteEventRecord {
+    MemoryWriteEventRecord {
+        source: observation.source.clone(),
+        trigger: observation.trigger.clone(),
+        extracted_count: observation.extracted_count,
+        stored_count: observation.stored_count,
+        deduplicated_count: observation.deduplicated_count,
+        invalidated_count: observation.invalidated_count,
+        duration_ms: observation.duration_ms,
+    }
+}
+
+fn build_memory_retrieval_log_record(
+    observation: &MemoryRetrievalObservation,
+) -> MemoryRetrievalLogRecord {
+    MemoryRetrievalLogRecord {
+        query: observation.query.clone(),
+        semantic_candidates: observation.semantic_candidates,
+        bm25_candidates: observation.bm25_candidates,
+        fused_candidates: observation.fused_candidates,
+        injected_count: observation.injected_count,
+    }
+}
+
+fn should_record_memory_observability() -> bool {
+    is_observability_enabled()
+}
+
+fn assert_non_negative_i64(value: i64, field_name: &str) -> std::result::Result<(), anyhow::Error> {
+    if value < 0 {
+        anyhow::bail!("{} must be non-negative", field_name);
+    }
+    Ok(())
+}
+
+fn validate_retrieval_stats(stats: &RetrievalCandidateStats) -> std::result::Result<(), anyhow::Error> {
+    if stats.injected_count > stats.fused_candidates {
+        anyhow::bail!("retrieval injected_count cannot exceed fused_candidates");
+    }
+    Ok(())
+}
+
+fn build_retrieval_stats_from_lengths(
+    semantic_candidates: usize,
+    bm25_candidates: usize,
+    fused_candidates: usize,
+    injected_count: usize,
+) -> RetrievalCandidateStats {
+    merge_retrieval_candidate_stats(
+        semantic_candidates,
+        bm25_candidates,
+        fused_candidates,
+        injected_count,
+    )
+}
+
+fn validate_write_result_counts(
+    extracted_count: i64,
+    stored_count: i64,
+    deduplicated_count: i64,
+    invalidated_count: i64,
+) -> std::result::Result<(), anyhow::Error> {
+    assert_non_negative_i64(extracted_count, "extracted_count")?;
+    assert_non_negative_i64(stored_count, "stored_count")?;
+    assert_non_negative_i64(deduplicated_count, "deduplicated_count")?;
+    assert_non_negative_i64(invalidated_count, "invalidated_count")?;
+    Ok(())
+}
+
+fn build_observation_duration(started_at: std::time::Instant) -> i64 {
+    started_at.elapsed().as_millis() as i64
+}
+
+fn build_periodic_source_label(source: &str) -> String {
+    normalize_source_value(source)
+}
+
+fn build_periodic_trigger_label(trigger: &str) -> String {
+    normalize_trigger_value(trigger)
+}
+
+fn build_periodic_character_label(character_id: &str) -> String {
+    normalize_character_id_value(character_id)
+}
+
+fn build_memory_write_observation_from_counts(
+    character_id: &str,
+    source: &str,
+    trigger: &str,
+    extracted_count: i64,
+    stored_count: i64,
+    deduplicated_count: i64,
+    invalidated_count: i64,
+    duration_ms: i64,
+) -> MemoryWriteObservation {
+    MemoryWriteObservation {
+        character_id: build_periodic_character_label(character_id),
+        source: build_periodic_source_label(source),
+        trigger: build_periodic_trigger_label(trigger),
+        extracted_count,
+        stored_count,
+        deduplicated_count,
+        invalidated_count,
+        duration_ms,
+    }
+}
+
+fn retrieval_stats_injected_count(snippets: &[MemorySnippet]) -> usize {
+    snippets.len()
+}
+
+fn bm25_candidate_count(matches: &[(i64, f64)]) -> usize {
+    matches.len()
+}
+
+fn semantic_candidate_count(snippets: &[MemorySnippet]) -> usize {
+    snippets.len()
+}
+
+fn fused_candidate_count(fused: &[(f32, MemorySnippet)]) -> usize {
+    fused.len()
+}
+
+fn clamp_observation_duration(duration_ms: i64) -> i64 {
+    duration_ms.max(0)
+}
+
+fn build_clamped_memory_write_observation(
+    observation: MemoryWriteObservation,
+) -> MemoryWriteObservation {
+    let mut observation = observation;
+    observation.duration_ms = clamp_observation_duration(observation.duration_ms);
+    observation
+}
+
+fn build_clamped_memory_retrieval_observation(
+    observation: MemoryRetrievalObservation,
+) -> MemoryRetrievalObservation {
+    observation
+}
+
+fn validate_memory_observability_summary(
+    summary: &MemoryObservabilitySummary,
+) -> std::result::Result<(), anyhow::Error> {
+    assert_non_negative_i64(summary.write_event_count, "write_event_count")?;
+    assert_non_negative_i64(summary.retrieval_log_count, "retrieval_log_count")?;
+    Ok(())
+}
+
+fn summarize_memory_observability_counts(
+    write_event_count: i64,
+    retrieval_log_count: i64,
+) -> std::result::Result<MemoryObservabilitySummary, anyhow::Error> {
+    let summary = build_memory_observability_summary(write_event_count, retrieval_log_count);
+    validate_memory_observability_summary(&summary)?;
+    Ok(summary)
+}
+
+fn build_observation_trigger_for_periodic_extraction() -> &'static str {
+    "periodic_extraction"
+}
+
+fn build_observation_trigger_for_periodic_consolidation() -> &'static str {
+    "periodic_consolidation"
+}
+
+fn build_observation_source_for_chat() -> &'static str {
+    "chat"
+}
+
+fn build_observation_source_for_telegram() -> &'static str {
+    "telegram"
+}
+
+fn build_retrieval_observation_record(
+    character_id: &str,
+    query: &str,
+    stats: &RetrievalCandidateStats,
+) -> std::result::Result<MemoryRetrievalObservation, anyhow::Error> {
+    validate_retrieval_stats(stats)?;
+    let observation = build_retrieval_observation(character_id, query, stats);
+    let observation = sanitize_retrieval_observation(observation);
+    validate_memory_retrieval_observation(&observation)?;
+    Ok(build_clamped_memory_retrieval_observation(observation))
+}
+
+fn build_write_observation_record(
+    character_id: &str,
+    source: &str,
+    trigger: &str,
+    extracted_count: i64,
+    stored_count: i64,
+    deduplicated_count: i64,
+    invalidated_count: i64,
+    duration_ms: i64,
+) -> std::result::Result<MemoryWriteObservation, anyhow::Error> {
+    validate_write_result_counts(
+        extracted_count,
+        stored_count,
+        deduplicated_count,
+        invalidated_count,
+    )?;
+    let observation = build_memory_write_observation_from_counts(
+        character_id,
+        source,
+        trigger,
+        extracted_count,
+        stored_count,
+        deduplicated_count,
+        invalidated_count,
+        duration_ms,
+    );
+    let observation = sanitize_write_observation(observation);
+    validate_memory_write_observation(&observation)?;
+    Ok(build_clamped_memory_write_observation(observation))
+}
+
+fn build_observation_summary_from_rows(
+    write_event_count: i64,
+    retrieval_log_count: i64,
+) -> std::result::Result<MemoryObservabilitySummary, anyhow::Error> {
+    summarize_memory_observability_counts(write_event_count, retrieval_log_count)
+}
+
+fn build_retrieval_stats_for_search(
+    semantic_candidates: usize,
+    bm25_candidates: usize,
+    fused_candidates: usize,
+    injected_count: usize,
+) -> std::result::Result<RetrievalCandidateStats, anyhow::Error> {
+    let stats = build_retrieval_stats_from_lengths(
+        semantic_candidates,
+        bm25_candidates,
+        fused_candidates,
+        injected_count,
+    );
+    validate_retrieval_stats(&stats)?;
+    Ok(stats)
+}
+
+fn observation_duration_from_start(started_at: std::time::Instant) -> i64 {
+    clamp_observation_duration(build_observation_duration(started_at))
+}
+
+fn build_memory_write_record(
+    observation: &MemoryWriteObservation,
+) -> std::result::Result<MemoryWriteEventRecord, anyhow::Error> {
+    validate_memory_write_observation(observation)?;
+    Ok(build_memory_write_event_record(observation))
+}
+
+fn build_memory_retrieval_record(
+    observation: &MemoryRetrievalObservation,
+) -> std::result::Result<MemoryRetrievalLogRecord, anyhow::Error> {
+    validate_memory_retrieval_observation(observation)?;
+    Ok(build_memory_retrieval_log_record(observation))
+}
+
+fn build_memory_observability_summary_checked(
+    write_event_count: i64,
+    retrieval_log_count: i64,
+) -> std::result::Result<MemoryObservabilitySummary, anyhow::Error> {
+    build_observation_summary_from_rows(write_event_count, retrieval_log_count)
+}
+
+fn build_retrieval_stats_from_results(
+    semantic_results: &[MemorySnippet],
+    bm25_results: &[(i64, f64)],
+    fused_results: &[(f32, MemorySnippet)],
+    injected_results: &[MemorySnippet],
+) -> std::result::Result<RetrievalCandidateStats, anyhow::Error> {
+    build_retrieval_stats_for_search(
+        semantic_candidate_count(semantic_results),
+        bm25_candidate_count(bm25_results),
+        fused_candidate_count(fused_results),
+        retrieval_stats_injected_count(injected_results),
+    )
+}
+
+fn build_observability_duration_ms(started_at: std::time::Instant) -> i64 {
+    observation_duration_from_start(started_at)
+}
+
+fn build_default_memory_observability_summary() -> MemoryObservabilitySummary {
+    MemoryObservabilitySummary {
+        write_event_count: 0,
+        retrieval_log_count: 0,
+    }
+}
+
+fn maybe_build_periodic_write_observation(
+    character_id: &str,
+    source: &str,
+    trigger: &str,
+    duration_ms: i64,
+) -> std::result::Result<Option<MemoryWriteObservation>, anyhow::Error> {
+    if !should_record_memory_observability() {
+        return Ok(None);
+    }
+    Ok(Some(build_write_observation_record(
+        character_id,
+        source,
+        trigger,
+        0,
+        0,
+        0,
+        0,
+        duration_ms,
+    )?))
+}
+
+fn maybe_build_retrieval_observation(
+    character_id: &str,
+    query: &str,
+    stats: &RetrievalCandidateStats,
+) -> std::result::Result<Option<MemoryRetrievalObservation>, anyhow::Error> {
+    if !should_record_memory_observability() {
+        return Ok(None);
+    }
+    Ok(Some(build_retrieval_observation_record(character_id, query, stats)?))
+}
+
+fn build_summary_from_counts_or_default(
+    write_event_count: i64,
+    retrieval_log_count: i64,
+) -> MemoryObservabilitySummary {
+    build_memory_observability_summary_checked(write_event_count, retrieval_log_count)
+        .unwrap_or_else(|_| build_default_memory_observability_summary())
+}
+
+fn is_empty_query(query: &str) -> bool {
+    query.trim().is_empty()
+}
+
+fn is_empty_label(label: &str) -> bool {
+    label.trim().is_empty()
+}
+
+fn build_memory_retrieval_log(
+    character_id: &str,
+    query: &str,
+    stats: &RetrievalCandidateStats,
+) -> std::result::Result<Option<MemoryRetrievalObservation>, anyhow::Error> {
+    if is_empty_query(query) {
+        return Ok(None);
+    }
+    maybe_build_retrieval_observation(character_id, query, stats)
+}
+
+fn build_memory_write_log(
+    character_id: &str,
+    source: &str,
+    trigger: &str,
+    duration_ms: i64,
+) -> std::result::Result<Option<MemoryWriteObservation>, anyhow::Error> {
+    if is_empty_label(source) || is_empty_label(trigger) {
+        return Ok(None);
+    }
+    maybe_build_periodic_write_observation(character_id, source, trigger, duration_ms)
+}
+
+fn observation_summary_from_manager_counts(
+    write_event_count: i64,
+    retrieval_log_count: i64,
+) -> MemoryObservabilitySummary {
+    build_summary_from_counts_or_default(write_event_count, retrieval_log_count)
+}
+
+fn build_stats_for_current_results(
+    semantic_results: &[MemorySnippet],
+    bm25_results: &[(i64, f64)],
+    fused_results: &[(f32, MemorySnippet)],
+    injected_results: &[MemorySnippet],
+) -> RetrievalCandidateStats {
+    build_retrieval_stats_from_results(
+        semantic_results,
+        bm25_results,
+        fused_results,
+        injected_results,
+    )
+    .unwrap_or_default()
+}
+
+fn periodic_source_for_chat() -> &'static str {
+    build_observation_source_for_chat()
+}
+
+fn periodic_source_for_telegram() -> &'static str {
+    build_observation_source_for_telegram()
+}
+
+fn periodic_trigger_for_extraction() -> &'static str {
+    build_observation_trigger_for_periodic_extraction()
+}
+
+fn periodic_trigger_for_consolidation() -> &'static str {
+    build_observation_trigger_for_periodic_consolidation()
+}
+
+fn build_periodic_write_duration(started_at: std::time::Instant) -> i64 {
+    build_observability_duration_ms(started_at)
+}
+
+fn build_observability_summary_or_default(
+    write_event_count: i64,
+    retrieval_log_count: i64,
+) -> MemoryObservabilitySummary {
+    observation_summary_from_manager_counts(write_event_count, retrieval_log_count)
+}
+
+fn validate_observability_log_inputs(
+    character_id: &str,
+    source: &str,
+    trigger: &str,
+) -> std::result::Result<(), anyhow::Error> {
+    if is_empty_label(character_id) {
+        anyhow::bail!("memory observability character_id cannot be empty");
+    }
+    if is_empty_label(source) {
+        anyhow::bail!("memory observability source cannot be empty");
+    }
+    if is_empty_label(trigger) {
+        anyhow::bail!("memory observability trigger cannot be empty");
+    }
+    Ok(())
+}
+
+fn validate_observability_query_inputs(
+    character_id: &str,
+    query: &str,
+) -> std::result::Result<(), anyhow::Error> {
+    if is_empty_label(character_id) {
+        anyhow::bail!("memory observability character_id cannot be empty");
+    }
+    if is_empty_query(query) {
+        anyhow::bail!("memory observability query cannot be empty");
+    }
+    Ok(())
+}
+
+fn should_skip_observability_insert() -> bool {
+    !should_record_memory_observability()
+}
+
+fn build_write_observation_if_enabled(
+    character_id: &str,
+    source: &str,
+    trigger: &str,
+    duration_ms: i64,
+) -> std::result::Result<Option<MemoryWriteObservation>, anyhow::Error> {
+    validate_observability_log_inputs(character_id, source, trigger)?;
+    if should_skip_observability_insert() {
+        return Ok(None);
+    }
+    build_memory_write_log(character_id, source, trigger, duration_ms)
+}
+
+fn build_retrieval_observation_if_enabled(
+    character_id: &str,
+    query: &str,
+    stats: &RetrievalCandidateStats,
+) -> std::result::Result<Option<MemoryRetrievalObservation>, anyhow::Error> {
+    validate_observability_query_inputs(character_id, query)?;
+    if should_skip_observability_insert() {
+        return Ok(None);
+    }
+    build_memory_retrieval_log(character_id, query, stats)
+}
+
+fn build_periodic_write_event(
+    character_id: &str,
+    source: &str,
+    trigger: &str,
+    started_at: std::time::Instant,
+) -> std::result::Result<Option<MemoryWriteObservation>, anyhow::Error> {
+    build_write_observation_if_enabled(
+        character_id,
+        source,
+        trigger,
+        build_periodic_write_duration(started_at),
+    )
+}
+
+fn build_observability_summary_from_counts(
+    write_event_count: i64,
+    retrieval_log_count: i64,
+) -> MemoryObservabilitySummary {
+    build_observability_summary_or_default(write_event_count, retrieval_log_count)
+}
+
+fn build_search_outcome(snippets: Vec<MemorySnippet>) -> SearchMemoriesOutcome {
+    SearchMemoriesOutcome::new(snippets)
+}
+
+fn build_search_stats(
+    semantic_results: &[MemorySnippet],
+    bm25_results: &[(i64, f64)],
+    fused_results: &[(f32, MemorySnippet)],
+    injected_results: &[MemorySnippet],
+) -> RetrievalCandidateStats {
+    build_stats_for_current_results(
+        semantic_results,
+        bm25_results,
+        fused_results,
+        injected_results,
+    )
+}
+
+fn build_current_write_observation(
+    character_id: &str,
+    source: &str,
+    trigger: &str,
+    started_at: std::time::Instant,
+) -> std::result::Result<Option<MemoryWriteObservation>, anyhow::Error> {
+    build_periodic_write_event(character_id, source, trigger, started_at)
+}
+
+fn build_current_retrieval_observation(
+    character_id: &str,
+    query: &str,
+    stats: &RetrievalCandidateStats,
+) -> std::result::Result<Option<MemoryRetrievalObservation>, anyhow::Error> {
+    build_retrieval_observation_if_enabled(character_id, query, stats)
+}
+
+fn build_memory_observability_counts(
+    manager: &MemoryManager,
+) -> impl std::future::Future<Output = Result<MemoryObservabilitySummary>> + '_ {
+    async move {
+        let write_event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_write_events")
+            .fetch_one(&manager.db)
+            .await?;
+        let retrieval_log_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_retrieval_logs")
+            .fetch_one(&manager.db)
+            .await?;
+        Ok(build_observability_summary_from_counts(
+            write_event_count,
+            retrieval_log_count,
+        ))
+    }
+}
+
+fn insert_memory_write_event(
+    manager: &MemoryManager,
+    observation: MemoryWriteObservation,
+) -> impl std::future::Future<Output = Result<()>> + '_ {
+    async move {
+        let record = build_memory_write_record(&observation)?;
+        sqlx::query(
+            "INSERT INTO memory_write_events (character_id, source, trigger, extracted_count, stored_count, deduplicated_count, invalidated_count, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(observation.character_id)
+        .bind(record.source)
+        .bind(record.trigger)
+        .bind(record.extracted_count)
+        .bind(record.stored_count)
+        .bind(record.deduplicated_count)
+        .bind(record.invalidated_count)
+        .bind(record.duration_ms)
+        .bind(chrono::Utc::now().timestamp())
+        .execute(&manager.db)
+        .await?;
+        Ok(())
+    }
+}
+
+fn insert_memory_retrieval_log(
+    manager: &MemoryManager,
+    observation: MemoryRetrievalObservation,
+) -> impl std::future::Future<Output = Result<()>> + '_ {
+    async move {
+        let record = build_memory_retrieval_record(&observation)?;
+        sqlx::query(
+            "INSERT INTO memory_retrieval_logs (character_id, query, semantic_candidates, bm25_candidates, fused_candidates, injected_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(observation.character_id)
+        .bind(record.query)
+        .bind(record.semantic_candidates)
+        .bind(record.bm25_candidates)
+        .bind(record.fused_candidates)
+        .bind(record.injected_count)
+        .bind(chrono::Utc::now().timestamp())
+        .execute(&manager.db)
+        .await?;
+        Ok(())
+    }
+}
+
+fn fetch_latest_memory_write_event(
+    manager: &MemoryManager,
+) -> impl std::future::Future<Output = Result<Option<MemoryWriteEventRecord>>> + '_ {
+    async move {
+        let row = sqlx::query_as::<_, MemoryWriteEventRecord>(
+            "SELECT source, trigger, extracted_count, stored_count, deduplicated_count, invalidated_count, duration_ms FROM memory_write_events ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_optional(&manager.db)
+        .await?;
+        Ok(row)
+    }
+}
+
+fn fetch_latest_memory_retrieval_log(
+    manager: &MemoryManager,
+) -> impl std::future::Future<Output = Result<Option<MemoryRetrievalLogRecord>>> + '_ {
+    async move {
+        let row = sqlx::query_as::<_, MemoryRetrievalLogRecord>(
+            "SELECT query, semantic_candidates, bm25_candidates, fused_candidates, injected_count FROM memory_retrieval_logs ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_optional(&manager.db)
+        .await?;
+        Ok(row)
+    }
+}
+
+async fn record_memory_write_if_enabled(
+    manager: &MemoryManager,
+    character_id: &str,
+    source: &str,
+    trigger: &str,
+    started_at: std::time::Instant,
+) -> Result<()> {
+    if let Some(observation) =
+        build_current_write_observation(character_id, source, trigger, started_at)?
+    {
+        insert_memory_write_event(manager, observation).await?;
+    }
+    Ok(())
+}
+
+async fn record_memory_retrieval_if_enabled(
+    manager: &MemoryManager,
+    character_id: &str,
+    query: &str,
+    stats: &RetrievalCandidateStats,
+) -> Result<()> {
+    if let Some(observation) = build_current_retrieval_observation(character_id, query, stats)? {
+        insert_memory_retrieval_log(manager, observation).await?;
+    }
+    Ok(())
 }
 
 /// Local model directory path (relative to working dir).
@@ -502,14 +1365,24 @@ impl MemoryManager {
         limit: usize,
         character_id: &str,
     ) -> Result<Vec<MemorySnippet>> {
-        // Run semantic search and BM25 search in parallel
+        let outcome = self
+            .search_memories_with_observability(query, limit, character_id)
+            .await?;
+        Ok(outcome.snippets)
+    }
+
+    async fn search_memories_with_observability(
+        &self,
+        query: &str,
+        limit: usize,
+        character_id: &str,
+    ) -> Result<SearchMemoriesOutcome> {
         let semantic_results = self.semantic_search(query, limit * 2, character_id).await?;
         let bm25_results = self
             .bm25_search(query, character_id, limit * 2)
             .await
             .unwrap_or_default();
 
-        // RRF (Reciprocal Rank Fusion) with k=60
         let k = 60.0_f32;
         let mut rrf_scores: std::collections::HashMap<i64, (f32, MemorySnippet)> =
             std::collections::HashMap::new();
@@ -523,23 +1396,148 @@ impl MemoryManager {
             let score = 1.0 / (k + rank as f32 + 1.0);
             if let Some(entry) = rrf_scores.get_mut(id) {
                 entry.0 += score;
-            } else {
-                // BM25 found a memory not in semantic results — fetch it
-                if let Ok(Some(snippet)) = self.fetch_memory_snippet(*id).await {
-                    rrf_scores.insert(*id, (score, snippet));
-                }
+            } else if let Ok(Some(snippet)) = self.fetch_memory_snippet(*id).await {
+                rrf_scores.insert(*id, (score, snippet));
             }
         }
 
         let mut fused: Vec<(f32, MemorySnippet)> = rrf_scores.into_values().collect();
         fused.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        Ok(fused
-            .into_iter()
+        let snippets: Vec<MemorySnippet> = fused
+            .iter()
             .filter(|(score, _)| *score >= MIN_RRF_SCORE)
             .take(limit)
-            .map(|(_, m)| m)
-            .collect())
+            .map(|(_, m)| m.clone())
+            .collect();
+
+        let stats = build_search_stats(&semantic_results, &bm25_results, &fused, &snippets);
+        let _ = record_memory_retrieval_if_enabled(self, character_id, query, &stats).await;
+
+        Ok(build_search_outcome(snippets))
+    }
+
+    pub async fn record_memory_write_observation(
+        &self,
+        observation: MemoryWriteObservation,
+    ) -> Result<()> {
+        insert_memory_write_event(self, observation).await
+    }
+
+    pub async fn record_memory_retrieval_observation(
+        &self,
+        observation: MemoryRetrievalObservation,
+    ) -> Result<()> {
+        insert_memory_retrieval_log(self, observation).await
+    }
+
+    pub async fn latest_memory_write_event(&self) -> Result<Option<MemoryWriteEventRecord>> {
+        fetch_latest_memory_write_event(self).await
+    }
+
+    pub async fn latest_memory_retrieval_log(&self) -> Result<Option<MemoryRetrievalLogRecord>> {
+        fetch_latest_memory_retrieval_log(self).await
+    }
+
+    pub async fn memory_observability_summary(&self) -> Result<MemoryObservabilitySummary> {
+        build_memory_observability_counts(self).await
+    }
+
+    pub async fn record_periodic_write_if_enabled(
+        &self,
+        character_id: &str,
+        source: &str,
+        trigger: &str,
+        started_at: std::time::Instant,
+    ) -> Result<()> {
+        record_memory_write_if_enabled(self, character_id, source, trigger, started_at).await
+    }
+
+    pub async fn periodic_write_observation_for_chat(
+        &self,
+        character_id: &str,
+        started_at: std::time::Instant,
+    ) -> Result<()> {
+        self.record_periodic_write_if_enabled(
+            character_id,
+            periodic_source_for_chat(),
+            periodic_trigger_for_extraction(),
+            started_at,
+        )
+        .await
+    }
+
+    pub async fn periodic_write_observation_for_telegram(
+        &self,
+        character_id: &str,
+        started_at: std::time::Instant,
+    ) -> Result<()> {
+        self.record_periodic_write_if_enabled(
+            character_id,
+            periodic_source_for_telegram(),
+            periodic_trigger_for_extraction(),
+            started_at,
+        )
+        .await
+    }
+
+    pub async fn periodic_consolidation_observation(
+        &self,
+        character_id: &str,
+        source: &str,
+        started_at: std::time::Instant,
+    ) -> Result<()> {
+        self.record_periodic_write_if_enabled(
+            character_id,
+            source,
+            periodic_trigger_for_consolidation(),
+            started_at,
+        )
+        .await
+    }
+
+    pub fn build_retrieval_observation_for_test(
+        character_id: &str,
+        query: &str,
+        stats: &RetrievalCandidateStats,
+    ) -> Result<MemoryRetrievalObservation> {
+        build_retrieval_observation_record(character_id, query, stats)
+    }
+
+    pub fn build_write_observation_for_test(
+        character_id: &str,
+        source: &str,
+        trigger: &str,
+        extracted_count: i64,
+        stored_count: i64,
+        deduplicated_count: i64,
+        invalidated_count: i64,
+        duration_ms: i64,
+    ) -> Result<MemoryWriteObservation> {
+        build_write_observation_record(
+            character_id,
+            source,
+            trigger,
+            extracted_count,
+            stored_count,
+            deduplicated_count,
+            invalidated_count,
+            duration_ms,
+        )
+    }
+
+    pub fn retrieval_stats_for_test(
+        semantic_candidates: usize,
+        bm25_candidates: usize,
+        fused_candidates: usize,
+        injected_count: usize,
+    ) -> Result<RetrievalCandidateStats> {
+        build_retrieval_stats_for_search(
+            semantic_candidates,
+            bm25_candidates,
+            fused_candidates,
+            injected_count,
+        )
     }
 
     /// Pure semantic (embedding) search with time decay, respecting tier.
