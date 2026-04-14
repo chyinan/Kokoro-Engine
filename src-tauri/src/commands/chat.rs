@@ -11,6 +11,9 @@ use crate::actions::{
 };
 use crate::ai::context::AIOrchestrator;
 use crate::ai::context::Message;
+use crate::ai::memory_event_ingress::{
+    build_cooldown_key, detect_memory_events, MemoryEventIngressOptions, MemoryEventType,
+};
 use crate::ai::memory_extractor;
 use crate::commands::system::WindowSizeState;
 use crate::error::{ChatErrorEvent, KokoroError};
@@ -2286,14 +2289,78 @@ pub async fn stream_chat(
         }
     }
 
-    // Periodic memory extraction
+    // Event-driven + periodic memory extraction
     let msg_count = state.get_message_count().await;
     let memory_msg_count = state.get_memory_trigger_count().await;
+    let upgrade_config = crate::config::load_memory_upgrade_config(
+        &crate::ai::memory::memory_upgrade_config_path(),
+    );
+    let ingress_options = MemoryEventIngressOptions {
+        enabled: upgrade_config.event_trigger_enabled,
+        event_cooldown_secs: upgrade_config.event_cooldown_secs,
+    };
     tracing::info!(
         target: "memory",
         "[Memory] User message count: {}, memory trigger count: {}",
         msg_count, memory_msg_count
     );
+
+    if state.is_memory_enabled() && ingress_options.enabled {
+        let detected_events = detect_memory_events(&request.message, &ingress_options);
+        if let Some(event) = detected_events.first() {
+            let conversation_key = conversation_id
+                .as_deref()
+                .unwrap_or("no-conversation")
+                .to_string();
+            let cooldown_key = build_cooldown_key(&char_id, &conversation_key, event.event_type);
+            if state
+                .should_trigger_memory_event(&cooldown_key, event.cooldown_secs)
+                .await
+            {
+                let trigger_label = match event.event_type {
+                    MemoryEventType::Preference => "event_preference",
+                    MemoryEventType::Correction => "event_correction",
+                    MemoryEventType::Plan => "event_plan",
+                    MemoryEventType::Profile => "event_profile",
+                };
+                tracing::info!(
+                    target: "memory",
+                    "[Memory] Triggering event-driven extraction (trigger={}, count={})",
+                    trigger_label,
+                    msg_count
+                );
+
+                let history = state.get_recent_memory_history(10).await;
+                let memory_mgr = state.memory_manager.clone();
+                let char_id_for_mem = char_id.clone();
+                let provider_for_mem = system_provider.clone();
+                let memory_enabled = state.memory_enabled_flag();
+                let observation_started_at = std::time::Instant::now();
+                let trigger_for_observation = trigger_label.to_string();
+                tauri::async_runtime::spawn(async move {
+                    if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    let _ = memory_mgr
+                        .record_periodic_write_if_enabled(
+                            &char_id_for_mem,
+                            "chat",
+                            &trigger_for_observation,
+                            observation_started_at,
+                        )
+                        .await;
+                    memory_extractor::extract_and_store_memories(
+                        &history,
+                        &memory_mgr,
+                        provider_for_mem,
+                        char_id_for_mem,
+                    )
+                    .await;
+                });
+            }
+        }
+    }
+
     if state.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
         tracing::info!(
             target: "memory",
@@ -2322,7 +2389,6 @@ pub async fn stream_chat(
             .await;
         });
     }
-
 
     // Periodic memory consolidation (every 20 user messages)
     if state.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
@@ -2466,7 +2532,24 @@ mod tests {
     use crate::actions::registry::{
         ActionInfo, ActionPermissionLevel, ActionRiskTag, ActionSource,
     };
+    use crate::ai::memory_event_ingress::MemoryEventType;
     use crate::hooks::HookPayload;
+
+    #[test]
+    fn chat_memory_ingress_triggers_immediate_extraction_for_profile_event() {
+        let decision = detect_memory_events(
+            "我是第一次接触这个项目的前端部分",
+            &MemoryEventIngressOptions {
+                enabled: true,
+                event_cooldown_secs: 120,
+            },
+        );
+        assert!(
+            decision
+                .iter()
+                .any(|event| event.event_type == MemoryEventType::Profile)
+        );
+    }
 
     #[test]
     fn test_build_chat_error_event_contains_observability_fields() {

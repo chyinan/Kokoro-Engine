@@ -2486,6 +2486,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn build_write_observation_for_event_trigger() {
+        let observation = MemoryManager::build_write_observation_for_test(
+            "char-1",
+            "chat",
+            "event_profile",
+            1,
+            1,
+            0,
+            0,
+            10,
+        )
+        .expect("observation");
+
+        assert_eq!(observation.trigger, "event_profile");
+    }
+
+    #[test]
     fn test_cosine_similarity_identical_vectors() {
         let a = vec![1.0, 0.0, 0.0];
         let b = vec![1.0, 0.0, 0.0];

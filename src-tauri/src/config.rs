@@ -81,6 +81,7 @@ pub fn resolve_api_key(api_key: &Option<String>, api_key_env: &Option<String>) -
 pub struct MemoryUpgradeConfig {
     pub observability_enabled: bool,
     pub event_trigger_enabled: bool,
+    pub event_cooldown_secs: u64,
     pub structured_memory_enabled: bool,
     pub intent_routing_enabled: bool,
     pub retrieval_eval_enabled: bool,
@@ -91,6 +92,7 @@ impl Default for MemoryUpgradeConfig {
         Self {
             observability_enabled: false,
             event_trigger_enabled: false,
+            event_cooldown_secs: 120,
             structured_memory_enabled: false,
             intent_routing_enabled: false,
             retrieval_eval_enabled: false,
@@ -104,6 +106,12 @@ pub fn validate_memory_upgrade_config(
     if config.retrieval_eval_enabled && !config.observability_enabled {
         return Err(KokoroError::Validation(
             "retrieval_eval_enabled requires observability_enabled".to_string(),
+        ));
+    }
+
+    if config.event_cooldown_secs == 0 {
+        return Err(KokoroError::Validation(
+            "event_cooldown_secs must be greater than 0".to_string(),
         ));
     }
 
@@ -128,19 +136,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_upgrade_config_defaults_disable_all_flags() {
+    fn memory_upgrade_config_defaults_include_event_cooldown() {
         let config = MemoryUpgradeConfig::default();
 
+        assert_eq!(config.event_trigger_enabled, false);
+        assert_eq!(config.event_cooldown_secs, 120);
         assert_eq!(
             config,
             MemoryUpgradeConfig {
                 observability_enabled: false,
                 event_trigger_enabled: false,
+                event_cooldown_secs: 120,
                 structured_memory_enabled: false,
                 intent_routing_enabled: false,
                 retrieval_eval_enabled: false,
             }
         );
+    }
+
+    #[test]
+    fn validate_memory_upgrade_config_rejects_zero_event_cooldown() {
+        let error = validate_memory_upgrade_config(MemoryUpgradeConfig {
+            event_cooldown_secs: 0,
+            ..MemoryUpgradeConfig::default()
+        })
+        .expect_err("config should be rejected");
+
+        match error {
+            KokoroError::Validation(message) => {
+                assert_eq!(message, "event_cooldown_secs must be greater than 0");
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
     }
 
     #[test]

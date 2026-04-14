@@ -742,6 +742,7 @@ export interface ListMemoriesResponse {
 export type MemoryUpgradeConfig = {
     readonly observability_enabled: boolean;
     readonly event_trigger_enabled: boolean;
+    readonly event_cooldown_secs: number;
     readonly structured_memory_enabled: boolean;
     readonly intent_routing_enabled: boolean;
     readonly retrieval_eval_enabled: boolean;
