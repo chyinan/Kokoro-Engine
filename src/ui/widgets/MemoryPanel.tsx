@@ -7,8 +7,8 @@ import { useTranslation } from "react-i18next";
 import { Trash2, Pencil, Check, X, Search, Brain, ChevronDown, List, Calendar, Share2, UserCircle } from "lucide-react";
 import { inputClasses } from "../styles/settings-primitives";
 import { Select } from "@/components/ui/select";
-import { listMemories, updateMemory, deleteMemory, listCharacters, getMemoryEnabled, setMemoryEnabled, getMemoryObservabilitySummary, getLatestMemoryRetrievalEvalSummary } from "../../lib/kokoro-bridge";
-import type { MemoryRecord, CharacterRecord, MemoryObservabilitySummary, MemoryRetrievalEvalSummary } from "../../lib/kokoro-bridge";
+import { listMemories, updateMemory, deleteMemory, listCharacters, getMemoryEnabled, setMemoryEnabled, getMemoryObservabilitySummary, getLatestMemoryRetrievalEvalSummary, getLatestMemoryWriteEvent, getLatestMemoryRetrievalLog } from "../../lib/kokoro-bridge";
+import type { MemoryRecord, CharacterRecord, MemoryObservabilitySummary, MemoryRetrievalEvalSummary, MemoryWriteEventRecord, MemoryRetrievalLogRecord } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { MemoryTimeline } from "./memory/MemoryTimeline";
 import { MemoryGraph } from "./memory/MemoryGraph";
@@ -35,6 +35,8 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
     const [togglingMemory, setTogglingMemory] = useState(false);
     const [observability, setObservability] = useState<MemoryObservabilitySummary | null>(null);
     const [retrievalEval, setRetrievalEval] = useState<MemoryRetrievalEvalSummary | null>(null);
+    const [latestWrite, setLatestWrite] = useState<MemoryWriteEventRecord | null>(null);
+    const [latestRetrieval, setLatestRetrieval] = useState<MemoryRetrievalLogRecord | null>(null);
     const [observabilityLoading, setObservabilityLoading] = useState(false);
     const [observabilityError, setObservabilityError] = useState<string | null>(null);
     const pageSize = 50; // Load more for graph/timeline
@@ -65,8 +67,12 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
         try {
             const summary = await getMemoryObservabilitySummary();
             const retrievalEvalSummary = await getLatestMemoryRetrievalEvalSummary();
+            const latestWriteEvent = await getLatestMemoryWriteEvent();
+            const latestRetrievalLog = await getLatestMemoryRetrievalLog();
             setObservability(summary);
             setRetrievalEval(retrievalEvalSummary);
+            setLatestWrite(latestWriteEvent);
+            setLatestRetrieval(latestRetrievalLog);
         } catch (e) {
             setObservabilityError(e instanceof Error ? e.message : String(e));
         } finally {
@@ -237,6 +243,18 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                                         <span>评估开关: {retrievalEval.retrieval_eval_enabled ? "开" : "关"}</span>
                                         <span>查询长度: {retrievalEval.query_length}</span>
                                         <span>候选效率: {retrievalEval.candidate_efficiency_pct}%</span>
+                                    </div>
+                                ) : null}
+                                {latestWrite ? (
+                                    <div className="flex items-center gap-3">
+                                        <span>最近写入: {latestWrite.trigger}</span>
+                                        <span>存储: {latestWrite.stored_count}</span>
+                                    </div>
+                                ) : null}
+                                {latestRetrieval ? (
+                                    <div className="flex items-center gap-3">
+                                        <span>最近检索: {latestRetrieval.query}</span>
+                                        <span>注入: {latestRetrieval.injected_count}</span>
                                     </div>
                                 ) : null}
                             </div>

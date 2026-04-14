@@ -1458,6 +1458,10 @@ impl MemoryManager {
     pub async fn latest_memory_retrieval_eval_summary(
         &self,
     ) -> Result<Option<MemoryRetrievalEvalSummary>> {
+        if !is_retrieval_eval_enabled() {
+            return Ok(None);
+        }
+
         Ok(self
             .latest_memory_retrieval_log()
             .await?
@@ -2488,6 +2492,27 @@ async fn merge_facts_via_llm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retrieval_eval_summary_is_hidden_when_flag_disabled() {
+        let summary = if is_retrieval_eval_enabled() {
+            Some(build_retrieval_eval_summary(&MemoryRetrievalLogRecord {
+                query: "hello".to_string(),
+                semantic_candidates: 1,
+                bm25_candidates: 1,
+                fused_candidates: 2,
+                injected_count: 1,
+            }))
+        } else {
+            None
+        };
+
+        if is_retrieval_eval_enabled() {
+            assert!(summary.is_some());
+        } else {
+            assert!(summary.is_none());
+        }
+    }
 
     #[test]
     fn build_write_observation_for_event_trigger() {
