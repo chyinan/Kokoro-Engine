@@ -417,25 +417,30 @@ fn build_periodic_character_label(character_id: &str) -> String {
     normalize_character_id_value(character_id)
 }
 
-fn build_memory_write_observation_from_counts(
-    character_id: &str,
-    source: &str,
-    trigger: &str,
+#[derive(Debug, Clone, Copy)]
+struct WriteObservationCounts {
     extracted_count: i64,
     stored_count: i64,
     deduplicated_count: i64,
     invalidated_count: i64,
     duration_ms: i64,
+}
+
+fn build_memory_write_observation_from_counts(
+    character_id: &str,
+    source: &str,
+    trigger: &str,
+    counts: WriteObservationCounts,
 ) -> MemoryWriteObservation {
     MemoryWriteObservation {
         character_id: build_periodic_character_label(character_id),
         source: build_periodic_source_label(source),
         trigger: build_periodic_trigger_label(trigger),
-        extracted_count,
-        stored_count,
-        deduplicated_count,
-        invalidated_count,
-        duration_ms,
+        extracted_count: counts.extracted_count,
+        stored_count: counts.stored_count,
+        deduplicated_count: counts.deduplicated_count,
+        invalidated_count: counts.invalidated_count,
+        duration_ms: counts.duration_ms,
     }
 }
 
@@ -522,27 +527,19 @@ fn build_write_observation_record(
     character_id: &str,
     source: &str,
     trigger: &str,
-    extracted_count: i64,
-    stored_count: i64,
-    deduplicated_count: i64,
-    invalidated_count: i64,
-    duration_ms: i64,
+    counts: WriteObservationCounts,
 ) -> std::result::Result<MemoryWriteObservation, anyhow::Error> {
     validate_write_result_counts(
-        extracted_count,
-        stored_count,
-        deduplicated_count,
-        invalidated_count,
+        counts.extracted_count,
+        counts.stored_count,
+        counts.deduplicated_count,
+        counts.invalidated_count,
     )?;
     let observation = build_memory_write_observation_from_counts(
         character_id,
         source,
         trigger,
-        extracted_count,
-        stored_count,
-        deduplicated_count,
-        invalidated_count,
-        duration_ms,
+        counts,
     );
     let observation = sanitize_write_observation(observation);
     validate_memory_write_observation(&observation)?;
@@ -635,11 +632,13 @@ fn maybe_build_periodic_write_observation(
         character_id,
         source,
         trigger,
-        0,
-        0,
-        0,
-        0,
-        duration_ms,
+        WriteObservationCounts {
+            extracted_count: 0,
+            stored_count: 0,
+            deduplicated_count: 0,
+            invalidated_count: 0,
+            duration_ms,
+        },
     )?))
 }
 
@@ -857,93 +856,83 @@ fn build_current_retrieval_observation(
     build_retrieval_observation_if_enabled(character_id, query, stats)
 }
 
-fn build_memory_observability_counts(
+async fn build_memory_observability_counts(
     manager: &MemoryManager,
-) -> impl std::future::Future<Output = Result<MemoryObservabilitySummary>> + '_ {
-    async move {
-        let write_event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_write_events")
-            .fetch_one(&manager.db)
-            .await?;
-        let retrieval_log_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_retrieval_logs")
-            .fetch_one(&manager.db)
-            .await?;
-        Ok(build_observability_summary_from_counts(
-            write_event_count,
-            retrieval_log_count,
-        ))
-    }
+) -> Result<MemoryObservabilitySummary> {
+    let write_event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_write_events")
+        .fetch_one(&manager.db)
+        .await?;
+    let retrieval_log_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_retrieval_logs")
+        .fetch_one(&manager.db)
+        .await?;
+    Ok(build_observability_summary_from_counts(
+        write_event_count,
+        retrieval_log_count,
+    ))
 }
 
-fn insert_memory_write_event(
+async fn insert_memory_write_event(
     manager: &MemoryManager,
     observation: MemoryWriteObservation,
-) -> impl std::future::Future<Output = Result<()>> + '_ {
-    async move {
-        let record = build_memory_write_record(&observation)?;
-        sqlx::query(
-            "INSERT INTO memory_write_events (character_id, source, trigger, extracted_count, stored_count, deduplicated_count, invalidated_count, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(observation.character_id)
-        .bind(record.source)
-        .bind(record.trigger)
-        .bind(record.extracted_count)
-        .bind(record.stored_count)
-        .bind(record.deduplicated_count)
-        .bind(record.invalidated_count)
-        .bind(record.duration_ms)
-        .bind(chrono::Utc::now().timestamp())
-        .execute(&manager.db)
-        .await?;
-        Ok(())
-    }
+) -> Result<()> {
+    let record = build_memory_write_record(&observation)?;
+    sqlx::query(
+        "INSERT INTO memory_write_events (character_id, source, trigger, extracted_count, stored_count, deduplicated_count, invalidated_count, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(observation.character_id)
+    .bind(record.source)
+    .bind(record.trigger)
+    .bind(record.extracted_count)
+    .bind(record.stored_count)
+    .bind(record.deduplicated_count)
+    .bind(record.invalidated_count)
+    .bind(record.duration_ms)
+    .bind(chrono::Utc::now().timestamp())
+    .execute(&manager.db)
+    .await?;
+    Ok(())
 }
 
-fn insert_memory_retrieval_log(
+async fn insert_memory_retrieval_log(
     manager: &MemoryManager,
     observation: MemoryRetrievalObservation,
-) -> impl std::future::Future<Output = Result<()>> + '_ {
-    async move {
-        let record = build_memory_retrieval_record(&observation)?;
-        sqlx::query(
-            "INSERT INTO memory_retrieval_logs (character_id, query, semantic_candidates, bm25_candidates, fused_candidates, injected_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(observation.character_id)
-        .bind(record.query)
-        .bind(record.semantic_candidates)
-        .bind(record.bm25_candidates)
-        .bind(record.fused_candidates)
-        .bind(record.injected_count)
-        .bind(chrono::Utc::now().timestamp())
-        .execute(&manager.db)
-        .await?;
-        Ok(())
-    }
+) -> Result<()> {
+    let record = build_memory_retrieval_record(&observation)?;
+    sqlx::query(
+        "INSERT INTO memory_retrieval_logs (character_id, query, semantic_candidates, bm25_candidates, fused_candidates, injected_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(observation.character_id)
+    .bind(record.query)
+    .bind(record.semantic_candidates)
+    .bind(record.bm25_candidates)
+    .bind(record.fused_candidates)
+    .bind(record.injected_count)
+    .bind(chrono::Utc::now().timestamp())
+    .execute(&manager.db)
+    .await?;
+    Ok(())
 }
 
-fn fetch_latest_memory_write_event(
+async fn fetch_latest_memory_write_event(
     manager: &MemoryManager,
-) -> impl std::future::Future<Output = Result<Option<MemoryWriteEventRecord>>> + '_ {
-    async move {
-        let row = sqlx::query_as::<_, MemoryWriteEventRecord>(
-            "SELECT source, trigger, extracted_count, stored_count, deduplicated_count, invalidated_count, duration_ms FROM memory_write_events ORDER BY id DESC LIMIT 1",
-        )
-        .fetch_optional(&manager.db)
-        .await?;
-        Ok(row)
-    }
+) -> Result<Option<MemoryWriteEventRecord>> {
+    let row = sqlx::query_as::<_, MemoryWriteEventRecord>(
+        "SELECT source, trigger, extracted_count, stored_count, deduplicated_count, invalidated_count, duration_ms FROM memory_write_events ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_optional(&manager.db)
+    .await?;
+    Ok(row)
 }
 
-fn fetch_latest_memory_retrieval_log(
+async fn fetch_latest_memory_retrieval_log(
     manager: &MemoryManager,
-) -> impl std::future::Future<Output = Result<Option<MemoryRetrievalLogRecord>>> + '_ {
-    async move {
-        let row = sqlx::query_as::<_, MemoryRetrievalLogRecord>(
-            "SELECT query, semantic_candidates, bm25_candidates, fused_candidates, injected_count FROM memory_retrieval_logs ORDER BY id DESC LIMIT 1",
-        )
-        .fetch_optional(&manager.db)
-        .await?;
-        Ok(row)
-    }
+) -> Result<Option<MemoryRetrievalLogRecord>> {
+    let row = sqlx::query_as::<_, MemoryRetrievalLogRecord>(
+        "SELECT query, semantic_candidates, bm25_candidates, fused_candidates, injected_count FROM memory_retrieval_logs ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_optional(&manager.db)
+    .await?;
+    Ok(row)
 }
 
 async fn record_memory_write_if_enabled(
@@ -1502,28 +1491,6 @@ impl MemoryManager {
         stats: &RetrievalCandidateStats,
     ) -> Result<MemoryRetrievalObservation> {
         build_retrieval_observation_record(character_id, query, stats)
-    }
-
-    pub fn build_write_observation_for_test(
-        character_id: &str,
-        source: &str,
-        trigger: &str,
-        extracted_count: i64,
-        stored_count: i64,
-        deduplicated_count: i64,
-        invalidated_count: i64,
-        duration_ms: i64,
-    ) -> Result<MemoryWriteObservation> {
-        build_write_observation_record(
-            character_id,
-            source,
-            trigger,
-            extracted_count,
-            stored_count,
-            deduplicated_count,
-            invalidated_count,
-            duration_ms,
-        )
     }
 
     pub fn retrieval_stats_for_test(
@@ -2487,15 +2454,17 @@ mod tests {
 
     #[test]
     fn build_write_observation_for_event_trigger() {
-        let observation = MemoryManager::build_write_observation_for_test(
+        let observation = build_write_observation_record(
             "char-1",
             "chat",
             "event_profile",
-            1,
-            1,
-            0,
-            0,
-            10,
+            WriteObservationCounts {
+                extracted_count: 1,
+                stored_count: 1,
+                deduplicated_count: 0,
+                invalidated_count: 0,
+                duration_ms: 10,
+            },
         )
         .expect("observation");
 
