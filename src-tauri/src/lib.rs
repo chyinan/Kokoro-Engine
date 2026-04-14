@@ -111,6 +111,7 @@ pub fn run() {
             commands::context::get_memory_observability_summary,
             commands::context::get_latest_memory_write_event,
             commands::context::get_latest_memory_retrieval_log,
+            commands::context::get_latest_memory_retrieval_eval_summary,
             commands::context::clear_history,
             commands::context::delete_last_messages,
             commands::context::end_session,

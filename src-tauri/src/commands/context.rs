@@ -59,6 +59,17 @@ pub async fn get_latest_memory_retrieval_log(
         .map_err(|e| KokoroError::Database(e.to_string()))
 }
 
+#[tauri::command]
+pub async fn get_latest_memory_retrieval_eval_summary(
+    state: State<'_, AIOrchestrator>,
+) -> Result<Option<crate::ai::memory::MemoryRetrievalEvalSummary>, KokoroError> {
+    state
+        .memory_manager
+        .latest_memory_retrieval_eval_summary()
+        .await
+        .map_err(|e| KokoroError::Database(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

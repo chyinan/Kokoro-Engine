@@ -7,8 +7,8 @@ import { useTranslation } from "react-i18next";
 import { Trash2, Pencil, Check, X, Search, Brain, ChevronDown, List, Calendar, Share2, UserCircle } from "lucide-react";
 import { inputClasses } from "../styles/settings-primitives";
 import { Select } from "@/components/ui/select";
-import { listMemories, updateMemory, deleteMemory, listCharacters, getMemoryEnabled, setMemoryEnabled, getMemoryObservabilitySummary } from "../../lib/kokoro-bridge";
-import type { MemoryRecord, CharacterRecord, MemoryObservabilitySummary } from "../../lib/kokoro-bridge";
+import { listMemories, updateMemory, deleteMemory, listCharacters, getMemoryEnabled, setMemoryEnabled, getMemoryObservabilitySummary, getLatestMemoryRetrievalEvalSummary } from "../../lib/kokoro-bridge";
+import type { MemoryRecord, CharacterRecord, MemoryObservabilitySummary, MemoryRetrievalEvalSummary } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { MemoryTimeline } from "./memory/MemoryTimeline";
 import { MemoryGraph } from "./memory/MemoryGraph";
@@ -34,6 +34,7 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
     const [memoryEnabled, setMemoryEnabledState] = useState(true);
     const [togglingMemory, setTogglingMemory] = useState(false);
     const [observability, setObservability] = useState<MemoryObservabilitySummary | null>(null);
+    const [retrievalEval, setRetrievalEval] = useState<MemoryRetrievalEvalSummary | null>(null);
     const [observabilityLoading, setObservabilityLoading] = useState(false);
     const [observabilityError, setObservabilityError] = useState<string | null>(null);
     const pageSize = 50; // Load more for graph/timeline
@@ -63,7 +64,9 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
         setObservabilityError(null);
         try {
             const summary = await getMemoryObservabilitySummary();
+            const retrievalEvalSummary = await getLatestMemoryRetrievalEvalSummary();
             setObservability(summary);
+            setRetrievalEval(retrievalEvalSummary);
         } catch (e) {
             setObservabilityError(e instanceof Error ? e.message : String(e));
         } finally {
@@ -224,9 +227,18 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                         ) : observabilityError ? (
                             <div className="mt-1 text-xs text-red-400">{observabilityError}</div>
                         ) : (
-                            <div className="mt-1 flex items-center gap-3 text-xs text-[var(--color-text-muted)]">
-                                <span>写入事件: {observability?.write_event_count ?? 0}</span>
-                                <span>检索日志: {observability?.retrieval_log_count ?? 0}</span>
+                            <div className="mt-1 flex flex-col gap-1 text-xs text-[var(--color-text-muted)]">
+                                <div className="flex items-center gap-3">
+                                    <span>写入事件: {observability?.write_event_count ?? 0}</span>
+                                    <span>检索日志: {observability?.retrieval_log_count ?? 0}</span>
+                                </div>
+                                {retrievalEval ? (
+                                    <div className="flex items-center gap-3">
+                                        <span>评估开关: {retrievalEval.retrieval_eval_enabled ? "开" : "关"}</span>
+                                        <span>查询长度: {retrievalEval.query_length}</span>
+                                        <span>候选效率: {retrievalEval.candidate_efficiency_pct}%</span>
+                                    </div>
+                                ) : null}
                             </div>
                         )}
                     </div>

@@ -771,6 +771,12 @@ export type MemoryRetrievalLogRecord = {
     readonly injected_count: number;
 };
 
+export type MemoryRetrievalEvalSummary = {
+    readonly retrieval_eval_enabled: boolean;
+    readonly query_length: number;
+    readonly candidate_efficiency_pct: number;
+};
+
 export async function listMemories(characterId: string, limit = 50, offset = 0): Promise<ListMemoriesResponse> {
     return invoke<ListMemoriesResponse>("list_memories", {
         request: { character_id: characterId, limit, offset },
@@ -813,6 +819,10 @@ export async function getLatestMemoryWriteEvent(): Promise<MemoryWriteEventRecor
 
 export async function getLatestMemoryRetrievalLog(): Promise<MemoryRetrievalLogRecord | null> {
     return invoke<MemoryRetrievalLogRecord | null>("get_latest_memory_retrieval_log");
+}
+
+export async function getLatestMemoryRetrievalEvalSummary(): Promise<MemoryRetrievalEvalSummary | null> {
+    return invoke<MemoryRetrievalEvalSummary | null>("get_latest_memory_retrieval_eval_summary");
 }
 
 // ── STT (Speech-to-Text) ──────────────────────────────

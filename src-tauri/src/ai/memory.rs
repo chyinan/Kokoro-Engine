@@ -144,6 +144,13 @@ pub struct MemoryRetrievalLogRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryRetrievalEvalSummary {
+    pub retrieval_eval_enabled: bool,
+    pub query_length: i64,
+    pub candidate_efficiency_pct: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryObservabilitySummary {
     pub write_event_count: i64,
     pub retrieval_log_count: i64,
@@ -155,6 +162,22 @@ pub struct RetrievalCandidateStats {
     pub bm25_candidates: usize,
     pub fused_candidates: usize,
     pub injected_count: usize,
+}
+
+fn build_retrieval_eval_summary(log: &MemoryRetrievalLogRecord) -> MemoryRetrievalEvalSummary {
+    let fused_candidates = log.fused_candidates.max(0);
+    let injected_count = log.injected_count.max(0);
+    let candidate_efficiency_pct = if fused_candidates == 0 {
+        0
+    } else {
+        ((injected_count as f64 / fused_candidates as f64) * 100.0).round() as i64
+    };
+
+    MemoryRetrievalEvalSummary {
+        retrieval_eval_enabled: is_retrieval_eval_enabled(),
+        query_length: log.query.chars().count() as i64,
+        candidate_efficiency_pct,
+    }
 }
 
 fn build_retrieval_observation(
@@ -254,6 +277,10 @@ pub struct MemoryWriteEventRecord {
 
 fn is_observability_enabled() -> bool {
     crate::config::load_memory_upgrade_config(&memory_upgrade_config_path()).observability_enabled
+}
+
+fn is_retrieval_eval_enabled() -> bool {
+    crate::config::load_memory_upgrade_config(&memory_upgrade_config_path()).retrieval_eval_enabled
 }
 
 pub fn memory_upgrade_config_path() -> std::path::PathBuf {
@@ -1426,6 +1453,16 @@ impl MemoryManager {
 
     pub async fn latest_memory_retrieval_log(&self) -> Result<Option<MemoryRetrievalLogRecord>> {
         fetch_latest_memory_retrieval_log(self).await
+    }
+
+    pub async fn latest_memory_retrieval_eval_summary(
+        &self,
+    ) -> Result<Option<MemoryRetrievalEvalSummary>> {
+        Ok(self
+            .latest_memory_retrieval_log()
+            .await?
+            .as_ref()
+            .map(build_retrieval_eval_summary))
     }
 
     pub async fn memory_observability_summary(&self) -> Result<MemoryObservabilitySummary> {
