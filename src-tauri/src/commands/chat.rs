@@ -12,7 +12,8 @@ use crate::actions::{
 use crate::ai::context::AIOrchestrator;
 use crate::ai::context::Message;
 use crate::ai::memory_event_ingress::{
-    build_cooldown_key, detect_memory_events, MemoryEventIngressOptions, MemoryEventType,
+    build_routed_cooldown_key, detect_memory_events, memory_ingress_trigger_label,
+    route_memory_ingress_event, MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
 use crate::commands::system::WindowSizeState;
@@ -2307,22 +2308,19 @@ pub async fn stream_chat(
 
     if state.is_memory_enabled() && ingress_options.enabled {
         let detected_events = detect_memory_events(&request.message, &ingress_options);
-        if let Some(event) = detected_events.first() {
+        if let Some(route) =
+            route_memory_ingress_event(&detected_events, upgrade_config.intent_routing_enabled)
+        {
             let conversation_key = conversation_id
                 .as_deref()
                 .unwrap_or("no-conversation")
                 .to_string();
-            let cooldown_key = build_cooldown_key(&char_id, &conversation_key, event.event_type);
+            let cooldown_key = build_routed_cooldown_key(&char_id, &conversation_key, route);
             if state
-                .should_trigger_memory_event(&cooldown_key, event.cooldown_secs)
+                .should_trigger_memory_event(&cooldown_key, route.cooldown_secs)
                 .await
             {
-                let trigger_label = match event.event_type {
-                    MemoryEventType::Preference => "event_preference",
-                    MemoryEventType::Correction => "event_correction",
-                    MemoryEventType::Plan => "event_plan",
-                    MemoryEventType::Profile => "event_profile",
-                };
+                let trigger_label = memory_ingress_trigger_label(route);
                 tracing::info!(
                     target: "memory",
                     "[Memory] Triggering event-driven extraction (trigger={}, count={})",
@@ -2337,6 +2335,8 @@ pub async fn stream_chat(
                 let memory_enabled = state.memory_enabled_flag();
                 let observation_started_at = std::time::Instant::now();
                 let trigger_for_observation = trigger_label.to_string();
+                let extraction_options =
+                    memory_extractor::build_memory_extraction_options(&upgrade_config, route.focus_event);
                 tauri::async_runtime::spawn(async move {
                     if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                         return;
@@ -2354,6 +2354,7 @@ pub async fn stream_chat(
                         &memory_mgr,
                         provider_for_mem,
                         char_id_for_mem,
+                        extraction_options,
                     )
                     .await;
                 });
@@ -2373,6 +2374,7 @@ pub async fn stream_chat(
         let provider_for_mem = system_provider.clone();
         let memory_enabled = state.memory_enabled_flag();
         let observation_started_at = std::time::Instant::now();
+        let extraction_options = memory_extractor::build_memory_extraction_options(&upgrade_config, None);
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -2385,6 +2387,7 @@ pub async fn stream_chat(
                 &memory_mgr,
                 provider_for_mem,
                 char_id_for_mem,
+                extraction_options,
             )
             .await;
         });

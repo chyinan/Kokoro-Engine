@@ -7,7 +7,8 @@ use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{execute_tool_calls, ToolInvocation};
 use crate::ai::context::AIOrchestrator;
 use crate::ai::memory_event_ingress::{
-    build_cooldown_key, detect_memory_events, MemoryEventIngressOptions, MemoryEventType,
+    build_routed_cooldown_key, detect_memory_events, memory_ingress_trigger_label,
+    route_memory_ingress_event, MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
 use crate::imagegen::ImageGenService;
@@ -515,18 +516,15 @@ async fn handle_text(
 
     if orchestrator.is_memory_enabled() && ingress_options.enabled {
         let detected_events = detect_memory_events(text, &ingress_options);
-        if let Some(event) = detected_events.first() {
-            let cooldown_key = build_cooldown_key(&char_id, &chat_id.to_string(), event.event_type);
+        if let Some(route) =
+            route_memory_ingress_event(&detected_events, upgrade_config.intent_routing_enabled)
+        {
+            let cooldown_key = build_routed_cooldown_key(&char_id, &chat_id.to_string(), route);
             if orchestrator
-                .should_trigger_memory_event(&cooldown_key, event.cooldown_secs)
+                .should_trigger_memory_event(&cooldown_key, route.cooldown_secs)
                 .await
             {
-                let trigger_label = match event.event_type {
-                    MemoryEventType::Preference => "event_preference",
-                    MemoryEventType::Correction => "event_correction",
-                    MemoryEventType::Plan => "event_plan",
-                    MemoryEventType::Profile => "event_profile",
-                };
+                let trigger_label = memory_ingress_trigger_label(route);
                 tracing::info!(
                     target: "telegram::memory",
                     "[Telegram/Memory] Triggering event-driven extraction (trigger={}, count={})",
@@ -541,6 +539,8 @@ async fn handle_text(
                 let memory_enabled = orchestrator.memory_enabled_flag();
                 let observation_started_at = std::time::Instant::now();
                 let trigger_for_observation = trigger_label.to_string();
+                let extraction_options =
+                    memory_extractor::build_memory_extraction_options(&upgrade_config, route.focus_event);
                 tauri::async_runtime::spawn(async move {
                     if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                         return;
@@ -558,6 +558,7 @@ async fn handle_text(
                         &memory_mgr,
                         provider_for_mem,
                         char_id_for_mem,
+                        extraction_options,
                     )
                     .await;
                 });
@@ -577,6 +578,7 @@ async fn handle_text(
         let char_id_for_mem = char_id.clone();
         let memory_enabled = orchestrator.memory_enabled_flag();
         let observation_started_at = std::time::Instant::now();
+        let extraction_options = memory_extractor::build_memory_extraction_options(&upgrade_config, None);
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -589,6 +591,7 @@ async fn handle_text(
                 &memory_mgr,
                 provider_for_mem,
                 char_id_for_mem,
+                extraction_options,
             )
             .await;
         });
@@ -971,6 +974,9 @@ async fn handle_photo(
     // Trigger periodic memory extraction (every 5 user messages)
     let msg_count = orchestrator.get_message_count().await;
     let memory_msg_count = orchestrator.get_memory_trigger_count().await;
+    let upgrade_config = crate::config::load_memory_upgrade_config(
+        &crate::ai::memory::memory_upgrade_config_path(),
+    );
     tracing::info!(
         target: "telegram::memory",
         "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
@@ -988,6 +994,7 @@ async fn handle_photo(
         let char_id_for_mem = char_id.clone();
         let memory_enabled = orchestrator.memory_enabled_flag();
         let observation_started_at = std::time::Instant::now();
+        let extraction_options = memory_extractor::build_memory_extraction_options(&upgrade_config, None);
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -1000,6 +1007,7 @@ async fn handle_photo(
                 &memory_mgr,
                 provider_for_mem,
                 char_id_for_mem,
+                extraction_options,
             )
             .await;
         });

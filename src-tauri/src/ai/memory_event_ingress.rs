@@ -25,6 +25,12 @@ pub struct MemoryIngressEvent {
     pub cooldown_secs: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryIngressRoute {
+    pub focus_event: Option<MemoryEventType>,
+    pub cooldown_secs: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct MemoryEventIngressOptions {
     pub enabled: bool,
@@ -40,8 +46,48 @@ impl Default for MemoryEventIngressOptions {
     }
 }
 
-pub fn build_cooldown_key(character_id: &str, conversation_id: &str, event_type: MemoryEventType) -> String {
+pub fn build_cooldown_key(
+    character_id: &str,
+    conversation_id: &str,
+    event_type: MemoryEventType,
+) -> String {
     format!("{}:{}:{}", character_id.trim(), conversation_id.trim(), event_type.as_str())
+}
+
+pub fn build_routed_cooldown_key(
+    character_id: &str,
+    conversation_id: &str,
+    route: MemoryIngressRoute,
+) -> String {
+    match route.focus_event {
+        Some(event_type) => build_cooldown_key(character_id, conversation_id, event_type),
+        None => format!(
+            "{}:{}:event_detected",
+            character_id.trim(),
+            conversation_id.trim()
+        ),
+    }
+}
+
+pub fn memory_ingress_trigger_label(route: MemoryIngressRoute) -> &'static str {
+    match route.focus_event {
+        Some(MemoryEventType::Preference) => "event_preference",
+        Some(MemoryEventType::Correction) => "event_correction",
+        Some(MemoryEventType::Plan) => "event_plan",
+        Some(MemoryEventType::Profile) => "event_profile",
+        None => "event_detected",
+    }
+}
+
+pub fn route_memory_ingress_event(
+    detected_events: &[MemoryIngressEvent],
+    intent_routing_enabled: bool,
+) -> Option<MemoryIngressRoute> {
+    let first = detected_events.first()?;
+    Some(MemoryIngressRoute {
+        focus_event: intent_routing_enabled.then_some(first.event_type),
+        cooldown_secs: first.cooldown_secs,
+    })
 }
 
 pub fn detect_memory_events(input: &str, options: &MemoryEventIngressOptions) -> Vec<MemoryIngressEvent> {
@@ -52,7 +98,10 @@ pub fn detect_memory_events(input: &str, options: &MemoryEventIngressOptions) ->
 
     let mut events = Vec::new();
 
-    if contains_any(&normalized, &["不是", "而是", "纠正", "更正", "说错", "并不是"]) {
+    if contains_any(
+        &normalized,
+        &["??", "??", "??", "??", "??", "???", "actually", "not exactly"],
+    ) {
         events.push(MemoryIngressEvent {
             event_type: MemoryEventType::Correction,
             cooldown_secs: options.event_cooldown_secs,
@@ -62,11 +111,11 @@ pub fn detect_memory_events(input: &str, options: &MemoryEventIngressOptions) ->
     if contains_any(
         &normalized,
         &[
-            "我喜欢",
-            "我不喜欢",
-            "我更喜欢",
-            "我讨厌",
-            "偏好",
+            "???",
+            "????",
+            "????",
+            "???",
+            "??",
             "prefer",
             "i like",
             "i dislike",
@@ -81,15 +130,15 @@ pub fn detect_memory_events(input: &str, options: &MemoryEventIngressOptions) ->
     if contains_any(
         &normalized,
         &[
-            "我要",
-            "我会",
-            "我计划",
-            "下周",
-            "明天",
-            "接下来",
-            "打算",
-            "承诺",
-            "约定",
+            "??",
+            "??",
+            "???",
+            "??",
+            "??",
+            "???",
+            "??",
+            "??",
+            "??",
             "i will",
             "plan to",
         ],
@@ -103,14 +152,14 @@ pub fn detect_memory_events(input: &str, options: &MemoryEventIngressOptions) ->
     if contains_any(
         &normalized,
         &[
-            "我是",
-            "我来自",
-            "我做",
-            "我在",
-            "第一次",
-            "背景",
-            "职业",
-            "工作是",
+            "??",
+            "???",
+            "??",
+            "??",
+            "???",
+            "??",
+            "??",
+            "???",
             "my background",
             "i am",
         ],
@@ -152,7 +201,7 @@ mod tests {
     #[test]
     fn detects_preference_correction_event() {
         let result = detect_memory_events(
-            "不是我喜欢猫，是我以前养过猫",
+            "???????????????",
             &MemoryEventIngressOptions::default(),
         );
         assert!(
@@ -165,7 +214,7 @@ mod tests {
     #[test]
     fn detects_plan_event() {
         let result = detect_memory_events(
-            "下周我要继续做这个记忆系统架构",
+            "???????????????",
             &MemoryEventIngressOptions::default(),
         );
         assert!(
@@ -178,7 +227,7 @@ mod tests {
     #[test]
     fn detects_profile_event() {
         let result = detect_memory_events(
-            "我是第一次接触这个项目的前端部分",
+            "????????????????",
             &MemoryEventIngressOptions::default(),
         );
         assert!(
@@ -190,7 +239,7 @@ mod tests {
 
     #[test]
     fn ignores_low_value_small_talk() {
-        let result = detect_memory_events("哈哈好的", &MemoryEventIngressOptions::default());
+        let result = detect_memory_events("????", &MemoryEventIngressOptions::default());
         assert!(result.is_empty());
     }
 
@@ -198,5 +247,39 @@ mod tests {
     fn builds_cooldown_key_with_event_type() {
         let key = build_cooldown_key("char-1", "conv-1", MemoryEventType::Preference);
         assert_eq!(key, "char-1:conv-1:preference");
+    }
+
+    #[test]
+    fn routes_detected_event_when_intent_routing_enabled() {
+        let detected = vec![MemoryIngressEvent {
+            event_type: MemoryEventType::Plan,
+            cooldown_secs: 45,
+        }];
+
+        let route = route_memory_ingress_event(&detected, true).expect("route should exist");
+
+        assert_eq!(route.focus_event, Some(MemoryEventType::Plan));
+        assert_eq!(memory_ingress_trigger_label(route), "event_plan");
+        assert_eq!(
+            build_routed_cooldown_key("char-1", "conv-1", route),
+            "char-1:conv-1:plan"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_generic_trigger_when_intent_routing_disabled() {
+        let detected = vec![MemoryIngressEvent {
+            event_type: MemoryEventType::Correction,
+            cooldown_secs: 90,
+        }];
+
+        let route = route_memory_ingress_event(&detected, false).expect("route should exist");
+
+        assert_eq!(route.focus_event, None);
+        assert_eq!(memory_ingress_trigger_label(route), "event_detected");
+        assert_eq!(
+            build_routed_cooldown_key("char-1", "conv-1", route),
+            "char-1:conv-1:event_detected"
+        );
     }
 }

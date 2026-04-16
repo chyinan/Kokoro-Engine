@@ -124,6 +124,14 @@ pub struct MemoryWriteObservation {
     pub duration_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalEvalMetrics {
+    pub overlap_count: usize,
+    pub semantic_only_count: usize,
+    pub bm25_only_count: usize,
+    pub filtered_out_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryRetrievalObservation {
     pub character_id: String,
@@ -132,6 +140,10 @@ pub struct MemoryRetrievalObservation {
     pub bm25_candidates: i64,
     pub fused_candidates: i64,
     pub injected_count: i64,
+    pub overlap_count: Option<i64>,
+    pub semantic_only_count: Option<i64>,
+    pub bm25_only_count: Option<i64>,
+    pub filtered_out_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, sqlx::FromRow)]
@@ -141,6 +153,10 @@ pub struct MemoryRetrievalLogRecord {
     pub bm25_candidates: i64,
     pub fused_candidates: i64,
     pub injected_count: i64,
+    pub overlap_count: Option<i64>,
+    pub semantic_only_count: Option<i64>,
+    pub bm25_only_count: Option<i64>,
+    pub filtered_out_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -155,6 +171,7 @@ pub struct RetrievalCandidateStats {
     pub bm25_candidates: usize,
     pub fused_candidates: usize,
     pub injected_count: usize,
+    pub eval_metrics: Option<RetrievalEvalMetrics>,
 }
 
 fn build_retrieval_observation(
@@ -162,6 +179,7 @@ fn build_retrieval_observation(
     query: &str,
     stats: &RetrievalCandidateStats,
 ) -> MemoryRetrievalObservation {
+    let eval_metrics = stats.eval_metrics.as_ref();
     MemoryRetrievalObservation {
         character_id: character_id.to_string(),
         query: query.to_string(),
@@ -169,6 +187,10 @@ fn build_retrieval_observation(
         bm25_candidates: stats.bm25_candidates as i64,
         fused_candidates: stats.fused_candidates as i64,
         injected_count: stats.injected_count as i64,
+        overlap_count: eval_metrics.map(|metrics| metrics.overlap_count as i64),
+        semantic_only_count: eval_metrics.map(|metrics| metrics.semantic_only_count as i64),
+        bm25_only_count: eval_metrics.map(|metrics| metrics.bm25_only_count as i64),
+        filtered_out_count: eval_metrics.map(|metrics| metrics.filtered_out_count as i64),
     }
 }
 
@@ -212,6 +234,35 @@ fn validate_memory_retrieval_observation(
     {
         anyhow::bail!("memory retrieval observation counts must be non-negative");
     }
+    assert_optional_non_negative_i64(observation.overlap_count, "overlap_count")?;
+    assert_optional_non_negative_i64(observation.semantic_only_count, "semantic_only_count")?;
+    assert_optional_non_negative_i64(observation.bm25_only_count, "bm25_only_count")?;
+    assert_optional_non_negative_i64(observation.filtered_out_count, "filtered_out_count")?;
+
+    if let Some(overlap_count) = observation.overlap_count {
+        if overlap_count > observation.semantic_candidates || overlap_count > observation.bm25_candidates {
+            anyhow::bail!("memory retrieval overlap_count cannot exceed semantic/bm25 candidates");
+        }
+    }
+    if let (Some(overlap_count), Some(semantic_only_count)) =
+        (observation.overlap_count, observation.semantic_only_count)
+    {
+        if semantic_only_count + overlap_count > observation.semantic_candidates {
+            anyhow::bail!("memory retrieval semantic eval counts cannot exceed semantic_candidates");
+        }
+    }
+    if let (Some(overlap_count), Some(bm25_only_count)) =
+        (observation.overlap_count, observation.bm25_only_count)
+    {
+        if bm25_only_count + overlap_count > observation.bm25_candidates {
+            anyhow::bail!("memory retrieval bm25 eval counts cannot exceed bm25_candidates");
+        }
+    }
+    if let Some(filtered_out_count) = observation.filtered_out_count {
+        if filtered_out_count > observation.fused_candidates {
+            anyhow::bail!("memory retrieval filtered_out_count cannot exceed fused_candidates");
+        }
+    }
 
     Ok(())
 }
@@ -227,6 +278,7 @@ fn merge_retrieval_candidate_stats(
         bm25_candidates,
         fused_candidates,
         injected_count,
+        eval_metrics: None,
     }
 }
 
@@ -254,6 +306,10 @@ pub struct MemoryWriteEventRecord {
 
 fn is_observability_enabled() -> bool {
     crate::config::load_memory_upgrade_config(&memory_upgrade_config_path()).observability_enabled
+}
+
+fn is_retrieval_eval_enabled() -> bool {
+    crate::config::load_memory_upgrade_config(&memory_upgrade_config_path()).retrieval_eval_enabled
 }
 
 pub fn memory_upgrade_config_path() -> std::path::PathBuf {
@@ -353,6 +409,10 @@ fn build_memory_retrieval_log_record(
         bm25_candidates: observation.bm25_candidates,
         fused_candidates: observation.fused_candidates,
         injected_count: observation.injected_count,
+        overlap_count: observation.overlap_count,
+        semantic_only_count: observation.semantic_only_count,
+        bm25_only_count: observation.bm25_only_count,
+        filtered_out_count: observation.filtered_out_count,
     }
 }
 
@@ -367,9 +427,35 @@ fn assert_non_negative_i64(value: i64, field_name: &str) -> std::result::Result<
     Ok(())
 }
 
+fn assert_optional_non_negative_i64(
+    value: Option<i64>,
+    field_name: &str,
+) -> std::result::Result<(), anyhow::Error> {
+    if let Some(value) = value {
+        assert_non_negative_i64(value, field_name)?;
+    }
+    Ok(())
+}
+
 fn validate_retrieval_stats(stats: &RetrievalCandidateStats) -> std::result::Result<(), anyhow::Error> {
     if stats.injected_count > stats.fused_candidates {
         anyhow::bail!("retrieval injected_count cannot exceed fused_candidates");
+    }
+    if let Some(eval_metrics) = &stats.eval_metrics {
+        if eval_metrics.overlap_count > stats.semantic_candidates
+            || eval_metrics.overlap_count > stats.bm25_candidates
+        {
+            anyhow::bail!("retrieval overlap_count cannot exceed semantic/bm25 candidates");
+        }
+        if eval_metrics.semantic_only_count + eval_metrics.overlap_count > stats.semantic_candidates {
+            anyhow::bail!("retrieval semantic eval counts cannot exceed semantic_candidates");
+        }
+        if eval_metrics.bm25_only_count + eval_metrics.overlap_count > stats.bm25_candidates {
+            anyhow::bail!("retrieval bm25 eval counts cannot exceed bm25_candidates");
+        }
+        if eval_metrics.filtered_out_count > stats.fused_candidates {
+            anyhow::bail!("retrieval filtered_out_count cannot exceed fused_candidates");
+        }
     }
     Ok(())
 }
@@ -417,6 +503,7 @@ fn build_periodic_character_label(character_id: &str) -> String {
     normalize_character_id_value(character_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_memory_write_observation_from_counts(
     character_id: &str,
     source: &str,
@@ -518,6 +605,7 @@ fn build_retrieval_observation_record(
     Ok(build_clamped_memory_retrieval_observation(observation))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_write_observation_record(
     character_id: &str,
     source: &str,
@@ -700,19 +788,50 @@ fn observation_summary_from_manager_counts(
     build_summary_from_counts_or_default(write_event_count, retrieval_log_count)
 }
 
+fn build_retrieval_eval_metrics(
+    semantic_results: &[MemorySnippet],
+    bm25_results: &[(i64, f64)],
+    fused_results: &[(f32, MemorySnippet)],
+    injected_results: &[MemorySnippet],
+) -> RetrievalEvalMetrics {
+    let semantic_ids: std::collections::HashSet<i64> =
+        semantic_results.iter().map(|memory| memory.id).collect();
+    let bm25_ids: std::collections::HashSet<i64> =
+        bm25_results.iter().map(|(id, _)| *id).collect();
+
+    RetrievalEvalMetrics {
+        overlap_count: semantic_ids.intersection(&bm25_ids).count(),
+        semantic_only_count: semantic_ids.difference(&bm25_ids).count(),
+        bm25_only_count: bm25_ids.difference(&semantic_ids).count(),
+        filtered_out_count: fused_results.len().saturating_sub(injected_results.len()),
+    }
+}
+
 fn build_stats_for_current_results(
     semantic_results: &[MemorySnippet],
     bm25_results: &[(i64, f64)],
     fused_results: &[(f32, MemorySnippet)],
     injected_results: &[MemorySnippet],
+    retrieval_eval_enabled: bool,
 ) -> RetrievalCandidateStats {
-    build_retrieval_stats_from_results(
+    let mut stats = build_retrieval_stats_from_results(
         semantic_results,
         bm25_results,
         fused_results,
         injected_results,
     )
-    .unwrap_or_default()
+    .unwrap_or_default();
+
+    if retrieval_eval_enabled {
+        stats.eval_metrics = Some(build_retrieval_eval_metrics(
+            semantic_results,
+            bm25_results,
+            fused_results,
+            injected_results,
+        ));
+    }
+
+    stats
 }
 
 fn periodic_source_for_chat() -> &'static str {
@@ -831,12 +950,14 @@ fn build_search_stats(
     bm25_results: &[(i64, f64)],
     fused_results: &[(f32, MemorySnippet)],
     injected_results: &[MemorySnippet],
+    retrieval_eval_enabled: bool,
 ) -> RetrievalCandidateStats {
     build_stats_for_current_results(
         semantic_results,
         bm25_results,
         fused_results,
         injected_results,
+        retrieval_eval_enabled,
     )
 }
 
@@ -857,6 +978,7 @@ fn build_current_retrieval_observation(
     build_retrieval_observation_if_enabled(character_id, query, stats)
 }
 
+#[allow(clippy::manual_async_fn)]
 fn build_memory_observability_counts(
     manager: &MemoryManager,
 ) -> impl std::future::Future<Output = Result<MemoryObservabilitySummary>> + '_ {
@@ -874,6 +996,7 @@ fn build_memory_observability_counts(
     }
 }
 
+#[allow(clippy::manual_async_fn)]
 fn insert_memory_write_event(
     manager: &MemoryManager,
     observation: MemoryWriteObservation,
@@ -898,6 +1021,7 @@ fn insert_memory_write_event(
     }
 }
 
+#[allow(clippy::manual_async_fn)]
 fn insert_memory_retrieval_log(
     manager: &MemoryManager,
     observation: MemoryRetrievalObservation,
@@ -905,7 +1029,7 @@ fn insert_memory_retrieval_log(
     async move {
         let record = build_memory_retrieval_record(&observation)?;
         sqlx::query(
-            "INSERT INTO memory_retrieval_logs (character_id, query, semantic_candidates, bm25_candidates, fused_candidates, injected_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memory_retrieval_logs (character_id, query, semantic_candidates, bm25_candidates, fused_candidates, injected_count, overlap_count, semantic_only_count, bm25_only_count, filtered_out_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(observation.character_id)
         .bind(record.query)
@@ -913,6 +1037,10 @@ fn insert_memory_retrieval_log(
         .bind(record.bm25_candidates)
         .bind(record.fused_candidates)
         .bind(record.injected_count)
+        .bind(record.overlap_count)
+        .bind(record.semantic_only_count)
+        .bind(record.bm25_only_count)
+        .bind(record.filtered_out_count)
         .bind(chrono::Utc::now().timestamp())
         .execute(&manager.db)
         .await?;
@@ -920,6 +1048,7 @@ fn insert_memory_retrieval_log(
     }
 }
 
+#[allow(clippy::manual_async_fn)]
 fn fetch_latest_memory_write_event(
     manager: &MemoryManager,
 ) -> impl std::future::Future<Output = Result<Option<MemoryWriteEventRecord>>> + '_ {
@@ -933,12 +1062,13 @@ fn fetch_latest_memory_write_event(
     }
 }
 
+#[allow(clippy::manual_async_fn)]
 fn fetch_latest_memory_retrieval_log(
     manager: &MemoryManager,
 ) -> impl std::future::Future<Output = Result<Option<MemoryRetrievalLogRecord>>> + '_ {
     async move {
         let row = sqlx::query_as::<_, MemoryRetrievalLogRecord>(
-            "SELECT query, semantic_candidates, bm25_candidates, fused_candidates, injected_count FROM memory_retrieval_logs ORDER BY id DESC LIMIT 1",
+            "SELECT query, semantic_candidates, bm25_candidates, fused_candidates, injected_count, overlap_count, semantic_only_count, bm25_only_count, filtered_out_count FROM memory_retrieval_logs ORDER BY id DESC LIMIT 1",
         )
         .fetch_optional(&manager.db)
         .await?;
@@ -1411,7 +1541,13 @@ impl MemoryManager {
             .map(|(_, m)| m.clone())
             .collect();
 
-        let stats = build_search_stats(&semantic_results, &bm25_results, &fused, &snippets);
+        let stats = build_search_stats(
+            &semantic_results,
+            &bm25_results,
+            &fused,
+            &snippets,
+            is_retrieval_eval_enabled(),
+        );
         let _ = record_memory_retrieval_if_enabled(self, character_id, query, &stats).await;
 
         Ok(build_search_outcome(snippets))
@@ -1504,6 +1640,7 @@ impl MemoryManager {
         build_retrieval_observation_record(character_id, query, stats)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build_write_observation_for_test(
         character_id: &str,
         source: &str,
@@ -2829,5 +2966,102 @@ mod tests {
             "The user loves jazz music",
             "The user hates jazz music"
         ));
+    }
+
+    #[tokio::test]
+    async fn latest_memory_retrieval_log_returns_eval_fields_when_present() {
+        let pool = setup_test_pool().await;
+        let manager = MemoryManager::new(pool);
+
+        manager
+            .record_memory_retrieval_observation(MemoryRetrievalObservation {
+                character_id: "char-1".to_string(),
+                query: "frontend memory panel".to_string(),
+                semantic_candidates: 4,
+                bm25_candidates: 3,
+                fused_candidates: 5,
+                injected_count: 2,
+                overlap_count: Some(2),
+                semantic_only_count: Some(2),
+                bm25_only_count: Some(1),
+                filtered_out_count: Some(3),
+            })
+            .await
+            .expect("retrieval observation should persist");
+
+        let latest = manager
+            .latest_memory_retrieval_log()
+            .await
+            .expect("latest retrieval log should load")
+            .expect("retrieval log should exist");
+
+        assert_eq!(latest.query, "frontend memory panel");
+        assert_eq!(latest.overlap_count, Some(2));
+        assert_eq!(latest.semantic_only_count, Some(2));
+        assert_eq!(latest.bm25_only_count, Some(1));
+        assert_eq!(latest.filtered_out_count, Some(3));
+    }
+
+    #[test]
+    fn build_search_stats_omits_eval_metrics_when_flag_disabled() {
+        let semantic_results = vec![test_memory_snippet(1), test_memory_snippet(2)];
+        let bm25_results = vec![(2, 1.0), (3, 0.8)];
+        let fused_results = vec![
+            (0.9, test_memory_snippet(2)),
+            (0.7, test_memory_snippet(3)),
+            (0.5, test_memory_snippet(1)),
+        ];
+        let injected_results = vec![test_memory_snippet(2), test_memory_snippet(3)];
+
+        let stats = build_search_stats(
+            &semantic_results,
+            &bm25_results,
+            &fused_results,
+            &injected_results,
+            false,
+        );
+
+        assert_eq!(stats.eval_metrics, None);
+    }
+
+    #[test]
+    fn build_search_stats_includes_eval_metrics_when_flag_enabled() {
+        let semantic_results = vec![test_memory_snippet(1), test_memory_snippet(2)];
+        let bm25_results = vec![(2, 1.0), (3, 0.8)];
+        let fused_results = vec![
+            (0.9, test_memory_snippet(2)),
+            (0.7, test_memory_snippet(3)),
+            (0.5, test_memory_snippet(1)),
+        ];
+        let injected_results = vec![test_memory_snippet(2), test_memory_snippet(3)];
+
+        let stats = build_search_stats(
+            &semantic_results,
+            &bm25_results,
+            &fused_results,
+            &injected_results,
+            true,
+        );
+
+        assert_eq!(
+            stats.eval_metrics,
+            Some(RetrievalEvalMetrics {
+                overlap_count: 1,
+                semantic_only_count: 1,
+                bm25_only_count: 1,
+                filtered_out_count: 1,
+            })
+        );
+    }
+
+    fn test_memory_snippet(id: i64) -> MemorySnippet {
+        MemorySnippet {
+            id,
+            content: format!("memory-{id}"),
+            embedding: vec![],
+            created_at: id,
+            importance: 0.5,
+            tier: "ephemeral".to_string(),
+        }
     }
 }

@@ -1,3 +1,5 @@
+﻿// pattern: Mixed (unavoidable)
+// Reason: This module combines pure extraction prompt/candidate helpers with the provider call and memory persistence shell.
 //! Automatic memory extraction from conversation history.
 //!
 //! Every N conversation turns, the recent history is sent to the LLM
@@ -6,6 +8,7 @@
 
 use crate::ai::context::Message;
 use crate::ai::memory::MemoryManager;
+use crate::ai::memory_event_ingress::MemoryEventType;
 use crate::llm::messages::{system_message, user_text_message};
 use crate::llm::provider::LlmProvider;
 use std::sync::Arc;
@@ -30,11 +33,95 @@ const EXTRACTION_PROMPT: &str = concat!(
     "IMPORTANT: Output ONLY the JSON array, no explanation or markdown."
 );
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MemoryExtractionOptions {
+    pub structured_memory_enabled: bool,
+    pub focus_event: Option<MemoryEventType>,
+}
+
 /// A scored memory fact from the LLM.
 #[derive(serde::Deserialize)]
 struct ScoredFact {
     fact: String,
     importance: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct MemoryWriteCandidate {
+    content: String,
+    importance: Option<f64>,
+}
+
+pub fn build_memory_extraction_options(
+    config: &crate::config::MemoryUpgradeConfig,
+    focus_event: Option<MemoryEventType>,
+) -> MemoryExtractionOptions {
+    MemoryExtractionOptions {
+        structured_memory_enabled: config.structured_memory_enabled,
+        focus_event,
+    }
+}
+
+fn build_extraction_prompt(existing_block: &str, options: MemoryExtractionOptions) -> String {
+    let structured_block = if options.structured_memory_enabled {
+        "\n\nKeep each memory candidate compact, standalone, and canonical. Prefer one fact per item."
+    } else {
+        ""
+    };
+    let focus_block = match options.focus_event {
+        Some(event_type) => format!(
+            "\n\nPrioritize {} and discard unrelated low-signal facts.",
+            event_focus_instruction(event_type)
+        ),
+        None => String::new(),
+    };
+
+    format!(
+        "{}{}{}{}",
+        EXTRACTION_PROMPT, structured_block, focus_block, existing_block
+    )
+}
+
+fn event_focus_instruction(event_type: MemoryEventType) -> &'static str {
+    match event_type {
+        MemoryEventType::Preference => "stable preferences and likes/dislikes",
+        MemoryEventType::Correction => "corrections that update an existing memory",
+        MemoryEventType::Plan => "future plans, commitments, and upcoming actions",
+        MemoryEventType::Profile => "profile facts, identity, background, and role information",
+    }
+}
+
+fn build_memory_write_candidates(
+    response: &str,
+    options: MemoryExtractionOptions,
+) -> Vec<MemoryWriteCandidate> {
+    let scored = parse_scored_response(response);
+    if !scored.is_empty() {
+        return scored
+            .into_iter()
+            .map(|item| MemoryWriteCandidate {
+                content: item.fact,
+                importance: options
+                    .structured_memory_enabled
+                    .then_some(item.importance.clamp(0.0, 1.0)),
+            })
+            .collect();
+    }
+
+    parse_plain_response(response)
+        .into_iter()
+        .map(|content| MemoryWriteCandidate {
+            content,
+            importance: None,
+        })
+        .collect()
+}
+
+fn focus_event_label(focus_event: Option<MemoryEventType>) -> &'static str {
+    match focus_event {
+        Some(event_type) => event_type.as_str(),
+        None => "generic",
+    }
 }
 
 /// Extracts memories from recent conversation history and stores them.
@@ -45,6 +132,7 @@ pub async fn extract_and_store_memories(
     memory_manager: &Arc<MemoryManager>,
     provider: Arc<dyn LlmProvider>,
     character_id: String,
+    options: MemoryExtractionOptions,
 ) {
     if recent_history.is_empty() {
         tracing::info!(target: "memory", "[Memory] extract_and_store_memories called but history is empty");
@@ -53,9 +141,11 @@ pub async fn extract_and_store_memories(
 
     tracing::info!(
         target: "memory",
-        "[Memory] Starting extraction for '{}' with {} history messages",
+        "[Memory] Starting extraction for '{}' with {} history messages (structured={}, focus={})",
         character_id,
-        recent_history.len()
+        recent_history.len(),
+        options.structured_memory_enabled,
+        focus_event_label(options.focus_event)
     );
 
     // Fetch existing memories so the LLM can avoid duplicates
@@ -72,7 +162,7 @@ pub async fn extract_and_store_memories(
     } else {
         let list = existing_memories
             .iter()
-            .map(|m| format!("- {}", m))
+            .map(|memory| format!("- {}", memory))
             .collect::<Vec<_>>()
             .join("\n");
         format!(
@@ -84,57 +174,52 @@ pub async fn extract_and_store_memories(
     // Build the conversation transcript for the LLM
     let transcript = recent_history
         .iter()
-        .map(|m| format!("{}: {}", m.role, m.content))
+        .map(|message| format!("{}: {}", message.role, message.content))
         .collect::<Vec<_>>()
         .join("\n");
 
     let messages = vec![
-        system_message(format!("{}{}", EXTRACTION_PROMPT, existing_block)),
+        system_message(build_extraction_prompt(&existing_block, options)),
         user_text_message(format!("Conversation to analyze:\n\n{}", transcript)),
     ];
 
     match provider.chat(messages, None).await {
         Ok(response) => {
-            // Try scored format first, fall back to plain string array
-            let scored = parse_scored_response(&response);
-            if scored.is_empty() {
-                // Fallback: try parsing as plain string array
-                let plain = parse_plain_response(&response);
-                if plain.is_empty() {
-                    tracing::info!(target: "memory", "[Memory] No noteworthy facts extracted this round.");
-                    return;
-                }
-                let count = plain.len();
-                for memory in plain {
-                    if let Err(e) = memory_manager.add_memory(&memory, &character_id).await {
-                        tracing::error!(target: "memory", "[Memory] Failed to store memory '{}': {}", memory, e);
-                    }
-                }
-                tracing::info!(
-                    target: "memory",
-                    "[Memory] Extracted {} memories (plain format) for '{}'.",
-                    count, character_id
-                );
-            } else {
-                let count = scored.len();
-                for sf in scored {
-                    if let Err(e) = memory_manager
-                        .add_memory_with_importance(&sf.fact, &character_id, sf.importance)
-                        .await
-                    {
-                        tracing::error!(
-                            target: "memory",
-                            "[Memory] Failed to store scored memory '{}': {}",
-                            sf.fact, e
-                        );
-                    }
-                }
-                tracing::info!(
-                    target: "memory",
-                    "[Memory] Extracted {} scored memories for '{}'.",
-                    count, character_id
-                );
+            let candidates = build_memory_write_candidates(&response, options);
+            if candidates.is_empty() {
+                tracing::info!(target: "memory", "[Memory] No noteworthy facts extracted this round.");
+                return;
             }
+
+            let candidate_count = candidates.len();
+            for candidate in candidates {
+                let result = match candidate.importance {
+                    Some(importance) => {
+                        memory_manager
+                            .add_memory_with_importance(&candidate.content, &character_id, importance)
+                            .await
+                    }
+                    None => memory_manager.add_memory(&candidate.content, &character_id).await,
+                };
+
+                if let Err(error) = result {
+                    tracing::error!(
+                        target: "memory",
+                        "[Memory] Failed to store memory '{}': {}",
+                        candidate.content,
+                        error
+                    );
+                }
+            }
+
+            tracing::info!(
+                target: "memory",
+                "[Memory] Extracted {} memories for '{}' (structured={}, focus={}).",
+                candidate_count,
+                character_id,
+                options.structured_memory_enabled,
+                focus_event_label(options.focus_event)
+            );
         }
         Err(e) => {
             tracing::error!(target: "memory", "[Memory] Extraction LLM call failed: {}", e);
@@ -148,7 +233,7 @@ fn parse_scored_response(response: &str) -> Vec<ScoredFact> {
     match serde_json::from_str::<Vec<ScoredFact>>(json_str) {
         Ok(items) => items
             .into_iter()
-            .filter(|s| !s.fact.trim().is_empty())
+            .filter(|item| !item.fact.trim().is_empty())
             .collect(),
         Err(_) => Vec::new(),
     }
@@ -158,7 +243,7 @@ fn parse_scored_response(response: &str) -> Vec<ScoredFact> {
 fn parse_plain_response(response: &str) -> Vec<String> {
     let json_str = strip_code_fences(response);
     match serde_json::from_str::<Vec<String>>(json_str) {
-        Ok(items) => items.into_iter().filter(|s| !s.trim().is_empty()).collect(),
+        Ok(items) => items.into_iter().filter(|item| !item.trim().is_empty()).collect(),
         Err(e) => {
             tracing::error!(
                 target: "memory",

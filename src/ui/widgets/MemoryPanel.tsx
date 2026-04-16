@@ -7,11 +7,12 @@ import { useTranslation } from "react-i18next";
 import { Trash2, Pencil, Check, X, Search, Brain, ChevronDown, List, Calendar, Share2, UserCircle } from "lucide-react";
 import { inputClasses } from "../styles/settings-primitives";
 import { Select } from "@/components/ui/select";
-import { listMemories, updateMemory, deleteMemory, listCharacters, getMemoryEnabled, setMemoryEnabled, getMemoryObservabilitySummary } from "../../lib/kokoro-bridge";
-import type { MemoryRecord, CharacterRecord, MemoryObservabilitySummary } from "../../lib/kokoro-bridge";
+import { listMemories, updateMemory, deleteMemory, listCharacters, getMemoryEnabled, setMemoryEnabled, getMemoryObservabilitySummary, getLatestMemoryWriteEvent, getLatestMemoryRetrievalLog, getMemoryUpgradeConfig, setMemoryUpgradeConfig } from "../../lib/kokoro-bridge";
+import type { MemoryRecord, CharacterRecord, MemoryObservabilitySummary, MemoryUpgradeConfig, MemoryWriteEventRecord, MemoryRetrievalLogRecord } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
 import { MemoryTimeline } from "./memory/MemoryTimeline";
 import { MemoryGraph } from "./memory/MemoryGraph";
+import { type MemoryUpgradeFlagKey, updateMemoryUpgradeFlag } from "./memory/memory-upgrade-flags";
 
 interface MemoryPanelProps {
     characterId: string;
@@ -36,6 +37,11 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
     const [observability, setObservability] = useState<MemoryObservabilitySummary | null>(null);
     const [observabilityLoading, setObservabilityLoading] = useState(false);
     const [observabilityError, setObservabilityError] = useState<string | null>(null);
+    const [upgradeConfig, setUpgradeConfigState] = useState<MemoryUpgradeConfig | null>(null);
+    const [upgradeConfigError, setUpgradeConfigError] = useState<string | null>(null);
+    const [savingUpgradeFlag, setSavingUpgradeFlag] = useState<MemoryUpgradeFlagKey | null>(null);
+    const [latestWriteEvent, setLatestWriteEvent] = useState<MemoryWriteEventRecord | null>(null);
+    const [latestRetrievalLog, setLatestRetrievalLog] = useState<MemoryRetrievalLogRecord | null>(null);
     const pageSize = 50; // Load more for graph/timeline
 
     // ── Character selector state ──
@@ -62,8 +68,16 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
         setObservabilityLoading(true);
         setObservabilityError(null);
         try {
-            const summary = await getMemoryObservabilitySummary();
+            const [summary, writeEvent, retrievalLog, config] = await Promise.all([
+                getMemoryObservabilitySummary(),
+                getLatestMemoryWriteEvent(),
+                getLatestMemoryRetrievalLog(),
+                getMemoryUpgradeConfig(),
+            ]);
             setObservability(summary);
+            setLatestWriteEvent(writeEvent);
+            setLatestRetrievalLog(retrievalLog);
+            setUpgradeConfigState(config);
         } catch (e) {
             setObservabilityError(e instanceof Error ? e.message : String(e));
         } finally {
@@ -172,6 +186,59 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
         }
     };
 
+    const handleUpgradeFlagChange = async (
+        key: MemoryUpgradeFlagKey,
+        enabled: boolean,
+    ) => {
+        if (!upgradeConfig) {
+            return;
+        }
+        const nextConfig = updateMemoryUpgradeFlag(upgradeConfig, key, enabled);
+        setSavingUpgradeFlag(key);
+        setUpgradeConfigError(null);
+        try {
+            await setMemoryUpgradeConfig(nextConfig);
+            setUpgradeConfigState(nextConfig);
+            await fetchObservability();
+        } catch (e) {
+            setUpgradeConfigError(e instanceof Error ? e.message : String(e));
+        } finally {
+            setSavingUpgradeFlag(null);
+        }
+    };
+
+    const upgradeFlags: Array<{
+        key: MemoryUpgradeFlagKey;
+        label: string;
+        description: string;
+    }> = [
+        {
+            key: "observability_enabled",
+            label: "Observability",
+            description: "Record write/retrieval logs for the memory pipeline.",
+        },
+        {
+            key: "event_trigger_enabled",
+            label: "Event Triggers",
+            description: "Allow chat and Telegram event ingress to trigger immediate extraction.",
+        },
+        {
+            key: "structured_memory_enabled",
+            label: "Structured Writes",
+            description: "Persist scored extraction candidates with importance-aware memory writes.",
+        },
+        {
+            key: "intent_routing_enabled",
+            label: "Intent Routing",
+            description: "Use detected event type to scope cooldown keys and focus event-driven extraction.",
+        },
+        {
+            key: "retrieval_eval_enabled",
+            label: "Retrieval Eval",
+            description: "Attach overlap/filter metrics to retrieval logs. Requires observability.",
+        },
+    ];
+
     // Helpers
     const getTimeAgo = (ts: number) => {
         const now = Date.now() / 1000;
@@ -195,6 +262,50 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
         return "text-[var(--color-accent)] bg-[var(--color-accent)]/15 border-[var(--color-accent)]/30";
     };
 
+    const formatDurationMs = (durationMs: number) => `${durationMs} ms`;
+
+    const renderUpgradeSwitch = (flag: {
+        key: MemoryUpgradeFlagKey;
+        label: string;
+        description: string;
+    }) => {
+        const enabled = upgradeConfig?.[flag.key] ?? false;
+        const disabled = savingUpgradeFlag !== null && savingUpgradeFlag !== flag.key;
+        return (
+            <div
+                key={flag.key}
+                className="flex items-start justify-between gap-4 rounded-md border border-[var(--color-border)] bg-black/20 px-3 py-2"
+            >
+                <div className="space-y-1">
+                    <div className="text-xs font-heading font-semibold text-[var(--color-text-primary)]">
+                        {flag.label}
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-[var(--color-text-muted)]">
+                        {flag.description}
+                    </p>
+                </div>
+                <button
+                    onClick={() => handleUpgradeFlagChange(flag.key, !enabled)}
+                    disabled={disabled}
+                    className={clsx(
+                        "relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-60",
+                        enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
+                    )}
+                    role="switch"
+                    aria-checked={enabled}
+                    aria-label={flag.label}
+                >
+                    <span
+                        className={clsx(
+                            "absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform",
+                            enabled && "translate-x-5"
+                        )}
+                    />
+                </button>
+            </div>
+        );
+    };
+
     return (
         <div className="space-y-4 flex flex-col">
             {/* Header & Character Selector */}
@@ -213,20 +324,72 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                         {t("settings.memory.count", { count: total })}
                     </span>
                 </div>
-
                 <div className="rounded-lg border border-[var(--color-border)] bg-black/20 p-3">
                     <div className="mb-3 rounded-md border border-[var(--color-border)] bg-black/30 px-3 py-2">
-                        <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
-                            记忆可观测性（Phase 1）
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                                Memory upgrade status
+                            </div>
+                            <div className="text-[10px] font-mono text-[var(--color-text-muted)]">
+                                cooldown {upgradeConfig?.event_cooldown_secs ?? 0}s
+                            </div>
                         </div>
                         {observabilityLoading ? (
-                            <div className="mt-1 text-xs text-[var(--color-text-muted)]">加载中...</div>
+                            <div className="mt-2 text-xs text-[var(--color-text-muted)]">Loading memory telemetry...</div>
                         ) : observabilityError ? (
-                            <div className="mt-1 text-xs text-red-400">{observabilityError}</div>
+                            <div className="mt-2 text-xs text-red-400">{observabilityError}</div>
                         ) : (
-                            <div className="mt-1 flex items-center gap-3 text-xs text-[var(--color-text-muted)]">
-                                <span>写入事件: {observability?.write_event_count ?? 0}</span>
-                                <span>检索日志: {observability?.retrieval_log_count ?? 0}</span>
+                            <div className="mt-2 space-y-3">
+                                <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--color-text-muted)]">
+                                    <span>write events: {observability?.write_event_count ?? 0}</span>
+                                    <span>retrieval logs: {observability?.retrieval_log_count ?? 0}</span>
+                                </div>
+                                <div className="space-y-2">
+                                    {upgradeFlags.map(renderUpgradeSwitch)}
+                                </div>
+                                {upgradeConfigError && (
+                                    <div className="text-xs text-red-400">{upgradeConfigError}</div>
+                                )}
+                                <div className="grid gap-2 md:grid-cols-2">
+                                    <div className="rounded-md border border-[var(--color-border)] bg-black/20 px-3 py-2">
+                                        <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                                            latest write
+                                        </div>
+                                        {latestWriteEvent ? (
+                                            <div className="mt-2 space-y-1 text-xs text-[var(--color-text-muted)]">
+                                                <div>source: {latestWriteEvent.source}</div>
+                                                <div>trigger: {latestWriteEvent.trigger}</div>
+                                                <div>
+                                                    stored {latestWriteEvent.stored_count} / dedup {latestWriteEvent.deduplicated_count} / invalidated {latestWriteEvent.invalidated_count}
+                                                </div>
+                                                <div>duration: {formatDurationMs(latestWriteEvent.duration_ms)}</div>
+                                            </div>
+                                        ) : (
+                                            <div className="mt-2 text-xs text-[var(--color-text-muted)]">No write event yet.</div>
+                                        )}
+                                    </div>
+                                    <div className="rounded-md border border-[var(--color-border)] bg-black/20 px-3 py-2">
+                                        <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                                            latest retrieval
+                                        </div>
+                                        {latestRetrievalLog ? (
+                                            <div className="mt-2 space-y-1 text-xs text-[var(--color-text-muted)]">
+                                                <div className="break-words">query: {latestRetrievalLog.query}</div>
+                                                <div>
+                                                    semantic {latestRetrievalLog.semantic_candidates} / bm25 {latestRetrievalLog.bm25_candidates} / fused {latestRetrievalLog.fused_candidates}
+                                                </div>
+                                                <div>injected: {latestRetrievalLog.injected_count}</div>
+                                                {latestRetrievalLog.overlap_count !== null && (
+                                                    <div>
+                                                        overlap {latestRetrievalLog.overlap_count} / semantic-only {latestRetrievalLog.semantic_only_count ?? 0} / bm25-only {latestRetrievalLog.bm25_only_count ?? 0} / filtered-out {latestRetrievalLog.filtered_out_count ?? 0}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <div className="mt-2 text-xs text-[var(--color-text-muted)]">No retrieval log yet.</div>
+                                        )}
+                                    </div>
+                                </div>
                             </div>
                         )}
                     </div>

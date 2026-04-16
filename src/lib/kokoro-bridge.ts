@@ -769,6 +769,10 @@ export type MemoryRetrievalLogRecord = {
     readonly bm25_candidates: number;
     readonly fused_candidates: number;
     readonly injected_count: number;
+    readonly overlap_count: number | null;
+    readonly semantic_only_count: number | null;
+    readonly bm25_only_count: number | null;
+    readonly filtered_out_count: number | null;
 };
 
 export async function listMemories(characterId: string, limit = 50, offset = 0): Promise<ListMemoriesResponse> {
