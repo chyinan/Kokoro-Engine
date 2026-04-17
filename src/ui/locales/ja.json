@@ -534,6 +534,28 @@
                 "high": "高",
                 "med": "中",
                 "low": "低"
+            },
+            "upgrade": {
+                "title": "記憶アクティビティ",
+                "loading": "メモリテレメトリを読み込み中...",
+                "write_events": "書き込みイベント",
+                "retrieval_logs": "検索ログ",
+                "latest_write": {
+                    "title": "最新の書き込み",
+                    "empty": "まだ書き込みイベントはありません。",
+                    "source": "ソース",
+                    "trigger": "トリガー",
+                    "counts": "保存 {{stored}} / 重複排除 {{deduplicated}} / 無効化 {{invalidated}}",
+                    "duration": "所要時間: {{duration}}"
+                },
+                "latest_retrieval": {
+                    "title": "最新の検索",
+                    "empty": "まだ検索ログはありません。",
+                    "query": "クエリ: {{query}}",
+                    "candidates": "semantic {{semantic}} / bm25 {{bm25}} / fused {{fused}}",
+                    "injected": "注入件数: {{count}}",
+                    "metrics": "重複 {{overlap}} / semanticのみ {{semanticOnly}} / bm25のみ {{bm25Only}} / 除外 {{filteredOut}}"
+                }
             }
         },
         "vision": {

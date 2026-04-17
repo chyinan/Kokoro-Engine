@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState, useMemo, type MouseEvent as ReactMouseEvent } from "react";
 import type { MemoryRecord } from "../../../lib/kokoro-bridge";
+import { stripStructuredMemoryPrefix } from "./memory-display-content";
 
 interface MemoryGraphProps {
     memories: MemoryRecord[];
@@ -113,7 +114,7 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
 
         memories.forEach(mem => {
             // Keyword extraction with CJK support
-            const words = extractKeywords(mem.content);
+            const words = extractKeywords(stripStructuredMemoryPrefix(mem.content));
 
             const uniqueWords = Array.from(new Set(words));
 

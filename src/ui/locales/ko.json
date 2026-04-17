@@ -534,6 +534,28 @@
                 "high": "높음",
                 "med": "중간",
                 "low": "낮음"
+            },
+            "upgrade": {
+                "title": "메모리 활동",
+                "loading": "메모리 텔레메트리를 불러오는 중...",
+                "write_events": "쓰기 이벤트",
+                "retrieval_logs": "검색 로그",
+                "latest_write": {
+                    "title": "최근 쓰기",
+                    "empty": "아직 쓰기 이벤트가 없습니다.",
+                    "source": "소스",
+                    "trigger": "트리거",
+                    "counts": "저장 {{stored}} / 중복 제거 {{deduplicated}} / 무효화 {{invalidated}}",
+                    "duration": "소요 시간: {{duration}}"
+                },
+                "latest_retrieval": {
+                    "title": "최근 검색",
+                    "empty": "아직 검색 로그가 없습니다.",
+                    "query": "쿼리: {{query}}",
+                    "candidates": "semantic {{semantic}} / bm25 {{bm25}} / fused {{fused}}",
+                    "injected": "주입: {{count}}",
+                    "metrics": "중복 {{overlap}} / semantic 전용 {{semanticOnly}} / bm25 전용 {{bm25Only}} / 필터됨 {{filteredOut}}"
+                }
             }
         },
         "vision": {

@@ -534,6 +534,28 @@
                 "high": "HIGH",
                 "med": "MED",
                 "low": "LOW"
+            },
+            "upgrade": {
+                "title": "Memory Activity",
+                "loading": "Loading memory telemetry...",
+                "write_events": "write events",
+                "retrieval_logs": "retrieval logs",
+                "latest_write": {
+                    "title": "latest write",
+                    "empty": "No write event yet.",
+                    "source": "source",
+                    "trigger": "trigger",
+                    "counts": "stored {{stored}} / dedup {{deduplicated}} / invalidated {{invalidated}}",
+                    "duration": "duration: {{duration}}"
+                },
+                "latest_retrieval": {
+                    "title": "latest retrieval",
+                    "empty": "No retrieval log yet.",
+                    "query": "query: {{query}}",
+                    "candidates": "semantic {{semantic}} / bm25 {{bm25}} / fused {{fused}}",
+                    "injected": "injected: {{count}}",
+                    "metrics": "overlap {{overlap}} / semantic-only {{semanticOnly}} / bm25-only {{bm25Only}} / filtered-out {{filteredOut}}"
+                }
             }
         },
         "vision": {

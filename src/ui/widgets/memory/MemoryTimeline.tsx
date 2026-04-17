@@ -3,6 +3,7 @@ import { format, isToday, isYesterday, isThisWeek, isThisYear } from "date-fns";
 import { clsx } from "clsx";
 import { Calendar, Star } from "lucide-react";
 import type { MemoryRecord } from "../../../lib/kokoro-bridge";
+import { stripStructuredMemoryPrefix } from "./memory-display-content";
 
 interface MemoryTimelineProps {
     memories: MemoryRecord[];
@@ -74,7 +75,7 @@ export function MemoryTimeline({ memories, onSelect }: MemoryTimelineProps) {
                                 {/* Content */}
                                 <div className="flex justify-between items-start gap-3">
                                     <p className="text-sm text-slate-200 line-clamp-3 leading-relaxed">
-                                        {mem.content}
+                                        {stripStructuredMemoryPrefix(mem.content)}
                                     </p>
                                     {mem.importance >= 8 && (
                                         <Star size={12} className="text-amber-500 fill-amber-500/20 shrink-0 mt-1" />

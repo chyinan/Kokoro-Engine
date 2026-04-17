@@ -90,32 +90,37 @@ pub struct MemoryUpgradeConfig {
 impl Default for MemoryUpgradeConfig {
     fn default() -> Self {
         Self {
-            observability_enabled: false,
-            event_trigger_enabled: false,
+            observability_enabled: true,
+            event_trigger_enabled: true,
             event_cooldown_secs: 120,
-            structured_memory_enabled: false,
-            intent_routing_enabled: false,
-            retrieval_eval_enabled: false,
+            structured_memory_enabled: true,
+            intent_routing_enabled: true,
+            retrieval_eval_enabled: true,
         }
+    }
+}
+
+fn normalize_memory_upgrade_config(config: MemoryUpgradeConfig) -> MemoryUpgradeConfig {
+    MemoryUpgradeConfig {
+        observability_enabled: true,
+        event_trigger_enabled: true,
+        event_cooldown_secs: config.event_cooldown_secs,
+        structured_memory_enabled: true,
+        intent_routing_enabled: true,
+        retrieval_eval_enabled: true,
     }
 }
 
 pub fn validate_memory_upgrade_config(
     config: MemoryUpgradeConfig,
 ) -> Result<MemoryUpgradeConfig, KokoroError> {
-    if config.retrieval_eval_enabled && !config.observability_enabled {
-        return Err(KokoroError::Validation(
-            "retrieval_eval_enabled requires observability_enabled".to_string(),
-        ));
-    }
-
     if config.event_cooldown_secs == 0 {
         return Err(KokoroError::Validation(
             "event_cooldown_secs must be greater than 0".to_string(),
         ));
     }
 
-    Ok(config)
+    Ok(normalize_memory_upgrade_config(config))
 }
 
 pub fn load_memory_upgrade_config(path: &Path) -> MemoryUpgradeConfig {
@@ -139,17 +144,17 @@ mod tests {
     fn memory_upgrade_config_defaults_include_event_cooldown() {
         let config = MemoryUpgradeConfig::default();
 
-        assert_eq!(config.event_trigger_enabled, false);
+        assert_eq!(config.event_trigger_enabled, true);
         assert_eq!(config.event_cooldown_secs, 120);
         assert_eq!(
             config,
             MemoryUpgradeConfig {
-                observability_enabled: false,
-                event_trigger_enabled: false,
+                observability_enabled: true,
+                event_trigger_enabled: true,
                 event_cooldown_secs: 120,
-                structured_memory_enabled: false,
-                intent_routing_enabled: false,
-                retrieval_eval_enabled: false,
+                structured_memory_enabled: true,
+                intent_routing_enabled: true,
+                retrieval_eval_enabled: true,
             }
         );
     }
@@ -171,20 +176,18 @@ mod tests {
     }
 
     #[test]
-    fn validate_memory_upgrade_config_rejects_eval_without_observability() {
-        let error = validate_memory_upgrade_config(MemoryUpgradeConfig {
+    fn validate_memory_upgrade_config_forces_flags_enabled() {
+        let config = validate_memory_upgrade_config(MemoryUpgradeConfig {
             observability_enabled: false,
-            retrieval_eval_enabled: true,
+            event_trigger_enabled: false,
+            structured_memory_enabled: false,
+            intent_routing_enabled: false,
+            retrieval_eval_enabled: false,
             ..MemoryUpgradeConfig::default()
         })
-        .expect_err("config should be rejected");
+        .expect("config should be normalized");
 
-        match error {
-            KokoroError::Validation(message) => {
-                assert_eq!(message, "retrieval_eval_enabled requires observability_enabled");
-            }
-            other => panic!("expected validation error, got {other:?}"),
-        }
+        assert_eq!(config, MemoryUpgradeConfig::default());
     }
 
     #[test]
@@ -207,24 +210,23 @@ mod tests {
     }
 
     #[test]
-    fn save_memory_upgrade_config_rejects_invalid_flag_combinations() {
+    fn save_memory_upgrade_config_normalizes_flags_to_enabled() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let path = temp_dir.path().join("memory_upgrade_config.json");
-        let error = save_memory_upgrade_config(
+        save_memory_upgrade_config(
             &path,
             &MemoryUpgradeConfig {
                 observability_enabled: false,
-                retrieval_eval_enabled: true,
+                event_trigger_enabled: false,
+                structured_memory_enabled: false,
+                intent_routing_enabled: false,
+                retrieval_eval_enabled: false,
                 ..MemoryUpgradeConfig::default()
             },
         )
-        .expect_err("save should fail");
+        .expect("save should normalize");
 
-        match error {
-            KokoroError::Validation(message) => {
-                assert_eq!(message, "retrieval_eval_enabled requires observability_enabled");
-            }
-            other => panic!("expected validation error, got {other:?}"),
-        }
+        let config = load_memory_upgrade_config(&path);
+        assert_eq!(config, MemoryUpgradeConfig::default());
     }
 }

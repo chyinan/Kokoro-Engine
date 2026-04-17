@@ -534,6 +534,28 @@
                 "high": "高",
                 "med": "中",
                 "low": "低"
+            },
+            "upgrade": {
+                "title": "记忆活动",
+                "loading": "正在加载记忆遥测...",
+                "write_events": "写入事件",
+                "retrieval_logs": "检索日志",
+                "latest_write": {
+                    "title": "最近一次写入",
+                    "empty": "还没有写入事件。",
+                    "source": "来源",
+                    "trigger": "触发器",
+                    "counts": "存储 {{stored}} / 去重 {{deduplicated}} / 失效 {{invalidated}}",
+                    "duration": "耗时：{{duration}}"
+                },
+                "latest_retrieval": {
+                    "title": "最近一次检索",
+                    "empty": "还没有检索日志。",
+                    "query": "查询：{{query}}",
+                    "candidates": "语义 {{semantic}} / bm25 {{bm25}} / 融合 {{fused}}",
+                    "injected": "注入：{{count}}",
+                    "metrics": "重叠 {{overlap}} / 仅语义 {{semanticOnly}} / 仅 bm25 {{bm25Only}} / 过滤掉 {{filteredOut}}"
+                }
             }
         },
         "vision": {

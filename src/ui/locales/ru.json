@@ -534,6 +534,28 @@
         "high": "ВЫС",
         "med": "СРЕД",
         "low": "НИЗ"
+      },
+      "upgrade": {
+        "title": "Активность памяти",
+        "loading": "Загрузка телеметрии памяти...",
+        "write_events": "события записи",
+        "retrieval_logs": "логи поиска",
+        "latest_write": {
+          "title": "последняя запись",
+          "empty": "Событий записи пока нет.",
+          "source": "источник",
+          "trigger": "триггер",
+          "counts": "сохранено {{stored}} / дедуп {{deduplicated}} / инвалидировано {{invalidated}}",
+          "duration": "длительность: {{duration}}"
+        },
+        "latest_retrieval": {
+          "title": "последний поиск",
+          "empty": "Логов поиска пока нет.",
+          "query": "запрос: {{query}}",
+          "candidates": "semantic {{semantic}} / bm25 {{bm25}} / fused {{fused}}",
+          "injected": "внедрено: {{count}}",
+          "metrics": "пересечение {{overlap}} / только semantic {{semanticOnly}} / только bm25 {{bm25Only}} / отфильтровано {{filteredOut}}"
+        }
       }
     },
     "vision": {
