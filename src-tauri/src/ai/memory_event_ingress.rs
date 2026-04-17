@@ -165,7 +165,7 @@ pub fn detect_memory_events(input: &str, options: &MemoryEventIngressOptions) ->
             "i like",
             "i dislike",
         ],
-    ) {
+    ) && !is_explicit_correction_statement(&normalized) {
         events.push(MemoryIngressEvent {
             event_type: MemoryEventType::Preference,
             cooldown_secs: options.event_cooldown_secs,
@@ -226,6 +226,36 @@ fn contains_any(content: &str, keywords: &[&str]) -> bool {
     keywords.iter().any(|keyword| content.contains(keyword))
 }
 
+fn is_explicit_correction_statement(content: &str) -> bool {
+    let has_direct_correction_keyword = contains_any(
+        content,
+        &[
+            "\u{7ea0}\u{6b63}",
+            "\u{66f4}\u{6b63}",
+            "\u{8bf4}\u{9519}",
+            "actually",
+            "not exactly",
+        ],
+    );
+    let has_negated_restatement = contains_any(
+        content,
+        &[
+            "\u{4e0d}\u{662f}",
+            "\u{5e76}\u{4e0d}\u{662f}",
+        ],
+    ) && contains_any(
+        content,
+        &[
+            "\u{800c}\u{662f}",
+            "\u{ff0c}\u{662f}",
+            ",\u{662f}",
+            " is ",
+        ],
+    );
+
+    has_direct_correction_keyword || has_negated_restatement
+}
+
 fn dedup_events(events: Vec<MemoryIngressEvent>) -> Vec<MemoryIngressEvent> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
@@ -253,6 +283,19 @@ mod tests {
             result
                 .iter()
                 .any(|event| event.event_type == MemoryEventType::Correction)
+        );
+    }
+
+    #[test]
+    fn explicit_correction_statement_does_not_emit_preference_event() {
+        let result = detect_memory_events(
+            "\u{4e0d}\u{662f}\u{6211}\u{559c}\u{6b22}\u{732b}\u{ff0c}\u{662f}\u{6211}\u{4ee5}\u{524d}\u{517b}\u{8fc7}\u{732b}",
+            &MemoryEventIngressOptions::default(),
+        );
+        assert!(
+            !result
+                .iter()
+                .any(|event| event.event_type == MemoryEventType::Preference)
         );
     }
 
