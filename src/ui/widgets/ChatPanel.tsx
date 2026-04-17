@@ -11,6 +11,7 @@ import { useTranslation } from "react-i18next";
 import ConversationSidebar from "./ConversationSidebar";
 import { ChatMessage } from "./ChatMessage";
 import { buildChatMessagesFromConversation } from "./chat-history";
+import { getStreamingRevealText, hasActiveKokoroBubble, hasVisibleAssistantContent, shouldRenderTypingIndicator, shouldRevealLiveTurnToolTrace } from "./chat-streaming-state";
 
 // ── Types ──────────────────────────────────────────────────
 interface ChatMessage {
@@ -26,6 +27,7 @@ interface PendingTurnState {
     turnId: string;
     messageIndex: number | null;
     rawText: string;
+    visibleTextStarted: boolean;
     translation?: string;
     tools: ToolTraceItem[];
 }
@@ -44,12 +46,6 @@ const stripStoredMarkup = (text: string) =>
         .replace(/\[EMOTION:[^\]]*\]/g, "")
         .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
         .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "");
-
-const hasActiveKokoroBubble = (messages: ChatMessage[], index: number | null) =>
-    index !== null &&
-    index >= 0 &&
-    index < messages.length &&
-    messages[index]?.role === "kokoro";
 
 const ensureTurnMessage = (messages: ChatMessage[], turn: PendingTurnState) => {
     if (hasActiveKokoroBubble(messages, turn.messageIndex)) {
@@ -208,6 +204,14 @@ function mergeToolIntoTurn(turn: PendingTurnState, incoming: ToolTraceItem): voi
 }
 
 function updateTurnToolsInMessages(prev: Array<ChatMessage>, turn: PendingTurnState, incoming: ToolTraceItem): Array<ChatMessage> {
+    if (!shouldRevealLiveTurnToolTrace({
+        messages: prev,
+        activeMessageIndex: turn.messageIndex,
+        approvalStatus: incoming.approvalStatus,
+    })) {
+        return prev;
+    }
+
     const ensured = ensureTurnMessage(prev, turn);
     return updateTurnMessage(ensured, turn, (current) => ({
         ...current,
@@ -897,6 +901,7 @@ export default function ChatPanel() {
                     turnId: turn_id,
                     messageIndex: null,
                     rawText: "",
+                    visibleTextStarted: false,
                     translation: undefined,
                     tools: [],
                 };
@@ -913,13 +918,23 @@ export default function ChatPanel() {
                 const delta = stripStreamingMarkup(rawDelta);
                 if (!delta) return;
 
-                setIsThinking(false);
                 turn.rawText += delta;
                 rawResponseRef.current = turn.rawText;
 
-                setMessages(prev => ensureTurnMessage(prev, turn));
+                const revealText = getStreamingRevealText({
+                    accumulatedText: turn.rawText,
+                    delta,
+                    hasVisibleTextStarted: turn.visibleTextStarted,
+                });
+                if (!revealText) return;
 
-                pushDelta(delta);
+                setIsThinking(false);
+                if (!turn.visibleTextStarted) {
+                    turn.visibleTextStarted = true;
+                    setMessages(prev => ensureTurnMessage(prev, turn));
+                }
+
+                pushDelta(revealText);
             });
             if (aborted) { unDelta(); return; }
             cleanups.push(unDelta);
@@ -948,7 +963,7 @@ export default function ChatPanel() {
                 const cleanText = stripStoredMarkup(fullText);
 
                 setMessages(prev => {
-                    const hasContent = Boolean(cleanText) || turn.tools.length > 0;
+                    const hasContent = hasVisibleAssistantContent(cleanText) || turn.tools.length > 0;
 
                     if (hasActiveKokoroBubble(prev, turn.messageIndex)) {
                         if (!hasContent && status === "error") {
@@ -1501,7 +1516,7 @@ export default function ChatPanel() {
                         );
                     })}
 
-                    {isThinking && <TypingIndicator />}
+                    {shouldRenderTypingIndicator({ isThinking, messages: deferredMessages, activeMessageIndex: currentTurnRef.current?.messageIndex ?? null }) && <TypingIndicator />}
                 </AnimatePresence>
                 <div ref={messagesEndRef} />
             </div>
