@@ -2623,6 +2623,10 @@ mod tests {
                 bm25_candidates: 1,
                 fused_candidates: 2,
                 injected_count: 1,
+                overlap_count: None,
+                semantic_only_count: None,
+                bm25_only_count: None,
+                filtered_out_count: None,
             }))
         } else {
             None
