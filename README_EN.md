@@ -154,7 +154,7 @@ flowchart LR
   end
 
   subgraph DATA["Data & Runtime Config"]
-    DB[("SQLite: memories / conversations / characters")]
+    DB[("SQLite: memories / summaries / conversations / characters")]
     CFG["Config Files: llm/tts/stt/vision/imagegen/mcp/telegram"]
   end
 
@@ -179,7 +179,7 @@ flowchart LR
 
 - Frontend: declarative layout, component registry, theme system, MOD UI injection.
 - Backend: command modules + AI orchestration (LLM/TTS/STT/Vision/ImageGen/MCP).
-- Data layer: SQLite + local vector retrieval.
+- Data layer: a local-first memory layer built on SQLite, persistently storing characters, conversations, summaries, and long-term memory, and using `embedding + FTS5 BM25 + RRF` hybrid retrieval to provide stable long-term context for dialogue.
 
 See [docs/architecture.md](docs/architecture.md) for details.
 

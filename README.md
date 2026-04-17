@@ -155,7 +155,7 @@ flowchart LR
   end
 
   subgraph DATA["Data & Runtime Config"]
-    DB[("SQLite: memories / conversations / characters")]
+    DB[("SQLite: memories / summaries / conversations / characters")]
     CFG["Config Files: llm/tts/stt/vision/imagegen/mcp/telegram"]
   end
 
@@ -180,7 +180,7 @@ flowchart LR
 
 - 前端：声明式布局、组件注册、主题系统、MOD UI 注入
 - 后端：命令模块 + 多模态编排（LLM/TTS/STT/Vision/ImageGen/MCP）
-- 数据层：SQLite + 本地向量检索
+- 数据层：以 SQLite 为底座构建本地优先记忆层，统一持久化角色、会话、摘要与长期记忆，并通过 `embedding + FTS5 BM25 + RRF` 混合检索为对话提供稳定的长期上下文。
 
 详细设计见 [docs/architecture.md](docs/architecture.md)。
 

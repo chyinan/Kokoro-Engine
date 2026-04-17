@@ -154,7 +154,7 @@ flowchart LR
   end
 
   subgraph DATA["Data & Runtime Config"]
-    DB[("SQLite: memories / conversations / characters")]
+    DB[("SQLite: memories / summaries / conversations / characters")]
     CFG["Config Files: llm/tts/stt/vision/imagegen/mcp/telegram"]
   end
 
@@ -179,7 +179,7 @@ flowchart LR
 
 - Фронтенд: декларативный layout, реестр компонентов, тема, MOD UI injection.
 - Бэкенд: командные модули + AI orchestration (LLM/TTS/STT/Vision/ImageGen/MCP).
-- Слой данных: SQLite + локальный векторный retrieval.
+- Слой данных: локально-ориентированный слой памяти на базе SQLite, который сохраняет персонажей, диалоги, сводки и долгосрочную память, а `embedding + FTS5 BM25 + RRF` гибридный поиск даёт диалогу стабильный долгосрочный контекст.
 
 Подробности: [docs/architecture.md](docs/architecture.md).
 

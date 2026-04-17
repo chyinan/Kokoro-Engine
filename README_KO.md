@@ -154,7 +154,7 @@ flowchart LR
   end
 
   subgraph DATA["Data & Runtime Config"]
-    DB[("SQLite: memories / conversations / characters")]
+    DB[("SQLite: memories / summaries / conversations / characters")]
     CFG["Config Files: llm/tts/stt/vision/imagegen/mcp/telegram"]
   end
 
@@ -179,7 +179,7 @@ flowchart LR
 
 - 프론트엔드: 선언형 레이아웃, 컴포넌트 등록, 테마 시스템, MOD UI 주입.
 - 백엔드: 명령 모듈 + AI 오케스트레이션(LLM/TTS/STT/Vision/ImageGen/MCP).
-- 데이터 계층: SQLite + 로컬 벡터 검색.
+- 데이터 계층: SQLite 기반의 로컬 우선 메모리 레이어로 캐릭터, 대화, 요약, 장기 기억을 영속화하고, `embedding + FTS5 BM25 + RRF` 하이브리드 검색으로 대화에 안정적인 장기 컨텍스트를 제공합니다.
 
 자세한 설계는 [docs/architecture.md](docs/architecture.md)를 참고하세요.
 
