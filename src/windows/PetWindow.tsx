@@ -2,8 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
-import Live2DViewer from "../features/live2d/Live2DViewer";
-import { Live2DController } from "../features/live2d/Live2DController";
+import Live2DViewer from "../features/live2d/Live2DViewerLoader";
 import PetContextMenu from "../features/pet/PetContextMenu";
 import { usePetChat } from "../features/pet/usePetChat";
 import type { Live2DViewerHandle } from "../features/live2d/Live2DViewer";
@@ -82,7 +81,6 @@ export default function PetWindow() {
     const [chatInput, setChatInput] = useState("");
     const [canvasSize, setCanvasSize] = useState<{ width: number; height: number } | null>(null);
     const viewerRef = useRef<Live2DViewerHandle>(null);
-    const controllerRef = useRef<Live2DController>(new Live2DController());
     const inputRef = useRef<HTMLInputElement>(null);
     const isDragModeRef = useRef(false);
     const isResizeModeRef = useRef(false);
@@ -597,9 +595,6 @@ export default function PetWindow() {
                     ref={viewerRef}
                     modelUrl={modelUrl}
                     modelPath={modelPath}
-                    // Live2DViewer owns the chat-cue subscriptions
-                    // and drives this shared controller directly.
-                    controller={controllerRef.current}
                     backgroundAlpha={0}
                     displayMode="full"
                     gazeTracking={true}
