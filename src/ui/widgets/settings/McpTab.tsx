@@ -191,7 +191,7 @@ export default function McpTab({ initialServers }: McpTabProps) {
                 return;
             }
         } catch (e) {
-            setParseError(t("settings.mcp.add_modal.invalid_json", { error: e instanceof Error ? e.message : String(e) }));
+            setParseError(t("settings.mcp.add_modal.invalid_json", { error: typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e)) }));
             return;
         }
 
@@ -205,7 +205,7 @@ export default function McpTab({ initialServers }: McpTabProps) {
             setShowAdd(false);
             await reloadAll();
         } catch (e) {
-            setParseError(t("settings.mcp.add_modal.failed_add", { error: e instanceof Error ? e.message : String(e) }));
+            setParseError(t("settings.mcp.add_modal.failed_add", { error: typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e)) }));
         } finally {
             setAdding(false);
         }

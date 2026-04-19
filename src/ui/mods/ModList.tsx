@@ -58,7 +58,7 @@ export function ModList() {
             showStatus(t("mods.status.unloaded"), "success");
         } catch (e) {
             console.error("Failed to unload mod:", e);
-            showStatus(String(e), "error");
+            showStatus(typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e)), "error");
         }
     };
 

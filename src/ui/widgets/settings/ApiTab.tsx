@@ -60,7 +60,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                 })
                 .catch((e) => {
                     console.error("Failed to load LLM config:", e);
-                    setError(String(e));
+                    setError(typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e)));
                     setLoading(false);
                 });
         }
@@ -151,7 +151,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
         const updated = { ...config, presets };
         setConfig(updated);
         setSelectedPresetId(preset.id);
-        saveLlmConfig(updated).catch((e) => setError(String(e)));
+        saveLlmConfig(updated).catch((e) => setError(typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e))));
     }, [config, selectedPresetId, t]);
 
     const handleLoadPreset = useCallback(
@@ -186,7 +186,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                 providers: Array.from(providerMap.values()),
             };
             setConfig(updated);
-            saveLlmConfig(updated).catch((e) => setError(String(e)));
+            saveLlmConfig(updated).catch((e) => setError(typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e))));
         },
         [config]
     );
@@ -201,7 +201,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
         const updated = { ...config, presets };
         setConfig(updated);
         setSelectedPresetId("");
-        saveLlmConfig(updated).catch((e) => setError(String(e)));
+        saveLlmConfig(updated).catch((e) => setError(typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e))));
     }, [config, selectedPresetId, t]);
 
     const handleSave = async () => {
@@ -251,7 +251,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
             setTimeout(() => setSaved(false), 2000);
         } catch (e) {
             console.error("Failed to save LLM config:", e);
-            setError(String(e));
+            setError(typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e)));
         } finally {
             setSaving(false);
         }
@@ -274,7 +274,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
             }
         } catch (e) {
             console.error("Failed to fetch models:", e);
-            setError(String(e));
+            setError(typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e)));
         } finally {
             setIsLoadingModels(false);
         }

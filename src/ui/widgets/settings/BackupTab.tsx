@@ -61,7 +61,7 @@ export const BackupTab: React.FC = () => {
             setAutoBackupSaved(true);
             setTimeout(() => setAutoBackupSaved(false), 2000);
         } catch (e: any) {
-            setAutoBackupError(String(e));
+            setAutoBackupError(typeof e === 'string' ? e : (e?.message ?? JSON.stringify(e)));
         }
     };
 
@@ -80,7 +80,7 @@ export const BackupTab: React.FC = () => {
             const path = await runAutoBackupNow();
             setRunNowResult(path);
         } catch (e: any) {
-            setAutoBackupError(String(e));
+            setAutoBackupError(typeof e === 'string' ? e : (e?.message ?? JSON.stringify(e)));
         } finally {
             setRunningNow(false);
         }
@@ -131,7 +131,7 @@ export const BackupTab: React.FC = () => {
                 }),
             });
         } catch (e: any) {
-            setExportError(String(e));
+            setExportError(typeof e === 'string' ? e : (e?.message ?? JSON.stringify(e)));
         } finally {
             setExporting(false);
         }

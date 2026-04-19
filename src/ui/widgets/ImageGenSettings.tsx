@@ -33,9 +33,10 @@ export default function ImageGenSettings({ config, onChange }: ImageGenSettingsP
                 }
             }));
         } catch (e) {
+            const msg = typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e));
             setTestState(prev => ({
                 ...prev,
-                [providerId]: { loading: false, error: String(e) }
+                [providerId]: { loading: false, error: msg }
             }));
         }
     };
@@ -49,9 +50,10 @@ export default function ImageGenSettings({ config, onChange }: ImageGenSettingsP
                 [providerId]: { loading: false, imageUrl: result.image_url }
             }));
         } catch (e) {
+            const msg = typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e));
             setGenTestState(prev => ({
                 ...prev,
-                [providerId]: { loading: false, error: String(e) }
+                [providerId]: { loading: false, error: msg }
             }));
         }
     };
@@ -65,9 +67,10 @@ export default function ImageGenSettings({ config, onChange }: ImageGenSettingsP
                 [providerId]: { loading: false, models }
             }));
         } catch (e) {
+            const msg = typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e));
             setTestState(prev => ({
                 ...prev,
-                [providerId]: { ...prev[providerId], loading: false, error: String(e) }
+                [providerId]: { ...prev[providerId], loading: false, error: msg }
             }));
         }
     };

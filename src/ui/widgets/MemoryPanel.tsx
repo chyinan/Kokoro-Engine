@@ -86,7 +86,7 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
             setLatestWriteEvent(writeEvent);
             setLatestRetrievalLog(retrievalLog);
         } catch (e) {
-            setObservabilityError(e instanceof Error ? e.message : String(e));
+            setObservabilityError(typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e)));
         } finally {
             if (options.showLoading) {
                 setObservabilityLoading(false);
