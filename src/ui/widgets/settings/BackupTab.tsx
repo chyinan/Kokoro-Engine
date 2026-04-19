@@ -3,9 +3,7 @@ import { motion } from 'framer-motion';
 import { clsx } from 'clsx';
 import { Download, Upload, Loader2, Check, AlertTriangle, Database, FileJson, Clock, FolderOpen, Trash2, Play } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { save, open } from '@tauri-apps/plugin-dialog';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { relaunch } from '@tauri-apps/plugin-process';
+import { save, open, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { exportData, previewImport, importData, getAutoBackupConfig, saveAutoBackupConfig, runAutoBackupNow } from '../../../lib/kokoro-bridge';
 import type { ImportPreview, AutoBackupConfig } from '../../../lib/kokoro-bridge';
 import { characterDb } from '../../../lib/db';
@@ -258,7 +256,7 @@ export const BackupTab: React.FC = () => {
                 }) + '\n\n[debug]\n' + debugInfo
             );
             setPreview(null);
-            setTimeout(() => relaunch(), 1500);
+            setTimeout(() => window.location.reload(), 1500);
         } catch (e: any) {
             const msg = typeof e === 'string' ? e : (e?.message ?? JSON.stringify(e));
             setImportError(msg);
