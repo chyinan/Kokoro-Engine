@@ -589,7 +589,7 @@ impl AIOrchestrator {
         tool_prompt: Option<String>,
         native_tools_enabled: bool,
         character_id: &str,
-    ) -> Result<Vec<Message>> {
+    ) -> Result<(Vec<Message>, Vec<String>)> {
         // 1. Determine Model logic
         let model_type = self.router.route(query);
         let _max_context = match model_type {
@@ -603,11 +603,15 @@ impl AIOrchestrator {
         // For now, always try to fetch relevant memories (scoped to current character)
         let cid = character_id;
         let current_conversation_id = self.current_conversation_id.lock().await.clone();
+        let mut warnings: Vec<String> = Vec::new();
         let memories = if self.is_memory_enabled() {
-            self.memory_manager
-                .search_memories(query, 5, cid)
-                .await
-                .ok()
+            match self.memory_manager.search_memories(query, 5, cid).await {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    warnings.push(format!("记忆检索失败（本次对话将不含记忆上下文）：{e}"));
+                    None
+                }
+            }
         } else {
             None
         };
@@ -879,7 +883,7 @@ impl AIOrchestrator {
         // OR we can make `compose_prompt` take the current message and add it.
         // Let's stick to returning context *state*.
 
-        Ok(final_messages)
+        Ok((final_messages, warnings))
     }
 
     pub async fn get_context_settings(&self) -> (String, usize) {

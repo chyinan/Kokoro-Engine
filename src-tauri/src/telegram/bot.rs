@@ -345,10 +345,13 @@ async fn handle_text(
         }
     };
 
-    let prompt_messages = orchestrator
+    let (prompt_messages, compose_warnings) = orchestrator
         .compose_prompt(text, false, tool_prompt, false, &char_id)
         .await
         .map_err(|e| e.to_string())?;
+    for w in &compose_warnings {
+        tracing::warn!("[telegram compose_prompt] {}", w);
+    }
 
     let mut client_messages = prompt_messages
         .into_iter()
@@ -814,10 +817,13 @@ async fn handle_photo(
         }
     };
 
-    let prompt_messages = orchestrator
+    let (prompt_messages, compose_warnings) = orchestrator
         .compose_prompt(&caption, false, tool_prompt, false, &char_id)
         .await
         .map_err(|e| e.to_string())?;
+    for w in &compose_warnings {
+        tracing::warn!("[telegram compose_prompt] {}", w);
+    }
 
     let mut client_messages = prompt_messages
         .into_iter()

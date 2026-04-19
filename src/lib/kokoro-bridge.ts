@@ -234,6 +234,10 @@ export async function onChatError(callback: (error: string) => void): Promise<Un
     return listen<string>("chat-error", (event) => callback(event.payload));
 }
 
+export async function onChatWarning(callback: (warning: string) => void): Promise<UnlistenFn> {
+    return listen<string>("chat-warning", (event) => callback(event.payload));
+}
+
 export interface FailureEventContext {
     deny_kind?: "hook_denied" | "policy_denied" | "fail_closed" | "pending_approval" | "execution_error";
     approval_status?: "requested" | "approved" | "rejected";

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, useDeferredValue, memo } from
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
-import { streamChat, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatError, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages, approveToolApproval, rejectToolApproval } from "../../lib/kokoro-bridge";
+import { streamChat, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages, approveToolApproval, rejectToolApproval } from "../../lib/kokoro-bridge";
 import type { FailureEvent, ToolTraceItem } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen } from "@tauri-apps/api/event";
@@ -1025,6 +1025,13 @@ export default function ChatPanel() {
             });
             if (aborted) { unError(); return; }
             cleanups.push(unError);
+
+            const unWarning = await onChatWarning((warning: string) => {
+                if (aborted) return;
+                setError(warning);
+            });
+            if (aborted) { unWarning(); return; }
+            cleanups.push(unWarning);
 
             const unToolResult = await onChatTurnTool((event) => {
                 if (aborted) return;

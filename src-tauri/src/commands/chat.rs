@@ -1501,7 +1501,7 @@ pub async fn stream_chat(
     };
 
     // Compose Persona Prompt
-    let prompt_messages = state
+    let (prompt_messages, compose_warnings) = state
         .compose_prompt(
             &request.message,
             request.allow_image_gen.unwrap_or(false),
@@ -1511,6 +1511,12 @@ pub async fn stream_chat(
         )
         .await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
+
+    // 将构建过程中产生的非致命警告（如记忆检索失败）通知前端
+    for warning in compose_warnings {
+        tracing::warn!("[compose_prompt] {}", warning);
+        let _ = app.emit("chat-warning", &warning);
+    }
 
     let assistant_turn_id = uuid::Uuid::new_v4().to_string();
     cancel_state.register_turn(&assistant_turn_id).await;
