@@ -1352,8 +1352,19 @@ impl MemoryManager {
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let embedder = self.get_embedder().await?;
         let mut guard = embedder.lock().await;
-        let embeddings = guard.embed(vec![text], None)?;
-        Ok(embeddings[0].clone())
+        let text_owned = text.to_owned();
+        // ORT 内部使用 std::sync::Mutex，若初始化时曾发生 panic 则 mutex 被污染
+        // 后续调用会以 panic 形式传播，必须用 catch_unwind 捕获转为 Err
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            guard.embed(vec![text_owned.as_str()], None)
+        }));
+        let embeddings = result
+            .map_err(|_| anyhow::anyhow!("ORT embedding panicked — local embedding unavailable"))?
+            .map_err(|e| anyhow::anyhow!("ORT embed error: {e}"))?;
+        embeddings
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Empty embedding result"))
     }
 
     #[cfg(test)]
