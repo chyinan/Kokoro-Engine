@@ -666,7 +666,10 @@ pub async fn import_data(
                 .await
                 .map_err(|e| KokoroError::Database(format!("DELETE memories failed: {}", e)))?;
 
-            let r = sqlx::query("INSERT INTO memories SELECT * FROM import_db.memories")
+            let r = sqlx::query(
+                "INSERT INTO memories (id, content, embedding, created_at, updated_at, importance, character_id, tier, consolidated_from)
+                 SELECT id, content, embedding, created_at, updated_at, importance, character_id, tier, consolidated_from FROM import_db.memories"
+            )
                 .execute(&mut *conn)
                 .await
                 .map_err(|e| KokoroError::Database(format!("INSERT memories failed: {}", e)))?;
@@ -689,7 +692,8 @@ pub async fn import_data(
             ));
 
             sqlx::query(
-                "INSERT INTO conversation_messages SELECT * FROM import_db.conversation_messages",
+                "INSERT INTO conversation_messages (id, conversation_id, role, content, metadata, created_at)
+                 SELECT id, conversation_id, role, content, metadata, created_at FROM import_db.conversation_messages",
             )
             .execute(&mut *conn)
             .await
@@ -712,7 +716,10 @@ pub async fn import_data(
                 .await
                 .ok();
 
-            let r = sqlx::query("INSERT OR IGNORE INTO memories SELECT * FROM import_db.memories")
+            let r = sqlx::query(
+                "INSERT OR IGNORE INTO memories (id, content, embedding, created_at, updated_at, importance, character_id, tier, consolidated_from)
+                 SELECT id, content, embedding, created_at, updated_at, importance, character_id, tier, consolidated_from FROM import_db.memories"
+            )
                 .execute(&mut *conn)
                 .await
                 .map_err(|e| {
@@ -741,7 +748,7 @@ pub async fn import_data(
                 result.imported_conversations
             ));
 
-            sqlx::query("INSERT OR IGNORE INTO conversation_messages SELECT * FROM import_db.conversation_messages")
+            sqlx::query("INSERT OR IGNORE INTO conversation_messages (id, conversation_id, role, content, metadata, created_at) SELECT id, conversation_id, role, content, metadata, created_at FROM import_db.conversation_messages")
                 .execute(&mut *conn).await
                 .map_err(|e| KokoroError::Database(format!("INSERT OR IGNORE conversation_messages failed: {}", e)))?;
 

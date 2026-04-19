@@ -153,7 +153,8 @@ export const BackupTab: React.FC = () => {
             setImportDb(p.has_database);
             setImportConfigs(p.has_configs);
         } catch (e: any) {
-            setImportError(String(e));
+            const msg = typeof e === 'string' ? e : (e?.message ?? JSON.stringify(e));
+            setImportError(msg);
         }
     };
 
@@ -259,7 +260,8 @@ export const BackupTab: React.FC = () => {
             setPreview(null);
             setTimeout(() => relaunch(), 1500);
         } catch (e: any) {
-            setImportError(String(e));
+            const msg = typeof e === 'string' ? e : (e?.message ?? JSON.stringify(e));
+            setImportError(msg);
         } finally {
             setImporting(false);
         }
