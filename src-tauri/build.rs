@@ -2,9 +2,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// ONNX Runtime version that matches ort-sys 2.0.0-rc.11 (used by ort 2.0.0-rc.9).
-/// v1.21.1 only ships GPU builds; v1.21.0 is the latest with CPU-only archives.
-const ORT_VERSION: &str = "1.21.0";
+/// ONNX Runtime version compatible with ort-sys 2.0.0-rc.11 (requires >= 1.23.x).
+/// fastembed 5.13.0 pulls ort 2.0.0-rc.11 which rejects anything below 1.23.x.
+const ORT_VERSION: &str = "1.23.0";
 
 fn main() {
     // --- Tauri codegen (must always run) ---
