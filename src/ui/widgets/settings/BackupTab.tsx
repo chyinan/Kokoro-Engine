@@ -4,7 +4,7 @@ import { clsx } from 'clsx';
 import { Download, Upload, Loader2, Check, AlertTriangle, Database, FileJson, Clock, FolderOpen, Trash2, Play } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { save, open, open as openDialog } from '@tauri-apps/plugin-dialog';
-import { exportData, previewImport, importData, getAutoBackupConfig, saveAutoBackupConfig, runAutoBackupNow } from '../../../lib/kokoro-bridge';
+import { exportData, previewImport, importData, getAutoBackupConfig, saveAutoBackupConfig, runAutoBackupNow, listCharacters } from '../../../lib/kokoro-bridge';
 import type { ImportPreview, AutoBackupConfig } from '../../../lib/kokoro-bridge';
 import { characterDb } from '../../../lib/db';
 import type { CharacterProfile } from '../../../lib/db';
@@ -97,15 +97,18 @@ export const BackupTab: React.FC = () => {
             });
             if (!filePath) { setExporting(false); return; }
 
-            // 序列化角色数据（头像 Blob 转 base64）+ 用户资料
-            const chars = await characterDb.getAll();
-            const charsSerializable = await Promise.all(chars.map(async (c) => {
-                if (c.avatarBlob) {
-                    const buf = await c.avatarBlob.arrayBuffer();
+            // 序列化角色数据：从 SQLite 读文字数据，从 IndexedDB 匹配头像
+            const sqliteChars = await listCharacters();
+            const idbChars = await characterDb.getAll();
+            const idbByStableId = new Map(idbChars.filter(c => c.stableId).map(c => [c.stableId, c]));
+            const charsSerializable = await Promise.all(sqliteChars.map(async (c) => {
+                const idbChar = idbByStableId.get(c.id);
+                if (idbChar?.avatarBlob) {
+                    const buf = await idbChar.avatarBlob.arrayBuffer();
                     const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-                    return { ...c, avatarBlob: undefined, avatarB64: b64 };
+                    return { ...c, stableId: c.id, avatarB64: b64 };
                 }
-                return { ...c, avatarBlob: undefined };
+                return { ...c, stableId: c.id };
             }));
             const payload = {
                 characters: charsSerializable,

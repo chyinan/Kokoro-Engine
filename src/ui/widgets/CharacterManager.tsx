@@ -155,11 +155,11 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
     const loadCharacters = useCallback(async () => {
         setIsLoading(true);
         try {
-            // One-time migration: copy IndexedDB characters to SQLite, then delete from IndexedDB
+            // Migration/restore: copy IndexedDB characters to SQLite (upsert), then delete from IndexedDB
             const idbChars = await characterDb.getAll();
             for (const c of idbChars) {
                 if (!c.stableId) continue;
-                await createCharacter({
+                const record = {
                     id: c.stableId,
                     name: c.name,
                     persona: c.persona,
@@ -167,8 +167,10 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                     source_format: c.sourceFormat ?? "manual",
                     created_at: c.createdAt ?? 0,
                     updated_at: c.updatedAt ?? 0,
-                }).catch(() => {});
-                // Remove from IndexedDB after migration so deleted SQLite records don't resurrect
+                };
+                await createCharacter(record).catch(() => {});
+                // Always update to ensure backup-restored data overwrites stale SQLite records
+                await updateCharacter(record).catch(() => {});
                 if (c.id != null) {
                     await characterDb.remove(c.id).catch(() => {});
                 }
