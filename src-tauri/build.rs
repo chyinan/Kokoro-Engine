@@ -186,9 +186,19 @@ fn copy_to_binary_dir(lib_path: &Path, lib_name: &str) {
         let out = PathBuf::from(&out_dir);
         if let Some(target_profile_dir) = out.ancestors().nth(3) {
             let bin_dest = target_profile_dir.join(lib_name);
-            if !bin_dest.exists() {
-                let _ = fs::copy(lib_path, &bin_dest);
+            let _ = fs::copy(lib_path, &bin_dest);
+
+            let deps_dest = target_profile_dir.join("deps").join(lib_name);
+            if let Some(parent) = deps_dest.parent() {
+                let _ = fs::create_dir_all(parent);
             }
+            let _ = fs::copy(lib_path, &deps_dest);
+
+            let examples_dest = target_profile_dir.join("examples").join(lib_name);
+            if let Some(parent) = examples_dest.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::copy(lib_path, &examples_dest);
         }
     }
 }
