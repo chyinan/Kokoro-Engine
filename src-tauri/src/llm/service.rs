@@ -332,9 +332,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn from_config_skips_disabled_active_provider_and_uses_first_enabled() {
+    async fn from_config_uses_first_enabled_when_active_provider_is_missing() {
         let config = LlmConfig {
-            active_provider: "disabled-provider".to_string(),
+            active_provider: "missing-provider".to_string(),
             system_provider: None,
             system_model: None,
             providers: vec![
@@ -364,10 +364,19 @@ mod tests {
             presets: vec![],
         };
 
-        let service = LlmService::from_config(config, PathBuf::from("llm_config.test.json"));
+        let config_path = temp_config_path("llm_config_missing_active_provider");
+        let service = LlmService::from_config(config, config_path.clone());
 
         let provider = service.provider().await;
         assert_eq!(provider.id(), "enabled-provider");
+
+        let normalized_config = service.config().await;
+        assert_eq!(normalized_config.active_provider, "enabled-provider");
+
+        let persisted_config = crate::llm::llm_config::load_config(&config_path);
+        assert_eq!(persisted_config.active_provider, "enabled-provider");
+
+        let _ = std::fs::remove_file(config_path);
     }
 
     #[tokio::test]
