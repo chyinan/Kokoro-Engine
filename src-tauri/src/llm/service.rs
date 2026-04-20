@@ -1,7 +1,7 @@
 //! LLM Service — managed Tauri state holding the active LLM provider.
 
 use crate::error::KokoroError;
-use crate::llm::llm_config::{LlmConfig, LlmProviderConfig};
+use crate::llm::llm_config::{LlmConfig, LlmPreset, LlmProviderConfig};
 use crate::llm::ollama::OllamaProvider;
 use crate::llm::provider::{LlmProvider, OpenAIProvider};
 use std::collections::HashMap;
@@ -21,15 +21,33 @@ pub struct LlmService {
 impl LlmService {
     /// Create a new LlmService from a persisted config.
     pub fn from_config(config: LlmConfig, config_path: PathBuf) -> Self {
-        let providers = build_provider_map(&config);
-        let active_provider_id = resolve_active_provider_id(&config)
+        let original_config = config.clone();
+        let normalized_config = normalize_config(config);
+        if normalized_config != original_config {
+            tracing::warn!(
+                target: "llm",
+                "Normalized inconsistent LLM config: ensured selected providers are enabled and provider IDs are valid"
+            );
+            if let Err(error) = crate::llm::llm_config::save_config(&config_path, &normalized_config)
+            {
+                tracing::warn!(
+                    target: "llm",
+                    "Failed to persist normalized LLM config to {}: {}",
+                    config_path.display(),
+                    error
+                );
+            }
+        }
+
+        let providers = build_provider_map(&normalized_config);
+        let active_provider_id = resolve_active_provider_id(&normalized_config)
             .map(str::to_owned)
             .unwrap_or_else(|| "openai".to_string());
 
         Self {
             providers: Arc::new(RwLock::new(providers)),
             active_provider_id: Arc::new(RwLock::new(active_provider_id)),
-            config: Arc::new(RwLock::new(config)),
+            config: Arc::new(RwLock::new(normalized_config)),
             config_path,
         }
     }
@@ -68,19 +86,20 @@ impl LlmService {
 
     /// Update config, persist to disk, and hot-swap the active provider.
     pub async fn update_config(&self, new_config: LlmConfig) -> Result<(), KokoroError> {
+        let normalized_config = normalize_config(new_config);
         // Rebuild providers + active id first
-        let rebuilt_providers = try_build_provider_map(&new_config)?;
-        let rebuilt_active_provider_id = resolve_active_provider_id(&new_config)
+        let rebuilt_providers = try_build_provider_map(&normalized_config)?;
+        let rebuilt_active_provider_id = resolve_active_provider_id(&normalized_config)
             .map(str::to_owned)
             .unwrap_or_else(|| "openai".to_string());
 
         // Persist only after successful rebuild
-        crate::llm::llm_config::save_config(&self.config_path, &new_config)?;
+        crate::llm::llm_config::save_config(&self.config_path, &normalized_config)?;
 
         // Swap only after successful rebuild + persistence
         *self.providers.write().await = rebuilt_providers;
         *self.active_provider_id.write().await = rebuilt_active_provider_id;
-        *self.config.write().await = new_config;
+        *self.config.write().await = normalized_config;
 
         Ok(())
     }
@@ -140,6 +159,55 @@ fn try_provider_by_id(
             provider_id
         ))
     })
+}
+
+fn normalize_config(mut config: LlmConfig) -> LlmConfig {
+    normalize_provider_selection(
+        &mut config.active_provider,
+        &mut config.system_provider,
+        &mut config.providers,
+    );
+
+    for preset in &mut config.presets {
+        normalize_preset(preset);
+    }
+
+    config
+}
+
+fn normalize_preset(preset: &mut LlmPreset) {
+    normalize_provider_selection(
+        &mut preset.active_provider,
+        &mut preset.system_provider,
+        &mut preset.providers,
+    );
+}
+
+fn normalize_provider_selection(
+    active_provider: &mut String,
+    system_provider: &mut Option<String>,
+    providers: &mut [LlmProviderConfig],
+) {
+    if let Some(active_index) = providers.iter().position(|provider| provider.id == *active_provider)
+    {
+        providers[active_index].enabled = true;
+    } else if let Some(resolved_id) = providers
+        .iter()
+        .find(|provider| provider.enabled)
+        .or_else(|| providers.first())
+        .map(|provider| provider.id.clone())
+    {
+        *active_provider = resolved_id;
+    }
+
+    if let Some(system_id) = system_provider.clone() {
+        if let Some(system_index) = providers.iter().position(|provider| provider.id == system_id)
+        {
+            providers[system_index].enabled = true;
+        } else {
+            *system_provider = None;
+        }
+    }
 }
 
 fn resolve_active_provider_id(config: &LlmConfig) -> Option<&str> {
@@ -440,6 +508,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn from_config_normalizes_disabled_selected_providers_and_presets() {
+        let config_path = temp_config_path("llm_config_from_config_normalization");
+        let config = LlmConfig {
+            active_provider: "ollama".to_string(),
+            system_provider: Some("openai".to_string()),
+            system_model: Some("qwen3-coder:30b".to_string()),
+            providers: vec![
+                LlmProviderConfig {
+                    id: "openai".to_string(),
+                    provider_type: "openai".to_string(),
+                    enabled: false,
+                    supports_native_tools: true,
+                    api_key: Some("test-key-openai".to_string()),
+                    api_key_env: None,
+                    base_url: Some("https://api.openai.com/v1".to_string()),
+                    model: Some("gpt-4o-mini".to_string()),
+                    extra: std::collections::HashMap::new(),
+                },
+                LlmProviderConfig {
+                    id: "ollama".to_string(),
+                    provider_type: "ollama".to_string(),
+                    enabled: false,
+                    supports_native_tools: true,
+                    api_key: None,
+                    api_key_env: None,
+                    base_url: Some("http://localhost:11434".to_string()),
+                    model: Some("qwen3-coder:30b".to_string()),
+                    extra: std::collections::HashMap::new(),
+                },
+            ],
+            presets: vec![LlmPreset {
+                id: "preset-1".to_string(),
+                name: "Broken preset".to_string(),
+                active_provider: "ollama".to_string(),
+                system_provider: Some("openai".to_string()),
+                system_model: None,
+                providers: vec![
+                    LlmProviderConfig {
+                        id: "openai".to_string(),
+                        provider_type: "openai".to_string(),
+                        enabled: false,
+                        supports_native_tools: true,
+                        api_key: Some("test-key-openai".to_string()),
+                        api_key_env: None,
+                        base_url: Some("https://api.openai.com/v1".to_string()),
+                        model: Some("gpt-4o-mini".to_string()),
+                        extra: std::collections::HashMap::new(),
+                    },
+                    LlmProviderConfig {
+                        id: "ollama".to_string(),
+                        provider_type: "ollama".to_string(),
+                        enabled: false,
+                        supports_native_tools: true,
+                        api_key: None,
+                        api_key_env: None,
+                        base_url: Some("http://localhost:11434".to_string()),
+                        model: Some("qwen3-coder:30b".to_string()),
+                        extra: std::collections::HashMap::new(),
+                    },
+                ],
+            }],
+        };
+
+        let service = LlmService::from_config(config, config_path.clone());
+
+        let provider = service.provider().await;
+        assert_eq!(provider.id(), "ollama");
+
+        let system_provider = service.system_provider().await;
+        assert_eq!(system_provider.id(), "openai");
+
+        let normalized_config = service.config().await;
+        assert!(normalized_config
+            .providers
+            .iter()
+            .find(|provider| provider.id == "ollama")
+            .unwrap()
+            .enabled);
+        assert!(normalized_config
+            .providers
+            .iter()
+            .find(|provider| provider.id == "openai")
+            .unwrap()
+            .enabled);
+        assert!(normalized_config.presets[0]
+            .providers
+            .iter()
+            .find(|provider| provider.id == "ollama")
+            .unwrap()
+            .enabled);
+        assert!(normalized_config.presets[0]
+            .providers
+            .iter()
+            .find(|provider| provider.id == "openai")
+            .unwrap()
+            .enabled);
+
+        let persisted_config = crate::llm::llm_config::load_config(&config_path);
+        assert!(persisted_config
+            .providers
+            .iter()
+            .find(|provider| provider.id == "ollama")
+            .unwrap()
+            .enabled);
+        assert!(persisted_config.presets[0]
+            .providers
+            .iter()
+            .find(|provider| provider.id == "openai")
+            .unwrap()
+            .enabled);
+
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
     async fn update_config_rebuilds_provider_map_and_switches_active_consistently() {
         let config_path = std::env::temp_dir().join(format!(
             "llm_config_update_config_atomic_{}.json",
@@ -507,6 +690,60 @@ mod tests {
         let _ = std::fs::remove_file(config_path);
     }
 
+    #[tokio::test]
+    async fn update_config_enables_selected_providers_before_persisting() {
+        let config_path = temp_config_path("llm_config_update_config_normalization");
+        let service =
+            LlmService::from_config(test_config_with_named_providers(), config_path.clone());
+
+        let mut new_config = test_config_with_named_providers();
+        new_config.active_provider = "other-provider".to_string();
+        new_config.system_provider = Some("system-provider".to_string());
+        for provider in &mut new_config.providers {
+            if provider.id == "other-provider" || provider.id == "system-provider" {
+                provider.enabled = false;
+            }
+        }
+
+        service.update_config(new_config).await.unwrap();
+
+        let provider = service.provider().await;
+        assert_eq!(provider.id(), "other-provider");
+
+        let system_provider = service.system_provider().await;
+        assert_eq!(system_provider.id(), "system-provider");
+
+        let updated_config = service.config().await;
+        assert!(updated_config
+            .providers
+            .iter()
+            .find(|provider| provider.id == "other-provider")
+            .unwrap()
+            .enabled);
+        assert!(updated_config
+            .providers
+            .iter()
+            .find(|provider| provider.id == "system-provider")
+            .unwrap()
+            .enabled);
+
+        let persisted_config = crate::llm::llm_config::load_config(&config_path);
+        assert!(persisted_config
+            .providers
+            .iter()
+            .find(|provider| provider.id == "other-provider")
+            .unwrap()
+            .enabled);
+        assert!(persisted_config
+            .providers
+            .iter()
+            .find(|provider| provider.id == "system-provider")
+            .unwrap()
+            .enabled);
+
+        let _ = std::fs::remove_file(config_path);
+    }
+
     fn make_service_with_active_and_system_provider() -> LlmService {
         let mut config = test_config_with_named_providers();
         config.active_provider = "active-provider".to_string();
@@ -518,7 +755,10 @@ mod tests {
         let mut config = test_config_with_named_providers();
         config.active_provider = "active-provider".to_string();
         config.system_provider = Some("missing-system-provider".to_string());
-        LlmService::from_config(config, PathBuf::from("llm_config.test.json"))
+        LlmService::from_config(
+            config,
+            temp_config_path("llm_config_missing_system_provider"),
+        )
     }
 
     fn make_service_with_no_enabled_provider() -> LlmService {
@@ -610,5 +850,16 @@ mod tests {
         };
 
         (config, PathBuf::from("llm_config.test.json"))
+    }
+
+    fn temp_config_path(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{}_{}.json",
+            prefix,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
     }
 }

@@ -952,6 +952,7 @@ function App() {
             responseLanguage={responseLanguage}
             ttsConfig={ttsConfig}
             llmConfig={llmConfig}
+            onLlmConfigSaved={setLlmConfig}
             sttConfig={sttConfig}
             visionConfig={visionConfig}
             onVisionConfigChange={setVisionConfig}

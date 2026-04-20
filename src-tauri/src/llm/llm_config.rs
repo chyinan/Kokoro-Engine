@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmProviderConfig {
     pub id: String,
     /// "openai" | "ollama"
@@ -37,7 +37,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmPreset {
     pub id: String,
     pub name: String,
@@ -47,7 +47,7 @@ pub struct LlmPreset {
     pub providers: Vec<LlmProviderConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmConfig {
     /// ID of the active provider (must match one of `providers[].id`).
     #[serde(default = "default_active_provider")]

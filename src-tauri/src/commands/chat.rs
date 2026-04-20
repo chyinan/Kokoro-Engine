@@ -1462,16 +1462,17 @@ pub async fn stream_chat(
 
     let llm_config = llm_state.config().await;
     let chat_provider = llm_state.provider().await;
+    let effective_provider_id = chat_provider.id().to_string();
     let native_tools_enabled = llm_config
         .providers
         .iter()
-        .find(|provider| provider.id == llm_config.active_provider)
+        .find(|provider| provider.id == effective_provider_id)
         .map(|provider| provider.supports_native_tools)
-        .unwrap_or(true);
+        .unwrap_or_else(|| chat_provider.supports_native_tools());
     tracing::info!(
         target: "chat",
-        "[Chat] active_provider={}, native_tools_enabled={}",
-        llm_config.active_provider, native_tools_enabled
+        "[Chat] configured_active_provider={}, effective_active_provider={}, native_tools_enabled={}",
+        llm_config.active_provider, effective_provider_id, native_tools_enabled
     );
 
     // Native tool-calling requests already carry structured tool definitions,
@@ -1635,8 +1636,9 @@ pub async fn stream_chat(
     {
         tracing::info!(
             target: "llm",
-            "[LLM/Debug] active_provider={} native_tools_enabled={} tool_count={}",
+            "[LLM/Debug] configured_active_provider={} effective_active_provider={} native_tools_enabled={} tool_count={}",
             llm_config.active_provider,
+            effective_provider_id,
             native_tools_enabled,
             native_tools.len()
         );

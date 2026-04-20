@@ -73,6 +73,7 @@ interface SettingsPanelProps {
     responseLanguage?: string;
     ttsConfig?: TtsSystemConfig;
     llmConfig?: LlmConfig;
+    onLlmConfigSaved?: (cfg: LlmConfig) => void;
     sttConfig?: SttConfig;
     visionConfig?: VisionConfig;
     onVisionConfigChange?: (cfg: VisionConfig) => void;
@@ -216,7 +217,7 @@ function normalizeTtsVoice(
     return getDefaultTtsVoice(providerId, voices);
 }
 
-export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: telegramConfigProp, llmConfig: llmConfigProp, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, initialTelegramStatus, onVisionConfigChange }: SettingsPanelProps) {
+export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: telegramConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, initialTelegramStatus, onVisionConfigChange }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [activeTab, setActiveTab] = useState<TabId>(() => {
         const saved = localStorage.getItem("kokoro_settings_active_tab");
@@ -510,6 +511,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
         if (latestLlmConfigRef.current) {
             try {
                 await saveLlmConfig(latestLlmConfigRef.current);
+                onLlmConfigSaved?.(latestLlmConfigRef.current);
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save LLM config:", e);
             }
@@ -593,7 +595,10 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                                         visionEnabled={visionEnabled}
                                         onVisionEnabledChange={setVisionEnabled}
                                         initialConfig={llmConfigProp ?? null}
-                                        onConfigSaved={(cfg) => { latestLlmConfigRef.current = cfg; }}
+                                        onConfigSaved={(cfg) => {
+                                            latestLlmConfigRef.current = cfg;
+                                            onLlmConfigSaved?.(cfg);
+                                        }}
                                         onConfigChange={(cfg) => { latestLlmConfigRef.current = cfg; }}
                                     />
                                 </div>

@@ -32,6 +32,27 @@ export interface ApiTabProps {
     onConfigChange?: (config: LlmConfig) => void;
 }
 
+function enableProvider(config: LlmConfig, providerId?: string | null): LlmConfig {
+    if (!providerId) return config;
+
+    let changed = false;
+    const providers = config.providers.map((provider) => {
+        if (provider.id !== providerId || provider.enabled) {
+            return provider;
+        }
+        changed = true;
+        return { ...provider, enabled: true };
+    });
+
+    return changed ? { ...config, providers } : config;
+}
+
+function normalizeSelectedProviders(config: LlmConfig): LlmConfig {
+    let next = enableProvider(config, config.active_provider);
+    next = enableProvider(next, next.system_provider);
+    return next;
+}
+
 export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialConfig = null, onConfigSaved, onConfigChange }: ApiTabProps) {
     const { t } = useTranslation();
     const [config, setConfigRaw] = useState<LlmConfig | null>(initialConfig);
@@ -59,14 +80,14 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
     // Load config from backend on mount
     useEffect(() => {
         if (initialConfig) {
-            setConfig(initialConfig);
+            setConfig(normalizeSelectedProviders(initialConfig));
             setLoading(false);
         }
 
         if (!initialConfig) {
             getLlmConfig()
                 .then((cfg) => {
-                    setConfig(cfg);
+                    setConfig(normalizeSelectedProviders(cfg));
                     setLoading(false);
                 })
                 .catch((e) => {
@@ -135,8 +156,12 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
 
     const handleSavePreset = useCallback(() => {
         if (!config) return;
+        const normalizedConfig = normalizeSelectedProviders(config);
+        if (normalizedConfig !== config) {
+            setConfig(normalizedConfig);
+        }
         const existing = selectedPresetId
-            ? config.presets?.find((p) => p.id === selectedPresetId)
+            ? normalizedConfig.presets?.find((p) => p.id === selectedPresetId)
             : null;
         const defaultName = existing?.name || "";
         const name = window.prompt(t("settings.api.preset.name_prompt"), defaultName);
@@ -145,13 +170,13 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
         const preset: LlmPreset = {
             id: existing?.id || crypto.randomUUID(),
             name,
-            active_provider: config.active_provider,
-            system_provider: config.system_provider,
-            system_model: config.system_model,
-            providers: JSON.parse(JSON.stringify(config.providers)),
+            active_provider: normalizedConfig.active_provider,
+            system_provider: normalizedConfig.system_provider,
+            system_model: normalizedConfig.system_model,
+            providers: JSON.parse(JSON.stringify(normalizedConfig.providers)),
         };
 
-        const presets = [...(config.presets || [])];
+        const presets = [...(normalizedConfig.presets || [])];
         const idx = presets.findIndex((p) => p.id === preset.id);
         if (idx >= 0) {
             presets[idx] = preset;
@@ -159,7 +184,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
             presets.push(preset);
         }
 
-        const updated = { ...config, presets };
+        const updated = { ...normalizedConfig, presets };
         setConfig(updated);
         setSelectedPresetId(preset.id);
         saveLlmConfig(updated).catch((e) => setError(typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e))));
@@ -189,13 +214,13 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                 });
             });
 
-            const updated: LlmConfig = {
+            const updated = normalizeSelectedProviders({
                 ...config,
                 active_provider: preset.active_provider,
                 system_provider: preset.system_provider,
                 system_model: preset.system_model,
                 providers: Array.from(providerMap.values()),
-            };
+            });
             setConfig(updated);
             saveLlmConfig(updated).catch((e) => setError(typeof e === 'string' ? e : ((e as any)?.message ?? JSON.stringify(e))));
         },
@@ -235,10 +260,10 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                 });
             });
 
-            let updatedConfig = {
+            let updatedConfig = normalizeSelectedProviders({
                 ...config,
                 providers: Array.from(providerMap.values()),
-            };
+            });
 
             // If a preset is selected, also update that preset with current config
             if (selectedPresetId) {
@@ -377,7 +402,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                     {config.providers.map((p) => (
                         <div key={p.id} className="relative flex-1 group/card">
                             <button
-                                onClick={() => setConfig({ ...config, active_provider: p.id })}
+                                onClick={() => setConfig(normalizeSelectedProviders({ ...config, active_provider: p.id }))}
                                 className={clsx(
                                     "w-full px-3 py-2 text-xs rounded-lg border transition-all",
                                     config.active_provider === p.id
@@ -398,7 +423,15 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                                         const newActive = config.active_provider === p.id
                                             ? remaining[0]?.id ?? ""
                                             : config.active_provider;
-                                        setConfig({ ...config, providers: remaining, active_provider: newActive });
+                                        const newSystemProvider = config.system_provider === p.id
+                                            ? undefined
+                                            : config.system_provider;
+                                        setConfig(normalizeSelectedProviders({
+                                            ...config,
+                                            providers: remaining,
+                                            active_provider: newActive,
+                                            system_provider: newSystemProvider,
+                                        }));
                                     }}
                                     className="absolute top-1 right-2 text-[var(--color-text-muted)] hover:text-red-400 opacity-0 group-hover/card:opacity-100 transition-opacity"
                                     title={t("common.actions.delete")}
@@ -430,6 +463,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                                 p.id === activeProvider.id ? { ...p, id: newId } : p
                             ),
                             active_provider: config.active_provider === activeProvider.id ? newId : config.active_provider,
+                            system_provider: config.system_provider === activeProvider.id ? newId : config.system_provider,
                         });
                     }}
                     placeholder="e.g., comiai, xianyu-opus"
@@ -538,7 +572,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                         </label>
                         <Select
                             value={config.system_provider || ""}
-                            onChange={(v) => setConfig({ ...config, system_provider: v || undefined })}
+                            onChange={(v) => setConfig(normalizeSelectedProviders({ ...config, system_provider: v || undefined }))}
                             options={[
                                 { value: "", label: t("settings.api.system_llm.same_as_active", { provider: config.active_provider }) },
                                 ...allAvailableProviders.map(p => ({
