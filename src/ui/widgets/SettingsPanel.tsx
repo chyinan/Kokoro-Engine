@@ -20,7 +20,7 @@ import { JailbreakTab } from "./settings/JailbreakTab";
 import { BackupTab } from "./settings/BackupTab";
 import PetTab from "./settings/PetTab";
 import { useTranslation } from "react-i18next";
-import { setPersona, setResponseLanguage, setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, saveTelegramConfig, getTelegramConfig } from "../../lib/kokoro-bridge";
+import { setPersona, setResponseLanguage, setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, saveTelegramConfig, getTelegramConfig, saveLlmConfig } from "../../lib/kokoro-bridge";
 import type {
     ProviderStatus,
     VoiceProfile,
@@ -224,6 +224,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
     });
     const bg = backgroundControls;
     const overlayRef = useRef<HTMLDivElement>(null);
+    const latestLlmConfigRef = useRef<LlmConfig | null>(llmConfigProp ?? null);
 
     // ── Local Buffer State ───────────────────────────────
     // We hold changes locally until "Save" is clicked.
@@ -241,6 +242,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
         if (isOpen) {
             setLocalDisplayMode(displayMode);
             setLocalCustomModelPath(customModelPath);
+            latestLlmConfigRef.current = llmConfigProp ?? null;
             setLocalGazeTracking(gazeTrackingProp ?? true);
             setLocalBgConfig({ ...bg.config });
             setPersonaText(localStorage.getItem("kokoro_persona") || "You are a friendly, warm companion character. Respond with personality and emotion.");
@@ -504,6 +506,15 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
             }
         }
 
+        // Commit LLM Config (if ApiTab has unsaved changes)
+        if (latestLlmConfigRef.current) {
+            try {
+                await saveLlmConfig(latestLlmConfigRef.current);
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to save LLM config:", e);
+            }
+        }
+
         setSaved(true);
         setTimeout(() => setSaved(false), 2000);
     };
@@ -582,6 +593,8 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                                         visionEnabled={visionEnabled}
                                         onVisionEnabledChange={setVisionEnabled}
                                         initialConfig={llmConfigProp ?? null}
+                                        onConfigSaved={(cfg) => { latestLlmConfigRef.current = cfg; }}
+                                        onConfigChange={(cfg) => { latestLlmConfigRef.current = cfg; }}
                                     />
                                 </div>
                             )}

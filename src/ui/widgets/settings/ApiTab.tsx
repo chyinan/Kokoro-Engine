@@ -28,11 +28,22 @@ export interface ApiTabProps {
     visionEnabled: boolean;
     onVisionEnabledChange: (v: boolean) => void;
     initialConfig?: LlmConfig | null;
+    onConfigSaved?: (config: LlmConfig) => void;
+    onConfigChange?: (config: LlmConfig) => void;
 }
 
-export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialConfig = null }: ApiTabProps) {
+export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialConfig = null, onConfigSaved, onConfigChange }: ApiTabProps) {
     const { t } = useTranslation();
-    const [config, setConfig] = useState<LlmConfig | null>(initialConfig);
+    const [config, setConfigRaw] = useState<LlmConfig | null>(initialConfig);
+    const onConfigChangeRef = useRef(onConfigChange);
+    onConfigChangeRef.current = onConfigChange;
+    const setConfig = useCallback((cfg: LlmConfig | null | ((prev: LlmConfig | null) => LlmConfig | null)) => {
+        setConfigRaw(prev => {
+            const next = typeof cfg === 'function' ? cfg(prev) : cfg;
+            if (next) onConfigChangeRef.current?.(next);
+            return next;
+        });
+    }, []);
     const [loading, setLoading] = useState(initialConfig === null);
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
@@ -247,6 +258,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
 
             await saveLlmConfig(updatedConfig);
             setConfig(updatedConfig);
+            onConfigSaved?.(updatedConfig);
             setSaved(true);
             setTimeout(() => setSaved(false), 2000);
         } catch (e) {
