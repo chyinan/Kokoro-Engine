@@ -733,7 +733,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                                     {t("settings.app_language.label")}
                                 </div>
                                 <Select
-                                    value={i18n.language}
+                                    value={i18n.language.split("-")[0]}
                                     onChange={(v) => {
                                         i18n.changeLanguage(v);
                                         localStorage.setItem("kokoro_app_language", v);
@@ -745,6 +745,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                                         { value: "ko", label: "한국어" },
                                         { value: "ru", label: "Русский" },
                                     ]}
+                                    className="min-w-[120px]"
                                 />
                             </div>
 

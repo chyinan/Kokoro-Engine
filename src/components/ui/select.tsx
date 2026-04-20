@@ -182,7 +182,9 @@ const Select = React.forwardRef<HTMLDivElement, SelectProps>(
                     top: dropUp ? "auto" : `${coords.top + 8}px`,
                     bottom: dropUp ? `${window.innerHeight - coords.top + 8}px` : "auto",
                     left: `${coords.left}px`,
-                    width: `${coords.width}px`,
+                    minWidth: `${coords.width}px`,
+                    width: "max-content",
+                    maxWidth: "320px",
                     maxHeight: "320px",
                 }}
                 className={cn(
