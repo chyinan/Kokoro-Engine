@@ -6,7 +6,7 @@
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { clsx } from "clsx";
-import { RefreshCw, Check, AlertCircle, Save, Trash2 } from "lucide-react";
+import { RefreshCw, Check, AlertCircle, Save, Trash2, Plus } from "lucide-react";
 import { motion } from "framer-motion";
 import { inputClasses, labelClasses } from "../../styles/settings-primitives";
 import { Select } from "@/components/ui/select";
@@ -16,6 +16,7 @@ import {
     getLlmConfig,
     saveLlmConfig,
     listOllamaModels,
+    getLlamaCppStatus,
     getContextSettings,
     setContextSettings as saveContextSettings,
     type LlmConfig,
@@ -53,6 +54,156 @@ function normalizeSelectedProviders(config: LlmConfig): LlmConfig {
     return next;
 }
 
+type SupportedProviderType = "openai" | "ollama" | "llama_cpp";
+
+const LLAMA_CPP_CURRENT_MODEL_KEY = "llama_cpp_current_model";
+const LLAMA_CPP_CONTEXT_LENGTH_KEY = "llama_cpp_context_length";
+
+function buildProviderId(providerType: SupportedProviderType, providers: LlmProviderConfig[]): string {
+    const baseId = providerType === "llama_cpp" ? "llama-cpp" : providerType;
+    if (!providers.some((provider) => provider.id === baseId)) {
+        return baseId;
+    }
+
+    let suffix = 2;
+    while (providers.some((provider) => provider.id === `${baseId}-${suffix}`)) {
+        suffix += 1;
+    }
+    return `${baseId}-${suffix}`;
+}
+
+function sanitizeProviderExtra(
+    providerType: SupportedProviderType,
+    extra?: Record<string, unknown>,
+): Record<string, unknown> {
+    const nextExtra = { ...(extra || {}) };
+    if (providerType !== "llama_cpp") {
+        delete nextExtra[LLAMA_CPP_CURRENT_MODEL_KEY];
+        delete nextExtra[LLAMA_CPP_CONTEXT_LENGTH_KEY];
+    }
+    return nextExtra;
+}
+
+function getDefaultBaseUrl(providerType: SupportedProviderType): string {
+    switch (providerType) {
+        case "ollama":
+            return "http://localhost:11434";
+        case "llama_cpp":
+            return "http://127.0.0.1:8080";
+        default:
+            return "https://api.openai.com/v1";
+    }
+}
+
+function getDefaultModel(providerType: SupportedProviderType): string {
+    switch (providerType) {
+        case "ollama":
+            return "llama3";
+        case "llama_cpp":
+            return "";
+        default:
+            return "gpt-4";
+    }
+}
+
+function normalizeProviderForType(
+    provider: LlmProviderConfig,
+    providerType: SupportedProviderType,
+): LlmProviderConfig {
+    const previousType = (provider.provider_type as SupportedProviderType) || "openai";
+    const previousDefaultBaseUrl = getDefaultBaseUrl(previousType);
+    const nextDefaultBaseUrl = getDefaultBaseUrl(providerType);
+    const previousDefaultModel = getDefaultModel(previousType);
+    const nextDefaultModel = getDefaultModel(providerType);
+    const baseUrl =
+        !provider.base_url || (previousType !== providerType && provider.base_url === previousDefaultBaseUrl)
+            ? nextDefaultBaseUrl
+            : provider.base_url;
+    const model =
+        provider.model === undefined || provider.model === null || provider.model === ""
+            ? nextDefaultModel
+            : previousType !== providerType && provider.model === previousDefaultModel
+                ? nextDefaultModel
+                : provider.model;
+    const base = {
+        ...provider,
+        provider_type: providerType,
+        base_url: baseUrl,
+        model,
+        extra: sanitizeProviderExtra(providerType, provider.extra),
+    };
+
+    if (providerType === "openai") {
+        return {
+            ...base,
+            api_key_env: provider.api_key_env || "OPENAI_API_KEY",
+        };
+    }
+
+    if (providerType === "ollama") {
+        return {
+            ...base,
+            api_key: undefined,
+            api_key_env: undefined,
+        };
+    }
+
+    return {
+        ...base,
+        api_key: undefined,
+        api_key_env: undefined,
+    };
+}
+
+function createProvider(providerType: SupportedProviderType, providers: LlmProviderConfig[]): LlmProviderConfig {
+    return normalizeProviderForType(
+        {
+            id: buildProviderId(providerType, providers),
+            provider_type: providerType,
+            enabled: true,
+            supports_native_tools: true,
+            api_key: undefined,
+            api_key_env: undefined,
+            base_url: undefined,
+            model: undefined,
+            extra: {},
+        },
+        providerType,
+    );
+}
+
+function getProviderTypeLabel(providerType: string): string {
+    switch (providerType) {
+        case "ollama":
+            return "Ollama";
+        case "llama_cpp":
+            return "llama.cpp";
+        default:
+            return "OpenAI-Compatible";
+    }
+}
+
+function getProviderLocationLabel(providerType: string): string {
+    return providerType === "openai" ? "Cloud" : "Local";
+}
+
+function getProviderExtraString(provider: LlmProviderConfig, key: string): string | undefined {
+    const value = provider.extra?.[key];
+    return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function getProviderExtraNumber(provider: LlmProviderConfig, key: string): number | undefined {
+    const value = provider.extra?.[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+        return value;
+    }
+    if (typeof value === "string") {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : undefined;
+    }
+    return undefined;
+}
+
 export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialConfig = null, onConfigSaved, onConfigChange }: ApiTabProps) {
     const { t } = useTranslation();
     const [config, setConfigRaw] = useState<LlmConfig | null>(initialConfig);
@@ -76,7 +227,6 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
         strategy: "window",
         max_message_chars: 2000,
     });
-
     // Load config from backend on mount
     useEffect(() => {
         if (initialConfig) {
@@ -137,6 +287,22 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
             });
         },
         [config, activeProvider]
+    );
+
+    const updateActiveProviderExtra = useCallback(
+        (updates: Record<string, unknown | undefined>) => {
+            if (!activeProvider) return;
+            const nextExtra = { ...(activeProvider.extra || {}) };
+            for (const [key, value] of Object.entries(updates)) {
+                if (value === undefined || value === null || value === "") {
+                    delete nextExtra[key];
+                } else {
+                    nextExtra[key] = value;
+                }
+            }
+            updateActiveProvider({ extra: nextExtra });
+        },
+        [activeProvider, updateActiveProvider]
     );
 
     const saveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -302,6 +468,24 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                 const baseUrl = activeProvider.base_url || "http://localhost:11434";
                 const models = await listOllamaModels(baseUrl);
                 setAvailableModels(models.map((m) => m.name));
+            } else if (activeProvider.provider_type === "llama_cpp") {
+                const baseUrl = activeProvider.base_url || "http://127.0.0.1:8080";
+                const status = await getLlamaCppStatus(baseUrl);
+                const resolvedModel =
+                    status.current_model || status.available_models[0] || activeProvider.model || "";
+                setAvailableModels(status.available_models);
+                updateActiveProvider({
+                    model: resolvedModel,
+                    extra: {
+                        ...(activeProvider.extra || {}),
+                        ...(status.current_model
+                            ? { [LLAMA_CPP_CURRENT_MODEL_KEY]: status.current_model }
+                            : {}),
+                        ...(typeof status.context_length === "number"
+                            ? { [LLAMA_CPP_CONTEXT_LENGTH_KEY]: status.context_length }
+                            : {}),
+                    },
+                });
             } else {
                 // OpenAI-compatible: use /v1/models
                 const apiKey = activeProvider.api_key || "";
@@ -346,7 +530,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
         return (
             <div className="flex items-center justify-center py-8 text-[var(--color-text-muted)]">
                 <RefreshCw size={14} className="animate-spin mr-2" />
-                Loading LLM config...
+                {t("settings.api.loading_config", { defaultValue: "Loading LLM config..." })}
             </div>
         );
     }
@@ -355,12 +539,18 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
         return (
             <div className="text-center py-8 text-red-400">
                 <AlertCircle size={20} className="mx-auto mb-2" />
-                Failed to load LLM configuration
+                {t("settings.api.load_failed", { defaultValue: "Failed to load LLM configuration" })}
             </div>
         );
     }
 
     const isOllama = activeProvider.provider_type === "ollama";
+    const isLlamaCpp = activeProvider.provider_type === "llama_cpp";
+    const showApiKey = activeProvider.provider_type === "openai";
+    const configuredContextLength = getProviderExtraNumber(activeProvider, LLAMA_CPP_CONTEXT_LENGTH_KEY);
+    const detectedCurrentModel = getProviderExtraString(activeProvider, LLAMA_CPP_CURRENT_MODEL_KEY);
+    const modelFetchDisabled =
+        isLoadingModels || (activeProvider.provider_type === "openai" && !activeProvider.api_key);
 
     return (
         <div className="space-y-4">
@@ -412,7 +602,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                             >
                                 <div className="font-medium capitalize">{p.id}</div>
                                 <div className="text-[9px] opacity-70 mt-0.5">
-                                    {p.provider_type === "ollama" ? "Local" : "Cloud"}
+                                    {getProviderLocationLabel(p.provider_type)} · {getProviderTypeLabel(p.provider_type)}
                                 </div>
                             </button>
                             {config.providers.length > 1 && (
@@ -445,11 +635,32 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                         </div>
                     ))}
                 </div>
+                <div className="flex flex-wrap gap-2 mt-2">
+                    {(["openai", "ollama", "llama_cpp"] as const).map((providerType) => (
+                        <button
+                            key={providerType}
+                            onClick={() => {
+                                const provider = createProvider(providerType, config.providers);
+                                setConfig(normalizeSelectedProviders({
+                                    ...config,
+                                    providers: [...config.providers, provider],
+                                    active_provider: provider.id,
+                                }));
+                            }}
+                            className="px-3 py-1.5 text-[10px] rounded-lg border border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-all flex items-center gap-1"
+                        >
+                            <Plus size={10} />
+                            {getProviderTypeLabel(providerType)}
+                        </button>
+                    ))}
+                </div>
             </div>
 
             {/* Provider ID */}
             <div>
-                <label className={labelClasses}>Provider ID</label>
+                <label className={labelClasses}>
+                    {t("settings.api.provider_id_label", { defaultValue: "Provider ID" })}
+                </label>
                 <input
                     type="text"
                     value={activeProvider.id || ""}
@@ -470,12 +681,14 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                     className={clsx(inputClasses, "font-mono")}
                 />
                 <p className="text-[9px] text-[var(--color-text-muted)] mt-1">
-                    Unique identifier for this provider (used in system LLM selection)
+                    {t("settings.api.provider_id_hint", {
+                        defaultValue: "Unique identifier for this provider (used in system LLM selection)",
+                    })}
                 </p>
             </div>
 
             {/* API Key (OpenAI only) */}
-            {!isOllama && (
+            {showApiKey && (
                 <div>
                     <label className={labelClasses}>{t("settings.api.api_key")}</label>
                     <input
@@ -497,13 +710,23 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
             {/* Base URL */}
             <div>
                 <label className={labelClasses}>
-                    {isOllama ? t("settings.api.ollama_url") : t("settings.api.endpoint_url")}
+                    {isOllama
+                        ? t("settings.api.ollama_url")
+                        : isLlamaCpp
+                            ? t("settings.api.llama_cpp_url", { defaultValue: "llama.cpp Server URL" })
+                            : t("settings.api.endpoint_url")}
                 </label>
                 <input
                     type="url"
                     value={activeProvider.base_url || ""}
                     onChange={(e) => updateActiveProvider({ base_url: e.target.value })}
-                    placeholder={isOllama ? "http://localhost:11434" : "https://api.openai.com/v1"}
+                    placeholder={
+                        isOllama
+                            ? "http://localhost:11434"
+                            : isLlamaCpp
+                                ? "http://127.0.0.1:8080"
+                                : "https://api.openai.com/v1"
+                    }
                     className={clsx(inputClasses, "font-mono")}
                 />
             </div>
@@ -514,7 +737,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                     <label className={labelClasses.replace("mb-2", "mb-0")}>{t("settings.api.model_label")}</label>
                     <button
                         onClick={handleFetchModels}
-                        disabled={isLoadingModels || (!isOllama && !activeProvider.api_key)}
+                        disabled={modelFetchDisabled}
                         className="text-[10px] uppercase tracking-wider text-[var(--color-accent)] hover:underline disabled:opacity-50 flex items-center gap-1"
                     >
                         <RefreshCw size={10} className={isLoadingModels ? "animate-spin" : ""} />
@@ -526,7 +749,13 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                         type="text"
                         value={activeProvider.model || ""}
                         onChange={(e) => updateActiveProvider({ model: e.target.value })}
-                        placeholder={isOllama ? "llama3" : "gpt-4"}
+                        placeholder={
+                            isOllama
+                                ? "llama3"
+                                : isLlamaCpp
+                                    ? "Qwen2.5-7B-Instruct"
+                                    : "gpt-4"
+                        }
                         list="model-list"
                         className={clsx(inputClasses, "font-mono")}
                     />
@@ -538,19 +767,82 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                 </div>
             </div>
 
+            {isLlamaCpp && (
+                <>
+                    <div>
+                        <label className={labelClasses}>
+                            {t("settings.api.current_model_label", { defaultValue: "Current Model" })}
+                        </label>
+                        <div className={clsx(inputClasses, "font-mono text-[var(--color-text-main)]")}>
+                            {detectedCurrentModel || t("settings.api.current_model_empty", { defaultValue: "Not detected yet" })}
+                        </div>
+                        <p className="text-[9px] text-[var(--color-text-muted)] mt-1">
+                            {t("settings.api.current_model_hint", { defaultValue: "Fetched from the active llama.cpp server." })}
+                        </p>
+                    </div>
+
+                    <div>
+                        <label className={labelClasses}>
+                            {t("settings.api.context_length_label", { defaultValue: "Context Length" })}
+                        </label>
+                        <input
+                            type="number"
+                            min={256}
+                            step={256}
+                            value={configuredContextLength ?? ""}
+                            onChange={(e) => {
+                                const value = e.target.value.trim();
+                                updateActiveProviderExtra({
+                                    [LLAMA_CPP_CONTEXT_LENGTH_KEY]: value ? Number(value) : undefined,
+                                });
+                            }}
+                            placeholder="16384"
+                            className={clsx(inputClasses, "font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none")}
+                        />
+                        <p className="text-[9px] text-[var(--color-text-muted)] mt-1">
+                            {t("settings.api.context_length_hint", {
+                                defaultValue: 'You can enter it manually or use "Fetch Available" to read it from llama.cpp.',
+                            })}
+                        </p>
+                    </div>
+                </>
+            )}
+
             <div>
-                <label className={labelClasses}>{t("settings.api.native_tools.label")}</label>
-                <label className="flex items-center gap-2 text-sm text-[var(--color-text-main)]">
-                    <input
-                        type="checkbox"
-                        checked={activeProvider.supports_native_tools ?? true}
-                        onChange={(e) => updateActiveProvider({ supports_native_tools: e.target.checked })}
-                    />
-                    <span>{t("settings.api.native_tools.toggle")}</span>
-                </label>
-                <p className="text-[9px] text-[var(--color-text-muted)] mt-1">
-                    {t("settings.api.native_tools.desc")}
-                </p>
+                <div className="flex items-start justify-between gap-3">
+                    <div>
+                        <label className={labelClasses.replace("mb-2", "mb-0")}>
+                            {t("settings.api.native_tools.label")}
+                        </label>
+                        <p className="text-sm text-[var(--color-text-main)] mt-1">
+                            {t("settings.api.native_tools.toggle")}
+                        </p>
+                        <p className="text-[9px] text-[var(--color-text-muted)] mt-1">
+                            {t("settings.api.native_tools.desc")}
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        aria-pressed={activeProvider.supports_native_tools ?? true}
+                        onClick={() =>
+                            updateActiveProvider({
+                                supports_native_tools: !(activeProvider.supports_native_tools ?? true),
+                            })
+                        }
+                        className={clsx(
+                            "w-10 h-6 rounded-full transition-colors relative shrink-0 mt-5",
+                            (activeProvider.supports_native_tools ?? true)
+                                ? "bg-[var(--color-accent)]"
+                                : "bg-[var(--color-border)]"
+                        )}
+                    >
+                        <motion.div
+                            animate={{ x: (activeProvider.supports_native_tools ?? true) ? 18 : 2 }}
+                            transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                            className="absolute top-1 w-4 h-4 rounded-full bg-white"
+                        />
+                    </button>
+                </div>
             </div>
 
             {/* System LLM Config */}

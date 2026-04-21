@@ -263,7 +263,9 @@ fn validate_memory_retrieval_observation(
     assert_optional_non_negative_i64(observation.filtered_out_count, "filtered_out_count")?;
 
     if let Some(overlap_count) = observation.overlap_count {
-        if overlap_count > observation.semantic_candidates || overlap_count > observation.bm25_candidates {
+        if overlap_count > observation.semantic_candidates
+            || overlap_count > observation.bm25_candidates
+        {
             anyhow::bail!("memory retrieval overlap_count cannot exceed semantic/bm25 candidates");
         }
     }
@@ -271,7 +273,9 @@ fn validate_memory_retrieval_observation(
         (observation.overlap_count, observation.semantic_only_count)
     {
         if semantic_only_count + overlap_count > observation.semantic_candidates {
-            anyhow::bail!("memory retrieval semantic eval counts cannot exceed semantic_candidates");
+            anyhow::bail!(
+                "memory retrieval semantic eval counts cannot exceed semantic_candidates"
+            );
         }
     }
     if let (Some(overlap_count), Some(bm25_only_count)) =
@@ -394,9 +398,7 @@ fn normalize_character_id_value(character_id: &str) -> String {
     character_id.trim().to_string()
 }
 
-fn sanitize_write_observation(
-    mut observation: MemoryWriteObservation,
-) -> MemoryWriteObservation {
+fn sanitize_write_observation(mut observation: MemoryWriteObservation) -> MemoryWriteObservation {
     observation.source = normalize_source_value(&observation.source);
     observation.trigger = normalize_trigger_value(&observation.trigger);
     observation.character_id = normalize_character_id_value(&observation.character_id);
@@ -460,7 +462,9 @@ fn assert_optional_non_negative_i64(
     Ok(())
 }
 
-fn validate_retrieval_stats(stats: &RetrievalCandidateStats) -> std::result::Result<(), anyhow::Error> {
+fn validate_retrieval_stats(
+    stats: &RetrievalCandidateStats,
+) -> std::result::Result<(), anyhow::Error> {
     if stats.injected_count > stats.fused_candidates {
         anyhow::bail!("retrieval injected_count cannot exceed fused_candidates");
     }
@@ -470,7 +474,8 @@ fn validate_retrieval_stats(stats: &RetrievalCandidateStats) -> std::result::Res
         {
             anyhow::bail!("retrieval overlap_count cannot exceed semantic/bm25 candidates");
         }
-        if eval_metrics.semantic_only_count + eval_metrics.overlap_count > stats.semantic_candidates {
+        if eval_metrics.semantic_only_count + eval_metrics.overlap_count > stats.semantic_candidates
+        {
             anyhow::bail!("retrieval semantic eval counts cannot exceed semantic_candidates");
         }
         if eval_metrics.bm25_only_count + eval_metrics.overlap_count > stats.bm25_candidates {
@@ -644,12 +649,8 @@ fn build_write_observation_record(
         counts.deduplicated_count,
         counts.invalidated_count,
     )?;
-    let observation = build_memory_write_observation_from_counts(
-        character_id,
-        source,
-        trigger,
-        counts,
-    );
+    let observation =
+        build_memory_write_observation_from_counts(character_id, source, trigger, counts);
     let observation = sanitize_write_observation(observation);
     validate_memory_write_observation(&observation)?;
     Ok(build_clamped_memory_write_observation(observation))
@@ -759,7 +760,11 @@ fn maybe_build_retrieval_observation(
     if !should_record_memory_observability() {
         return Ok(None);
     }
-    Ok(Some(build_retrieval_observation_record(character_id, query, stats)?))
+    Ok(Some(build_retrieval_observation_record(
+        character_id,
+        query,
+        stats,
+    )?))
 }
 
 fn build_summary_from_counts_or_default(
@@ -816,8 +821,7 @@ fn build_retrieval_eval_metrics(
 ) -> RetrievalEvalMetrics {
     let semantic_ids: std::collections::HashSet<i64> =
         semantic_results.iter().map(|memory| memory.id).collect();
-    let bm25_ids: std::collections::HashSet<i64> =
-        bm25_results.iter().map(|(id, _)| *id).collect();
+    let bm25_ids: std::collections::HashSet<i64> = bm25_results.iter().map(|(id, _)| *id).collect();
 
     RetrievalEvalMetrics {
         overlap_count: semantic_ids.intersection(&bm25_ids).count(),

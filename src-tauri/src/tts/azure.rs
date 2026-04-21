@@ -22,10 +22,9 @@ impl AzureTtsProvider {
             return None;
         }
 
-        let endpoint = config
-            .base_url
-            .clone()
-            .unwrap_or_else(|| "https://eastus.tts.speech.microsoft.com/cognitiveservices/v1".to_string());
+        let endpoint = config.base_url.clone().unwrap_or_else(|| {
+            "https://eastus.tts.speech.microsoft.com/cognitiveservices/v1".to_string()
+        });
         let endpoint = endpoint.trim().to_string();
         if endpoint.is_empty() {
             tracing::error!(target: "tts", "Azure provider '{}' missing endpoint", config.id);
@@ -55,7 +54,6 @@ impl AzureTtsProvider {
             config.id,
             endpoint
         );
-
 
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -142,7 +140,10 @@ impl TtsProvider for AzureTtsProvider {
             .post(&self.endpoint)
             .header("Ocp-Apim-Subscription-Key", &self.api_key)
             .header("Content-Type", "application/ssml+xml")
-            .header("X-Microsoft-OutputFormat", "audio-24khz-96kbitrate-mono-mp3")
+            .header(
+                "X-Microsoft-OutputFormat",
+                "audio-24khz-96kbitrate-mono-mp3",
+            )
             .header("User-Agent", "kokoro-engine")
             .body(ssml)
             .send()

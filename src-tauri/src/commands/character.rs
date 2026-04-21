@@ -57,11 +57,17 @@ pub async fn play_cue(
         return Err(KokoroError::Validation("Cue cannot be empty".to_string()));
     }
 
-    let profile = load_active_live2d_profile()
-        .ok_or_else(|| KokoroError::Validation("No active Live2D model profile loaded".to_string()))?;
+    let profile = load_active_live2d_profile().ok_or_else(|| {
+        KokoroError::Validation("No active Live2D model profile loaded".to_string())
+    })?;
 
     if !profile.cue_map.contains_key(trimmed) {
-        let available_cues = profile.cue_map.keys().cloned().collect::<Vec<_>>().join(", ");
+        let available_cues = profile
+            .cue_map
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(KokoroError::Validation(format!(
             "Unknown cue '{}'. Available configured cues: {}",
             trimmed,

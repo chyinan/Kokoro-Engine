@@ -1,6 +1,7 @@
 //! LLM Service — managed Tauri state holding the active LLM provider.
 
 use crate::error::KokoroError;
+use crate::llm::llama_cpp::LlamaCppProvider;
 use crate::llm::llm_config::{LlmConfig, LlmPreset, LlmProviderConfig};
 use crate::llm::ollama::OllamaProvider;
 use crate::llm::provider::{LlmProvider, OpenAIProvider};
@@ -28,7 +29,8 @@ impl LlmService {
                 target: "llm",
                 "Normalized inconsistent LLM config: ensured selected providers are enabled and provider IDs are valid"
             );
-            if let Err(error) = crate::llm::llm_config::save_config(&config_path, &normalized_config)
+            if let Err(error) =
+                crate::llm::llm_config::save_config(&config_path, &normalized_config)
             {
                 tracing::warn!(
                     target: "llm",
@@ -188,7 +190,9 @@ fn normalize_provider_selection(
     system_provider: &mut Option<String>,
     providers: &mut [LlmProviderConfig],
 ) {
-    if let Some(active_index) = providers.iter().position(|provider| provider.id == *active_provider)
+    if let Some(active_index) = providers
+        .iter()
+        .position(|provider| provider.id == *active_provider)
     {
         providers[active_index].enabled = true;
     } else if let Some(resolved_id) = providers
@@ -201,7 +205,9 @@ fn normalize_provider_selection(
     }
 
     if let Some(system_id) = system_provider.clone() {
-        if let Some(system_index) = providers.iter().position(|provider| provider.id == system_id)
+        if let Some(system_index) = providers
+            .iter()
+            .position(|provider| provider.id == system_id)
         {
             providers[system_index].enabled = true;
         } else {
@@ -287,6 +293,26 @@ fn try_build_from_provider_config(
             let model = cfg.model.clone().unwrap_or_else(|| "llama3".to_string());
             tracing::info!(target: "llm", "Initializing Ollama provider: model={}", model);
             Ok(Box::new(OllamaProvider::new(cfg.base_url.clone(), model)))
+        }
+        "llama_cpp" => {
+            let model = cfg.model.clone().or_else(|| {
+                cfg.extra
+                    .get("llama_cpp_current_model")
+                    .and_then(|value| value.as_str().map(str::to_string))
+            });
+            tracing::info!(
+                target: "llm",
+                "Initializing llama.cpp provider: base_url={}, model={}",
+                cfg.base_url
+                    .as_deref()
+                    .unwrap_or("http://127.0.0.1:8080"),
+                model.as_deref().unwrap_or("<unset>")
+            );
+            Ok(Box::new(LlamaCppProvider::new(
+                cfg.base_url.clone(),
+                model,
+                cfg.id.clone(),
+            )))
         }
         "openai" => {
             let api_key = cfg.resolve_api_key().unwrap_or_default();
@@ -589,44 +615,56 @@ mod tests {
         assert_eq!(system_provider.id(), "openai");
 
         let normalized_config = service.config().await;
-        assert!(normalized_config
-            .providers
-            .iter()
-            .find(|provider| provider.id == "ollama")
-            .unwrap()
-            .enabled);
-        assert!(normalized_config
-            .providers
-            .iter()
-            .find(|provider| provider.id == "openai")
-            .unwrap()
-            .enabled);
-        assert!(normalized_config.presets[0]
-            .providers
-            .iter()
-            .find(|provider| provider.id == "ollama")
-            .unwrap()
-            .enabled);
-        assert!(normalized_config.presets[0]
-            .providers
-            .iter()
-            .find(|provider| provider.id == "openai")
-            .unwrap()
-            .enabled);
+        assert!(
+            normalized_config
+                .providers
+                .iter()
+                .find(|provider| provider.id == "ollama")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            normalized_config
+                .providers
+                .iter()
+                .find(|provider| provider.id == "openai")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            normalized_config.presets[0]
+                .providers
+                .iter()
+                .find(|provider| provider.id == "ollama")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            normalized_config.presets[0]
+                .providers
+                .iter()
+                .find(|provider| provider.id == "openai")
+                .unwrap()
+                .enabled
+        );
 
         let persisted_config = crate::llm::llm_config::load_config(&config_path);
-        assert!(persisted_config
-            .providers
-            .iter()
-            .find(|provider| provider.id == "ollama")
-            .unwrap()
-            .enabled);
-        assert!(persisted_config.presets[0]
-            .providers
-            .iter()
-            .find(|provider| provider.id == "openai")
-            .unwrap()
-            .enabled);
+        assert!(
+            persisted_config
+                .providers
+                .iter()
+                .find(|provider| provider.id == "ollama")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            persisted_config.presets[0]
+                .providers
+                .iter()
+                .find(|provider| provider.id == "openai")
+                .unwrap()
+                .enabled
+        );
 
         let _ = std::fs::remove_file(config_path);
     }
@@ -723,34 +761,62 @@ mod tests {
         assert_eq!(system_provider.id(), "system-provider");
 
         let updated_config = service.config().await;
-        assert!(updated_config
-            .providers
-            .iter()
-            .find(|provider| provider.id == "other-provider")
-            .unwrap()
-            .enabled);
-        assert!(updated_config
-            .providers
-            .iter()
-            .find(|provider| provider.id == "system-provider")
-            .unwrap()
-            .enabled);
+        assert!(
+            updated_config
+                .providers
+                .iter()
+                .find(|provider| provider.id == "other-provider")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            updated_config
+                .providers
+                .iter()
+                .find(|provider| provider.id == "system-provider")
+                .unwrap()
+                .enabled
+        );
 
         let persisted_config = crate::llm::llm_config::load_config(&config_path);
-        assert!(persisted_config
-            .providers
-            .iter()
-            .find(|provider| provider.id == "other-provider")
-            .unwrap()
-            .enabled);
-        assert!(persisted_config
-            .providers
-            .iter()
-            .find(|provider| provider.id == "system-provider")
-            .unwrap()
-            .enabled);
+        assert!(
+            persisted_config
+                .providers
+                .iter()
+                .find(|provider| provider.id == "other-provider")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            persisted_config
+                .providers
+                .iter()
+                .find(|provider| provider.id == "system-provider")
+                .unwrap()
+                .enabled
+        );
 
         let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn try_build_from_provider_config_supports_llama_cpp() {
+        let cfg = LlmProviderConfig {
+            id: "local-llama".to_string(),
+            provider_type: "llama_cpp".to_string(),
+            enabled: true,
+            supports_native_tools: true,
+            api_key: None,
+            api_key_env: None,
+            base_url: Some("http://127.0.0.1:8080".to_string()),
+            model: Some("Qwen2.5-7B-Instruct".to_string()),
+            extra: std::collections::HashMap::new(),
+        };
+
+        let provider = try_build_from_provider_config(&cfg).expect("llama.cpp should be supported");
+
+        assert_eq!(provider.id(), "local-llama");
+        assert!(provider.supports_native_tools());
     }
 
     fn make_service_with_active_and_system_provider() -> LlmService {

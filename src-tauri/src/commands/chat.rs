@@ -69,7 +69,9 @@ async fn rotate_failure_events_log_if_needed(path: &Path) -> Result<(), std::io:
     tokio::fs::rename(path, &rotated_path).await
 }
 
-async fn append_failure_event_jsonl(failure_event: &crate::error::FailureEvent) -> Result<(), std::io::Error> {
+async fn append_failure_event_jsonl(
+    failure_event: &crate::error::FailureEvent,
+) -> Result<(), std::io::Error> {
     let path = failure_events_log_path();
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -2301,9 +2303,8 @@ pub async fn stream_chat(
     // Event-driven + periodic memory extraction
     let msg_count = state.get_message_count().await;
     let memory_msg_count = state.get_memory_trigger_count().await;
-    let upgrade_config = crate::config::load_memory_upgrade_config(
-        &crate::ai::memory::memory_upgrade_config_path(),
-    );
+    let upgrade_config =
+        crate::config::load_memory_upgrade_config(&crate::ai::memory::memory_upgrade_config_path());
     let ingress_options = MemoryEventIngressOptions {
         enabled: upgrade_config.event_trigger_enabled,
         event_cooldown_secs: upgrade_config.event_cooldown_secs,
@@ -2321,7 +2322,8 @@ pub async fn stream_chat(
                 .as_deref()
                 .unwrap_or("no-conversation")
                 .to_string();
-            let cooldown_key = build_cooldown_key(&char_id, &conversation_key, decision.event.event_type);
+            let cooldown_key =
+                build_cooldown_key(&char_id, &conversation_key, decision.event.event_type);
             if state
                 .should_trigger_memory_event(&cooldown_key, decision.event.cooldown_secs)
                 .await
@@ -2649,25 +2651,16 @@ mod tests {
 
     #[test]
     fn chat_memory_ingress_prefers_preference_trigger_label_for_preference_event() {
-        let decision = build_memory_ingress_decision_for_test(
-            "我更喜欢 Rust",
-            true,
-            true,
-            120,
-        )
-        .expect("decision");
+        let decision = build_memory_ingress_decision_for_test("我更喜欢 Rust", true, true, 120)
+            .expect("decision");
         assert_eq!(decision.trigger_label, "event_preference");
     }
 
     #[test]
     fn chat_memory_ingress_prefers_correction_trigger_label_for_correction_event() {
-        let decision = build_memory_ingress_decision_for_test(
-            "不是我喜欢猫，是我以前养过猫",
-            true,
-            true,
-            120,
-        )
-        .expect("decision");
+        let decision =
+            build_memory_ingress_decision_for_test("不是我喜欢猫，是我以前养过猫", true, true, 120)
+                .expect("decision");
         assert_eq!(decision.trigger_label, "event_correction");
     }
 
@@ -2721,25 +2714,16 @@ mod tests {
 
     #[test]
     fn chat_memory_ingress_detects_preference_event_type_for_preference_input() {
-        let decision = build_memory_ingress_decision_for_test(
-            "我更喜欢 Rust",
-            true,
-            true,
-            120,
-        )
-        .expect("decision");
+        let decision = build_memory_ingress_decision_for_test("我更喜欢 Rust", true, true, 120)
+            .expect("decision");
         assert_eq!(decision.event.event_type, MemoryEventType::Preference);
     }
 
     #[test]
     fn chat_memory_ingress_detects_correction_event_type_for_correction_input() {
-        let decision = build_memory_ingress_decision_for_test(
-            "不是我喜欢猫，是我以前养过猫",
-            true,
-            true,
-            120,
-        )
-        .expect("decision");
+        let decision =
+            build_memory_ingress_decision_for_test("不是我喜欢猫，是我以前养过猫", true, true, 120)
+                .expect("decision");
         assert_eq!(decision.event.event_type, MemoryEventType::Correction);
     }
 
@@ -2812,13 +2796,9 @@ mod tests {
 
     #[test]
     fn chat_memory_ingress_intent_priority_beats_profile() {
-        let decision = build_memory_ingress_decision_for_test(
-            "我是前端开发者，我喜欢 Rust",
-            true,
-            true,
-            120,
-        )
-        .expect("decision");
+        let decision =
+            build_memory_ingress_decision_for_test("我是前端开发者，我喜欢 Rust", true, true, 120)
+                .expect("decision");
         assert_eq!(decision.trigger_label, "event_preference");
     }
 
@@ -2860,13 +2840,8 @@ mod tests {
 
     #[test]
     fn chat_memory_ingress_default_order_keeps_preference_when_only_preference_matches() {
-        let decision = build_memory_ingress_decision_for_test(
-            "我更喜欢 Rust",
-            true,
-            false,
-            120,
-        )
-        .expect("decision");
+        let decision = build_memory_ingress_decision_for_test("我更喜欢 Rust", true, false, 120)
+            .expect("decision");
         assert_eq!(decision.trigger_label, "event_preference");
     }
 

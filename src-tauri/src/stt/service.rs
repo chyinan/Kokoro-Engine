@@ -74,18 +74,20 @@ impl SttService {
                 }
             }
             "whisper_cpp" => Some(Arc::new(WhisperCppProvider::new(config.base_url.clone()))),
-            "sensevoice" => match SenseVoiceProvider::new(config.id.clone(), config.base_url.clone()) {
-                Ok(provider) => Some(Arc::new(provider)),
-                Err(e) => {
-                    tracing::error!(
-                        target: "stt",
-                        "Failed to build SenseVoice provider '{}': {}",
-                        config.id,
-                        e
-                    );
-                    None
+            "sensevoice" => {
+                match SenseVoiceProvider::new(config.id.clone(), config.base_url.clone()) {
+                    Ok(provider) => Some(Arc::new(provider)),
+                    Err(e) => {
+                        tracing::error!(
+                            target: "stt",
+                            "Failed to build SenseVoice provider '{}': {}",
+                            config.id,
+                            e
+                        );
+                        None
+                    }
                 }
-            },
+            }
             "sensevoice_local" => Some(Arc::new(SenseVoiceLocalProvider::new(config, None))),
             other => {
                 tracing::error!(target: "stt", "Unknown provider type: {}", other);

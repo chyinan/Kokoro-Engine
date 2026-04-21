@@ -504,9 +504,8 @@ async fn handle_text(
     // Event-driven + periodic memory extraction
     let msg_count = orchestrator.get_message_count().await;
     let memory_msg_count = orchestrator.get_memory_trigger_count().await;
-    let upgrade_config = crate::config::load_memory_upgrade_config(
-        &crate::ai::memory::memory_upgrade_config_path(),
-    );
+    let upgrade_config =
+        crate::config::load_memory_upgrade_config(&crate::ai::memory::memory_upgrade_config_path());
     let ingress_options = MemoryEventIngressOptions {
         enabled: upgrade_config.event_trigger_enabled,
         event_cooldown_secs: upgrade_config.event_cooldown_secs,
@@ -520,7 +519,8 @@ async fn handle_text(
 
     if orchestrator.is_memory_enabled() {
         if let Some(decision) = select_memory_ingress_decision(text, &ingress_options) {
-            let cooldown_key = build_cooldown_key(&char_id, &chat_id.to_string(), decision.event.event_type);
+            let cooldown_key =
+                build_cooldown_key(&char_id, &chat_id.to_string(), decision.event.event_type);
             if orchestrator
                 .should_trigger_memory_event(&cooldown_key, decision.event.cooldown_secs)
                 .await
@@ -1468,5 +1468,4 @@ mod tests {
         assert!(rendered.starts_with("[ERROR][Telegram]"));
         assert!(rendered.contains("Network timeout"));
     }
-
 }

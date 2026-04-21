@@ -82,7 +82,10 @@ pub fn get_system_status(app: tauri::AppHandle, state: State<'_, AIOrchestrator>
     if app.try_state::<crate::stt::SttService>().is_some() {
         active_modules.push("stt".to_string());
     }
-    if app.try_state::<crate::imagegen::ImageGenService>().is_some() {
+    if app
+        .try_state::<crate::imagegen::ImageGenService>()
+        .is_some()
+    {
         active_modules.push("imagegen".to_string());
     }
     if app

@@ -196,6 +196,12 @@ export interface OllamaModelInfo {
     modified_at?: string;
 }
 
+export interface LlamaCppStatus {
+    current_model?: string;
+    context_length?: number;
+    available_models: string[];
+}
+
 export async function getLlmConfig(): Promise<LlmConfig> {
     return invoke<LlmConfig>("get_llm_config");
 }
@@ -206,6 +212,10 @@ export async function saveLlmConfig(config: LlmConfig): Promise<void> {
 
 export async function listOllamaModels(baseUrl: string): Promise<OllamaModelInfo[]> {
     return invoke<OllamaModelInfo[]>("list_ollama_models", { baseUrl });
+}
+
+export async function getLlamaCppStatus(baseUrl: string): Promise<LlamaCppStatus> {
+    return invoke<LlamaCppStatus>("get_llama_cpp_status", { baseUrl });
 }
 
 // ── LLM Streaming ──────────────────────────────────

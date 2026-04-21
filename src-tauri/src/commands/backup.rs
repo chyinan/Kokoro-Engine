@@ -124,9 +124,9 @@ async fn open_readonly_pool(path: &Path) -> Result<SqlitePool, KokoroError> {
 async fn open_import_pool_without_orchestrator(app_data: &Path) -> Result<SqlitePool, KokoroError> {
     let db = db_path(app_data);
     let db_url = format!("sqlite:///{}", db.to_string_lossy().replace('\\', "/"));
-    let orchestrator = AIOrchestrator::new(&db_url)
-        .await
-        .map_err(|e| KokoroError::Internal(format!("Failed to init fallback orchestrator DB: {}", e)))?;
+    let orchestrator = AIOrchestrator::new(&db_url).await.map_err(|e| {
+        KokoroError::Internal(format!("Failed to init fallback orchestrator DB: {}", e))
+    })?;
     Ok(orchestrator.db)
 }
 

@@ -134,11 +134,23 @@ fn prioritized_event(events: Vec<MemoryIngressEvent>) -> Option<MemoryIngressEve
     None
 }
 
-pub fn build_cooldown_key(character_id: &str, conversation_id: &str, event_type: MemoryEventType) -> String {
-    format!("{}:{}:{}", character_id.trim(), conversation_id.trim(), event_type.as_str())
+pub fn build_cooldown_key(
+    character_id: &str,
+    conversation_id: &str,
+    event_type: MemoryEventType,
+) -> String {
+    format!(
+        "{}:{}:{}",
+        character_id.trim(),
+        conversation_id.trim(),
+        event_type.as_str()
+    )
 }
 
-pub fn detect_memory_events(input: &str, options: &MemoryEventIngressOptions) -> Vec<MemoryIngressEvent> {
+pub fn detect_memory_events(
+    input: &str,
+    options: &MemoryEventIngressOptions,
+) -> Vec<MemoryIngressEvent> {
     let normalized = normalize(input);
     if normalized.is_empty() {
         return vec![];
@@ -146,7 +158,10 @@ pub fn detect_memory_events(input: &str, options: &MemoryEventIngressOptions) ->
 
     let mut events = Vec::new();
 
-    if contains_any(&normalized, &["不是", "而是", "纠正", "更正", "说错", "并不是"]) {
+    if contains_any(
+        &normalized,
+        &["不是", "而是", "纠正", "更正", "说错", "并不是"],
+    ) {
         events.push(MemoryIngressEvent {
             event_type: MemoryEventType::Correction,
             cooldown_secs: options.event_cooldown_secs,
@@ -165,7 +180,8 @@ pub fn detect_memory_events(input: &str, options: &MemoryEventIngressOptions) ->
             "i like",
             "i dislike",
         ],
-    ) && !is_explicit_correction_statement(&normalized) {
+    ) && !is_explicit_correction_statement(&normalized)
+    {
         events.push(MemoryIngressEvent {
             event_type: MemoryEventType::Preference,
             cooldown_secs: options.event_cooldown_secs,
@@ -237,21 +253,12 @@ fn is_explicit_correction_statement(content: &str) -> bool {
             "not exactly",
         ],
     );
-    let has_negated_restatement = contains_any(
-        content,
-        &[
-            "\u{4e0d}\u{662f}",
-            "\u{5e76}\u{4e0d}\u{662f}",
-        ],
-    ) && contains_any(
-        content,
-        &[
-            "\u{800c}\u{662f}",
-            "\u{ff0c}\u{662f}",
-            ",\u{662f}",
-            " is ",
-        ],
-    );
+    let has_negated_restatement =
+        contains_any(content, &["\u{4e0d}\u{662f}", "\u{5e76}\u{4e0d}\u{662f}"])
+            && contains_any(
+                content,
+                &["\u{800c}\u{662f}", "\u{ff0c}\u{662f}", ",\u{662f}", " is "],
+            );
 
     has_direct_correction_keyword || has_negated_restatement
 }
@@ -279,11 +286,9 @@ mod tests {
             "不是我喜欢猫，是我以前养过猫",
             &MemoryEventIngressOptions::default(),
         );
-        assert!(
-            result
-                .iter()
-                .any(|event| event.event_type == MemoryEventType::Correction)
-        );
+        assert!(result
+            .iter()
+            .any(|event| event.event_type == MemoryEventType::Correction));
     }
 
     #[test]
@@ -292,11 +297,9 @@ mod tests {
             "\u{4e0d}\u{662f}\u{6211}\u{559c}\u{6b22}\u{732b}\u{ff0c}\u{662f}\u{6211}\u{4ee5}\u{524d}\u{517b}\u{8fc7}\u{732b}",
             &MemoryEventIngressOptions::default(),
         );
-        assert!(
-            !result
-                .iter()
-                .any(|event| event.event_type == MemoryEventType::Preference)
-        );
+        assert!(!result
+            .iter()
+            .any(|event| event.event_type == MemoryEventType::Preference));
     }
 
     #[test]
@@ -305,11 +308,9 @@ mod tests {
             "下周我要继续做这个记忆系统架构",
             &MemoryEventIngressOptions::default(),
         );
-        assert!(
-            result
-                .iter()
-                .any(|event| event.event_type == MemoryEventType::Plan)
-        );
+        assert!(result
+            .iter()
+            .any(|event| event.event_type == MemoryEventType::Plan));
     }
 
     #[test]
@@ -318,11 +319,9 @@ mod tests {
             "我是第一次接触这个项目的前端部分",
             &MemoryEventIngressOptions::default(),
         );
-        assert!(
-            result
-                .iter()
-                .any(|event| event.event_type == MemoryEventType::Profile)
-        );
+        assert!(result
+            .iter()
+            .any(|event| event.event_type == MemoryEventType::Profile));
     }
 
     #[test]

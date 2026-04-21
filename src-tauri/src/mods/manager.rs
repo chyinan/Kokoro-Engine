@@ -637,7 +637,10 @@ impl ModManager {
     pub fn runtime_status_summary(&self) -> (String, bool, bool) {
         let state = self.runtime_state();
         let ready = self.runtime_ready();
-        let degraded = matches!(state, ModRuntimeState::Failed | ModRuntimeState::Disconnected);
+        let degraded = matches!(
+            state,
+            ModRuntimeState::Failed | ModRuntimeState::Disconnected
+        );
         (state.as_str().to_string(), ready, degraded)
     }
 

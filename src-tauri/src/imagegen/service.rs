@@ -265,7 +265,10 @@ impl ImageGenService {
         providers.keys().cloned().collect()
     }
 
-    pub async fn reload_from_config(&self, config: &ImageGenSystemConfig) -> Result<(), ImageGenError> {
+    pub async fn reload_from_config(
+        &self,
+        config: &ImageGenSystemConfig,
+    ) -> Result<(), ImageGenError> {
         if !config.enabled {
             let mut providers = self.providers.write().await;
             providers.clear();
@@ -301,7 +304,8 @@ impl ImageGenService {
                 "Reload skipped: no valid providers built; keeping existing runtime providers"
             );
             return Err(ImageGenError::ConfigError(
-                "no valid imagegen providers built from config; runtime providers unchanged".to_string(),
+                "no valid imagegen providers built from config; runtime providers unchanged"
+                    .to_string(),
             ));
         }
 

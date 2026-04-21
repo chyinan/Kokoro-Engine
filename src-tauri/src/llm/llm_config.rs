@@ -10,7 +10,7 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmProviderConfig {
     pub id: String,
-    /// "openai" | "ollama"
+    /// "openai" | "ollama" | "llama_cpp"
     pub provider_type: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -93,6 +93,17 @@ fn default_providers() -> Vec<LlmProviderConfig> {
             api_key_env: None,
             base_url: Some("http://localhost:11434".to_string()),
             model: Some("llama3".to_string()),
+            extra: HashMap::new(),
+        },
+        LlmProviderConfig {
+            id: "llama-cpp".to_string(),
+            provider_type: "llama_cpp".to_string(),
+            enabled: false,
+            supports_native_tools: true,
+            api_key: None,
+            api_key_env: None,
+            base_url: Some("http://127.0.0.1:8080".to_string()),
+            model: None,
             extra: HashMap::new(),
         },
     ]

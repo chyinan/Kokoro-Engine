@@ -13,9 +13,7 @@ fn memory_upgrade_config_path() -> std::path::PathBuf {
 }
 
 #[tauri::command]
-pub async fn set_memory_upgrade_config(
-    config: MemoryUpgradeConfig,
-) -> Result<(), KokoroError> {
+pub async fn set_memory_upgrade_config(config: MemoryUpgradeConfig) -> Result<(), KokoroError> {
     crate::config::save_memory_upgrade_config(&memory_upgrade_config_path(), &config)
 }
 
@@ -77,10 +75,12 @@ mod tests {
     #[test]
     fn memory_upgrade_config_roundtrip_uses_shared_path_rules() {
         let path = memory_upgrade_config_path();
-        assert!(path.ends_with("com.chyin.kokoro/memory_upgrade_config.json") || path.ends_with("com.chyin.kokoro\\memory_upgrade_config.json"));
+        assert!(
+            path.ends_with("com.chyin.kokoro/memory_upgrade_config.json")
+                || path.ends_with("com.chyin.kokoro\\memory_upgrade_config.json")
+        );
     }
 }
-
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct MemorySystemConfig {

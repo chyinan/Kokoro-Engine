@@ -909,7 +909,11 @@ impl AIOrchestrator {
         Self::persist_conversation_id(None);
     }
 
-    pub async fn should_trigger_memory_event(&self, cooldown_key: &str, cooldown_secs: u64) -> bool {
+    pub async fn should_trigger_memory_event(
+        &self,
+        cooldown_key: &str,
+        cooldown_secs: u64,
+    ) -> bool {
         let now = Instant::now();
         let mut cooldowns = self.memory_event_cooldowns.lock().await;
 
@@ -938,36 +942,48 @@ mod tests {
     async fn memory_event_cooldown_blocks_same_key_within_window() {
         let orchestrator = setup_test_orchestrator().await;
 
-        assert!(orchestrator
-            .should_trigger_memory_event("char-1:conv-1:preference", 60)
-            .await);
-        assert!(!orchestrator
-            .should_trigger_memory_event("char-1:conv-1:preference", 60)
-            .await);
+        assert!(
+            orchestrator
+                .should_trigger_memory_event("char-1:conv-1:preference", 60)
+                .await
+        );
+        assert!(
+            !orchestrator
+                .should_trigger_memory_event("char-1:conv-1:preference", 60)
+                .await
+        );
     }
 
     #[tokio::test]
     async fn memory_event_cooldown_allows_different_keys() {
         let orchestrator = setup_test_orchestrator().await;
 
-        assert!(orchestrator
-            .should_trigger_memory_event("char-1:conv-1:preference", 60)
-            .await);
-        assert!(orchestrator
-            .should_trigger_memory_event("char-1:conv-1:plan", 60)
-            .await);
+        assert!(
+            orchestrator
+                .should_trigger_memory_event("char-1:conv-1:preference", 60)
+                .await
+        );
+        assert!(
+            orchestrator
+                .should_trigger_memory_event("char-1:conv-1:plan", 60)
+                .await
+        );
     }
 
     #[tokio::test]
     async fn memory_event_cooldown_allows_zero_window() {
         let orchestrator = setup_test_orchestrator().await;
 
-        assert!(orchestrator
-            .should_trigger_memory_event("char-1:conv-1:preference", 0)
-            .await);
-        assert!(orchestrator
-            .should_trigger_memory_event("char-1:conv-1:preference", 0)
-            .await);
+        assert!(
+            orchestrator
+                .should_trigger_memory_event("char-1:conv-1:preference", 0)
+                .await
+        );
+        assert!(
+            orchestrator
+                .should_trigger_memory_event("char-1:conv-1:preference", 0)
+                .await
+        );
     }
 
     #[tokio::test]
