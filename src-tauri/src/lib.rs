@@ -236,12 +236,12 @@ pub fn run() {
                 tauri::WindowEvent::Moved(_)
                 | tauri::WindowEvent::Resized(_)
                 | tauri::WindowEvent::ScaleFactorChanged { .. } => {
-                    if let Err(error) = crate::commands::pet::sync_bubble_window_to_pet(&app) {
+                    if let Err(error) = crate::commands::pet::sync_bubble_window_to_pet(app) {
                         tracing::warn!(target: "pet", "failed to sync bubble after pet window event: {}", error);
                     }
                 }
                 tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed => {
-                    if let Err(error) = crate::commands::pet::hide_bubble_window_if_open(&app) {
+                    if let Err(error) = crate::commands::pet::hide_bubble_window_if_open(app) {
                         tracing::warn!(target: "pet", "failed to hide bubble after pet window closed: {}", error);
                     }
                 }
