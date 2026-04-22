@@ -2,6 +2,10 @@ use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 
+const BUBBLE_WIDTH: i32 = 320;
+const BUBBLE_HEIGHT: i32 = 240;
+const BUBBLE_GAP: i32 = 8;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PetConfig {
     pub enabled: bool,
@@ -63,6 +67,60 @@ fn save_pet_config_to_disk(config: &PetConfig) -> Result<(), KokoroError> {
     std::fs::write(&path, content).map_err(KokoroError::from)
 }
 
+fn bubble_position_for_pet_bounds(pet_x: i32, pet_y: i32, pet_width: u32) -> (i32, i32) {
+    let x = pet_x + (pet_width as i32 - BUBBLE_WIDTH) / 2;
+    let y = pet_y - BUBBLE_HEIGHT - BUBBLE_GAP;
+    (x, y)
+}
+
+fn bubble_position_from_pet_window(
+    app: &tauri::AppHandle,
+) -> Result<Option<(i32, i32)>, KokoroError> {
+    let Some(pet) = app.get_webview_window("pet") else {
+        return Ok(None);
+    };
+
+    if !pet.is_visible().unwrap_or(false) {
+        return Ok(None);
+    }
+
+    let pos = pet
+        .outer_position()
+        .map_err(|e| KokoroError::Internal(e.to_string()))?;
+    let size = pet
+        .inner_size()
+        .map_err(|e| KokoroError::Internal(e.to_string()))?;
+
+    Ok(Some(bubble_position_for_pet_bounds(
+        pos.x, pos.y, size.width,
+    )))
+}
+
+pub fn sync_bubble_window_to_pet(app: &tauri::AppHandle) -> Result<(), KokoroError> {
+    let Some(bubble) = app.get_webview_window("bubble") else {
+        return Ok(());
+    };
+
+    let Some((bx, by)) = bubble_position_from_pet_window(app)? else {
+        return Ok(());
+    };
+
+    bubble
+        .set_position(tauri::PhysicalPosition::new(bx, by))
+        .map_err(|e| KokoroError::Internal(e.to_string()))?;
+
+    Ok(())
+}
+
+pub fn hide_bubble_window_if_open(app: &tauri::AppHandle) -> Result<(), KokoroError> {
+    if let Some(win) = app.get_webview_window("bubble") {
+        win.hide()
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
     tracing::info!(target: "pet", "show_pet_window called");
@@ -100,6 +158,7 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
         win.set_focus()
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
+        sync_bubble_window_to_pet(&app)?;
         tracing::info!(target: "pet", "pet window shown successfully");
     } else {
         tracing::info!(target: "pet", "pet window not found, creating new one...");
@@ -152,6 +211,7 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
         win.set_focus()
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
+        sync_bubble_window_to_pet(&app)?;
         tracing::info!(target: "pet", "pet window created and shown successfully");
     }
     Ok(())
@@ -162,6 +222,7 @@ pub async fn hide_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("pet") {
         win.hide()
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
+        hide_bubble_window_if_open(&app)?;
 
         // Update config to reflect window is closed
         let mut cfg = load_pet_config();
@@ -199,6 +260,7 @@ pub async fn move_pet_window(app: tauri::AppHandle, x: i32, y: i32) -> Result<()
     if let Some(win) = app.get_webview_window("pet") {
         win.set_position(tauri::PhysicalPosition::new(x, y))
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
+        sync_bubble_window_to_pet(&app)?;
     }
     Ok(())
 }
@@ -212,31 +274,19 @@ pub async fn resize_pet_window(
     if let Some(win) = app.get_webview_window("pet") {
         win.set_size(tauri::PhysicalSize::new(width, height))
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
+        sync_bubble_window_to_pet(&app)?;
     }
     Ok(())
 }
 
 #[tauri::command]
 pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(), KokoroError> {
-    let bubble_w = 320i32;
-    let bubble_h = 240i32;
-    let gap = 8i32;
-
-    let (bx, by) = if let Some(pet) = app.get_webview_window("pet") {
-        if !pet.is_visible().unwrap_or(false) {
-            return Ok(());
-        }
-        let pos = pet
-            .outer_position()
-            .map_err(|e| KokoroError::Internal(e.to_string()))?;
-        let size = pet
-            .inner_size()
-            .map_err(|e| KokoroError::Internal(e.to_string()))?;
-        let x = pos.x + (size.width as i32 - bubble_w) / 2;
-        let y = pos.y - bubble_h - gap;
-        (x, y)
-    } else {
+    if app.get_webview_window("pet").is_none() {
         return Err(KokoroError::NotFound("Pet window not found".to_string()));
+    }
+
+    let Some((bx, by)) = bubble_position_from_pet_window(&app)? else {
+        return Ok(());
     };
 
     if let Some(existing) = app.get_webview_window("bubble") {
@@ -262,7 +312,7 @@ pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(
 
         let win = tauri::WebviewWindowBuilder::new(&app, "bubble", url)
             .title("")
-            .inner_size(bubble_w as f64, bubble_h as f64)
+            .inner_size(BUBBLE_WIDTH as f64, BUBBLE_HEIGHT as f64)
             .position(bx as f64, by as f64)
             .decorations(false)
             .transparent(true)
@@ -290,6 +340,7 @@ pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(
 #[tauri::command]
 pub async fn update_bubble_text(app: tauri::AppHandle, text: String) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("bubble") {
+        sync_bubble_window_to_pet(&app)?;
         win.emit("bubble-text-update", &text)
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
         Ok(())
@@ -300,9 +351,25 @@ pub async fn update_bubble_text(app: tauri::AppHandle, text: String) -> Result<(
 
 #[tauri::command]
 pub async fn hide_bubble_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
-    if let Some(win) = app.get_webview_window("bubble") {
-        win.hide()
-            .map_err(|e| KokoroError::Internal(e.to_string()))?;
+    hide_bubble_window_if_open(&app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bubble_position_for_pet_bounds, BUBBLE_GAP, BUBBLE_HEIGHT, BUBBLE_WIDTH};
+
+    #[test]
+    fn bubble_position_is_centered_above_pet_window() {
+        let (x, y) = bubble_position_for_pet_bounds(100, 400, 500);
+
+        assert_eq!(x, 100 + (500 - BUBBLE_WIDTH) / 2);
+        assert_eq!(y, 400 - BUBBLE_HEIGHT - BUBBLE_GAP);
     }
-    Ok(())
+
+    #[test]
+    fn bubble_position_supports_windows_narrower_than_bubble() {
+        let (x, _) = bubble_position_for_pet_bounds(50, 200, 200);
+
+        assert_eq!(x, 50 + (200 - BUBBLE_WIDTH) / 2);
+    }
 }
