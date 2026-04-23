@@ -111,7 +111,7 @@
             },
             "save_config": "保存 LLM 配置",
             "saving": "保存中...",
-            "vision_mode": "视觉模式",
+            "vision_mode": "图片发送",
             "vision_desc": "允许在对话中发送图片 (需要多模态模型)",
             "context": {
                 "title": "上下文管理",

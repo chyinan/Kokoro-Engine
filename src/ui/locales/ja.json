@@ -111,7 +111,7 @@
             },
             "save_config": "LLM 設定を保存",
             "saving": "保存中...",
-            "vision_mode": "ビジョンモード",
+            "vision_mode": "画像送信",
             "vision_desc": "マルチモーダルモデルでの画像アップロードを有効にする",
             "context": {
                 "title": "コンテキスト管理",

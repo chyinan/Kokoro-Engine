@@ -111,7 +111,7 @@
             },
             "save_config": "Save LLM Config",
             "saving": "Saving...",
-            "vision_mode": "Vision Mode",
+            "vision_mode": "Image Sending",
             "vision_desc": "Enable image upload in chat for multimodal models",
             "context": {
                 "title": "Context Management",

@@ -111,7 +111,7 @@
             },
             "save_config": "LLM 설정 저장",
             "saving": "저장 중...",
-            "vision_mode": "비전 모드",
+            "vision_mode": "이미지 전송",
             "vision_desc": "멀티모달 모델을 위한 이미지 업로드 활성화",
             "context": {
                 "title": "컨텍스트 관리",
