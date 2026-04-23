@@ -511,6 +511,7 @@ async fn handle_text(
         event_cooldown_secs: upgrade_config.event_cooldown_secs,
         intent_routing_enabled: upgrade_config.intent_routing_enabled,
     };
+    let memory_target_language = orchestrator.response_language.lock().await.clone();
     tracing::info!(
         target: "telegram::memory",
         "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
@@ -544,6 +545,7 @@ async fn handle_text(
                         upgrade_config.structured_memory_enabled,
                         &ingress_options,
                     ),
+                    target_language: Some(memory_target_language.clone()),
                 };
                 tauri::async_runtime::spawn(async move {
                     if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
@@ -582,6 +584,10 @@ async fn handle_text(
         let char_id_for_mem = char_id.clone();
         let memory_enabled = orchestrator.memory_enabled_flag();
         let observation_started_at = std::time::Instant::now();
+        let extraction_options = memory_extractor::MemoryExtractionOptions {
+            structured_memory_enabled: false,
+            target_language: Some(memory_target_language.clone()),
+        };
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -589,11 +595,12 @@ async fn handle_text(
             let _ = memory_mgr
                 .periodic_write_observation_for_telegram(&char_id_for_mem, observation_started_at)
                 .await;
-            memory_extractor::extract_and_store_memories(
+            memory_extractor::extract_and_store_memories_with_options(
                 &history,
                 &memory_mgr,
                 provider_for_mem,
                 char_id_for_mem,
+                extraction_options,
             )
             .await;
         });
@@ -604,6 +611,7 @@ async fn handle_text(
         let provider_for_consolidation = llm_service.provider().await;
         let memory_enabled = orchestrator.memory_enabled_flag();
         let observation_started_at = std::time::Instant::now();
+        let target_language_for_consolidation = memory_target_language.clone();
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -616,7 +624,11 @@ async fn handle_text(
                 )
                 .await;
             match memory_mgr
-                .consolidate_memories(&char_id_for_consolidation, provider_for_consolidation)
+                .consolidate_memories_with_language(
+                    &char_id_for_consolidation,
+                    provider_for_consolidation,
+                    Some(target_language_for_consolidation),
+                )
                 .await
             {
                 Ok(count) if count > 0 => {
@@ -979,6 +991,7 @@ async fn handle_photo(
     // Trigger periodic memory extraction (every 5 user messages)
     let msg_count = orchestrator.get_message_count().await;
     let memory_msg_count = orchestrator.get_memory_trigger_count().await;
+    let memory_target_language = orchestrator.response_language.lock().await.clone();
     tracing::info!(
         target: "telegram::memory",
         "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
@@ -996,6 +1009,10 @@ async fn handle_photo(
         let char_id_for_mem = char_id.clone();
         let memory_enabled = orchestrator.memory_enabled_flag();
         let observation_started_at = std::time::Instant::now();
+        let extraction_options = memory_extractor::MemoryExtractionOptions {
+            structured_memory_enabled: false,
+            target_language: Some(memory_target_language.clone()),
+        };
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -1003,11 +1020,12 @@ async fn handle_photo(
             let _ = memory_mgr
                 .periodic_write_observation_for_telegram(&char_id_for_mem, observation_started_at)
                 .await;
-            memory_extractor::extract_and_store_memories(
+            memory_extractor::extract_and_store_memories_with_options(
                 &history,
                 &memory_mgr,
                 provider_for_mem,
                 char_id_for_mem,
+                extraction_options,
             )
             .await;
         });
@@ -1018,6 +1036,7 @@ async fn handle_photo(
         let provider_for_consolidation = llm_service.provider().await;
         let memory_enabled = orchestrator.memory_enabled_flag();
         let observation_started_at = std::time::Instant::now();
+        let target_language_for_consolidation = memory_target_language.clone();
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -1030,7 +1049,11 @@ async fn handle_photo(
                 )
                 .await;
             match memory_mgr
-                .consolidate_memories(&char_id_for_consolidation, provider_for_consolidation)
+                .consolidate_memories_with_language(
+                    &char_id_for_consolidation,
+                    provider_for_consolidation,
+                    Some(target_language_for_consolidation),
+                )
                 .await
             {
                 Ok(count) if count > 0 => {

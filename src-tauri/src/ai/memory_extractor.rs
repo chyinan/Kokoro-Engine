@@ -30,9 +30,10 @@ const EXTRACTION_PROMPT: &str = concat!(
     "IMPORTANT: Output ONLY the JSON array, no explanation or markdown."
 );
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct MemoryExtractionOptions {
     pub structured_memory_enabled: bool,
+    pub target_language: Option<String>,
 }
 
 /// A scored memory fact from the LLM.
@@ -52,18 +53,40 @@ struct StructuredFact {
     entity_key: Option<String>,
 }
 
-fn extraction_prompt(options: MemoryExtractionOptions) -> String {
+fn normalized_target_language(language: Option<&str>) -> Option<&str> {
+    language.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn memory_language_instruction(target_language: Option<&str>) -> String {
+    let Some(language) = normalized_target_language(target_language) else {
+        return String::new();
+    };
+
+    format!(
+        "\n\nMEMORY LANGUAGE: Write every extracted memory fact in {language}. \
+         If the conversation uses another language, translate or summarize the fact into {language}. \
+         Keep proper nouns, code identifiers, product names, and exact quoted phrases unchanged only when necessary. \
+         JSON field names and enum values must remain exactly as specified."
+    )
+}
+
+fn extraction_prompt(options: &MemoryExtractionOptions) -> String {
+    let language_instruction = memory_language_instruction(options.target_language.as_deref());
+
     if options.structured_memory_enabled {
-        concat!(
+        format!(
+            "{}{}",
+            concat!(
             "You are a memory extraction assistant. Analyze the following conversation and extract noteworthy facts worth remembering.\n\n",
             "Respond with ONLY a JSON array of objects in this schema:\n",
             "[{\"fact\":\"...\",\"importance\":0.8,\"memory_type\":\"profile|preference|plan|fact|constraint\",\"entity_key\":\"optional.entity.key\"}]\n",
             "If nothing noteworthy was said, respond with [].\n",
             "IMPORTANT: Output ONLY the JSON array, no explanation or markdown."
+            ),
+            language_instruction
         )
-        .to_string()
     } else {
-        EXTRACTION_PROMPT.to_string()
+        format!("{}{}", EXTRACTION_PROMPT, language_instruction)
     }
 }
 
@@ -156,7 +179,7 @@ pub async fn extract_and_store_memories_with_options(
         .join("\n");
 
     let messages = vec![
-        system_message(format!("{}{}", extraction_prompt(options), existing_block)),
+        system_message(format!("{}{}", extraction_prompt(&options), existing_block)),
         user_text_message(format!("Conversation to analyze:\n\n{}", transcript)),
     ];
 
@@ -288,5 +311,35 @@ fn strip_code_fences(response: &str) -> &str {
             .trim()
     } else {
         trimmed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extraction_prompt_includes_target_memory_language() {
+        let prompt = extraction_prompt(&MemoryExtractionOptions {
+            structured_memory_enabled: false,
+            target_language: Some("日本語".to_string()),
+        });
+
+        assert!(prompt.contains("Write every extracted memory fact in 日本語"));
+        assert!(prompt.contains("translate or summarize the fact into 日本語"));
+    }
+
+    #[test]
+    fn structured_extraction_keeps_schema_keys_while_setting_fact_language() {
+        let prompt = extraction_prompt(&MemoryExtractionOptions {
+            structured_memory_enabled: true,
+            target_language: Some("中文".to_string()),
+        });
+
+        assert!(prompt.contains("\"memory_type\""));
+        assert!(
+            prompt.contains("JSON field names and enum values must remain exactly as specified")
+        );
+        assert!(prompt.contains("Write every extracted memory fact in 中文"));
     }
 }

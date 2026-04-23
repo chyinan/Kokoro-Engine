@@ -1502,6 +1502,7 @@ pub async fn stream_chat(
         let tool_settings = tool_settings_state.read().await;
         registry.list_tools_for_llm_with_settings(state.is_memory_enabled(), &tool_settings)
     };
+    let memory_target_language = state.response_language.lock().await.clone();
 
     // Compose Persona Prompt
     let (prompt_messages, compose_warnings) = state
@@ -2347,6 +2348,7 @@ pub async fn stream_chat(
                         upgrade_config.structured_memory_enabled,
                         &ingress_options,
                     ),
+                    target_language: Some(memory_target_language.clone()),
                 };
                 tauri::async_runtime::spawn(async move {
                     if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
@@ -2385,6 +2387,10 @@ pub async fn stream_chat(
         let provider_for_mem = system_provider.clone();
         let memory_enabled = state.memory_enabled_flag();
         let observation_started_at = std::time::Instant::now();
+        let extraction_options = memory_extractor::MemoryExtractionOptions {
+            structured_memory_enabled: false,
+            target_language: Some(memory_target_language.clone()),
+        };
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -2392,11 +2398,12 @@ pub async fn stream_chat(
             let _ = memory_mgr
                 .periodic_write_observation_for_chat(&char_id_for_mem, observation_started_at)
                 .await;
-            memory_extractor::extract_and_store_memories(
+            memory_extractor::extract_and_store_memories_with_options(
                 &history,
                 &memory_mgr,
                 provider_for_mem,
                 char_id_for_mem,
+                extraction_options,
             )
             .await;
         });
@@ -2409,6 +2416,7 @@ pub async fn stream_chat(
         let provider_for_consolidation = system_provider.clone();
         let memory_enabled = state.memory_enabled_flag();
         let observation_started_at = std::time::Instant::now();
+        let target_language_for_consolidation = memory_target_language.clone();
         tauri::async_runtime::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -2421,7 +2429,11 @@ pub async fn stream_chat(
                 )
                 .await;
             match memory_mgr
-                .consolidate_memories(&char_id_for_consolidation, provider_for_consolidation)
+                .consolidate_memories_with_language(
+                    &char_id_for_consolidation,
+                    provider_for_consolidation,
+                    Some(target_language_for_consolidation),
+                )
                 .await
             {
                 Ok(count) if count > 0 => {

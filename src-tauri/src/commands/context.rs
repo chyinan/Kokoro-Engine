@@ -334,6 +334,7 @@ pub async fn end_session(
     let char_id = state.get_character_id().await;
     let memory_mgr = state.memory_manager.clone();
     let memory_enabled = state.memory_enabled_flag();
+    let summary_language = state.response_language.lock().await.clone();
 
     // Clear history immediately so the user can start fresh
     state.clear_history().await;
@@ -346,18 +347,22 @@ pub async fn end_session(
                 .map(|m| format!("{}: {}", m.role, m.content))
                 .collect::<Vec<_>>()
                 .join("\n");
+            let language_rule = if summary_language.trim().is_empty() {
+                "Write the summary in the language the users were speaking.".to_string()
+            } else {
+                let language = summary_language.trim();
+                format!(
+                    "Write the summary in {language}. If the conversation uses another language, translate or summarize it into {language}."
+                )
+            };
 
             let messages = vec![
-                system_message(
-                    concat!(
-                        "You are a conversation summarizer. Write a brief 2-3 sentence summary ",
-                        "of this conversation in the language the users were speaking. ",
-                        "Focus on key topics discussed, any emotional moments, and important ",
-                        "information shared. Write from a third-person perspective.\n",
-                        "Output ONLY the summary, no labels or formatting."
-                    )
-                    .to_string(),
-                ),
+                system_message(format!(
+                    "You are a conversation summarizer. Write a brief 2-3 sentence summary of this conversation. \
+                     {language_rule} Focus on key topics discussed, any emotional moments, and important \
+                     information shared. Write from a third-person perspective.\n\
+                     Output ONLY the summary, no labels or formatting."
+                )),
                 user_text_message(format!("Summarize this conversation:\n\n{}", transcript)),
             ];
 

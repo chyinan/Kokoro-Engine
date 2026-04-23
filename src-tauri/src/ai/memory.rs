@@ -2365,6 +2365,18 @@ impl MemoryManager {
         character_id: &str,
         provider: std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
     ) -> Result<usize> {
+        self.consolidate_memories_with_language(character_id, provider, None)
+            .await
+    }
+
+    /// Find clusters of similar memories and merge them via LLM, preserving the
+    /// configured assistant response language for newly written entries.
+    pub async fn consolidate_memories_with_language(
+        &self,
+        character_id: &str,
+        provider: std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
+        target_language: Option<String>,
+    ) -> Result<usize> {
         // 1. Load all memories with embeddings for this character
         let rows = sqlx::query(
             "SELECT id, content, embedding, created_at, importance, tier FROM memories WHERE character_id = ?",
@@ -2450,7 +2462,9 @@ impl MemoryManager {
                 .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
             // Call LLM to merge facts
-            let merged = match merge_facts_via_llm(&facts, &provider).await {
+            let merged = match merge_facts_via_llm(&facts, &provider, target_language.as_deref())
+                .await
+            {
                 Ok(text) => text,
                 Err(e) => {
                     tracing::error!(target: "memory", "[Memory] Consolidation LLM call failed: {}", e);
@@ -2597,24 +2611,11 @@ fn is_likely_contradiction(a: &str, b: &str) -> bool {
 async fn merge_facts_via_llm(
     facts: &[&str],
     provider: &std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
+    target_language: Option<&str>,
 ) -> Result<String> {
     use crate::llm::messages::user_text_message;
 
-    let facts_list = facts
-        .iter()
-        .enumerate()
-        .map(|(i, f)| format!("{}. {}", i + 1, f))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let prompt = format!(
-        "You are a memory consolidation assistant. Merge the following related facts into a single, \
-         concise, and complete memory entry. Preserve all important details. Do not add information \
-         that is not present in the original facts. Output only the merged memory text, nothing else.\n\n\
-         Facts:\n{}",
-        facts_list
-    );
-
+    let prompt = build_merge_facts_prompt(facts, target_language);
     let messages = vec![user_text_message(prompt)];
 
     let result = provider
@@ -2623,6 +2624,40 @@ async fn merge_facts_via_llm(
         .map_err(|e| anyhow::anyhow!("LLM merge failed: {}", e))?;
 
     Ok(result.trim().to_string())
+}
+
+fn build_memory_language_requirement(target_language: Option<&str>) -> String {
+    let Some(language) = target_language
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return String::new();
+    };
+
+    format!(
+        " Write the merged memory entry in {language}. \
+         If the source facts use another language, translate or summarize them into {language}. \
+         Preserve proper nouns, code identifiers, product names, and exact quoted phrases only when necessary."
+    )
+}
+
+fn build_merge_facts_prompt(facts: &[&str], target_language: Option<&str>) -> String {
+    let facts_list = facts
+        .iter()
+        .enumerate()
+        .map(|(i, f)| format!("{}. {}", i + 1, f))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let language_requirement = build_memory_language_requirement(target_language);
+
+    format!(
+        "You are a memory consolidation assistant. Merge the following related facts into a single, \
+         concise, and complete memory entry. Preserve all important details. Do not add information \
+         that is not present in the original facts.{language_requirement} \
+         Output only the merged memory text, nothing else.\n\n\
+         Facts:\n{}",
+        facts_list
+    )
 }
 
 #[cfg(test)]
@@ -2652,6 +2687,14 @@ mod tests {
         } else {
             assert!(summary.is_none());
         }
+    }
+
+    #[test]
+    fn merge_facts_prompt_includes_target_memory_language() {
+        let prompt = build_merge_facts_prompt(&["The user likes cats."], Some("日本語"));
+
+        assert!(prompt.contains("Write the merged memory entry in 日本語"));
+        assert!(prompt.contains("translate or summarize them into 日本語"));
     }
 
     #[test]

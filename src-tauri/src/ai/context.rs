@@ -34,6 +34,38 @@ pub struct MemorySnippet {
     pub tier: String,
 }
 
+fn normalized_language_name(language: &str) -> Option<&str> {
+    let trimmed = language.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn memory_write_language_instruction(response_language: &str) -> Option<String> {
+    let language = normalized_language_name(response_language)?;
+    Some(format!(
+        "When writing or updating memory entries, write the stored memory text in {language}. \
+         This includes the fact argument for store_memory. If the source text uses another language, \
+         translate or summarize it into {language}; preserve proper nouns, code identifiers, \
+         product names, and exact quoted phrases only when necessary."
+    ))
+}
+
+fn build_conversation_summary_prompt(transcript: &str, target_language: &str) -> String {
+    let language_requirement = normalized_language_name(target_language)
+        .map(|language| {
+            format!(
+                " Write the summary in {language}. If the conversation uses another language, translate or summarize it into {language}."
+            )
+        })
+        .unwrap_or_default();
+
+    format!(
+        "Summarize the following conversation in 2-3 sentences, focusing on key facts, \
+         decisions, emotional shifts, and unresolved threads.{language_requirement} \
+         Output only the summary, no preamble.\n\n{}",
+        transcript
+    )
+}
+
 pub struct AIOrchestrator {
     pub db: SqlitePool,
     pub system_prompt: Arc<Mutex<String>>,
@@ -273,6 +305,7 @@ impl AIOrchestrator {
             {
                 let memory_manager = self.memory_manager.clone();
                 let cid = character_id.to_string();
+                let summary_language = self.response_language.lock().await.clone();
                 tauri::async_runtime::spawn(async move {
                     let task = match memory_manager
                         .get_conversation_summary_task(&conversation_id, &cid)
@@ -302,10 +335,8 @@ impl AIOrchestrator {
                         return;
                     }
 
-                    let prompt = format!(
-                        "Summarize the following conversation in 2-3 sentences, focusing on key facts, decisions, emotional shifts, and unresolved threads. Output only the summary, no preamble.\n\n{}",
-                        task.transcript
-                    );
+                    let prompt =
+                        build_conversation_summary_prompt(&task.transcript, &summary_language);
 
                     match provider.chat(vec![user_text_message(prompt)], None).await {
                         Ok(text) if !text.trim().is_empty() => {
@@ -809,6 +840,13 @@ impl AIOrchestrator {
             ));
         }
 
+        if let Some(memory_language_rule) = memory_write_language_instruction(&resp_lang) {
+            system_parts.push(format!(
+                "<memory_write_language>\n{}\n</memory_write_language>",
+                memory_language_rule
+            ));
+        }
+
         // Push the single consolidated system message
         final_messages.push(Message {
             role: "system".to_string(),
@@ -936,6 +974,22 @@ mod tests {
         AIOrchestrator::new("sqlite::memory:")
             .await
             .expect("Failed to create test orchestrator")
+    }
+
+    #[test]
+    fn memory_write_language_instruction_uses_response_language() {
+        let instruction = memory_write_language_instruction("日本語").expect("instruction");
+
+        assert!(instruction.contains("stored memory text in 日本語"));
+        assert!(instruction.contains("fact argument for store_memory"));
+    }
+
+    #[test]
+    fn conversation_summary_prompt_uses_response_language() {
+        let prompt = build_conversation_summary_prompt("user: hello", "中文");
+
+        assert!(prompt.contains("Write the summary in 中文"));
+        assert!(prompt.contains("translate or summarize it into 中文"));
     }
 
     #[tokio::test]

@@ -245,14 +245,14 @@ impl ActionHandler for StoreMemoryAction {
     }
 
     fn description(&self) -> &str {
-        "Store an important fact or detail about the user to remember for future conversations"
+        "Store an important fact or detail about the user to remember for future conversations. Store the fact in the configured assistant response language."
     }
 
     fn parameters(&self) -> Vec<ActionParam> {
         vec![
             ActionParam {
                 name: "fact".to_string(),
-                description: "The fact or detail to remember (concise, factual statement)".to_string(),
+                description: "The fact or detail to remember (concise, factual statement written in the configured assistant response language)".to_string(),
                 required: true,
             },
             ActionParam {
