@@ -694,6 +694,9 @@
                     "get_time": {
                         "description": "현재 날짜와 시간을 가져옵니다."
                     },
+                    "capture_screen": {
+                        "description": "현재 화면을 캡처하고 간결한 시각 관찰을 반환합니다. 화면 인식이 켜져 있어야 합니다."
+                    },
                     "play_cue": {
                         "description": "현재 모델에 설정된 Live2D cue를 실행합니다."
                     },

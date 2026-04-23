@@ -694,6 +694,9 @@
                     "get_time": {
                         "description": "Get the current date and time."
                     },
+                    "capture_screen": {
+                        "description": "Capture the current screen and return a concise visual observation. Requires Screen Vision to be enabled."
+                    },
                     "play_cue": {
                         "description": "Trigger a configured Live2D cue on the active model."
                     },

@@ -694,6 +694,9 @@
                     "get_time": {
                         "description": "現在の日付と時刻を取得します。"
                     },
+                    "capture_screen": {
+                        "description": "現在の画面をキャプチャし、簡潔な視覚的観察を返します。画面認識を有効にする必要があります。"
+                    },
                     "play_cue": {
                         "description": "現在のモデルで設定済みの Live2D cue を再生します。"
                     },

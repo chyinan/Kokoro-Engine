@@ -46,6 +46,74 @@ impl ActionHandler for GetTimeAction {
     }
 }
 
+// ── capture_screen ─────────────────────────────────────
+
+pub struct CaptureScreenAction;
+
+#[async_trait]
+impl ActionHandler for CaptureScreenAction {
+    fn name(&self) -> &str {
+        "capture_screen"
+    }
+
+    fn description(&self) -> &str {
+        "Capture the current primary screen and return a concise visual observation. Only available when Settings > Vision > Screen Vision is enabled."
+    }
+
+    fn parameters(&self) -> Vec<ActionParam> {
+        vec![]
+    }
+
+    fn needs_feedback(&self) -> bool {
+        true
+    }
+
+    fn risk_tags(&self) -> Vec<ActionRiskTag> {
+        vec![ActionRiskTag::Read, ActionRiskTag::Sensitive]
+    }
+
+    async fn execute(
+        &self,
+        _args: HashMap<String, String>,
+        ctx: ActionContext,
+    ) -> Result<ActionResult, ActionError> {
+        let watcher = ctx.app.state::<crate::vision::watcher::VisionWatcher>();
+        let config = watcher.config.read().await.clone();
+
+        if !config.enabled {
+            return Err(ActionError(
+                "Screen vision is disabled. Enable Settings > Vision > Screen Vision before using this tool."
+                    .to_string(),
+            ));
+        }
+
+        let screenshot = crate::vision::capture::capture_screen()
+            .map_err(|error| ActionError(format!("Screen capture failed: {}", error)))?;
+        let description = crate::vision::watcher::analyze_screenshot(
+            &watcher.client,
+            &config,
+            &screenshot,
+            watcher.llm_service.as_ref(),
+        )
+        .await
+        .map_err(|error| ActionError(format!("Screen analysis failed: {}", error)))?;
+
+        watcher.context.update(description.clone()).await;
+        let captured_at = chrono::Utc::now().to_rfc3339();
+
+        Ok(ActionResult::ok_with_data(
+            format!(
+                "Current screen observation (captured at {}): {}",
+                captured_at, description
+            ),
+            serde_json::json!({
+                "captured_at": captured_at,
+                "description": description,
+            }),
+        ))
+    }
+}
+
 // ── play_cue ──────────────────────────────────
 
 pub struct PlayCueAction;
@@ -431,6 +499,7 @@ impl ActionHandler for SendNotificationAction {
 /// Register all built-in action handlers into the given registry.
 pub fn register_builtins(registry: &mut super::registry::ActionRegistry) {
     registry.register(GetTimeAction);
+    registry.register(CaptureScreenAction);
     registry.register(PlayCueAction);
     registry.register(SetBackgroundAction);
     registry.register(SearchMemoryAction);

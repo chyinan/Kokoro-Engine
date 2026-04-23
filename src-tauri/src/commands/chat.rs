@@ -1476,6 +1476,7 @@ pub async fn stream_chat(
         "[Chat] configured_active_provider={}, effective_active_provider={}, native_tools_enabled={}",
         llm_config.active_provider, effective_provider_id, native_tools_enabled
     );
+    let vision_enabled = _vision_watcher.config.read().await.enabled;
 
     // Native tool-calling requests already carry structured tool definitions,
     // so avoid duplicating a long textual tool prompt there.
@@ -1485,8 +1486,9 @@ pub async fn stream_chat(
         let prompt = if native_tools_enabled {
             String::new()
         } else {
-            registry.generate_tool_prompt_for_prompt_with_settings(
+            registry.generate_tool_prompt_for_prompt_with_settings_and_availability(
                 state.is_memory_enabled(),
+                vision_enabled,
                 &tool_settings,
             )
         };
@@ -1500,7 +1502,11 @@ pub async fn stream_chat(
     let native_tools = {
         let registry = _action_registry.read().await;
         let tool_settings = tool_settings_state.read().await;
-        registry.list_tools_for_llm_with_settings(state.is_memory_enabled(), &tool_settings)
+        registry.list_tools_for_llm_with_settings_and_availability(
+            state.is_memory_enabled(),
+            vision_enabled,
+            &tool_settings,
+        )
     };
     let memory_target_language = state.response_language.lock().await.clone();
 

@@ -104,9 +104,11 @@ or just a URL (type is auto-detected):
 
 interface McpTabProps {
     initialServers?: McpServerStatus[];
+    visionEnabled?: boolean;
+    isActive?: boolean;
 }
 
-export default function McpTab({ initialServers }: McpTabProps) {
+export default function McpTab({ initialServers, visionEnabled, isActive = false }: McpTabProps) {
     const { t } = useTranslation();
     const hasInitialServers = initialServers !== undefined;
     const [servers, setServers] = useState<McpServerStatus[]>(initialServers ?? []);
@@ -177,6 +179,16 @@ export default function McpTab({ initialServers }: McpTabProps) {
         if (loading) return;
         void fetchToolState();
     }, [servers, loading, fetchToolState]);
+
+    useEffect(() => {
+        if (!isActive) return;
+        void fetchToolState();
+    }, [isActive, fetchToolState]);
+
+    useEffect(() => {
+        if (visionEnabled === undefined) return;
+        void fetchToolState();
+    }, [visionEnabled, fetchToolState]);
 
     // ── Add server(s) from JSON ──────────────────────────
     const handleAdd = async () => {

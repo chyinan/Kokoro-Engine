@@ -715,7 +715,11 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                             )}
                             {mountedTabs.has("mcp") && (
                                 <div className={activeTab === "mcp" ? "block" : "hidden"}>
-                                    <McpTab initialServers={mcpServersProp} />
+                                    <McpTab
+                                        initialServers={mcpServersProp}
+                                        visionEnabled={visionConfigProp?.enabled}
+                                        isActive={activeTab === "mcp"}
+                                    />
                                 </div>
                             )}
                             {mountedTabs.has("telegram") && (

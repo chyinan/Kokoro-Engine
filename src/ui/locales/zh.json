@@ -694,6 +694,9 @@
                     "get_time": {
                         "description": "获取当前日期和时间。"
                     },
+                    "capture_screen": {
+                        "description": "获取当前屏幕截图并返回简洁的视觉观察。需要先开启屏幕视觉总开关。"
+                    },
                     "play_cue": {
                         "description": "触发当前模型已配置的 Live2D cue。"
                     },

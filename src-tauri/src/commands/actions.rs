@@ -574,18 +574,22 @@ async fn modify_direct_action_args(
 
 #[command]
 pub async fn list_actions(
-    state: State<'_, Arc<RwLock<ActionRegistry>>>,
+    registry_state: State<'_, Arc<RwLock<ActionRegistry>>>,
+    vision_watcher: State<'_, crate::vision::watcher::VisionWatcher>,
 ) -> Result<Vec<crate::actions::ActionInfo>, KokoroError> {
-    let registry = state.read().await;
-    Ok(registry.list_actions())
+    let vision_enabled = vision_watcher.config.read().await.enabled;
+    let registry = registry_state.read().await;
+    Ok(registry.list_actions_with_availability(vision_enabled))
 }
 
 #[command]
 pub async fn list_builtin_tools(
     registry_state: State<'_, Arc<RwLock<ActionRegistry>>>,
+    vision_watcher: State<'_, crate::vision::watcher::VisionWatcher>,
 ) -> Result<Vec<ActionInfo>, KokoroError> {
+    let vision_enabled = vision_watcher.config.read().await.enabled;
     let registry = registry_state.read().await;
-    Ok(registry.list_builtin_actions())
+    Ok(registry.list_builtin_actions_with_availability(vision_enabled))
 }
 
 #[command]

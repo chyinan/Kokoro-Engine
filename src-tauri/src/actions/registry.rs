@@ -164,6 +164,7 @@ pub struct ActionRegistry {
 }
 
 const MEMORY_ACTIONS: &[&str] = &["search_memory", "store_memory", "forget_memory"];
+const VISION_ACTIONS: &[&str] = &["capture_screen"];
 
 fn encode_tool_id_segment(value: &str) -> String {
     value.replace('%', "%25").replace("__", "%5F%5F")
@@ -391,6 +392,32 @@ impl ActionRegistry {
             .collect()
     }
 
+    pub fn list_actions_with_availability(&self, vision_enabled: bool) -> Vec<ActionInfo> {
+        self.list_actions()
+            .into_iter()
+            .filter(|action| {
+                vision_enabled
+                    || action.source != ActionSource::Builtin
+                    || !VISION_ACTIONS.contains(&action.name.as_str())
+            })
+            .collect()
+    }
+
+    pub fn list_actions_for_prompt_with_availability(
+        &self,
+        memory_enabled: bool,
+        vision_enabled: bool,
+    ) -> Vec<ActionInfo> {
+        self.list_actions_for_prompt(memory_enabled)
+            .into_iter()
+            .filter(|action| {
+                vision_enabled
+                    || action.source != ActionSource::Builtin
+                    || !VISION_ACTIONS.contains(&action.name.as_str())
+            })
+            .collect()
+    }
+
     pub fn list_builtin_actions(&self) -> Vec<ActionInfo> {
         let mut actions: Vec<_> = self
             .entries_by_id
@@ -402,12 +429,31 @@ impl ActionRegistry {
         actions
     }
 
+    pub fn list_builtin_actions_with_availability(&self, vision_enabled: bool) -> Vec<ActionInfo> {
+        self.list_builtin_actions()
+            .into_iter()
+            .filter(|action| vision_enabled || !VISION_ACTIONS.contains(&action.name.as_str()))
+            .collect()
+    }
+
     pub fn list_actions_for_prompt_with_settings(
         &self,
         memory_enabled: bool,
         tool_settings: &ToolSettings,
     ) -> Vec<ActionInfo> {
         self.list_actions_for_prompt(memory_enabled)
+            .into_iter()
+            .filter(|action| tool_settings.is_enabled(&action.id))
+            .collect()
+    }
+
+    pub fn list_actions_for_prompt_with_settings_and_availability(
+        &self,
+        memory_enabled: bool,
+        vision_enabled: bool,
+        tool_settings: &ToolSettings,
+    ) -> Vec<ActionInfo> {
+        self.list_actions_for_prompt_with_availability(memory_enabled, vision_enabled)
             .into_iter()
             .filter(|action| tool_settings.is_enabled(&action.id))
             .collect()
@@ -455,6 +501,34 @@ impl ActionRegistry {
             .collect()
     }
 
+    pub fn list_tools_for_llm_with_settings_and_availability(
+        &self,
+        memory_enabled: bool,
+        vision_enabled: bool,
+        tool_settings: &ToolSettings,
+    ) -> Vec<LlmToolDefinition> {
+        self.list_actions_for_prompt_with_settings_and_availability(
+            memory_enabled,
+            vision_enabled,
+            tool_settings,
+        )
+        .into_iter()
+        .map(|action| LlmToolDefinition {
+            name: action.id,
+            description: action.description,
+            parameters: action
+                .parameters
+                .into_iter()
+                .map(|param| LlmToolParam {
+                    name: param.name,
+                    description: param.description,
+                    required: param.required,
+                })
+                .collect(),
+        })
+        .collect()
+    }
+
     /// Generate the prompt instruction block describing available tools.
     pub fn generate_tool_prompt(&self) -> String {
         self.generate_tool_prompt_for_prompt(true)
@@ -471,6 +545,20 @@ impl ActionRegistry {
         tool_settings: &ToolSettings,
     ) -> String {
         let actions = self.list_actions_for_prompt_with_settings(memory_enabled, tool_settings);
+        self.generate_tool_prompt_from_actions(actions)
+    }
+
+    pub fn generate_tool_prompt_for_prompt_with_settings_and_availability(
+        &self,
+        memory_enabled: bool,
+        vision_enabled: bool,
+        tool_settings: &ToolSettings,
+    ) -> String {
+        let actions = self.list_actions_for_prompt_with_settings_and_availability(
+            memory_enabled,
+            vision_enabled,
+            tool_settings,
+        );
         self.generate_tool_prompt_from_actions(actions)
     }
 
@@ -714,6 +802,25 @@ mod tests {
         assert_eq!(search_memory.permission_level, ActionPermissionLevel::Safe);
         assert_eq!(play_cue.risk_tags, vec![ActionRiskTag::Write]);
         assert_eq!(play_cue.permission_level, ActionPermissionLevel::Elevated);
+    }
+
+    #[test]
+    fn test_capture_screen_is_gated_by_vision_availability() {
+        let mut reg = ActionRegistry::new();
+        crate::actions::builtin::register_builtins(&mut reg);
+        let settings = ToolSettings::default();
+
+        let disabled_tools =
+            reg.list_tools_for_llm_with_settings_and_availability(true, false, &settings);
+        assert!(!disabled_tools
+            .iter()
+            .any(|tool| tool.name == "builtin__capture_screen"));
+
+        let enabled_tools =
+            reg.list_tools_for_llm_with_settings_and_availability(true, true, &settings);
+        assert!(enabled_tools
+            .iter()
+            .any(|tool| tool.name == "builtin__capture_screen"));
     }
 
     // ── Registry without handlers ─────────────────────────
