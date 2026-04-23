@@ -194,6 +194,7 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
     const persistVisionConfig = async (cfg: VisionConfig) => {
         await saveVisionConfig(cfg);
         localStorage.setItem("kokoro_vision_config", JSON.stringify(cfg));
+        window.dispatchEvent(new Event("kokoro-vision-settings-changed"));
         onConfigChange?.(cfg);
     };
 

@@ -814,16 +814,20 @@ export default function ChatPanel() {
     // Sync vision state when localStorage changes (from Settings panel)
     useEffect(() => {
         const checkVision = () => {
-            setVisionEnabled(localStorage.getItem("kokoro_vision_enabled") === "true");
+            const nextVisionEnabled = localStorage.getItem("kokoro_vision_enabled") === "true";
+            setVisionEnabled(nextVisionEnabled);
+            if (!nextVisionEnabled) setPendingImages([]);
             try {
                 const cfg = JSON.parse(localStorage.getItem("kokoro_vision_config") || "{}");
                 setCameraEnabled(cfg.camera_enabled === true);
             } catch { /* ignore */ }
         };
+        window.addEventListener("kokoro-vision-settings-changed", checkVision);
         window.addEventListener("storage", checkVision);
         // Also poll on focus since Tauri doesn't fire storage events within same webview
         window.addEventListener("focus", checkVision);
         return () => {
+            window.removeEventListener("kokoro-vision-settings-changed", checkVision);
             window.removeEventListener("storage", checkVision);
             window.removeEventListener("focus", checkVision);
         };
@@ -1130,11 +1134,12 @@ export default function ChatPanel() {
     const handleSend = async (e?: React.FormEvent) => {
         e?.preventDefault();
         const trimmed = input.trim();
-        if ((!trimmed && pendingImages.length === 0) || isStreaming) return;
+        const messageImages = visionEnabled ? [...pendingImages] : [];
+        if ((!trimmed && messageImages.length === 0) || isStreaming) return;
 
-        setMessages(prev => [...prev, { role: "user", text: trimmed, images: pendingImages.length > 0 ? [...pendingImages] : undefined }]);
-        const cameraFrame = getLatestCameraFrame();
-        const imagesToSend = cameraFrame ? [...pendingImages, cameraFrame] : [...pendingImages];
+        setMessages(prev => [...prev, { role: "user", text: trimmed, images: messageImages.length > 0 ? messageImages : undefined }]);
+        const cameraFrame = visionEnabled ? getLatestCameraFrame() : null;
+        const imagesToSend = cameraFrame ? [...messageImages, cameraFrame] : messageImages;
         setInput("");
         setPendingImages([]);
         startStreaming();
@@ -1182,6 +1187,7 @@ export default function ChatPanel() {
 
     // ── Image upload ───────────────────────────────────────
     const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (!visionEnabled) return;
         const file = e.target.files?.[0];
         if (!file) return;
 
@@ -1218,6 +1224,7 @@ export default function ChatPanel() {
 
     // ── Clipboard paste image ────────────────────────────────
     const handlePaste = async (e: React.ClipboardEvent) => {
+        if (!visionEnabled) return;
         const items = Array.from(e.clipboardData.items);
         const imageItem = items.find(item => item.type.startsWith("image/"));
         if (!imageItem) return;
@@ -1417,6 +1424,8 @@ export default function ChatPanel() {
     // ════════════════════════════════════════════════════════�?
     // Expanded state �?full chat panel
     // ════════════════════════════════════════════════════════�?
+    const hasSendableImages = visionEnabled && pendingImages.length > 0;
+
     return (
         <motion.div
             initial={{ opacity: 0, x: -20 }}
@@ -1532,7 +1541,7 @@ export default function ChatPanel() {
             <form onSubmit={handleSend} className="border-t border-[var(--color-border)] bg-black/20">
                 {/* Pending images preview */}
                 <AnimatePresence>
-                    {pendingImages.length > 0 && (
+                    {hasSendableImages && (
                         <motion.div
                             initial={{ height: 0, opacity: 0 }}
                             animate={{ height: "auto", opacity: 1 }}
@@ -1706,11 +1715,11 @@ export default function ChatPanel() {
                         whileHover={{ scale: 1.1 }}
                         whileTap={{ scale: 0.9 }}
                         type="submit"
-                        disabled={isStreaming || (!input.trim() && pendingImages.length === 0)}
+                        disabled={isStreaming || (!input.trim() && !hasSendableImages)}
                         className={clsx(
                             "p-2.5 rounded-lg transition-colors",
                             "bg-[var(--color-accent)] text-black hover:bg-white",
-                            (isStreaming || (!input.trim() && pendingImages.length === 0)) && "opacity-50 cursor-not-allowed"
+                            (isStreaming || (!input.trim() && !hasSendableImages)) && "opacity-50 cursor-not-allowed"
                         )}
                         aria-label="Send message"
                     >

@@ -404,6 +404,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
         localStorage.setItem("kokoro_tts_provider", ttsProviderId);
         localStorage.setItem("kokoro_tts_enabled", ttsEnabled ? "true" : "false");
         localStorage.setItem("kokoro_vision_enabled", visionEnabled ? "true" : "false");
+        window.dispatchEvent(new Event("kokoro-vision-settings-changed"));
         if (localSttConfig) {
             const activeSttProvider = localSttConfig.providers?.find(p => p.id === localSttConfig.active_provider);
             localStorage.setItem("kokoro_stt_enabled", activeSttProvider?.enabled ? "true" : "false");
