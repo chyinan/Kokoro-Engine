@@ -9,6 +9,7 @@ import { useTranslation } from "react-i18next";
 import {
     getVisionConfig, saveVisionConfig, captureScreenNow,
     listOllamaModels,
+    getLlamaCppStatus,
 } from "../../../lib/kokoro-bridge";
 import type { VisionConfig, OllamaModelInfo } from "../../../lib/kokoro-bridge";
 import { Select } from "@/components/ui/select";
@@ -21,6 +22,8 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
     const [captureResult, setCaptureResult] = useState<string | null>(null);
     const [ollamaModels, setOllamaModels] = useState<OllamaModelInfo[]>([]);
     const [ollamaReachable, setOllamaReachable] = useState(true);
+    const [llamaCppModels, setLlamaCppModels] = useState<string[]>([]);
+    const [llamaCppReachable, setLlamaCppReachable] = useState(true);
     const [dirty, setDirty] = useState(false);
     const [editingInterval, setEditingInterval] = useState(false);
     const [intervalInput, setIntervalInput] = useState("");
@@ -103,22 +106,79 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
         };
     }, [initialConfig]);
 
+    useEffect(() => {
+        if (!config) return;
+
+        const provider = config.vlm_provider;
+        const baseUrl = config.vlm_base_url;
+
+        if (provider === "llm" || provider === "openai" || !baseUrl) {
+            setOllamaModels([]);
+            setLlamaCppModels([]);
+            setOllamaReachable(true);
+            setLlamaCppReachable(true);
+            return;
+        }
+
+        let cancelled = false;
+        const timer = window.setTimeout(() => {
+            const refreshModels = async () => {
+                if (provider === "ollama") {
+                    try {
+                        const models = await listOllamaModels(baseUrl);
+                        if (cancelled) return;
+                        setOllamaModels(models);
+                        setOllamaReachable(true);
+                    } catch {
+                        if (cancelled) return;
+                        setOllamaModels([]);
+                        setOllamaReachable(false);
+                    }
+                    if (!cancelled) {
+                        setLlamaCppModels([]);
+                        setLlamaCppReachable(true);
+                    }
+                    return;
+                }
+
+                if (provider === "llama_cpp") {
+                    try {
+                        const status = await getLlamaCppStatus(baseUrl);
+                        if (cancelled) return;
+                        const detectedModels = Array.from(new Set([
+                            ...status.available_models,
+                            ...(status.current_model ? [status.current_model] : []),
+                        ]));
+                        setLlamaCppModels(detectedModels);
+                        setLlamaCppReachable(true);
+                    } catch {
+                        if (cancelled) return;
+                        setLlamaCppModels([]);
+                        setLlamaCppReachable(false);
+                    }
+                    if (!cancelled) {
+                        setOllamaModels([]);
+                        setOllamaReachable(true);
+                    }
+                }
+            };
+
+            refreshModels().catch((err) => {
+                console.error("[VisionTab] Failed to refresh provider models:", err);
+            });
+        }, 300);
+
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timer);
+        };
+    }, [config?.vlm_provider, config?.vlm_base_url]);
+
     const loadConfig = async () => {
         try {
             const cfg = await getVisionConfig();
             setConfig(cfg);
             setLoading(false);
-
-            // Try to load Ollama models in background
-            if (cfg.vlm_provider === "ollama" && cfg.vlm_base_url) {
-                try {
-                    const models = await listOllamaModels(cfg.vlm_base_url);
-                    setOllamaModels(models);
-                    setOllamaReachable(true);
-                } catch {
-                    setOllamaReachable(false);
-                }
-            }
         } catch (e) {
             console.error("[VisionTab] Failed to load config:", e);
             setLoading(false);
@@ -162,7 +222,23 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
 
     // ── Model detection ──
     const isOllamaProvider = config?.vlm_provider === "ollama";
+    const isLlamaCppProvider = config?.vlm_provider === "llama_cpp";
     const isLlmProvider = config?.vlm_provider === "llm";
+    const detectedModels = isOllamaProvider
+        ? ollamaModels.map((model) => model.name)
+        : isLlamaCppProvider
+            ? llamaCppModels
+            : [];
+    const providerReachable = isOllamaProvider
+        ? ollamaReachable
+        : isLlamaCppProvider
+            ? llamaCppReachable
+            : true;
+    const hasMatchingDetectedModel = detectedModels.some((model) => {
+        const configModel = (config?.vlm_model || "").split(":")[0].toLowerCase();
+        const detectedModel = model.split(":")[0].toLowerCase();
+        return detectedModel === configModel;
+    });
     const modelInstalled = isOllamaProvider && ollamaModels.length > 0
         ? ollamaModels.some(m => {
             // Ollama model names can have `:latest` suffix
@@ -239,22 +315,33 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                         onChange={(prov) => {
                             update({
                                 vlm_provider: prov,
-                                vlm_base_url: prov === "ollama" ? "http://localhost:11434/v1" : prov === "llm" ? null : "https://api.openai.com/v1",
-                                vlm_model: prov === "ollama" ? "minicpm-v" : prov === "llm" ? "" : "gpt-4o",
-                                vlm_api_key: prov === "ollama" || prov === "llm" ? null : config.vlm_api_key,
+                                vlm_base_url: prov === "ollama"
+                                    ? "http://localhost:11434/v1"
+                                    : prov === "llama_cpp"
+                                        ? "http://127.0.0.1:8080"
+                                        : prov === "llm"
+                                            ? null
+                                            : "https://api.openai.com/v1",
+                                vlm_model: prov === "ollama" || prov === "llama_cpp"
+                                    ? "minicpm-v"
+                                    : prov === "llm"
+                                        ? ""
+                                        : "gpt-4o",
+                                vlm_api_key: prov === "openai" ? config.vlm_api_key : null,
                             });
                         }}
                         options={[
                             { value: "ollama", label: t("settings.vision.provider.ollama") },
+                            { value: "llama_cpp", label: t("settings.vision.provider.llama_cpp") },
                             { value: "openai", label: t("settings.vision.provider.openai") },
                             { value: "llm", label: t("settings.vision.provider.llm") },
                         ]}
                     />
                 </div>
 
-                {/* Ollama not reachable warning */}
+                {/* Local provider not reachable warning */}
                 <AnimatePresence>
-                    {isOllamaProvider && !ollamaReachable && (
+                    {(isOllamaProvider || isLlamaCppProvider) && !providerReachable && (
                         <motion.div
                             initial={{ opacity: 0, height: 0 }}
                             animate={{ opacity: 1, height: "auto" }}
@@ -264,8 +351,10 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                             <div className="flex items-start gap-2">
                                 <AlertTriangle size={14} className="text-[var(--color-warning)] mt-0.5 shrink-0" />
                                 <p className="text-xs text-[var(--color-warning)] leading-relaxed">
-                                    {t("settings.vision.ollama.warning")}{" "}
-                                    <span className="font-mono">{config.vlm_base_url?.replace("/v1", "") || "http://localhost:11434"}</span>
+                                    {isOllamaProvider
+                                        ? t("settings.vision.ollama.warning")
+                                        : t("settings.vision.llama_cpp.warning")}{" "}
+                                    <span className="font-mono">{config.vlm_base_url || "http://127.0.0.1:8080"}</span>
                                 </p>
                             </div>
                         </motion.div>
@@ -292,7 +381,11 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                             type="text"
                             value={config.vlm_base_url || ""}
                             onChange={(e) => update({ vlm_base_url: e.target.value || null })}
-                            placeholder={config.vlm_provider === "ollama" ? "http://localhost:11434/v1" : "https://api.openai.com/v1"}
+                            placeholder={config.vlm_provider === "ollama"
+                                ? "http://localhost:11434/v1"
+                                : config.vlm_provider === "llama_cpp"
+                                    ? "http://127.0.0.1:8080"
+                                    : "https://api.openai.com/v1"}
                             className={clsx(
                                 "w-full px-3 py-2 rounded-lg text-sm",
                                 "bg-[var(--color-bg-surface)] border border-[var(--color-border)]",
@@ -310,14 +403,19 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                         <MonitorSmartphone size={14} strokeWidth={1.5} className="text-[var(--color-text-muted)]" />
                         <label className="text-sm text-[var(--color-text-primary)]">{t("settings.vision.model.label")}</label>
                     </div>
-                    {config.vlm_provider === "ollama" && ollamaModels.length > 0 ? (
+                    {detectedModels.length > 0 ? (
                         <Select
                             value={config.vlm_model}
                             onChange={(v) => update({ vlm_model: v })}
                             options={[
-                                ...ollamaModels.map(m => ({ value: m.name, label: m.name })),
-                                ...(!ollamaModels.some(m => m.name.split(":")[0].toLowerCase() === config.vlm_model.split(":")[0].toLowerCase())
-                                    ? [{ value: config.vlm_model, label: `${config.vlm_model} ${t("settings.vision.model.not_installed_prefix")}` }]
+                                ...detectedModels.map((model) => ({ value: model, label: model })),
+                                ...(!hasMatchingDetectedModel && config.vlm_model
+                                    ? [{
+                                        value: config.vlm_model,
+                                        label: isOllamaProvider
+                                            ? `${config.vlm_model} ${t("settings.vision.model.not_installed_prefix")}`
+                                            : config.vlm_model,
+                                    }]
                                     : []),
                             ]}
                         />
@@ -326,7 +424,7 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                             type="text"
                             value={config.vlm_model}
                             onChange={(e) => update({ vlm_model: e.target.value })}
-                            placeholder={config.vlm_provider === "ollama" ? "minicpm-v" : "gpt-4o"}
+                            placeholder={config.vlm_provider === "ollama" || config.vlm_provider === "llama_cpp" ? "minicpm-v" : "gpt-4o"}
                             className={clsx(
                                 "w-full px-3 py-2 rounded-lg text-sm",
                                 "bg-[var(--color-bg-surface)] border border-[var(--color-border)]",
@@ -338,6 +436,8 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                     <p className="text-xs text-[var(--color-text-muted)]">
                         {config.vlm_provider === "ollama"
                             ? t("settings.vision.model.recommend.ollama")
+                            : config.vlm_provider === "llama_cpp"
+                                ? t("settings.vision.model.recommend.llama_cpp")
                             : t("settings.vision.model.recommend.openai")}
                     </p>
                 </div>
@@ -368,7 +468,7 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                 </AnimatePresence>
 
                 {/* API Key (only for online providers) */}
-                {config.vlm_provider !== "ollama" && !isLlmProvider && (
+                {config.vlm_provider === "openai" && !isLlmProvider && (
                     <div className="space-y-2">
                         <div className="flex items-center gap-2">
                             <KeyRound size={14} strokeWidth={1.5} className="text-[var(--color-text-muted)]" />
@@ -471,6 +571,45 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                     <p className="text-xs text-[var(--color-text-muted)]">
                         {t("settings.vision.sensitivity.desc", { percent: (config.change_threshold * 100).toFixed(0) })}
                     </p>
+                </div>
+
+                {/* Proactive comments */}
+                <div className="flex items-center justify-between rounded-lg bg-[var(--color-bg-surface)] border border-[var(--color-border)] p-3">
+                    <div className="flex items-center gap-3">
+                        <Eye size={15} strokeWidth={1.5} className="text-[var(--color-text-muted)]" />
+                        <div>
+                            <div className="text-sm text-[var(--color-text-primary)]">
+                                {t("settings.vision.proactive.label")}
+                            </div>
+                            <div className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+                                {t("settings.vision.proactive.desc")}
+                            </div>
+                        </div>
+                    </div>
+                    <motion.button
+                        whileTap={{ scale: 0.95 }}
+                        onClick={async () => {
+                            const next = { ...config, proactive_enabled: !config.proactive_enabled };
+                            setConfig(next);
+                            setDirty(false);
+                            try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                        }}
+                        className={clsx(
+                            "w-12 h-6 rounded-full relative transition-colors duration-200 shrink-0",
+                            config.proactive_enabled
+                                ? "bg-[var(--color-accent)]"
+                                : "bg-[var(--color-bg-surface)] border border-[var(--color-border)]"
+                        )}
+                    >
+                        <motion.div
+                            animate={{ x: config.proactive_enabled ? 24 : 2 }}
+                            transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                            className={clsx(
+                                "w-5 h-5 rounded-full absolute top-0.5",
+                                config.proactive_enabled ? "bg-black" : "bg-[var(--color-text-muted)]"
+                            )}
+                        />
+                    </motion.button>
                 </div>
 
                 {/* Save Config Button */}

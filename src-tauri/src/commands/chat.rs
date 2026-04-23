@@ -1576,7 +1576,7 @@ pub async fn stream_chat(
     // 注入视觉上下文（如果有最近的屏幕观察）
     if let Some(vision_desc) = _vision_watcher.context.get_context_string().await {
         client_messages.push(system_message(format!(
-            "[Vision] The user's screen currently shows: {}",
+            "[Vision] Visible screen content: {}. Use this only as optional visual context. Refer only to what is directly visible on screen, and avoid speculation about hidden details, intent, authorship, or anything off-screen.",
             vision_desc
         )));
     }

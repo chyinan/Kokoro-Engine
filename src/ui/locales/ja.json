@@ -576,6 +576,7 @@
             "provider": {
                 "label": "VLM プロバイダー",
                 "ollama": "Ollama (ローカル — 推奨)",
+                "llama_cpp": "llama.cpp (ローカル VLM)",
                 "openai": "OpenAI",
                 "llm": "現在の LLM を使用 (マルチモーダル)",
                 "llm_note": "「API」タブで設定した LLM プロバイダーに直接スクリーンショットを送信します。別途 VLM の設定は不要です。使用するモデルが画像入力に対応していることを確認してください（例: GPT-4o、Claude 3、Gemini など）。"
@@ -583,11 +584,15 @@
             "ollama": {
                 "warning": "Ollamaに接続できません。Ollamaがインストールされ、以下で実行されていることを確認してください"
             },
+            "llama_cpp": {
+                "warning": "llama.cpp に接続できません。OpenAI 互換の llama.cpp サーバーが起動していて、次のアドレスで待ち受けていることを確認してください"
+            },
             "base_url": "ベース URL",
             "model": {
                 "label": "モデル",
                 "recommend": {
                     "ollama": "推奨: minicpm-v, moondream2, llava",
+                    "llama_cpp": "推奨: minicpm-v, Qwen2.5-VL, LLaVA",
                     "openai": "推奨: gpt-4o (ビジョン対応)"
                 },
                 "not_installed_prefix": "(未インストール)",
@@ -619,6 +624,10 @@
             "sensitivity": {
                 "label": "変化感度",
                 "desc": "低いほど画面の変化に敏感になります ({{percent}}% のピクセル変化が必要)"
+            },
+            "proactive": {
+                "label": "画面変化にコメント",
+                "desc": "オフにすると、画面は認識され会話コンテキストには使われますが、自動発言は行いません。"
             },
             "save": "変更を適用",
             "test": {

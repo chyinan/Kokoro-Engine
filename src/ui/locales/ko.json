@@ -576,6 +576,7 @@
             "provider": {
                 "label": "VLM 공급자",
                 "ollama": "Ollama (로컬 — 권장)",
+                "llama_cpp": "llama.cpp (로컬 VLM)",
                 "openai": "OpenAI",
                 "llm": "현재 LLM 사용 (멀티모달)",
                 "llm_note": "「API」탭에서 설정한 LLM 공급자에 직접 스크린샷을 전송합니다. 별도의 VLM 설정이 필요 없습니다. 사용 중인 모델이 이미지 입력을 지원하는지 확인하세요 (예: GPT-4o, Claude 3, Gemini 등)."
@@ -583,11 +584,15 @@
             "ollama": {
                 "warning": "Ollama에 연결할 수 없습니다. Ollama가 설치되어 있고 다음 주소에서 실행 중인지 확인하세요:"
             },
+            "llama_cpp": {
+                "warning": "llama.cpp에 연결할 수 없습니다. OpenAI 호환 llama.cpp 서버가 다음 주소에서 실행 중인지 확인하세요:"
+            },
             "base_url": "기본 URL",
             "model": {
                 "label": "모델",
                 "recommend": {
                     "ollama": "권장: minicpm-v, moondream2, llava",
+                    "llama_cpp": "권장: minicpm-v, Qwen2.5-VL, LLaVA",
                     "openai": "권장: gpt-4o (비전 지원)"
                 },
                 "not_installed_prefix": "(설치되지 않음)",
@@ -619,6 +624,10 @@
             "sensitivity": {
                 "label": "변화 민감도",
                 "desc": "낮을수록 화면 변화에 더 민감합니다 ({{percent}}% 픽셀 변화 필요)"
+            },
+            "proactive": {
+                "label": "화면 변화에 코멘트",
+                "desc": "끄면 화면은 계속 분석되어 대화 문맥으로 쓰이지만, 자동 발화는 트리거하지 않습니다."
             },
             "save": "변경 사항 적용",
             "test": {

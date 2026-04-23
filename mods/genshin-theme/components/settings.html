@@ -2003,26 +2003,44 @@
 
                 const provOpts = [
                     { value: 'ollama', label: 'Ollama' },
+                    { value: 'llama_cpp', label: 'llama.cpp' },
                     { value: 'openai', label: 'OpenAI' },
                     { value: 'llm', label: '复用主 LLM' }
                 ];
                 sec.appendChild(createSelect("服务商", "Vision 模型后端", provOpts, config.vlm_provider, (v) => {
                     config.vlm_provider = v;
+                    if (v === 'ollama') {
+                        config.vlm_base_url = 'http://localhost:11434/v1';
+                        config.vlm_model = 'minicpm-v';
+                        config.vlm_api_key = null;
+                    } else if (v === 'llama_cpp') {
+                        config.vlm_base_url = 'http://127.0.0.1:8080';
+                        config.vlm_model = 'minicpm-v';
+                        config.vlm_api_key = null;
+                    } else if (v === 'openai') {
+                        config.vlm_base_url = 'https://api.openai.com/v1';
+                        config.vlm_model = 'gpt-4o';
+                    } else {
+                        config.vlm_base_url = null;
+                        config.vlm_api_key = null;
+                    }
                     Kokoro.action('save_vision_config', { config });
                 }));
 
-                sec.appendChild(createRow("Base URL", `
-                    <input class="gi-input" type="text" value="${escapeHtml(config.vlm_base_url || '')}" id="vision_base_url">
-                `));
-                setTimeout(() => {
-                    const el = document.getElementById('vision_base_url');
-                    if (el) el.onchange = function () {
-                        config.vlm_base_url = this.value;
-                        Kokoro.action('save_vision_config', { config });
-                    };
-                }, 0);
+                if (config.vlm_provider !== 'llm') {
+                    sec.appendChild(createRow("Base URL", `
+                        <input class="gi-input" type="text" value="${escapeHtml(config.vlm_base_url || '')}" id="vision_base_url">
+                    `));
+                    setTimeout(() => {
+                        const el = document.getElementById('vision_base_url');
+                        if (el) el.onchange = function () {
+                            config.vlm_base_url = this.value;
+                            Kokoro.action('save_vision_config', { config });
+                        };
+                    }, 0);
+                }
 
-                if (config.vlm_provider !== 'ollama') {
+                if (config.vlm_provider === 'openai') {
                     sec.appendChild(createRow("API Key", `
                         <input class="gi-input" type="password" value="${escapeHtml(config.vlm_api_key || '')}" id="vision_api_key">
                     `));
@@ -2035,16 +2053,18 @@
                     }, 0);
                 }
 
-                sec.appendChild(createRow("Model", `
-                    <input class="gi-input" type="text" value="${escapeHtml(config.vlm_model || '')}" id="vision_model">
-                `));
-                setTimeout(() => {
-                    const el = document.getElementById('vision_model');
-                    if (el) el.onchange = function () {
-                        config.vlm_model = this.value;
-                        Kokoro.action('save_vision_config', { config });
-                    };
-                }, 0);
+                if (config.vlm_provider !== 'llm') {
+                    sec.appendChild(createRow("Model", `
+                        <input class="gi-input" type="text" value="${escapeHtml(config.vlm_model || '')}" id="vision_model">
+                    `));
+                    setTimeout(() => {
+                        const el = document.getElementById('vision_model');
+                        if (el) el.onchange = function () {
+                            config.vlm_model = this.value;
+                            Kokoro.action('save_vision_config', { config });
+                        };
+                    }, 0);
+                }
 
                 sec.appendChild(createSlider("检测间隔 (秒)", 5, 60, 5, config.interval_secs || 5, (v) => {
                     config.interval_secs = parseInt(v);
@@ -2055,6 +2075,11 @@
                     config.change_threshold = parseInt(v) / 100;
                     Kokoro.action('save_vision_config', { config });
                 }, '%'));
+
+                sec.appendChild(createToggle("主动评论屏幕变化", "关闭后仍会识别屏幕并作为对话上下文，但不会主动发言", config.proactive_enabled === true, (v) => {
+                    config.proactive_enabled = v;
+                    Kokoro.action('save_vision_config', { config });
+                }));
 
                 sec.appendChild(createRow("测试", `
                     <button class="gi-btn" id="vision_test_btn">截图测试</button>

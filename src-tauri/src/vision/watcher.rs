@@ -118,27 +118,26 @@ impl VisionWatcher {
                             watcher.context.update(description.clone()).await;
                             let _ = app_handle.emit("vision-observation", &description);
 
-                            // 冷却检查：距上次 proactive 至少间隔 interval_secs
-                            let cooldown =
-                                std::time::Duration::from_secs(config.interval_secs as u64);
-                            let ready =
-                                !proactive_initialized || last_proactive_ts.elapsed() >= cooldown;
-                            if ready {
-                                proactive_initialized = true;
-                                last_proactive_ts = std::time::Instant::now();
-                                let instruction = format!(
-                                    "You just noticed the user's screen changed. Current observation: {}. \
-                                    React naturally — comment, ask, or just say something relevant. Keep it brief.",
-                                    description
-                                );
-                                let _ = app_handle.emit(
-                                    "proactive-trigger",
-                                    serde_json::json!({
-                                        "trigger": "vision",
-                                        "idle_seconds": 0,
-                                        "instruction": instruction,
-                                    }),
-                                );
+                            if config.proactive_enabled {
+                                // 冷却检查：距上次 proactive 至少间隔 interval_secs
+                                let cooldown =
+                                    std::time::Duration::from_secs(config.interval_secs as u64);
+                                let ready = !proactive_initialized
+                                    || last_proactive_ts.elapsed() >= cooldown;
+                                if ready {
+                                    proactive_initialized = true;
+                                    last_proactive_ts = std::time::Instant::now();
+                                    let instruction =
+                                        build_proactive_vision_instruction(&description);
+                                    let _ = app_handle.emit(
+                                        "proactive-trigger",
+                                        serde_json::json!({
+                                            "trigger": "vision",
+                                            "idle_seconds": 0,
+                                            "instruction": instruction,
+                                        }),
+                                    );
+                                }
                             }
                         }
                         Err(e) => {
@@ -169,7 +168,55 @@ impl VisionWatcher {
     }
 }
 
-const VISION_PROMPT: &str = "Describe what you see on this screen briefly (1-2 sentences). Focus on what the user is currently doing — what application is open, what content is visible. Be concise and factual.";
+const VISION_PROMPT: &str = "Describe the screenshot in 2-3 concise, information-rich sentences. Include the active application/window, important visible UI text, and the most visually prominent non-UI content such as characters, artwork, background, objects, colors, and scene details. If a fictional/anime character is clearly recognizable, you may name them; do not identify real people from appearance alone. Do not infer authorship, private intent, emotions, or anything off-screen. If something is unclear, say that briefly.";
+const DEFAULT_OLLAMA_VLM_BASE_URL: &str = "http://localhost:11434/v1";
+const DEFAULT_OPENAI_VLM_BASE_URL: &str = "https://api.openai.com/v1";
+const DEFAULT_LLAMA_CPP_VLM_BASE_URL: &str = "http://127.0.0.1:8080";
+
+fn build_proactive_vision_instruction(description: &str) -> String {
+    format!(
+        "用户的电脑屏幕上目前正在显示的是：{}。请结合当前角色的人设和性格，对屏幕内容做一句自然、简短、轻量的评论。\
+        只评论屏幕上直接可见的内容，不要表现得像在监视用户，也不要声称知道隐藏信息、用户想法、代码是谁写的或谁改的，或屏幕外发生的事。\
+        避免重复、恐怖、威胁、夸张或令人不适的措辞；如果内容不清楚或可能敏感，就保持中性温和。",
+        description
+    )
+}
+
+fn default_vlm_base_url(provider: &str) -> &'static str {
+    match provider {
+        "llama_cpp" => DEFAULT_LLAMA_CPP_VLM_BASE_URL,
+        "openai" => DEFAULT_OPENAI_VLM_BASE_URL,
+        _ => DEFAULT_OLLAMA_VLM_BASE_URL,
+    }
+}
+
+fn normalize_openai_compatible_chat_base_url(base_url: &str, default_base_url: &str) -> String {
+    let mut normalized = base_url.trim().trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        normalized = default_base_url.trim_end_matches('/').to_string();
+    }
+
+    for suffix in ["/v1/chat/completions", "/chat/completions"] {
+        if let Some(stripped) = normalized.strip_suffix(suffix) {
+            normalized = stripped.to_string();
+            break;
+        }
+    }
+
+    if !normalized.ends_with("/v1") {
+        normalized.push_str("/v1");
+    }
+
+    normalized
+}
+
+fn normalize_vlm_chat_base_url(provider: &str, base_url: Option<&str>) -> String {
+    let default_base_url = default_vlm_base_url(provider);
+    normalize_openai_compatible_chat_base_url(
+        base_url.unwrap_or(default_base_url),
+        default_base_url,
+    )
+}
 
 /// Send a screenshot to the VLM for analysis.
 /// When `vlm_provider` is "llm", delegates to the active LlmService provider.
@@ -203,12 +250,9 @@ pub async fn analyze_screenshot(
         provider.chat(messages, Some(params)).await
     } else {
         // ── Independent VLM endpoint (ollama / openai) ─────────────────────
-        let base_url = config
-            .vlm_base_url
-            .as_deref()
-            .unwrap_or("http://localhost:11434/v1");
-
-        let url = format!("{}/chat/completions", base_url);
+        let chat_base_url =
+            normalize_vlm_chat_base_url(&config.vlm_provider, config.vlm_base_url.as_deref());
+        let url = format!("{}/chat/completions", chat_base_url);
 
         let body = serde_json::json!({
             "model": config.vlm_model,
@@ -260,5 +304,42 @@ pub async fn analyze_screenshot(
         }
 
         Ok(content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_proactive_vision_instruction, normalize_vlm_chat_base_url};
+
+    #[test]
+    fn normalizes_llama_cpp_root_to_openai_compatible_chat_url() {
+        assert_eq!(
+            normalize_vlm_chat_base_url("llama_cpp", Some("http://127.0.0.1:8080")),
+            "http://127.0.0.1:8080/v1"
+        );
+        assert_eq!(
+            normalize_vlm_chat_base_url(
+                "llama_cpp",
+                Some("http://127.0.0.1:8080/v1/chat/completions")
+            ),
+            "http://127.0.0.1:8080/v1"
+        );
+    }
+
+    #[test]
+    fn normalizes_ollama_root_to_openai_compatible_chat_url() {
+        assert_eq!(
+            normalize_vlm_chat_base_url("ollama", Some("http://localhost:11434")),
+            "http://localhost:11434/v1"
+        );
+    }
+
+    #[test]
+    fn proactive_vision_instruction_contains_safety_constraints() {
+        let instruction = build_proactive_vision_instruction("VS Code with Rust source open");
+
+        assert!(instruction.contains("用户的电脑屏幕上目前正在显示的是"));
+        assert!(instruction.contains("不要表现得像在监视用户"));
+        assert!(instruction.contains("代码是谁写的或谁改的"));
     }
 }

@@ -710,6 +710,7 @@ export interface VisionConfig {
     enabled: boolean;
     interval_secs: number;
     change_threshold: number;
+    proactive_enabled: boolean;
     vlm_provider: string;
     vlm_base_url: string | null;
     vlm_model: string;

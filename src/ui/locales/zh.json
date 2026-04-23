@@ -576,6 +576,7 @@
             "provider": {
                 "label": "VLM 提供商",
                 "ollama": "Ollama (本地 - 推荐)",
+                "llama_cpp": "llama.cpp (本地 VLM)",
                 "openai": "OpenAI",
                 "llm": "使用当前大模型 (多模态)",
                 "llm_note": "将直接使用「API」页面配置的大模型服务商处理截图，无需单独配置 VLM。请确保所选模型支持图像输入（如 GPT-4o、Claude 3、Gemini 等）。"
@@ -583,11 +584,15 @@
             "ollama": {
                 "warning": "无法连接到 Ollama。请确保 Ollama 已安装并运行在"
             },
+            "llama_cpp": {
+                "warning": "无法连接到 llama.cpp。请确保兼容 OpenAI 的 llama.cpp 服务已启动，并运行在"
+            },
             "base_url": "基础 URL",
             "model": {
                 "label": "模型",
                 "recommend": {
                     "ollama": "推荐: minicpm-v, moondream2, llava",
+                    "llama_cpp": "推荐: minicpm-v, Qwen2.5-VL, LLaVA",
                     "openai": "推荐: gpt-4o (支持视觉)"
                 },
                 "not_installed_prefix": "(未安装)",
@@ -619,6 +624,10 @@
             "sensitivity": {
                 "label": "变化灵敏度",
                 "desc": "值越低对屏幕变化越敏感 (需 {{percent}}% 像素变化)"
+            },
+            "proactive": {
+                "label": "主动评论屏幕变化",
+                "desc": "关闭后仍会识别屏幕并作为对话上下文，但不会主动发言。"
             },
             "save": "应用更改",
             "test": {
