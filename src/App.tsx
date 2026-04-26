@@ -105,6 +105,7 @@ import {
   listTtsVoices,
   // Actions
   fetchModels,
+  listAnthropicModels,
   listOllamaModels,
   getLlamaCppStatus,
   listGptSovitsModels,
@@ -670,6 +671,10 @@ function App() {
         listOllamaModels(baseUrl || "http://localhost:11434")
           .then(models => setFetchedLlmModels(models.map(m => m.name)))
           .catch(err => console.error("[App] Failed to list Ollama models:", err));
+      } else if (providerType === 'anthropic') {
+        listAnthropicModels(baseUrl || "https://api.anthropic.com/v1", apiKey || "")
+          .then(models => setFetchedLlmModels(models))
+          .catch(err => console.error("[App] Failed to list Anthropic models:", err));
       } else if (providerType === 'llama_cpp') {
         getLlamaCppStatus(baseUrl || "http://127.0.0.1:8080")
           .then(status => setFetchedLlmModels(status.available_models))

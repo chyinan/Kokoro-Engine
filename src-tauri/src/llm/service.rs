@@ -1,6 +1,7 @@
 //! LLM Service — managed Tauri state holding the active LLM provider.
 
 use crate::error::KokoroError;
+use crate::llm::anthropic::AnthropicProvider;
 use crate::llm::llama_cpp::LlamaCppProvider;
 use crate::llm::llm_config::{LlmConfig, LlmPreset, LlmProviderConfig};
 use crate::llm::ollama::OllamaProvider;
@@ -289,6 +290,25 @@ fn try_build_from_provider_config(
     cfg: &LlmProviderConfig,
 ) -> Result<Box<dyn LlmProvider>, KokoroError> {
     match cfg.provider_type.as_str() {
+        "anthropic" => {
+            let api_key = cfg.resolve_api_key().unwrap_or_default();
+            let model = cfg
+                .model
+                .clone()
+                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+            tracing::info!(
+                target: "llm",
+                "Initializing Anthropic provider: base_url={}, model={}",
+                cfg.base_url
+                    .as_deref()
+                    .unwrap_or("https://api.anthropic.com/v1"),
+                model
+            );
+            Ok(Box::new(
+                AnthropicProvider::new(api_key, cfg.base_url.clone(), Some(model))
+                    .with_id(cfg.id.clone()),
+            ))
+        }
         "ollama" => {
             let model = cfg.model.clone().unwrap_or_else(|| "llama3".to_string());
             tracing::info!(target: "llm", "Initializing Ollama provider: model={}", model);
@@ -816,6 +836,27 @@ mod tests {
         let provider = try_build_from_provider_config(&cfg).expect("llama.cpp should be supported");
 
         assert_eq!(provider.id(), "local-llama");
+        assert!(provider.supports_native_tools());
+    }
+
+    #[test]
+    fn try_build_from_provider_config_supports_anthropic() {
+        let cfg = LlmProviderConfig {
+            id: "claude".to_string(),
+            provider_type: "anthropic".to_string(),
+            enabled: true,
+            supports_native_tools: true,
+            api_key: Some("test-key".to_string()),
+            api_key_env: None,
+            base_url: Some("https://api.anthropic.com/v1".to_string()),
+            model: Some("claude-sonnet-4-20250514".to_string()),
+            extra: std::collections::HashMap::new(),
+        };
+
+        let provider =
+            try_build_from_provider_config(&cfg).expect("anthropic should be supported");
+
+        assert_eq!(provider.id(), "claude");
         assert!(provider.supports_native_tools());
     }
 

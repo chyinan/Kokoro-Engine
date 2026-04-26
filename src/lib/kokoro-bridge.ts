@@ -214,6 +214,11 @@ export async function listOllamaModels(baseUrl: string): Promise<OllamaModelInfo
     return invoke<OllamaModelInfo[]>("list_ollama_models", { baseUrl });
 }
 
+export async function listAnthropicModels(baseUrl: string, apiKey: string): Promise<string[]> {
+    const models = await invoke<Array<{ id: string }>>("list_anthropic_models", { baseUrl, apiKey });
+    return models.map((model) => model.id).sort();
+}
+
 export async function getLlamaCppStatus(baseUrl: string): Promise<LlamaCppStatus> {
     return invoke<LlamaCppStatus>("get_llama_cpp_status", { baseUrl });
 }
@@ -445,7 +450,7 @@ export async function fetchModels(endpoint: string, apiKey: string): Promise<str
     // Remove trailing slash if present
     const baseUrl = endpoint.replace(/\/+$/, "");
     // Handle cases where user provides full /v1/chat/completions URL
-    // We want the base, usually ending in /v1
+    // We want the base, usually ending in /v1.
     const cleanUrl = baseUrl.replace(/\/chat\/completions$/, "");
 
     try {

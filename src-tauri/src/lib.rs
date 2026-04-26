@@ -167,6 +167,7 @@ pub fn run() {
             commands::llm::get_llm_config,
             commands::llm::save_llm_config,
             commands::llm::list_ollama_models,
+            commands::llm::list_anthropic_models,
             commands::llm::get_llama_cpp_status,
             commands::stt::transcribe_audio,
             commands::stt::get_stt_config,

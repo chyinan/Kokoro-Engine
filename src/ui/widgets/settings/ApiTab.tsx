@@ -1,8 +1,8 @@
 /**
  * ApiTab — Multi-provider LLM configuration.
  *
- * Manages OpenAI and Ollama providers through backend `LlmConfig`.
- * Provider-specific fields shown/hidden based on active provider type.
+ * Manages OpenAI-compatible, Anthropic, Ollama, and llama.cpp providers
+ * through backend `LlmConfig`.
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { clsx } from "clsx";
@@ -15,6 +15,7 @@ import {
     fetchModels,
     getLlmConfig,
     saveLlmConfig,
+    listAnthropicModels,
     listOllamaModels,
     getLlamaCppStatus,
     getContextSettings,
@@ -54,7 +55,7 @@ function normalizeSelectedProviders(config: LlmConfig): LlmConfig {
     return next;
 }
 
-type SupportedProviderType = "openai" | "ollama" | "llama_cpp";
+type SupportedProviderType = "openai" | "anthropic" | "ollama" | "llama_cpp";
 
 const LLAMA_CPP_CURRENT_MODEL_KEY = "llama_cpp_current_model";
 const LLAMA_CPP_CONTEXT_LENGTH_KEY = "llama_cpp_context_length";
@@ -86,6 +87,8 @@ function sanitizeProviderExtra(
 
 function getDefaultBaseUrl(providerType: SupportedProviderType): string {
     switch (providerType) {
+        case "anthropic":
+            return "https://api.anthropic.com/v1";
         case "ollama":
             return "http://localhost:11434";
         case "llama_cpp":
@@ -97,6 +100,8 @@ function getDefaultBaseUrl(providerType: SupportedProviderType): string {
 
 function getDefaultModel(providerType: SupportedProviderType): string {
     switch (providerType) {
+        case "anthropic":
+            return "claude-sonnet-4-20250514";
         case "ollama":
             return "llama3";
         case "llama_cpp":
@@ -140,6 +145,13 @@ function normalizeProviderForType(
         };
     }
 
+    if (providerType === "anthropic") {
+        return {
+            ...base,
+            api_key_env: provider.api_key_env || "ANTHROPIC_API_KEY",
+        };
+    }
+
     if (providerType === "ollama") {
         return {
             ...base,
@@ -174,6 +186,8 @@ function createProvider(providerType: SupportedProviderType, providers: LlmProvi
 
 function getProviderTypeLabel(providerType: string): string {
     switch (providerType) {
+        case "anthropic":
+            return "Anthropic-Compatible";
         case "ollama":
             return "Ollama";
         case "llama_cpp":
@@ -184,7 +198,7 @@ function getProviderTypeLabel(providerType: string): string {
 }
 
 function getProviderLocationLabel(providerType: string): string {
-    return providerType === "openai" ? "Cloud" : "Local";
+    return providerType === "openai" || providerType === "anthropic" ? "Cloud" : "Local";
 }
 
 function getProviderExtraString(provider: LlmProviderConfig, key: string): string | undefined {
@@ -468,6 +482,11 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                 const baseUrl = activeProvider.base_url || "http://localhost:11434";
                 const models = await listOllamaModels(baseUrl);
                 setAvailableModels(models.map((m) => m.name));
+            } else if (activeProvider.provider_type === "anthropic") {
+                const apiKey = activeProvider.api_key || "";
+                const baseUrl = activeProvider.base_url || "https://api.anthropic.com/v1";
+                const models = await listAnthropicModels(baseUrl, apiKey);
+                setAvailableModels(models);
             } else if (activeProvider.provider_type === "llama_cpp") {
                 const baseUrl = activeProvider.base_url || "http://127.0.0.1:8080";
                 const status = await getLlamaCppStatus(baseUrl);
@@ -545,12 +564,13 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
     }
 
     const isOllama = activeProvider.provider_type === "ollama";
+    const isAnthropic = activeProvider.provider_type === "anthropic";
     const isLlamaCpp = activeProvider.provider_type === "llama_cpp";
-    const showApiKey = activeProvider.provider_type === "openai";
+    const showApiKey = activeProvider.provider_type === "openai" || isAnthropic;
     const configuredContextLength = getProviderExtraNumber(activeProvider, LLAMA_CPP_CONTEXT_LENGTH_KEY);
     const detectedCurrentModel = getProviderExtraString(activeProvider, LLAMA_CPP_CURRENT_MODEL_KEY);
     const modelFetchDisabled =
-        isLoadingModels || (activeProvider.provider_type === "openai" && !activeProvider.api_key);
+        isLoadingModels || ((activeProvider.provider_type === "openai" || isAnthropic) && !activeProvider.api_key);
 
     return (
         <div className="space-y-4">
@@ -601,7 +621,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                                 )}
                             >
                                 <div className="font-medium capitalize">{p.id}</div>
-                                <div className="text-[9px] opacity-70 mt-0.5">
+                                <div className="text-[8px] leading-tight whitespace-nowrap opacity-70 mt-0.5 overflow-hidden">
                                     {getProviderLocationLabel(p.provider_type)} · {getProviderTypeLabel(p.provider_type)}
                                 </div>
                             </button>
@@ -636,7 +656,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                     ))}
                 </div>
                 <div className="flex flex-wrap gap-2 mt-2">
-                    {(["openai", "ollama", "llama_cpp"] as const).map((providerType) => (
+                    {(["openai", "anthropic", "ollama", "llama_cpp"] as const).map((providerType) => (
                         <button
                             key={providerType}
                             onClick={() => {
@@ -687,7 +707,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                 </p>
             </div>
 
-            {/* API Key (OpenAI only) */}
+            {/* API Key (cloud providers) */}
             {showApiKey && (
                 <div>
                     <label className={labelClasses}>{t("settings.api.api_key")}</label>
@@ -695,7 +715,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                         type="password"
                         value={activeProvider.api_key || ""}
                         onChange={(e) => updateActiveProvider({ api_key: e.target.value })}
-                        placeholder="sk-..."
+                        placeholder={isAnthropic ? "sk-ant-..." : "sk-..."}
                         className={clsx(inputClasses, "font-mono")}
                     />
                     {activeProvider.api_key_env && (
@@ -725,7 +745,9 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                             ? "http://localhost:11434"
                             : isLlamaCpp
                                 ? "http://127.0.0.1:8080"
-                                : "https://api.openai.com/v1"
+                                : isAnthropic
+                                    ? "https://api.anthropic.com/v1"
+                                    : "https://api.openai.com/v1"
                     }
                     className={clsx(inputClasses, "font-mono")}
                 />
@@ -754,7 +776,9 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                                 ? "llama3"
                                 : isLlamaCpp
                                     ? "Qwen2.5-7B-Instruct"
-                                    : "gpt-4"
+                                    : isAnthropic
+                                        ? "claude-sonnet-4-20250514"
+                                        : "gpt-4"
                         }
                         list="model-list"
                         className={clsx(inputClasses, "font-mono")}

@@ -1,3 +1,4 @@
+pub mod anthropic;
 pub mod context;
 pub mod llama_cpp;
 pub mod llm_config;

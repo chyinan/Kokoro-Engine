@@ -1,6 +1,7 @@
 //! Tauri commands for LLM config management.
 
 use crate::error::KokoroError;
+use crate::llm::anthropic::{AnthropicModelInfo, AnthropicProvider};
 use crate::llm::llama_cpp::{LlamaCppProvider, LlamaCppStatus};
 use crate::llm::llm_config::LlmConfig;
 use crate::llm::ollama::{OllamaModelInfo, OllamaProvider};
@@ -23,6 +24,16 @@ pub async fn save_llm_config(
 #[tauri::command]
 pub async fn list_ollama_models(base_url: String) -> Result<Vec<OllamaModelInfo>, KokoroError> {
     OllamaProvider::list_models(&base_url)
+        .await
+        .map_err(KokoroError::Llm)
+}
+
+#[tauri::command]
+pub async fn list_anthropic_models(
+    base_url: String,
+    api_key: String,
+) -> Result<Vec<AnthropicModelInfo>, KokoroError> {
+    AnthropicProvider::list_models(&base_url, &api_key)
         .await
         .map_err(KokoroError::Llm)
 }
