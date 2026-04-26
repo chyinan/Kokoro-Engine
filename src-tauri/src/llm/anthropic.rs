@@ -230,9 +230,7 @@ impl AnthropicProvider {
                 }
             }
 
-            if emit_pending_tool_calls(&mut tx, pending_tool_calls).is_err() {
-                return;
-            }
+            let _ = emit_pending_tool_calls(&mut tx, pending_tool_calls);
         });
 
         Ok(Box::pin(rx))
