@@ -987,5 +987,50 @@
         "save": "Save",
         "start": "Start",
         "stop": "Stop"
+    },
+    "onboarding": {
+        "title": "Quick Tour",
+        "dismiss": "Exit guide",
+        "hints": {
+            "click_highlighted": "Click the highlighted area first, then continue."
+        },
+        "actions": {
+            "start": "Get started",
+            "next": "Next",
+            "finish": "Start chatting"
+        },
+        "language": {
+            "eyebrow": "First launch",
+            "title": "Choose a language first",
+            "description": "After you pick the interface language, I will also sync the default chat language. You can still change both later in Settings."
+        },
+        "steps": {
+            "open_settings": {
+                "title": "Open Settings",
+                "description": "Settings contains many features, so start here first."
+            },
+            "api": {
+                "title": "Open the API tab",
+                "description": "This is where you configure your LLM provider.",
+                "done_title": "This is the API tab",
+                "done_description": "You can configure your LLM provider here."
+            },
+            "persona": {
+                "title": "Open the Persona tab",
+                "description": "Next, go to Persona for character and language related setup.",
+                "done_title": "This is the Persona tab",
+                "done_description": "You can define the virtual character's details here."
+            },
+            "return_home": {
+                "title": "Return to Home",
+                "description": "Close Settings and go back to the home screen."
+            },
+            "chat": {
+                "title": "Start chatting",
+                "description": "You can type into the chat box now, and come back to Settings any time later.",
+                "collapsed_title": "Open the chat panel",
+                "collapsed_description": "Expand the chat panel first, then you can type in the chat box."
+            }
+        }
     }
 }

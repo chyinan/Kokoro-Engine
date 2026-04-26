@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useSyncExternalStore } from "react";
 import { motion } from "framer-motion";
 import { Settings } from "lucide-react";
 import { emit } from "@tauri-apps/api/event";
+import { useTranslation } from "react-i18next";
 import { LayoutRenderer } from "./ui/layout/LayoutRenderer";
 import { LayoutConfig } from "./ui/layout/types";
 import { ThemeProvider } from "./ui/theme/ThemeContext";
@@ -9,8 +10,12 @@ import { defaultTheme } from "./ui/theme/default";
 import { registry } from "./ui/registry/ComponentRegistry";
 import { registerCoreComponents } from "./core/init";
 import { ttsService } from "./core/services";
-import SettingsPanel from "./ui/widgets/SettingsPanel";
+import SettingsPanel, { type SettingsTabId } from "./ui/widgets/SettingsPanel";
 import BackgroundLayer from "./ui/widgets/BackgroundLayer";
+import OnboardingOverlay, {
+  type OnboardingLanguageCode,
+  type OnboardingStep,
+} from "./ui/widgets/OnboardingOverlay";
 import { useBackgroundSlideshow } from "./ui/hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "./features/live2d/Live2DViewer";
 import { live2dUrl } from "./lib/utils";
@@ -172,8 +177,46 @@ interface PetConfig {
   render_fps?: number;
 }
 
+const ONBOARDING_STATUS_KEY = "kokoro_onboarding_status";
+
+const ONBOARDING_LANGUAGE_NAMES: Record<OnboardingLanguageCode, string> = {
+  en: "English",
+  zh: "中文",
+  ja: "日本語",
+  ko: "한국어",
+  ru: "Русский",
+};
+
+function normalizeOnboardingLanguageCode(language: string | null | undefined): OnboardingLanguageCode {
+  const base = language?.split("-")[0];
+  switch (base) {
+    case "en":
+    case "zh":
+    case "ja":
+    case "ko":
+    case "ru":
+      return base;
+    default:
+      return "zh";
+  }
+}
+
 function App() {
+  const { i18n } = useTranslation();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>(() => {
+    const saved = localStorage.getItem("kokoro_settings_active_tab");
+    return (saved as SettingsTabId) || "bg";
+  });
+  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep | null>(() =>
+    localStorage.getItem(ONBOARDING_STATUS_KEY) ? null : "language"
+  );
+  const [onboardingLanguage, setOnboardingLanguage] = useState<OnboardingLanguageCode>(() =>
+    normalizeOnboardingLanguageCode(
+      localStorage.getItem("kokoro_app_language")
+      || (typeof navigator !== "undefined" ? navigator.language : "zh")
+    )
+  );
   const [displayMode, setDisplayMode] = useState<Live2DDisplayMode>(
     () => (localStorage.getItem("kokoro_display_mode") as Live2DDisplayMode) || "full"
   );
@@ -290,6 +333,56 @@ function App() {
       console.error("[App] Failed to persist render FPS:", e);
     }
   };
+
+  const applyOnboardingLanguage = (language: OnboardingLanguageCode) => {
+    const label = ONBOARDING_LANGUAGE_NAMES[language];
+    setOnboardingLanguage(language);
+    i18n.changeLanguage(language);
+    localStorage.setItem("kokoro_app_language", language);
+    localStorage.setItem("kokoro_response_language", label);
+    localStorage.setItem("kokoro_user_language", label);
+    setResponseLanguageState(label);
+    setUserLanguageState(label);
+    setResponseLanguage(label).catch(console.error);
+    setUserLanguage(label).catch(console.error);
+  };
+
+  const previewOnboardingLanguage = (language: OnboardingLanguageCode) => {
+    applyOnboardingLanguage(language);
+  };
+
+  const closeOnboarding = (status: "completed" | "dismissed") => {
+    localStorage.setItem(ONBOARDING_STATUS_KEY, status);
+    setOnboardingStep(null);
+  };
+
+  const advanceOnboarding = () => {
+    switch (onboardingStep) {
+      case "language":
+        setOnboardingStep("open-settings");
+        break;
+      case "api":
+        setOnboardingStep("persona");
+        break;
+      case "persona":
+        setOnboardingStep("return-home");
+        break;
+      case "chat":
+        closeOnboarding("completed");
+        break;
+      default:
+        break;
+    }
+  };
+
+  useEffect(() => {
+    if (onboardingStep === "open-settings" && settingsOpen) {
+      setOnboardingStep("api");
+    }
+    if (onboardingStep === "return-home" && !settingsOpen) {
+      setOnboardingStep("chat");
+    }
+  }, [onboardingStep, settingsOpen]);
 
   useEffect(() => {
     const sync = () => {
@@ -917,13 +1010,22 @@ function App() {
 
       {/* Floating settings gear — top-right corner */}
       <motion.button
-        whileHover={{ scale: 1.1, rotate: 30 }}
-        whileTap={{ scale: 0.9 }}
+        initial={false}
+        whileHover="hover"
+        whileTap={{ scale: 0.97 }}
+        transition={{ type: "spring", stiffness: 360, damping: 26 }}
         onClick={() => setSettingsOpen(true)}
-        className="fixed top-[34px] right-[35px] z-50 p-3 rounded-full bg-[var(--color-bg-surface)] backdrop-blur-[var(--glass-blur)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-accent)] shadow-lg transition-colors"
+        data-onboarding-id="settings-button"
+        className="fixed top-[34px] right-[35px] z-50 p-3 rounded-full bg-[var(--color-bg-surface)] backdrop-blur-[var(--glass-blur)] border border-[var(--color-border)] text-[var(--color-text-secondary)] shadow-lg transition-[color,border-color,box-shadow] duration-200 ease-out hover:border-[var(--color-border-accent)] hover:text-[var(--color-accent)] hover:shadow-[0_0_18px_rgba(0,240,255,0.18)]"
         aria-label="Open settings"
       >
-        <Settings size={20} strokeWidth={1.5} />
+        <motion.span
+          variants={{ hover: { rotate: 18, scale: 1.04 } }}
+          transition={{ type: "spring", stiffness: 420, damping: 24 }}
+          className="flex items-center justify-center"
+        >
+          <Settings size={20} strokeWidth={1.5} />
+        </motion.span>
       </motion.button>
 
       {/* SettingsPanel is retrieved from registry to allow mod overrides */}
@@ -934,6 +1036,8 @@ function App() {
           <SettingsComponent
             isOpen={settingsOpen}
             onClose={() => setSettingsOpen(false)}
+            activeTab={activeSettingsTab}
+            onActiveTabChange={setActiveSettingsTab}
             backgroundControls={{
               config: bgSlideshow.config,
               setConfig: bgSlideshow.setConfig,
@@ -1010,6 +1114,16 @@ function App() {
 
         return component;
       })()}
+
+      <OnboardingOverlay
+        step={onboardingStep}
+        selectedLanguage={onboardingLanguage}
+        settingsOpen={settingsOpen}
+        activeSettingsTab={activeSettingsTab}
+        onLanguageSelect={previewOnboardingLanguage}
+        onAdvance={advanceOnboarding}
+        onDismiss={() => closeOnboarding("dismissed")}
+      />
 
       {/* Camera watcher — lives at app root so it persists when settings panel closes */}
       <CameraWatcher

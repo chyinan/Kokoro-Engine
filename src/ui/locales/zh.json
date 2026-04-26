@@ -987,5 +987,50 @@
         "save": "保存",
         "start": "启动",
         "stop": "停止"
+    },
+    "onboarding": {
+        "title": "新手引导",
+        "dismiss": "退出引导",
+        "hints": {
+            "click_highlighted": "请先点击高亮区域，再进入下一步"
+        },
+        "actions": {
+            "start": "开始使用",
+            "next": "下一步",
+            "finish": "开始聊天"
+        },
+        "language": {
+            "eyebrow": "首次启动",
+            "title": "先选择语言",
+            "description": "选择界面语言后，我也会同步设置默认聊天语言。之后你仍然可以在设置中修改。"
+        },
+        "steps": {
+            "open_settings": {
+                "title": "打开设置",
+                "description": "设置里有许多功能，先从这里开始。"
+            },
+            "api": {
+                "title": "打开 API 页",
+                "description": "在这里可以设定 LLM 提供商。",
+                "done_title": "这是 API 页",
+                "done_description": "你可以在这里设定 LLM 提供商。"
+            },
+            "persona": {
+                "title": "打开人格页",
+                "description": "继续前往人格页，角色和语言相关设置都在这里。",
+                "done_title": "这是人格页",
+                "done_description": "你可以在这里设定虚拟角色的详细信息。"
+            },
+            "return_home": {
+                "title": "返回主页",
+                "description": "关闭设置，回到主页继续。"
+            },
+            "chat": {
+                "title": "开始聊天",
+                "description": "现在你可以在聊天框输入文字，之后也可以随时回来修改设置。",
+                "collapsed_title": "展开聊天面板",
+                "collapsed_description": "先展开聊天面板，然后就可以在聊天框输入文字。"
+            }
+        }
     }
 }

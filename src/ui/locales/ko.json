@@ -987,5 +987,50 @@
         "save": "저장",
         "start": "시작",
         "stop": "중지"
+    },
+    "onboarding": {
+        "title": "빠른 안내",
+        "dismiss": "안내 종료",
+        "hints": {
+            "click_highlighted": "강조된 영역을 먼저 클릭한 뒤 다음으로 진행하세요"
+        },
+        "actions": {
+            "start": "시작하기",
+            "next": "다음",
+            "finish": "채팅 시작"
+        },
+        "language": {
+            "eyebrow": "첫 실행",
+            "title": "먼저 언어를 선택하세요",
+            "description": "인터페이스 언어를 고르면 기본 채팅 언어도 함께 맞춰집니다. 나중에 설정에서 언제든 다시 바꿀 수 있습니다."
+        },
+        "steps": {
+            "open_settings": {
+                "title": "설정 열기",
+                "description": "설정에는 많은 기능이 있으니 먼저 여기부터 보세요."
+            },
+            "api": {
+                "title": "API 탭 열기",
+                "description": "여기에서 LLM 공급자를 설정할 수 있습니다.",
+                "done_title": "여기가 API 탭입니다",
+                "done_description": "여기에서 LLM 공급자를 설정할 수 있습니다."
+            },
+            "persona": {
+                "title": "페르소나 탭 열기",
+                "description": "다음으로 페르소나 탭으로 이동해 캐릭터와 언어 관련 설정을 확인하세요.",
+                "done_title": "여기가 페르소나 탭입니다",
+                "done_description": "여기에서 가상 캐릭터의 상세 정보를 설정할 수 있습니다."
+            },
+            "return_home": {
+                "title": "홈으로 돌아가기",
+                "description": "설정을 닫고 홈 화면으로 돌아가세요."
+            },
+            "chat": {
+                "title": "채팅 시작",
+                "description": "이제 채팅 입력창에 글을 입력할 수 있고, 나중에도 언제든 설정으로 돌아올 수 있습니다.",
+                "collapsed_title": "채팅 패널 열기",
+                "collapsed_description": "먼저 채팅 패널을 펼친 뒤 입력창에 글을 입력하세요."
+            }
+        }
     }
 }

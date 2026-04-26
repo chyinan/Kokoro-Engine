@@ -987,5 +987,50 @@
         "save": "保存",
         "start": "開始",
         "stop": "停止"
+    },
+    "onboarding": {
+        "title": "クイックガイド",
+        "dismiss": "ガイドを終了",
+        "hints": {
+            "click_highlighted": "先にハイライトされた場所をクリックしてから次へ進んでください"
+        },
+        "actions": {
+            "start": "開始する",
+            "next": "次へ",
+            "finish": "チャットを始める"
+        },
+        "language": {
+            "eyebrow": "初回起動",
+            "title": "先に言語を選択してください",
+            "description": "UI の言語を選ぶと、デフォルトのチャット言語も一緒に設定されます。あとで設定からいつでも変更できます。"
+        },
+        "steps": {
+            "open_settings": {
+                "title": "設定を開く",
+                "description": "設定には多くの機能があります。まずここから始めましょう。"
+            },
+            "api": {
+                "title": "API タブを開く",
+                "description": "ここで LLM プロバイダーを設定できます。",
+                "done_title": "ここが API タブです",
+                "done_description": "ここで LLM プロバイダーを設定できます。"
+            },
+            "persona": {
+                "title": "人格タブを開く",
+                "description": "次は人格タブへ進み、キャラクターや言語関連の設定を確認しましょう。",
+                "done_title": "ここが人格タブです",
+                "done_description": "ここでバーチャルキャラクターの詳細を設定できます。"
+            },
+            "return_home": {
+                "title": "ホームに戻る",
+                "description": "設定を閉じてホーム画面に戻りましょう。"
+            },
+            "chat": {
+                "title": "チャットを始める",
+                "description": "これでチャット欄に文字を入力できます。あとからいつでも設定に戻れます。",
+                "collapsed_title": "チャットパネルを開く",
+                "collapsed_description": "先にチャットパネルを開くと、入力欄に文字を入力できます。"
+            }
+        }
     }
 }

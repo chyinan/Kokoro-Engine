@@ -43,7 +43,7 @@ import type {
 import type { BackgroundConfig } from "../hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "../../features/live2d/Live2DViewer";
 
-type TabId = "api" | "persona" | "tts" | "stt" | "sing" | "mods" | "bg" | "model" | "imagegen" | "memory" | "vision" | "mcp" | "telegram" | "jailbreak" | "backup" | "pet";
+export type SettingsTabId = "api" | "persona" | "tts" | "stt" | "sing" | "mods" | "bg" | "model" | "imagegen" | "memory" | "vision" | "mcp" | "telegram" | "jailbreak" | "backup" | "pet";
 
 export interface BackgroundControls {
     config: BackgroundConfig;
@@ -58,6 +58,8 @@ export interface BackgroundControls {
 interface SettingsPanelProps {
     isOpen: boolean;
     onClose: () => void;
+    activeTab?: SettingsTabId;
+    onActiveTabChange?: (tab: SettingsTabId) => void;
     backgroundControls: BackgroundControls;
     displayMode: Live2DDisplayMode;
     onDisplayModeChange: (mode: Live2DDisplayMode) => void;
@@ -106,7 +108,7 @@ interface SettingsPanelProps {
     initialTelegramStatus?: TelegramStatus | null;
 }
 
-const tabs: { id: TabId; label: string; icon: typeof Key }[] = [
+const tabs: { id: SettingsTabId; label: string; icon: typeof Key }[] = [
     // 核心体验
     { id: "persona", label: "settings.tabs.persona", icon: User },
     { id: "model", label: "settings.tabs.model", icon: PersonStanding },
@@ -217,12 +219,19 @@ function normalizeTtsVoice(
     return getDefaultTtsVoice(providerId, voices);
 }
 
-export default function SettingsPanel({ isOpen, onClose, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: telegramConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, initialTelegramStatus, onVisionConfigChange }: SettingsPanelProps) {
+export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, telegramConfig: telegramConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, initialTelegramStatus, onVisionConfigChange }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
-    const [activeTab, setActiveTab] = useState<TabId>(() => {
+    const [internalActiveTab, setInternalActiveTab] = useState<SettingsTabId>(() => {
         const saved = localStorage.getItem("kokoro_settings_active_tab");
-        return (saved as TabId) || "bg";
+        return (saved as SettingsTabId) || "bg";
     });
+    const activeTab = activeTabProp ?? internalActiveTab;
+    const handleActiveTabChange = (tab: SettingsTabId) => {
+        if (activeTabProp === undefined) {
+            setInternalActiveTab(tab);
+        }
+        onActiveTabChange?.(tab);
+    };
     const bg = backgroundControls;
     const overlayRef = useRef<HTMLDivElement>(null);
     const latestLlmConfigRef = useRef<LlmConfig | null>(llmConfigProp ?? null);
@@ -261,7 +270,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
         }
     }, [isOpen, telegramConfigProp]);
 
-    const [mountedTabs, setMountedTabs] = useState<Set<TabId>>(() => new Set([activeTab]));
+    const [mountedTabs, setMountedTabs] = useState<Set<SettingsTabId>>(() => new Set([activeTab]));
 
     // Persist active tab selection
     useEffect(() => {
@@ -555,15 +564,26 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                             <h2 className="font-heading text-lg font-bold tracking-widest uppercase text-[var(--color-accent)] drop-shadow-[var(--glow-accent)]">
                                 {t("settings.title")}
                             </h2>
-                            <motion.button
-                                whileHover={{ scale: 1.1 }}
-                                whileTap={{ scale: 0.95 }}
-                                onClick={onClose}
-                                className="p-2 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-accent)] transition-colors"
-                                aria-label="Close settings"
-                            >
-                                <X size={18} strokeWidth={1.5} />
-                            </motion.button>
+                            <div className="flex items-center gap-2">
+                                <motion.button
+                                    initial={false}
+                                    whileHover="hover"
+                                    whileTap={{ scale: 0.97 }}
+                                    transition={{ type: "spring", stiffness: 380, damping: 26 }}
+                                    onClick={onClose}
+                                    data-onboarding-id="settings-close-button"
+                                    className="inline-flex h-9 w-9 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-[color,border-color,box-shadow,background-color] duration-200 ease-out hover:bg-[var(--color-accent)]/8 hover:text-[var(--color-accent)]"
+                                    aria-label="Close settings"
+                                >
+                                    <motion.span
+                                        variants={{ hover: { rotate: 10, scale: 1.03 } }}
+                                        transition={{ type: "spring", stiffness: 420, damping: 24 }}
+                                        className="flex items-center justify-center"
+                                    >
+                                        <X size={18} strokeWidth={1.5} />
+                                    </motion.span>
+                                </motion.button>
+                            </div>
                         </div>
 
                         {/* Tabs */}
@@ -573,7 +593,14 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                                 {tabs.map(({ id, label, icon: Icon }) => (
                                     <button
                                         key={id}
-                                        onClick={() => setActiveTab(id)}
+                                        onClick={() => handleActiveTabChange(id)}
+                                        data-onboarding-id={
+                                            id === "api"
+                                                ? "settings-tab-api"
+                                                : id === "persona"
+                                                    ? "settings-tab-persona"
+                                                    : undefined
+                                        }
                                         className={clsx(
                                             "flex items-center gap-2 px-3 py-2 text-[11px] font-heading font-semibold tracking-wider uppercase transition-all rounded-md flex-grow justify-center",
                                             activeTab === id
@@ -777,6 +804,7 @@ export default function SettingsPanel({ isOpen, onClose, backgroundControls, dis
                                     whileHover={{ scale: 1.02 }}
                                     whileTap={{ scale: 0.98 }}
                                     onClick={handleCancel}
+                                    data-onboarding-id="settings-cancel-button"
                                     className={clsx(
                                         "px-4 py-2 rounded-lg text-sm font-heading font-semibold tracking-wider uppercase",
                                         "border border-[var(--color-border)] text-[var(--color-text-secondary)]",

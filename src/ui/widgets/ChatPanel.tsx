@@ -1396,6 +1396,7 @@ export default function ChatPanel() {
                     whileHover={{ scale: 1.1 }}
                     whileTap={{ scale: 0.9 }}
                     onClick={handleExpand}
+                    data-onboarding-id="chat-open-button"
                     className={clsx(
                         "relative p-3 rounded-full",
                         "bg-[var(--color-bg-surface)] backdrop-blur-[var(--glass-blur)]",
@@ -1684,6 +1685,7 @@ export default function ChatPanel() {
                             value={input}
                             onChange={(e) => setInput(e.target.value)}
                             onPaste={handlePaste}
+                            data-onboarding-id="chat-input"
                             placeholder={t("chat.input.placeholder")}
                             disabled={isStreaming}
                             className={clsx(
