@@ -22,6 +22,8 @@ const DEFAULT_CONFIG: BackgroundConfig = {
     mode: "slideshow",
 };
 
+const DEFAULT_BACKGROUND_URL = "/backgrounds/default-cozy-room.png";
+
 function loadConfig(): BackgroundConfig {
     try {
         const raw = localStorage.getItem("kokoro_bg_config");
@@ -202,7 +204,7 @@ export function useBackgroundSlideshow() {
         config,
         setConfig,
         images,
-        currentUrl: config.enabled ? currentUrl : null,
+        currentUrl: config.enabled ? (currentUrl ?? DEFAULT_BACKGROUND_URL) : null,
         currentIndex,
         importFiles,
         removeImage,

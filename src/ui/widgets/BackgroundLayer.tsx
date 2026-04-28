@@ -47,8 +47,8 @@ export default function BackgroundLayer({ imageUrl, blur, blurAmount }: Backgrou
                         }}
                         draggable={false}
                     />
-                    {/* Dark overlay so UI elements remain readable */}
-                    <div className="absolute inset-0 bg-black/40" />
+                    {/* Keep UI readable without making the default scene feel muddy. */}
+                    <div className="absolute inset-0 bg-black/25" />
                 </motion.div>
             </AnimatePresence>
         </div>
