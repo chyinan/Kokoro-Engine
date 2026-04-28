@@ -39,7 +39,7 @@ export default function PetWindow() {
         const savedPath = localStorage.getItem("kokoro_custom_model_path");
         return {
             modelPath: savedPath ?? BUILTIN_LIVE2D_MODEL_PATH,
-            modelUrl: savedPath ? live2dUrl(savedPath) : "/live2d/haru/haru_greeter_t03.model3.json",
+            modelUrl: savedPath ? live2dUrl(savedPath) : "/live2d/hiyori/hiyori_pro_t11.model3.json",
         };
     };
     const [{ modelUrl, modelPath }, setModelSelection] = useState(getModelSelection);

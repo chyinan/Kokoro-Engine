@@ -328,7 +328,7 @@
             },
             "list": {
                 "label": "사용 가능한 모델",
-                "default": "기본 모델 (Haru)",
+                "default": "기본 모델 (Hiyori)",
                 "builtin": "내장됨",
                 "empty": "가져온 모델이 없습니다"
             },

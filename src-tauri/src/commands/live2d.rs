@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use tauri::{Emitter, Manager};
 use zip::write::SimpleFileOptions;
 
-pub const BUILTIN_LIVE2D_MODEL_PATH: &str = "__builtin__/haru/haru_greeter_t03.model3.json";
+pub const BUILTIN_LIVE2D_MODEL_PATH: &str = "__builtin__/hiyori/hiyori_pro_t11.model3.json";
+const LEGACY_BUILTIN_HARU_MODEL_PATH: &str = "__builtin__/haru/haru_greeter_t03.model3.json";
 
 #[derive(Debug, Serialize)]
 pub struct Live2dModelInfo {
@@ -545,7 +546,7 @@ fn discover_model_profile(
 ) -> Result<Live2dModelProfile, String> {
     let normalized = normalize_relative_model_path(model_path)?;
     if normalized == BUILTIN_LIVE2D_MODEL_PATH {
-        return Ok(builtin_haru_profile());
+        return Ok(builtin_hiyori_profile());
     }
     let model_json_path = models_dir.join(&normalized);
     if !model_json_path.exists() {
@@ -667,7 +668,7 @@ fn profile_path_for_model(
     if normalized == BUILTIN_LIVE2D_MODEL_PATH {
         return Ok(models_dir
             .join("__builtin__")
-            .join("haru")
+            .join("hiyori")
             .join(".kokoro-live2d-profile.json"));
     }
     let root = normalized
@@ -678,39 +679,35 @@ fn profile_path_for_model(
     Ok(models_dir.join(root).join(".kokoro-live2d-profile.json"))
 }
 
-fn builtin_haru_profile() -> Live2dModelProfile {
+fn builtin_hiyori_profile() -> Live2dModelProfile {
     Live2dModelProfile {
         version: 3,
         model_path: BUILTIN_LIVE2D_MODEL_PATH.to_string(),
-        available_expressions: vec![
-            "f00".to_string(),
-            "f01".to_string(),
-            "f02".to_string(),
-            "f03".to_string(),
-            "f04".to_string(),
-            "f05".to_string(),
-            "f06".to_string(),
-            "f07".to_string(),
-        ],
+        available_expressions: Vec::new(),
         available_motion_groups: HashMap::from([
             ("Idle".to_string(), 3usize),
+            ("Flick".to_string(), 1usize),
+            ("FlickDown".to_string(), 1usize),
+            ("FlickUp".to_string(), 1usize),
             ("Tap".to_string(), 2usize),
+            ("Tap@Body".to_string(), 1usize),
+            ("Flick@Body".to_string(), 1usize),
         ]),
-        available_hit_areas: vec!["Head".to_string(), "Body".to_string()],
+        available_hit_areas: vec!["Body".to_string()],
         cue_map: HashMap::from([
             (
                 "惊讶".to_string(),
                 Live2dCueBinding {
-                    expression: Some("f05".to_string()),
-                    motion_group: None,
+                    expression: None,
+                    motion_group: Some("FlickUp".to_string()),
                     exclude_from_prompt: false,
                 },
             ),
             (
                 "害羞".to_string(),
                 Live2dCueBinding {
-                    expression: Some("f06".to_string()),
-                    motion_group: None,
+                    expression: None,
+                    motion_group: Some("FlickDown".to_string()),
                     exclude_from_prompt: false,
                 },
             ),
@@ -725,40 +722,40 @@ fn builtin_haru_profile() -> Live2dModelProfile {
             (
                 "笑".to_string(),
                 Live2dCueBinding {
-                    expression: Some("f04".to_string()),
-                    motion_group: None,
+                    expression: None,
+                    motion_group: Some("Tap".to_string()),
                     exclude_from_prompt: false,
                 },
             ),
             (
                 "微笑".to_string(),
                 Live2dCueBinding {
-                    expression: Some("f00".to_string()),
-                    motion_group: None,
+                    expression: None,
+                    motion_group: Some("Idle".to_string()),
                     exclude_from_prompt: false,
                 },
             ),
             (
                 "平静".to_string(),
                 Live2dCueBinding {
-                    expression: Some("f07".to_string()),
-                    motion_group: None,
+                    expression: None,
+                    motion_group: Some("Idle".to_string()),
                     exclude_from_prompt: false,
                 },
             ),
             (
                 "悲".to_string(),
                 Live2dCueBinding {
-                    expression: Some("f03".to_string()),
-                    motion_group: None,
+                    expression: None,
+                    motion_group: Some("FlickDown".to_string()),
                     exclude_from_prompt: false,
                 },
             ),
             (
                 "疑惑".to_string(),
                 Live2dCueBinding {
-                    expression: Some("f02".to_string()),
-                    motion_group: None,
+                    expression: None,
+                    motion_group: Some("Flick".to_string()),
                     exclude_from_prompt: false,
                 },
             ),
@@ -843,7 +840,12 @@ fn normalize_relative_model_path(model_path: &str) -> Result<String, String> {
         return Err("Invalid model path".to_string());
     }
 
-    Ok(parts.join("/"))
+    let normalized = parts.join("/");
+    if normalized == LEGACY_BUILTIN_HARU_MODEL_PATH {
+        return Ok(BUILTIN_LIVE2D_MODEL_PATH.to_string());
+    }
+
+    Ok(normalized)
 }
 
 fn normalize_semantic_map(map: HashMap<String, String>) -> HashMap<String, String> {

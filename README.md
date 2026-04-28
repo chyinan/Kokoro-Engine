@@ -104,7 +104,7 @@ npm run tauri dev
 
 ### 多维架构
 
-- 支持 Ollama 与 OpenAI ，Anthropic 兼容协议API接口
+- 支持 Ollama 与 OpenAI 、Anthropic 兼容协议API接口
 - 支持多模态输入、上下文回溯、长期记忆与情感状态
 
 ### 音频交互
@@ -252,6 +252,15 @@ flowchart LR
 - [Live2D Open Software License Agreement](https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html)
 
 > 若您属于年营业额超过 1000 万日元的中大型企业，可能需要与 Live2D Inc. 签署单独商业授权协议。
+
+### ⚠️ 内置 Live2D 样本模型声明
+
+本项目内置的默认模型 **Hiyori Momose - PRO** 来自 Live2D 官方样本数据。该样本模型的使用受 Live2D Free Material License Agreement 与样本数据条款约束：
+
+- [Live2D Sample Data](https://www.live2d.com/en/learn/sample/)
+- [Live2D Sample Model Terms](https://www.live2d.com/en/learn/sample/model-terms/)
+
+版权信息：Illustration: Kani Biimu / Modeling: Live2D。请勿修改 Hiyori Momose 的角色设计。非一般用户或小规模企业用户使用时，请自行确认是否需要 Live2D Inc. 的额外许可。
 
 ---
 

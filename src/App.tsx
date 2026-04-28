@@ -287,7 +287,7 @@ function App() {
     if (customModelPath) {
       return live2dUrl(customModelPath);
     }
-    return "/live2d/haru/haru_greeter_t03.model3.json";
+    return "/live2d/hiyori/hiyori_pro_t11.model3.json";
   }, [customModelPath]);
 
   useEffect(() => {

@@ -251,6 +251,15 @@ Kokoro Engine への貢献に感謝します。
 
 > 年間売上高が 1,000 万円を超える中・大規模企業は、Live2D Inc. との別途商用ライセンス契約が必要になる場合があります。
 
+### ⚠️ 同梱 Live2D サンプルモデルに関する注意
+
+同梱の標準モデル **Hiyori Momose - PRO** は Live2D 公式サンプルデータです。このサンプルモデルの利用は Live2D Free Material License Agreement およびサンプルデータ利用条件に従います。
+
+- [Live2D Sample Data](https://www.live2d.com/en/learn/sample/)
+- [Live2D Sample Model Terms](https://www.live2d.com/en/learn/sample/model-terms/)
+
+クレジット: Illustration: Kani Biimu / Modeling: Live2D。Hiyori Momose のキャラクターデザインを改変しないでください。一般ユーザーまたは小規模事業者以外の利用者は、Live2D Inc. の追加許可が必要か確認してください。
+
 ---
 
 **Kokoro Engine** is an open-source project.

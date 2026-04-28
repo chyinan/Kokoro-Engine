@@ -251,6 +251,15 @@ This project uses **Live2D Cubism SDK**, and related parts are owned by Live2D I
 
 > Organizations with annual revenue above JPY 10 million may need a separate commercial license agreement with Live2D Inc.
 
+### ⚠️ Bundled Live2D sample model notice
+
+The bundled default model **Hiyori Momose - PRO** is official Live2D sample data. Use of this sample model is governed by the Live2D Free Material License Agreement and sample data terms:
+
+- [Live2D Sample Data](https://www.live2d.com/en/learn/sample/)
+- [Live2D Sample Model Terms](https://www.live2d.com/en/learn/sample/model-terms/)
+
+Credits: Illustration: Kani Biimu / Modeling: Live2D. Do not modify Hiyori Momose's character design. Parties other than General Users or Small-Scale Enterprise Users should confirm whether additional permission from Live2D Inc. is required.
+
 ---
 
 **Kokoro Engine** is an open-source project.

@@ -328,7 +328,7 @@
             },
             "list": {
                 "label": "可用模型",
-                "default": "默认模型 (Haru)",
+                "default": "默认模型 (Hiyori)",
                 "builtin": "内置",
                 "empty": "暂无导入的模型"
             },

@@ -251,6 +251,15 @@ flowchart LR
 
 > Для компаний с годовой выручкой выше 10 млн иен может потребоваться отдельное коммерческое лицензионное соглашение с Live2D Inc.
 
+### ⚠️ Уведомление о встроенной примерной модели Live2D
+
+Встроенная модель по умолчанию **Hiyori Momose - PRO** является официальным примером данных Live2D. Использование этой модели регулируется Live2D Free Material License Agreement и условиями использования sample data.
+
+- [Live2D Sample Data](https://www.live2d.com/en/learn/sample/)
+- [Live2D Sample Model Terms](https://www.live2d.com/en/learn/sample/model-terms/)
+
+Кредиты: Illustration: Kani Biimu / Modeling: Live2D. Не изменяйте дизайн персонажа Hiyori Momose. Пользователям, не относящимся к General Users или Small-Scale Enterprise Users, следует проверить, требуется ли дополнительное разрешение Live2D Inc.
+
 ---
 
 **Kokoro Engine** is an open-source project.

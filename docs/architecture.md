@@ -275,7 +275,7 @@ src-tauri/src/
 
 ```
 mods/
-├── default/                       # Default Haru character
+├── default/                       # Default Hiyori character
 │   ├── mod.json                   # Manifest
 │   └── theme.json                 # Default theme variables
 │

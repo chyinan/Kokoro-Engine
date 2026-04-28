@@ -328,7 +328,7 @@
             },
             "list": {
                 "label": "Available Models",
-                "default": "Default Model (Haru)",
+                "default": "Default Model (Hiyori)",
                 "builtin": "Built-in",
                 "empty": "No imported models yet"
             },
