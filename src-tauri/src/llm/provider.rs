@@ -9,7 +9,10 @@ use async_openai::types::chat::{
 };
 use async_openai::Client;
 use async_trait::async_trait;
+use eventsource_stream::Eventsource;
 use futures::{channel::mpsc, Stream, StreamExt};
+use reqwest::Client as HttpClient;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::pin::Pin;
 
@@ -48,7 +51,23 @@ pub struct LlmToolCall {
 #[derive(Debug, Clone)]
 pub enum LlmStreamEvent {
     Text(String),
+    ReasoningContent(String),
     ToolCall(LlmToolCall),
+}
+
+#[derive(Debug, Clone)]
+pub struct LlmChatMessage {
+    pub message: ChatCompletionRequestMessage,
+    pub reasoning_content: Option<String>,
+}
+
+impl From<ChatCompletionRequestMessage> for LlmChatMessage {
+    fn from(message: ChatCompletionRequestMessage) -> Self {
+        Self {
+            message,
+            reasoning_content: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -86,6 +105,55 @@ pub trait LlmProvider: Send + Sync {
 
     fn supports_native_tools(&self) -> bool {
         false
+    }
+
+    async fn chat_rich(
+        &self,
+        messages: Vec<LlmChatMessage>,
+        options: Option<LlmParams>,
+    ) -> Result<String, String> {
+        self.chat(
+            messages
+                .into_iter()
+                .map(|message| message.message)
+                .collect(),
+            options,
+        )
+        .await
+    }
+
+    async fn chat_stream_rich(
+        &self,
+        messages: Vec<LlmChatMessage>,
+        options: Option<LlmParams>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamEvent, String>> + Send>>, String> {
+        let stream = self
+            .chat_stream(
+                messages
+                    .into_iter()
+                    .map(|message| message.message)
+                    .collect(),
+                options,
+            )
+            .await?;
+        Ok(Box::pin(stream.map(|item| item.map(LlmStreamEvent::Text))))
+    }
+
+    async fn chat_stream_with_tools_rich(
+        &self,
+        messages: Vec<LlmChatMessage>,
+        options: Option<LlmParams>,
+        tools: Vec<LlmToolDefinition>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamEvent, String>> + Send>>, String> {
+        self.chat_stream_with_tools(
+            messages
+                .into_iter()
+                .map(|message| message.message)
+                .collect(),
+            options,
+            tools,
+        )
+        .await
     }
 
     fn id(&self) -> &str;
@@ -261,6 +329,47 @@ fn build_request(
     builder.build().map_err(|error| error.to_string())
 }
 
+fn build_rich_request_json(
+    model: &str,
+    messages: Vec<LlmChatMessage>,
+    options: Option<LlmParams>,
+    tools: Option<Vec<LlmToolDefinition>>,
+    stream: bool,
+) -> Result<serde_json::Value, String> {
+    let reasoning_content = messages
+        .iter()
+        .map(|message| message.reasoning_content.clone())
+        .collect::<Vec<_>>();
+    let plain_messages = messages
+        .into_iter()
+        .map(|message| message.message)
+        .collect::<Vec<_>>();
+    let request = build_request(model, plain_messages, options, tools, stream)?;
+    let mut value = serde_json::to_value(request).map_err(|error| error.to_string())?;
+
+    if let Some(messages_value) = value
+        .get_mut("messages")
+        .and_then(|value| value.as_array_mut())
+    {
+        for (message_value, reasoning) in messages_value.iter_mut().zip(reasoning_content) {
+            let Some(reasoning) = reasoning.filter(|value| !value.trim().is_empty()) else {
+                continue;
+            };
+            let Some(message_object) = message_value.as_object_mut() else {
+                continue;
+            };
+            if message_object.get("role").and_then(|value| value.as_str()) == Some("assistant") {
+                message_object.insert(
+                    "reasoning_content".to_string(),
+                    serde_json::Value::String(reasoning),
+                );
+            }
+        }
+    }
+
+    Ok(value)
+}
+
 fn convert_tools(tools: Vec<LlmToolDefinition>) -> Result<Vec<ChatCompletionTools>, String> {
     tools
         .into_iter()
@@ -375,14 +484,21 @@ fn format_openai_error(error: OpenAIError) -> String {
 
 pub struct OpenAIProvider {
     client: Client<OpenAIConfig>,
+    http_client: HttpClient,
+    api_key: String,
+    base_url: String,
     model: String,
     provider_id: String,
 }
 
 impl OpenAIProvider {
     pub fn new(api_key: String, base_url: Option<String>, model: Option<String>) -> Self {
+        let base_url = base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
         Self {
-            client: build_openai_client(api_key, base_url),
+            client: build_openai_client(api_key.clone(), Some(base_url.clone())),
+            http_client: HttpClient::new(),
+            api_key,
+            base_url: base_url.trim_end_matches('/').to_string(),
             model: model.unwrap_or_else(|| "gpt-3.5-turbo".to_string()),
             provider_id: "openai".to_string(),
         }
@@ -392,6 +508,158 @@ impl OpenAIProvider {
         self.provider_id = id;
         self
     }
+
+    async fn post_chat_json(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<reqwest::Response, String> {
+        let response = self
+            .http_client
+            .post(format!("{}/chat/completions", self.base_url))
+            .bearer_auth(&self.api_key)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| format!("Failed to call OpenAI-compatible chat API: {}", error))?;
+
+        if response.status().is_success() {
+            return Ok(response);
+        }
+
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        Err(format!("OpenAI-compatible API error {}: {}", status, text))
+    }
+
+    async fn create_chat_rich_inner(
+        &self,
+        messages: Vec<LlmChatMessage>,
+        options: Option<LlmParams>,
+    ) -> Result<String, String> {
+        let request = build_rich_request_json(&self.model, messages, options, None, false)?;
+        let response = self.post_chat_json(request).await?;
+        let payload = response
+            .json::<OpenAICompatChatResponse>()
+            .await
+            .map_err(|error| {
+                format!("Failed to parse OpenAI-compatible response JSON: {}", error)
+            })?;
+
+        Ok(payload
+            .choices
+            .first()
+            .and_then(|choice| choice.message.content.clone())
+            .unwrap_or_default())
+    }
+
+    async fn create_chat_stream_rich_inner(
+        &self,
+        messages: Vec<LlmChatMessage>,
+        options: Option<LlmParams>,
+        tools: Option<Vec<LlmToolDefinition>>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamEvent, String>> + Send>>, String> {
+        let request = build_rich_request_json(&self.model, messages, options, tools, true)?;
+        let response = self.post_chat_json(request).await?;
+        let mut stream = response.bytes_stream().eventsource();
+        let (mut tx, rx) = mpsc::unbounded::<Result<LlmStreamEvent, String>>();
+
+        tokio::spawn(async move {
+            let mut pending_tool_calls: HashMap<u32, PartialToolCall> = HashMap::new();
+
+            while let Some(event_result) = stream.next().await {
+                let event = match event_result {
+                    Ok(event) => event,
+                    Err(error) => {
+                        let _ = tx.start_send(Err(format!(
+                            "OpenAI-compatible SSE stream error: {}",
+                            error
+                        )));
+                        return;
+                    }
+                };
+
+                if event.data == "[DONE]" {
+                    break;
+                }
+
+                let parsed = match serde_json::from_str::<OpenAICompatStreamChunk>(&event.data) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        let _ = tx.start_send(Err(format!(
+                            "Failed to parse OpenAI-compatible stream event JSON: {}",
+                            error
+                        )));
+                        return;
+                    }
+                };
+
+                for choice in parsed.choices {
+                    if let Some(reasoning) = choice.delta.reasoning_content {
+                        if !reasoning.is_empty()
+                            && tx
+                                .start_send(Ok(LlmStreamEvent::ReasoningContent(reasoning)))
+                                .is_err()
+                        {
+                            return;
+                        }
+                    }
+
+                    if let Some(content) = choice.delta.content {
+                        if tx.start_send(Ok(LlmStreamEvent::Text(content))).is_err() {
+                            return;
+                        }
+                    }
+
+                    if let Some(tool_calls) = choice.delta.tool_calls {
+                        apply_tool_call_chunks(&mut pending_tool_calls, tool_calls);
+                    }
+
+                    if matches!(choice.finish_reason, Some(FinishReason::ToolCalls))
+                        && emit_pending_tool_calls(&mut tx, &mut pending_tool_calls).is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+
+            let _ = emit_pending_tool_calls(&mut tx, &mut pending_tool_calls);
+        });
+
+        Ok(Box::pin(rx))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAICompatChatResponse {
+    choices: Vec<OpenAICompatChatChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAICompatChatChoice {
+    message: OpenAICompatChatMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAICompatChatMessage {
+    content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAICompatStreamChunk {
+    choices: Vec<OpenAICompatStreamChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAICompatStreamChoice {
+    delta: OpenAICompatStreamDelta,
+    finish_reason: Option<FinishReason>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAICompatStreamDelta {
+    content: Option<String>,
+    reasoning_content: Option<String>,
+    tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
 }
 
 #[async_trait]
@@ -423,6 +691,33 @@ impl LlmProvider for OpenAIProvider {
 
     fn supports_native_tools(&self) -> bool {
         true
+    }
+
+    async fn chat_rich(
+        &self,
+        messages: Vec<LlmChatMessage>,
+        options: Option<LlmParams>,
+    ) -> Result<String, String> {
+        self.create_chat_rich_inner(messages, options).await
+    }
+
+    async fn chat_stream_rich(
+        &self,
+        messages: Vec<LlmChatMessage>,
+        options: Option<LlmParams>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamEvent, String>> + Send>>, String> {
+        self.create_chat_stream_rich_inner(messages, options, None)
+            .await
+    }
+
+    async fn chat_stream_with_tools_rich(
+        &self,
+        messages: Vec<LlmChatMessage>,
+        options: Option<LlmParams>,
+        tools: Vec<LlmToolDefinition>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamEvent, String>> + Send>>, String> {
+        self.create_chat_stream_rich_inner(messages, options, Some(tools))
+            .await
     }
 
     fn id(&self) -> &str {

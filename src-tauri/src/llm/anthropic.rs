@@ -61,7 +61,10 @@ impl AnthropicProvider {
         self
     }
 
-    pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<AnthropicModelInfo>, String> {
+    pub async fn list_models(
+        base_url: &str,
+        api_key: &str,
+    ) -> Result<Vec<AnthropicModelInfo>, String> {
         let client = Client::new();
         let response = client
             .get(format!(
@@ -219,10 +222,10 @@ impl AnthropicProvider {
                         }
                     }
                     "error" => {
-                        let message = parsed
-                            .error
-                            .map(|error| error.message)
-                            .unwrap_or_else(|| "Anthropic stream returned an error event".to_string());
+                        let message =
+                            parsed.error.map(|error| error.message).unwrap_or_else(|| {
+                                "Anthropic stream returned an error event".to_string()
+                            });
                         let _ = tx.start_send(Err(message));
                         return;
                     }
@@ -269,6 +272,7 @@ impl LlmProvider for AnthropicProvider {
         let mapped = stream.filter_map(|item| async move {
             match item {
                 Ok(LlmStreamEvent::Text(text)) => Some(Ok(text)),
+                Ok(LlmStreamEvent::ReasoningContent(_)) => None,
                 Ok(LlmStreamEvent::ToolCall(_)) => None,
                 Err(error) => Some(Err(error)),
             }
@@ -282,7 +286,8 @@ impl LlmProvider for AnthropicProvider {
         options: Option<LlmParams>,
         tools: Vec<LlmToolDefinition>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamEvent, String>> + Send>>, String> {
-        self.create_message_stream(messages, options, Some(tools)).await
+        self.create_message_stream(messages, options, Some(tools))
+            .await
     }
 
     fn supports_native_tools(&self) -> bool {
@@ -350,13 +355,8 @@ enum AnthropicContentBlock {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicImageSource {
-    Base64 {
-        media_type: String,
-        data: String,
-    },
-    Url {
-        url: String,
-    },
+    Base64 { media_type: String, data: String },
+    Url { url: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -496,7 +496,8 @@ fn convert_messages(
                 }
             }
             ChatCompletionRequestMessage::Tool(message) => {
-                let text = extract_message_text(&ChatCompletionRequestMessage::Tool(message.clone()));
+                let text =
+                    extract_message_text(&ChatCompletionRequestMessage::Tool(message.clone()));
                 pending_tool_results.push(AnthropicContentBlock::ToolResult {
                     tool_use_id: message.tool_call_id,
                     content: text,
@@ -582,11 +583,11 @@ fn convert_user_part(
                 }])
             }
         }
-        ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => Ok(vec![
-            AnthropicContentBlock::Image {
+        ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
+            Ok(vec![AnthropicContentBlock::Image {
                 source: convert_image_url(&image_part.image_url.url)?,
-            },
-        ]),
+            }])
+        }
         other => Err(format!(
             "Anthropic provider does not support this user content part: {:?}",
             other
@@ -846,8 +847,7 @@ mod tests {
         AnthropicProvider,
     };
     use crate::llm::messages::{
-        assistant_tool_calls_message, system_message, tool_result_message,
-        user_message_with_images,
+        assistant_tool_calls_message, system_message, tool_result_message, user_message_with_images,
     };
     use crate::llm::provider::{LlmParams, LlmToolDefinition, LlmToolParam};
     use async_openai::types::chat::ChatCompletionRequestMessage;

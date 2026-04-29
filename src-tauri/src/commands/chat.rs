@@ -25,10 +25,10 @@ use crate::hooks::{
 };
 use crate::imagegen::ImageGenService;
 use crate::llm::messages::{
-    assistant_tool_calls_message, extract_message_text, history_message_to_chat_message,
+    assistant_tool_calls_message, extract_message_text, history_message_to_llm_chat_message,
     replace_user_message_with_images, system_message, tool_result_message, user_text_message,
 };
-use crate::llm::provider::LlmStreamEvent;
+use crate::llm::provider::{LlmChatMessage, LlmStreamEvent};
 use crate::llm::service::LlmService;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -559,13 +559,7 @@ fn build_before_llm_request_payload(
 fn apply_before_llm_request_payload(
     payload: BeforeLlmRequestPayload,
     original_prompt_messages: &[Message],
-) -> Result<
-    (
-        String,
-        Vec<async_openai::types::chat::ChatCompletionRequestMessage>,
-    ),
-    String,
-> {
+) -> Result<(String, Vec<LlmChatMessage>), String> {
     let request_message = payload.request_message;
     let messages = payload
         .messages
@@ -576,7 +570,7 @@ fn apply_before_llm_request_payload(
                 .get(index)
                 .filter(|original| original.role == message.role)
                 .and_then(|original| original.metadata.as_ref());
-            history_message_to_chat_message(&message.role, message.content, metadata)
+            history_message_to_llm_chat_message(&message.role, message.content, metadata)
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((request_message, messages))
@@ -590,13 +584,7 @@ fn build_effective_before_llm_request(
     request_message: String,
     hidden: bool,
     prompt_messages: &[Message],
-) -> Result<
-    (
-        String,
-        Vec<async_openai::types::chat::ChatCompletionRequestMessage>,
-    ),
-    String,
-> {
+) -> Result<(String, Vec<LlmChatMessage>), String> {
     let payload = build_before_llm_request_payload(
         conversation_id,
         character_id,
@@ -632,6 +620,21 @@ fn debug_log_llm_messages(
         };
         tracing::info!(target: "llm", "[LLM/Debug]   #{} role={} text={}", index, role, preview);
     }
+}
+
+#[cfg(debug_assertions)]
+fn debug_log_rich_llm_messages(label: &str, messages: &[LlmChatMessage]) {
+    let plain_messages = messages
+        .iter()
+        .map(|message| message.message.clone())
+        .collect::<Vec<_>>();
+    debug_log_llm_messages(label, &plain_messages);
+}
+
+fn plain_llm_message(
+    message: async_openai::types::chat::ChatCompletionRequestMessage,
+) -> LlmChatMessage {
+    message.into()
 }
 
 const TOOL_CALL_TAG_PREFIX: &str = "[TOOL_CALL:";
@@ -1582,10 +1585,10 @@ pub async fn stream_chat(
 
     // 注入视觉上下文（如果有最近的屏幕观察）
     if let Some(vision_desc) = _vision_watcher.context.get_context_string().await {
-        client_messages.push(system_message(format!(
+        client_messages.push(plain_llm_message(system_message(format!(
             "[Vision] Visible screen content: {}. Use this only as optional visual context. Refer only to what is directly visible on screen, and avoid speculation about hidden details, intent, authorship, or anything off-screen.",
             vision_desc
-        )));
+        ))));
     }
 
     // Attach images to the last user message if present
@@ -1594,9 +1597,9 @@ pub async fn stream_chat(
             // Find the last message with role "user"
             if let Some(last_user_msg) = client_messages
                 .iter_mut()
-                .rfind(|m| crate::llm::messages::is_user_message(m))
+                .rfind(|m| crate::llm::messages::is_user_message(&m.message))
             {
-                let text_content = extract_message_text(last_user_msg);
+                let text_content = extract_message_text(&last_user_msg.message);
 
                 // Process images: convert local URLs to base64
                 let mut processed_images = Vec::with_capacity(images.len());
@@ -1628,8 +1631,12 @@ pub async fn stream_chat(
                 }
 
                 // Create multimodal content
-                replace_user_message_with_images(last_user_msg, text_content, processed_images)
-                    .map_err(KokoroError::Chat)?;
+                replace_user_message_with_images(
+                    &mut last_user_msg.message,
+                    text_content,
+                    processed_images,
+                )
+                .map_err(KokoroError::Chat)?;
                 tracing::info!(target: "chat", "[Chat] Attached {} images to user message", images.len());
             }
         }
@@ -1638,7 +1645,9 @@ pub async fn stream_chat(
     // For hidden messages (touch interactions), the user message wasn't added to
     // history, so we must explicitly include it in the context for the LLM to see.
     if request.hidden {
-        client_messages.push(user_text_message(effective_request_message.clone()));
+        client_messages.push(plain_llm_message(user_text_message(
+            effective_request_message.clone(),
+        )));
     }
 
     #[cfg(debug_assertions)]
@@ -1651,7 +1660,7 @@ pub async fn stream_chat(
             native_tools_enabled,
             native_tools.len()
         );
-        debug_log_llm_messages("initial chat request", &client_messages);
+        debug_log_rich_llm_messages("initial chat request", &client_messages);
     }
 
     // Stream Response with Tool Call Feedback Loop
@@ -1668,6 +1677,7 @@ pub async fn stream_chat(
     let mut stream_failed = false;
     let mut text_retry_count = 0u32;
     let mut force_text_only_round = false;
+    let mut all_reasoning_content = String::new();
 
     for round in 0..max_tool_rounds {
         tracing::info!(target: "chat", "[Chat] Tool loop round {}", round + 1);
@@ -1679,18 +1689,18 @@ pub async fn stream_chat(
             Box<dyn futures::Stream<Item = Result<LlmStreamEvent, String>> + Send>,
         > = if native_tools_enabled && !force_text_only_round {
             chat_provider
-                .chat_stream_with_tools(client_messages.clone(), None, native_tools.clone())
+                .chat_stream_with_tools_rich(client_messages.clone(), None, native_tools.clone())
                 .await
                 .map_err(KokoroError::Chat)?
         } else {
-            let text_stream = chat_provider
-                .chat_stream(client_messages.clone(), None)
+            chat_provider
+                .chat_stream_rich(client_messages.clone(), None)
                 .await
-                .map_err(KokoroError::Chat)?;
-            Box::pin(text_stream.map(|item| item.map(LlmStreamEvent::Text)))
+                .map_err(KokoroError::Chat)?
         };
 
         let mut round_response = String::new();
+        let mut round_reasoning_content = String::new();
         let mut emit_buffer = String::new();
         let mut native_tool_calls = Vec::new();
 
@@ -1717,6 +1727,9 @@ pub async fn stream_chat(
                                 app.emit("chat-turn-delta", payload)
                                     .map_err(|e| KokoroError::Chat(e.to_string()))?;
                             }
+                        }
+                        LlmStreamEvent::ReasoningContent(content) => {
+                            round_reasoning_content.push_str(&content);
                         }
                         LlmStreamEvent::ToolCall(tool_call) => {
                             native_tool_calls.push(ToolCall {
@@ -1811,6 +1824,7 @@ pub async fn stream_chat(
 
         // Accumulate cleaned text for history
         merge_continuation_text(&mut all_cleaned_text, &cleaned_text);
+        all_reasoning_content.push_str(&round_reasoning_content);
 
         // Persist assistant draft incrementally (hidden interactions still save the response, just not the user message)
         if !all_cleaned_text.is_empty() {
@@ -1988,12 +2002,16 @@ pub async fn stream_chat(
         }
 
         if has_native_tool_calls {
-            let assistant_tool_call_metadata = serde_json::json!({
+            let mut assistant_tool_call_metadata_value = serde_json::json!({
                 "type": "assistant_tool_calls",
                 "turn_id": assistant_turn_id,
                 "tool_calls": continuation_tool_calls,
-            })
-            .to_string();
+            });
+            if !round_reasoning_content.trim().is_empty() {
+                assistant_tool_call_metadata_value["reasoning_content"] =
+                    serde_json::Value::String(round_reasoning_content.clone());
+            }
+            let assistant_tool_call_metadata = assistant_tool_call_metadata_value.to_string();
             state
                 .add_message_with_metadata(
                     "assistant".to_string(),
@@ -2015,15 +2033,19 @@ pub async fn stream_chat(
                     )
                     .await;
             }
-            client_messages.push(assistant_tool_calls_message(
-                if cleaned_text.is_empty() {
-                    None
-                } else {
-                    Some(cleaned_text.clone())
-                },
-                continuation_tool_call_messages,
-            ));
-            client_messages.extend(tool_result_messages);
+            client_messages.push(LlmChatMessage {
+                message: assistant_tool_calls_message(
+                    if cleaned_text.is_empty() {
+                        None
+                    } else {
+                        Some(cleaned_text.clone())
+                    },
+                    continuation_tool_call_messages,
+                ),
+                reasoning_content: (!round_reasoning_content.trim().is_empty())
+                    .then_some(round_reasoning_content.clone()),
+            });
+            client_messages.extend(tool_result_messages.into_iter().map(plain_llm_message));
 
             // Apply the same side-effect / feedback guard as the text-tool path
             // to prevent infinite loops when LLM keeps emitting only tool calls
@@ -2032,12 +2054,12 @@ pub async fn stream_chat(
                 if all_cleaned_text.trim().is_empty() && !forced_text_after_side_effect {
                     tracing::info!(target: "chat", "[Chat] Native side-effect tools ran without text, forcing one follow-up text round");
                     forced_text_after_side_effect = true;
-                    client_messages.push(system_message(
+                    client_messages.push(plain_llm_message(system_message(
                         "The tool has already been executed successfully. \
                          Now respond with a natural dialogue reply for the user. \
                          Do NOT call the same tool again unless absolutely necessary."
                             .to_string(),
-                    ));
+                    )));
                 } else if all_cleaned_text.trim().is_empty() {
                     // Already forced once but still no text — retry with tools disabled
                     if text_retry_count < 3 {
@@ -2048,9 +2070,9 @@ pub async fn stream_chat(
                         // Strip trailing tool/system/empty-assistant messages to avoid poisoning the context
                         while client_messages.len() > 1 {
                             let should_pop = match client_messages.last() {
-                                Some(async_openai::types::chat::ChatCompletionRequestMessage::Tool(_)) => true,
-                                Some(async_openai::types::chat::ChatCompletionRequestMessage::System(_)) => true,
-                                Some(async_openai::types::chat::ChatCompletionRequestMessage::Assistant(m)) => {
+                                Some(LlmChatMessage { message: async_openai::types::chat::ChatCompletionRequestMessage::Tool(_), .. }) => true,
+                                Some(LlmChatMessage { message: async_openai::types::chat::ChatCompletionRequestMessage::System(_), .. }) => true,
+                                Some(LlmChatMessage { message: async_openai::types::chat::ChatCompletionRequestMessage::Assistant(m), .. }) => {
                                     m.content.as_ref().map(|_c| extract_message_text(
                                         &async_openai::types::chat::ChatCompletionRequestMessage::Assistant(m.clone())
                                     ).trim().is_empty()).unwrap_or(true)
@@ -2063,10 +2085,10 @@ pub async fn stream_chat(
                                 break;
                             }
                         }
-                        client_messages.push(system_message(
+                        client_messages.push(plain_llm_message(system_message(
                             "IMPORTANT: Respond with dialogue text only. Do NOT call any tools."
                                 .to_string(),
-                        ));
+                        )));
                         continue;
                     }
                     tracing::info!(
@@ -2084,7 +2106,7 @@ pub async fn stream_chat(
                 "[Chat] Continuing after native tool calls with assistant/tool result messages"
             );
             #[cfg(debug_assertions)]
-            debug_log_llm_messages(
+            debug_log_rich_llm_messages(
                 &format!("post-tool continuation round {}", round + 1),
                 &client_messages,
             );
@@ -2096,16 +2118,16 @@ pub async fn stream_chat(
             if all_cleaned_text.trim().is_empty() && !forced_text_after_side_effect {
                 tracing::info!(target: "chat", "[Chat] Side-effect tools ran without any text reply, forcing one follow-up text round");
                 forced_text_after_side_effect = true;
-                client_messages.push(system_message(format!(
+                client_messages.push(plain_llm_message(system_message(format!(
                     "[Tool results]\n\
                     {}\n\n\
                     The side-effect tool has already been executed successfully.\n\
                     Now continue with a natural reply for the user in plain dialogue text.\n\
                     Do not explain the tool call, do not output metadata, and do not repeat the same side-effect tool unless it is still necessary.",
                     tool_results.join("\n")
-                )));
+                ))));
                 #[cfg(debug_assertions)]
-                debug_log_llm_messages(
+                debug_log_rich_llm_messages(
                     &format!("forced follow-up round {}", round + 1),
                     &client_messages,
                 );
@@ -2117,14 +2139,14 @@ pub async fn stream_chat(
         }
 
         // Only inject tool results — no need to replay the assistant's previous output
-        client_messages.push(system_message(format!(
+        client_messages.push(plain_llm_message(system_message(format!(
             "[Tool results]\n\
             {}\n\n\
             Incorporate these results naturally into your dialogue. Do NOT echo raw data or JSON.",
             tool_results.join("\n")
-        )));
+        ))));
         #[cfg(debug_assertions)]
-        debug_log_llm_messages(
+        debug_log_rich_llm_messages(
             &format!("feedback continuation round {}", round + 1),
             &client_messages,
         );
@@ -2260,23 +2282,17 @@ pub async fn stream_chat(
     // 8. Update History with final response
     // hidden 模式下跳过用户消息保存，但助手回复仍需持久化以便重载后显示
     if !full_response.is_empty() {
-        let metadata = if !all_translations.is_empty() {
-            let combined = all_translations.join(" ");
-            Some(
-                serde_json::json!({
-                    "translation": combined,
-                    "turn_id": assistant_turn_id,
-                })
-                .to_string(),
-            )
-        } else {
-            Some(
-                serde_json::json!({
-                    "turn_id": assistant_turn_id,
-                })
-                .to_string(),
-            )
-        };
+        let mut metadata_value = serde_json::json!({
+            "turn_id": assistant_turn_id,
+        });
+        if !all_translations.is_empty() {
+            metadata_value["translation"] = serde_json::Value::String(all_translations.join(" "));
+        }
+        if !all_reasoning_content.trim().is_empty() {
+            metadata_value["reasoning_content"] =
+                serde_json::Value::String(all_reasoning_content.clone());
+        }
+        let metadata = Some(metadata_value.to_string());
 
         // Update the draft row with final content + metadata (DB already has the row)
         if let Some(row_id) = draft_row_id {
@@ -2301,7 +2317,7 @@ pub async fn stream_chat(
                 .push_history_message(Message {
                     role: "assistant".to_string(),
                     content,
-                    metadata: None,
+                    metadata: Some(metadata_value),
                 })
                 .await;
         }
@@ -2970,8 +2986,14 @@ mod tests {
 
         assert_eq!(request_message, "modified hidden");
         assert_eq!(client_messages.len(), 2);
-        assert_eq!(extract_message_text(&client_messages[0]), "system prompt");
-        assert_eq!(extract_message_text(&client_messages[1]), "modified user");
+        assert_eq!(
+            extract_message_text(&client_messages[0].message),
+            "system prompt"
+        );
+        assert_eq!(
+            extract_message_text(&client_messages[1].message),
+            "modified user"
+        );
     }
 
     #[test]
@@ -3001,8 +3023,11 @@ mod tests {
 
         assert_eq!(request_message, "hello");
         assert_eq!(client_messages.len(), 2);
-        assert_eq!(extract_message_text(&client_messages[0]), "system prompt");
-        assert_eq!(extract_message_text(&client_messages[1]), "hello");
+        assert_eq!(
+            extract_message_text(&client_messages[0].message),
+            "system prompt"
+        );
+        assert_eq!(extract_message_text(&client_messages[1].message), "hello");
     }
 
     #[test]

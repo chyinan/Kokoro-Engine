@@ -9,6 +9,8 @@ use async_openai::types::chat::{
     ChatCompletionRequestUserMessageContentPart, FunctionCall, ImageUrlArgs,
 };
 
+use crate::llm::provider::LlmChatMessage;
+
 pub fn role_text_message(
     role: &str,
     text: impl Into<String>,
@@ -70,6 +72,28 @@ pub fn history_message_to_chat_message(
     }
 
     role_text_message(role, content)
+}
+
+pub fn history_message_to_llm_chat_message(
+    role: &str,
+    content: impl Into<String>,
+    metadata: Option<&serde_json::Value>,
+) -> Result<LlmChatMessage, String> {
+    let message = history_message_to_chat_message(role, content, metadata)?;
+    let reasoning_content = if role == "assistant" {
+        metadata
+            .and_then(|meta| meta.get("reasoning_content"))
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(ToString::to_string)
+    } else {
+        None
+    };
+
+    Ok(LlmChatMessage {
+        message,
+        reasoning_content,
+    })
 }
 
 pub fn system_message(text: impl Into<String>) -> ChatCompletionRequestMessage {
@@ -235,6 +259,24 @@ mod tests {
             }
             other => panic!("expected assistant tool-call message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn assistant_history_keeps_reasoning_content_for_openai_compatible_replay() {
+        let metadata = serde_json::json!({
+            "turn_id": "turn-1",
+            "reasoning_content": "private model reasoning token stream",
+        });
+
+        let message =
+            history_message_to_llm_chat_message("assistant", "visible answer", Some(&metadata))
+                .expect("assistant history should convert");
+
+        assert_eq!(
+            message.reasoning_content.as_deref(),
+            Some("private model reasoning token stream")
+        );
+        assert_eq!(extract_message_text(&message.message), "visible answer");
     }
 }
 
