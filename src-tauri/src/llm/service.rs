@@ -853,8 +853,7 @@ mod tests {
             extra: std::collections::HashMap::new(),
         };
 
-        let provider =
-            try_build_from_provider_config(&cfg).expect("anthropic should be supported");
+        let provider = try_build_from_provider_config(&cfg).expect("anthropic should be supported");
 
         assert_eq!(provider.id(), "claude");
         assert!(provider.supports_native_tools());
