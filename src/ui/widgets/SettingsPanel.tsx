@@ -332,6 +332,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
     // Save feedback
     const [saved, setSaved] = useState(false);
+    const savedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // STT state
     const [localSttConfig, setLocalSttConfig] = useState<SttConfig | null>(sttConfigProp ?? null);
@@ -404,6 +405,25 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         setTtsVoice(prev => normalizeTtsVoice(ttsProviderId, prev, ttsVoices, localTtsConfig));
     }, [ttsProviderId, ttsVoices, localTtsConfig]);
 
+    useEffect(() => {
+        return () => {
+            if (savedTimeoutRef.current) {
+                clearTimeout(savedTimeoutRef.current);
+            }
+        };
+    }, []);
+
+    const showSaveFeedback = () => {
+        if (savedTimeoutRef.current) {
+            clearTimeout(savedTimeoutRef.current);
+        }
+        setSaved(true);
+        savedTimeoutRef.current = setTimeout(() => {
+            setSaved(false);
+            savedTimeoutRef.current = null;
+        }, 2000);
+    };
+
     const handleSave = async () => {
         // Persist to localStorage (non-LLM settings)
         localStorage.setItem("kokoro_persona", persona);
@@ -435,6 +455,8 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
         // Commit background config
         bg.setConfig(localBgConfig);
+
+        showSaveFeedback();
 
         // Send persona to backend
         try {
@@ -526,9 +548,6 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 console.error("[SettingsPanel] Failed to save LLM config:", e);
             }
         }
-
-        setSaved(true);
-        setTimeout(() => setSaved(false), 2000);
     };
 
     const handleCancel = () => {
@@ -811,20 +830,24 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                         "hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-colors"
                                     )}
                                 >
-                                    {t("common.actions.cancel")}
+                                    <span className="block leading-none translate-y-px">
+                                        {t("common.actions.cancel")}
+                                    </span>
                                 </motion.button>
                                 <motion.button
                                     whileHover={{ scale: 1.05 }}
                                     whileTap={{ scale: 0.95 }}
                                     onClick={handleSave}
                                     className={clsx(
-                                        "flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-heading font-semibold tracking-wider uppercase",
+                                        "inline-flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-heading font-semibold tracking-wider uppercase",
                                         "bg-[var(--color-accent)] text-black",
                                         "hover:bg-white transition-colors"
                                     )}
                                 >
-                                    {saved ? <Check size={16} strokeWidth={2} /> : <Save size={16} strokeWidth={1.5} />}
-                                    {saved ? t("common.actions.saved") : t("common.actions.save")}
+                                    {saved ? <Check size={16} strokeWidth={2} className="shrink-0" /> : <Save size={16} strokeWidth={1.5} className="shrink-0" />}
+                                    <span className="leading-none translate-y-px">
+                                        {saved ? t("common.actions.saved") : t("common.actions.save")}
+                                    </span>
                                 </motion.button>
                             </div>
                         </div>
