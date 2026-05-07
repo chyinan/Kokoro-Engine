@@ -10,7 +10,7 @@ import { clsx } from "clsx";
 import { Plus, Upload, Trash2, UserCircle, Check, X, User } from "lucide-react";
 import { characterDb } from "../../lib/db";
 import { parseCharacterCard } from "../../lib/character-card-parser";
-import { setPersona, setCharacterName, setUserName, setProactiveEnabled, getProactiveEnabled, setActiveCharacterId, listCharacters, createCharacter, updateCharacter, deleteCharacter } from "../../lib/kokoro-bridge";
+import { setPersona, setCharacterName, setUserName, setUserPersona, setProactiveEnabled, getProactiveEnabled, setActiveCharacterId, listCharacters, createCharacter, updateCharacter, deleteCharacter } from "../../lib/kokoro-bridge";
 import type { CharacterRecord } from "../../lib/kokoro-bridge";
 import { Languages, MessageCircle } from "lucide-react";
 import { Select } from "@/components/ui/select";
@@ -335,12 +335,13 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
 
     const handleUserProfileSave = () => {
         saveUserProfile(userProfile);
+        setUserName(userProfile.name).catch(e => console.error("[CharacterManager] Failed to set user name:", e));
+        setUserPersona(userProfile.persona).catch(e => console.error("[CharacterManager] Failed to persist user profile:", e));
         // Re-compose the active character's prompt with updated user info
         if (editChar) {
             onPersonaChangeRef.current(composeSystemPrompt(editChar, userProfile));
             // Push updated persona to backend immediately
             setPersona(composeSystemPrompt(editChar, userProfile)).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
-            setUserName(userProfile.name).catch(e => console.error("[CharacterManager] Failed to set user name:", e));
         }
     };
 

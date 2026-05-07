@@ -92,8 +92,11 @@ import {
   listLive2dModels,
   getTtsConfig,
   setPersona,
+  setUserName,
+  setUserPersona,
   setResponseLanguage,
   getProactiveEnabled,
+  getUserProfileSettings,
   getMemoryEmbeddingModelStatus,
   // Config Getters
   getLlmConfig,
@@ -559,6 +562,14 @@ function App() {
     if (savedResponseLang) setResponseLanguage(savedResponseLang).catch(console.error);
     if (savedUserLang) setUserLanguage(savedUserLang).catch(console.error);
 
+    const userProfileHydration = getUserProfileSettings()
+      .then((profile) => {
+        if (!profile) return;
+        localStorage.setItem("kokoro_user_name", profile.user_name);
+        localStorage.setItem("kokoro_user_persona", profile.user_persona);
+      })
+      .catch(err => console.error("[App] Failed to restore user profile:", err));
+
     // These may be slower (file system scans, network)
     listLive2dModels()
       .then(models => setAvailableModels(models))
@@ -571,7 +582,8 @@ function App() {
       .catch(err => console.error("[App] Failed to list TTS voices:", err));
 
     // Sync the active character's persona to the backend on startup
-    import("./ui/widgets/CharacterManager").then(async ({ composeSystemPrompt }) => {
+    userProfileHydration.finally(() => {
+      import("./ui/widgets/CharacterManager").then(async ({ composeSystemPrompt }) => {
       const { listCharacters, setPersona, setActiveCharacterId } = await import("./lib/kokoro-bridge");
       try {
         const all = await listCharacters();
@@ -589,6 +601,7 @@ function App() {
       } catch (e) {
         console.error("[App] Failed to sync persona on startup:", e);
       }
+    });
     });
 
     // Listen for generated images
@@ -1015,10 +1028,11 @@ function App() {
     // ── User Profile Actions ───────────────────────
     if (detail.action === 'set_user_name' && detail.data?.name) {
       localStorage.setItem('kokoro_user_name', detail.data.name);
-      // No backend syncing needed for name currently, just local storage for UI
+      setUserName(detail.data.name).catch(console.error);
     }
     if (detail.action === 'set_user_persona' && detail.data?.persona) {
       localStorage.setItem('kokoro_user_persona', detail.data.persona);
+      setUserPersona(detail.data.persona).catch(console.error);
     }
 
     // ── Character Actions ─────────────────────────

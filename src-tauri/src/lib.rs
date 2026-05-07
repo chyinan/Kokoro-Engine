@@ -97,7 +97,9 @@ pub fn run() {
             commands::context::set_persona,
             commands::context::set_character_name,
             commands::context::set_active_character_id,
+            commands::context::get_user_profile_settings,
             commands::context::set_user_name,
+            commands::context::set_user_persona,
             commands::context::set_response_language,
             commands::context::set_user_language,
             commands::context::set_jailbreak_prompt,
@@ -359,6 +361,20 @@ pub fn run() {
                                     }
                                 }
                             }
+                        }
+
+                        if let Some(profile) =
+                            crate::commands::context::load_user_profile_settings_from_app_data(
+                                &app_data_dir,
+                            )
+                        {
+                            orchestrator.set_user_name(profile.user_name.clone()).await;
+                            tracing::info!(
+                                target: "ai",
+                                "Restored user_profile: user_name={}, persona_chars={}",
+                                profile.user_name,
+                                profile.user_persona.len()
+                            );
                         }
 
                         app_handle.manage(orchestrator);

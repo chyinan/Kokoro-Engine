@@ -4,7 +4,7 @@ import { clsx } from 'clsx';
 import { Download, Upload, Loader2, Check, AlertTriangle, Database, FileJson, Clock, FolderOpen, Trash2, Play } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { save, open, open as openDialog } from '@tauri-apps/plugin-dialog';
-import { exportData, previewImport, importData, getAutoBackupConfig, saveAutoBackupConfig, runAutoBackupNow, listCharacters } from '../../../lib/kokoro-bridge';
+import { exportData, previewImport, importData, getAutoBackupConfig, saveAutoBackupConfig, runAutoBackupNow, listCharacters, setUserName, setUserPersona } from '../../../lib/kokoro-bridge';
 import type { ImportPreview, AutoBackupConfig } from '../../../lib/kokoro-bridge';
 import { characterDb } from '../../../lib/db';
 import type { CharacterProfile } from '../../../lib/db';
@@ -101,6 +101,17 @@ export const BackupTab: React.FC = () => {
             const sqliteChars = await listCharacters();
             const idbChars = await characterDb.getAll();
             const idbByStableId = new Map(idbChars.filter(c => c.stableId).map(c => [c.stableId, c]));
+            const userName = localStorage.getItem('kokoro_user_name') ?? 'User';
+            const userPersona = localStorage.getItem('kokoro_user_persona') ?? '';
+            const userLanguage = localStorage.getItem('kokoro_user_language');
+            const responseLanguage = localStorage.getItem('kokoro_response_language');
+            const voiceInterrupt = localStorage.getItem('kokoro_voice_interrupt');
+
+            // Keep the on-disk profile config in sync with the localStorage payload
+            // so configs/user_profile.json and characters.json do not disagree.
+            await setUserName(userName);
+            await setUserPersona(userPersona);
+
             const charsSerializable = await Promise.all(sqliteChars.map(async (c) => {
                 const idbChar = idbByStableId.get(c.id);
                 if (idbChar?.avatarBlob) {
@@ -113,11 +124,11 @@ export const BackupTab: React.FC = () => {
             const payload = {
                 characters: charsSerializable,
                 activeCharacterId: localStorage.getItem('kokoro_active_character_id'),
-                userName: localStorage.getItem('kokoro_user_name'),
-                userPersona: localStorage.getItem('kokoro_user_persona'),
-                userLanguage: localStorage.getItem('kokoro_user_language'),
-                responseLanguage: localStorage.getItem('kokoro_response_language'),
-                voiceInterrupt: localStorage.getItem('kokoro_voice_interrupt'),
+                userName,
+                userPersona,
+                userLanguage,
+                responseLanguage,
+                voiceInterrupt,
             };
             const charactersJson = JSON.stringify(payload);
 
@@ -183,8 +194,14 @@ export const BackupTab: React.FC = () => {
                         payload.characters ?? payload; // 兼容旧格式
 
                     // 恢复用户资料 localStorage
-                    if (payload.userName != null) localStorage.setItem('kokoro_user_name', payload.userName);
-                    if (payload.userPersona != null) localStorage.setItem('kokoro_user_persona', payload.userPersona);
+                    if (payload.userName != null) {
+                        localStorage.setItem('kokoro_user_name', payload.userName);
+                        await setUserName(payload.userName);
+                    }
+                    if (payload.userPersona != null) {
+                        localStorage.setItem('kokoro_user_persona', payload.userPersona);
+                        await setUserPersona(payload.userPersona);
+                    }
                     if (payload.userLanguage != null) localStorage.setItem('kokoro_user_language', payload.userLanguage);
                     if (payload.responseLanguage != null) localStorage.setItem('kokoro_response_language', payload.responseLanguage);
                     if (payload.voiceInterrupt != null) localStorage.setItem('kokoro_voice_interrupt', payload.voiceInterrupt);
@@ -245,6 +262,18 @@ export const BackupTab: React.FC = () => {
                 target_character_id: targetCharacterId,
             });
             console.log('[Backup] Phase 2 result:', result);
+
+            // The characters payload is sourced from localStorage at export time and is
+            // the most authoritative copy for the user profile fields. Re-apply it after
+            // config import so a stale user_profile.json inside the backup cannot wipe it.
+            if (payload?.userName != null) {
+                localStorage.setItem('kokoro_user_name', payload.userName);
+                await setUserName(payload.userName);
+            }
+            if (payload?.userPersona != null) {
+                localStorage.setItem('kokoro_user_persona', payload.userPersona);
+                await setUserPersona(payload.userPersona);
+            }
 
             const debugInfo = [
                 `oldActiveId: ${payload?.activeCharacterId ?? 'n/a'}`,

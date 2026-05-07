@@ -28,6 +28,7 @@ const CONFIG_FILES: &[&str] = &[
     "emotion_state.json",
     "context_settings.json",
     "current_conversation_id.json",
+    "user_profile.json",
 ];
 
 // ── Types ────────────────────────────────────────────

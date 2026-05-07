@@ -33,6 +33,8 @@ CLAUDE.md
 # Rust
 src-tauri/target/
 **/target/
+target-codex-*/
+src-tauri/target-codex-*/
 **/*.rs.bk
 
 # Database

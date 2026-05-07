@@ -104,12 +104,25 @@ export async function setUserName(name: string): Promise<void> {
     return invoke("set_user_name", { name });
 }
 
+export async function setUserPersona(persona: string): Promise<void> {
+    return invoke("set_user_persona", { persona });
+}
+
 export async function setResponseLanguage(language: string): Promise<void> {
     return invoke("set_response_language", { language });
 }
 
 export async function setUserLanguage(language: string): Promise<void> {
     return invoke("set_user_language", { language });
+}
+
+export interface UserProfileSettings {
+    user_name: string;
+    user_persona: string;
+}
+
+export async function getUserProfileSettings(): Promise<UserProfileSettings | null> {
+    return invoke<UserProfileSettings | null>("get_user_profile_settings");
 }
 
 export async function setJailbreakPrompt(prompt: string): Promise<void> {

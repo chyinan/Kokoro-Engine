@@ -4,12 +4,68 @@ use crate::ai::context::AIOrchestrator;
 use crate::error::KokoroError;
 use crate::llm::messages::{system_message, user_text_message};
 use crate::llm::provider::{build_openai_client, create_chat};
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 pub use crate::config::MemoryUpgradeConfig;
 
 fn memory_upgrade_config_path() -> std::path::PathBuf {
     crate::ai::memory::memory_upgrade_config_path()
+}
+
+const USER_PROFILE_SETTINGS_FILE: &str = "user_profile.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UserProfileSettings {
+    pub user_name: String,
+    pub user_persona: String,
+}
+
+impl Default for UserProfileSettings {
+    fn default() -> Self {
+        Self {
+            user_name: "User".to_string(),
+            user_persona: String::new(),
+        }
+    }
+}
+
+fn app_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, KokoroError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| KokoroError::Internal(format!("Failed to resolve app data dir: {}", e)))
+}
+
+fn user_profile_settings_path(app_data: &std::path::Path) -> std::path::PathBuf {
+    app_data.join(USER_PROFILE_SETTINGS_FILE)
+}
+
+pub fn load_user_profile_settings_from_app_data(
+    app_data: &std::path::Path,
+) -> Option<UserProfileSettings> {
+    let path = user_profile_settings_path(app_data);
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn save_user_profile_settings_to_app_data(
+    app_data: &std::path::Path,
+    settings: &UserProfileSettings,
+) -> Result<(), KokoroError> {
+    std::fs::create_dir_all(app_data).map_err(KokoroError::from)?;
+    let path = user_profile_settings_path(app_data);
+    let json = serde_json::to_string_pretty(settings)
+        .map_err(|e| KokoroError::Config(format!("Serialize error: {}", e)))?;
+    std::fs::write(path, json).map_err(KokoroError::from)
+}
+
+fn update_user_profile_settings<F>(app: &AppHandle, update: F) -> Result<(), KokoroError>
+where
+    F: FnOnce(&mut UserProfileSettings),
+{
+    let app_data = app_data_dir(app)?;
+    let mut settings = load_user_profile_settings_from_app_data(&app_data).unwrap_or_default();
+    update(&mut settings);
+    save_user_profile_settings_to_app_data(&app_data, &settings)
 }
 
 #[tauri::command]
@@ -123,11 +179,31 @@ pub async fn set_active_character_id(
 }
 
 #[tauri::command]
+pub async fn get_user_profile_settings(
+    app: AppHandle,
+) -> Result<Option<UserProfileSettings>, KokoroError> {
+    let app_data = app_data_dir(&app)?;
+    Ok(load_user_profile_settings_from_app_data(&app_data))
+}
+
+#[tauri::command]
 pub async fn set_user_name(
     name: String,
+    app: AppHandle,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
-    state.set_user_name(name).await;
+    state.set_user_name(name.clone()).await;
+    update_user_profile_settings(&app, |settings| {
+        settings.user_name = name.clone();
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_user_persona(persona: String, app: AppHandle) -> Result<(), KokoroError> {
+    update_user_profile_settings(&app, |settings| {
+        settings.user_persona = persona;
+    })?;
     Ok(())
 }
 
