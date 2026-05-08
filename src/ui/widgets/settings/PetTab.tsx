@@ -58,6 +58,17 @@ export default function PetTab() {
     const [recordingDisplay, setRecordingDisplay] = useState("");
     const { t } = useTranslation();
 
+    const persistConfig = useCallback(async (nextConfig: PetConfig, showSavedState = false) => {
+        setConfig(nextConfig);
+        await invoke("save_pet_config", { config: nextConfig }).catch(console.error);
+        await emit("pet-config-updated", nextConfig).catch(console.error);
+
+        if (showSavedState) {
+            setSaved(true);
+            setTimeout(() => setSaved(false), 2000);
+        }
+    }, []);
+
     const startRecording = useCallback(() => {
         setRecording(true);
         setRecordingDisplay(t("settings.pet.record_prompt"));
@@ -77,13 +88,13 @@ export default function PetTab() {
             for (const k of pressedKeys) {
                 if (!modifiers.has(k)) parts.push(k.length === 1 ? k.toUpperCase() : k);
             }
-            setRecordingDisplay(parts.join(" + ") || "请按下快捷键...");
+            setRecordingDisplay(parts.join(" + ") || t("settings.pet.record_prompt"));
         };
 
         const onKeyUp = () => {
             const tauri = keysToTauri(pressedKeys);
             if (tauri) {
-                setConfig(c => ({ ...c, shortcut: tauri }));
+                void persistConfig({ ...config, shortcut: tauri }, true);
             }
             setRecording(false);
             document.removeEventListener("keydown", onKeyDown);
@@ -92,7 +103,7 @@ export default function PetTab() {
 
         document.addEventListener("keydown", onKeyDown);
         document.addEventListener("keyup", onKeyUp);
-    }, []);
+    }, [config, persistConfig, t]);
 
     useEffect(() => {
         invoke<PetConfig>("get_pet_config").then(setConfig).catch(console.error);
@@ -112,17 +123,6 @@ export default function PetTab() {
         };
     }, []);
 
-    const persistConfig = useCallback(async (nextConfig: PetConfig, showSavedState = false) => {
-        setConfig(nextConfig);
-        await invoke("save_pet_config", { config: nextConfig }).catch(console.error);
-        await emit("pet-config-updated", nextConfig).catch(console.error);
-
-        if (showSavedState) {
-            setSaved(true);
-            setTimeout(() => setSaved(false), 2000);
-        }
-    }, []);
-
     const handleToggle = async (enabled: boolean) => {
         const newCfg = { ...config, enabled };
         await persistConfig(newCfg);
@@ -138,10 +138,6 @@ export default function PetTab() {
             console.log("[PetTab] Calling hide_pet_window...");
             await invoke("hide_pet_window").catch(console.error);
         }
-    };
-
-    const handleSave = async () => {
-        await persistConfig(config, true);
     };
 
     const handleResetPosition = async () => {
@@ -207,7 +203,10 @@ export default function PetTab() {
                         flex: 1, ...inputStyle,
                         display: "flex", alignItems: "center",
                         color: recording ? "var(--color-accent)" : "var(--color-text-primary)",
-                        fontFamily: "monospace",
+                        fontFamily: "var(--font-mono)",
+                        fontSize: "12px",
+                        fontWeight: 500,
+                        letterSpacing: 0,
                         minHeight: "36px",
                     }}>
                         {recording ? recordingDisplay : shortcutToDisplay(config.shortcut)}
@@ -228,7 +227,7 @@ export default function PetTab() {
                     </button>
                 </div>
                 <div style={{ fontSize: "11px", color: "var(--color-text-muted)", marginTop: "4px" }}>
-                    {t("settings.pet.shortcut_hint")}
+                    {saved ? t("settings.pet.saved") : t("settings.pet.shortcut_hint")}
                 </div>
             </div>
 
@@ -247,18 +246,6 @@ export default function PetTab() {
                 </button>
             </div>
 
-            {/* Save */}
-            <button
-                onClick={handleSave}
-                style={{
-                    padding: "10px", borderRadius: "8px", border: "none",
-                    background: saved ? "var(--color-success, #4caf50)" : "var(--color-accent)",
-                    color: "#000", fontSize: "13px", fontWeight: 600, cursor: "pointer",
-                    transition: "background 0.2s",
-                }}
-            >
-                {saved ? t("settings.pet.saved") : t("settings.pet.save")}
-            </button>
         </div>
     );
 }

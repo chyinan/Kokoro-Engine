@@ -568,7 +568,7 @@
             "latest": {
                 "last": "最近：{{status}}",
                 "auto_applied": "自动处理：{{count}}",
-                "proposals": "待审提案：{{count}}"
+                "proposals": "本次提案：{{count}}"
             },
             "empty_proposals": "暂无待审梦境提案。",
             "recent_jobs": "最近任务",

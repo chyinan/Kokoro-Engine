@@ -568,7 +568,7 @@
             "latest": {
                 "last": "最新: {{status}}",
                 "auto_applied": "自動適用: {{count}}",
-                "proposals": "提案: {{count}}"
+                "proposals": "生成提案: {{count}}"
             },
             "empty_proposals": "保留中の夢提案はありません。",
             "recent_jobs": "最近のジョブ",

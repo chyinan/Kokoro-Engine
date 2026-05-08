@@ -568,7 +568,7 @@
             "latest": {
                 "last": "최근: {{status}}",
                 "auto_applied": "자동 적용: {{count}}",
-                "proposals": "제안: {{count}}"
+                "proposals": "생성된 제안: {{count}}"
             },
             "empty_proposals": "대기 중인 꿈 제안이 없습니다.",
             "recent_jobs": "최근 작업",

@@ -23,6 +23,34 @@ interface Link {
     strength: number;
 }
 
+const MIN_CANVAS_WIDTH = 320;
+const MIN_CANVAS_HEIGHT = 320;
+
+function clamp(value: number, min: number, max: number): number {
+    if (max < min) return min;
+    return Math.max(min, Math.min(max, value));
+}
+
+function finiteOr(value: number, fallback: number): number {
+    return Number.isFinite(value) ? value : fallback;
+}
+
+function normalizedVector(dx: number, dy: number, fallbackAngle: number) {
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (!Number.isFinite(dist) || dist < 0.001) {
+        return {
+            nx: Math.cos(fallbackAngle),
+            ny: Math.sin(fallbackAngle),
+            dist: 0.001,
+        };
+    }
+    return {
+        nx: dx / dist,
+        ny: dy / dist,
+        dist,
+    };
+}
+
 // Common stopwords to filter out
 const STOPWORDS = new Set([
     "the", "be", "to", "of", "and", "a", "in", "that", "have", "i", "it", "for", "not", "on", "with", "he", "as", "you", "do", "at",
@@ -90,21 +118,49 @@ function extractKeywords(text: string): string[] {
 export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
+    const renderedNodesRef = useRef<Node[]>([]);
+    const hoveredNodeIdRef = useRef<string | null>(null);
     const [hoveredNode, setHoveredNode] = useState<Node | null>(null);
     const [canvasSize, setCanvasSize] = useState({ width: 600, height: 400 });
+
+    useEffect(() => {
+        hoveredNodeIdRef.current = hoveredNode?.id ?? null;
+    }, [hoveredNode?.id]);
 
     // 响应式 canvas 尺寸
     useEffect(() => {
         const container = containerRef.current;
         if (!container) return;
+
+        const measure = () => {
+            const rect = container.getBoundingClientRect();
+            const width = Math.max(Math.floor(rect.width), MIN_CANVAS_WIDTH);
+            const height = Math.max(Math.floor(rect.height), MIN_CANVAS_HEIGHT);
+            setCanvasSize((prev) => (
+                prev.width === width && prev.height === height
+                    ? prev
+                    : { width, height }
+            ));
+        };
+
+        measure();
+        const frameId = requestAnimationFrame(measure);
+
         const ro = new ResizeObserver(entries => {
             const { width, height } = entries[0].contentRect;
-            if (width > 0 && height > 0) {
-                setCanvasSize({ width: Math.floor(width), height: Math.floor(height) });
-            }
+            const nextWidth = Math.max(Math.floor(width), MIN_CANVAS_WIDTH);
+            const nextHeight = Math.max(Math.floor(height), MIN_CANVAS_HEIGHT);
+            setCanvasSize((prev) => (
+                prev.width === nextWidth && prev.height === nextHeight
+                    ? prev
+                    : { width: nextWidth, height: nextHeight }
+            ));
         });
         ro.observe(container);
-        return () => ro.disconnect();
+        return () => {
+            cancelAnimationFrame(frameId);
+            ro.disconnect();
+        };
     }, []);
 
     // Process data into graph
@@ -141,15 +197,19 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
 
         const topSet = new Set(topKeywords);
 
-        const nodes: Node[] = topKeywords.map(k => ({
-            id: k,
-            count: keywordCounts[k],
-            x: Math.random() * 800,
-            y: Math.random() * 600,
-            vx: 0,
-            vy: 0,
-            radius: Math.min(Math.max(keywordCounts[k] * 3, 5), 25)
-        }));
+        const nodes: Node[] = topKeywords.map((k, index) => {
+            const angle = (index / Math.max(topKeywords.length, 1)) * Math.PI * 2;
+            const ring = 120 + (index % 5) * 12;
+            return {
+                id: k,
+                count: keywordCounts[k],
+                x: 300 + Math.cos(angle) * ring,
+                y: 200 + Math.sin(angle) * ring,
+                vx: 0,
+                vy: 0,
+                radius: Math.min(Math.max(keywordCounts[k] * 3, 5), 25),
+            };
+        });
 
         const links: Link[] = [];
         Object.entries(cooccurrences).forEach(([key, count]) => {
@@ -173,48 +233,68 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
         const width = canvasSize.width;
         const height = canvasSize.height;
         const center = { x: width / 2, y: height / 2 };
+        const simulationNodes = nodes.map((node, index) => {
+            const angle = (index / Math.max(nodes.length, 1)) * Math.PI * 2;
+            const ring = Math.min(width, height) * 0.24 + (index % 4) * 14;
+            return {
+                ...node,
+                x: clamp(center.x + Math.cos(angle) * ring, node.radius, width - node.radius),
+                y: clamp(center.y + Math.sin(angle) * ring, node.radius, height - node.radius - 16),
+                vx: 0,
+                vy: 0,
+            };
+        });
 
         const tick = () => {
             // Forces
-            nodes.forEach(node => {
+            simulationNodes.forEach((node, nodeIndex) => {
+                node.x = finiteOr(node.x, center.x);
+                node.y = finiteOr(node.y, center.y);
+                node.vx = finiteOr(node.vx, 0);
+                node.vy = finiteOr(node.vy, 0);
+
                 // 1. Center gravity
                 node.vx += (center.x - node.x) * 0.005;
                 node.vy += (center.y - node.y) * 0.005;
 
                 // 2. Repulsion — 考虑节点半径，防止重叠
-                nodes.forEach(other => {
+                simulationNodes.forEach((other, otherIndex) => {
                     if (node === other) return;
                     const dx = node.x - other.x;
                     const dy = node.y - other.y;
-                    const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+                    const { nx, ny, dist } = normalizedVector(
+                        dx,
+                        dy,
+                        (nodeIndex - otherIndex || 1) * 1.618,
+                    );
                     const minDist = node.radius + other.radius + 20;
                     if (dist < minDist) {
                         // 在最小距离内施加强排斥
                         const force = (minDist - dist) * 0.3;
-                        node.vx += (dx / dist) * force;
-                        node.vy += (dy / dist) * force;
+                        node.vx += nx * force;
+                        node.vy += ny * force;
                     } else {
                         // 远距离弱排斥
                         const force = 800 / (dist * dist);
-                        node.vx += (dx / dist) * force;
-                        node.vy += (dy / dist) * force;
+                        node.vx += nx * force;
+                        node.vy += ny * force;
                     }
                 });
             });
 
             // 3. Link attraction
-            links.forEach(link => {
-                const s = nodes.find(n => n.id === link.source);
-                const t = nodes.find(n => n.id === link.target);
+            links.forEach((link, linkIndex) => {
+                const s = simulationNodes.find(n => n.id === link.source);
+                const t = simulationNodes.find(n => n.id === link.target);
                 if (!s || !t) return;
 
                 const dx = t.x - s.x;
                 const dy = t.y - s.y;
-                const dist = Math.sqrt(dx * dx + dy * dy);
+                const { nx, ny, dist } = normalizedVector(dx, dy, linkIndex + 1);
                 const force = (dist - 150) * 0.008; // Rest length 150
 
-                const fx = (dx / dist) * force;
-                const fy = (dy / dist) * force;
+                const fx = nx * force;
+                const fy = ny * force;
 
                 s.vx += fx;
                 s.vy += fy;
@@ -223,7 +303,20 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
             });
 
             // Apply velocity & damping
-            nodes.forEach(node => {
+            simulationNodes.forEach((node, index) => {
+                if (
+                    !Number.isFinite(node.x)
+                    || !Number.isFinite(node.y)
+                    || !Number.isFinite(node.vx)
+                    || !Number.isFinite(node.vy)
+                ) {
+                    const angle = (index / Math.max(simulationNodes.length, 1)) * Math.PI * 2;
+                    node.x = center.x + Math.cos(angle) * Math.min(width, height) * 0.2;
+                    node.y = center.y + Math.sin(angle) * Math.min(width, height) * 0.2;
+                    node.vx = 0;
+                    node.vy = 0;
+                }
+
                 node.vx *= 0.9;
                 node.vy *= 0.9;
                 node.x += node.vx;
@@ -237,13 +330,15 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
 
             // Render
             ctx.clearRect(0, 0, width, height);
+            renderedNodesRef.current = simulationNodes;
+            const hoveredNodeId = hoveredNodeIdRef.current;
 
             // Draw links
             ctx.strokeStyle = "rgba(100, 116, 139, 0.2)";
             ctx.lineWidth = 1;
             links.forEach(link => {
-                const s = nodes.find(n => n.id === link.source);
-                const t = nodes.find(n => n.id === link.target);
+                const s = simulationNodes.find(n => n.id === link.source);
+                const t = simulationNodes.find(n => n.id === link.target);
                 if (s && t) {
                     ctx.beginPath();
                     ctx.moveTo(s.x, s.y);
@@ -253,15 +348,15 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
             });
 
             // Draw nodes
-            nodes.forEach(node => {
+            simulationNodes.forEach(node => {
                 ctx.beginPath();
                 ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
-                ctx.fillStyle = hoveredNode === node ? "#3b82f6" : "rgba(59, 130, 246, 0.6)"; // Blue-500
+                ctx.fillStyle = hoveredNodeId === node.id ? "#3b82f6" : "rgba(59, 130, 246, 0.6)"; // Blue-500
                 ctx.fill();
 
                 // Text
                 ctx.fillStyle = "#cbd5e1"; // Slate-300
-                ctx.font = hoveredNode === node ? "bold 12px Inter" : "10px Inter";
+                ctx.font = hoveredNodeId === node.id ? "bold 12px Inter" : "10px Inter";
                 ctx.textAlign = "center";
                 ctx.fillText(node.id, node.x, node.y + node.radius + 12);
             });
@@ -272,7 +367,7 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
         tick();
 
         return () => cancelAnimationFrame(animationId);
-    }, [nodes, links, hoveredNode, canvasSize]);
+    }, [nodes, links, canvasSize]);
 
     // Interaction handlers
     const handleMouseMove = (e: ReactMouseEvent) => {
@@ -282,7 +377,8 @@ export function MemoryGraph({ memories, onSelectKeyword }: MemoryGraphProps) {
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;
 
-        const found = nodes.find(n => {
+        const renderedNodes = renderedNodesRef.current.length > 0 ? renderedNodesRef.current : nodes;
+        const found = renderedNodes.find(n => {
             const dx = n.x - x;
             const dy = n.y - y;
             return dx * dx + dy * dy < (n.radius + 5) * (n.radius + 5);

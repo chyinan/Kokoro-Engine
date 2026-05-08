@@ -568,7 +568,7 @@
             "latest": {
                 "last": "Last: {{status}}",
                 "auto_applied": "Auto applied: {{count}}",
-                "proposals": "Proposals: {{count}}"
+                "proposals": "Generated proposals: {{count}}"
             },
             "empty_proposals": "No pending dream proposals.",
             "recent_jobs": "Recent jobs",

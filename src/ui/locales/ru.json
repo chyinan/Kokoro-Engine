@@ -568,7 +568,7 @@
             "latest": {
                 "last": "Последний: {{status}}",
                 "auto_applied": "Авто применено: {{count}}",
-                "proposals": "Предложения: {{count}}"
+                "proposals": "Создано предложений: {{count}}"
             },
             "empty_proposals": "Нет ожидающих предложений сна.",
             "recent_jobs": "Последние задания",
