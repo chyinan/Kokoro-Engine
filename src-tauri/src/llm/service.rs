@@ -201,8 +201,7 @@ pub async fn test_config_connection(
 
     for target in test_targets {
         let provider = try_build_from_provider_config(&target.provider_config)?;
-        let response = provider
-            .chat(vec![user_text_message(CONNECTION_TEST_PROMPT)], None);
+        let response = provider.chat(vec![user_text_message(CONNECTION_TEST_PROMPT)], None);
         let response = tokio::time::timeout(Duration::from_secs(15), response)
             .await
             .map_err(|_| {
@@ -328,7 +327,9 @@ fn build_connection_test_targets(
     config: &LlmConfig,
 ) -> Result<Vec<ConnectionTestTarget>, KokoroError> {
     let active_provider_id = resolve_active_provider_id(config)
-        .ok_or_else(|| KokoroError::Config("No enabled LLM provider available to test".to_string()))?
+        .ok_or_else(|| {
+            KokoroError::Config("No enabled LLM provider available to test".to_string())
+        })?
         .to_string();
     let active_provider_config = find_enabled_provider_config(config, &active_provider_id)?;
 
@@ -350,7 +351,8 @@ fn build_connection_test_targets(
         .cloned()
         .unwrap_or_else(|| active_provider_id.clone());
 
-    let mut system_provider_config = find_enabled_provider_config(config, &resolved_system_provider_id)?;
+    let mut system_provider_config =
+        find_enabled_provider_config(config, &resolved_system_provider_id)?;
     if let Some(system_model) = normalized_model_value(config.system_model.clone()) {
         system_provider_config.model = Some(system_model);
     }
@@ -1047,7 +1049,10 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[1].role, ConnectionTestRole::System);
         assert_eq!(targets[1].provider_id, "system-provider");
-        assert_eq!(targets[1].provider_config.model.as_deref(), Some("gpt-4.1-mini"));
+        assert_eq!(
+            targets[1].provider_config.model.as_deref(),
+            Some("gpt-4.1-mini")
+        );
     }
 
     #[test]
@@ -1060,7 +1065,10 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[1].role, ConnectionTestRole::System);
         assert_eq!(targets[1].provider_id, "active-provider");
-        assert_eq!(targets[1].provider_config.model.as_deref(), Some("gpt-4.1-nano"));
+        assert_eq!(
+            targets[1].provider_config.model.as_deref(),
+            Some("gpt-4.1-nano")
+        );
     }
 
     fn make_service_with_active_and_system_provider() -> LlmService {
