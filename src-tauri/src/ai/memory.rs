@@ -2324,7 +2324,8 @@ impl MemoryManager {
         } else {
             "ephemeral"
         };
-        let merged_content = upsert.metadata
+        let merged_content = upsert
+            .metadata
             .canonical_content
             .as_deref()
             .unwrap_or(upsert.content)
@@ -3575,7 +3576,8 @@ impl MemoryManager {
                 proposed_content: Some(&merged_content),
                 proposed_memory_type: Some(&keeper.memory_type),
                 proposed_entity_key: keeper.entity_key.as_deref(),
-                impact: "Auto-merged duplicate active memories; source rows were marked superseded.",
+                impact:
+                    "Auto-merged duplicate active memories; source rows were marked superseded.",
             })
             .await?;
 
@@ -3610,7 +3612,8 @@ impl MemoryManager {
             status: "pending",
             confidence: f64::from(similarity),
             title: "Review similar memories",
-            rationale: "These memories are semantically similar but below the automatic merge threshold.",
+            rationale:
+                "These memories are semantically similar but below the automatic merge threshold.",
             source_memory_ids: &[a.id, b.id],
             target_memory_id: Some(keeper.id),
             proposed_content: Some(&keeper.content),
@@ -3941,7 +3944,8 @@ impl MemoryManager {
                     entries: group,
                     proposal_type: "entity_slot_merge",
                     title: "Merged duplicate slot memories",
-                    rationale: "Dream REM found multiple active memories for the same structured slot.",
+                    rationale:
+                        "Dream REM found multiple active memories for the same structured slot.",
                     confidence: DREAM_CONFIDENCE_AUTO_APPLY,
                     proposed_content_override: None,
                     preferred_keeper_id: None,

@@ -679,7 +679,7 @@
                 "label": "VLM 공급자",
                 "ollama": "Ollama (로컬 — 권장)",
                 "llama_cpp": "llama.cpp (로컬 VLM)",
-                "openai": "OpenAI",
+                "openai": "OpenAI 호환",
                 "anthropic": "Anthropic 호환",
                 "llm": "현재 LLM 사용 (멀티모달)",
                 "llm_note": "「API」탭에서 설정한 LLM 공급자에 직접 스크린샷을 전송합니다. 별도의 VLM 설정이 필요 없습니다. 사용 중인 모델이 이미지 입력을 지원하는지 확인하세요 (예: GPT-4o, Claude 3, Gemini 등)."

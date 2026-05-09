@@ -679,7 +679,7 @@
                 "label": "VLM 提供商",
                 "ollama": "Ollama (本地 - 推荐)",
                 "llama_cpp": "llama.cpp (本地 VLM)",
-                "openai": "OpenAI",
+                "openai": "OpenAI 兼容",
                 "anthropic": "Anthropic 兼容",
                 "llm": "使用当前大模型 (多模态)",
                 "llm_note": "将直接使用「API」页面配置的大模型服务商处理截图，无需单独配置 VLM。请确保所选模型支持图像输入（如 GPT-4o、Claude 3、Gemini 等）。"

@@ -679,7 +679,7 @@
                 "label": "VLM Provider",
                 "ollama": "Ollama (Local — Recommended)",
                 "llama_cpp": "llama.cpp (Local VLM)",
-                "openai": "OpenAI",
+                "openai": "OpenAI-Compatible",
                 "anthropic": "Anthropic-Compatible",
                 "llm": "Use Active LLM (Multimodal)",
                 "llm_note": "Screenshots will be sent directly to the LLM provider configured in the API tab — no separate VLM setup needed. Make sure your active model supports image input (e.g. GPT-4o, Claude 3, Gemini)."
