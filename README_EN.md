@@ -103,7 +103,7 @@ For more Nix usage, see [docs/nix.md](docs/nix.md).
 
 ### AI brain
 
-- Supports Ollama and protocol API interfaces compatible with OpenAI and Anthropic.
+- Supports Ollama, llama.cpp, and protocol API interfaces compatible with OpenAI and Anthropic.
 - Supports multimodal input, context recall, long-term memory, and emotional state continuity.
 
 ### Voice stack
@@ -159,7 +159,7 @@ flowchart LR
   end
 
   subgraph EXT["External Services"]
-    EXT_LLM["OpenAI-Compatible / Ollama"]
+    EXT_LLM["OpenAI-Compatible / Ollama / llama.cpp"]
     EXT_TTS["TTS Providers"]
     EXT_MCP["MCP Servers"]
     EXT_TG["Telegram"]

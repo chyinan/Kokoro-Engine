@@ -103,7 +103,7 @@ Nix の詳細は [docs/nix.md](docs/nix.md) を参照してください。
 
 ### AI ブレイン
 
-- Ollama と OpenAI / Anthropic 互換プロトコルAPIインターフェースをサポート。
+- Ollama、llama.cpp と OpenAI / Anthropic 互換プロトコルAPIインターフェースをサポート。
 - マルチモーダル入力、文脈回想、長期記憶、感情状態の継続。
 
 ### 音声スタック
@@ -159,7 +159,7 @@ flowchart LR
   end
 
   subgraph EXT["External Services"]
-    EXT_LLM["OpenAI-Compatible / Ollama"]
+    EXT_LLM["OpenAI-Compatible / Ollama / llama.cpp"]
     EXT_TTS["TTS Providers"]
     EXT_MCP["MCP Servers"]
     EXT_TG["Telegram"]

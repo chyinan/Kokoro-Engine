@@ -103,7 +103,7 @@ Nix 상세 내용은 [docs/nix.md](docs/nix.md)를 참고하세요.
 
 ### AI 브레인
 
-- Ollama 및 OpenAI / Anthropic 호환 프로토콜 API 인터페이스 지원.
+- Ollama, llama.cpp 및 OpenAI / Anthropic 호환 프로토콜 API 인터페이스 지원.
 - 멀티모달 입력, 컨텍스트 회수, 장기 기억, 감정 상태 연속성.
 
 ### 음성 스택
@@ -159,7 +159,7 @@ flowchart LR
   end
 
   subgraph EXT["External Services"]
-    EXT_LLM["OpenAI-Compatible / Ollama"]
+    EXT_LLM["OpenAI-Compatible / Ollama / llama.cpp"]
     EXT_TTS["TTS Providers"]
     EXT_MCP["MCP Servers"]
     EXT_TG["Telegram"]

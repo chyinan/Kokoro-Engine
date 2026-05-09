@@ -104,7 +104,7 @@ npm run tauri dev
 
 ### 多维架构
 
-- 支持 Ollama 与 OpenAI 、Anthropic 兼容协议API接口
+- 支持 Ollama 、llama.cpp 与 OpenAI 、Anthropic 兼容协议API接口
 - 支持多模态输入、上下文回溯、长期记忆与情感状态
 
 ### 音频交互
@@ -160,7 +160,7 @@ flowchart LR
   end
 
   subgraph EXT["External Services"]
-    EXT_LLM["OpenAI-Compatible / Ollama"]
+    EXT_LLM["OpenAI-Compatible / Ollama / llama.cpp"]
     EXT_TTS["TTS Providers"]
     EXT_MCP["MCP Servers"]
     EXT_TG["Telegram"]

@@ -103,7 +103,7 @@ npm run tauri dev
 
 ### AI-мозг
 
-- Поддержка Ollama и протокольных API-интерфейсов, совместимых с OpenAI и Anthropic.
+- Поддержка Ollama, llama.cpp и протокольных API-интерфейсов, совместимых с OpenAI и Anthropic.
 - Мультимодальный вход, возврат контекста, долгосрочная память и непрерывность эмоционального состояния.
 
 ### Голосовой стек
@@ -159,7 +159,7 @@ flowchart LR
   end
 
   subgraph EXT["External Services"]
-    EXT_LLM["OpenAI-Compatible / Ollama"]
+    EXT_LLM["OpenAI-Compatible / Ollama / llama.cpp"]
     EXT_TTS["TTS Providers"]
     EXT_MCP["MCP Servers"]
     EXT_TG["Telegram"]
