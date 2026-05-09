@@ -453,31 +453,37 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
 
             {/* ── Proactive Messages (Idle Auto-Talk) ── */}
             <div>
-                <label className={labelClasses}>
-                    <MessageCircle size={12} strokeWidth={2} className="inline-block mr-1.5 -mt-0.5" />
-                    {t("settings.persona.proactive.label")}
-                </label>
-                <p className="text-[10px] text-[var(--color-text-muted)] mb-3 -mt-1">
-                    {t("settings.persona.proactive.desc")}
-                </p>
-                <button
-                    onClick={() => {
-                        const next = !proactiveEnabled;
-                        setProactiveEnabledState(next);
-                        setProactiveEnabled(next).catch(e => console.error("[CharacterManager] Failed to set proactive:", e));
-                    }}
-                    className={clsx(
-                        "relative inline-flex h-6 w-11 items-center rounded-full transition-colors",
-                        proactiveEnabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
-                    )}
-                >
-                    <span
+                <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                        <label className={labelClasses}>
+                            <MessageCircle size={12} strokeWidth={2} className="inline-block mr-1.5 -mt-0.5" />
+                            {t("settings.persona.proactive.label")}
+                        </label>
+                        <p className="text-[10px] text-[var(--color-text-muted)] -mt-1">
+                            {t("settings.persona.proactive.desc")}
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        aria-pressed={proactiveEnabled}
+                        onClick={() => {
+                            const next = !proactiveEnabled;
+                            setProactiveEnabledState(next);
+                            setProactiveEnabled(next).catch(e => console.error("[CharacterManager] Failed to set proactive:", e));
+                        }}
                         className={clsx(
-                            "inline-block h-4 w-4 rounded-full bg-white transition-transform",
-                            proactiveEnabled ? "translate-x-6" : "translate-x-1"
+                            "relative inline-flex h-6 w-11 items-center rounded-full transition-colors shrink-0",
+                            proactiveEnabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
                         )}
-                    />
-                </button>
+                    >
+                        <span
+                            className={clsx(
+                                "inline-block h-4 w-4 rounded-full bg-white transition-transform",
+                                proactiveEnabled ? "translate-x-6" : "translate-x-1"
+                            )}
+                        />
+                    </button>
+                </div>
             </div>
 
             {/* ── Divider ── */}

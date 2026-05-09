@@ -320,120 +320,6 @@ export default function McpTab({ initialServers, visionEnabled, isActive = false
 
     return (
         <div className="space-y-5">
-            <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-2)]/80 p-4 space-y-4">
-                <div className="flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-1)]/80 px-3 py-3">
-                    <div className="min-w-0">
-                        <div className="text-sm font-heading font-semibold text-[var(--color-text-primary)]">
-                            {t("settings.mcp.native_loop.title")}
-                        </div>
-                        <div className="mt-1 text-xs text-[var(--color-text-muted)]">
-                            {t("settings.mcp.native_loop.desc")}
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-xs text-[var(--color-text-secondary)]">{t("settings.mcp.native_loop.max_rounds")}</span>
-                        <input
-                            type="number"
-                            min={1}
-                            max={20}
-                            value={toolSettings.max_tool_rounds}
-                            onChange={(e) => { void handleMaxToolRoundsChange(e.target.value); }}
-                            className="w-20 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
-                        />
-                    </div>
-                </div>
-
-                <div className="flex items-center justify-between gap-4">
-                    <div>
-                        <div className="text-sm font-heading font-semibold text-[var(--color-text-primary)]">
-                            {t("settings.mcp.builtin_tools.title")}
-                        </div>
-                        <div className="text-xs text-[var(--color-text-muted)]">
-                            {t("settings.mcp.builtin_tools.desc")}
-                        </div>
-                    </div>
-                    <div className="text-[11px] uppercase tracking-wider text-[var(--color-text-muted)]">
-                        {savingToolSettings ? t("settings.mcp.builtin_tools.saving") : t("settings.mcp.builtin_tools.saved_auto")}
-                    </div>
-                </div>
-
-                <div className="space-y-4">
-                    {buildSortedToolGroups(tools).map((group) => (
-                        <div key={group.key} className="space-y-2">
-                            <div>
-                                <div className="text-xs font-heading font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
-                                    {getToolGroupTitle(group, t)}
-                                </div>
-                                {getToolGroupDescription(group, t) && (
-                                    <div className="text-[11px] text-[var(--color-text-muted)]">
-                                        {getToolGroupDescription(group, t)}
-                                    </div>
-                                )}
-                            </div>
-
-                            {group.tools.map((tool) => {
-                                const enabled = getToolEnabled(tool.id, toolSettings.enabled_tools);
-                                const sourceLabel = getToolSourceLabel(tool, t);
-                                const riskTagsLabel = getToolRiskTagsLabel(tool, t);
-                                const permissionLabel = getToolPermissionLevelLabel(tool, t);
-                                const displayDescription = getToolDisplayDescription(tool, t);
-                                return (
-                                    <div
-                                        key={tool.id}
-                                        className={getToolCardContainerClass()}
-                                    >
-                                        <div className="flex items-start justify-between gap-4">
-                                            <div className="min-w-0">
-                                                <div className="flex items-center gap-2 flex-wrap">
-                                                    <div className={getToolCardHeaderTitleClass()}>
-                                                        {tool.name}
-                                                    </div>
-                                                    <span className={clsx(getToolBadgeClass(), getToolSourceBadgeClass(tool))}>
-                                                        {sourceLabel}
-                                                    </span>
-                                                    <span className={clsx(getToolBadgeClass(), getToolPermissionBadgeClass(tool))}>
-                                                        {permissionLabel}
-                                                    </span>
-                                                </div>
-                                                <div className={getToolMetaTextClass()}>
-                                                    {tool.id}
-                                                </div>
-                                                <div className={getToolDescriptionClass()}>
-                                                    {displayDescription}
-                                                </div>
-                                                <div className={getToolBadgeRowClass()}>
-                                                    <span className={clsx(getToolBadgeClass(), getToolRiskBadgeClass())}>
-                                                        {t('settings.mcp.builtin_tools.risk_tags_label', { defaultValue: '风险' })}: {riskTagsLabel}
-                                                    </span>
-                                                    <span className={clsx(getToolBadgeClass(), getToolRiskBadgeClass())}>
-                                                        {t('settings.mcp.builtin_tools.permission_label', { defaultValue: '权限' })}: {permissionLabel}
-                                                    </span>
-                                                </div>
-                                            </div>
-                                            <button
-                                                onClick={() => { void handleToolToggle(tool.id, !enabled); }}
-                                                aria-checked={enabled}
-                                                aria-label={tool.id}
-                                                title={getToolToggleTitle(enabled, t)}
-                                                className={clsx(
-                                                    "w-10 h-5 rounded-full transition-colors relative shrink-0",
-                                                    getToolSwitchEnabledClass(enabled)
-                                                )}
-                                            >
-                                                <motion.div
-                                                    animate={{ x: getToolSwitchThumbX(enabled) }}
-                                                    className={getToolSwitchThumbClass()}
-                                                />
-                                            </button>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    ))}
-                </div>
-            </div>
-
             {/* Header row */}
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
@@ -692,6 +578,120 @@ export default function McpTab({ initialServers, visionEnabled, isActive = false
                     </motion.div>
                 )}
             </AnimatePresence>
+
+            <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-2)]/80 p-4 space-y-4">
+                <div className="flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-1)]/80 px-3 py-3">
+                    <div className="min-w-0">
+                        <div className="text-sm font-heading font-semibold text-[var(--color-text-primary)]">
+                            {t("settings.mcp.native_loop.title")}
+                        </div>
+                        <div className="mt-1 text-xs text-[var(--color-text-muted)]">
+                            {t("settings.mcp.native_loop.desc")}
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-xs text-[var(--color-text-secondary)]">{t("settings.mcp.native_loop.max_rounds")}</span>
+                        <input
+                            type="number"
+                            min={1}
+                            max={20}
+                            value={toolSettings.max_tool_rounds}
+                            onChange={(e) => { void handleMaxToolRoundsChange(e.target.value); }}
+                            className="w-20 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
+                        />
+                    </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-4">
+                    <div>
+                        <div className="text-sm font-heading font-semibold text-[var(--color-text-primary)]">
+                            {t("settings.mcp.builtin_tools.title")}
+                        </div>
+                        <div className="text-xs text-[var(--color-text-muted)]">
+                            {t("settings.mcp.builtin_tools.desc")}
+                        </div>
+                    </div>
+                    <div className="text-[11px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                        {savingToolSettings ? t("settings.mcp.builtin_tools.saving") : t("settings.mcp.builtin_tools.saved_auto")}
+                    </div>
+                </div>
+
+                <div className="space-y-4">
+                    {buildSortedToolGroups(tools).map((group) => (
+                        <div key={group.key} className="space-y-2">
+                            <div>
+                                <div className="text-xs font-heading font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
+                                    {getToolGroupTitle(group, t)}
+                                </div>
+                                {getToolGroupDescription(group, t) && (
+                                    <div className="text-[11px] text-[var(--color-text-muted)]">
+                                        {getToolGroupDescription(group, t)}
+                                    </div>
+                                )}
+                            </div>
+
+                            {group.tools.map((tool) => {
+                                const enabled = getToolEnabled(tool.id, toolSettings.enabled_tools);
+                                const sourceLabel = getToolSourceLabel(tool, t);
+                                const riskTagsLabel = getToolRiskTagsLabel(tool, t);
+                                const permissionLabel = getToolPermissionLevelLabel(tool, t);
+                                const displayDescription = getToolDisplayDescription(tool, t);
+                                return (
+                                    <div
+                                        key={tool.id}
+                                        className={getToolCardContainerClass()}
+                                    >
+                                        <div className="flex items-start justify-between gap-4">
+                                            <div className="min-w-0">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    <div className={getToolCardHeaderTitleClass()}>
+                                                        {tool.name}
+                                                    </div>
+                                                    <span className={clsx(getToolBadgeClass(), getToolSourceBadgeClass(tool))}>
+                                                        {sourceLabel}
+                                                    </span>
+                                                    <span className={clsx(getToolBadgeClass(), getToolPermissionBadgeClass(tool))}>
+                                                        {permissionLabel}
+                                                    </span>
+                                                </div>
+                                                <div className={getToolMetaTextClass()}>
+                                                    {tool.id}
+                                                </div>
+                                                <div className={getToolDescriptionClass()}>
+                                                    {displayDescription}
+                                                </div>
+                                                <div className={getToolBadgeRowClass()}>
+                                                    <span className={clsx(getToolBadgeClass(), getToolRiskBadgeClass())}>
+                                                        {t('settings.mcp.builtin_tools.risk_tags_label', { defaultValue: '风险' })}: {riskTagsLabel}
+                                                    </span>
+                                                    <span className={clsx(getToolBadgeClass(), getToolRiskBadgeClass())}>
+                                                        {t('settings.mcp.builtin_tools.permission_label', { defaultValue: '权限' })}: {permissionLabel}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            <button
+                                                onClick={() => { void handleToolToggle(tool.id, !enabled); }}
+                                                aria-checked={enabled}
+                                                aria-label={tool.id}
+                                                title={getToolToggleTitle(enabled, t)}
+                                                className={clsx(
+                                                    "w-10 h-5 rounded-full transition-colors relative shrink-0",
+                                                    getToolSwitchEnabledClass(enabled)
+                                                )}
+                                            >
+                                                <motion.div
+                                                    animate={{ x: getToolSwitchThumbX(enabled) }}
+                                                    className={getToolSwitchThumbClass()}
+                                                />
+                                            </button>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    ))}
+                </div>
+            </div>
 
             {/* Info note */}
             <div className="rounded-lg bg-[var(--color-bg-surface)] border border-[var(--color-border)] p-3">

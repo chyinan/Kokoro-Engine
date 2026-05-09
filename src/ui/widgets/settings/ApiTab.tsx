@@ -905,6 +905,36 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                 </div>
             </div>
 
+            {/* Vision Mode Toggle */}
+            <div className="pt-2 border-t border-[var(--color-border)]">
+                <div className="flex items-start justify-between gap-3">
+                    <div>
+                        <label className={labelClasses.replace("mb-2", "mb-0")}>{t("settings.api.vision_mode")}</label>
+                        <p className="text-sm text-[var(--color-text-main)] mt-1">
+                            {t("settings.api.vision_toggle")}
+                        </p>
+                        <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+                            {t("settings.api.vision_desc")}
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        aria-pressed={visionEnabled}
+                        onClick={() => onVisionEnabledChange(!visionEnabled)}
+                        className={clsx(
+                            "w-10 h-6 rounded-full transition-colors relative shrink-0 mt-5",
+                            visionEnabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
+                        )}
+                    >
+                        <motion.div
+                            animate={{ x: visionEnabled ? 18 : 2 }}
+                            transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                            className="absolute top-1 w-4 h-4 rounded-full bg-white"
+                        />
+                    </button>
+                </div>
+            </div>
+
             {/* System LLM Config */}
             <div className="pt-4 border-t border-[var(--color-border)]">
                 <div className="mb-3">
@@ -1060,30 +1090,6 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                     <p className="text-[9px] text-[var(--color-text-muted)] mt-1">
                         {t("settings.api.context.max_chars_hint")}
                     </p>
-                </div>
-            </div>
-
-            {/* Vision Mode Toggle */}
-            <div className="pt-2 border-t border-[var(--color-border)]">
-                <div className="flex items-center justify-between">
-                    <div>
-                        <label className={labelClasses.replace("mb-2", "mb-0")}>{t("settings.api.vision_mode")}</label>
-                        <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
-                            {t("settings.api.vision_desc")}
-                        </p>
-                    </div>
-                    <button
-                        onClick={() => onVisionEnabledChange(!visionEnabled)}
-                        className={clsx(
-                            "w-10 h-5 rounded-full transition-colors relative",
-                            visionEnabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
-                        )}
-                    >
-                        <motion.div
-                            animate={{ x: visionEnabled ? 20 : 2 }}
-                            className="absolute top-0.5 w-4 h-4 rounded-full bg-white"
-                        />
-                    </button>
                 </div>
             </div>
         </div>
