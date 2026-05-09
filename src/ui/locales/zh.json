@@ -754,6 +754,13 @@
                 },
                 "device": {
                     "label": "摄像头设备"
+                },
+                "feedback": {
+                    "loading": "正在检测摄像头...",
+                    "no_devices": "未检测到可用摄像头",
+                    "permission_denied": "无法访问摄像头，请检查系统权限",
+                    "unsupported": "当前环境不支持摄像头预览",
+                    "unavailable": "摄像头暂不可用，请检查是否被其他程序占用"
                 }
             },
             "privacy_note": "屏幕截图仅在本地处理并直接发送给您配置的 VLM 提供商。截图永远不会被永久保存——仅保留文本描述。",

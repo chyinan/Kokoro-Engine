@@ -754,6 +754,13 @@
                 },
                 "device": {
                     "label": "Camera Device"
+                },
+                "feedback": {
+                    "loading": "Detecting camera...",
+                    "no_devices": "No available camera detected",
+                    "permission_denied": "Camera access is blocked. Check system permissions.",
+                    "unsupported": "Camera preview is not supported in this environment",
+                    "unavailable": "Camera is unavailable. Check whether another app is using it."
                 }
             },
             "privacy_note": "🔒 Screenshots are captured locally and sent directly to your configured VLM provider. They are never stored permanently — only the text description is kept in memory.",
