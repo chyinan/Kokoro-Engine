@@ -179,7 +179,7 @@ flowchart LR
 
 - Frontend: declarative layout, component registry, theme system, MOD UI injection.
 - Backend: command modules + AI orchestration (LLM/TTS/STT/Vision/ImageGen/MCP).
-- Data layer: a local-first memory layer built on SQLite, persistently storing characters, conversations, summaries, and long-term memory, and using `embedding + FTS5 BM25 + RRF` hybrid retrieval to provide stable long-term context for dialogue.
+- Data layer: a local-first memory layer built on SQLite, persistently storing characters, conversations, summaries, and long-term memory, with `embedding + FTS5 BM25 + RRF` hybrid retrieval for stable long-term dialogue context; dream consolidation combines rule-based screening, LLM review, and scheduled/manual jobs to continuously govern duplicate, conflicting, and mergeable memories.
 
 See [docs/architecture.md](docs/architecture.md) for details.
 
