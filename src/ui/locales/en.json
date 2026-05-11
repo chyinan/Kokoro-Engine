@@ -934,7 +934,7 @@
             "title": "Desktop Float Mode",
             "description": "Display a transparent floating Live2D model on your desktop",
             "shortcut_label": "Global Shortcut",
-            "shortcut_hint": "Restart the app for changes to take effect",
+            "shortcut_hint": "Changes take effect immediately",
             "record": "Record",
             "recording": "Recording...",
             "record_prompt": "Press a shortcut key...",

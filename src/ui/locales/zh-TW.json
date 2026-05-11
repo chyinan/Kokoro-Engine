@@ -934,7 +934,7 @@
             "title": "桌面懸浮模式",
             "description": "在桌面顯示透明懸浮 Live2D 模型",
             "shortcut_label": "全局快捷鍵",
-            "shortcut_hint": "修改后需重啟應用生效",
+            "shortcut_hint": "修改後立即生效",
             "record": "錄制",
             "recording": "錄制中...",
             "record_prompt": "請按下快捷鍵...",

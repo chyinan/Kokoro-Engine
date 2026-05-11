@@ -1,10 +1,16 @@
 use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 const BUBBLE_WIDTH: i32 = 320;
 const BUBBLE_HEIGHT: i32 = 240;
 const BUBBLE_GAP: i32 = 8;
+
+#[derive(Default)]
+pub struct PetShortcutState {
+    registered_shortcut: std::sync::Mutex<Option<String>>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PetConfig {
@@ -65,6 +71,115 @@ fn save_pet_config_to_disk(config: &PetConfig) -> Result<(), KokoroError> {
     let path = dir.join("pet_config.json");
     let content = serde_json::to_string_pretty(config).map_err(KokoroError::from)?;
     std::fs::write(&path, content).map_err(KokoroError::from)
+}
+
+fn save_pet_config_and_emit(
+    app: &tauri::AppHandle,
+    config: &PetConfig,
+) -> Result<(), KokoroError> {
+    save_pet_config_to_disk(config)?;
+    app.emit("pet-config-updated", config)
+        .map_err(|e| KokoroError::Internal(e.to_string()))?;
+    Ok(())
+}
+
+fn set_pet_enabled(app: &tauri::AppHandle, enabled: bool) -> Result<(), KokoroError> {
+    let mut cfg = load_pet_config();
+    cfg.enabled = enabled;
+    save_pet_config_and_emit(app, &cfg)
+}
+
+fn parse_pet_shortcut(shortcut: &str) -> Result<Shortcut, KokoroError> {
+    let shortcut = shortcut.trim();
+    if shortcut.is_empty() {
+        return Err(KokoroError::Validation(
+            "Pet shortcut cannot be empty".to_string(),
+        ));
+    }
+
+    shortcut.parse::<Shortcut>().map_err(|e| {
+        KokoroError::Validation(format!("Invalid pet shortcut '{}': {}", shortcut, e))
+    })
+}
+
+pub fn register_pet_shortcut(
+    app: &tauri::AppHandle,
+    shortcut_str: &str,
+) -> Result<(), KokoroError> {
+    let shortcut_str = shortcut_str.trim().to_string();
+    let shortcut = parse_pet_shortcut(&shortcut_str)?;
+    let state = app.try_state::<PetShortcutState>().ok_or_else(|| {
+        KokoroError::Internal("Pet shortcut state was not initialized".to_string())
+    })?;
+
+    let registered_shortcut = state
+        .registered_shortcut
+        .lock()
+        .map_err(|e| KokoroError::Internal(format!("Pet shortcut state lock failed: {}", e)))?
+        .clone();
+
+    if registered_shortcut.as_deref() == Some(shortcut_str.as_str())
+        && app.global_shortcut().is_registered(shortcut)
+    {
+        return Ok(());
+    }
+
+    if let Some(old_shortcut_str) = registered_shortcut.as_deref() {
+        if old_shortcut_str != shortcut_str {
+            match parse_pet_shortcut(old_shortcut_str) {
+                Ok(old_shortcut) if app.global_shortcut().is_registered(old_shortcut) => {
+                    if let Err(error) = app.global_shortcut().unregister(old_shortcut) {
+                        tracing::warn!(
+                            target: "pet",
+                            "failed to unregister old pet shortcut '{}': {}",
+                            old_shortcut_str,
+                            error
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        target: "pet",
+                        "stored pet shortcut '{}' is invalid: {}",
+                        old_shortcut_str,
+                        error
+                    );
+                }
+            }
+        }
+    }
+
+    if app.global_shortcut().is_registered(shortcut) {
+        app.global_shortcut()
+            .unregister(shortcut)
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
+    }
+
+    let shortcut_app = app.clone();
+    app.global_shortcut()
+        .on_shortcut(shortcut, move |_app, _shortcut, event| {
+            if event.state() != ShortcutState::Pressed {
+                return;
+            }
+
+            let app = shortcut_app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = toggle_pet_window(app).await {
+                    tracing::error!(target: "pet", "global shortcut toggle failed: {}", error);
+                }
+            });
+        })
+        .map_err(|e| KokoroError::Internal(e.to_string()))?;
+
+    *state
+        .registered_shortcut
+        .lock()
+        .map_err(|e| KokoroError::Internal(format!("Pet shortcut state lock failed: {}", e)))? =
+        Some(shortcut_str.clone());
+
+    tracing::info!(target: "pet", "registered pet shortcut '{}'", shortcut_str);
+    Ok(())
 }
 
 fn bubble_position_for_pet_bounds(pet_x: i32, pet_y: i32, pet_width: u32) -> (i32, i32) {
@@ -159,6 +274,7 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
         win.set_focus()
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
         sync_bubble_window_to_pet(&app)?;
+        set_pet_enabled(&app, true)?;
         tracing::info!(target: "pet", "pet window shown successfully");
     } else {
         tracing::info!(target: "pet", "pet window not found, creating new one...");
@@ -212,6 +328,7 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
         win.set_focus()
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
         sync_bubble_window_to_pet(&app)?;
+        set_pet_enabled(&app, true)?;
         tracing::info!(target: "pet", "pet window created and shown successfully");
     }
     Ok(())
@@ -225,15 +342,24 @@ pub async fn hide_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
         hide_bubble_window_if_open(&app)?;
 
         // Update config to reflect window is closed
-        let mut cfg = load_pet_config();
-        cfg.enabled = false;
-        save_pet_config_to_disk(&cfg)?;
+        set_pet_enabled(&app, false)?;
 
         // Emit event to notify main window
         app.emit("pet-window-closed", ())
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn toggle_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
+    if let Some(win) = app.get_webview_window("pet") {
+        if win.is_visible().unwrap_or(false) {
+            return hide_pet_window(app).await;
+        }
+    }
+
+    show_pet_window(app).await
 }
 
 #[tauri::command]
@@ -251,8 +377,10 @@ pub async fn get_pet_config(_app: tauri::AppHandle) -> Result<PetConfig, KokoroE
 }
 
 #[tauri::command]
-pub async fn save_pet_config(_app: tauri::AppHandle, config: PetConfig) -> Result<(), KokoroError> {
-    save_pet_config_to_disk(&config)
+pub async fn save_pet_config(app: tauri::AppHandle, config: PetConfig) -> Result<(), KokoroError> {
+    parse_pet_shortcut(&config.shortcut)?;
+    save_pet_config_and_emit(&app, &config)?;
+    register_pet_shortcut(&app, &config.shortcut)
 }
 
 #[tauri::command]

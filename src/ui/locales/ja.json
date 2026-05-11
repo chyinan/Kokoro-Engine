@@ -934,7 +934,7 @@
             "title": "デスクトップ浮動モード",
             "description": "透明な浮動ウィンドウで Live2D モデルをデスクトップに表示",
             "shortcut_label": "グローバルショートカット",
-            "shortcut_hint": "変更を反映するにはアプリを再起動してください",
+            "shortcut_hint": "変更はすぐに反映されます",
             "record": "録音",
             "recording": "録音中...",
             "record_prompt": "ショートカットキーを押してください...",

@@ -217,6 +217,7 @@ pub fn run() {
             commands::auto_backup::run_auto_backup_now,
             commands::pet::show_pet_window,
             commands::pet::hide_pet_window,
+            commands::pet::toggle_pet_window,
             commands::pet::set_pet_drag_mode,
             commands::pet::get_pet_config,
             commands::pet::save_pet_config,
@@ -263,6 +264,7 @@ pub fn run() {
         .setup(|app| {
             let startup_begin = std::time::Instant::now();
             tracing::info!(target: "startup", "setup begin");
+            app.manage(crate::commands::pet::PetShortcutState::default());
 
             let app_handle = app.handle();
             tauri::async_runtime::block_on(async move {
@@ -755,21 +757,13 @@ pub fn run() {
 
             // Global shortcut + Pet window auto-start
             {
-                use tauri::Emitter;
-                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
                 let pet_cfg = crate::commands::pet::load_pet_config();
-                let shortcut_str = pet_cfg.shortcut.clone();
                 let pet_enabled = pet_cfg.enabled;
 
-                if let Ok(shortcut) = shortcut_str.parse::<tauri_plugin_global_shortcut::Shortcut>() {
-                    let shortcut_app = app.handle().clone();
-                    let _ = app.handle().global_shortcut().on_shortcut(shortcut, move |_app, _sc, event| {
-                        if event.state() == ShortcutState::Pressed {
-                            if let Some(pet_win) = shortcut_app.get_webview_window("pet") {
-                                let _ = pet_win.emit("toggle-chat-input", ());
-                            }
-                        }
-                    });
+                if let Err(error) =
+                    crate::commands::pet::register_pet_shortcut(app.handle(), &pet_cfg.shortcut)
+                {
+                    tracing::error!(target: "pet", "failed to register pet shortcut: {}", error);
                 }
 
                 if pet_enabled {

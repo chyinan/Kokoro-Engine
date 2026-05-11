@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { emit, listen } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 
 interface PetConfig {
@@ -12,6 +12,7 @@ interface PetConfig {
     window_width: number;
     window_height: number;
     model_scale: number;
+    render_fps?: number;
 }
 
 const isMac = navigator.platform.toUpperCase().includes("MAC");
@@ -52,6 +53,7 @@ export default function PetTab() {
         window_width: 0,
         window_height: 0,
         model_scale: 0,
+        render_fps: 60,
     });
     const [saved, setSaved] = useState(false);
     const [recording, setRecording] = useState(false);
@@ -61,7 +63,6 @@ export default function PetTab() {
     const persistConfig = useCallback(async (nextConfig: PetConfig, showSavedState = false) => {
         setConfig(nextConfig);
         await invoke("save_pet_config", { config: nextConfig }).catch(console.error);
-        await emit("pet-config-updated", nextConfig).catch(console.error);
 
         if (showSavedState) {
             setSaved(true);
@@ -108,18 +109,18 @@ export default function PetTab() {
     useEffect(() => {
         invoke<PetConfig>("get_pet_config").then(setConfig).catch(console.error);
 
-        // Listen for pet window close event
-        const unlisten = listen("pet-window-closed", () => {
+        const unlistenClosed = listen("pet-window-closed", () => {
             console.log("[PetTab] Pet window closed, updating config");
             setConfig(c => ({ ...c, enabled: false }));
-            // Also save to backend
-            invoke<PetConfig>("get_pet_config").then(cfg => {
-                invoke("save_pet_config", { config: { ...cfg, enabled: false } }).catch(console.error);
-            }).catch(console.error);
+        });
+
+        const unlistenConfig = listen<PetConfig>("pet-config-updated", (event) => {
+            setConfig(event.payload);
         });
 
         return () => {
-            unlisten.then(fn => fn());
+            unlistenClosed.then(fn => fn()).catch(console.error);
+            unlistenConfig.then(fn => fn()).catch(console.error);
         };
     }, []);
 
