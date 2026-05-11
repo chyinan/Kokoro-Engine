@@ -73,10 +73,7 @@ fn save_pet_config_to_disk(config: &PetConfig) -> Result<(), KokoroError> {
     std::fs::write(&path, content).map_err(KokoroError::from)
 }
 
-fn save_pet_config_and_emit(
-    app: &tauri::AppHandle,
-    config: &PetConfig,
-) -> Result<(), KokoroError> {
+fn save_pet_config_and_emit(app: &tauri::AppHandle, config: &PetConfig) -> Result<(), KokoroError> {
     save_pet_config_to_disk(config)?;
     app.emit("pet-config-updated", config)
         .map_err(|e| KokoroError::Internal(e.to_string()))?;
@@ -97,9 +94,9 @@ fn parse_pet_shortcut(shortcut: &str) -> Result<Shortcut, KokoroError> {
         ));
     }
 
-    shortcut.parse::<Shortcut>().map_err(|e| {
-        KokoroError::Validation(format!("Invalid pet shortcut '{}': {}", shortcut, e))
-    })
+    shortcut
+        .parse::<Shortcut>()
+        .map_err(|e| KokoroError::Validation(format!("Invalid pet shortcut '{}': {}", shortcut, e)))
 }
 
 pub fn register_pet_shortcut(
