@@ -173,6 +173,7 @@ impl VisionContext {
     pub async fn clear_auto_state_on_disable(&self) {
         let mut inner = self.inner.write().await;
         inner.latest_frame = None;
+        inner.latest_auto_observation = None;
         inner.analysis_in_flight = false;
         inner.pending_frame = None;
         inner.last_error = None;
@@ -323,6 +324,20 @@ mod tests {
             .await
             .is_none());
         assert!(!ctx.inner.read().await.analysis_in_flight);
+    }
+
+    #[tokio::test]
+    async fn clear_auto_state_on_disable_drops_completed_auto_observation() {
+        let ctx = VisionContext::new();
+        let now = Utc::now();
+        ctx.inner.write().await.latest_auto_observation = Some(observation(
+            VisionObservationSource::Auto,
+            now - chrono::Duration::seconds(30),
+        ));
+
+        ctx.clear_auto_state_on_disable().await;
+
+        assert!(ctx.latest_completed_observation(now).await.is_none());
     }
 
     #[tokio::test]
