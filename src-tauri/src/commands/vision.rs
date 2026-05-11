@@ -78,6 +78,15 @@ pub async fn stop_vision_watcher(state: State<'_, VisionWatcher>) -> Result<(), 
 }
 
 #[tauri::command]
+pub async fn set_vision_text_input_focused(
+    state: State<'_, VisionWatcher>,
+    focused: bool,
+) -> Result<(), KokoroError> {
+    state.context.set_text_input_focus_state(focused).await;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn capture_screen_now(
     state: State<'_, VisionWatcher>,
     llm_service: State<'_, crate::llm::service::LlmService>,

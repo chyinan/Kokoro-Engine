@@ -152,6 +152,7 @@ pub fn run() {
             commands::vision::save_vision_config,
             commands::vision::start_vision_watcher,
             commands::vision::stop_vision_watcher,
+            commands::vision::set_vision_text_input_focused,
             commands::vision::capture_screen_now,
             commands::memory::list_memories,
             commands::memory::update_memory,
@@ -235,18 +236,6 @@ pub fn run() {
             stt::stream::prune_audio_buffer,
         ])
         .on_window_event(|window, event| {
-            if window.label() == "main" {
-                if let tauri::WindowEvent::Focused(focused) = event {
-                    if let Some(watcher) = window.app_handle().try_state::<crate::vision::watcher::VisionWatcher>() {
-                        let ctx = watcher.context.clone();
-                        let focused = *focused;
-                        tauri::async_runtime::spawn(async move {
-                            ctx.set_focus_state(focused).await;
-                        });
-                    }
-                }
-            }
-
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 if window.label() == "main" {
                     window.app_handle().exit(0);

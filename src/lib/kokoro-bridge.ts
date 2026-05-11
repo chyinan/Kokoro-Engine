@@ -830,6 +830,10 @@ export async function saveVisionConfig(config: VisionConfig): Promise<void> {
     return invoke("save_vision_config", { config });
 }
 
+export async function setVisionTextInputFocused(focused: boolean): Promise<void> {
+    return invoke("set_vision_text_input_focused", { focused });
+}
+
 export async function captureScreenNow(): Promise<string> {
     return invoke<string>("capture_screen_now");
 }

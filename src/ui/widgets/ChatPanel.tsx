@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, useDeferredValue, memo } from
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
-import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus } from "../../lib/kokoro-bridge";
+import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
 import type { FailureEvent, ToolTraceItem } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen } from "@tauri-apps/api/event";
@@ -680,6 +680,7 @@ export default function ChatPanel() {
     const [visibleCount, setVisibleCount] = useState(20);
     const [input, setInput] = useState("");
     const [expandedInput, setExpandedInput] = useState(false);
+    const compactInputRef = useRef<HTMLInputElement>(null);
     const expandedTextareaRef = useRef<HTMLTextAreaElement>(null);
     const [isStreaming, setIsStreaming] = useState(false);
     const isStreamingRef = useRef(false);
@@ -903,6 +904,26 @@ export default function ChatPanel() {
     useEffect(() => { startVoiceRef.current = startVoice; }, [startVoice]);
     useEffect(() => { sttAutoSendRef.current = sttAutoSend; }, [sttAutoSend]);
     useEffect(() => { sttEnabledRef.current = sttEnabled; }, [sttEnabled]);
+
+    useEffect(() => {
+        const syncTextInputFocus = () => {
+            const active = document.activeElement;
+            const focused = active === compactInputRef.current || active === expandedTextareaRef.current;
+            setVisionTextInputFocused(focused).catch(error => {
+                console.error("[ChatPanel] Failed to sync text input focus:", error);
+            });
+        };
+
+        syncTextInputFocus();
+        window.addEventListener("focusin", syncTextInputFocus);
+        window.addEventListener("focusout", syncTextInputFocus);
+
+        return () => {
+            window.removeEventListener("focusin", syncTextInputFocus);
+            window.removeEventListener("focusout", syncTextInputFocus);
+            setVisionTextInputFocused(false).catch(() => { /* best effort */ });
+        };
+    }, []);
 
     // Wake word detection — starts main STT when keyword is heard
     const [wakeWordEnabled, setWakeWordEnabled] = useState(() => localStorage.getItem("kokoro_wake_word_enabled") === "true");
@@ -1931,6 +1952,7 @@ export default function ChatPanel() {
 
                     <div className="relative flex-1">
                         <input
+                            ref={compactInputRef}
                             type="text"
                             value={input}
                             onChange={(e) => setInput(e.target.value)}

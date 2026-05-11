@@ -65,7 +65,7 @@ pub struct VisionContextInner {
     pub analysis_in_flight: bool,
     pub pending_frame: Option<VisionFrame>,
     pub last_error: Option<String>,
-    pub kokoro_focused: bool,
+    pub text_input_focused: bool,
     pub resume_auto_capture_after: Option<Instant>,
 }
 
@@ -85,7 +85,7 @@ impl VisionContext {
                 analysis_in_flight: false,
                 pending_frame: None,
                 last_error: None,
-                kokoro_focused: false,
+                text_input_focused: false,
                 resume_auto_capture_after: None,
             })),
         }
@@ -152,9 +152,9 @@ impl VisionContext {
         inner.latest_manual_observation = Some(observation);
     }
 
-    pub async fn set_focus_state(&self, focused: bool) {
+    pub async fn set_text_input_focus_state(&self, focused: bool) {
         let mut inner = self.inner.write().await;
-        inner.kokoro_focused = focused;
+        inner.text_input_focused = focused;
         inner.resume_auto_capture_after = if focused {
             None
         } else {
@@ -164,7 +164,7 @@ impl VisionContext {
 
     pub async fn should_pause_auto_capture(&self) -> bool {
         let inner = self.inner.read().await;
-        inner.kokoro_focused
+        inner.text_input_focused
             || inner
                 .resume_auto_capture_after
                 .is_some_and(|resume_at| Instant::now() < resume_at)
@@ -323,5 +323,20 @@ mod tests {
             .await
             .is_none());
         assert!(!ctx.inner.read().await.analysis_in_flight);
+    }
+
+    #[tokio::test]
+    async fn text_input_focus_pauses_auto_capture_until_resume_delay_expires() {
+        let ctx = VisionContext::new();
+
+        ctx.set_text_input_focus_state(true).await;
+        assert!(ctx.should_pause_auto_capture().await);
+
+        ctx.set_text_input_focus_state(false).await;
+        assert!(ctx.should_pause_auto_capture().await);
+
+        ctx.inner.write().await.resume_auto_capture_after =
+            Some(Instant::now() - Duration::from_millis(1));
+        assert!(!ctx.should_pause_auto_capture().await);
     }
 }
