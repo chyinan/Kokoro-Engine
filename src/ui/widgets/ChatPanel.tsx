@@ -590,10 +590,12 @@ function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => 
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
-            className="absolute top-2 right-2 z-[110] flex items-center gap-2 px-4 py-2 rounded-lg bg-red-900/80 border border-red-500/50 text-red-200 text-xs shadow-lg"
+            className="absolute top-2 left-2 right-2 z-[110] flex items-start gap-2 px-4 py-2 rounded-lg bg-red-900/80 border border-red-500/50 text-red-200 text-xs shadow-lg"
         >
-            <AlertCircle size={14} strokeWidth={1.5} />
-            {message}
+            <AlertCircle size={14} strokeWidth={1.5} className="mt-0.5 shrink-0" />
+            <span className="min-w-0 flex-1 break-words leading-relaxed [overflow-wrap:anywhere]">
+                {message}
+            </span>
         </motion.div>
     );
 }

@@ -273,7 +273,7 @@ export async function cancelChatTurn(turnId: string, reason?: string): Promise<v
 }
 
 export async function onChatError(callback: (error: string) => void): Promise<UnlistenFn> {
-    return listen<string>("chat-error", (event) => callback(event.payload));
+    return listen<unknown>("chat-error", (event) => callback(parseLegacyChatError(event.payload)));
 }
 
 export async function onChatWarning(callback: (warning: string) => void): Promise<UnlistenFn> {
@@ -303,55 +303,83 @@ export interface FailureEvent {
 
 export async function onChatFailure(callback: (event: FailureEvent) => void): Promise<UnlistenFn> {
     return listen<FailureEvent | string>("chat-failure", (event) => {
-        const payload = event.payload;
-        if (typeof payload === "string") {
-            try {
-                const parsed = JSON.parse(payload) as FailureEvent;
-                callback(parsed);
-            } catch {
-                callback({
-                    event_id: "",
-                    timestamp: "",
-                    domain: "chat",
-                    stage: "unknown",
-                    code: "CHAT_FAILURE",
-                    message: payload,
-                    retryable: false,
-                    trace_id: "",
-                });
-            }
-            return;
-        }
-
-        callback(payload);
+        callback(parseFailureEvent(event.payload) ?? createFallbackFailureEvent(parseLegacyChatError(event.payload)));
     });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null;
+}
+
+function getStringField(record: Record<string, unknown>, key: string): string | undefined {
+    const value = record[key];
+    return typeof value === "string" ? value : undefined;
+}
+
+function stringifyUnknown(value: unknown): string {
+    if (typeof value === "string") {
+        return value;
+    }
+
+    if (value instanceof Error) {
+        return value.message;
+    }
+
+    if (isRecord(value)) {
+        try {
+            return JSON.stringify(value);
+        } catch {
+            // Fall through to String for unusual host objects.
+        }
+    }
+
+    return String(value);
+}
+
+function parseJsonPayload(payload: string): unknown | null {
+    try {
+        return JSON.parse(payload);
+    } catch {
+        return null;
+    }
+}
+
+function createFallbackFailureEvent(message: string): FailureEvent {
+    return {
+        event_id: "",
+        timestamp: "",
+        domain: "chat",
+        stage: "unknown",
+        code: "CHAT_FAILURE",
+        message,
+        retryable: false,
+        trace_id: "",
+    };
 }
 
 export function parseFailureEvent(payload: unknown): FailureEvent | null {
     if (typeof payload === "string") {
-        try {
-            return JSON.parse(payload) as FailureEvent;
-        } catch {
-            return null;
-        }
+        const parsed = parseJsonPayload(payload);
+        return parsed === null ? null : parseFailureEvent(parsed);
     }
 
-    if (typeof payload === "object" && payload !== null) {
-        const candidate = payload as Partial<FailureEvent>;
-        if (typeof candidate.code === "string" && typeof candidate.message === "string") {
+    if (isRecord(payload)) {
+        const code = getStringField(payload, "code");
+        const message = getStringField(payload, "message");
+        if (code && message) {
             return {
-                event_id: candidate.event_id ?? "",
-                timestamp: candidate.timestamp ?? "",
-                domain: candidate.domain ?? "chat",
-                stage: candidate.stage ?? "unknown",
-                code: candidate.code,
-                message: candidate.message,
-                retryable: Boolean(candidate.retryable),
-                trace_id: candidate.trace_id ?? "",
-                conversation_id: candidate.conversation_id ?? null,
-                turn_id: candidate.turn_id ?? null,
-                character_id: candidate.character_id ?? null,
-                context: candidate.context ?? null,
+                event_id: getStringField(payload, "event_id") ?? "",
+                timestamp: getStringField(payload, "timestamp") ?? "",
+                domain: getStringField(payload, "domain") ?? "chat",
+                stage: getStringField(payload, "stage") ?? "unknown",
+                code,
+                message,
+                retryable: Boolean(payload.retryable),
+                trace_id: getStringField(payload, "trace_id") ?? "",
+                conversation_id: getStringField(payload, "conversation_id") ?? null,
+                turn_id: getStringField(payload, "turn_id") ?? null,
+                character_id: getStringField(payload, "character_id") ?? null,
+                context: isRecord(payload.context) ? payload.context : null,
             };
         }
     }
@@ -361,7 +389,7 @@ export function parseFailureEvent(payload: unknown): FailureEvent | null {
 
 export function parseLegacyChatError(payload: unknown): string {
     if (typeof payload === "string") {
-        return payload;
+        return parseFailureEvent(payload)?.message ?? payload;
     }
 
     if (payload instanceof Error) {
@@ -373,7 +401,14 @@ export function parseLegacyChatError(payload: unknown): string {
         return failure.message;
     }
 
-    return String(payload);
+    if (isRecord(payload)) {
+        const message = getStringField(payload, "message") ?? getStringField(payload, "error");
+        if (message) {
+            return message;
+        }
+    }
+
+    return stringifyUnknown(payload);
 }
 
 export interface ChatTurnStartEvent {
@@ -1516,6 +1551,34 @@ export interface KokoroErrorObject {
     trace_id?: string;
 }
 
+function parseKokoroErrorObject(error: unknown): KokoroErrorObject | null {
+    const payload = typeof error === "string" ? parseJsonPayload(error) : error;
+    if (!isRecord(payload)) {
+        return null;
+    }
+
+    const code = getStringField(payload, "code");
+    const message = getStringField(payload, "message");
+    if (!code || !message) {
+        return null;
+    }
+
+    const parsed: KokoroErrorObject = { code, message };
+    const stage = getStringField(payload, "stage");
+    const traceId = getStringField(payload, "trace_id");
+    if (stage) {
+        parsed.stage = stage;
+    }
+    if (typeof payload.retryable === "boolean") {
+        parsed.retryable = payload.retryable;
+    }
+    if (traceId) {
+        parsed.trace_id = traceId;
+    }
+
+    return parsed;
+}
+
 /**
  * 解析 Kokoro 错误，支持结构化 JSON 和裸字符串两种格式
  *
@@ -1523,21 +1586,27 @@ export interface KokoroErrorObject {
  * @returns 结构化错误对象或原始错误字符串
  */
 export function parseKokoroError(error: unknown): KokoroErrorObject | string {
-    if (typeof error !== "string") {
-        if (error instanceof Error) return error.message;
-        return String(error);
+    const structured = parseKokoroErrorObject(error);
+    if (structured) {
+        return structured;
     }
 
-    try {
-        const parsed = JSON.parse(error);
-        if (parsed.code && parsed.message) {
-            return parsed as KokoroErrorObject;
+    if (typeof error === "string") {
+        return error;
+    }
+
+    if (error instanceof Error) {
+        return error.message;
+    }
+
+    if (isRecord(error)) {
+        const message = getStringField(error, "message") ?? getStringField(error, "error");
+        if (message) {
+            return message;
         }
-    } catch {
-        // 不是 JSON，返回原始字符串
     }
 
-    return error;
+    return stringifyUnknown(error);
 }
 
 /**
