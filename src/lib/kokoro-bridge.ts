@@ -833,8 +833,20 @@ export async function captureScreenNow(): Promise<string> {
     return invoke<string>("capture_screen_now");
 }
 
-export async function onVisionObservation(callback: (desc: string) => void): Promise<UnlistenFn> {
-    return listen<string>("vision-observation", (event) => callback(event.payload));
+export interface VisionObservationEvent {
+    summary: string;
+    captured_at?: string;
+    source?: string;
+}
+
+export async function onVisionObservation(callback: (event: VisionObservationEvent) => void): Promise<UnlistenFn> {
+    return listen<string | VisionObservationEvent>("vision-observation", (event) => {
+        if (typeof event.payload === "string") {
+            callback({ summary: event.payload });
+        } else {
+            callback(event.payload);
+        }
+    });
 }
 
 export async function onCameraObservation(callback: (desc: string) => void): Promise<UnlistenFn> {

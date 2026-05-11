@@ -16,6 +16,7 @@ interface ChatMessageProps {
         tools?: ToolTraceItem[];
         capturedAt?: string;
         source?: string;
+        turnId?: string;
     };
     index: number;
     isStreaming: boolean;
@@ -134,6 +135,12 @@ function formatContextTime(value: string | undefined): string | null {
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function getContextPreview(text: string): string {
+    const compact = text.replace(/\s+/g, " ").trim();
+    if (compact.length <= 72) return compact;
+    return `${compact.slice(0, 72)}…`;
+}
+
 function isToolSuccessful(tool: ToolTraceItem): boolean {
     return tool.isError !== true || tool.approvalStatus === "approved";
 }
@@ -188,6 +195,7 @@ export const ChatMessage = memo(function ChatMessage({
         setEditingText("");
     };
 
+    const [contextExpanded, setContextExpanded] = useState(false);
     const contextTime = formatContextTime(msg.capturedAt);
 
     if (msg.role === "context") {
@@ -197,19 +205,38 @@ export const ChatMessage = memo(function ChatMessage({
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 transition={{ duration: 0.2 }}
                 className={clsx(
-                    "mx-auto max-w-[92%] rounded-md border border-slate-800/60 bg-slate-950/35 px-3 py-2",
+                    "mx-auto max-w-[92%] rounded-md border border-slate-800/60 bg-slate-950/35",
                     "text-[11px] leading-relaxed text-slate-500 font-body"
                 )}
             >
-                <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-slate-500/90">
+                <button
+                    type="button"
+                    onClick={() => setContextExpanded((expanded) => !expanded)}
+                    className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[10px] uppercase tracking-wider text-slate-500/90"
+                    aria-expanded={contextExpanded}
+                >
                     <Eye size={11} strokeWidth={1.5} />
                     <span>屏幕上下文</span>
                     {contextTime && <span className="normal-case tracking-normal text-slate-600">{contextTime}</span>}
                     {msg.source && <span className="normal-case tracking-normal text-slate-600">· {msg.source}</span>}
-                </div>
-                <div className="line-clamp-2 whitespace-pre-wrap break-words text-slate-500/90">
-                    {msg.text}
-                </div>
+                    <ChevronDown
+                        size={12}
+                        strokeWidth={1.5}
+                        className={clsx(
+                            "ml-auto transition-transform",
+                            contextExpanded && "rotate-180"
+                        )}
+                    />
+                </button>
+                {contextExpanded ? (
+                    <div className="border-t border-slate-800/60 px-2.5 py-2 whitespace-pre-wrap break-words text-slate-500/90">
+                        {msg.text}
+                    </div>
+                ) : (
+                    <div className="px-2.5 pb-1.5 text-slate-600">
+                        {getContextPreview(msg.text)}
+                    </div>
+                )}
             </motion.div>
         );
     }

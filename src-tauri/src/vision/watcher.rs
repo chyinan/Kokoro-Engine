@@ -184,29 +184,48 @@ async fn run_analysis_chain(
         match &result {
             Ok(description) => {
                 tracing::debug!(target: "vision", "Observation: {}", description);
-                let _ = app_handle.emit("vision-observation", description);
-
-                if config.proactive_vision_enabled {
-                    emit_proactive_vision_comment(&app_handle, description);
-                }
             }
             Err(error) => tracing::error!(target: "vision", "VLM analysis failed: {}", error),
         }
 
-        match watcher.context.finish_auto_analysis(&current, result).await {
+        let should_emit_proactive = result.is_ok() && config.proactive_vision_enabled;
+        let next_frame = watcher.context.finish_auto_analysis(&current, result).await;
+
+        if should_emit_proactive {
+            if let Some(observation) = watcher
+                .context
+                .latest_completed_observation(chrono::Utc::now())
+                .await
+            {
+                let _ = app_handle.emit(
+                    "vision-observation",
+                    serde_json::json!({
+                        "summary": observation.summary,
+                        "captured_at": observation.captured_at.to_rfc3339(),
+                        "source": observation.source.as_str(),
+                    }),
+                );
+            }
+        }
+
+        if should_emit_proactive {
+            emit_proactive_vision_comment(&app_handle);
+        }
+
+        match next_frame {
             Some(next) => current = next,
             None => break,
         }
     }
 }
 
-fn emit_proactive_vision_comment(app_handle: &AppHandle, description: &str) {
+fn emit_proactive_vision_comment(app_handle: &AppHandle) {
     tracing::info!(target: "vision", "Vision screen-comment trigger fired");
     let _ = app_handle.emit(
         "proactive-trigger",
         serde_json::json!({
             "trigger": "vision",
-            "instruction": build_proactive_vision_instruction(description),
+            "instruction": build_proactive_vision_instruction(),
         }),
     );
 }
@@ -217,14 +236,11 @@ const DEFAULT_OPENAI_VLM_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_ANTHROPIC_VLM_BASE_URL: &str = "https://api.anthropic.com/v1";
 const DEFAULT_LLAMA_CPP_VLM_BASE_URL: &str = "http://127.0.0.1:8080";
 
-fn build_proactive_vision_instruction(description: &str) -> String {
-    format!(
-        "用户的电脑屏幕上目前正在显示的是：{}。请结合当前角色的人设和性格，对屏幕内容做一句自然、简短、轻量的评论。\
-        只评论屏幕上直接可见的内容，不要表现得像在监视用户，也不要声称知道隐藏信息、用户想法、代码是谁写的或谁改的，或屏幕外发生的事。\
-        避免重复、恐怖、威胁、夸张或令人不适的措辞；如果内容不清楚或可能敏感，就保持中性温和。\
-        如果这个屏幕变化不值得评论，请只回复 PASS。",
-        description
-    )
+fn build_proactive_vision_instruction() -> &'static str {
+    "请结合上方的屏幕上下文、当前角色的人设和性格，对屏幕内容做一句自然、简短、轻量的评论。\
+    只评论屏幕上直接可见的内容，不要表现得像在监视用户，也不要声称知道隐藏信息、用户想法、代码是谁写的或谁改的，或屏幕外发生的事。\
+    避免重复、恐怖、威胁、夸张或令人不适的措辞；如果内容不清楚或可能敏感，就保持中性温和。\
+    如果这个屏幕变化不值得评论，请只回复 PASS。"
 }
 
 fn default_vlm_base_url(provider: &str) -> &'static str {
@@ -410,9 +426,11 @@ mod tests {
 
     #[test]
     fn proactive_vision_instruction_contains_safety_constraints() {
-        let instruction = build_proactive_vision_instruction("VS Code with Rust source open");
+        let instruction = build_proactive_vision_instruction();
 
-        assert!(instruction.contains("用户的电脑屏幕上目前正在显示的是"));
+        assert!(!instruction.contains("用户的电脑屏幕上目前正在显示的是"));
+        assert!(!instruction.contains("VS Code with Rust source open"));
+        assert!(instruction.contains("上方的屏幕上下文"));
         assert!(instruction.contains("不要表现得像在监视用户"));
         assert!(instruction.contains("代码是谁写的或谁改的"));
     }

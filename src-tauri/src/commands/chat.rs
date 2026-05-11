@@ -568,6 +568,27 @@ fn insert_vision_context_before_latest_user(
     client_messages.insert(index, rendered);
 }
 
+async fn persist_vision_context_message(
+    state: &AIOrchestrator,
+    observation: &crate::vision::context::VisionObservation,
+    character_id: &str,
+    turn_id: Option<&str>,
+) {
+    let mut metadata = vision_context_metadata_value(observation);
+    if let Some(turn_id) = turn_id {
+        metadata["turn_id"] = serde_json::Value::String(turn_id.to_string());
+    }
+    state
+        .add_message_with_metadata(
+            "context".to_string(),
+            observation.summary.clone(),
+            Some(metadata.to_string()),
+            character_id,
+            None,
+        )
+        .await;
+}
+
 fn is_proactive_noop_response(text: &str) -> bool {
     let trimmed = text.trim();
     trimmed.is_empty() || trimmed.eq_ignore_ascii_case("PASS")
@@ -1527,15 +1548,7 @@ pub async fn stream_chat(
     let system_provider = llm_state.system_provider().await;
     if !request.hidden {
         if let Some(observation) = selected_vision_observation.as_ref() {
-            state
-                .add_message_with_metadata(
-                    "context".to_string(),
-                    observation.summary.clone(),
-                    Some(vision_context_metadata_value(observation).to_string()),
-                    &char_id,
-                    None,
-                )
-                .await;
+            persist_vision_context_message(&state, observation, &char_id, None).await;
         }
 
         state
@@ -1781,10 +1794,7 @@ pub async fn stream_chat(
     let mut bg_generated_by_tool = false;
     let mut cue_set_by_tool = false;
     let mut draft_row_id: Option<i64> = None;
-    let mut forced_text_after_side_effect = false;
     let mut stream_failed = false;
-    let mut text_retry_count = 0u32;
-    let mut force_text_only_round = false;
     let mut all_reasoning_content = String::new();
 
     for round in 0..max_tool_rounds {
@@ -1795,7 +1805,7 @@ pub async fn stream_chat(
 
         let mut stream: std::pin::Pin<
             Box<dyn futures::Stream<Item = Result<LlmStreamEvent, String>> + Send>,
-        > = if native_tools_enabled && !force_text_only_round {
+        > = if native_tools_enabled {
             chat_provider
                 .chat_stream_with_tools_rich(client_messages.clone(), None, native_tools.clone())
                 .await
@@ -2166,60 +2176,6 @@ pub async fn stream_chat(
             });
             client_messages.extend(tool_result_messages.into_iter().map(plain_llm_message));
 
-            // Apply the same side-effect / feedback guard as the text-tool path
-            // to prevent infinite loops when LLM keeps emitting only tool calls
-            // without any dialogue text.
-            if !any_needs_feedback {
-                if all_cleaned_text.trim().is_empty() && !forced_text_after_side_effect {
-                    tracing::info!(target: "chat", "[Chat] Native side-effect tools ran without text, forcing one follow-up text round");
-                    forced_text_after_side_effect = true;
-                    client_messages.push(plain_llm_message(system_message(
-                        "The tool has already been executed successfully. \
-                         Now respond with a natural dialogue reply for the user. \
-                         Do NOT call the same tool again unless absolutely necessary."
-                            .to_string(),
-                    )));
-                } else if all_cleaned_text.trim().is_empty() {
-                    // Already forced once but still no text — retry with tools disabled
-                    if text_retry_count < 3 {
-                        text_retry_count += 1;
-                        forced_text_after_side_effect = false;
-                        force_text_only_round = true;
-                        tracing::info!(target: "chat", "[Chat] Native tool loop: no text after forced round, retrying without tools ({}/3)", text_retry_count);
-                        // Strip trailing tool/system/empty-assistant messages to avoid poisoning the context
-                        while client_messages.len() > 1 {
-                            let should_pop = match client_messages.last() {
-                                Some(LlmChatMessage { message: async_openai::types::chat::ChatCompletionRequestMessage::Tool(_), .. }) => true,
-                                Some(LlmChatMessage { message: async_openai::types::chat::ChatCompletionRequestMessage::System(_), .. }) => true,
-                                Some(LlmChatMessage { message: async_openai::types::chat::ChatCompletionRequestMessage::Assistant(m), .. }) => {
-                                    m.content.as_ref().map(|_c| extract_message_text(
-                                        &async_openai::types::chat::ChatCompletionRequestMessage::Assistant(m.clone())
-                                    ).trim().is_empty()).unwrap_or(true)
-                                }
-                                _ => false,
-                            };
-                            if should_pop {
-                                client_messages.pop();
-                            } else {
-                                break;
-                            }
-                        }
-                        client_messages.push(plain_llm_message(system_message(
-                            "IMPORTANT: Respond with dialogue text only. Do NOT call any tools."
-                                .to_string(),
-                        )));
-                        continue;
-                    }
-                    tracing::info!(
-                        target: "chat::tools",
-                        "[Chat] Native tool loop: still no text after {} retries, ending loop",
-                        text_retry_count
-                    );
-                    break;
-                }
-                // If there IS text, fall through to continue normally
-            }
-
             tracing::info!(
                 target: "chat::tools",
                 "[Chat] Continuing after native tool calls with assistant/tool result messages"
@@ -2234,34 +2190,16 @@ pub async fn stream_chat(
 
         // Only continue the loop if at least one tool needs its result fed back to the LLM
         if !any_needs_feedback {
-            if all_cleaned_text.trim().is_empty() && !forced_text_after_side_effect {
-                tracing::info!(target: "chat", "[Chat] Side-effect tools ran without any text reply, forcing one follow-up text round");
-                forced_text_after_side_effect = true;
-                client_messages.push(plain_llm_message(system_message(format!(
-                    "[Tool results]\n\
-                    {}\n\n\
-                    The side-effect tool has already been executed successfully.\n\
-                    Now continue with a natural reply for the user in plain dialogue text.\n\
-                    Do not explain the tool call, do not output metadata, and do not repeat the same side-effect tool unless it is still necessary.",
-                    tool_results.join("\n")
-                ))));
-                #[cfg(debug_assertions)]
-                debug_log_rich_llm_messages(
-                    &format!("forced follow-up round {}", round + 1),
-                    &client_messages,
-                );
-                continue;
-            }
-
             tracing::info!(target: "chat", "[Chat] No feedback-requiring tools, ending loop");
             break;
         }
 
-        // Only inject tool results — no need to replay the assistant's previous output
+        // Prompt-mode tools do not have native tool-result messages, so feed a
+        // neutral tool-result summary back into the model without forcing a
+        // visible reply. The next round may answer, call more tools, or end
+        // with empty text.
         client_messages.push(plain_llm_message(system_message(format!(
-            "[Tool results]\n\
-            {}\n\n\
-            Incorporate these results naturally into your dialogue. Do NOT echo raw data or JSON.",
+            "[Tool results]\n{}",
             tool_results.join("\n")
         ))));
         #[cfg(debug_assertions)]
@@ -2465,15 +2403,13 @@ pub async fn stream_chat(
 
         if request.hidden {
             if let Some(observation) = selected_vision_observation.as_ref() {
-                state
-                    .add_message_with_metadata(
-                        "context".to_string(),
-                        observation.summary.clone(),
-                        Some(vision_context_metadata_value(observation).to_string()),
-                        &char_id,
-                        None,
-                    )
-                    .await;
+                persist_vision_context_message(
+                    &state,
+                    observation,
+                    &char_id,
+                    Some(&assistant_turn_id),
+                )
+                .await;
             }
             state
                 .add_message_with_metadata(
@@ -3270,8 +3206,9 @@ mod tests {
             extract_message_text(&messages[1].message),
             "older visible user"
         );
-        assert!(extract_message_text(&messages[2].message)
-            .contains("[Screen context, not typed by the user]"));
+        assert!(extract_message_text(&messages[2].message).contains("[Screen context]"));
+        assert!(!extract_message_text(&messages[2].message).contains("Captured at:"));
+        assert!(!extract_message_text(&messages[2].message).contains("Source:"));
         assert_eq!(
             extract_message_text(&messages[3].message),
             "current hidden instruction"

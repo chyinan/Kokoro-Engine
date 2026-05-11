@@ -46,6 +46,42 @@ describe("buildChatMessagesFromConversation", () => {
         ]);
     });
 
+    it("从 context metadata 恢复关联的 proactive turn_id", () => {
+        const messages: Array<ConversationMessage> = [
+            createMessage({
+                role: "context",
+                content: "屏幕上有调试日志。",
+                metadata: JSON.stringify({
+                    type: "vision_observation",
+                    turn_id: "turn-proactive-1",
+                    captured_at: "2026-04-05T10:00:00Z",
+                    source: "auto",
+                }),
+            }),
+            createMessage({
+                role: "assistant",
+                content: "这些日志看起来很密集呢。",
+                metadata: JSON.stringify({
+                    turn_id: "turn-proactive-1",
+                }),
+            }),
+        ];
+
+        const chatMessages = buildChatMessagesFromConversation(messages);
+
+        expect(chatMessages).toEqual([
+            expect.objectContaining({
+                role: "context",
+                text: "屏幕上有调试日志。",
+                turnId: "turn-proactive-1",
+            }),
+            expect.objectContaining({
+                role: "kokoro",
+                text: "这些日志看起来很密集呢。",
+            }),
+        ]);
+    });
+
     it("从 tool_result metadata 恢复完整工具身份字段", () => {
         const messages: Array<ConversationMessage> = [
             createMessage({

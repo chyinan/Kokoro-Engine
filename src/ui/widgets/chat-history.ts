@@ -8,6 +8,7 @@ export interface ChatHistoryMessage {
     tools?: ToolTraceItem[];
     capturedAt?: string;
     source?: string;
+    turnId?: string;
 }
 
 function getStringMetadataValue(meta: Record<string, unknown> | null, key: string): string | undefined {
@@ -60,6 +61,7 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
                 text: m.content,
                 capturedAt: getStringMetadataValue(meta, "captured_at") ?? m.created_at,
                 source: getStringMetadataValue(meta, "source"),
+                turnId,
             });
             continue;
         }

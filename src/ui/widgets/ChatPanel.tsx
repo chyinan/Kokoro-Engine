@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, useDeferredValue, memo } from
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
-import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus } from "../../lib/kokoro-bridge";
+import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus } from "../../lib/kokoro-bridge";
 import type { FailureEvent, ToolTraceItem } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen } from "@tauri-apps/api/event";
@@ -26,6 +26,7 @@ interface ChatMessage {
     tools?: ToolTraceItem[];
     capturedAt?: string;
     source?: string;
+    turnId?: string;
 }
 
 interface PendingTurnState {
@@ -36,6 +37,7 @@ interface PendingTurnState {
     translation?: string;
     translationPending: boolean;
     tools: ToolTraceItem[];
+    pendingContext?: ChatMessage;
 }
 
 export type { ChatMessage as ChatPanelMessage };
@@ -58,11 +60,18 @@ const ensureTurnMessage = (messages: ChatMessage[], turn: PendingTurnState) => {
         return [...messages];
     }
 
-    const next = [...messages, {
+    const next = [...messages];
+    if (turn.pendingContext && !next.some(message => message.role === "context" && message.turnId === turn.turnId)) {
+        next.push({
+            ...turn.pendingContext,
+            turnId: turn.turnId,
+        });
+    }
+    next.push({
         role: "kokoro" as const,
         text: "",
         tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
-    }];
+    });
     turn.messageIndex = next.length - 1;
     return next;
 };
@@ -692,6 +701,7 @@ export default function ChatPanel() {
     // Raw (unfiltered) full response text — accumulated from all deltas
     const rawResponseRef = useRef("");
     const currentTurnRef = useRef<PendingTurnState | null>(null);
+    const pendingVisionContextRef = useRef<ChatMessage | null>(null);
 
     // Typing reveal: per-character animation
     const { pushDelta, flush: flushReveal, reset: resetReveal } = useTypingReveal({
@@ -1015,7 +1025,9 @@ export default function ChatPanel() {
                     translation: undefined,
                     translationPending: false,
                     tools: [],
+                    pendingContext: pendingVisionContextRef.current ?? undefined,
                 };
+                pendingVisionContextRef.current = null;
                 rawResponseRef.current = "";
                 if (cancelRequestedRef.current) {
                     void requestTurnCancellation(turn_id);
@@ -1137,13 +1149,21 @@ export default function ChatPanel() {
                     }
 
                     if (hasContent) {
-                        return [...prev, {
+                        const next = [...prev];
+                        if (turn.pendingContext && !next.some(message => message.role === "context" && message.turnId === turn.turnId)) {
+                            next.push({
+                                ...turn.pendingContext,
+                                turnId: turn.turnId,
+                            });
+                        }
+                        next.push({
                             role: "kokoro",
                             text: cleanText,
                             translation: turn.translation,
                             translationPending: false,
                             tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
-                        }];
+                        });
+                        return next;
                     }
 
                     return prev;
@@ -1200,6 +1220,20 @@ export default function ChatPanel() {
             });
             if (aborted) { unToolResult(); return; }
             cleanups.push(unToolResult);
+
+            const unVisionObservation = await onVisionObservation((observation) => {
+                if (aborted) return;
+                const summary = observation.summary.trim();
+                if (!summary) return;
+                pendingVisionContextRef.current = {
+                    role: "context",
+                    text: summary,
+                    capturedAt: observation.captured_at,
+                    source: observation.source,
+                };
+            });
+            if (aborted) { unVisionObservation(); return; }
+            cleanups.push(unVisionObservation);
 
             const unTtsStart = await listen("tts:start", () => {
                 if (aborted) return;

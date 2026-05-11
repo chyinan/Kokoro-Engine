@@ -22,20 +22,8 @@ pub fn render_vision_context_user_message(
     content: impl AsRef<str>,
     metadata: Option<&serde_json::Value>,
 ) -> ChatCompletionRequestMessage {
-    let source = metadata
-        .and_then(|meta| meta.get("source"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown");
-    let captured_at = metadata
-        .and_then(|meta| meta.get("captured_at"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown");
-    user_text_message(format!(
-        "[Screen context, not typed by the user]\nCaptured at: {}\nSource: {}\nSummary: {}",
-        captured_at,
-        source,
-        content.as_ref()
-    ))
+    let _ = metadata;
+    user_text_message(format!("[Screen context]\nSummary: {}", content.as_ref()))
 }
 
 pub fn role_text_message(
@@ -325,9 +313,9 @@ mod tests {
         match message {
             ChatCompletionRequestMessage::User(_) => {
                 let text = extract_message_text(&message);
-                assert!(text.contains("[Screen context, not typed by the user]"));
-                assert!(text.contains("Captured at: 2026-05-11T06:00:00Z"));
-                assert!(text.contains("Source: auto"));
+                assert!(text.contains("[Screen context]"));
+                assert!(!text.contains("Captured at: 2026-05-11T06:00:00Z"));
+                assert!(!text.contains("Source: auto"));
                 assert!(text.contains("VS Code is visible"));
             }
             other => panic!("expected user-rendered context, got {other:?}"),
