@@ -79,11 +79,33 @@
       "telegram": "Telegram",
       "jailbreak": "Jailbreak",
       "backup": "Резервное копирование",
-      "pet": "Питомец"
+      "pet": "Питомец",
+      "about": "О приложении"
     },
     "app_language": {
       "label": "Язык приложения",
       "description": "Выберите язык интерфейса"
+    },
+    "about": {
+      "logo_alt": "Логотип Kokoro Engine",
+      "current_version": "Текущая версия: {{version}}",
+      "version_unknown": "Неизвестная версия",
+      "links_title": "Ссылки проекта",
+      "github": "Репозиторий GitHub",
+      "github_desc": "Исходный код, задачи и документация",
+      "telegram": "Сообщество Telegram",
+      "telegram_desc": "Присоединиться к официальной группе",
+      "updates_title": "Обновления Release",
+      "updates_desc": "Проверьте GitHub Releases, чтобы узнать, доступна ли новая версия.",
+      "check_updates": "Проверить обновления",
+      "checking": "Проверка...",
+      "open_releases": "Открыть Releases",
+      "latest": "Установлена последняя версия ({{version}})",
+      "available": "Доступна новая версия: {{version}}",
+      "latest_release": "Последний Release: {{version}}",
+      "published": "Опубликовано {{date}}",
+      "error": "Не удалось проверить обновления: {{error}}",
+      "release_invalid": "Недопустимый ответ GitHub Release"
     },
     "api": {
       "provider_label": "Поставщик LLM",

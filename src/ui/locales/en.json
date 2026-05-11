@@ -79,11 +79,33 @@
             "telegram": "TELEGRAM",
             "jailbreak": "JAILBREAK",
             "backup": "BACKUP",
-            "pet": "FLOAT"
+            "pet": "FLOAT",
+            "about": "ABOUT"
         },
         "app_language": {
             "label": "Application Language",
             "description": "Select the interface language"
+        },
+        "about": {
+            "logo_alt": "Kokoro Engine logo",
+            "current_version": "Current version: {{version}}",
+            "version_unknown": "Unknown version",
+            "links_title": "Project Links",
+            "github": "GitHub Repository",
+            "github_desc": "View source code, issues, and docs",
+            "telegram": "Telegram Community",
+            "telegram_desc": "Join the official discussion group",
+            "updates_title": "Release Updates",
+            "updates_desc": "Check GitHub Releases to see whether a newer version is available.",
+            "check_updates": "Check Updates",
+            "checking": "Checking...",
+            "open_releases": "Open Releases",
+            "latest": "You are on the latest version ({{version}})",
+            "available": "New version available: {{version}}",
+            "latest_release": "Latest release: {{version}}",
+            "published": "Published {{date}}",
+            "error": "Update check failed: {{error}}",
+            "release_invalid": "Invalid GitHub Release response"
         },
         "api": {
             "provider_label": "LLM Provider",

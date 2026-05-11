@@ -79,11 +79,33 @@
             "telegram": "Telegram",
             "jailbreak": "ジェイルブレイク",
             "backup": "バックアップ",
-            "pet": "デスクトップ浮動"
+            "pet": "デスクトップ浮動",
+            "about": "概要"
         },
         "app_language": {
             "label": "アプリケーション言語",
             "description": "インターフェース言語を選択"
+        },
+        "about": {
+            "logo_alt": "Kokoro Engine ロゴ",
+            "current_version": "現在のバージョン：{{version}}",
+            "version_unknown": "不明なバージョン",
+            "links_title": "プロジェクトリンク",
+            "github": "GitHub リポジトリ",
+            "github_desc": "ソースコード、Issue、ドキュメントを表示",
+            "telegram": "Telegram コミュニティ",
+            "telegram_desc": "公式ディスカッショングループに参加",
+            "updates_title": "Release 更新",
+            "updates_desc": "GitHub Releases を確認して、新しいバージョンがあるか調べます。",
+            "check_updates": "更新を確認",
+            "checking": "確認中...",
+            "open_releases": "Releases を開く",
+            "latest": "最新バージョンです（{{version}}）",
+            "available": "新しいバージョンがあります：{{version}}",
+            "latest_release": "最新 Release：{{version}}",
+            "published": "公開日：{{date}}",
+            "error": "更新確認に失敗しました：{{error}}",
+            "release_invalid": "GitHub Release のレスポンスが無効です"
         },
         "api": {
             "provider_label": "LLM プロバイダー",

@@ -79,11 +79,33 @@
             "telegram": "Telegram",
             "jailbreak": "破限提示詞",
             "backup": "備份",
-            "pet": "桌面懸浮"
+            "pet": "桌面懸浮",
+            "about": "關於"
         },
         "app_language": {
             "label": "應用語言",
             "description": "選擇界面語言"
+        },
+        "about": {
+            "logo_alt": "Kokoro Engine 標誌",
+            "current_version": "當前版本：{{version}}",
+            "version_unknown": "未知版本",
+            "links_title": "項目鏈接",
+            "github": "GitHub 倉庫",
+            "github_desc": "查看源碼、議題和文檔",
+            "telegram": "Telegram 社群",
+            "telegram_desc": "加入官方討論群",
+            "updates_title": "Release 更新",
+            "updates_desc": "檢查 GitHub Releases，確認是否有新版本可用。",
+            "check_updates": "檢查更新",
+            "checking": "檢查中...",
+            "open_releases": "打開 Releases",
+            "latest": "已是最新版本（{{version}}）",
+            "available": "發現新版本 {{version}}",
+            "latest_release": "最新 Release：{{version}}",
+            "published": "發布于 {{date}}",
+            "error": "檢查更新失敗：{{error}}",
+            "release_invalid": "GitHub Release 響應無效"
         },
         "api": {
             "provider_label": "大模型服務商",

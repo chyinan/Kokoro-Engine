@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Sparkles, Brain, Mic, Music, Eye, Server, Bot, Shield, HardDrive, Ghost } from "lucide-react";
+import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Sparkles, Brain, Mic, Music, Eye, Server, Bot, Shield, HardDrive, Ghost, Info } from "lucide-react";
 import { ModList } from "../mods/ModList";
 import { Select } from "@/components/ui/select";
 import CharacterManager from "./CharacterManager";
@@ -19,6 +19,7 @@ import TelegramTab from "./settings/TelegramTab";
 import { JailbreakTab } from "./settings/JailbreakTab";
 import { BackupTab } from "./settings/BackupTab";
 import PetTab from "./settings/PetTab";
+import AboutTab from "./settings/AboutTab";
 import { useTranslation } from "react-i18next";
 import { setPersona, setResponseLanguage, setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, saveTelegramConfig, getTelegramConfig, saveLlmConfig } from "../../lib/kokoro-bridge";
 import type {
@@ -43,7 +44,7 @@ import type {
 import { normalizeBackgroundConfigForImageCount, type BackgroundConfig } from "../hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "../../features/live2d/Live2DViewer";
 
-export type SettingsTabId = "api" | "persona" | "tts" | "stt" | "sing" | "mods" | "bg" | "model" | "imagegen" | "memory" | "vision" | "mcp" | "telegram" | "jailbreak" | "backup" | "pet";
+export type SettingsTabId = "api" | "persona" | "tts" | "stt" | "sing" | "mods" | "bg" | "model" | "imagegen" | "memory" | "vision" | "mcp" | "telegram" | "jailbreak" | "backup" | "pet" | "about";
 
 export interface BackgroundControls {
     config: BackgroundConfig;
@@ -129,6 +130,7 @@ const tabs: { id: SettingsTabId; label: string; icon: typeof Key }[] = [
     { id: "jailbreak", label: "settings.tabs.jailbreak", icon: Shield },
     { id: "pet", label: "settings.tabs.pet", icon: Ghost },
     { id: "backup", label: "settings.tabs.backup", icon: HardDrive },
+    { id: "about", label: "settings.tabs.about", icon: Info },
 ];
 
 const APP_LANGUAGE_OPTIONS = [
@@ -826,6 +828,11 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                             {mountedTabs.has("pet") && (
                                 <div className={activeTab === "pet" ? "block" : "hidden"}>
                                     <PetTab />
+                                </div>
+                            )}
+                            {mountedTabs.has("about") && (
+                                <div className={activeTab === "about" ? "block" : "hidden"}>
+                                    <AboutTab />
                                 </div>
                             )}
                         </div>
