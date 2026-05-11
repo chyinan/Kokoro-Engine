@@ -92,8 +92,8 @@ impl Default for VisionConfig {
     fn default() -> Self {
         Self {
             vlm_enabled: false,
-            auto_vision_enabled: false,
-            proactive_vision_enabled: false,
+            auto_vision_enabled: true,
+            proactive_vision_enabled: true,
             vision_context_history_mode: default_vision_context_history_mode(),
             capture_interval_secs: 15,
             change_threshold: 0.05,
