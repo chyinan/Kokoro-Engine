@@ -237,10 +237,9 @@ const DEFAULT_ANTHROPIC_VLM_BASE_URL: &str = "https://api.anthropic.com/v1";
 const DEFAULT_LLAMA_CPP_VLM_BASE_URL: &str = "http://127.0.0.1:8080";
 
 fn build_proactive_vision_instruction() -> &'static str {
-    "请结合上方的屏幕上下文、当前角色的人设和性格，对屏幕内容做一句自然、简短、轻量的评论。\
-    只评论屏幕上直接可见的内容，不要表现得像在监视用户，也不要声称知道隐藏信息、用户想法、代码是谁写的或谁改的，或屏幕外发生的事。\
-    避免重复、恐怖、威胁、夸张或令人不适的措辞；如果内容不清楚或可能敏感，就保持中性温和。\
-    如果这个屏幕变化不值得评论，请只回复 PASS。"
+    "结合上方屏幕上下文和当前角色的人设，判断这次屏幕变化是否值得轻声回应。\
+    如果有新页面、新应用、醒目的视觉内容、明显状态变化或适合角色自然吐槽的点，就说一句简短评论。\
+    如果只是同一界面、普通滚动、日志/聊天内容变化，或评论会和最近说过的内容相似，请只回复 PASS。"
 }
 
 fn default_vlm_base_url(provider: &str) -> &'static str {
@@ -425,14 +424,15 @@ mod tests {
     }
 
     #[test]
-    fn proactive_vision_instruction_contains_safety_constraints() {
+    fn proactive_vision_instruction_defaults_to_pass() {
         let instruction = build_proactive_vision_instruction();
 
         assert!(!instruction.contains("用户的电脑屏幕上目前正在显示的是"));
         assert!(!instruction.contains("VS Code with Rust source open"));
-        assert!(instruction.contains("上方的屏幕上下文"));
-        assert!(instruction.contains("不要表现得像在监视用户"));
-        assert!(instruction.contains("代码是谁写的或谁改的"));
+        assert!(instruction.contains("上方屏幕上下文"));
+        assert!(instruction.contains("值得轻声回应"));
+        assert!(instruction.contains("新页面、新应用"));
+        assert!(instruction.contains("同一界面"));
     }
 
     #[tokio::test]

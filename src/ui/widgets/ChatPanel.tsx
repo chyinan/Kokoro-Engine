@@ -214,6 +214,24 @@ function normalizeToolList(tools: Array<ToolTraceItem>): Array<ToolTraceItem> {
     return filterVisibleTools(tools);
 }
 
+function hasRenderableTurnContent(turn: PendingTurnState, text: string): boolean {
+    return hasVisibleAssistantContent(text) || normalizeToolList(turn.tools).length > 0;
+}
+
+function removeTurnContext(messages: Array<ChatMessage>, turn: PendingTurnState): Array<ChatMessage> {
+    if (!turn.pendingContext) {
+        return messages;
+    }
+    return messages.filter(message => !(message.role === "context" && message.turnId === turn.turnId));
+}
+
+function removeTurnMessages(messages: Array<ChatMessage>, turn: PendingTurnState): Array<ChatMessage> {
+    const withoutAssistant = hasActiveKokoroBubble(messages, turn.messageIndex)
+        ? [...messages.slice(0, turn.messageIndex!), ...messages.slice(turn.messageIndex! + 1)]
+        : messages;
+    return removeTurnContext(withoutAssistant, turn);
+}
+
 function mergeToolIntoTurn(turn: PendingTurnState, incoming: ToolTraceItem): void {
     turn.tools = normalizeToolList(mergeToolTraceItems(turn.tools, incoming));
 }
@@ -1083,8 +1101,9 @@ export default function ChatPanel() {
                 userScrolledRef.current = false;
 
                 const cleanText = stripStoredMarkup(text);
-                const hasContent = hasVisibleAssistantContent(cleanText) || turn.tools.length > 0;
+                const hasContent = hasRenderableTurnContent(turn, cleanText);
                 if (!hasContent) {
+                    setMessages(prev => removeTurnMessages(prev, turn));
                     return;
                 }
 
@@ -1132,11 +1151,11 @@ export default function ChatPanel() {
                 const cleanText = stripStoredMarkup(fullText);
 
                 setMessages(prev => {
-                    const hasContent = hasVisibleAssistantContent(cleanText) || turn.tools.length > 0;
+                    const hasContent = hasRenderableTurnContent(turn, cleanText);
 
                     if (hasActiveKokoroBubble(prev, turn.messageIndex)) {
                         if (!hasContent) {
-                            return [...prev.slice(0, turn.messageIndex!), ...prev.slice(turn.messageIndex! + 1)];
+                            return removeTurnMessages(prev, turn);
                         }
 
                         return updateTurnMessage(prev, turn, (current) => ({
