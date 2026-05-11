@@ -1599,7 +1599,11 @@ pub async fn stream_chat(
         "[Chat] configured_active_provider={}, effective_active_provider={}, native_tools_enabled={}",
         llm_config.active_provider, effective_provider_id, native_tools_enabled
     );
-    let vision_enabled = _vision_watcher.config.read().await.vlm_enabled;
+    let vision_config = _vision_watcher.config.read().await.clone();
+    state
+        .set_vision_context_history_mode(vision_config.vision_context_history_mode.clone())
+        .await;
+    let vision_enabled = vision_config.vlm_enabled;
 
     // Native tool-calling requests already carry structured tool definitions,
     // so avoid duplicating a long textual tool prompt there.
@@ -1714,10 +1718,12 @@ pub async fn stream_chat(
     }
 
     // Dedicated current-turn vision context rendering happens after ordinary
-    // request hooks and after the current hidden user turn exists, so it is
-    // always inserted immediately before the current user message.
-    if let Some(observation) = selected_vision_observation.as_ref() {
-        insert_vision_context_before_latest_user(&mut client_messages, observation);
+    // request hooks. Visible turns already persisted the selected observation
+    // before prompt composition, so only hidden turns need an in-flight insert.
+    if request.hidden {
+        if let Some(observation) = selected_vision_observation.as_ref() {
+            insert_vision_context_before_latest_user(&mut client_messages, observation);
+        }
     }
 
     // Attach images to the last user message if present

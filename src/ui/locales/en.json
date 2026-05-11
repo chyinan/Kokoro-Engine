@@ -775,6 +775,12 @@
                 "label": "Automatic background observation",
                 "desc": "Watch changed screens in the background and prepare context for your next chat."
             },
+            "contextHistory": {
+                "label": "LLM screen context history",
+                "desc": "Choose how much historical vision summary is sent to the LLM; observations are still saved in full.",
+                "latest": "Latest only",
+                "full": "Full"
+            },
             "proactive": {
                 "label": "Comment on screen changes",
                 "desc": "When off, vision is still analyzed and used as chat context, but it will not trigger proactive messages."

@@ -352,6 +352,19 @@ pub fn run() {
                             }
                         }
 
+                        let vision_config_path = app_data_dir.join("vision_config.json");
+                        let vision_config = crate::vision::config::load_config(&vision_config_path);
+                        orchestrator
+                            .set_vision_context_history_mode(
+                                vision_config.vision_context_history_mode.clone(),
+                            )
+                            .await;
+                        tracing::info!(
+                            target: "ai",
+                            "Restored vision_context_history_mode={}",
+                            vision_config.vision_context_history_mode
+                        );
+
                         // Restore current_conversation_id from disk and reload history
                         let conv_id_path = app_data_dir.join("current_conversation_id.json");
                         if let Ok(content) = std::fs::read_to_string(&conv_id_path) {

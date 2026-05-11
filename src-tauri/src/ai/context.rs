@@ -42,6 +42,33 @@ pub fn is_summary_candidate_message(message: &Message) -> bool {
     !is_vision_context_message(message)
 }
 
+fn latest_vision_context_index(messages: &[Message]) -> Option<usize> {
+    messages.iter().rposition(is_vision_context_message)
+}
+
+fn should_include_message_for_llm_history(
+    message: &Message,
+    index: usize,
+    latest_vision_index: Option<usize>,
+    vision_context_history_mode: &str,
+) -> bool {
+    let technical_type = message
+        .metadata
+        .as_ref()
+        .and_then(|meta| meta.get("type"))
+        .and_then(|value| value.as_str());
+
+    if matches!(technical_type, Some("translation_instruction")) {
+        return false;
+    }
+
+    if is_vision_context_message(message) && vision_context_history_mode != "full" {
+        return latest_vision_index == Some(index);
+    }
+
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySnippet {
     pub id: i64,
@@ -141,6 +168,8 @@ pub struct AIOrchestrator {
     pub context_strategy: Arc<Mutex<String>>,
     /// Max characters per message before truncation
     pub max_message_chars: Arc<Mutex<usize>>,
+    /// Screen context history injected into the LLM prompt: "latest" | "full".
+    pub vision_context_history_mode: Arc<Mutex<String>>,
 }
 
 impl AIOrchestrator {
@@ -189,6 +218,7 @@ impl AIOrchestrator {
             current_conversation_id: Arc::new(Mutex::new(None)),
             context_strategy: Arc::new(Mutex::new("window".to_string())),
             max_message_chars: Arc::new(Mutex::new(2000)),
+            vision_context_history_mode: Arc::new(Mutex::new("latest".to_string())),
         })
     }
 
@@ -747,20 +777,21 @@ impl AIOrchestrator {
         // Read all lock-guarded values upfront and drop locks immediately.
         // This prevents holding multiple mutexes across .await points.
         let sp = self.system_prompt.lock().await.clone();
+        let vision_context_history_mode = self.vision_context_history_mode.lock().await.clone();
         let history_snapshot: Vec<Message> = self.history.lock().await.iter().cloned().collect();
+        let latest_vision_index = latest_vision_context_index(&history_snapshot);
         let recent_history_snapshot: Vec<Message> = history_snapshot
             .iter()
-            .filter(|msg| {
-                let technical_type = msg
-                    .metadata
-                    .as_ref()
-                    .and_then(|meta| meta.get("type"))
-                    .and_then(|value| value.as_str());
-                !matches!(
-                    technical_type,
-                    Some("translation_instruction") | Some("vision_observation")
-                ) && msg.role != "context"
+            .enumerate()
+            .filter(|(index, msg)| {
+                should_include_message_for_llm_history(
+                    msg,
+                    *index,
+                    latest_vision_index,
+                    &vision_context_history_mode,
+                )
             })
+            .map(|(_, msg)| msg)
             .cloned()
             .collect();
 
@@ -1013,6 +1044,11 @@ impl AIOrchestrator {
         *self.max_message_chars.lock().await = max_chars;
     }
 
+    pub async fn set_vision_context_history_mode(&self, mode: String) {
+        *self.vision_context_history_mode.lock().await =
+            crate::vision::config::normalize_vision_context_history_mode(&mode);
+    }
+
     pub async fn clear_history(&self) {
         let mut history = self.history.lock().await;
         history.clear();
@@ -1201,6 +1237,85 @@ mod tests {
         assert_eq!(summary_history[0].role, "user");
         assert_eq!(memory_history.len(), 1);
         assert_eq!(memory_history[0].role, "user");
+    }
+
+    #[tokio::test]
+    async fn compose_prompt_defaults_to_latest_vision_context_history() {
+        let orchestrator = setup_test_orchestrator().await;
+        orchestrator.set_memory_enabled(false).await;
+        orchestrator
+            .push_history_message(Message {
+                role: "context".to_string(),
+                content: "Old screen summary".to_string(),
+                metadata: Some(serde_json::json!({"type": "vision_observation"})),
+            })
+            .await;
+        orchestrator
+            .push_history_message(Message {
+                role: "assistant".to_string(),
+                content: "Old visual reply".to_string(),
+                metadata: None,
+            })
+            .await;
+        orchestrator
+            .push_history_message(Message {
+                role: "context".to_string(),
+                content: "Latest screen summary".to_string(),
+                metadata: Some(serde_json::json!({"type": "vision_observation"})),
+            })
+            .await;
+
+        let (messages, warnings) = orchestrator
+            .compose_prompt("hello", false, None, true, "char-cache")
+            .await
+            .expect("compose_prompt should succeed");
+
+        assert!(warnings.is_empty());
+        assert!(messages
+            .iter()
+            .any(|message| message.content == "Latest screen summary"));
+        assert!(messages
+            .iter()
+            .all(|message| message.content != "Old screen summary"));
+        assert!(messages
+            .iter()
+            .any(|message| message.content == "Old visual reply"));
+    }
+
+    #[tokio::test]
+    async fn compose_prompt_can_include_full_vision_context_history() {
+        let orchestrator = setup_test_orchestrator().await;
+        orchestrator.set_memory_enabled(false).await;
+        orchestrator
+            .set_vision_context_history_mode("full".to_string())
+            .await;
+        orchestrator
+            .push_history_message(Message {
+                role: "context".to_string(),
+                content: "Old screen summary".to_string(),
+                metadata: Some(serde_json::json!({"type": "vision_observation"})),
+            })
+            .await;
+        orchestrator
+            .push_history_message(Message {
+                role: "context".to_string(),
+                content: "Latest screen summary".to_string(),
+                metadata: Some(serde_json::json!({"type": "vision_observation"})),
+            })
+            .await;
+
+        let (messages, warnings) = orchestrator
+            .compose_prompt("hello", false, None, true, "char-cache")
+            .await
+            .expect("compose_prompt should succeed");
+
+        assert!(warnings.is_empty());
+        assert!(messages
+            .iter()
+            .any(|message| message.content == "Old screen summary"));
+        assert!(messages
+            .iter()
+            .any(|message| message.content == "Latest screen summary"));
     }
 
     #[tokio::test]

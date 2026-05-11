@@ -17,6 +17,7 @@ import type { VisionConfig, OllamaModelInfo, VisionScreenInfo } from "../../../l
 import { Select } from "@/components/ui/select";
 
 type CameraPreviewIssue = "no_devices" | "permission_denied" | "unsupported" | "unavailable";
+type VisionContextHistoryMode = VisionConfig["vision_context_history_mode"];
 
 function getCameraPreviewIssue(error: unknown): CameraPreviewIssue {
     const name = error instanceof DOMException ? error.name : "";
@@ -812,6 +813,35 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                                     )}
                                 />
                             </motion.button>
+                        </div>
+
+                        <div className="flex items-start justify-between gap-4 px-3 py-3">
+                            <div className="flex items-start gap-3">
+                                <MonitorSmartphone size={15} strokeWidth={1.5} className="mt-0.5 text-[var(--color-text-muted)]" />
+                                <div>
+                                    <div className="text-sm text-[var(--color-text-primary)]">
+                                        {t("settings.vision.contextHistory.label")}
+                                    </div>
+                                    <div className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+                                        {t("settings.vision.contextHistory.desc")}
+                                    </div>
+                                </div>
+                            </div>
+                            <Select
+                                value={config.vision_context_history_mode ?? "latest"}
+                                onChange={async (value) => {
+                                    const mode = value as VisionContextHistoryMode;
+                                    const next = { ...config, vision_context_history_mode: mode };
+                                    setConfig(next);
+                                    setDirty(false);
+                                    try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                                }}
+                                options={[
+                                    { value: "latest", label: t("settings.vision.contextHistory.latest") },
+                                    { value: "full", label: t("settings.vision.contextHistory.full") },
+                                ]}
+                                className="min-w-36 shrink-0"
+                            />
                         </div>
 
                         <div className="flex items-center justify-between gap-4 px-3 py-3">

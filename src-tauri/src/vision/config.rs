@@ -55,6 +55,9 @@ pub struct VisionConfig {
     pub auto_vision_enabled: bool,
     /// Whether completed observations can trigger proactive comments.
     pub proactive_vision_enabled: bool,
+    /// How much persisted screen context should be included in LLM history: "latest" or "full".
+    #[serde(default = "default_vision_context_history_mode")]
+    pub vision_context_history_mode: String,
     /// Capture interval in seconds.
     pub capture_interval_secs: u32,
     /// Change threshold (0.0–1.0). Lower = more sensitive.
@@ -91,6 +94,7 @@ impl Default for VisionConfig {
             vlm_enabled: false,
             auto_vision_enabled: false,
             proactive_vision_enabled: false,
+            vision_context_history_mode: default_vision_context_history_mode(),
             capture_interval_secs: 15,
             change_threshold: 0.05,
             display_id: None,
@@ -102,6 +106,18 @@ impl Default for VisionConfig {
             camera_enabled: false,
             camera_device_id: None,
         }
+    }
+}
+
+pub fn default_vision_context_history_mode() -> String {
+    "latest".to_string()
+}
+
+pub fn normalize_vision_context_history_mode(mode: &str) -> String {
+    if mode == "full" {
+        "full".to_string()
+    } else {
+        "latest".to_string()
     }
 }
 
@@ -172,6 +188,12 @@ fn migrate_config_value(value: serde_json::Value) -> VisionConfig {
             Some("proactive_enabled"),
             defaults.proactive_vision_enabled,
         ),
+        vision_context_history_mode: normalize_vision_context_history_mode(
+            value
+                .get("vision_context_history_mode")
+                .and_then(|value| value.as_str())
+                .unwrap_or(&defaults.vision_context_history_mode),
+        ),
         capture_interval_secs: u32_field(
             &value,
             "capture_interval_secs",
@@ -219,6 +241,8 @@ pub fn load_config(path: &Path) -> VisionConfig {
 pub fn save_config(path: &Path, config: &VisionConfig) -> Result<(), String> {
     let mut config = config.clone();
     config.vlm_region = config.vlm_region.and_then(NormalizedRect::clamped);
+    config.vision_context_history_mode =
+        normalize_vision_context_history_mode(&config.vision_context_history_mode);
     let json = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize vision config: {}", e))?;
     std::fs::write(path, json).map_err(|e| format!("Failed to write vision config: {}", e))?;
@@ -258,6 +282,7 @@ mod tests {
         assert!(config.vlm_enabled);
         assert!(config.auto_vision_enabled);
         assert!(config.proactive_vision_enabled);
+        assert_eq!(config.vision_context_history_mode, "latest");
         assert_eq!(config.capture_interval_secs, 7);
         assert_eq!(config.change_threshold, 0.12);
         assert_eq!(
@@ -278,6 +303,7 @@ mod tests {
         config.vlm_enabled = true;
         config.auto_vision_enabled = false;
         config.capture_interval_secs = 22;
+        config.vision_context_history_mode = "full".to_string();
 
         save_config(&path, &config).expect("config should save");
         let raw = std::fs::read_to_string(&path).expect("config should be readable");
@@ -286,6 +312,7 @@ mod tests {
         assert_eq!(value["vlm_enabled"], true);
         assert_eq!(value["auto_vision_enabled"], false);
         assert_eq!(value["capture_interval_secs"], 22);
+        assert_eq!(value["vision_context_history_mode"], "full");
         assert!(value.get("enabled").is_none());
         assert!(value.get("interval_secs").is_none());
         assert!(value.get("proactive_enabled").is_none());

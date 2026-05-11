@@ -788,6 +788,7 @@ export async function uploadVisionImage(fileBytes: number[], filename: string): 
 export interface VisionConfig {
     vlm_enabled: boolean;
     auto_vision_enabled: boolean;
+    vision_context_history_mode: "latest" | "full";
     capture_interval_secs: number;
     change_threshold: number;
     display_id?: string | null;
