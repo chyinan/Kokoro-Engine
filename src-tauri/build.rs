@@ -20,12 +20,16 @@ fn main() {
     // and also copied next to the compiled binary for production builds.
     let dest = project_dir.join(lib_name);
     if dest.exists() {
-        println!(
-            "cargo:warning=ONNX Runtime already present at {}",
-            dest.display()
-        );
-        copy_to_binary_dir(&dest, lib_name);
-        return;
+        if !is_usable_dylib(&dest) {
+            let _ = fs::remove_file(&dest);
+        } else {
+            println!(
+                "cargo:warning=ONNX Runtime already present at {}",
+                dest.display()
+            );
+            copy_to_binary_dir(&dest, lib_name);
+            return;
+        }
     }
 
     println!(
@@ -48,6 +52,14 @@ fn main() {
     );
 
     copy_to_binary_dir(&dest, lib_name);
+}
+
+fn is_usable_dylib(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .metadata()
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
 }
 
 /// Returns (library_filename, download_url) for the current build target.
@@ -157,6 +169,9 @@ fn extract_from_tgz(archive: &Path, cache_dir: &Path, lib_name: &str) -> PathBuf
     let suffix = format!("/lib/{}", lib_name);
     for entry in tar.entries().expect("failed to read tar entries") {
         let mut entry = entry.expect("failed to read tar entry");
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
         let path = entry
             .path()
             .expect("failed to read entry path")

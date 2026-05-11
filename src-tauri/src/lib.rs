@@ -18,6 +18,7 @@ pub mod vision;
 use crate::hooks::{AuditLogHookHandler, HookRuntime};
 use crate::mods::ModManager;
 use crate::utils::logging::init_logging;
+use std::path::Path;
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -63,7 +64,7 @@ pub fn run() {
         ];
         for root in search_roots.into_iter().flatten() {
             let candidate = root.join(ORT_LIB_NAME);
-            if candidate.exists() {
+            if is_usable_dylib(&candidate) {
                 tracing::info!(target: "tools", "Using bundled ONNX Runtime: {}", candidate.display());
                 std::env::set_var("ORT_DYLIB_PATH", &candidate);
                 break;
@@ -802,6 +803,14 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn is_usable_dylib(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .metadata()
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
 }
 
 /// Recursively copy a directory tree from `src` to `dst`.
