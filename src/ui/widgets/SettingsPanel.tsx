@@ -665,7 +665,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                         )}
                                     >
                                         <Icon size={14} strokeWidth={1.5} />
-                                        {t(label)}
+                                        <span className="relative top-[2px]">{t(label)}</span>
                                     </button>
                                 ))}
                             </div>
