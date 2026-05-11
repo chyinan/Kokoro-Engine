@@ -1574,32 +1574,71 @@ export interface KokoroErrorObject {
     trace_id?: string;
 }
 
-function parseKokoroErrorObject(error: unknown): KokoroErrorObject | null {
-    const payload = typeof error === "string" ? parseJsonPayload(error) : error;
-    if (!isRecord(payload)) {
-        return null;
+function stringifyErrorObject(error: object): string {
+    try {
+        return JSON.stringify(error);
+    } catch {
+        return Object.prototype.toString.call(error);
     }
+}
 
-    const code = getStringField(payload, "code");
-    const message = getStringField(payload, "message");
+function objectToKokoroError(error: Record<string, unknown>): KokoroErrorObject | null {
+    const code = getStringField(error, "code");
+    const message = getStringField(error, "message");
     if (!code || !message) {
         return null;
     }
 
-    const parsed: KokoroErrorObject = { code, message };
-    const stage = getStringField(payload, "stage");
-    const traceId = getStringField(payload, "trace_id");
-    if (stage) {
-        parsed.stage = stage;
-    }
-    if (typeof payload.retryable === "boolean") {
-        parsed.retryable = payload.retryable;
-    }
-    if (traceId) {
-        parsed.trace_id = traceId;
+    return {
+        code,
+        message,
+        ...(typeof error.stage === "string" ? { stage: error.stage } : {}),
+        ...(typeof error.retryable === "boolean" ? { retryable: error.retryable } : {}),
+        ...(typeof error.trace_id === "string" ? { trace_id: error.trace_id } : {}),
+    };
+}
+
+/**
+ * 将 Tauri / Rust / JS 各种错误载荷转成人能读的文本。
+ */
+export function getKokoroErrorMessage(error: unknown): string {
+    if (error instanceof Error) {
+        return error.message;
     }
 
-    return parsed;
+    if (typeof error === "string") {
+        const parsed = parseJsonPayload(error);
+        return parsed === null ? error : getKokoroErrorMessage(parsed);
+    }
+
+    if (isRecord(error)) {
+        const structured = objectToKokoroError(error);
+        if (structured) {
+            return structured.message;
+        }
+
+        const message = error.message ?? error.error;
+        if (typeof message === "string") {
+            return message;
+        }
+        if (isRecord(message)) {
+            return getKokoroErrorMessage(message);
+        }
+
+        const stringValue = Object.values(error).find((value): value is string => typeof value === "string");
+        if (stringValue) {
+            return stringValue;
+        }
+
+        const nestedObject = Object.values(error).find(isRecord);
+        if (nestedObject) {
+            return getKokoroErrorMessage(nestedObject);
+        }
+
+        return stringifyErrorObject(error);
+    }
+
+    return String(error);
 }
 
 /**
@@ -1609,27 +1648,19 @@ function parseKokoroErrorObject(error: unknown): KokoroErrorObject | null {
  * @returns 结构化错误对象或原始错误字符串
  */
 export function parseKokoroError(error: unknown): KokoroErrorObject | string {
-    const structured = parseKokoroErrorObject(error);
-    if (structured) {
-        return structured;
-    }
-
     if (typeof error === "string") {
+        const parsed = parseJsonPayload(error);
+        if (isRecord(parsed)) {
+            return objectToKokoroError(parsed) ?? getKokoroErrorMessage(parsed);
+        }
         return error;
     }
 
-    if (error instanceof Error) {
-        return error.message;
-    }
-
     if (isRecord(error)) {
-        const message = getStringField(error, "message") ?? getStringField(error, "error");
-        if (message) {
-            return message;
-        }
+        return objectToKokoroError(error) ?? getKokoroErrorMessage(error);
     }
 
-    return stringifyUnknown(error);
+    return getKokoroErrorMessage(error);
 }
 
 /**

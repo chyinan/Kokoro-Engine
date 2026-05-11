@@ -172,6 +172,7 @@ import {
   type CharacterRecord,
   type MemoryEmbeddingModelStatus,
   type MemoryEmbeddingModelDownloadProgress,
+  getKokoroErrorMessage,
   onMemoryEmbeddingModelProgress,
 } from "./lib/kokoro-bridge";
 import type { ThemeConfig } from "./ui/layout/types";
@@ -388,26 +389,6 @@ function App() {
     return status;
   }, []);
 
-  const getMemoryModelErrorMessage = useCallback((error: unknown): string => {
-    if (error instanceof Error) return error.message;
-    if (typeof error === "string") return error;
-    if (typeof error === "object" && error !== null) {
-      const maybeMessage = (error as { message?: unknown }).message;
-      if (typeof maybeMessage === "string") return maybeMessage;
-
-      const values = Object.values(error as Record<string, unknown>);
-      const stringValue = values.find((value): value is string => typeof value === "string");
-      if (stringValue) return stringValue;
-
-      try {
-        return JSON.stringify(error);
-      } catch {
-        return Object.prototype.toString.call(error);
-      }
-    }
-    return String(error);
-  }, []);
-
   const startMemoryModelDownload = useCallback(async () => {
     if (memoryModelDownloadInFlightRef.current) {
       return;
@@ -431,7 +412,7 @@ function App() {
       const status = await downloadMemoryEmbeddingModel();
       setMemoryModelStatus(status);
     } catch (error) {
-      setMemoryModelError(getMemoryModelErrorMessage(error));
+      setMemoryModelError(getKokoroErrorMessage(error));
     } finally {
       memoryModelDownloadInFlightRef.current = false;
       setMemoryModelDownloading(false);
@@ -450,9 +431,9 @@ function App() {
         void startMemoryModelDownload();
       }
     } catch (error) {
-      setMemoryModelError(getMemoryModelErrorMessage(error));
+      setMemoryModelError(getKokoroErrorMessage(error));
     }
-  }, [getMemoryModelErrorMessage, memoryModelError, memoryModelStatus, refreshMemoryModelStatus, startMemoryModelDownload]);
+  }, [memoryModelError, memoryModelStatus, refreshMemoryModelStatus, startMemoryModelDownload]);
 
   const closeOnboarding = (status: "completed" | "dismissed") => {
     localStorage.setItem(ONBOARDING_STATUS_KEY, status);
@@ -490,9 +471,9 @@ function App() {
   useEffect(() => {
     refreshMemoryModelStatus().catch((err) => {
       console.error("[App] Failed to load memory model status:", err);
-      setMemoryModelError(getMemoryModelErrorMessage(err));
+      setMemoryModelError(getKokoroErrorMessage(err));
     });
-  }, [getMemoryModelErrorMessage, refreshMemoryModelStatus]);
+  }, [refreshMemoryModelStatus]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
