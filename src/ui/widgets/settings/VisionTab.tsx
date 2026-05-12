@@ -12,6 +12,7 @@ import {
     listAnthropicModels,
     getLlamaCppStatus,
     listVisionScreens,
+    getKokoroErrorMessage,
 } from "../../../lib/kokoro-bridge";
 import type { VisionConfig, OllamaModelInfo, VisionScreenInfo } from "../../../lib/kokoro-bridge";
 import { Select } from "@/components/ui/select";
@@ -180,7 +181,7 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
             } catch (error) {
                 if (cancelled) return;
                 setScreens([]);
-                setScreensError(String(error));
+                setScreensError(getKokoroErrorMessage(error));
             } finally {
                 if (!cancelled) setScreensLoading(false);
             }
@@ -341,7 +342,7 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
             const desc = await captureScreenNow();
             setCaptureResult(desc);
         } catch (e) {
-            setCaptureResult(`Error: ${e}`);
+            setCaptureResult(`Error: ${getKokoroErrorMessage(e)}`);
         } finally {
             setCapturing(false);
         }
