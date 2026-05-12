@@ -2,6 +2,7 @@
 
 use crate::vision::config::NormalizedRect;
 use chrono::{DateTime, Utc};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -46,15 +47,27 @@ pub struct VisionObservation {
     pub source: VisionObservationSource,
 }
 
+pub type AutoAnalysisGeneration = u64;
+
 #[derive(Debug, Clone)]
 pub enum AnalysisDispatch {
-    Dispatch(VisionFrame),
+    Dispatch {
+        frame: VisionFrame,
+        generation: AutoAnalysisGeneration,
+    },
     NotDispatched,
+}
+
+#[derive(Debug, Clone)]
+pub struct AutoAnalysisFinish {
+    pub next_frame: Option<VisionFrame>,
+    pub recorded: bool,
 }
 
 #[derive(Clone)]
 pub struct VisionContext {
     inner: Arc<RwLock<VisionContextInner>>,
+    auto_generation: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -88,6 +101,7 @@ impl VisionContext {
                 text_input_focused: false,
                 resume_auto_capture_after: None,
             })),
+            auto_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -105,6 +119,7 @@ impl VisionContext {
     }
 
     pub async fn submit_auto_frame(&self, frame: VisionFrame) -> AnalysisDispatch {
+        let generation = self.auto_generation.load(Ordering::SeqCst);
         let mut inner = self.inner.write().await;
         inner.latest_frame = Some(frame.clone());
         if inner.analysis_in_flight {
@@ -112,18 +127,35 @@ impl VisionContext {
             AnalysisDispatch::NotDispatched
         } else {
             inner.analysis_in_flight = true;
-            AnalysisDispatch::Dispatch(frame)
+            AnalysisDispatch::Dispatch { frame, generation }
         }
     }
 
     pub async fn finish_auto_analysis(
         &self,
+        generation: AutoAnalysisGeneration,
         frame: &VisionFrame,
         result: Result<String, String>,
-    ) -> Option<VisionFrame> {
+    ) -> AutoAnalysisFinish {
+        if generation != self.auto_generation.load(Ordering::SeqCst) {
+            return AutoAnalysisFinish {
+                next_frame: None,
+                recorded: false,
+            };
+        }
+
         let mut inner = self.inner.write().await;
+        if generation != self.auto_generation.load(Ordering::SeqCst) {
+            return AutoAnalysisFinish {
+                next_frame: None,
+                recorded: false,
+            };
+        }
+
+        let mut recorded = false;
         match result {
             Ok(summary) => {
+                recorded = true;
                 inner.last_error = None;
                 inner.latest_auto_observation = Some(VisionObservation {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -139,11 +171,14 @@ impl VisionContext {
             }
         }
 
-        if let Some(next) = inner.pending_frame.take() {
-            Some(next)
-        } else {
+        let next_frame = inner.pending_frame.take();
+        if next_frame.is_none() {
             inner.analysis_in_flight = false;
-            None
+        }
+
+        AutoAnalysisFinish {
+            next_frame,
+            recorded,
         }
     }
 
@@ -171,6 +206,15 @@ impl VisionContext {
     }
 
     pub async fn clear_auto_state_on_disable(&self) {
+        self.invalidate_auto_generation();
+        self.clear_auto_state_after_invalidated().await;
+    }
+
+    pub fn invalidate_auto_generation(&self) {
+        self.auto_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub async fn clear_auto_state_after_invalidated(&self) {
         let mut inner = self.inner.write().await;
         inner.latest_frame = None;
         inner.latest_auto_observation = None;
@@ -193,6 +237,7 @@ impl VisionContext {
 
     /// Clear all context (used when the watcher is explicitly stopped).
     pub async fn clear(&self) {
+        self.invalidate_auto_generation();
         let mut inner = self.inner.write().await;
         inner.latest_frame = None;
         inner.latest_auto_observation = None;
@@ -252,6 +297,13 @@ mod tests {
         }
     }
 
+    fn dispatched_generation(dispatch: AnalysisDispatch) -> AutoAnalysisGeneration {
+        match dispatch {
+            AnalysisDispatch::Dispatch { generation, .. } => generation,
+            AnalysisDispatch::NotDispatched => panic!("expected frame dispatch"),
+        }
+    }
+
     #[tokio::test]
     async fn latest_completed_observation_selects_newest_non_stale_auto_or_manual() {
         let ctx = VisionContext::new();
@@ -262,7 +314,8 @@ mod tests {
         ))
         .await;
         let auto_frame = frame("auto");
-        ctx.finish_auto_analysis(&auto_frame, Ok("auto".to_string()))
+        let generation = dispatched_generation(ctx.submit_auto_frame(auto_frame.clone()).await);
+        ctx.finish_auto_analysis(generation, &auto_frame, Ok("auto".to_string()))
             .await;
 
         let selected = ctx.latest_completed_observation(now).await.unwrap();
@@ -302,7 +355,7 @@ mod tests {
 
         assert!(matches!(
             ctx.submit_auto_frame(first.clone()).await,
-            AnalysisDispatch::Dispatch(_)
+            AnalysisDispatch::Dispatch { .. }
         ));
         assert!(matches!(
             ctx.submit_auto_frame(second).await,
@@ -313,17 +366,36 @@ mod tests {
             AnalysisDispatch::NotDispatched
         ));
 
-        let next = ctx
-            .finish_auto_analysis(&first, Ok("done".to_string()))
-            .await
-            .unwrap();
+        let generation = ctx.auto_generation.load(Ordering::SeqCst);
+        let completion = ctx
+            .finish_auto_analysis(generation, &first, Ok("done".to_string()))
+            .await;
+        let next = completion.next_frame.unwrap();
+        assert!(completion.recorded);
         assert_eq!(next.image_hash, "third");
         assert!(ctx.inner.read().await.analysis_in_flight);
-        assert!(ctx
-            .finish_auto_analysis(&next, Ok("done2".to_string()))
-            .await
-            .is_none());
+        let completion = ctx
+            .finish_auto_analysis(generation, &next, Ok("done2".to_string()))
+            .await;
+        assert!(completion.recorded);
+        assert!(completion.next_frame.is_none());
         assert!(!ctx.inner.read().await.analysis_in_flight);
+    }
+
+    #[tokio::test]
+    async fn stale_auto_analysis_after_disable_does_not_restore_observation() {
+        let ctx = VisionContext::new();
+        let auto_frame = frame("auto");
+        let generation = dispatched_generation(ctx.submit_auto_frame(auto_frame.clone()).await);
+
+        ctx.clear_auto_state_on_disable().await;
+        let completion = ctx
+            .finish_auto_analysis(generation, &auto_frame, Ok("stale".to_string()))
+            .await;
+
+        assert!(!completion.recorded);
+        assert!(completion.next_frame.is_none());
+        assert!(ctx.latest_completed_observation(Utc::now()).await.is_none());
     }
 
     #[tokio::test]

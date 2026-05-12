@@ -40,6 +40,14 @@ impl VisionWatcher {
         self
     }
 
+    async fn auto_capture_active(&self) -> bool {
+        if !self.running.load(Ordering::Relaxed) {
+            return false;
+        }
+        let config = self.config.read().await;
+        config.vlm_enabled && config.auto_vision_enabled
+    }
+
     /// Start the background producer loop. VLM analysis is dispatched asynchronously
     /// with at most one in-flight request and newest-only pending frame state.
     pub fn start(&self, app_handle: AppHandle) {
@@ -135,13 +143,13 @@ impl VisionWatcher {
                     image_hash: captured.image_hash,
                 };
 
-                if let AnalysisDispatch::Dispatch(frame) =
+                if let AnalysisDispatch::Dispatch { frame, generation } =
                     watcher.context.submit_auto_frame(frame).await
                 {
                     let analysis_watcher = watcher.clone();
                     let analysis_app = app_handle.clone();
                     tokio::spawn(async move {
-                        run_analysis_chain(analysis_watcher, analysis_app, frame).await;
+                        run_analysis_chain(analysis_watcher, analysis_app, frame, generation).await;
                     });
                 }
 
@@ -160,7 +168,8 @@ impl VisionWatcher {
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
         let ctx = self.context.clone();
-        tokio::spawn(async move { ctx.clear_auto_state_on_disable().await });
+        ctx.invalidate_auto_generation();
+        tokio::spawn(async move { ctx.clear_auto_state_after_invalidated().await });
     }
 }
 
@@ -168,9 +177,15 @@ async fn run_analysis_chain(
     watcher: VisionWatcher,
     app_handle: AppHandle,
     first_frame: VisionFrame,
+    generation: crate::vision::context::AutoAnalysisGeneration,
 ) {
     let mut current = first_frame;
     loop {
+        if !watcher.auto_capture_active().await {
+            watcher.context.clear_auto_state_on_disable().await;
+            break;
+        }
+
         tracing::info!(target: "vision", "Screen changed, analyzing with VLM...");
         let config = watcher.config.read().await.clone();
         let result = analyze_screenshot(
@@ -188,10 +203,22 @@ async fn run_analysis_chain(
             Err(error) => tracing::error!(target: "vision", "VLM analysis failed: {}", error),
         }
 
-        let should_emit_proactive = result.is_ok() && config.proactive_vision_enabled;
-        let next_frame = watcher.context.finish_auto_analysis(&current, result).await;
+        let completion_config = watcher.config.read().await.clone();
+        if !watcher.running.load(Ordering::Relaxed)
+            || !completion_config.vlm_enabled
+            || !completion_config.auto_vision_enabled
+        {
+            watcher.context.clear_auto_state_on_disable().await;
+            break;
+        }
 
-        if should_emit_proactive {
+        let should_emit_proactive = result.is_ok() && completion_config.proactive_vision_enabled;
+        let completion = watcher
+            .context
+            .finish_auto_analysis(generation, &current, result)
+            .await;
+
+        if should_emit_proactive && completion.recorded {
             if let Some(observation) = watcher
                 .context
                 .latest_completed_observation(chrono::Utc::now())
@@ -208,11 +235,11 @@ async fn run_analysis_chain(
             }
         }
 
-        if should_emit_proactive {
+        if should_emit_proactive && completion.recorded {
             emit_proactive_vision_comment(&app_handle);
         }
 
-        match next_frame {
+        match completion.next_frame {
             Some(next) => current = next,
             None => break,
         }
