@@ -4,6 +4,8 @@ use super::registry::{
     ActionContext, ActionError, ActionHandler, ActionParam, ActionPermissionLevel, ActionResult,
     ActionRiskTag,
 };
+use crate::vision::capture::{capture_screen_with_options, CaptureOptions};
+use crate::vision::context::{VisionObservation, VisionObservationSource};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use tauri::Emitter;
@@ -57,7 +59,7 @@ impl ActionHandler for CaptureScreenAction {
     }
 
     fn description(&self) -> &str {
-        "Capture the current primary screen and return a concise visual observation. Only available when Settings > Vision > Screen Vision is enabled."
+        "Capture the current primary screen and return a concise visual observation. Only available when Settings > Vision > VLM is enabled."
     }
 
     fn parameters(&self) -> Vec<ActionParam> {
@@ -80,26 +82,43 @@ impl ActionHandler for CaptureScreenAction {
         let watcher = ctx.app.state::<crate::vision::watcher::VisionWatcher>();
         let config = watcher.config.read().await.clone();
 
-        if !config.enabled {
+        if !config.vlm_enabled {
             return Err(ActionError(
-                "Screen vision is disabled. Enable Settings > Vision > Screen Vision before using this tool."
+                "Screen vision is disabled. Enable Settings > Vision > VLM before using this tool."
                     .to_string(),
             ));
         }
 
-        let screenshot = crate::vision::capture::capture_screen()
-            .map_err(|error| ActionError(format!("Screen capture failed: {}", error)))?;
+        let captured = capture_screen_with_options(&CaptureOptions {
+            display_id: config.display_id.clone(),
+            region: config.vlm_region,
+        })
+        .map_err(|error| ActionError(format!("Screen capture failed: {}", error)))?;
+        if let Some(warning) = captured.warning.clone() {
+            watcher.context.set_last_error(warning).await;
+        }
+        let captured_at = chrono::Utc::now();
         let description = crate::vision::watcher::analyze_screenshot(
             &watcher.client,
             &config,
-            &screenshot,
+            &captured.jpeg_bytes,
             watcher.llm_service.as_ref(),
         )
         .await
         .map_err(|error| ActionError(format!("Screen analysis failed: {}", error)))?;
 
-        watcher.context.update(description.clone()).await;
-        let captured_at = chrono::Utc::now().to_rfc3339();
+        watcher
+            .context
+            .record_manual_observation(VisionObservation {
+                id: uuid::Uuid::new_v4().to_string(),
+                frame_id: None,
+                captured_at,
+                analyzed_at: chrono::Utc::now(),
+                summary: description.clone(),
+                source: VisionObservationSource::ManualTool,
+            })
+            .await;
+        let captured_at = captured_at.to_rfc3339();
 
         Ok(ActionResult::ok_with_data(
             format!(

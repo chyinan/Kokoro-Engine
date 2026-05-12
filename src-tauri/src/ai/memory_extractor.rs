@@ -4,7 +4,7 @@
 //! with a special prompt that asks it to extract noteworthy facts.
 //! Extracted memories are stored via MemoryManager for future RAG retrieval.
 
-use crate::ai::context::Message;
+use crate::ai::context::{is_memory_candidate_message, Message};
 use crate::ai::memory::MemoryManager;
 use crate::llm::messages::{system_message, user_text_message};
 use crate::llm::provider::LlmProvider;
@@ -136,7 +136,12 @@ pub async fn extract_and_store_memories_with_options(
     character_id: String,
     options: MemoryExtractionOptions,
 ) {
-    if recent_history.is_empty() {
+    let candidate_history = recent_history
+        .iter()
+        .filter(|message| is_memory_candidate_message(message))
+        .collect::<Vec<_>>();
+
+    if candidate_history.is_empty() {
         tracing::info!(target: "memory", "[Memory] extract_and_store_memories called but history is empty");
         return;
     }
@@ -145,7 +150,7 @@ pub async fn extract_and_store_memories_with_options(
         target: "memory",
         "[Memory] Starting extraction for '{}' with {} history messages",
         character_id,
-        recent_history.len()
+        candidate_history.len()
     );
 
     // Fetch existing memories so the LLM can avoid duplicates
@@ -172,7 +177,7 @@ pub async fn extract_and_store_memories_with_options(
     };
 
     // Build the conversation transcript for the LLM
-    let transcript = recent_history
+    let transcript = candidate_history
         .iter()
         .map(|m| format!("{}: {}", m.role, m.content))
         .collect::<Vec<_>>()

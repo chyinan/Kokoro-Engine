@@ -54,10 +54,26 @@ export default function MemoryModelDownloadDialog({
         if (status?.installed) {
             return 100;
         }
+        if (progress?.stage === "ready") {
+            return 100;
+        }
+        if (progress?.stage === "complete" && progress.file_count > 0) {
+            return Math.max(0, Math.min(100, Math.round((progress.file_index / progress.file_count) * 100)));
+        }
         if (!progress?.total_bytes || progress.total_bytes <= 0) {
+            if (progress?.stage === "downloading" && progress.file_count > 0) {
+                const completedFiles = Math.max(0, progress.file_index - 1);
+                const currentFileShare = progress.downloaded_bytes > 0 ? 0.5 : 0;
+                return Math.max(0, Math.min(99, Math.round(((completedFiles + currentFileShare) / progress.file_count) * 100)));
+            }
             return null;
         }
-        return Math.max(0, Math.min(100, Math.round((progress.downloaded_bytes / progress.total_bytes) * 100)));
+        const currentFilePercent = progress.downloaded_bytes / progress.total_bytes;
+        const completedFiles = Math.max(0, progress.file_index - 1);
+        const aggregatePercent = progress.file_count > 0
+            ? (completedFiles + currentFilePercent) / progress.file_count
+            : currentFilePercent;
+        return Math.max(0, Math.min(100, Math.round(aggregatePercent * 100)));
     }, [progress, status?.installed]);
 
     const stageLabel = status?.installed

@@ -1,19 +1,22 @@
 import { useState, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench } from "lucide-react";
+import { Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench, Eye } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ToolTraceItem } from "../../lib/kokoro-bridge";
 
 interface ChatMessageProps {
     message: {
-        role: "user" | "kokoro" | "tool";
+        role: "user" | "kokoro" | "tool" | "context";
         text: string;
         images?: string[];
         translation?: string;
         translationPending?: boolean;
         isError?: boolean;
         tools?: ToolTraceItem[];
+        capturedAt?: string;
+        source?: string;
+        turnId?: string;
     };
     index: number;
     isStreaming: boolean;
@@ -125,6 +128,19 @@ function isPendingApprovalTrace(tool: ToolTraceItem): boolean {
     return tool.denyKind === "pending_approval";
 }
 
+function formatContextTime(value: string | undefined): string | null {
+    if (!value) return null;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function getContextPreview(text: string): string {
+    const compact = text.replace(/\s+/g, " ").trim();
+    if (compact.length <= 72) return compact;
+    return `${compact.slice(0, 72)}…`;
+}
+
 function isToolSuccessful(tool: ToolTraceItem): boolean {
     return tool.isError !== true || tool.approvalStatus === "approved";
 }
@@ -178,6 +194,52 @@ export const ChatMessage = memo(function ChatMessage({
         setIsEditing(false);
         setEditingText("");
     };
+
+    const [contextExpanded, setContextExpanded] = useState(false);
+    const contextTime = formatContextTime(msg.capturedAt);
+
+    if (msg.role === "context") {
+        return (
+            <motion.div
+                initial={{ opacity: 0, y: 6, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                transition={{ duration: 0.2 }}
+                className={clsx(
+                    "mx-auto max-w-[92%] rounded-md border border-slate-800/60 bg-slate-950/35",
+                    "text-[11px] leading-relaxed text-slate-500 font-body"
+                )}
+            >
+                <button
+                    type="button"
+                    onClick={() => setContextExpanded((expanded) => !expanded)}
+                    className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[10px] uppercase tracking-wider text-slate-500/90"
+                    aria-expanded={contextExpanded}
+                >
+                    <Eye size={11} strokeWidth={1.5} />
+                    <span>屏幕上下文</span>
+                    {contextTime && <span className="normal-case tracking-normal text-slate-600">{contextTime}</span>}
+                    {msg.source && <span className="normal-case tracking-normal text-slate-600">· {msg.source}</span>}
+                    <ChevronDown
+                        size={12}
+                        strokeWidth={1.5}
+                        className={clsx(
+                            "ml-auto transition-transform",
+                            contextExpanded && "rotate-180"
+                        )}
+                    />
+                </button>
+                {contextExpanded ? (
+                    <div className="border-t border-slate-800/60 px-2.5 py-2 whitespace-pre-wrap break-words text-slate-500/90">
+                        {msg.text}
+                    </div>
+                ) : (
+                    <div className="px-2.5 pb-1.5 text-slate-600">
+                        {getContextPreview(msg.text)}
+                    </div>
+                )}
+            </motion.div>
+        );
+    }
 
     return (
         <motion.div

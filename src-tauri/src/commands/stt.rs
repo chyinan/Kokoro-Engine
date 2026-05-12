@@ -157,7 +157,7 @@ pub async fn download_sensevoice_local_model(
     app: tauri::AppHandle,
 ) -> Result<SenseVoiceLocalModelStatus, KokoroError> {
     use tauri::Emitter;
-    crate::stt::sensevoice_local::download_recommended_model(|progress| {
+    crate::stt::sensevoice_local::download_recommended_model(move |progress| {
         app.emit("stt:sensevoice-local-progress", &progress)
             .map_err(|e| e.to_string())
     })

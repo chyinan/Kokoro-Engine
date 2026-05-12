@@ -7,7 +7,7 @@ use bzip2::read::BzDecoder;
 use serde::{Deserialize, Serialize};
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig};
 use std::fs::{self, File};
-use std::io::{BufReader, Write};
+use std::io::BufReader;
 use std::path::PathBuf;
 use tar::Archive;
 
@@ -82,11 +82,12 @@ pub fn recommended_model_status() -> SenseVoiceLocalModelStatus {
 }
 
 pub async fn download_recommended_model<F>(
-    mut emit_progress: F,
+    emit_progress: F,
 ) -> Result<SenseVoiceLocalModelStatus, String>
 where
-    F: FnMut(SenseVoiceLocalDownloadProgress) -> Result<(), String>,
+    F: Fn(SenseVoiceLocalDownloadProgress) -> Result<(), String> + Send + Sync + 'static,
 {
+    let emit_progress = std::sync::Arc::new(emit_progress);
     let status = recommended_model_status();
     if status.installed {
         emit_progress(SenseVoiceLocalDownloadProgress {
@@ -114,37 +115,26 @@ where
         total_bytes: None,
     })?;
 
-    let response = client
-        .get(RECOMMENDED_DOWNLOAD_URL)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to start download: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("Download failed with status {}", response.status()));
-    }
-
-    let total_bytes = response.content_length();
-    let mut file = File::create(&archive_path).map_err(|e| e.to_string())?;
-    let mut downloaded_bytes = 0u64;
-    let mut stream = response.bytes_stream();
-
-    use futures::StreamExt;
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Download stream error: {}", e))?;
-        file.write_all(&chunk).map_err(|e| e.to_string())?;
-        downloaded_bytes += chunk.len() as u64;
-
-        emit_progress(SenseVoiceLocalDownloadProgress {
-            stage: "downloading".to_string(),
-            message: "Downloading recommended SenseVoice model".to_string(),
-            downloaded_bytes,
-            total_bytes,
-        })?;
-    }
-
-    file.flush().map_err(|e| e.to_string())?;
+    let progress = crate::utils::download::download_file_with_progress(
+        &client,
+        RECOMMENDED_DOWNLOAD_URL,
+        &archive_path,
+        crate::utils::download::DownloadOptions::default(),
+        {
+            let emit_progress = emit_progress.clone();
+            std::sync::Arc::new(move |progress| {
+                emit_progress(SenseVoiceLocalDownloadProgress {
+                    stage: "downloading".to_string(),
+                    message: "Downloading recommended SenseVoice model".to_string(),
+                    downloaded_bytes: progress.downloaded_bytes,
+                    total_bytes: progress.total_bytes,
+                })
+            })
+        },
+    )
+    .await?;
+    let downloaded_bytes = progress.downloaded_bytes;
+    let total_bytes = progress.total_bytes;
 
     emit_progress(SenseVoiceLocalDownloadProgress {
         stage: "extracting".to_string(),

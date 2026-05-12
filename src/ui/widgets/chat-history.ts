@@ -1,11 +1,19 @@
 import type { ConversationMessage, ToolTraceItem } from "../../lib/kokoro-bridge";
 
 export interface ChatHistoryMessage {
-    role: "user" | "kokoro";
+    role: "user" | "kokoro" | "context";
     text: string;
     images?: string[];
     translation?: string;
     tools?: ToolTraceItem[];
+    capturedAt?: string;
+    source?: string;
+    turnId?: string;
+}
+
+function getStringMetadataValue(meta: Record<string, unknown> | null, key: string): string | undefined {
+    const value = meta?.[key];
+    return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
 function parseDenyKind(meta: Record<string, unknown> | null, errorText: string, rawContent: string): ToolTraceItem["denyKind"] {
@@ -46,6 +54,17 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
 
         const technicalType = typeof meta?.type === "string" ? meta.type : undefined;
         const turnId = typeof meta?.turn_id === "string" ? meta.turn_id : undefined;
+
+        if (m.role === "context") {
+            chatMsgs.push({
+                role: "context",
+                text: m.content,
+                capturedAt: getStringMetadataValue(meta, "captured_at") ?? m.created_at,
+                source: getStringMetadataValue(meta, "source"),
+                turnId,
+            });
+            continue;
+        }
 
         if (m.role === "tool" || technicalType === "tool_result") {
             const toolName = typeof meta?.tool_name === "string"

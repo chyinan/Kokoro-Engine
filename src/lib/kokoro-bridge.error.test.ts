@@ -10,7 +10,14 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { parseKokoroError, parseFailureEvent, parseLegacyChatError, getEngineInfo, onChatError } from "./kokoro-bridge";
+import {
+    parseKokoroError,
+    parseFailureEvent,
+    parseLegacyChatError,
+    getEngineInfo,
+    getKokoroErrorMessage,
+    onChatError,
+} from "./kokoro-bridge";
 
 const mockedInvoke = vi.mocked(invoke);
 const mockedListen = vi.mocked(listen);
@@ -56,6 +63,25 @@ describe("parseKokoroError structured payload", () => {
 
     it("uses message fields from generic object errors", () => {
         expect(parseKokoroError({ message: "bad api key" })).toBe("bad api key");
+    });
+
+    it("keeps object-form Tauri errors readable instead of [object Object]", () => {
+        const raw = {
+            code: "Internal",
+            message: "download request failed: connection reset",
+        };
+
+        expect(parseKokoroError(raw)).toMatchObject(raw);
+        expect(getKokoroErrorMessage(raw)).toBe("download request failed: connection reset");
+    });
+
+    it("extracts message from externally tagged Rust errors", () => {
+        const raw = {
+            Internal: "failed to download model file",
+        };
+
+        expect(parseKokoroError(raw)).toBe("failed to download model file");
+        expect(getKokoroErrorMessage(raw)).toBe("failed to download model file");
     });
 });
 

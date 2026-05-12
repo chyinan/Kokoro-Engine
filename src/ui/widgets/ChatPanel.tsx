@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, useDeferredValue, memo } from
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
-import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus } from "../../lib/kokoro-bridge";
+import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
 import type { FailureEvent, ToolTraceItem } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen } from "@tauri-apps/api/event";
@@ -13,16 +13,20 @@ import { ChatMessage } from "./ChatMessage";
 import { buildChatMessagesFromConversation } from "./chat-history";
 import { getStreamingRevealText, hasActiveKokoroBubble, hasVisibleAssistantContent, shouldRenderTypingIndicator, shouldRevealLiveTurnToolTrace } from "./chat-streaming-state";
 import { requestMemoryModelDialog } from "../../lib/memory-model-gate";
+import { audioPlayer } from "../../core/services";
 
 // ── Types ──────────────────────────────────────────────────
 interface ChatMessage {
-    role: "user" | "kokoro" | "tool";
+    role: "user" | "kokoro" | "tool" | "context";
     text: string;
     images?: string[];
     translation?: string;
     translationPending?: boolean;
     isError?: boolean;
     tools?: ToolTraceItem[];
+    capturedAt?: string;
+    source?: string;
+    turnId?: string;
 }
 
 interface PendingTurnState {
@@ -33,6 +37,7 @@ interface PendingTurnState {
     translation?: string;
     translationPending: boolean;
     tools: ToolTraceItem[];
+    pendingContext?: ChatMessage;
 }
 
 export type { ChatMessage as ChatPanelMessage };
@@ -55,11 +60,18 @@ const ensureTurnMessage = (messages: ChatMessage[], turn: PendingTurnState) => {
         return [...messages];
     }
 
-    const next = [...messages, {
+    const next = [...messages];
+    if (turn.pendingContext && !next.some(message => message.role === "context" && message.turnId === turn.turnId)) {
+        next.push({
+            ...turn.pendingContext,
+            turnId: turn.turnId,
+        });
+    }
+    next.push({
         role: "kokoro" as const,
         text: "",
         tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
-    }];
+    });
     turn.messageIndex = next.length - 1;
     return next;
 };
@@ -200,6 +212,24 @@ function filterVisibleTools(tools: Array<ToolTraceItem>): Array<ToolTraceItem> {
 
 function normalizeToolList(tools: Array<ToolTraceItem>): Array<ToolTraceItem> {
     return filterVisibleTools(tools);
+}
+
+function hasRenderableTurnContent(turn: PendingTurnState, text: string): boolean {
+    return hasVisibleAssistantContent(text) || normalizeToolList(turn.tools).length > 0;
+}
+
+function removeTurnContext(messages: Array<ChatMessage>, turn: PendingTurnState): Array<ChatMessage> {
+    if (!turn.pendingContext) {
+        return messages;
+    }
+    return messages.filter(message => !(message.role === "context" && message.turnId === turn.turnId));
+}
+
+function removeTurnMessages(messages: Array<ChatMessage>, turn: PendingTurnState): Array<ChatMessage> {
+    const withoutAssistant = hasActiveKokoroBubble(messages, turn.messageIndex)
+        ? [...messages.slice(0, turn.messageIndex!), ...messages.slice(turn.messageIndex! + 1)]
+        : messages;
+    return removeTurnContext(withoutAssistant, turn);
 }
 
 function mergeToolIntoTurn(turn: PendingTurnState, incoming: ToolTraceItem): void {
@@ -650,11 +680,13 @@ export default function ChatPanel() {
     const [visibleCount, setVisibleCount] = useState(20);
     const [input, setInput] = useState("");
     const [expandedInput, setExpandedInput] = useState(false);
+    const compactInputRef = useRef<HTMLInputElement>(null);
     const expandedTextareaRef = useRef<HTMLTextAreaElement>(null);
     const [isStreaming, setIsStreaming] = useState(false);
     const isStreamingRef = useRef(false);
     const [isBusy, setIsBusy] = useState(false);
     const isBusyRef = useRef(false);
+    const ttsSpeakingRef = useRef(false);
     const [isStopping, setIsStopping] = useState(false);
     const cancelRequestedRef = useRef(false);
     const messagesRef = useRef<ChatMessage[]>([]);
@@ -688,6 +720,7 @@ export default function ChatPanel() {
     // Raw (unfiltered) full response text — accumulated from all deltas
     const rawResponseRef = useRef("");
     const currentTurnRef = useRef<PendingTurnState | null>(null);
+    const pendingVisionContextRef = useRef<ChatMessage | null>(null);
 
     // Typing reveal: per-character animation
     const { pushDelta, flush: flushReveal, reset: resetReveal } = useTypingReveal({
@@ -872,6 +905,26 @@ export default function ChatPanel() {
     useEffect(() => { sttAutoSendRef.current = sttAutoSend; }, [sttAutoSend]);
     useEffect(() => { sttEnabledRef.current = sttEnabled; }, [sttEnabled]);
 
+    useEffect(() => {
+        const syncTextInputFocus = () => {
+            const active = document.activeElement;
+            const focused = active === compactInputRef.current || active === expandedTextareaRef.current;
+            setVisionTextInputFocused(focused).catch(error => {
+                console.error("[ChatPanel] Failed to sync text input focus:", error);
+            });
+        };
+
+        syncTextInputFocus();
+        window.addEventListener("focusin", syncTextInputFocus);
+        window.addEventListener("focusout", syncTextInputFocus);
+
+        return () => {
+            window.removeEventListener("focusin", syncTextInputFocus);
+            window.removeEventListener("focusout", syncTextInputFocus);
+            setVisionTextInputFocused(false).catch(() => { /* best effort */ });
+        };
+    }, []);
+
     // Wake word detection — starts main STT when keyword is heard
     const [wakeWordEnabled, setWakeWordEnabled] = useState(() => localStorage.getItem("kokoro_wake_word_enabled") === "true");
     const [wakeWord, setWakeWord] = useState(() => localStorage.getItem("kokoro_wake_word") || "");
@@ -1011,7 +1064,9 @@ export default function ChatPanel() {
                     translation: undefined,
                     translationPending: false,
                     tools: [],
+                    pendingContext: pendingVisionContextRef.current ?? undefined,
                 };
+                pendingVisionContextRef.current = null;
                 rawResponseRef.current = "";
                 if (cancelRequestedRef.current) {
                     void requestTurnCancellation(turn_id);
@@ -1067,8 +1122,9 @@ export default function ChatPanel() {
                 userScrolledRef.current = false;
 
                 const cleanText = stripStoredMarkup(text);
-                const hasContent = hasVisibleAssistantContent(cleanText) || turn.tools.length > 0;
+                const hasContent = hasRenderableTurnContent(turn, cleanText);
                 if (!hasContent) {
+                    setMessages(prev => removeTurnMessages(prev, turn));
                     return;
                 }
 
@@ -1116,11 +1172,11 @@ export default function ChatPanel() {
                 const cleanText = stripStoredMarkup(fullText);
 
                 setMessages(prev => {
-                    const hasContent = hasVisibleAssistantContent(cleanText) || turn.tools.length > 0;
+                    const hasContent = hasRenderableTurnContent(turn, cleanText);
 
                     if (hasActiveKokoroBubble(prev, turn.messageIndex)) {
-                        if (!hasContent && (status === "error" || status === "cancelled")) {
-                            return [...prev.slice(0, turn.messageIndex!), ...prev.slice(turn.messageIndex! + 1)];
+                        if (!hasContent) {
+                            return removeTurnMessages(prev, turn);
                         }
 
                         return updateTurnMessage(prev, turn, (current) => ({
@@ -1133,13 +1189,21 @@ export default function ChatPanel() {
                     }
 
                     if (hasContent) {
-                        return [...prev, {
+                        const next = [...prev];
+                        if (turn.pendingContext && !next.some(message => message.role === "context" && message.turnId === turn.turnId)) {
+                            next.push({
+                                ...turn.pendingContext,
+                                turnId: turn.turnId,
+                            });
+                        }
+                        next.push({
                             role: "kokoro",
                             text: cleanText,
                             translation: turn.translation,
                             translationPending: false,
                             tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
-                        }];
+                        });
+                        return next;
                     }
 
                     return prev;
@@ -1197,6 +1261,34 @@ export default function ChatPanel() {
             if (aborted) { unToolResult(); return; }
             cleanups.push(unToolResult);
 
+            const unVisionObservation = await onVisionObservation((observation) => {
+                if (aborted) return;
+                const summary = observation.summary.trim();
+                if (!summary) return;
+                pendingVisionContextRef.current = {
+                    role: "context",
+                    text: summary,
+                    capturedAt: observation.captured_at,
+                    source: observation.source,
+                };
+            });
+            if (aborted) { unVisionObservation(); return; }
+            cleanups.push(unVisionObservation);
+
+            const unTtsStart = await listen("tts:start", () => {
+                if (aborted) return;
+                ttsSpeakingRef.current = true;
+            });
+            if (aborted) { unTtsStart(); return; }
+            cleanups.push(unTtsStart);
+
+            const unTtsEnd = await listen("tts:end", () => {
+                if (aborted) return;
+                ttsSpeakingRef.current = false;
+            });
+            if (aborted) { unTtsEnd(); return; }
+            cleanups.push(unTtsEnd);
+
             // Telegram chat sync — show messages from Telegram bot in desktop UI
             const unTelegramSync = await onTelegramChatSync((data) => {
                 if (aborted) return;
@@ -1214,7 +1306,9 @@ export default function ChatPanel() {
 
             // Listen for proactive triggers from backend (heartbeat)
             const unProactive = await listen<any>("proactive-trigger", (event) => {
-                if (aborted || isBusyRef.current) return;
+                const browserSpeaking = typeof window !== "undefined"
+                    && Boolean(window.speechSynthesis?.speaking);
+                if (aborted || isBusyRef.current || ttsSpeakingRef.current || audioPlayer.isPlaying || browserSpeaking) return;
                 void (async () => {
                     if (!await ensureMemoryModelReady({ silent: true })) {
                         return;
@@ -1858,6 +1952,7 @@ export default function ChatPanel() {
 
                     <div className="relative flex-1">
                         <input
+                            ref={compactInputRef}
                             type="text"
                             value={input}
                             onChange={(e) => setInput(e.target.value)}

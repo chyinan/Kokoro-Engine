@@ -11,11 +11,13 @@ import {
     listOllamaModels,
     listAnthropicModels,
     getLlamaCppStatus,
+    listVisionScreens,
 } from "../../../lib/kokoro-bridge";
-import type { VisionConfig, OllamaModelInfo } from "../../../lib/kokoro-bridge";
+import type { VisionConfig, OllamaModelInfo, VisionScreenInfo } from "../../../lib/kokoro-bridge";
 import { Select } from "@/components/ui/select";
 
 type CameraPreviewIssue = "no_devices" | "permission_denied" | "unsupported" | "unavailable";
+type VisionContextHistoryMode = VisionConfig["vision_context_history_mode"];
 
 function getCameraPreviewIssue(error: unknown): CameraPreviewIssue {
     const name = error instanceof DOMException ? error.name : "";
@@ -38,6 +40,9 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
     const [llamaCppReachable, setLlamaCppReachable] = useState(true);
     const [anthropicModels, setAnthropicModels] = useState<string[]>([]);
     const [anthropicReachable, setAnthropicReachable] = useState(true);
+    const [screens, setScreens] = useState<VisionScreenInfo[]>([]);
+    const [screensLoading, setScreensLoading] = useState(false);
+    const [screensError, setScreensError] = useState<string | null>(null);
     const [dirty, setDirty] = useState(false);
     const [editingInterval, setEditingInterval] = useState(false);
     const [intervalInput, setIntervalInput] = useState("");
@@ -162,6 +167,33 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
             stopPreview();
         };
     }, [initialConfig]);
+
+    useEffect(() => {
+        let cancelled = false;
+        const loadScreens = async () => {
+            setScreensLoading(true);
+            setScreensError(null);
+            try {
+                const list = await listVisionScreens();
+                if (cancelled) return;
+                setScreens(list);
+            } catch (error) {
+                if (cancelled) return;
+                setScreens([]);
+                setScreensError(String(error));
+            } finally {
+                if (!cancelled) setScreensLoading(false);
+            }
+        };
+
+        loadScreens().catch((error) => {
+            console.error("[VisionTab] Failed to load screens:", error);
+        });
+
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     useEffect(() => {
         if (!config) return;
@@ -328,6 +360,26 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
             : isAnthropicProvider
                 ? anthropicModels
             : [];
+    const selectedDisplayId = config?.display_id ?? "__auto__";
+    const screenOptions = [
+        {
+            value: "__auto__",
+            label: t("settings.vision.display.auto"),
+            description: t("settings.vision.display.auto_desc"),
+        },
+        ...screens.map((screen) => ({
+            value: screen.display_id,
+            label: screen.label,
+            description: `${screen.x},${screen.y} · ${screen.width}×${screen.height}${screen.is_primary ? ` · ${t("settings.vision.display.primary")}` : ""}`,
+        })),
+        ...(config?.display_id && !screens.some((screen) => screen.display_id === config.display_id)
+            ? [{
+                value: config.display_id,
+                label: t("settings.vision.display.missing"),
+                description: config.display_id,
+            }]
+            : []),
+    ];
     const providerReachable = isOllamaProvider
         ? ollamaReachable
         : isLlamaCppProvider
@@ -376,28 +428,29 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                 <motion.button
                     whileTap={{ scale: 0.95 }}
                     onClick={async () => {
-                        const next = { ...config, enabled: !config.enabled };
+                        const next = { ...config, vlm_enabled: !config.vlm_enabled };
                         setConfig(next);
                         setDirty(false);
                         try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
                     }}
                     className={clsx(
                         "w-12 h-6 rounded-full relative transition-colors duration-200",
-                        config.enabled
+                        config.vlm_enabled
                             ? "bg-[var(--color-accent)]"
                             : "bg-[var(--color-bg-surface)] border border-[var(--color-border)]"
                     )}
                 >
                     <motion.div
-                        animate={{ x: config.enabled ? 24 : 2 }}
+                        animate={{ x: config.vlm_enabled ? 24 : 2 }}
                         transition={{ type: "spring", stiffness: 500, damping: 30 }}
                         className={clsx(
                             "w-5 h-5 rounded-full absolute top-0.5",
-                            config.enabled ? "bg-black" : "bg-[var(--color-text-muted)]"
+                            config.vlm_enabled ? "bg-black" : "bg-[var(--color-text-muted)]"
                         )}
                     />
                 </motion.button>
             </div>
+
 
             {/* VLM Provider Config — always shown so user can configure before enabling */}
             <motion.div
@@ -605,6 +658,28 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                     </div>
                 )}
 
+                {/* Display selection */}
+                <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                        <MonitorSmartphone size={14} strokeWidth={1.5} className="text-[var(--color-text-muted)]" />
+                        <label className="text-sm text-[var(--color-text-primary)]">
+                            {t("settings.vision.display.label")}
+                        </label>
+                    </div>
+                    <Select
+                        value={selectedDisplayId}
+                        onChange={(value) => update({ display_id: value === "__auto__" ? null : value })}
+                        options={screenOptions}
+                        disabled={screensLoading}
+                        placeholder={screensLoading ? t("settings.vision.display.loading") : t("settings.vision.display.auto")}
+                    />
+                    <p className="text-xs text-[var(--color-text-muted)]">
+                        {screensError
+                            ? t("settings.vision.display.error", { error: screensError })
+                            : t("settings.vision.display.desc")}
+                    </p>
+                </div>
+
                 {/* Interval */}
                 <div className="space-y-2">
                     <div className="flex items-center justify-between">
@@ -623,7 +698,7 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                                 onChange={(e) => setIntervalInput(e.target.value)}
                                 onBlur={() => {
                                     const v = parseInt(intervalInput, 10);
-                                    if (!isNaN(v) && v >= 5) update({ interval_secs: v });
+                                    if (!isNaN(v) && v >= 5) update({ capture_interval_secs: v });
                                     setEditingInterval(false);
                                 }}
                                 onKeyDown={(e) => {
@@ -637,11 +712,11 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                                 className="text-sm text-[var(--color-accent)] font-mono cursor-pointer select-none"
                                 title={t("settings.vision.interval.dblclick_hint")}
                                 onDoubleClick={() => {
-                                    setIntervalInput(String(config.interval_secs));
+                                    setIntervalInput(String(config.capture_interval_secs));
                                     setEditingInterval(true);
                                 }}
                             >
-                                {config.interval_secs}s
+                                {config.capture_interval_secs}s
                             </span>
                         )}
                     </div>
@@ -650,13 +725,13 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                         min={5}
                         max={60}
                         step={5}
-                        value={Math.min(config.interval_secs, 60)}
-                        onChange={(e) => update({ interval_secs: Number(e.target.value) })}
+                        value={Math.min(config.capture_interval_secs, 60)}
+                        onChange={(e) => update({ capture_interval_secs: Number(e.target.value) })}
                         className="w-full accent-[var(--color-accent)]"
                     />
                     <p className="text-xs text-[var(--color-text-muted)]">
                         {t("settings.vision.interval.desc")}
-                        {config.interval_secs > 60 && (
+                        {config.capture_interval_secs > 60 && (
                             <span className="ml-1 text-[var(--color-accent)]">
                                 ({t("settings.vision.interval.custom")})
                             </span>
@@ -689,43 +764,128 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                     </p>
                 </div>
 
-                {/* Proactive comments */}
-                <div className="flex items-center justify-between rounded-lg bg-[var(--color-bg-surface)] border border-[var(--color-border)] p-3">
-                    <div className="flex items-center gap-3">
-                        <Eye size={15} strokeWidth={1.5} className="text-[var(--color-text-muted)]" />
-                        <div>
+                {/* LLM context history */}
+                <div className="space-y-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)]/60 px-3 py-3">
+                    <div className="flex items-start gap-3">
+                        <MonitorSmartphone size={15} strokeWidth={1.5} className="mt-0.5 text-[var(--color-text-muted)]" />
+                        <div className="min-w-0">
                             <div className="text-sm text-[var(--color-text-primary)]">
-                                {t("settings.vision.proactive.label")}
+                                {t("settings.vision.contextHistory.label")}
                             </div>
-                            <div className="text-xs text-[var(--color-text-muted)] leading-relaxed">
-                                {t("settings.vision.proactive.desc")}
+                            <div className="mt-0.5 text-xs text-[var(--color-text-muted)] leading-relaxed">
+                                {t("settings.vision.contextHistory.desc")}
                             </div>
                         </div>
                     </div>
-                    <motion.button
-                        whileTap={{ scale: 0.95 }}
-                        onClick={async () => {
-                            const next = { ...config, proactive_enabled: !config.proactive_enabled };
+                    <Select
+                        value={config.vision_context_history_mode ?? "latest"}
+                        onChange={async (value) => {
+                            const mode = value as VisionContextHistoryMode;
+                            const next = { ...config, vision_context_history_mode: mode };
                             setConfig(next);
                             setDirty(false);
                             try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
                         }}
-                        className={clsx(
-                            "w-12 h-6 rounded-full relative transition-colors duration-200 shrink-0",
-                            config.proactive_enabled
-                                ? "bg-[var(--color-accent)]"
-                                : "bg-[var(--color-bg-surface)] border border-[var(--color-border)]"
+                        options={[
+                            { value: "latest", label: t("settings.vision.contextHistory.latest") },
+                            { value: "full", label: t("settings.vision.contextHistory.full") },
+                        ]}
+                        className="w-full"
+                    />
+                </div>
+
+                {/* Background observation behavior */}
+                <div className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)]/60">
+                    <div className="border-b border-[var(--color-border)]/70 px-3 py-2">
+                        <div className="text-xs font-heading font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                            {t("settings.vision.behavior.title")}
+                        </div>
+                        {t("settings.vision.behavior.desc") && (
+                            <div className="mt-0.5 text-[11px] leading-relaxed text-[var(--color-text-muted)]">
+                                {t("settings.vision.behavior.desc")}
+                            </div>
                         )}
-                    >
-                        <motion.div
-                            animate={{ x: config.proactive_enabled ? 24 : 2 }}
-                            transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                            className={clsx(
-                                "w-5 h-5 rounded-full absolute top-0.5",
-                                config.proactive_enabled ? "bg-black" : "bg-[var(--color-text-muted)]"
-                            )}
-                        />
-                    </motion.button>
+                    </div>
+
+                    <div className="divide-y divide-[var(--color-border)]/70">
+                        <div className="flex items-center justify-between gap-4 px-3 py-3">
+                            <div className="flex items-start gap-3">
+                                <MonitorSmartphone size={15} strokeWidth={1.5} className="mt-0.5 text-[var(--color-text-muted)]" />
+                                <div>
+                                    <div className="text-sm text-[var(--color-text-primary)]">
+                                        {t("settings.vision.auto.label")}
+                                    </div>
+                                    <div className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+                                        {t("settings.vision.auto.desc")}
+                                    </div>
+                                </div>
+                            </div>
+                            <motion.button
+                                whileTap={{ scale: 0.95 }}
+                                onClick={async () => {
+                                    const next = { ...config, auto_vision_enabled: !config.auto_vision_enabled };
+                                    setConfig(next);
+                                    setDirty(false);
+                                    try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                                }}
+                                className={clsx(
+                                    "w-12 h-6 rounded-full relative transition-colors duration-200 shrink-0",
+                                    config.auto_vision_enabled
+                                        ? "bg-[var(--color-accent)]"
+                                        : "bg-[var(--color-bg-surface)] border border-[var(--color-border)]"
+                                )}
+                                aria-pressed={config.auto_vision_enabled}
+                            >
+                                <motion.div
+                                    animate={{ x: config.auto_vision_enabled ? 24 : 2 }}
+                                    transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                                    className={clsx(
+                                        "w-5 h-5 rounded-full absolute top-0.5",
+                                        config.auto_vision_enabled ? "bg-black" : "bg-[var(--color-text-muted)]"
+                                    )}
+                                />
+                            </motion.button>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-4 px-3 py-3">
+                            <div className="flex items-start gap-3">
+                                <Eye size={15} strokeWidth={1.5} className="mt-0.5 text-[var(--color-text-muted)]" />
+                                <div>
+                                    <div className="text-sm text-[var(--color-text-primary)]">
+                                        {t("settings.vision.proactive.label")}
+                                    </div>
+                                    <div className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+                                        {t("settings.vision.proactive.desc")}
+                                    </div>
+                                </div>
+                            </div>
+                            <motion.button
+                                whileTap={{ scale: 0.95 }}
+                                onClick={async () => {
+                                    const next = { ...config, proactive_vision_enabled: !config.proactive_vision_enabled };
+                                    setConfig(next);
+                                    setDirty(false);
+                                    try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                                }}
+                                className={clsx(
+                                    "w-12 h-6 rounded-full relative transition-colors duration-200 shrink-0",
+                                    config.proactive_vision_enabled
+                                        ? "bg-[var(--color-accent)]"
+                                        : "bg-[var(--color-bg-surface)] border border-[var(--color-border)]"
+                                )}
+                                aria-pressed={config.proactive_vision_enabled}
+                            >
+                                <motion.div
+                                    animate={{ x: config.proactive_vision_enabled ? 24 : 2 }}
+                                    transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                                    className={clsx(
+                                        "w-5 h-5 rounded-full absolute top-0.5",
+                                        config.proactive_vision_enabled ? "bg-black" : "bg-[var(--color-text-muted)]"
+                                    )}
+                                />
+                            </motion.button>
+                        </div>
+                    </div>
                 </div>
 
                 {/* Save Config Button */}

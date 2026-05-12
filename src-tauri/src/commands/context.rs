@@ -420,6 +420,7 @@ pub async fn end_session(
         tauri::async_runtime::spawn(async move {
             let transcript = history
                 .iter()
+                .filter(|m| crate::ai::context::is_summary_candidate_message(m))
                 .map(|m| format!("{}: {}", m.role, m.content))
                 .collect::<Vec<_>>()
                 .join("\n");

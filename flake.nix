@@ -90,6 +90,7 @@
                 --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${pkgs.gst_all_1.gst-plugins-good}/lib/gstreamer-1.0 \
                 --set GST_PLUGIN_SCANNER ${pkgs.gst_all_1.gstreamer.out}/libexec/gstreamer-1.0/gst-plugin-scanner \
                 --prefix XDG_DATA_DIRS : ${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name} \
+                --set ORT_DYLIB_PATH ${pkgs.onnxruntime}/lib/libonnxruntime.so \
                 --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibraries}
             done
           '';
@@ -136,6 +137,7 @@
             export GST_PLUGIN_SYSTEM_PATH_1_0="${pkgs.gst_all_1.gst-plugins-bad}/lib/gstreamer-1.0:${pkgs.gst_all_1.gstreamer}/lib/gstreamer-1.0:${pkgs.gst_all_1.gst-plugins-base}/lib/gstreamer-1.0:${pkgs.gst_all_1.gst-plugins-good}/lib/gstreamer-1.0''${GST_PLUGIN_SYSTEM_PATH_1_0:+:$GST_PLUGIN_SYSTEM_PATH_1_0}"
             export GST_PLUGIN_SCANNER="${pkgs.gst_all_1.gstreamer.out}/libexec/gstreamer-1.0/gst-plugin-scanner"
             export ORT_LIB_LOCATION="${pkgs.onnxruntime}/lib"
+            export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime.so"
             export ORT_PREFER_DYNAMIC_LINK=1
             export ORT_SKIP_DOWNLOAD=1
             export LD_LIBRARY_PATH=${lib.makeLibraryPath runtimeLibraries}:$LD_LIBRARY_PATH

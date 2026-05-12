@@ -800,7 +800,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                 <div className={activeTab === "mcp" ? "block" : "hidden"}>
                                     <McpTab
                                         initialServers={mcpServersProp}
-                                        visionEnabled={visionConfigProp?.enabled}
+                                        visionEnabled={visionConfigProp?.vlm_enabled}
                                         isActive={activeTab === "mcp"}
                                     />
                                 </div>

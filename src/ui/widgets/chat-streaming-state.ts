@@ -1,5 +1,5 @@
 export type StreamingBubbleMessage = {
-    readonly role: "user" | "kokoro" | "tool";
+    readonly role: "user" | "kokoro" | "tool" | "context";
 };
 
 export type TypingIndicatorStateOptions = {

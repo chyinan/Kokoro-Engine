@@ -172,6 +172,7 @@ import {
   type CharacterRecord,
   type MemoryEmbeddingModelStatus,
   type MemoryEmbeddingModelDownloadProgress,
+  getKokoroErrorMessage,
   onMemoryEmbeddingModelProgress,
 } from "./lib/kokoro-bridge";
 import type { ThemeConfig } from "./ui/layout/types";
@@ -411,7 +412,7 @@ function App() {
       const status = await downloadMemoryEmbeddingModel();
       setMemoryModelStatus(status);
     } catch (error) {
-      setMemoryModelError(error instanceof Error ? error.message : String(error));
+      setMemoryModelError(getKokoroErrorMessage(error));
     } finally {
       memoryModelDownloadInFlightRef.current = false;
       setMemoryModelDownloading(false);
@@ -430,7 +431,7 @@ function App() {
         void startMemoryModelDownload();
       }
     } catch (error) {
-      setMemoryModelError(error instanceof Error ? error.message : String(error));
+      setMemoryModelError(getKokoroErrorMessage(error));
     }
   }, [memoryModelError, memoryModelStatus, refreshMemoryModelStatus, startMemoryModelDownload]);
 
@@ -470,7 +471,7 @@ function App() {
   useEffect(() => {
     refreshMemoryModelStatus().catch((err) => {
       console.error("[App] Failed to load memory model status:", err);
-      setMemoryModelError(err instanceof Error ? err.message : String(err));
+      setMemoryModelError(getKokoroErrorMessage(err));
     });
   }, [refreshMemoryModelStatus]);
 

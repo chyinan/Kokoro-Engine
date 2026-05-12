@@ -2,6 +2,16 @@ import { describe, expect, it } from "vitest";
 import { getStreamingRevealText, shouldRenderTypingIndicator, shouldRevealLiveTurnToolTrace } from "./chat-streaming-state";
 
 describe("shouldRenderTypingIndicator", () => {
+    it("keeps the typing indicator visible when the active index points at a context row", () => {
+        expect(shouldRenderTypingIndicator({
+            isThinking: true,
+            activeMessageIndex: 0,
+            messages: [
+                { role: "context" },
+            ],
+        })).toBe(true);
+    });
+
     it("shows the typing indicator while thinking before the assistant bubble exists", () => {
         expect(shouldRenderTypingIndicator({
             isThinking: true,

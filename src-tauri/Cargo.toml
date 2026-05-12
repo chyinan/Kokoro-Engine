@@ -41,7 +41,6 @@ sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite", "migra
 anyhow = "1.0.101"
 thiserror = "1"
 fastembed = "5.9.0"
-hf-hub = { version = "0.4.3", default-features = false, features = ["tokio", "rustls-tls"] }
 rquickjs = { version = "0.11", features = ["futures", "macro", "chrono", "loader"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"

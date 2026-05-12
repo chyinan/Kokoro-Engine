@@ -26,7 +26,8 @@ use crate::hooks::{
 use crate::imagegen::ImageGenService;
 use crate::llm::messages::{
     assistant_tool_calls_message, extract_message_text, history_message_to_llm_chat_message,
-    replace_user_message_with_images, system_message, tool_result_message, user_text_message,
+    render_vision_context_user_message, replace_user_message_with_images, system_message,
+    tool_result_message, user_text_message,
 };
 use crate::llm::provider::{LlmChatMessage, LlmStreamEvent};
 use crate::llm::service::LlmService;
@@ -491,7 +492,8 @@ pub struct ChatRequest {
     pub allow_image_gen: Option<bool>,
     pub images: Option<Vec<String>>,
     pub character_id: Option<String>,
-    /// If true, neither the user message nor the assistant response is saved to history.
+    /// If true, the user instruction is hidden. Non-empty assistant replies may
+    /// still be saved, while proactive no-op responses persist nothing.
     /// Used for touch interactions and proactive triggers where the instruction shouldn't appear in chat.
     #[serde(default)]
     pub hidden: bool,
@@ -536,6 +538,60 @@ fn build_chat_hook_payload(
         tool_round,
         hidden,
     })
+}
+
+fn vision_context_metadata_value(
+    observation: &crate::vision::context::VisionObservation,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "vision_observation",
+        "observation_id": observation.id,
+        "captured_at": observation.captured_at.to_rfc3339(),
+        "analyzed_at": observation.analyzed_at.to_rfc3339(),
+        "source": observation.source.as_str(),
+    })
+}
+
+fn insert_vision_context_before_latest_user(
+    client_messages: &mut Vec<LlmChatMessage>,
+    observation: &crate::vision::context::VisionObservation,
+) {
+    let metadata = vision_context_metadata_value(observation);
+    let rendered = plain_llm_message(render_vision_context_user_message(
+        &observation.summary,
+        Some(&metadata),
+    ));
+    let index = client_messages
+        .iter()
+        .rposition(|message| crate::llm::messages::is_user_message(&message.message))
+        .unwrap_or(client_messages.len());
+    client_messages.insert(index, rendered);
+}
+
+async fn persist_vision_context_message(
+    state: &AIOrchestrator,
+    observation: &crate::vision::context::VisionObservation,
+    character_id: &str,
+    turn_id: Option<&str>,
+) {
+    let mut metadata = vision_context_metadata_value(observation);
+    if let Some(turn_id) = turn_id {
+        metadata["turn_id"] = serde_json::Value::String(turn_id.to_string());
+    }
+    state
+        .add_message_with_metadata(
+            "context".to_string(),
+            observation.summary.clone(),
+            Some(metadata.to_string()),
+            character_id,
+            None,
+        )
+        .await;
+}
+
+fn is_proactive_noop_response(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.is_empty() || trimmed.eq_ignore_ascii_case("PASS")
 }
 
 fn build_before_llm_request_payload(
@@ -1482,9 +1538,19 @@ pub async fn stream_chat(
         let _ = app.emit("chat-typing", &typing_params);
     }
 
-    // 1. Update History with User Message (skip for hidden/touch interactions)
+    // 1. Select current-turn vision context before any user-message persistence.
+    let selected_vision_observation = _vision_watcher
+        .context
+        .latest_completed_observation(chrono::Utc::now())
+        .await;
+
+    // 2. Update History with User Message (skip for hidden/touch interactions)
     let system_provider = llm_state.system_provider().await;
     if !request.hidden {
+        if let Some(observation) = selected_vision_observation.as_ref() {
+            persist_vision_context_message(&state, observation, &char_id, None).await;
+        }
+
         state
             .add_message_with_metadata(
                 "user".to_string(),
@@ -1533,7 +1599,11 @@ pub async fn stream_chat(
         "[Chat] configured_active_provider={}, effective_active_provider={}, native_tools_enabled={}",
         llm_config.active_provider, effective_provider_id, native_tools_enabled
     );
-    let vision_enabled = _vision_watcher.config.read().await.enabled;
+    let vision_config = _vision_watcher.config.read().await.clone();
+    state
+        .set_vision_context_history_mode(vision_config.vision_context_history_mode.clone())
+        .await;
+    let vision_enabled = vision_config.vlm_enabled;
 
     // Native tool-calling requests already carry structured tool definitions,
     // so avoid duplicating a long textual tool prompt there.
@@ -1638,12 +1708,22 @@ pub async fn stream_chat(
     )
     .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
-    // 注入视觉上下文（如果有最近的屏幕观察）
-    if let Some(vision_desc) = _vision_watcher.context.get_context_string().await {
-        client_messages.push(plain_llm_message(system_message(format!(
-            "[Vision] Visible screen content: {}. Use this only as optional visual context. Refer only to what is directly visible on screen, and avoid speculation about hidden details, intent, authorship, or anything off-screen.",
-            vision_desc
-        ))));
+    // For hidden messages (touch/proactive interactions), the user message
+    // wasn't added to history, so include it before dedicated vision rendering.
+    // This keeps screen context immediately before the current hidden user turn.
+    if request.hidden {
+        client_messages.push(plain_llm_message(user_text_message(
+            effective_request_message.clone(),
+        )));
+    }
+
+    // Dedicated current-turn vision context rendering happens after ordinary
+    // request hooks. Visible turns already persisted the selected observation
+    // before prompt composition, so only hidden turns need an in-flight insert.
+    if request.hidden {
+        if let Some(observation) = selected_vision_observation.as_ref() {
+            insert_vision_context_before_latest_user(&mut client_messages, observation);
+        }
     }
 
     // Attach images to the last user message if present
@@ -1697,14 +1777,6 @@ pub async fn stream_chat(
         }
     }
 
-    // For hidden messages (touch interactions), the user message wasn't added to
-    // history, so we must explicitly include it in the context for the LLM to see.
-    if request.hidden {
-        client_messages.push(plain_llm_message(user_text_message(
-            effective_request_message.clone(),
-        )));
-    }
-
     #[cfg(debug_assertions)]
     {
         tracing::info!(
@@ -1728,10 +1800,7 @@ pub async fn stream_chat(
     let mut bg_generated_by_tool = false;
     let mut cue_set_by_tool = false;
     let mut draft_row_id: Option<i64> = None;
-    let mut forced_text_after_side_effect = false;
     let mut stream_failed = false;
-    let mut text_retry_count = 0u32;
-    let mut force_text_only_round = false;
     let mut all_reasoning_content = String::new();
 
     for round in 0..max_tool_rounds {
@@ -1742,7 +1811,7 @@ pub async fn stream_chat(
 
         let mut stream: std::pin::Pin<
             Box<dyn futures::Stream<Item = Result<LlmStreamEvent, String>> + Send>,
-        > = if native_tools_enabled && !force_text_only_round {
+        > = if native_tools_enabled {
             chat_provider
                 .chat_stream_with_tools_rich(client_messages.clone(), None, native_tools.clone())
                 .await
@@ -1890,8 +1959,10 @@ pub async fn stream_chat(
         merge_continuation_text(&mut all_cleaned_text, &cleaned_text);
         all_reasoning_content.push_str(&round_reasoning_content);
 
-        // Persist assistant draft incrementally (hidden interactions still save the response, just not the user message)
-        if !all_cleaned_text.is_empty() {
+        // Persist visible assistant drafts incrementally. Hidden proactive/touch
+        // turns are persisted only after final no-op filtering, so PASS/empty
+        // proactive vision responses leave no DB rows.
+        if !request.hidden && !all_cleaned_text.is_empty() {
             let draft_content = strip_leaked_tags(&all_cleaned_text);
             if !draft_content.is_empty() {
                 match draft_row_id {
@@ -2111,60 +2182,6 @@ pub async fn stream_chat(
             });
             client_messages.extend(tool_result_messages.into_iter().map(plain_llm_message));
 
-            // Apply the same side-effect / feedback guard as the text-tool path
-            // to prevent infinite loops when LLM keeps emitting only tool calls
-            // without any dialogue text.
-            if !any_needs_feedback {
-                if all_cleaned_text.trim().is_empty() && !forced_text_after_side_effect {
-                    tracing::info!(target: "chat", "[Chat] Native side-effect tools ran without text, forcing one follow-up text round");
-                    forced_text_after_side_effect = true;
-                    client_messages.push(plain_llm_message(system_message(
-                        "The tool has already been executed successfully. \
-                         Now respond with a natural dialogue reply for the user. \
-                         Do NOT call the same tool again unless absolutely necessary."
-                            .to_string(),
-                    )));
-                } else if all_cleaned_text.trim().is_empty() {
-                    // Already forced once but still no text — retry with tools disabled
-                    if text_retry_count < 3 {
-                        text_retry_count += 1;
-                        forced_text_after_side_effect = false;
-                        force_text_only_round = true;
-                        tracing::info!(target: "chat", "[Chat] Native tool loop: no text after forced round, retrying without tools ({}/3)", text_retry_count);
-                        // Strip trailing tool/system/empty-assistant messages to avoid poisoning the context
-                        while client_messages.len() > 1 {
-                            let should_pop = match client_messages.last() {
-                                Some(LlmChatMessage { message: async_openai::types::chat::ChatCompletionRequestMessage::Tool(_), .. }) => true,
-                                Some(LlmChatMessage { message: async_openai::types::chat::ChatCompletionRequestMessage::System(_), .. }) => true,
-                                Some(LlmChatMessage { message: async_openai::types::chat::ChatCompletionRequestMessage::Assistant(m), .. }) => {
-                                    m.content.as_ref().map(|_c| extract_message_text(
-                                        &async_openai::types::chat::ChatCompletionRequestMessage::Assistant(m.clone())
-                                    ).trim().is_empty()).unwrap_or(true)
-                                }
-                                _ => false,
-                            };
-                            if should_pop {
-                                client_messages.pop();
-                            } else {
-                                break;
-                            }
-                        }
-                        client_messages.push(plain_llm_message(system_message(
-                            "IMPORTANT: Respond with dialogue text only. Do NOT call any tools."
-                                .to_string(),
-                        )));
-                        continue;
-                    }
-                    tracing::info!(
-                        target: "chat::tools",
-                        "[Chat] Native tool loop: still no text after {} retries, ending loop",
-                        text_retry_count
-                    );
-                    break;
-                }
-                // If there IS text, fall through to continue normally
-            }
-
             tracing::info!(
                 target: "chat::tools",
                 "[Chat] Continuing after native tool calls with assistant/tool result messages"
@@ -2179,34 +2196,16 @@ pub async fn stream_chat(
 
         // Only continue the loop if at least one tool needs its result fed back to the LLM
         if !any_needs_feedback {
-            if all_cleaned_text.trim().is_empty() && !forced_text_after_side_effect {
-                tracing::info!(target: "chat", "[Chat] Side-effect tools ran without any text reply, forcing one follow-up text round");
-                forced_text_after_side_effect = true;
-                client_messages.push(plain_llm_message(system_message(format!(
-                    "[Tool results]\n\
-                    {}\n\n\
-                    The side-effect tool has already been executed successfully.\n\
-                    Now continue with a natural reply for the user in plain dialogue text.\n\
-                    Do not explain the tool call, do not output metadata, and do not repeat the same side-effect tool unless it is still necessary.",
-                    tool_results.join("\n")
-                ))));
-                #[cfg(debug_assertions)]
-                debug_log_rich_llm_messages(
-                    &format!("forced follow-up round {}", round + 1),
-                    &client_messages,
-                );
-                continue;
-            }
-
             tracing::info!(target: "chat", "[Chat] No feedback-requiring tools, ending loop");
             break;
         }
 
-        // Only inject tool results — no need to replay the assistant's previous output
+        // Prompt-mode tools do not have native tool-result messages, so feed a
+        // neutral tool-result summary back into the model without forcing a
+        // visible reply. The next round may answer, call more tools, or end
+        // with empty text.
         client_messages.push(plain_llm_message(system_message(format!(
-            "[Tool results]\n\
-            {}\n\n\
-            Incorporate these results naturally into your dialogue. Do NOT echo raw data or JSON.",
+            "[Tool results]\n{}",
             tool_results.join("\n")
         ))));
         #[cfg(debug_assertions)]
@@ -2217,6 +2216,37 @@ pub async fn stream_chat(
     }
 
     let full_response = strip_leaked_tags(&all_cleaned_text);
+
+    if request.hidden && is_proactive_noop_response(&full_response) {
+        if let Some(row_id) = draft_row_id {
+            if let Err(error) = state.delete_message_by_id(row_id).await {
+                tracing::error!(
+                    target: "chat",
+                    "[Chat] Failed to delete hidden proactive no-op draft: {}",
+                    error
+                );
+            }
+        }
+        app.emit(
+            "chat-turn-text-complete",
+            serde_json::json!({
+                "turn_id": assistant_turn_id,
+                "text": "",
+                "translation_pending": false,
+                "translation": serde_json::Value::Null,
+            }),
+        )
+        .map_err(|e| KokoroError::Chat(e.to_string()))?;
+        app.emit(
+            "chat-turn-finish",
+            serde_json::json!({
+                "turn_id": assistant_turn_id,
+                "status": "completed",
+            }),
+        )
+        .map_err(|e| KokoroError::Chat(e.to_string()))?;
+        return Ok(());
+    }
 
     if let Some(hooks) = hook_runtime.as_ref() {
         hooks
@@ -2377,25 +2407,46 @@ pub async fn stream_chat(
         }
         let metadata = Some(metadata_value.to_string());
 
-        // Update the draft row with final content + metadata (DB already has the row)
-        if let Some(row_id) = draft_row_id {
-            if let Err(e) = state
-                .update_streaming_draft(row_id, &full_response, metadata.as_deref())
-                .await
-            {
-                tracing::error!(target: "chat", "[Chat] Failed to finalize streaming draft: {}", e);
+        if request.hidden {
+            if let Some(observation) = selected_vision_observation.as_ref() {
+                persist_vision_context_message(
+                    &state,
+                    observation,
+                    &char_id,
+                    Some(&assistant_turn_id),
+                )
+                .await;
             }
-        }
+            state
+                .add_message_with_metadata(
+                    "assistant".to_string(),
+                    full_response.clone(),
+                    metadata,
+                    &char_id,
+                    None,
+                )
+                .await;
+        } else {
+            // Update the draft row with final content + metadata (DB already has the row)
+            if let Some(row_id) = draft_row_id {
+                if let Err(e) = state
+                    .update_streaming_draft(row_id, &full_response, metadata.as_deref())
+                    .await
+                {
+                    tracing::error!(target: "chat", "[Chat] Failed to finalize streaming draft: {}", e);
+                }
+            }
 
-        // Add to in-memory history only (DB already persisted).
-        // push_history_message applies the context message length limit.
-        state
-            .push_history_message(Message {
-                role: "assistant".to_string(),
-                content: full_response.clone(),
-                metadata: Some(metadata_value),
-            })
-            .await;
+            // Add to in-memory history only (DB already persisted).
+            // push_history_message applies the context message length limit.
+            state
+                .push_history_message(Message {
+                    role: "assistant".to_string(),
+                    content: full_response.clone(),
+                    metadata: Some(metadata_value),
+                })
+                .await;
+        }
     }
 
     // Event-driven + periodic memory extraction
@@ -2414,7 +2465,7 @@ pub async fn stream_chat(
         msg_count, memory_msg_count
     );
 
-    if state.is_memory_enabled() {
+    if !request.hidden && state.is_memory_enabled() {
         if let Some(decision) = select_memory_ingress_decision(&request.message, &ingress_options) {
             let conversation_key = conversation_id
                 .as_deref()
@@ -2472,7 +2523,7 @@ pub async fn stream_chat(
         }
     }
 
-    if state.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
+    if !request.hidden && state.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
         tracing::info!(
             target: "memory",
             "[Memory] Triggering memory extraction (count={})",
@@ -2507,7 +2558,7 @@ pub async fn stream_chat(
     }
 
     // Periodic memory consolidation (every 20 user messages)
-    if state.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
+    if !request.hidden && state.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
         let memory_mgr = state.memory_manager.clone();
         let char_id_for_consolidation = char_id.clone();
         let provider_for_consolidation = system_provider.clone();
@@ -3126,6 +3177,48 @@ mod tests {
             "system prompt"
         );
         assert_eq!(extract_message_text(&client_messages[1].message), "hello");
+    }
+
+    #[test]
+    fn proactive_noop_accepts_empty_and_pass_only() {
+        assert!(is_proactive_noop_response(""));
+        assert!(is_proactive_noop_response("  \n"));
+        assert!(is_proactive_noop_response("PASS"));
+        assert!(is_proactive_noop_response(" pass "));
+        assert!(!is_proactive_noop_response("pass for now"));
+        assert!(!is_proactive_noop_response("A short comment"));
+    }
+
+    #[test]
+    fn vision_context_inserts_before_current_hidden_user_message() {
+        let now = chrono::Utc::now();
+        let observation = crate::vision::context::VisionObservation {
+            id: "obs-1".to_string(),
+            frame_id: Some("frame-1".to_string()),
+            captured_at: now,
+            analyzed_at: now,
+            summary: "Current screen summary".to_string(),
+            source: crate::vision::context::VisionObservationSource::Auto,
+        };
+        let mut messages = vec![
+            plain_llm_message(system_message("system")),
+            plain_llm_message(user_text_message("older visible user")),
+            plain_llm_message(user_text_message("current hidden instruction")),
+        ];
+
+        insert_vision_context_before_latest_user(&mut messages, &observation);
+
+        assert_eq!(
+            extract_message_text(&messages[1].message),
+            "older visible user"
+        );
+        assert!(extract_message_text(&messages[2].message).contains("[Screen context]"));
+        assert!(!extract_message_text(&messages[2].message).contains("Captured at:"));
+        assert!(!extract_message_text(&messages[2].message).contains("Source:"));
+        assert_eq!(
+            extract_message_text(&messages[3].message),
+            "current hidden instruction"
+        );
     }
 
     #[test]

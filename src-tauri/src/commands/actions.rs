@@ -577,7 +577,7 @@ pub async fn list_actions(
     registry_state: State<'_, Arc<RwLock<ActionRegistry>>>,
     vision_watcher: State<'_, crate::vision::watcher::VisionWatcher>,
 ) -> Result<Vec<crate::actions::ActionInfo>, KokoroError> {
-    let vision_enabled = vision_watcher.config.read().await.enabled;
+    let vision_enabled = vision_watcher.config.read().await.vlm_enabled;
     let registry = registry_state.read().await;
     Ok(registry.list_actions_with_availability(vision_enabled))
 }
@@ -587,7 +587,7 @@ pub async fn list_builtin_tools(
     registry_state: State<'_, Arc<RwLock<ActionRegistry>>>,
     vision_watcher: State<'_, crate::vision::watcher::VisionWatcher>,
 ) -> Result<Vec<ActionInfo>, KokoroError> {
-    let vision_enabled = vision_watcher.config.read().await.enabled;
+    let vision_enabled = vision_watcher.config.read().await.vlm_enabled;
     let registry = registry_state.read().await;
     Ok(registry.list_builtin_actions_with_availability(vision_enabled))
 }

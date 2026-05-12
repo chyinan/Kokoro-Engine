@@ -1,6 +1,9 @@
 use crate::error::KokoroError;
-use crate::vision::capture::capture_screen;
+use crate::vision::capture::{
+    capture_screen_with_options, list_screens, CaptureOptions, ScreenInfo,
+};
 use crate::vision::config::VisionConfig;
+use crate::vision::context::{VisionObservation, VisionObservationSource};
 use crate::vision::server::VisionServer;
 use crate::vision::watcher::VisionWatcher;
 use std::sync::Arc;
@@ -28,6 +31,11 @@ pub async fn get_vision_config(
 }
 
 #[tauri::command]
+pub async fn list_vision_screens() -> Result<Vec<ScreenInfo>, KokoroError> {
+    list_screens().map_err(KokoroError::ExternalService)
+}
+
+#[tauri::command]
 pub async fn save_vision_config(
     app_handle: AppHandle,
     state: State<'_, VisionWatcher>,
@@ -38,12 +46,18 @@ pub async fn save_vision_config(
         .join("com.chyin.kokoro");
     let config_path = app_data.join("vision_config.json");
     crate::vision::config::save_config(&config_path, &config).map_err(KokoroError::Config)?;
-    let was_enabled = state.config.read().await.enabled;
+    let was_auto_enabled = {
+        let current = state.config.read().await;
+        current.vlm_enabled && current.auto_vision_enabled
+    };
     *state.config.write().await = config.clone();
-    if config.enabled && !was_enabled {
+    let auto_enabled = config.vlm_enabled && config.auto_vision_enabled;
+    if auto_enabled && !was_auto_enabled {
         state.start(app_handle.clone());
-    } else if !config.enabled && was_enabled {
+    } else if !auto_enabled && was_auto_enabled {
         state.stop();
+    } else if !auto_enabled {
+        state.context.clear_auto_state_on_disable().await;
     }
     Ok(())
 }
@@ -64,21 +78,53 @@ pub async fn stop_vision_watcher(state: State<'_, VisionWatcher>) -> Result<(), 
 }
 
 #[tauri::command]
+pub async fn set_vision_text_input_focused(
+    state: State<'_, VisionWatcher>,
+    focused: bool,
+) -> Result<(), KokoroError> {
+    state.context.set_text_input_focus_state(focused).await;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn capture_screen_now(
     state: State<'_, VisionWatcher>,
     llm_service: State<'_, crate::llm::service::LlmService>,
 ) -> Result<String, KokoroError> {
-    let screenshot = capture_screen().map_err(|e| KokoroError::ExternalService(e.to_string()))?;
     let config = state.config.read().await.clone();
+    if !config.vlm_enabled {
+        return Err(KokoroError::ExternalService(
+            "Screen VLM is disabled".to_string(),
+        ));
+    }
+    let captured = capture_screen_with_options(&CaptureOptions {
+        display_id: config.display_id.clone(),
+        region: config.vlm_region,
+    })
+    .map_err(|e| KokoroError::ExternalService(e.to_string()))?;
+    if let Some(warning) = captured.warning.clone() {
+        state.context.set_last_error(warning).await;
+    }
     let client = state.client.clone();
+    let captured_at = chrono::Utc::now();
     let description = crate::vision::watcher::analyze_screenshot(
         &client,
         &config,
-        &screenshot,
+        &captured.jpeg_bytes,
         Some(&llm_service),
     )
     .await
     .map_err(|e| KokoroError::ExternalService(e.to_string()))?;
-    state.context.update(description.clone()).await;
+    state
+        .context
+        .record_manual_observation(VisionObservation {
+            id: uuid::Uuid::new_v4().to_string(),
+            frame_id: None,
+            captured_at,
+            analyzed_at: chrono::Utc::now(),
+            summary: description.clone(),
+            source: VisionObservationSource::ManualTool,
+        })
+        .await;
     Ok(description)
 }

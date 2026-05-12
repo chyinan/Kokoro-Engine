@@ -12,6 +12,76 @@ function createMessage(overrides: Partial<ConversationMessage>): ConversationMes
 }
 
 describe("buildChatMessagesFromConversation", () => {
+    it("将 role=context 的视觉观察恢复为上下文消息并映射 metadata", () => {
+        const messages: Array<ConversationMessage> = [
+            createMessage({
+                role: "context",
+                content: "用户正在查看 VS Code 中的聊天历史代码。",
+                created_at: "2026-04-05T09:59:00Z",
+                metadata: JSON.stringify({
+                    captured_at: "2026-04-05T10:00:00Z",
+                    source: "screen",
+                }),
+            }),
+            createMessage({
+                role: "user",
+                content: "继续",
+                created_at: "2026-04-05T10:01:00Z",
+            }),
+        ];
+
+        const chatMessages = buildChatMessagesFromConversation(messages);
+
+        expect(chatMessages).toEqual([
+            expect.objectContaining({
+                role: "context",
+                text: "用户正在查看 VS Code 中的聊天历史代码。",
+                capturedAt: "2026-04-05T10:00:00Z",
+                source: "screen",
+            }),
+            expect.objectContaining({
+                role: "user",
+                text: "继续",
+            }),
+        ]);
+    });
+
+    it("从 context metadata 恢复关联的 proactive turn_id", () => {
+        const messages: Array<ConversationMessage> = [
+            createMessage({
+                role: "context",
+                content: "屏幕上有调试日志。",
+                metadata: JSON.stringify({
+                    type: "vision_observation",
+                    turn_id: "turn-proactive-1",
+                    captured_at: "2026-04-05T10:00:00Z",
+                    source: "auto",
+                }),
+            }),
+            createMessage({
+                role: "assistant",
+                content: "这些日志看起来很密集呢。",
+                metadata: JSON.stringify({
+                    turn_id: "turn-proactive-1",
+                }),
+            }),
+        ];
+
+        const chatMessages = buildChatMessagesFromConversation(messages);
+
+        expect(chatMessages).toEqual([
+            expect.objectContaining({
+                role: "context",
+                text: "屏幕上有调试日志。",
+                turnId: "turn-proactive-1",
+            }),
+            expect.objectContaining({
+                role: "kokoro",
+                text: "这些日志看起来很密集呢。",
+            }),
+        ]);
+    });
+
     it("从 tool_result metadata 恢复完整工具身份字段", () => {
         const messages: Array<ConversationMessage> = [
             createMessage({

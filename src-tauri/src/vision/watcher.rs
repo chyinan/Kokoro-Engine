@@ -4,9 +4,10 @@ use crate::llm::anthropic::AnthropicProvider;
 use crate::llm::messages::user_message_with_images;
 use crate::llm::provider::{LlmParams, LlmProvider};
 use crate::llm::service::LlmService;
-use crate::vision::capture::{capture_screen, has_significant_change};
+use crate::vision::capture::{capture_screen_with_options, has_significant_change, CaptureOptions};
 use crate::vision::config::VisionConfig;
 use crate::vision::context::VisionContext;
+use crate::vision::context::{AnalysisDispatch, VisionFrame};
 use reqwest::Client;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -39,7 +40,8 @@ impl VisionWatcher {
         self
     }
 
-    /// Start the background vision loop.
+    /// Start the background producer loop. VLM analysis is dispatched asynchronously
+    /// with at most one in-flight request and newest-only pending frame state.
     pub fn start(&self, app_handle: AppHandle) {
         if self
             .running
@@ -59,12 +61,8 @@ impl VisionWatcher {
         tokio::spawn(async move {
             tracing::info!(target: "vision", "Watcher started");
             let _ = app_handle.emit("vision-status", "active");
-
-            let client = watcher.client.clone();
             let mut prev_screenshot: Option<Vec<u8>> = None;
-            // 用一个足够久远的时间初始化，确保第一次触发不受冷却限制
-            let mut last_proactive_ts = std::time::Instant::now();
-            let mut proactive_initialized = false;
+            let mut last_capture_warning: Option<String> = None;
 
             loop {
                 if !watcher.running.load(Ordering::Relaxed) {
@@ -72,88 +70,85 @@ impl VisionWatcher {
                 }
 
                 let config = watcher.config.read().await.clone();
-                if !config.enabled {
+                if !config.vlm_enabled || !config.auto_vision_enabled {
+                    watcher.context.clear_auto_state_on_disable().await;
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     continue;
                 }
 
-                // 1. Capture screen
-                let screenshot = match capture_screen() {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        tracing::error!(target: "vision", "Capture failed: {}", e);
+                if watcher.context.should_pause_auto_capture().await {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    continue;
+                }
+
+                let capture_options = CaptureOptions {
+                    display_id: config.display_id.clone(),
+                    region: config.vlm_region,
+                };
+                let captured = match capture_screen_with_options(&capture_options) {
+                    Ok(image) => image,
+                    Err(error) => {
+                        tracing::error!(target: "vision", "Capture failed: {}", error);
+                        watcher.context.set_last_error(error).await;
                         tokio::time::sleep(std::time::Duration::from_secs(
-                            config.interval_secs as u64,
+                            config.capture_interval_secs as u64,
                         ))
                         .await;
                         continue;
                     }
                 };
-
-                // 2. Check for significant change
-                let changed = match &prev_screenshot {
-                    Some(prev) => {
-                        has_significant_change(prev, &screenshot, config.change_threshold)
+                if let Some(warning) = captured.warning.clone() {
+                    if last_capture_warning.as_deref() != Some(warning.as_str()) {
+                        tracing::warn!(target: "vision", "{}", warning);
+                        watcher.context.set_last_error(warning.clone()).await;
+                        last_capture_warning = Some(warning);
+                    } else {
+                        tracing::debug!(target: "vision", "{}", warning);
                     }
-                    None => true, // First capture is always "changed"
-                };
-
-                if changed {
-                    tracing::info!(target: "vision", "Screen changed, analyzing with VLM...");
-
-                    // 3. Send to VLM for analysis
-                    match analyze_screenshot(
-                        &client,
-                        &config,
-                        &screenshot,
-                        watcher.llm_service.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(description) => {
-                            tracing::info!(
-                                target: "vision",
-                                "Observation: {}",
-                                &description[..description.len().min(100)]
-                            );
-                            watcher.context.update(description.clone()).await;
-                            let _ = app_handle.emit("vision-observation", &description);
-
-                            if config.proactive_enabled {
-                                // 冷却检查：距上次 proactive 至少间隔 interval_secs
-                                let cooldown =
-                                    std::time::Duration::from_secs(config.interval_secs as u64);
-                                let ready = !proactive_initialized
-                                    || last_proactive_ts.elapsed() >= cooldown;
-                                if ready {
-                                    proactive_initialized = true;
-                                    last_proactive_ts = std::time::Instant::now();
-                                    let instruction =
-                                        build_proactive_vision_instruction(&description);
-                                    let _ = app_handle.emit(
-                                        "proactive-trigger",
-                                        serde_json::json!({
-                                            "trigger": "vision",
-                                            "idle_seconds": 0,
-                                            "instruction": instruction,
-                                        }),
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(target: "vision", "VLM analysis failed: {}", e);
-                        }
-                    }
-
-                    prev_screenshot = Some(screenshot);
                 } else {
-                    tracing::info!(target: "vision", "No significant change, skipping analysis");
+                    last_capture_warning = None;
                 }
 
-                // 4. Sleep for the configured interval
-                tokio::time::sleep(std::time::Duration::from_secs(config.interval_secs as u64))
+                let changed = prev_screenshot
+                    .as_ref()
+                    .map(|prev| {
+                        has_significant_change(prev, &captured.jpeg_bytes, config.change_threshold)
+                    })
+                    .unwrap_or(true);
+
+                if !changed {
+                    tracing::info!(target: "vision", "No significant change, skipping analysis");
+                    tokio::time::sleep(std::time::Duration::from_secs(
+                        config.capture_interval_secs as u64,
+                    ))
                     .await;
+                    continue;
+                }
+
+                prev_screenshot = Some(captured.jpeg_bytes.clone());
+                let frame = VisionFrame {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    captured_at: chrono::Utc::now(),
+                    jpeg_bytes: captured.jpeg_bytes,
+                    display_id: captured.display_id,
+                    region: captured.region,
+                    image_hash: captured.image_hash,
+                };
+
+                if let AnalysisDispatch::Dispatch(frame) =
+                    watcher.context.submit_auto_frame(frame).await
+                {
+                    let analysis_watcher = watcher.clone();
+                    let analysis_app = app_handle.clone();
+                    tokio::spawn(async move {
+                        run_analysis_chain(analysis_watcher, analysis_app, frame).await;
+                    });
+                }
+
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    config.capture_interval_secs as u64,
+                ))
+                .await;
             }
 
             tracing::info!(target: "vision", "Watcher stopped");
@@ -165,8 +160,74 @@ impl VisionWatcher {
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
         let ctx = self.context.clone();
-        tokio::spawn(async move { ctx.clear().await });
+        tokio::spawn(async move { ctx.clear_auto_state_on_disable().await });
     }
+}
+
+async fn run_analysis_chain(
+    watcher: VisionWatcher,
+    app_handle: AppHandle,
+    first_frame: VisionFrame,
+) {
+    let mut current = first_frame;
+    loop {
+        tracing::info!(target: "vision", "Screen changed, analyzing with VLM...");
+        let config = watcher.config.read().await.clone();
+        let result = analyze_screenshot(
+            &watcher.client,
+            &config,
+            &current.jpeg_bytes,
+            watcher.llm_service.as_ref(),
+        )
+        .await;
+
+        match &result {
+            Ok(description) => {
+                tracing::debug!(target: "vision", "Observation: {}", description);
+            }
+            Err(error) => tracing::error!(target: "vision", "VLM analysis failed: {}", error),
+        }
+
+        let should_emit_proactive = result.is_ok() && config.proactive_vision_enabled;
+        let next_frame = watcher.context.finish_auto_analysis(&current, result).await;
+
+        if should_emit_proactive {
+            if let Some(observation) = watcher
+                .context
+                .latest_completed_observation(chrono::Utc::now())
+                .await
+            {
+                let _ = app_handle.emit(
+                    "vision-observation",
+                    serde_json::json!({
+                        "summary": observation.summary,
+                        "captured_at": observation.captured_at.to_rfc3339(),
+                        "source": observation.source.as_str(),
+                    }),
+                );
+            }
+        }
+
+        if should_emit_proactive {
+            emit_proactive_vision_comment(&app_handle);
+        }
+
+        match next_frame {
+            Some(next) => current = next,
+            None => break,
+        }
+    }
+}
+
+fn emit_proactive_vision_comment(app_handle: &AppHandle) {
+    tracing::info!(target: "vision", "Vision screen-comment trigger fired");
+    let _ = app_handle.emit(
+        "proactive-trigger",
+        serde_json::json!({
+            "trigger": "vision",
+            "instruction": build_proactive_vision_instruction(),
+        }),
+    );
 }
 
 const VISION_PROMPT: &str = "Describe the screenshot in 2-3 concise, information-rich sentences. Include the active application/window, important visible UI text, and the most visually prominent non-UI content such as characters, artwork, background, objects, colors, and scene details. If a fictional/anime character is clearly recognizable, you may name them; do not identify real people from appearance alone. Do not infer authorship, private intent, emotions, or anything off-screen. If something is unclear, say that briefly.";
@@ -175,13 +236,10 @@ const DEFAULT_OPENAI_VLM_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_ANTHROPIC_VLM_BASE_URL: &str = "https://api.anthropic.com/v1";
 const DEFAULT_LLAMA_CPP_VLM_BASE_URL: &str = "http://127.0.0.1:8080";
 
-fn build_proactive_vision_instruction(description: &str) -> String {
-    format!(
-        "用户的电脑屏幕上目前正在显示的是：{}。请结合当前角色的人设和性格，对屏幕内容做一句自然、简短、轻量的评论。\
-        只评论屏幕上直接可见的内容，不要表现得像在监视用户，也不要声称知道隐藏信息、用户想法、代码是谁写的或谁改的，或屏幕外发生的事。\
-        避免重复、恐怖、威胁、夸张或令人不适的措辞；如果内容不清楚或可能敏感，就保持中性温和。",
-        description
-    )
+fn build_proactive_vision_instruction() -> &'static str {
+    "结合上方屏幕上下文和当前角色的人设，判断这次屏幕变化是否值得轻声回应。\
+    如果有新页面、新应用、醒目的视觉内容、明显状态变化或适合角色自然吐槽的点，就说一句简短评论。\
+    如果只是同一界面、普通滚动、日志/聊天内容变化，或评论会和最近说过的内容相似，请只回复 PASS。"
 }
 
 fn default_vlm_base_url(provider: &str) -> &'static str {
@@ -366,12 +424,15 @@ mod tests {
     }
 
     #[test]
-    fn proactive_vision_instruction_contains_safety_constraints() {
-        let instruction = build_proactive_vision_instruction("VS Code with Rust source open");
+    fn proactive_vision_instruction_defaults_to_pass() {
+        let instruction = build_proactive_vision_instruction();
 
-        assert!(instruction.contains("用户的电脑屏幕上目前正在显示的是"));
-        assert!(instruction.contains("不要表现得像在监视用户"));
-        assert!(instruction.contains("代码是谁写的或谁改的"));
+        assert!(!instruction.contains("用户的电脑屏幕上目前正在显示的是"));
+        assert!(!instruction.contains("VS Code with Rust source open"));
+        assert!(instruction.contains("上方屏幕上下文"));
+        assert!(instruction.contains("值得轻声回应"));
+        assert!(instruction.contains("新页面、新应用"));
+        assert!(instruction.contains("同一界面"));
     }
 
     #[tokio::test]

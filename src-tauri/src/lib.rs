@@ -18,6 +18,7 @@ pub mod vision;
 use crate::hooks::{AuditLogHookHandler, HookRuntime};
 use crate::mods::ModManager;
 use crate::utils::logging::init_logging;
+use std::path::Path;
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -63,7 +64,7 @@ pub fn run() {
         ];
         for root in search_roots.into_iter().flatten() {
             let candidate = root.join(ORT_LIB_NAME);
-            if candidate.exists() {
+            if is_usable_dylib(&candidate) {
                 tracing::info!(target: "tools", "Using bundled ONNX Runtime: {}", candidate.display());
                 std::env::set_var("ORT_DYLIB_PATH", &candidate);
                 break;
@@ -147,9 +148,11 @@ pub fn run() {
             commands::imagegen::test_sd_connection,
             commands::vision::upload_vision_image,
             commands::vision::get_vision_config,
+            commands::vision::list_vision_screens,
             commands::vision::save_vision_config,
             commands::vision::start_vision_watcher,
             commands::vision::stop_vision_watcher,
+            commands::vision::set_vision_text_input_focused,
             commands::vision::capture_screen_now,
             commands::memory::list_memories,
             commands::memory::update_memory,
@@ -337,6 +340,19 @@ pub fn run() {
                                 tracing::info!(target: "ai", "Restored context_settings: strategy={}, max_chars={}", strategy, max_chars);
                             }
                         }
+
+                        let vision_config_path = app_data_dir.join("vision_config.json");
+                        let vision_config = crate::vision::config::load_config(&vision_config_path);
+                        orchestrator
+                            .set_vision_context_history_mode(
+                                vision_config.vision_context_history_mode.clone(),
+                            )
+                            .await;
+                        tracing::info!(
+                            target: "ai",
+                            "Restored vision_context_history_mode={}",
+                            vision_config.vision_context_history_mode
+                        );
 
                         // Restore current_conversation_id from disk and reload history
                         let conv_id_path = app_data_dir.join("current_conversation_id.json");
@@ -712,7 +728,7 @@ pub fn run() {
             );
 
             // Auto-start vision watcher if previously enabled
-            if vision_config.enabled {
+            if vision_config.vlm_enabled && vision_config.auto_vision_enabled {
                 let watcher_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     // Small delay to let the app fully initialize
@@ -789,6 +805,14 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn is_usable_dylib(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .metadata()
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
 }
 
 /// Recursively copy a directory tree from `src` to `dst`.
