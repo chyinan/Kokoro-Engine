@@ -408,20 +408,18 @@ function ToggleRow({
 function SecretField({
     label,
     value,
-    env,
     placeholder,
-    hint,
+    fallbackEnv,
     onValueChange,
-    onEnvChange,
 }: {
     label: string;
     value?: string;
-    env?: string;
     placeholder: string;
-    hint: string;
+    fallbackEnv?: string;
     onValueChange: (value?: string) => void;
-    onEnvChange: (value?: string) => void;
 }) {
+    const { t } = useTranslation();
+
     return (
         <div>
             <label className={labelClasses}>{label}</label>
@@ -432,16 +430,15 @@ function SecretField({
                 placeholder={placeholder}
                 className={inputClasses}
             />
-            <div className="mt-2 flex items-center gap-2">
-                <KeyRound size={12} className="text-[var(--color-text-muted)]" />
-                <input
-                    type="text"
-                    value={env ?? ""}
-                    onChange={e => onEnvChange(e.target.value || undefined)}
-                    placeholder={hint}
-                    className={clsx(inputClasses, "py-2 text-xs")}
-                />
-            </div>
+            {fallbackEnv && (
+                <div className="mt-2 flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
+                    <KeyRound size={12} />
+                    <span>{t("settings.api.fallback_env")}</span>
+                    <code className="px-1.5 py-0.5 rounded bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-secondary)]">
+                        {fallbackEnv}
+                    </code>
+                </div>
+            )}
         </div>
     );
 }
@@ -633,11 +630,9 @@ function TelegramSettings({
             <SecretField
                 label={t("telegram.bot_token.label")}
                 value={config.bot_token}
-                env={config.bot_token_env}
                 placeholder={t("telegram.bot_token.placeholder")}
-                hint="TELEGRAM_BOT_TOKEN"
+                fallbackEnv="TELEGRAM_BOT_TOKEN"
                 onValueChange={value => onUpdate({ bot_token: value })}
-                onEnvChange={value => onUpdate({ bot_token_env: value })}
             />
 
             <StringListEditor
@@ -710,11 +705,9 @@ function DiscordSettings({
             <SecretField
                 label={t("bot.discord.bot_token")}
                 value={config.bot_token}
-                env={config.bot_token_env}
                 placeholder={t("bot.discord.bot_token_placeholder")}
-                hint="DISCORD_BOT_TOKEN"
+                fallbackEnv="DISCORD_BOT_TOKEN"
                 onValueChange={bot_token => onUpdate({ bot_token })}
-                onEnvChange={bot_token_env => onUpdate({ bot_token_env })}
             />
             <ToggleRow
                 label={t("bot.discord.allow_dm")}
@@ -783,20 +776,16 @@ function LineSettings({
             <SecretField
                 label={t("bot.line.access_token")}
                 value={config.channel_access_token}
-                env={config.channel_access_token_env}
                 placeholder={t("bot.line.access_token_placeholder")}
-                hint="LINE_CHANNEL_ACCESS_TOKEN"
+                fallbackEnv="LINE_CHANNEL_ACCESS_TOKEN"
                 onValueChange={channel_access_token => onUpdate({ channel_access_token })}
-                onEnvChange={channel_access_token_env => onUpdate({ channel_access_token_env })}
             />
             <SecretField
                 label={t("bot.line.channel_secret")}
                 value={config.channel_secret}
-                env={config.channel_secret_env}
                 placeholder={t("bot.line.channel_secret_placeholder")}
-                hint="LINE_CHANNEL_SECRET"
+                fallbackEnv="LINE_CHANNEL_SECRET"
                 onValueChange={channel_secret => onUpdate({ channel_secret })}
-                onEnvChange={channel_secret_env => onUpdate({ channel_secret_env })}
             />
             <div>
                 <label className={labelClasses}>{t("bot.line.webhook_path")}</label>
@@ -901,11 +890,9 @@ function WebhookSettings({
             <SecretField
                 label={t("bot.webhook.bearer_token")}
                 value={config.bearer_token}
-                env={config.bearer_token_env}
                 placeholder={t("bot.webhook.bearer_token_placeholder")}
-                hint="KOKORO_WEBHOOK_TOKEN"
+                fallbackEnv="KOKORO_WEBHOOK_TOKEN"
                 onValueChange={bearer_token => onUpdate({ bearer_token })}
-                onEnvChange={bearer_token_env => onUpdate({ bearer_token_env })}
             />
             <CharacterSelect
                 value={config.character_id}

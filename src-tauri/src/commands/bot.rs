@@ -31,6 +31,12 @@ use warp::{http::StatusCode, Filter, Reply};
 
 type HmacSha256 = Hmac<Sha256>;
 
+pub(crate) const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
+const DISCORD_BOT_TOKEN_ENV: &str = "DISCORD_BOT_TOKEN";
+const LINE_CHANNEL_ACCESS_TOKEN_ENV: &str = "LINE_CHANNEL_ACCESS_TOKEN";
+const LINE_CHANNEL_SECRET_ENV: &str = "LINE_CHANNEL_SECRET";
+const WEBHOOK_BEARER_TOKEN_ENV: &str = "KOKORO_WEBHOOK_TOKEN";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct BotConfig {
@@ -69,7 +75,7 @@ impl Default for DiscordBotConfig {
         Self {
             enabled: false,
             bot_token: None,
-            bot_token_env: Some("DISCORD_BOT_TOKEN".to_string()),
+            bot_token_env: Some(DISCORD_BOT_TOKEN_ENV.to_string()),
             allowed_channel_ids: Vec::new(),
             allow_direct_messages: true,
             character_id: None,
@@ -95,9 +101,9 @@ impl Default for LineBotConfig {
         Self {
             enabled: false,
             channel_access_token: None,
-            channel_access_token_env: Some("LINE_CHANNEL_ACCESS_TOKEN".to_string()),
+            channel_access_token_env: Some(LINE_CHANNEL_ACCESS_TOKEN_ENV.to_string()),
             channel_secret: None,
-            channel_secret_env: Some("LINE_CHANNEL_SECRET".to_string()),
+            channel_secret_env: Some(LINE_CHANNEL_SECRET_ENV.to_string()),
             webhook_path: "/line/webhook".to_string(),
             allowed_user_ids: Vec::new(),
             character_id: None,
@@ -125,7 +131,7 @@ impl Default for WebhookBotConfig {
             port: 8787,
             endpoint_path: "/webhook/message".to_string(),
             bearer_token: None,
-            bearer_token_env: Some("KOKORO_WEBHOOK_TOKEN".to_string()),
+            bearer_token_env: Some(WEBHOOK_BEARER_TOKEN_ENV.to_string()),
             character_id: None,
         }
     }
@@ -301,15 +307,36 @@ fn load_legacy_telegram_config() -> Option<crate::telegram::TelegramConfig> {
     }
 }
 
+pub(crate) fn normalize_telegram_config_env(
+    mut config: crate::telegram::TelegramConfig,
+) -> crate::telegram::TelegramConfig {
+    config.bot_token_env = Some(TELEGRAM_BOT_TOKEN_ENV.to_string());
+    config
+}
+
+pub(crate) fn normalize_bot_config_envs(mut config: BotConfig) -> BotConfig {
+    config.telegram = normalize_telegram_config_env(config.telegram);
+    config.discord.bot_token_env = Some(DISCORD_BOT_TOKEN_ENV.to_string());
+    config.line.channel_access_token_env = Some(LINE_CHANNEL_ACCESS_TOKEN_ENV.to_string());
+    config.line.channel_secret_env = Some(LINE_CHANNEL_SECRET_ENV.to_string());
+    config.webhook.bearer_token_env = Some(WEBHOOK_BEARER_TOKEN_ENV.to_string());
+    config
+}
+
 pub(crate) fn load_bot_config() -> BotConfig {
     let path = bot_config_path();
     let mut config: BotConfig = crate::config::load_json_config(&path, "BOT");
-    let Some(legacy_telegram) = load_legacy_telegram_config() else {
-        return config;
-    };
+    let mut migrated = false;
 
-    if !path.exists() || config.telegram == crate::telegram::TelegramConfig::default() {
-        config.telegram = legacy_telegram;
+    if let Some(legacy_telegram) = load_legacy_telegram_config() {
+        if !path.exists() || config.telegram == crate::telegram::TelegramConfig::default() {
+            config.telegram = legacy_telegram;
+            migrated = true;
+        }
+    }
+
+    let config = normalize_bot_config_envs(config);
+    if migrated {
         if let Err(error) = save_bot_config_file(&config) {
             tracing::warn!(
                 target: "bot",
@@ -323,7 +350,8 @@ pub(crate) fn load_bot_config() -> BotConfig {
 }
 
 pub(crate) fn save_bot_config_file(config: &BotConfig) -> Result<(), KokoroError> {
-    crate::config::save_json_config(&bot_config_path(), config, "BOT")
+    let config = normalize_bot_config_envs(config.clone());
+    crate::config::save_json_config(&bot_config_path(), &config, "BOT")
 }
 
 fn has_secret(value: &Option<String>, env: &Option<String>) -> bool {
@@ -345,6 +373,7 @@ pub async fn save_bot_config(
     runtime: State<'_, BotRuntimeService>,
     config: BotConfig,
 ) -> Result<(), KokoroError> {
+    let config = normalize_bot_config_envs(config);
     save_bot_config_file(&config)?;
     state.update_config(config.telegram.clone()).await;
     runtime.update_config(config).await;
@@ -1689,6 +1718,39 @@ mod tests {
         assert_eq!(config.selected_platform, "discord");
         assert!(config.discord.allow_direct_messages);
         assert_eq!(config.webhook.endpoint_path, "/webhook/message");
+    }
+
+    #[test]
+    fn bot_config_normalization_enforces_fixed_env_names() {
+        let mut config = BotConfig::default();
+        config.telegram.bot_token_env = Some("CUSTOM_TELEGRAM".to_string());
+        config.discord.bot_token_env = Some("CUSTOM_DISCORD".to_string());
+        config.line.channel_access_token_env = Some("CUSTOM_LINE_TOKEN".to_string());
+        config.line.channel_secret_env = Some("CUSTOM_LINE_SECRET".to_string());
+        config.webhook.bearer_token_env = Some("CUSTOM_WEBHOOK".to_string());
+
+        let normalized = normalize_bot_config_envs(config);
+
+        assert_eq!(
+            normalized.telegram.bot_token_env.as_deref(),
+            Some(TELEGRAM_BOT_TOKEN_ENV)
+        );
+        assert_eq!(
+            normalized.discord.bot_token_env.as_deref(),
+            Some(DISCORD_BOT_TOKEN_ENV)
+        );
+        assert_eq!(
+            normalized.line.channel_access_token_env.as_deref(),
+            Some(LINE_CHANNEL_ACCESS_TOKEN_ENV)
+        );
+        assert_eq!(
+            normalized.line.channel_secret_env.as_deref(),
+            Some(LINE_CHANNEL_SECRET_ENV)
+        );
+        assert_eq!(
+            normalized.webhook.bearer_token_env.as_deref(),
+            Some(WEBHOOK_BEARER_TOKEN_ENV)
+        );
     }
 
     #[test]

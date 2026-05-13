@@ -1472,12 +1472,35 @@ export interface BotStatus {
     webhook: BotPlatformStatus;
 }
 
+function withFixedBotEnv(config: BotConfig): BotConfig {
+    return {
+        ...config,
+        telegram: {
+            ...config.telegram,
+            bot_token_env: "TELEGRAM_BOT_TOKEN",
+        },
+        discord: {
+            ...config.discord,
+            bot_token_env: "DISCORD_BOT_TOKEN",
+        },
+        line: {
+            ...config.line,
+            channel_access_token_env: "LINE_CHANNEL_ACCESS_TOKEN",
+            channel_secret_env: "LINE_CHANNEL_SECRET",
+        },
+        webhook: {
+            ...config.webhook,
+            bearer_token_env: "KOKORO_WEBHOOK_TOKEN",
+        },
+    };
+}
+
 export async function getBotConfig(): Promise<BotConfig> {
     return invoke<BotConfig>("get_bot_config");
 }
 
 export async function saveBotConfig(config: BotConfig): Promise<void> {
-    return invoke("save_bot_config", { config });
+    return invoke("save_bot_config", { config: withFixedBotEnv(config) });
 }
 
 export async function startBotPlatform(platform: Exclude<BotPlatformId, "telegram">): Promise<void> {
