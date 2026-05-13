@@ -866,7 +866,7 @@ impl From<ToolCall> for ToolInvocation {
 
 fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
     let mut result = text.to_string();
-    let mut calls = Vec::new();
+    let mut calls_with_positions = Vec::new();
 
     while let Some(start) = result.rfind(TOOL_CALL_TAG_PREFIX) {
         let rest = &result[start..];
@@ -883,12 +883,12 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
                         args.insert(key, val);
                     }
                 }
-                calls.push(ToolCall { name, args });
+                calls_with_positions.push((start, ToolCall { name, args }));
             }
             let tag_end = start + end_bracket + 1;
             result = format!(
                 "{}{}",
-                result[..start].trim_end(),
+                &result[..start],
                 if tag_end < result.len() {
                     &result[tag_end..]
                 } else {
@@ -900,7 +900,6 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
         }
     }
 
-    let mut extra_calls = Vec::new();
     let mut cleaned = result.clone();
     let mut offset = 0;
     while offset < cleaned.len() {
@@ -930,11 +929,11 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
                         args.insert(key, val);
                     }
                 }
-                extra_calls.push(ToolCall { name, args });
+                calls_with_positions.push((start, ToolCall { name, args }));
                 let tag_end = start + end + 1;
                 cleaned = format!(
                     "{}{}",
-                    cleaned[..start].trim_end(),
+                    &cleaned[..start],
                     if tag_end < cleaned.len() {
                         &cleaned[tag_end..]
                     } else {
@@ -948,8 +947,11 @@ fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
             offset = start + 1;
         }
     }
-    calls.extend(extra_calls);
-    calls.reverse();
+    calls_with_positions.sort_by_key(|(start, _)| *start);
+    let calls = calls_with_positions
+        .into_iter()
+        .map(|(_, call)| call)
+        .collect();
     (cleaned.trim().to_string(), calls)
 }
 
@@ -1030,8 +1032,8 @@ fn strip_control_tags(text: &str) -> String {
                 let tag_end = start + end + 1;
                 bracket_cleaned = format!(
                     "{}{}",
-                    bracket_cleaned[..start].trim_end(),
-                    bracket_cleaned[tag_end..].trim_start()
+                    &bracket_cleaned[..start],
+                    &bracket_cleaned[tag_end..]
                 );
             } else {
                 break;
