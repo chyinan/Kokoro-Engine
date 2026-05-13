@@ -275,15 +275,27 @@ export default function PetWindow() {
         let unlisten: (() => void) | undefined;
 
         currentWindow.onResized(({ payload: size }) => {
-            setCanvasSize({ width: size.width, height: size.height });
-            if (saveTimer) clearTimeout(saveTimer);
-            saveTimer = setTimeout(() => {
-                invoke<PetConfig>("get_pet_config").then(cfg => {
-                    invoke("save_pet_config", {
-                        config: { ...cfg, window_width: size.width, window_height: size.height }
+            void currentWindow.scaleFactor().then((factor) => {
+                // Tauri resize events use physical pixels; Live2D layout must track
+                // the webview's logical/CSS size to avoid Retina clipping on macOS.
+                const logicalSize = size.toLogical(factor);
+                const nextSize = {
+                    width: Math.round(logicalSize.width),
+                    height: Math.round(logicalSize.height),
+                };
+
+                setCanvasSize(nextSize);
+                if (saveTimer) clearTimeout(saveTimer);
+                saveTimer = setTimeout(() => {
+                    invoke<PetConfig>("get_pet_config").then(cfg => {
+                        invoke("save_pet_config", {
+                            config: { ...cfg, window_width: nextSize.width, window_height: nextSize.height }
+                        }).catch(console.error);
                     }).catch(console.error);
-                }).catch(console.error);
-            }, 150);
+                }, 150);
+            }).catch((error) => {
+                console.error("[PetWindow] Failed to convert resized window size to logical pixels:", error);
+            });
         }).then(fn => { unlisten = fn; }).catch(console.error);
 
         return () => {

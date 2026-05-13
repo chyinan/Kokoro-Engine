@@ -264,7 +264,7 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
         } else {
             600
         };
-        win.set_size(tauri::PhysicalSize::new(w, h))
+        win.set_size(tauri::LogicalSize::new(w as f64, h as f64))
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
         win.show()
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
@@ -310,7 +310,6 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
         let win = tauri::WebviewWindowBuilder::new(&app, "pet", url)
             .title("Kokoro Pet")
             .inner_size(w as f64, h as f64)
-            .position(x as f64, y as f64)
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
@@ -320,6 +319,8 @@ pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
             .build()
             .map_err(|e: tauri::Error| KokoroError::Internal(e.to_string()))?;
 
+        win.set_position(tauri::PhysicalPosition::new(x, y))
+            .map_err(|e| KokoroError::Internal(e.to_string()))?;
         win.show()
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
         win.set_focus()
@@ -397,7 +398,7 @@ pub async fn resize_pet_window(
     height: u32,
 ) -> Result<(), KokoroError> {
     if let Some(win) = app.get_webview_window("pet") {
-        win.set_size(tauri::PhysicalSize::new(width, height))
+        win.set_size(tauri::LogicalSize::new(width as f64, height as f64))
             .map_err(|e| KokoroError::Internal(e.to_string()))?;
         sync_bubble_window_to_pet(&app)?;
     }
@@ -438,7 +439,6 @@ pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(
         let win = tauri::WebviewWindowBuilder::new(&app, "bubble", url)
             .title("")
             .inner_size(BUBBLE_WIDTH as f64, BUBBLE_HEIGHT as f64)
-            .position(bx as f64, by as f64)
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
@@ -448,6 +448,8 @@ pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(
             .build()
             .map_err(|e: tauri::Error| KokoroError::Internal(e.to_string()))?;
 
+        win.set_position(tauri::PhysicalPosition::new(bx, by))
+            .map_err(|e: tauri::Error| KokoroError::Internal(e.to_string()))?;
         win.set_ignore_cursor_events(false)
             .map_err(|e: tauri::Error| KokoroError::Internal(e.to_string()))?;
 
