@@ -120,7 +120,7 @@ For more Nix usage, see [docs/nix.md](docs/nix.md).
 
 ### Remote interaction
 
-- Built-in Telegram Bot service.
+- Built-in Telegram, Discord, LINE, and Webhook bot services.
 - Bridges text, voice, and image messages to the full AI pipeline.
 
 ## 🏗️ Technical architecture

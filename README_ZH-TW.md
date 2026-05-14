@@ -119,7 +119,7 @@ npm run tauri dev
 
 ### 遠端連線
 
-- 內建 Telegram Bot 服務
+- 內建 Telegram、Discord、LINE、Webhook 四種 Bot 服務
 - 文字、語音、圖片訊息完整橋接到 AI 管線流
 
 ## 🏗️ 技術架構

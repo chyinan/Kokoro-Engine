@@ -120,7 +120,7 @@ Nix 상세 내용은 [docs/nix.md](docs/nix.md)를 참고하세요.
 
 ### 원격 상호작용
 
-- Telegram Bot 서비스 내장.
+- Telegram, Discord, LINE, Webhook 네 가지 Bot 서비스 내장.
 - 텍스트, 음성, 이미지 메시지를 전체 AI 파이프라인으로 브리지.
 
 ## 🏗️ 기술 아키텍처

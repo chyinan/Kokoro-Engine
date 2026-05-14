@@ -120,7 +120,7 @@ Nix の詳細は [docs/nix.md](docs/nix.md) を参照してください。
 
 ### リモート連携
 
-- Telegram Bot サービスを内蔵。
+- Telegram、Discord、LINE、Webhook の4種類の Bot サービスを内蔵。
 - テキスト、音声、画像メッセージをフル AI パイプラインへ橋渡し。
 
 ## 🏗️ 技術アーキテクチャ
