@@ -1,5 +1,5 @@
 use crate::actions::tool_settings::ToolSettings;
-use crate::actions::{execute_tool_calls, ToolInvocation};
+use crate::actions::{builtin_tool_id, execute_tool_calls, ToolExecutionOutcome, ToolInvocation};
 use crate::ai::context::AIOrchestrator;
 use crate::ai::memory_event_ingress::{
     build_cooldown_key, select_memory_ingress_decision, should_use_structured_extraction,
@@ -7,14 +7,19 @@ use crate::ai::memory_event_ingress::{
 };
 use crate::ai::memory_extractor;
 use crate::error::KokoroError;
+use crate::imagegen::ImageGenService;
 use crate::llm::messages::{
-    assistant_text_message, is_user_message, role_text_message, system_message, user_text_message,
+    assistant_text_message, is_user_message, replace_user_message_with_images, role_text_message,
+    system_message, user_message_with_images, user_text_message,
 };
 use crate::llm::service::LlmService;
+use crate::stt::{AudioSource, SttService};
 use crate::telegram::TelegramService;
+use crate::tts::TtsService;
 use base64::Engine as _;
 use futures::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Sha256;
@@ -67,6 +72,7 @@ pub struct DiscordBotConfig {
     pub bot_token_env: Option<String>,
     pub allowed_channel_ids: Vec<String>,
     pub allow_direct_messages: bool,
+    pub send_voice_reply: bool,
     pub character_id: Option<String>,
 }
 
@@ -78,6 +84,7 @@ impl Default for DiscordBotConfig {
             bot_token_env: Some(DISCORD_BOT_TOKEN_ENV.to_string()),
             allowed_channel_ids: Vec::new(),
             allow_direct_messages: true,
+            send_voice_reply: false,
             character_id: None,
         }
     }
@@ -120,6 +127,7 @@ pub struct WebhookBotConfig {
     pub endpoint_path: String,
     pub bearer_token: Option<String>,
     pub bearer_token_env: Option<String>,
+    pub send_voice_reply: bool,
     pub character_id: Option<String>,
 }
 
@@ -132,6 +140,7 @@ impl Default for WebhookBotConfig {
             endpoint_path: "/webhook/message".to_string(),
             bearer_token: None,
             bearer_token_env: Some(WEBHOOK_BEARER_TOKEN_ENV.to_string()),
+            send_voice_reply: false,
             character_id: None,
         }
     }
@@ -524,6 +533,37 @@ struct BotReply {
     reply: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     translation: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<BotReplyImage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio: Option<BotReplyAudio>,
+    #[serde(skip)]
+    image_prompts: Vec<String>,
+    #[serde(skip)]
+    generated_image_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BotReplyImage {
+    prompt: String,
+    mime_type: String,
+    file_name: String,
+    data_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BotReplyAudio {
+    mime_type: String,
+    file_name: String,
+    data_base64: String,
+}
+
+#[derive(Debug, Clone)]
+struct GeneratedBotImage {
+    prompt: String,
+    mime_type: String,
+    file_name: String,
+    data: Vec<u8>,
 }
 
 fn reply_text_with_translation(reply: &BotReply) -> String {
@@ -542,13 +582,19 @@ async fn generate_bot_reply(
     app: &tauri::AppHandle,
     platform: &str,
     text: &str,
+    image_urls: Vec<String>,
     character_id: Option<&str>,
     conversation_key: Option<&str>,
 ) -> Result<BotReply, String> {
     let trimmed = text.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() && image_urls.is_empty() {
         return Err("Message text is empty".to_string());
     }
+    let prompt_text = if trimmed.is_empty() {
+        "The user sent an image:".to_string()
+    } else {
+        trimmed.to_string()
+    };
 
     let orchestrator = app
         .try_state::<AIOrchestrator>()
@@ -581,14 +627,19 @@ async fn generate_bot_reply(
         .to_string();
 
     orchestrator
-        .add_message("user".to_string(), trimmed.to_string(), &char_id)
+        .add_message("user".to_string(), prompt_text.clone(), &char_id)
         .await;
 
     let _ = app.emit(
         "telegram:chat-sync",
         json!({
             "role": "user",
-            "text": format!("[{}] {}", platform, trimmed),
+            "text": format!(
+                "[{}] {}{}",
+                platform,
+                prompt_text,
+                if image_urls.is_empty() { "" } else { " [image]" }
+            ),
         }),
     );
 
@@ -607,7 +658,7 @@ async fn generate_bot_reply(
     };
 
     let (prompt_messages, compose_warnings) = orchestrator
-        .compose_prompt(trimmed, false, tool_prompt, false, &char_id)
+        .compose_prompt(&prompt_text, false, tool_prompt, false, &char_id)
         .await
         .map_err(|e| e.to_string())?;
     for warning in compose_warnings {
@@ -619,8 +670,17 @@ async fn generate_bot_reply(
         .map(|m| role_text_message(&m.role, m.content))
         .collect::<Result<Vec<_>, _>>()?;
     let already_has_user = client_messages.last().map(is_user_message).unwrap_or(false);
-    if !already_has_user {
-        client_messages.push(user_text_message(trimmed.to_string()));
+    if image_urls.is_empty() {
+        if !already_has_user {
+            client_messages.push(user_text_message(prompt_text.clone()));
+        }
+    } else if already_has_user {
+        let last = client_messages
+            .last_mut()
+            .expect("last message checked above");
+        replace_user_message_with_images(last, prompt_text.clone(), image_urls)?;
+    } else {
+        client_messages.push(user_message_with_images(prompt_text.clone(), image_urls));
     }
 
     let provider = llm_service.provider().await;
@@ -630,6 +690,8 @@ async fn generate_bot_reply(
     };
     let mut all_cleaned_text = String::new();
     let mut all_translations = Vec::new();
+    let mut all_image_prompts = Vec::new();
+    let mut all_generated_images = Vec::new();
 
     for round in 0..max_rounds {
         let mut stream = provider
@@ -654,6 +716,7 @@ async fn generate_bot_reply(
 
         let (cleaned, tool_calls) = parse_tool_call_tags(&round_response);
         let (cleaned, round_translation) = extract_translate_tags(&cleaned);
+        let (cleaned, image_prompts) = extract_image_prompt_tags(&cleaned);
         let cleaned = strip_leaked_tags(&cleaned);
 
         tracing::info!(
@@ -668,6 +731,7 @@ async fn generate_bot_reply(
         if let Some(translation) = round_translation {
             all_translations.push(translation);
         }
+        all_image_prompts.extend(image_prompts);
         if !cleaned.is_empty() {
             merge_continuation_text(&mut all_cleaned_text, &cleaned);
         }
@@ -699,6 +763,8 @@ async fn generate_bot_reply(
             &tool_invocations,
         )
         .await;
+        all_generated_images
+            .extend(collect_generated_images_from_tool_outcomes(&execution_outcomes).await);
         let tool_results = execution_outcomes
             .iter()
             .map(|outcome| {
@@ -748,7 +814,7 @@ async fn generate_bot_reply(
     }
 
     let reply = compact_newlines(&strip_control_tags(&all_cleaned_text));
-    if reply.is_empty() {
+    if reply.is_empty() && all_image_prompts.is_empty() && all_generated_images.is_empty() {
         return Err("No response from AI".to_string());
     }
     let translation = if all_translations.is_empty() {
@@ -760,19 +826,21 @@ async fn generate_bot_reply(
     let metadata = translation
         .as_ref()
         .map(|value| json!({ "translation": value }).to_string());
-    orchestrator
-        .add_message_with_metadata(
-            "assistant".to_string(),
-            reply.clone(),
-            metadata,
-            &char_id,
-            None,
-        )
-        .await;
+    if !reply.is_empty() {
+        orchestrator
+            .add_message_with_metadata(
+                "assistant".to_string(),
+                reply.clone(),
+                metadata,
+                &char_id,
+                None,
+            )
+            .await;
+    }
 
     trigger_bot_memory_tasks(
         platform,
-        trimmed,
+        &prompt_text,
         &char_id,
         &conversation_key,
         &orchestrator,
@@ -780,16 +848,25 @@ async fn generate_bot_reply(
     )
     .await;
 
-    let _ = app.emit(
-        "telegram:chat-sync",
-        json!({
-            "role": "assistant",
-            "text": reply.clone(),
-            "translation": translation.clone(),
-        }),
-    );
+    if !reply.is_empty() {
+        let _ = app.emit(
+            "telegram:chat-sync",
+            json!({
+                "role": "assistant",
+                "text": reply.clone(),
+                "translation": translation.clone(),
+            }),
+        );
+    }
 
-    Ok(BotReply { reply, translation })
+    Ok(BotReply {
+        reply,
+        translation,
+        generated_image_count: all_generated_images.len(),
+        images: all_generated_images,
+        audio: None,
+        image_prompts: all_image_prompts,
+    })
 }
 
 async fn trigger_bot_memory_tasks(
@@ -1095,6 +1172,34 @@ fn extract_translate_tags(text: &str) -> (String, Option<String>) {
     (result.trim().to_string(), translation)
 }
 
+fn extract_image_prompt_tags(text: &str) -> (String, Vec<String>) {
+    let prefix = "[IMAGE_PROMPT:";
+    let mut prompts = Vec::new();
+    let mut result = text.to_string();
+
+    while let Some(start) = result.find(prefix) {
+        let Some(end_bracket) = result[start..].find(']') else {
+            break;
+        };
+        let inner = &result[start + prefix.len()..start + end_bracket];
+        let prompt = inner.trim();
+        if !prompt.is_empty() {
+            prompts.push(prompt.to_string());
+        }
+        let tag_end = start + end_bracket + 1;
+        let left = result[..start].trim_end();
+        let right = result[tag_end..].trim_start();
+        let separator = if left.is_empty() || right.is_empty() {
+            ""
+        } else {
+            " "
+        };
+        result = format!("{}{}{}", left, separator, right);
+    }
+
+    (result.trim().to_string(), prompts)
+}
+
 fn strip_leaked_tags(text: &str) -> String {
     let mut result = text.to_string();
     while let Some(start) = result.find("<tool_result>") {
@@ -1204,6 +1309,326 @@ fn compact_newlines(text: &str) -> String {
     out.trim().to_string()
 }
 
+fn image_mime_from_name(name: &str) -> &'static str {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else {
+        "image/jpeg"
+    }
+}
+
+fn audio_format_from_mime_or_name(mime_type: Option<&str>, name: Option<&str>) -> String {
+    let candidate = mime_type.or(name).unwrap_or_default().to_ascii_lowercase();
+    if candidate.contains("ogg") || candidate.contains("opus") {
+        "ogg".to_string()
+    } else if candidate.contains("mpeg") || candidate.contains("mp3") || candidate.ends_with(".mp3")
+    {
+        "mp3".to_string()
+    } else if candidate.contains("wav") || candidate.ends_with(".wav") {
+        "wav".to_string()
+    } else if candidate.contains("webm") || candidate.ends_with(".webm") {
+        "webm".to_string()
+    } else if candidate.contains("mp4")
+        || candidate.contains("m4a")
+        || candidate.ends_with(".m4a")
+        || candidate.ends_with(".mp4")
+    {
+        "m4a".to_string()
+    } else {
+        "ogg".to_string()
+    }
+}
+
+fn clean_mime_type(mime_type: &str) -> &str {
+    mime_type.split(';').next().unwrap_or(mime_type).trim()
+}
+
+fn is_image_media(mime_type: Option<&str>, name: Option<&str>) -> bool {
+    mime_type.is_some_and(|value| clean_mime_type(value).starts_with("image/"))
+        || name.is_some_and(|value| {
+            let lower = value.to_ascii_lowercase();
+            lower.ends_with(".png")
+                || lower.ends_with(".jpg")
+                || lower.ends_with(".jpeg")
+                || lower.ends_with(".webp")
+                || lower.ends_with(".gif")
+        })
+}
+
+fn is_audio_media(mime_type: Option<&str>, name: Option<&str>) -> bool {
+    mime_type.is_some_and(|value| clean_mime_type(value).starts_with("audio/"))
+        || name.is_some_and(|value| {
+            let lower = value.to_ascii_lowercase();
+            lower.ends_with(".ogg")
+                || lower.ends_with(".opus")
+                || lower.ends_with(".mp3")
+                || lower.ends_with(".wav")
+                || lower.ends_with(".webm")
+                || lower.ends_with(".m4a")
+                || lower.ends_with(".mp4")
+        })
+}
+
+fn image_data_url(data: &[u8], mime_type: &str) -> String {
+    format!(
+        "data:{};base64,{}",
+        clean_mime_type(mime_type),
+        base64::engine::general_purpose::STANDARD.encode(data)
+    )
+}
+
+fn normalize_image_reference(value: &str, fallback_mime: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("data:image/")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+    {
+        Some(trimmed.to_string())
+    } else {
+        Some(format!("data:{};base64,{}", fallback_mime, trimmed))
+    }
+}
+
+fn decode_base64_payload(value: &str) -> Result<Vec<u8>, String> {
+    let trimmed = value.trim();
+    let payload = if let Some((_, data)) = trimmed.split_once(',') {
+        data
+    } else {
+        trimmed
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|error| format!("Invalid base64 payload: {}", error))
+}
+
+fn bot_reply_image_bytes(image: &BotReplyImage) -> Result<Vec<u8>, String> {
+    decode_base64_payload(&image.data_base64)
+}
+
+fn text_with_transcription(text: String, transcription: Option<String>) -> String {
+    match transcription.filter(|value| !value.trim().is_empty()) {
+        Some(transcription) if text.trim().is_empty() => transcription,
+        Some(transcription) => format!("{}\n\nVoice message transcript: {}", text, transcription),
+        None => text,
+    }
+}
+
+async fn transcribe_bot_audio(
+    app: &tauri::AppHandle,
+    platform: &str,
+    data: Vec<u8>,
+    format: String,
+) -> Result<Option<String>, String> {
+    let Some(stt_service) = app.try_state::<SttService>() else {
+        return Err("STT service not available".to_string());
+    };
+    let audio_source = AudioSource::Encoded { data, format };
+    match stt_service.transcribe(&audio_source, None).await {
+        Ok(result) => {
+            let text = result.text.trim().to_string();
+            if text.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(text))
+            }
+        }
+        Err(error) => {
+            tracing::error!(target: "bot::stt", "[{}] STT error: {}", platform, error);
+            Err(format!("Failed to transcribe audio: {}", error))
+        }
+    }
+}
+
+async fn synthesize_bot_audio(
+    app: &tauri::AppHandle,
+    text: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(tts_service) = app.try_state::<TtsService>() else {
+        return Ok(None);
+    };
+    tts_service
+        .synthesize_text(text, None)
+        .await
+        .map(|audio| if audio.is_empty() { None } else { Some(audio) })
+        .map_err(|error| format!("TTS synthesis error: {}", error))
+}
+
+async fn generate_bot_images(
+    app: &tauri::AppHandle,
+    platform: &str,
+    prompts: &[String],
+) -> Vec<GeneratedBotImage> {
+    if prompts.is_empty() {
+        return Vec::new();
+    }
+    let Some(imagegen) = app.try_state::<ImageGenService>() else {
+        tracing::warn!(
+            target: "bot::imagegen",
+            "[{}] image generation requested but ImageGenService is not available",
+            platform
+        );
+        return Vec::new();
+    };
+
+    let mut images = Vec::new();
+    for prompt in prompts {
+        match imagegen.generate(prompt.clone(), None, None, None).await {
+            Ok(result) => match tokio::fs::read(&result.image_url).await {
+                Ok(data) => {
+                    let _ = app.emit("imagegen:done", &result);
+                    let file_name = Path::new(&result.image_url)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("image.png")
+                        .to_string();
+                    images.push(GeneratedBotImage {
+                        prompt: prompt.clone(),
+                        mime_type: image_mime_from_name(&file_name).to_string(),
+                        file_name,
+                        data,
+                    });
+                }
+                Err(error) => {
+                    tracing::error!(
+                        target: "bot::imagegen",
+                        "[{}] failed to read generated image: {}",
+                        platform,
+                        error
+                    );
+                }
+            },
+            Err(error) => {
+                tracing::error!(
+                    target: "bot::imagegen",
+                    "[{}] image generation failed: {}",
+                    platform,
+                    error
+                );
+            }
+        }
+    }
+    images
+}
+
+fn bot_reply_image_from_generated(image: GeneratedBotImage) -> BotReplyImage {
+    BotReplyImage {
+        prompt: image.prompt,
+        mime_type: image.mime_type,
+        file_name: image.file_name,
+        data_base64: base64::engine::general_purpose::STANDARD.encode(image.data),
+    }
+}
+
+async fn collect_generated_images_from_tool_outcomes(
+    outcomes: &[ToolExecutionOutcome],
+) -> Vec<BotReplyImage> {
+    let generate_image_id = builtin_tool_id("generate_image");
+    let mut images = Vec::new();
+
+    for outcome in outcomes {
+        if outcome.tool_id() != generate_image_id {
+            continue;
+        }
+        let Ok(result) = &outcome.result else {
+            continue;
+        };
+        let Some(data) = result.data.as_ref() else {
+            continue;
+        };
+        let Some(image_url) = data.get("image_url").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        match tokio::fs::read(image_url).await {
+            Ok(bytes) => {
+                let file_name = Path::new(image_url)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("image.png")
+                    .to_string();
+                images.push(BotReplyImage {
+                    prompt: data
+                        .get("prompt")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    mime_type: image_mime_from_name(&file_name).to_string(),
+                    file_name,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                });
+            }
+            Err(error) => {
+                tracing::error!(
+                    target: "bot::imagegen",
+                    "failed to read image generated by tool: {}",
+                    error
+                );
+            }
+        }
+    }
+
+    images
+}
+
+async fn attach_generated_images_to_reply(
+    app: &tauri::AppHandle,
+    platform: &str,
+    reply: &mut BotReply,
+) {
+    let images = generate_bot_images(app, platform, &reply.image_prompts).await;
+    let new_images = images
+        .into_iter()
+        .map(bot_reply_image_from_generated)
+        .collect::<Vec<_>>();
+    reply.generated_image_count += new_images.len();
+    reply.images.extend(new_images);
+}
+
+async fn attach_voice_reply_to_webhook(app: &tauri::AppHandle, reply: &mut BotReply) {
+    match synthesize_bot_audio(app, &reply.reply).await {
+        Ok(Some(data)) => {
+            reply.audio = Some(BotReplyAudio {
+                mime_type: "audio/ogg".to_string(),
+                file_name: "reply.ogg".to_string(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+            });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(target: "bot::webhook", "failed to synthesize voice reply: {}", error);
+        }
+    }
+}
+
+async fn download_url_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    bearer_token: Option<&str>,
+) -> Result<(Vec<u8>, Option<String>), String> {
+    let mut request = client.get(url);
+    if let Some(token) = bearer_token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("download returned {}", response.status()));
+    }
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let data = response.bytes().await.map_err(|error| error.to_string())?;
+    Ok((data.to_vec(), content_type))
+}
+
 fn normalize_path(path: &str) -> String {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -1288,6 +1713,12 @@ async fn handle_http_bot_request(
 struct GenericWebhookMessage {
     text: Option<String>,
     message: Option<String>,
+    image: Option<String>,
+    images: Option<Vec<String>>,
+    image_base64: Option<String>,
+    image_mime_type: Option<String>,
+    audio_base64: Option<String>,
+    audio_format: Option<String>,
     character_id: Option<String>,
     conversation_id: Option<String>,
     user_id: Option<String>,
@@ -1319,8 +1750,49 @@ async fn handle_generic_webhook(
         .unwrap_or_default()
         .trim()
         .to_string();
-    if text.is_empty() {
-        return bad_request("Missing text");
+    let image_mime_type = request.image_mime_type.as_deref().unwrap_or("image/jpeg");
+    let mut image_urls = Vec::new();
+    if let Some(image) = request.image.as_deref() {
+        if let Some(normalized) = normalize_image_reference(image, image_mime_type) {
+            image_urls.push(normalized);
+        }
+    }
+    if let Some(images) = request.images.as_ref() {
+        for image in images {
+            if let Some(normalized) = normalize_image_reference(image, image_mime_type) {
+                image_urls.push(normalized);
+            }
+        }
+    }
+    if let Some(image_base64) = request.image_base64.as_deref() {
+        if let Some(normalized) = normalize_image_reference(image_base64, image_mime_type) {
+            image_urls.push(normalized);
+        }
+    }
+
+    let mut text = if let Some(audio_base64) = request.audio_base64.as_deref() {
+        let audio = match decode_base64_payload(audio_base64) {
+            Ok(audio) => audio,
+            Err(error) => return bad_request(&error),
+        };
+        let format = request
+            .audio_format
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| audio_format_from_mime_or_name(None, None));
+        match transcribe_bot_audio(&app, "webhook", audio, format).await {
+            Ok(transcription) => text_with_transcription(text, transcription),
+            Err(error) => return server_error(&error),
+        }
+    } else {
+        text
+    };
+
+    if text.trim().is_empty() && !image_urls.is_empty() {
+        text = "The user sent an image:".to_string();
+    }
+    if text.trim().is_empty() {
+        return bad_request("Missing text or media");
     }
 
     let conversation_key = request
@@ -1332,12 +1804,19 @@ async fn handle_generic_webhook(
         &app,
         "webhook",
         &text,
+        image_urls,
         request.character_id.as_deref(),
         conversation_key,
     )
     .await
     {
-        Ok(reply) => json_response(json!(reply), StatusCode::OK),
+        Ok(mut reply) => {
+            attach_generated_images_to_reply(&app, "webhook", &mut reply).await;
+            if config.send_voice_reply {
+                attach_voice_reply_to_webhook(&app, &mut reply).await;
+            }
+            json_response(json!(reply), StatusCode::OK)
+        }
         Err(error) => server_error(&error),
     }
 }
@@ -1365,6 +1844,7 @@ struct LineSource {
 
 #[derive(Debug, Deserialize)]
 struct LineMessage {
+    id: Option<String>,
     #[serde(rename = "type")]
     message_type: String,
     text: Option<String>,
@@ -1405,12 +1885,6 @@ async fn handle_line_webhook(
         let Some(message) = event.message else {
             continue;
         };
-        if message.message_type != "text" {
-            continue;
-        }
-        let Some(text) = message.text else {
-            continue;
-        };
         let user_id = event.source.and_then(|source| source.user_id);
         if !config.allowed_user_ids.is_empty() {
             let Some(ref user_id) = user_id else {
@@ -1428,17 +1902,104 @@ async fn handle_line_webhook(
             continue;
         };
 
+        let mut image_urls = Vec::new();
+        let text = match message.message_type.as_str() {
+            "text" => message.text.unwrap_or_default(),
+            "image" => {
+                let Some(message_id) = message.id.as_deref() else {
+                    continue;
+                };
+                let url = format!(
+                    "https://api-data.line.me/v2/bot/message/{}/content",
+                    message_id
+                );
+                match download_url_bytes(&reqwest::Client::new(), &url, Some(&access_token)).await {
+                    Ok((data, content_type)) => {
+                        let mime_type = content_type.as_deref().unwrap_or("image/jpeg");
+                        image_urls.push(image_data_url(&data, mime_type));
+                        "The user sent an image:".to_string()
+                    }
+                    Err(error) => {
+                        tracing::error!(target: "bot::line", "failed to download LINE image: {}", error);
+                        continue;
+                    }
+                }
+            }
+            "audio" => {
+                let Some(message_id) = message.id.as_deref() else {
+                    continue;
+                };
+                let url = format!(
+                    "https://api-data.line.me/v2/bot/message/{}/content",
+                    message_id
+                );
+                match download_url_bytes(&reqwest::Client::new(), &url, Some(&access_token)).await {
+                    Ok((data, content_type)) => {
+                        let format = audio_format_from_mime_or_name(content_type.as_deref(), None);
+                        match transcribe_bot_audio(&app, "line", data, format).await {
+                            Ok(Some(transcription)) => transcription,
+                            Ok(None) => {
+                                let _ = send_line_reply(
+                                    &access_token,
+                                    &reply_token,
+                                    "(Could not recognize speech)",
+                                )
+                                .await;
+                                continue;
+                            }
+                            Err(error) => {
+                                tracing::error!(target: "bot::line", "failed to transcribe LINE audio: {}", error);
+                                let _ = send_line_reply(
+                                    &access_token,
+                                    &reply_token,
+                                    "Failed to transcribe audio message.",
+                                )
+                                .await;
+                                continue;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(target: "bot::line", "failed to download LINE audio: {}", error);
+                        continue;
+                    }
+                }
+            }
+            _ => continue,
+        };
+        if text.trim().is_empty() && image_urls.is_empty() {
+            continue;
+        }
+
         match generate_bot_reply(
             &app,
             "line",
             &text,
+            image_urls,
             config.character_id.as_deref(),
             user_id.as_deref(),
         )
         .await
         {
-            Ok(reply) => {
-                let reply_text = reply_text_with_translation(&reply);
+            Ok(mut reply) => {
+                let image_requested =
+                    !reply.image_prompts.is_empty() || reply.generated_image_count > 0;
+                if !reply.image_prompts.is_empty() {
+                    attach_generated_images_to_reply(&app, "line", &mut reply).await;
+                }
+                let mut reply_text = reply_text_with_translation(&reply);
+                if image_requested {
+                    let image_notice = if reply.generated_image_count == 0 {
+                        "Image generation was requested, but Kokoro Engine could not create the image. Please check the Kokoro Engine client."
+                    } else {
+                        "Image generated in Kokoro Engine. Please open the Kokoro Engine client to view it."
+                    };
+                    if reply_text.trim().is_empty() {
+                        reply_text = image_notice.to_string();
+                    } else {
+                        reply_text = format!("{}\n\n{}", reply_text, image_notice);
+                    }
+                }
                 if let Err(error) = send_line_reply(&access_token, &reply_token, &reply_text).await
                 {
                     tracing::error!(target: "bot::line", "failed to send LINE reply: {}", error);
@@ -1686,19 +2247,10 @@ async fn handle_discord_message(
         .unwrap_or_default()
         .trim()
         .to_string();
-    if content.is_empty() {
-        return;
-    }
 
     let cfg = config.read().await.discord.clone();
     let is_direct_message = message.get("guild_id").and_then(Value::as_str).is_none();
-    if is_direct_message && !cfg.allow_direct_messages {
-        return;
-    }
-    if !is_direct_message
-        && !cfg.allowed_channel_ids.is_empty()
-        && !cfg.allowed_channel_ids.iter().any(|id| id == &channel_id)
-    {
+    if !discord_message_allowed_by_scope(&cfg, &channel_id, is_direct_message) {
         return;
     }
 
@@ -1710,10 +2262,72 @@ async fn handle_discord_message(
         .map(|author| format!("{}:{}", channel_id, author))
         .unwrap_or_else(|| channel_id.clone());
 
+    let mut image_urls = Vec::new();
+    let mut audio_transcriptions = Vec::new();
+    if let Some(attachments) = message.get("attachments").and_then(Value::as_array) {
+        for attachment in attachments {
+            let url = attachment
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if url.is_empty() {
+                continue;
+            }
+            let filename = attachment.get("filename").and_then(Value::as_str);
+            let content_type = attachment.get("content_type").and_then(Value::as_str);
+            if is_image_media(content_type, filename) {
+                match download_url_bytes(client, url, None).await {
+                    Ok((data, downloaded_content_type)) => {
+                        let mime_type = downloaded_content_type
+                            .as_deref()
+                            .or(content_type)
+                            .unwrap_or_else(|| image_mime_from_name(filename.unwrap_or_default()));
+                        image_urls.push(image_data_url(&data, mime_type));
+                    }
+                    Err(error) => {
+                        tracing::error!(target: "bot::discord", "failed to download Discord image: {}", error);
+                    }
+                }
+            } else if is_audio_media(content_type, filename) {
+                match download_url_bytes(client, url, None).await {
+                    Ok((data, downloaded_content_type)) => {
+                        let format = audio_format_from_mime_or_name(
+                            downloaded_content_type.as_deref().or(content_type),
+                            filename,
+                        );
+                        match transcribe_bot_audio(app, "discord", data, format).await {
+                            Ok(Some(transcription)) => audio_transcriptions.push(transcription),
+                            Ok(None) => {}
+                            Err(error) => {
+                                tracing::error!(target: "bot::discord", "failed to transcribe Discord audio: {}", error);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(target: "bot::discord", "failed to download Discord audio: {}", error);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut content = audio_transcriptions
+        .into_iter()
+        .fold(content, |text, transcription| {
+            text_with_transcription(text, Some(transcription))
+        });
+    if content.trim().is_empty() && !image_urls.is_empty() {
+        content = "The user sent an image:".to_string();
+    }
+    if content.trim().is_empty() && image_urls.is_empty() {
+        return;
+    }
+
     match generate_bot_reply(
         app,
         "discord",
         &content,
+        image_urls,
         cfg.character_id.as_deref(),
         Some(&conversation_key),
     )
@@ -1721,15 +2335,90 @@ async fn handle_discord_message(
     {
         Ok(reply) => {
             let reply_text = reply_text_with_translation(&reply);
-            if let Err(error) = send_discord_message(client, token, &channel_id, &reply_text).await
-            {
-                tracing::error!(target: "bot::discord", "failed to send Discord message: {}", error);
+            if !reply_text.trim().is_empty() {
+                if let Err(error) =
+                    send_discord_message(client, token, &channel_id, &reply_text).await
+                {
+                    tracing::error!(target: "bot::discord", "failed to send Discord message: {}", error);
+                }
+            }
+            for image in &reply.images {
+                match bot_reply_image_bytes(image) {
+                    Ok(data) => {
+                        if let Err(error) = send_discord_file_message(
+                            client,
+                            token,
+                            &channel_id,
+                            "",
+                            &image.file_name,
+                            &image.mime_type,
+                            data,
+                        )
+                        .await
+                        {
+                            tracing::error!(target: "bot::discord", "failed to send Discord tool image: {}", error);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(target: "bot::discord", "failed to decode Discord tool image: {}", error);
+                    }
+                }
+            }
+            let generated_images = generate_bot_images(app, "discord", &reply.image_prompts).await;
+            for image in generated_images {
+                if let Err(error) = send_discord_file_message(
+                    client,
+                    token,
+                    &channel_id,
+                    "",
+                    &image.file_name,
+                    &image.mime_type,
+                    image.data,
+                )
+                .await
+                {
+                    tracing::error!(target: "bot::discord", "failed to send Discord image: {}", error);
+                }
+            }
+            if cfg.send_voice_reply {
+                match synthesize_bot_audio(app, &reply.reply).await {
+                    Ok(Some(audio)) => {
+                        if let Err(error) = send_discord_file_message(
+                            client,
+                            token,
+                            &channel_id,
+                            "",
+                            "reply.ogg",
+                            "audio/ogg",
+                            audio,
+                        )
+                        .await
+                        {
+                            tracing::error!(target: "bot::discord", "failed to send Discord voice reply: {}", error);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::error!(target: "bot::discord", "failed to synthesize Discord voice reply: {}", error);
+                    }
+                }
             }
         }
         Err(error) => {
             tracing::error!(target: "bot::discord", "failed to generate Discord reply: {}", error);
         }
     }
+}
+
+fn discord_message_allowed_by_scope(
+    cfg: &DiscordBotConfig,
+    channel_id: &str,
+    is_direct_message: bool,
+) -> bool {
+    if is_direct_message {
+        return cfg.allow_direct_messages;
+    }
+    !cfg.allowed_channel_ids.is_empty() && cfg.allowed_channel_ids.iter().any(|id| id == channel_id)
 }
 
 async fn send_discord_message(
@@ -1748,6 +2437,41 @@ async fn send_discord_message(
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("Discord API returned {}", response.status()));
+    }
+    Ok(())
+}
+
+async fn send_discord_file_message(
+    client: &reqwest::Client,
+    token: &str,
+    channel_id: &str,
+    text: &str,
+    file_name: &str,
+    mime_type: &str,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let part = reqwest::multipart::Part::bytes(data)
+        .file_name(file_name.to_string())
+        .mime_str(mime_type)
+        .map_err(|error| error.to_string())?;
+    let payload = json!({
+        "content": truncate_for_platform(text, 1900),
+    });
+    let form = reqwest::multipart::Form::new()
+        .text("payload_json", payload.to_string())
+        .part("files[0]", part);
+    let response = client
+        .post(format!(
+            "https://discord.com/api/v10/channels/{}/messages",
+            channel_id
+        ))
+        .header("Authorization", format!("Bot {}", token))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
     if !response.status().is_success() {
         return Err(format!("Discord API returned {}", response.status()));
     }
@@ -1781,6 +2505,7 @@ mod tests {
             config.discord.bot_token_env.as_deref(),
             Some("DISCORD_BOT_TOKEN")
         );
+        assert!(!config.discord.send_voice_reply);
         assert_eq!(
             config.line.channel_access_token_env.as_deref(),
             Some("LINE_CHANNEL_ACCESS_TOKEN")
@@ -1788,6 +2513,7 @@ mod tests {
         assert_eq!(config.line.webhook_path, "/line/webhook");
         assert_eq!(config.webhook.bind_host, "127.0.0.1");
         assert_eq!(config.webhook.port, 8787);
+        assert!(!config.webhook.send_voice_reply);
     }
 
     #[test]
@@ -1795,7 +2521,9 @@ mod tests {
         let config: BotConfig = serde_json::from_str(r#"{"selected_platform":"discord"}"#).unwrap();
         assert_eq!(config.selected_platform, "discord");
         assert!(config.discord.allow_direct_messages);
+        assert!(!config.discord.send_voice_reply);
         assert_eq!(config.webhook.endpoint_path, "/webhook/message");
+        assert!(!config.webhook.send_voice_reply);
     }
 
     #[test]
@@ -1911,6 +2639,41 @@ mod tests {
 
         assert_eq!(cleaned, "Hello");
         assert_eq!(translation.as_deref(), Some("こんにちは"));
+    }
+
+    #[test]
+    fn bot_extract_image_prompt_tags_strips_and_collects_prompts() {
+        let (cleaned, prompts) =
+            extract_image_prompt_tags("Here [IMAGE_PROMPT:cat cafe] and [IMAGE_PROMPT: sunset]");
+
+        assert_eq!(cleaned, "Here and");
+        assert_eq!(prompts, vec!["cat cafe", "sunset"]);
+    }
+
+    #[test]
+    fn bot_normalize_image_reference_accepts_urls_and_wraps_base64() {
+        assert_eq!(
+            normalize_image_reference("https://example.com/a.png", "image/png").as_deref(),
+            Some("https://example.com/a.png")
+        );
+        assert_eq!(
+            normalize_image_reference("abcd", "image/png").as_deref(),
+            Some("data:image/png;base64,abcd")
+        );
+    }
+
+    #[test]
+    fn bot_discord_empty_channel_allowlist_allows_dm_only() {
+        let mut config = DiscordBotConfig::default();
+        assert!(discord_message_allowed_by_scope(&config, "123", true));
+        assert!(!discord_message_allowed_by_scope(&config, "123", false));
+
+        config.allow_direct_messages = false;
+        assert!(!discord_message_allowed_by_scope(&config, "123", true));
+
+        config.allowed_channel_ids = vec!["123".to_string()];
+        assert!(discord_message_allowed_by_scope(&config, "123", false));
+        assert!(!discord_message_allowed_by_scope(&config, "999", false));
     }
 
     #[test]

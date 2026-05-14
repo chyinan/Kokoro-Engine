@@ -857,27 +857,39 @@
                 },
                 "items": {
                     "get_time": {
+                        "label": "获取时间",
                         "description": "获取当前日期和时间。"
                     },
                     "capture_screen": {
+                        "label": "捕获屏幕",
                         "description": "获取当前屏幕截图并返回简洁的视觉观察。需要先开启屏幕视觉总开关。"
                     },
                     "play_cue": {
+                        "label": "播放动作",
                         "description": "触发当前模型已配置的 Live2D cue。"
                     },
                     "set_background": {
+                        "label": "设置背景",
                         "description": "根据场景描述生成并切换新的背景。"
                     },
+                    "generate_image": {
+                        "label": "生成图片",
+                        "description": "根据用户请求生成图片，并在 Kokoro Engine 客户端中显示。"
+                    },
                     "search_memory": {
+                        "label": "搜索记忆",
                         "description": "搜索关于用户的已存记忆。"
                     },
                     "store_memory": {
+                        "label": "存储记忆",
                         "description": "为后续对话存储重要事实或细节。"
                     },
                     "forget_memory": {
+                        "label": "遗忘记忆",
                         "description": "当用户要求遗忘时，查找并删除相关记忆。"
                     },
                     "send_notification": {
+                        "label": "发送通知",
                         "description": "向用户显示桌面通知。"
                     }
                 }

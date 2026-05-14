@@ -255,6 +255,93 @@ impl ActionHandler for SetBackgroundAction {
     }
 }
 
+// ── generate_image ─────────────────────────────────────
+
+pub struct GenerateImageAction;
+
+#[async_trait]
+impl ActionHandler for GenerateImageAction {
+    fn name(&self) -> &str {
+        "generate_image"
+    }
+
+    fn description(&self) -> &str {
+        "Generate an image for the user with the configured image generation provider and show it in the Kokoro Engine client. Use this when the user asks for a picture, drawing, illustration, or generated visual. Do not use set_background unless the user specifically asks to change the background."
+    }
+
+    fn parameters(&self) -> Vec<ActionParam> {
+        vec![
+            ActionParam {
+                name: "prompt".to_string(),
+                description: "Detailed English prompt describing the image to generate".to_string(),
+                required: true,
+            },
+            ActionParam {
+                name: "provider_id".to_string(),
+                description: "Optional image generation provider id; omit to use the configured default provider".to_string(),
+                required: false,
+            },
+        ]
+    }
+
+    fn needs_feedback(&self) -> bool {
+        true
+    }
+
+    fn risk_tags(&self) -> Vec<ActionRiskTag> {
+        vec![ActionRiskTag::Write, ActionRiskTag::External]
+    }
+
+    fn permission_level(&self) -> ActionPermissionLevel {
+        ActionPermissionLevel::Elevated
+    }
+
+    async fn execute(
+        &self,
+        args: HashMap<String, String>,
+        ctx: ActionContext,
+    ) -> Result<ActionResult, ActionError> {
+        let prompt = args
+            .get("prompt")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| ActionError("Missing 'prompt' parameter".into()))?
+            .to_string();
+        let provider_id = args
+            .get("provider_id")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        let imagegen = ctx
+            .app
+            .try_state::<crate::imagegen::ImageGenService>()
+            .ok_or_else(|| ActionError("Image generation service is not available".into()))?;
+        let window_size = match ctx
+            .app
+            .try_state::<crate::commands::system::WindowSizeState>()
+        {
+            Some(state) => Some(state.get().await),
+            None => None,
+        };
+
+        let result = imagegen
+            .generate(prompt.clone(), provider_id, None, window_size)
+            .await
+            .map_err(|error| ActionError(format!("Image generation failed: {}", error)))?;
+
+        let _ = ctx.app.emit("imagegen:done", &result);
+
+        Ok(ActionResult::ok_with_data(
+            "Image generated in Kokoro Engine. If the user is chatting from an external bot platform that cannot display local images, tell them to open the Kokoro Engine client to view it.",
+            serde_json::json!({
+                "image_url": result.image_url,
+                "prompt": result.prompt,
+                "provider_id": result.provider_id,
+            }),
+        ))
+    }
+}
+
 // ── search_memory ──────────────────────────────────────
 
 pub struct SearchMemoryAction;
@@ -520,6 +607,7 @@ pub fn register_builtins(registry: &mut super::registry::ActionRegistry) {
     registry.register(GetTimeAction);
     registry.register(CaptureScreenAction);
     registry.register(PlayCueAction);
+    registry.register(GenerateImageAction);
     registry.register(SetBackgroundAction);
     registry.register(SearchMemoryAction);
     registry.register(StoreMemoryAction);

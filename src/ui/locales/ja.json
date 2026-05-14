@@ -857,27 +857,39 @@
                 },
                 "items": {
                     "get_time": {
+                        "label": "時刻を取得",
                         "description": "現在の日付と時刻を取得します。"
                     },
                     "capture_screen": {
+                        "label": "画面キャプチャ",
                         "description": "現在の画面をキャプチャし、簡潔な視覚的観察を返します。画面認識を有効にする必要があります。"
                     },
                     "play_cue": {
+                        "label": "Cue を再生",
                         "description": "現在のモデルで設定済みの Live2D cue を再生します。"
                     },
                     "set_background": {
+                        "label": "背景を設定",
                         "description": "シーン説明から新しい背景を生成して切り替えます。"
                     },
+                    "generate_image": {
+                        "label": "画像生成",
+                        "description": "ユーザー向けの画像を生成し、Kokoro Engine クライアントに表示します。"
+                    },
                     "search_memory": {
+                        "label": "記憶を検索",
                         "description": "ユーザーに関する保存済みの記憶を検索します。"
                     },
                     "store_memory": {
+                        "label": "記憶を保存",
                         "description": "今後の会話のために重要な事実や詳細を保存します。"
                     },
                     "forget_memory": {
+                        "label": "記憶を削除",
                         "description": "忘れてほしいと言われた記憶を見つけて削除します。"
                     },
                     "send_notification": {
+                        "label": "通知を送信",
                         "description": "ユーザーにデスクトップ通知を表示します。"
                     }
                 }

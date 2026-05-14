@@ -797,11 +797,21 @@ mod tests {
 
         let search_memory = reg.resolve_action("search_memory").unwrap();
         let play_cue = reg.resolve_action("play_cue").unwrap();
+        let generate_image = reg.resolve_action("generate_image").unwrap();
 
         assert_eq!(search_memory.risk_tags, vec![ActionRiskTag::Read]);
         assert_eq!(search_memory.permission_level, ActionPermissionLevel::Safe);
         assert_eq!(play_cue.risk_tags, vec![ActionRiskTag::Write]);
         assert_eq!(play_cue.permission_level, ActionPermissionLevel::Elevated);
+        assert_eq!(
+            generate_image.risk_tags,
+            vec![ActionRiskTag::Write, ActionRiskTag::External]
+        );
+        assert_eq!(
+            generate_image.permission_level,
+            ActionPermissionLevel::Elevated
+        );
+        assert!(generate_image.needs_feedback);
     }
 
     #[test]

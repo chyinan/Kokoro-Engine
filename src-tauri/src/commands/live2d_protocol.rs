@@ -168,9 +168,13 @@ fn builtin_live2d_roots(app_handle: &tauri::AppHandle) -> Vec<PathBuf> {
 }
 
 fn ensure_within_root(root: &Path, candidate: &Path) -> Result<(), String> {
-    let canonical_root = root
-        .canonicalize()
-        .map_err(|error| format!("Failed to canonicalize root '{}': {}", root.display(), error))?;
+    let canonical_root = root.canonicalize().map_err(|error| {
+        format!(
+            "Failed to canonicalize root '{}': {}",
+            root.display(),
+            error
+        )
+    })?;
     let canonical_candidate = candidate.canonicalize().map_err(|error| {
         format!(
             "Failed to canonicalize file '{}': {}",

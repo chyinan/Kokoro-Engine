@@ -857,27 +857,39 @@
                 },
                 "items": {
                     "get_time": {
+                        "label": "Get Time",
                         "description": "Get the current date and time."
                     },
                     "capture_screen": {
+                        "label": "Capture Screen",
                         "description": "Capture the current screen and return a concise visual observation. Requires Screen Vision to be enabled."
                     },
                     "play_cue": {
+                        "label": "Play Cue",
                         "description": "Trigger a configured Live2D cue on the active model."
                     },
                     "set_background": {
+                        "label": "Set Background",
                         "description": "Generate and switch to a new background from a scene description."
                     },
+                    "generate_image": {
+                        "label": "Generate Image",
+                        "description": "Generate an image for the user and show it in the Kokoro Engine client."
+                    },
                     "search_memory": {
+                        "label": "Search Memory",
                         "description": "Search stored memories about the user."
                     },
                     "store_memory": {
+                        "label": "Store Memory",
                         "description": "Store an important fact or detail for future conversations."
                     },
                     "forget_memory": {
+                        "label": "Forget Memory",
                         "description": "Find and remove a memory when the user asks you to forget something."
                     },
                     "send_notification": {
+                        "label": "Send Notification",
                         "description": "Show a desktop notification to the user."
                     }
                 }

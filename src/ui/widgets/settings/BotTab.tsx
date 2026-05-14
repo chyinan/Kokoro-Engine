@@ -715,6 +715,12 @@ function DiscordSettings({
                 onChange={allow_direct_messages => onUpdate({ allow_direct_messages })}
                 icon={MessageCircle}
             />
+            <ToggleRow
+                label={t("telegram.voice_reply")}
+                enabled={config.send_voice_reply}
+                onChange={send_voice_reply => onUpdate({ send_voice_reply })}
+                icon={Volume2}
+            />
             <StringListEditor
                 label={t("bot.discord.allowed_channels")}
                 description={t("bot.discord.allowed_channels_desc")}
@@ -893,6 +899,12 @@ function WebhookSettings({
                 placeholder={t("bot.webhook.bearer_token_placeholder")}
                 fallbackEnv="KOKORO_WEBHOOK_TOKEN"
                 onValueChange={bearer_token => onUpdate({ bearer_token })}
+            />
+            <ToggleRow
+                label={t("telegram.voice_reply")}
+                enabled={config.send_voice_reply}
+                onChange={send_voice_reply => onUpdate({ send_voice_reply })}
+                icon={Volume2}
             />
             <CharacterSelect
                 value={config.character_id}

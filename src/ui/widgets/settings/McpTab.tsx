@@ -19,6 +19,7 @@ import {
     getToolCardHeaderTitleClass,
     getToolDescriptionClass,
     getToolDisplayDescription,
+    getToolDisplayName,
     getToolEnabled,
     getToolGroupDescription,
     getToolGroupTitle,
@@ -636,6 +637,7 @@ export default function McpTab({ initialServers, visionEnabled, isActive = false
                                 const riskTagsLabel = getToolRiskTagsLabel(tool, t);
                                 const permissionLabel = getToolPermissionLevelLabel(tool, t);
                                 const displayDescription = getToolDisplayDescription(tool, t);
+                                const displayName = getToolDisplayName(tool, t);
                                 return (
                                     <div
                                         key={tool.id}
@@ -645,7 +647,7 @@ export default function McpTab({ initialServers, visionEnabled, isActive = false
                                             <div className="min-w-0">
                                                 <div className="flex items-center gap-2 flex-wrap">
                                                     <div className={getToolCardHeaderTitleClass()}>
-                                                        {tool.name}
+                                                        {displayName}
                                                     </div>
                                                     <span className={clsx(getToolBadgeClass(), getToolSourceBadgeClass(tool))}>
                                                         {sourceLabel}

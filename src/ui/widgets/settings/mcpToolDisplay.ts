@@ -20,6 +20,18 @@ export function getToolDisplayDescription(tool: ActionInfo, t: TranslateFn): str
     });
 }
 
+export function getToolDisplayName(tool: ActionInfo, t: TranslateFn): string {
+    if (tool.source === 'builtin') {
+        return t(`settings.mcp.builtin_tools.items.${tool.name}.label`, {
+            defaultValue: tool.name,
+        });
+    }
+
+    return t(`settings.mcp.mcp_tools.items.${tool.id}.label`, {
+        defaultValue: tool.name,
+    });
+}
+
 export function getToolSourceLabel(tool: ActionInfo, t: TranslateFn): string {
     if (tool.source === 'mcp') {
         const mcpLabel = t('settings.mcp.builtin_tools.source_mcp', { defaultValue: 'MCP' });

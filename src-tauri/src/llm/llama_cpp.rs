@@ -14,8 +14,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crate::llm::provider::{
-    build_openai_client, create_chat, create_chat_stream, create_chat_stream_with_tools,
-    LlmParams, LlmProvider, LlmStreamEvent, LlmToolDefinition,
+    build_openai_client, create_chat, create_chat_stream, create_chat_stream_with_tools, LlmParams,
+    LlmProvider, LlmStreamEvent, LlmToolDefinition,
 };
 
 const DEFAULT_LLAMA_CPP_BASE_URL: &str = "http://127.0.0.1:8080";

@@ -1427,6 +1427,7 @@ export interface DiscordBotConfig {
     bot_token_env?: string;
     allowed_channel_ids: string[];
     allow_direct_messages: boolean;
+    send_voice_reply: boolean;
     character_id?: string;
 }
 
@@ -1448,6 +1449,7 @@ export interface WebhookBotConfig {
     endpoint_path: string;
     bearer_token?: string;
     bearer_token_env?: string;
+    send_voice_reply: boolean;
     character_id?: string;
 }
 
