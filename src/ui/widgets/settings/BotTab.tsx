@@ -578,7 +578,7 @@ function TelegramSettings({
                 <div className="flex items-center gap-3">
                     <Send size={16} strokeWidth={1.5} className="text-[var(--color-accent)]" />
                     <div>
-                        <div className="text-sm font-heading font-semibold">{t("telegram.title")}</div>
+                        <div className="text-sm font-heading font-semibold">{t("bot.platform.telegram")}</div>
                         <div className="text-xs text-[var(--color-text-muted)]">
                             {isRunning ? t("telegram.status.running") : t("telegram.status.stopped")}
                         </div>
