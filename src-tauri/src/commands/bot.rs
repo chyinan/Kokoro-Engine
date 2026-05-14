@@ -332,13 +332,13 @@ fn telegram_config_has_user_values(config: &crate::telegram::TelegramConfig) -> 
         || config
             .bot_token
             .as_ref()
-            .map_or(false, |token| !token.is_empty())
+            .is_some_and(|token| !token.is_empty())
         || !config.allowed_chat_ids.is_empty()
         || config.send_voice_reply
         || config
             .character_id
             .as_ref()
-            .map_or(false, |character_id| !character_id.is_empty())
+            .is_some_and(|character_id| !character_id.is_empty())
 }
 
 fn remove_legacy_telegram_config(path: &Path) -> Result<(), KokoroError> {
