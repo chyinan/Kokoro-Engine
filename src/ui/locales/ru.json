@@ -279,6 +279,7 @@
         "model_path": "Путь к модели / конфигу",
         "project_path": "Путь к проекту OmniVoice",
         "python_executable": "Исполняемый файл Python",
+        "output_language": "Язык вывода",
         "generation_settings": "Параметры генерации (необязательно)",
         "speed_factor": "Скорость",
         "duration_seconds": "Длительность (сек.)",

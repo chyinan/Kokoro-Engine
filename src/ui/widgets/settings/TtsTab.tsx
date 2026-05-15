@@ -51,6 +51,15 @@ const readExtraBool = (extra: Record<string, unknown> | undefined, key: string, 
     return fallback;
 };
 
+const omnivoiceLanguageOptions = [
+    { value: "", label: "Auto" },
+    { value: "zh", label: "中文" },
+    { value: "en", label: "English" },
+    { value: "ja", label: "日本語" },
+    { value: "ko", label: "한국어" },
+    { value: "yue", label: "粵語" },
+];
+
 export interface TtsTabProps {
     ttsConfig: TtsSystemConfig | null;
     onTtsConfigChange: (config: TtsSystemConfig) => void;
@@ -668,6 +677,14 @@ export default function TtsTab({
                                                         })}
                                                         placeholder={t("settings.tts.fields.prompt_text.placeholder")}
                                                         className={clsx(inputClasses, "text-xs")}
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <label className={labelClasses}>{t("settings.tts.fields.output_language")}</label>
+                                                    <Select
+                                                        value={(provider.extra?.language as string) || ""}
+                                                        onChange={value => updateProviderExtra(index, provider, "language", value)}
+                                                        options={omnivoiceLanguageOptions}
                                                     />
                                                 </div>
                                                 <div className="space-y-3 pt-3 border-t border-[var(--color-border)]/60">

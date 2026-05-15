@@ -279,6 +279,7 @@
                 "model_path": "모델 경로 / 설정",
                 "project_path": "OmniVoice 프로젝트 경로",
                 "python_executable": "Python 실행 파일",
+                "output_language": "출력 언어",
                 "generation_settings": "생성 설정(선택)",
                 "speed_factor": "속도",
                 "duration_seconds": "지속 시간(초)",

@@ -279,6 +279,7 @@
                 "model_path": "Model Path / Config",
                 "project_path": "OmniVoice Project Path",
                 "python_executable": "Python Executable",
+                "output_language": "Output Language",
                 "generation_settings": "Generation Settings (Optional)",
                 "speed_factor": "Speed",
                 "duration_seconds": "Duration (seconds)",

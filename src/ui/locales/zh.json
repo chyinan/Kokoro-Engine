@@ -279,6 +279,7 @@
                 "model_path": "模型路径 / 配置",
                 "project_path": "OmniVoice 项目路径",
                 "python_executable": "Python 可执行文件",
+                "output_language": "输出语言",
                 "generation_settings": "生成设置（可选）",
                 "speed_factor": "速度",
                 "duration_seconds": "持续时间（秒）",
