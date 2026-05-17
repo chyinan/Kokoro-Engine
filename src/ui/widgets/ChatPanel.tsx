@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useDeferredValue, memo } from "react";
+import { useState, useRef, useEffect, useCallback, useDeferredValue, memo, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
@@ -40,7 +40,25 @@ interface PendingTurnState {
     pendingContext?: ChatMessage;
 }
 
+interface ChatPanelProps {
+    width?: number;
+    minWidth?: number;
+    onWidthPreview?: (width: number) => number;
+    onWidthChange?: (width: number) => void;
+}
+
 export type { ChatMessage as ChatPanelMessage };
+
+const DEFAULT_CHAT_PANEL_WIDTH = 350;
+const CHAT_PANEL_RESIZE_GUTTER = 160;
+const CHAT_PANEL_KEYBOARD_RESIZE_STEP = 24;
+
+const getChatPanelResizeMaxWidth = (minWidth: number) => {
+    if (typeof window === "undefined") {
+        return minWidth;
+    }
+    return Math.max(minWidth, window.innerWidth - CHAT_PANEL_RESIZE_GUTTER);
+};
 
 const stripStreamingMarkup = (text: string) =>
     text
@@ -672,7 +690,12 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
     );
 });
 
-export default function ChatPanel() {
+export default function ChatPanel({
+    width = DEFAULT_CHAT_PANEL_WIDTH,
+    minWidth = DEFAULT_CHAT_PANEL_WIDTH,
+    onWidthPreview,
+    onWidthChange,
+}: ChatPanelProps) {
     const { t } = useTranslation();
     const [collapsed, setCollapsed] = useState(false);
     const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -744,6 +767,8 @@ export default function ChatPanel() {
     const userScrolledRef = useRef(false);
     const isProgrammaticScrollRef = useRef(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const resizeCleanupRef = useRef<(() => void) | null>(null);
+    const latestResizeWidthRef = useRef(width);
     // Store last failed request for retry
     const lastFailedRequestRef = useRef<{ message: string; images?: string[]; allowImageGen?: boolean } | null>(null);
 
@@ -1649,6 +1674,88 @@ export default function ChatPanel() {
         }
     }, []);
 
+    useEffect(() => {
+        latestResizeWidthRef.current = width;
+    }, [width]);
+
+    const handleResizePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+        if (!onWidthChange || event.button !== 0) {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        resizeCleanupRef.current?.();
+
+        const startX = event.clientX;
+        const startWidth = Math.max(minWidth, width);
+        let pendingWidth = startWidth;
+        let animationFrame: number | null = null;
+        const previousCursor = document.body.style.cursor;
+        const previousUserSelect = document.body.style.userSelect;
+
+        document.body.style.cursor = "ew-resize";
+        document.body.style.userSelect = "none";
+
+        const previewWidth = (nextWidth: number) => {
+            const appliedWidth = onWidthPreview ? onWidthPreview(nextWidth) : nextWidth;
+            latestResizeWidthRef.current = appliedWidth;
+            return appliedWidth;
+        };
+
+        const flushPreview = () => {
+            animationFrame = null;
+            previewWidth(pendingWidth);
+        };
+
+        const handlePointerMove = (moveEvent: PointerEvent) => {
+            pendingWidth = startWidth + moveEvent.clientX - startX;
+            if (animationFrame === null) {
+                animationFrame = window.requestAnimationFrame(flushPreview);
+            }
+        };
+
+        const cleanup = () => {
+            if (animationFrame !== null) {
+                window.cancelAnimationFrame(animationFrame);
+                animationFrame = null;
+            }
+            const finalWidth = previewWidth(pendingWidth);
+            window.removeEventListener("pointermove", handlePointerMove);
+            window.removeEventListener("pointerup", cleanup);
+            window.removeEventListener("pointercancel", cleanup);
+            document.body.style.cursor = previousCursor;
+            document.body.style.userSelect = previousUserSelect;
+            resizeCleanupRef.current = null;
+            onWidthChange(finalWidth);
+        };
+
+        resizeCleanupRef.current = cleanup;
+        window.addEventListener("pointermove", handlePointerMove);
+        window.addEventListener("pointerup", cleanup, { once: true });
+        window.addEventListener("pointercancel", cleanup, { once: true });
+    }, [minWidth, onWidthChange, onWidthPreview, width]);
+
+    const handleResizeKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+        if (!onWidthChange || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) {
+            return;
+        }
+
+        event.preventDefault();
+        const direction = event.key === "ArrowRight" ? 1 : -1;
+        const multiplier = event.shiftKey ? 2 : 1;
+        const nextWidth = latestResizeWidthRef.current + direction * CHAT_PANEL_KEYBOARD_RESIZE_STEP * multiplier;
+        const finalWidth = onWidthPreview ? onWidthPreview(nextWidth) : nextWidth;
+        latestResizeWidthRef.current = finalWidth;
+        onWidthChange(finalWidth);
+    }, [onWidthChange, onWidthPreview]);
+
+    useEffect(() => {
+        return () => {
+            resizeCleanupRef.current?.();
+        };
+    }, []);
+
     // ── Expand handler ─────────────────────────────────────
     const handleExpand = () => {
         setCollapsed(false);
@@ -1697,6 +1804,8 @@ export default function ChatPanel() {
     // Expanded state �?full chat panel
     // ════════════════════════════════════════════════════════�?
     const hasSendableImages = visionEnabled && pendingImages.length > 0;
+    const panelResizeMaxWidth = getChatPanelResizeMaxWidth(minWidth);
+    const panelResizeValue = Math.min(Math.max(Math.round(width), minWidth), panelResizeMaxWidth);
 
     return (
         <motion.div
@@ -1710,6 +1819,27 @@ export default function ChatPanel() {
                 "relative overflow-hidden"
             )}
         >
+            {onWidthChange && (
+                <div
+                    role="separator"
+                    aria-label={t("chat.actions.resize")}
+                    aria-orientation="vertical"
+                    aria-valuemin={minWidth}
+                    aria-valuemax={panelResizeMaxWidth}
+                    aria-valuenow={panelResizeValue}
+                    tabIndex={0}
+                    onPointerDown={handleResizePointerDown}
+                    onKeyDown={handleResizeKeyDown}
+                    className={clsx(
+                        "absolute right-0 top-0 bottom-0 z-30 w-2 cursor-ew-resize touch-none",
+                        "focus-visible:outline-none",
+                        "after:absolute after:right-0 after:top-4 after:bottom-4 after:w-px",
+                        "after:bg-transparent after:transition-colors after:duration-150",
+                        "hover:after:bg-[var(--color-accent)]/80 focus-visible:after:bg-[var(--color-accent)]"
+                    )}
+                />
+            )}
+
             {/* Error toast */}
             <AnimatePresence>
                 {error && <ErrorToast message={error} onDismiss={() => setError(null)} />}

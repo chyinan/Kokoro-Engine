@@ -984,6 +984,7 @@
             "clear": "Clear conversation",
             "collapse": "Collapse chat",
             "open": "Open chat",
+            "resize": "Resize chat",
             "retry": "Retry",
             "stop": "Stop generation",
             "stopping": "Stopping..."

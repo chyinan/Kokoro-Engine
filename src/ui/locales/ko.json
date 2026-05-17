@@ -984,6 +984,7 @@
             "clear": "대화 지우기",
             "collapse": "채팅 접기",
             "open": "채팅 열기",
+            "resize": "채팅 너비 조절",
             "retry": "재시도",
             "stop": "생성 중지",
             "stopping": "중지하는 중..."

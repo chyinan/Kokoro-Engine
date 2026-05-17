@@ -26,8 +26,38 @@ import { characterDb } from "./lib/db";
 // Register components synchronously before first render
 registerCoreComponents();
 
+const CHAT_PANEL_MIN_WIDTH = 350;
+const CHAT_PANEL_RESIZE_GUTTER = 160;
+const CHAT_PANEL_WIDTH_CSS_VAR = "--kokoro-chat-panel-width";
+
+function clampChatPanelWidth(width: number): number {
+  const roundedWidth = Math.round(width);
+  if (typeof window === "undefined") {
+    return Math.max(CHAT_PANEL_MIN_WIDTH, roundedWidth);
+  }
+  const viewportMax = Math.max(CHAT_PANEL_MIN_WIDTH, window.innerWidth - CHAT_PANEL_RESIZE_GUTTER);
+  return Math.min(Math.max(CHAT_PANEL_MIN_WIDTH, roundedWidth), viewportMax);
+}
+
+function applyChatPanelWidth(width: number): number {
+  const nextWidth = clampChatPanelWidth(width);
+  if (typeof document !== "undefined") {
+    document.documentElement.style.setProperty(CHAT_PANEL_WIDTH_CSS_VAR, `${nextWidth}px`);
+  }
+  return nextWidth;
+}
+
 // Build layout config as a function of displayMode
-function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; modelPath: string | null; gazeTracking: boolean; renderFps: number }): LayoutConfig {
+function createLayout(options: {
+  mode: Live2DDisplayMode;
+  modelUrl: string;
+  modelPath: string | null;
+  gazeTracking: boolean;
+  renderFps: number;
+  chatPanelWidth: number;
+  onChatPanelWidthPreview: (width: number) => number;
+  onChatPanelWidthChange: (width: number) => void;
+}): LayoutConfig {
   return {
     root: {
       id: "root-layer",
@@ -39,11 +69,11 @@ function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; 
           component: "Live2DStage",
           zIndex: 0,
           props: {
-            modelUrl: displayMode.modelUrl,
-            modelPath: displayMode.modelPath,
-            displayMode: displayMode.mode,
-            gazeTracking: displayMode.gazeTracking,
-            maxFps: displayMode.renderFps,
+            modelUrl: options.modelUrl,
+            modelPath: options.modelPath,
+            displayMode: options.mode,
+            gazeTracking: options.gazeTracking,
+            maxFps: options.renderFps,
           }
         },
         {
@@ -51,7 +81,7 @@ function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; 
           type: "grid",
           zIndex: 10,
           style: {
-            gridTemplateColumns: "350px 1fr",
+            gridTemplateColumns: `var(${CHAT_PANEL_WIDTH_CSS_VAR}, ${CHAT_PANEL_MIN_WIDTH}px) minmax(0, 1fr)`,
             gridTemplateRows: "1fr",
             gridTemplateAreas: `
                         "highlight main"
@@ -66,6 +96,12 @@ function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; 
               type: "component",
               component: "ChatPanel",
               area: "highlight",
+              props: {
+                minWidth: CHAT_PANEL_MIN_WIDTH,
+                width: options.chatPanelWidth,
+                onWidthPreview: options.onChatPanelWidthPreview,
+                onWidthChange: options.onChatPanelWidthChange,
+              },
               style: { pointerEvents: "auto", margin: "20px 0 20px 20px", padding: "0" },
               motion: "panelEntry"
             }
@@ -320,12 +356,30 @@ function App() {
     () => localStorage.getItem("kokoro_gaze_tracking") !== "false"
   );
   const [renderFps, setRenderFps] = useState<number>(60);
+  const [chatPanelWidth, setChatPanelWidth] = useState(CHAT_PANEL_MIN_WIDTH);
   const activeLive2dModelPath = customModelPath ?? BUILTIN_LIVE2D_MODEL_PATH;
+
+  const handleChatPanelWidthPreview = useCallback((width: number) => {
+    return applyChatPanelWidth(width);
+  }, []);
+
+  const handleChatPanelWidthChange = useCallback((width: number) => {
+    setChatPanelWidth(applyChatPanelWidth(width));
+  }, []);
 
   const handleGazeTrackingChange = (enabled: boolean) => {
     setGazeTracking(enabled);
     localStorage.setItem("kokoro_gaze_tracking", enabled ? "true" : "false");
   };
+
+  useEffect(() => {
+    applyChatPanelWidth(chatPanelWidth);
+    const handleResize = () => {
+      setChatPanelWidth(prev => applyChatPanelWidth(prev));
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [chatPanelWidth]);
 
   // ── Global Settings State ──
   const [availableModels, setAvailableModels] = useState<Live2dModelInfo[]>([]);
@@ -402,8 +456,17 @@ function App() {
   }, [activeLive2dModelPath, customModelPath, modelUrl]);
 
   const layout = useMemo(
-    () => createLayout({ mode: displayMode, modelUrl, modelPath: activeLive2dModelPath, gazeTracking, renderFps }),
-    [displayMode, modelUrl, activeLive2dModelPath, gazeTracking, renderFps]
+    () => createLayout({
+      mode: displayMode,
+      modelUrl,
+      modelPath: activeLive2dModelPath,
+      gazeTracking,
+      renderFps,
+      chatPanelWidth,
+      onChatPanelWidthPreview: handleChatPanelWidthPreview,
+      onChatPanelWidthChange: handleChatPanelWidthChange,
+    }),
+    [displayMode, modelUrl, activeLive2dModelPath, gazeTracking, renderFps, chatPanelWidth, handleChatPanelWidthPreview, handleChatPanelWidthChange]
   );
 
   const handleDisplayModeChange = (mode: Live2DDisplayMode) => {
