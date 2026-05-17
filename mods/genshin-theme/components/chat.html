@@ -644,6 +644,7 @@
             let charTitle = 'AI 助理';
             let activeConvId = null;  // Currently loaded conversation ID
             let allConvs = [];        // Cached conversation list
+            let hostCharacterId = null;
 
             // ── DOM Elements ──
             const root = document.getElementById('root');
@@ -688,6 +689,37 @@
             }
 
             // ── Render Functions ──
+
+            async function getActiveCharacterId() {
+                if (hostCharacterId) return hostCharacterId;
+
+                try {
+                    const characterState = await Kokoro.invoke('get_character_state');
+                    if (characterState && characterState.name) {
+                        hostCharacterId = characterState.name;
+                        return hostCharacterId;
+                    }
+                } catch (e) {
+                    Kokoro.log('Failed to get active character from host: ' + e);
+                }
+
+                return localStorage.getItem('kokoro_active_character_id') || 'default';
+            }
+
+            function getLoadedMessages(loaded) {
+                if (Array.isArray(loaded)) return loaded;
+                if (loaded && Array.isArray(loaded.messages)) return loaded.messages;
+                return [];
+            }
+
+            function mapConversationMessages(loaded) {
+                return getLoadedMessages(loaded)
+                    .filter(m => m && (m.role === 'user' || m.role === 'assistant' || m.role === 'kokoro'))
+                    .map(m => ({
+                        role: m.role === 'user' ? 'user' : 'assistant',
+                        content: m.role === 'user' ? m.content : stripControlTags(m.content),
+                    }));
+            }
 
             function showDialogue(text, showCursor = false) {
                 charNameRow.style.display = 'flex';
@@ -763,7 +795,7 @@
             }
 
             async function renderConvList() {
-                const characterId = localStorage.getItem('kokoro_active_character_id') || 'default';
+                const characterId = await getActiveCharacterId();
                 try {
                     allConvs = await Kokoro.invoke('list_conversations', { request: { character_id: characterId } }) || [];
                 } catch(e) {
@@ -814,12 +846,9 @@
                     item.appendChild(delBtn);
                     item.addEventListener('click', async () => {
                         try {
-                            const msgs = await Kokoro.invoke('load_conversation', { request: { id: conv.id } });
+                            const loaded = await Kokoro.invoke('load_conversation', { request: { id: conv.id } });
                             activeConvId = conv.id;
-                            const mapped = (msgs || []).map(m => ({
-                                role: m.role === 'user' ? 'user' : 'assistant',
-                                content: m.role === 'user' ? m.content : stripControlTags(m.content),
-                            }));
+                            const mapped = mapConversationMessages(loaded);
                             messages = mapped;
                             const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
                             if (lastAssistant) showDialogue(lastAssistant.content, false);
@@ -975,20 +1004,21 @@
                     charTitle = props.characterTitle;
                     charTitleEl.textContent = charTitle;
                 }
+                if (props && props.activeCharacterId) {
+                    hostCharacterId = props.activeCharacterId;
+                }
             });
 
             // ── Load conversation history on init ──
             try {
-                const characterId = localStorage.getItem('kokoro_active_character_id') || 'default';
+                const characterId = await getActiveCharacterId();
                 const convs = await Kokoro.invoke('list_conversations', { request: { character_id: characterId } });
                 if (convs && convs.length > 0) {
-                    const msgs = await Kokoro.invoke('load_conversation', { request: { id: convs[0].id } });
+                    const loaded = await Kokoro.invoke('load_conversation', { request: { id: convs[0].id } });
                     activeConvId = convs[0].id;
-                    if (msgs && msgs.length > 0) {
-                        messages = msgs.map(m => ({
-                            role: m.role === 'user' ? 'user' : 'assistant',
-                            content: m.role === 'user' ? m.content : stripControlTags(m.content),
-                        }));
+                    const mapped = mapConversationMessages(loaded);
+                    if (mapped.length > 0) {
+                        messages = mapped;
                         // Show last assistant message
                         const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
                         if (lastAssistant) {

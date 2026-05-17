@@ -489,9 +489,11 @@
                 <div class="sidebar-tab" data-tab="imagegen" data-title="绘图">绘图</div>
                 <div class="sidebar-tab" data-tab="mods" data-title="模组">模组</div>
                 <div class="sidebar-tab" data-tab="mcp" data-title="MCP 服务">MCP 服务</div>
-                <div class="sidebar-tab" data-tab="telegram" data-title="Telegram">Telegram</div>
+                <div class="sidebar-tab" data-tab="bot" data-title="Bot">Bot</div>
                 <div class="sidebar-tab" data-tab="jailbreak" data-title="破限提示词">破限提示词</div>
+                <div class="sidebar-tab" data-tab="pet" data-title="Pet 小窗">Pet 小窗</div>
                 <div class="sidebar-tab" data-tab="backup" data-title="备份与恢复">备份与恢复</div>
+                <div class="sidebar-tab" data-tab="about" data-title="关于">关于</div>
             </div>
         </div>
 
@@ -559,9 +561,12 @@
                     case 'imagegen': renderImageGen(); break;
                     case 'mods': renderMods(); break;
                     case 'mcp': renderMCP(); break;
-                    case 'telegram': renderTelegram(); break;
+                    case 'bot': renderBot(); break;
+                    case 'telegram': renderBot(); break;
                     case 'jailbreak': renderJailbreak(); break;
+                    case 'pet': renderPet(); break;
                     case 'backup': renderBackup(); break;
+                    case 'about': renderAbout(); break;
                 }
             }
 
@@ -608,6 +613,11 @@
 
                 // Image Grid
                 const imgSec = createSection("图片管理 (" + images.length + ")");
+                if (config.mode === 'generated') {
+                    imgSec.appendChild(createRow("", "AI 生成模式会使用聊天中生成/选择的背景，图库导入在轮播或静态模式下可用。"));
+                    body.appendChild(imgSec);
+                    return;
+                }
                 const grid = document.createElement('div');
                 grid.className = 'img-grid';
 
@@ -652,11 +662,56 @@
                 importBtn.onclick = () => Kokoro.action('import_bg_images');
                 actionsRow.appendChild(importBtn);
 
+                const importFolderBtn = document.createElement('button');
+                importFolderBtn.className = 'gi-btn';
+                importFolderBtn.innerText = '+ 导入文件夹';
+                importFolderBtn.onclick = () => Kokoro.action('import_bg_folder');
+                actionsRow.appendChild(importFolderBtn);
+
                 imgSec.appendChild(actionsRow);
                 body.appendChild(imgSec);
             }
 
             // ── 2. Model Tab ────────────────
+            let _modelProfile = null;
+            let _modelProfilePath = null;
+            let _modelProfileLoading = false;
+            let _modelCueName = '';
+            let _modelCueExpression = '';
+            let _modelCueMotion = '';
+            let _modelInteractionGesture = 'tap';
+            let _modelInteractionArea = 'face';
+            let _modelInteractionCue = '';
+            const _builtinModelPath = '__builtin__/hiyori/hiyori_pro_t11.model3.json';
+
+            function loadModelProfile(modelPath) {
+                if (!modelPath || _modelProfileLoading) return;
+                if (_modelProfile && _modelProfilePath === modelPath) return;
+                _modelProfileLoading = true;
+                _modelProfilePath = modelPath;
+                Kokoro.invoke('get_live2d_model_profile', { modelPath }).then(profile => {
+                    _modelProfile = profile || null;
+                    _modelProfileLoading = false;
+                    if (activeTab === 'model') render();
+                }).catch(e => {
+                    console.error('Failed to load Live2D profile', e);
+                    _modelProfile = null;
+                    _modelProfileLoading = false;
+                });
+            }
+
+            function saveModelProfile(profile) {
+                _modelProfile = profile;
+                Kokoro.invoke('save_live2d_model_profile', { profile }).then(saved => {
+                    _modelProfile = saved || profile;
+                    if (activeTab === 'model') render();
+                }).catch(e => console.error('Failed to save Live2D profile', e));
+            }
+
+            function interactionKey(gesture, area) {
+                return `interaction:${String(gesture || 'tap').toLowerCase()}_${String(area || 'face').toLowerCase()}`;
+            }
+
             function renderModel() {
                 // Display Mode selector
                 const dispSec = createSection("显示模式");
@@ -668,10 +723,42 @@
                 dispSec.appendChild(createSelect("显示模式", "控制 Live2D 模型显示范围", displayModes, state.displayMode || 'full', (v) => {
                     Kokoro.action('set_display_mode', { mode: v });
                 }));
+                dispSec.appendChild(createToggle("视线跟随", "模型眼睛跟随鼠标/焦点移动", state.gazeTracking !== false, (v) => {
+                    state.gazeTracking = v;
+                    Kokoro.action('set_gaze_tracking', { enabled: v });
+                }));
+                const fpsPreset = [0, 30, 60].includes(Number(state.renderFps)) ? String(state.renderFps) : 'custom';
+                dispSec.appendChild(createSelect("渲染帧率", "限制 Live2D 渲染 FPS，0 表示不限制", [
+                    { value: '30', label: '30 FPS' },
+                    { value: '60', label: '60 FPS' },
+                    { value: '0', label: '不限制' },
+                    { value: 'custom', label: '自定义' }
+                ], fpsPreset, (v) => {
+                    if (v !== 'custom') {
+                        state.renderFps = parseInt(v);
+                        Kokoro.action('set_render_fps', { fps: state.renderFps });
+                        render();
+                    }
+                }));
+                if (fpsPreset === 'custom') {
+                    dispSec.appendChild(createRow("自定义 FPS", `
+                        <input class="gi-input" type="number" min="1" max="240" value="${Number(state.renderFps) || 45}" id="model_custom_fps">
+                    `));
+                    setTimeout(() => {
+                        const el = document.getElementById('model_custom_fps');
+                        if (el) el.onchange = function () {
+                            const fps = Math.max(1, Math.min(240, parseInt(this.value) || 45));
+                            state.renderFps = fps;
+                            Kokoro.action('set_render_fps', { fps });
+                        };
+                    }, 0);
+                }
                 body.appendChild(dispSec);
 
                 // Current model
                 const modelSec = createSection("模型选择");
+                const effectiveModelPath = state.customModelPath || _builtinModelPath;
+                loadModelProfile(effectiveModelPath);
                 modelSec.appendChild(createRow("当前模型",
                     `<div class="gi-input" style="width:100%;text-overflow:ellipsis;overflow:hidden;white-space:nowrap">${escapeHtml(state.customModelPath || '默认模型')}</div>`
                 ));
@@ -711,6 +798,35 @@
                         item.appendChild(infoDiv);
 
                         // Delete button
+                        const renameBtn = document.createElement('button');
+                        renameBtn.className = 'gi-btn';
+                        renameBtn.style.padding = '4px 10px';
+                        renameBtn.style.fontSize = '10px';
+                        renameBtn.style.marginLeft = '8px';
+                        renameBtn.style.flexShrink = '0';
+                        renameBtn.textContent = '重命名';
+                        renameBtn.onclick = (e) => {
+                            e.stopPropagation();
+                            const nextName = prompt('输入新的模型名称', m.name);
+                            if (nextName && nextName.trim() && nextName.trim() !== m.name) {
+                                Kokoro.action('rename_live2d_model', { path: m.path, newName: nextName.trim() });
+                            }
+                        };
+                        item.appendChild(renameBtn);
+
+                        const exportBtn = document.createElement('button');
+                        exportBtn.className = 'gi-btn';
+                        exportBtn.style.padding = '4px 10px';
+                        exportBtn.style.fontSize = '10px';
+                        exportBtn.style.marginLeft = '8px';
+                        exportBtn.style.flexShrink = '0';
+                        exportBtn.textContent = '导出';
+                        exportBtn.onclick = (e) => {
+                            e.stopPropagation();
+                            Kokoro.action('export_live2d_model', { path: m.path });
+                        };
+                        item.appendChild(exportBtn);
+
                         const delBtn = document.createElement('button');
                         delBtn.className = 'gi-btn danger';
                         delBtn.style.padding = '4px 10px';
@@ -721,7 +837,7 @@
                         delBtn.onclick = (e) => {
                             e.stopPropagation();
                             if (confirm(`确定删除模型 "${m.name}" 吗？`)) {
-                                Kokoro.action('delete_live2d_model', { name: m.name });
+                                Kokoro.action('delete_live2d_model', { modelName: m.name });
                             }
                         };
                         item.appendChild(delBtn);
@@ -745,10 +861,160 @@
                 const hint = document.createElement('div');
                 hint.className = 'setting-desc';
                 hint.style.marginTop = '8px';
-                hint.textContent = '支持 .zip 包或 .model3.json 文件';
+                hint.textContent = '支持 .zip 包或 .model3.json 文件；选择 .model3.json 时会按原生设置复制整个模型文件夹。';
                 modelSec.appendChild(hint);
 
                 body.appendChild(modelSec);
+
+                const profileSec = createSection("动作与表情映射");
+                if (_modelProfileLoading) {
+                    profileSec.appendChild(createRow("", "正在读取模型动作与表情..."));
+                } else if (!_modelProfile || _modelProfilePath !== effectiveModelPath) {
+                    profileSec.appendChild(createRow("", "请选择模型后刷新映射"));
+                } else {
+                    const expressions = _modelProfile.available_expressions || [];
+                    const motions = Object.keys(_modelProfile.available_motion_groups || {});
+                    profileSec.appendChild(createRow("新增 Cue", `
+                        <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:6px;width:100%">
+                            <input class="gi-input" id="model_cue_name" value="${escapeHtml(_modelCueName)}" placeholder="cue 名称">
+                            <select class="gi-select" id="model_cue_expr">
+                                <option value="">无表情</option>
+                                ${expressions.map(e => `<option value="${escapeHtml(e)}" ${_modelCueExpression === e ? 'selected' : ''}>${escapeHtml(e)}</option>`).join('')}
+                            </select>
+                            <select class="gi-select" id="model_cue_motion">
+                                <option value="">无动作组</option>
+                                ${motions.map(m => `<option value="${escapeHtml(m)}" ${_modelCueMotion === m ? 'selected' : ''}>${escapeHtml(m)} (${_modelProfile.available_motion_groups[m]})</option>`).join('')}
+                            </select>
+                            <button class="gi-btn primary" id="model_cue_save">保存</button>
+                        </div>
+                    `));
+                    setTimeout(() => {
+                        const nameEl = document.getElementById('model_cue_name');
+                        const exprEl = document.getElementById('model_cue_expr');
+                        const motionEl = document.getElementById('model_cue_motion');
+                        if (nameEl) nameEl.oninput = function () { _modelCueName = this.value; };
+                        if (exprEl) exprEl.onchange = function () { _modelCueExpression = this.value; };
+                        if (motionEl) motionEl.onchange = function () { _modelCueMotion = this.value; };
+                        const saveBtn = document.getElementById('model_cue_save');
+                        if (saveBtn) saveBtn.onclick = () => {
+                            const cue = _modelCueName.trim();
+                            if (!cue || (!_modelCueExpression && !_modelCueMotion)) return;
+                            saveModelProfile({
+                                ..._modelProfile,
+                                cue_map: {
+                                    ...(_modelProfile.cue_map || {}),
+                                    [cue]: {
+                                        expression: _modelCueExpression || null,
+                                        motion_group: _modelCueMotion || null,
+                                        exclude_from_prompt: false
+                                    }
+                                }
+                            });
+                            _modelCueName = '';
+                            _modelCueExpression = '';
+                            _modelCueMotion = '';
+                        };
+                    }, 0);
+
+                    const cueEntries = Object.entries(_modelProfile.cue_map || {});
+                    if (cueEntries.length === 0) {
+                        profileSec.appendChild(createRow("", "暂无自定义 cue 映射"));
+                    } else {
+                        cueEntries.forEach(([cue, binding]) => {
+                            const row = document.createElement('div');
+                            row.className = 'list-item';
+                            row.innerHTML = `
+                                <div class="list-item-header">
+                                    <span>${escapeHtml(cue)}</span>
+                                    <span style="font-size:10px;opacity:.65">${binding.exclude_from_prompt ? '不写入提示词' : '提示词可见'}</span>
+                                </div>
+                                <div class="list-item-desc">表情: ${escapeHtml(binding.expression || '无')} · 动作组: ${escapeHtml(binding.motion_group || '无')}</div>
+                            `;
+                            const actions = document.createElement('div');
+                            actions.style.cssText = 'display:flex;gap:6px;margin-top:8px;justify-content:flex-end';
+                            const preview = document.createElement('button');
+                            preview.className = 'gi-btn';
+                            preview.textContent = '预览';
+                            preview.onclick = () => Kokoro.invoke('play_cue', { cue });
+                            actions.appendChild(preview);
+                            const promptToggle = document.createElement('button');
+                            promptToggle.className = 'gi-btn';
+                            promptToggle.textContent = binding.exclude_from_prompt ? '加入提示词' : '从提示词隐藏';
+                            promptToggle.onclick = () => {
+                                const next = { ...(_modelProfile.cue_map || {}) };
+                                next[cue] = { ...binding, exclude_from_prompt: !binding.exclude_from_prompt };
+                                saveModelProfile({ ..._modelProfile, cue_map: next });
+                            };
+                            actions.appendChild(promptToggle);
+                            const del = document.createElement('button');
+                            del.className = 'gi-btn danger';
+                            del.textContent = '删除';
+                            del.onclick = () => {
+                                const next = { ...(_modelProfile.cue_map || {}) };
+                                delete next[cue];
+                                saveModelProfile({ ..._modelProfile, cue_map: next });
+                            };
+                            actions.appendChild(del);
+                            row.appendChild(actions);
+                            profileSec.appendChild(row);
+                        });
+                    }
+
+                    const areaOptions = Array.from(new Set(['eyes', 'lips', 'face', 'head', 'hair', 'hand', 'arm', 'chest', 'body', 'leg', 'skirt', 'accessory', '*'].concat((_modelProfile.available_hit_areas || []).map(a => String(a).toLowerCase()))));
+                    profileSec.appendChild(createRow("交互映射", `
+                        <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:6px;width:100%">
+                            <select class="gi-select" id="model_inter_gesture">
+                                ${['tap', 'long_press', 'rapid_tap', '*'].map(g => `<option value="${g}" ${_modelInteractionGesture === g ? 'selected' : ''}>${g}</option>`).join('')}
+                            </select>
+                            <select class="gi-select" id="model_inter_area">
+                                ${areaOptions.map(a => `<option value="${escapeHtml(a)}" ${_modelInteractionArea === a ? 'selected' : ''}>${escapeHtml(a)}</option>`).join('')}
+                            </select>
+                            <select class="gi-select" id="model_inter_cue">
+                                <option value="">选择 cue</option>
+                                ${cueEntries.map(([cue]) => `<option value="${escapeHtml(cue)}" ${_modelInteractionCue === cue ? 'selected' : ''}>${escapeHtml(cue)}</option>`).join('')}
+                            </select>
+                            <button class="gi-btn primary" id="model_inter_save">保存</button>
+                        </div>
+                    `));
+                    setTimeout(() => {
+                        const gesture = document.getElementById('model_inter_gesture');
+                        const area = document.getElementById('model_inter_area');
+                        const cue = document.getElementById('model_inter_cue');
+                        if (gesture) gesture.onchange = function () { _modelInteractionGesture = this.value; };
+                        if (area) area.onchange = function () { _modelInteractionArea = this.value; };
+                        if (cue) cue.onchange = function () { _modelInteractionCue = this.value; };
+                        const save = document.getElementById('model_inter_save');
+                        if (save) save.onclick = () => {
+                            if (!_modelInteractionCue) return;
+                            saveModelProfile({
+                                ..._modelProfile,
+                                semantic_cue_map: {
+                                    ...(_modelProfile.semantic_cue_map || {}),
+                                    [interactionKey(_modelInteractionGesture, _modelInteractionArea)]: _modelInteractionCue
+                                }
+                            });
+                            _modelInteractionCue = '';
+                        };
+                    }, 0);
+
+                    Object.entries(_modelProfile.semantic_cue_map || {}).filter(([key]) => key.startsWith('interaction:')).forEach(([key, cue]) => {
+                        const row = document.createElement('div');
+                        row.className = 'list-item';
+                        row.innerHTML = `<div class="list-item-header"><span>${escapeHtml(key)}</span><span>${escapeHtml(cue)}</span></div>`;
+                        const del = document.createElement('button');
+                        del.className = 'gi-btn danger';
+                        del.style.marginTop = '6px';
+                        del.textContent = '删除';
+                        del.onclick = () => {
+                            const next = { ...(_modelProfile.semantic_cue_map || {}) };
+                            delete next[key];
+                            saveModelProfile({ ..._modelProfile, semantic_cue_map: next });
+                        };
+                        row.appendChild(del);
+                        profileSec.appendChild(row);
+                    });
+                }
+                body.appendChild(profileSec);
             }
 
             // ── 3. Persona Tab ────────────────
@@ -851,12 +1117,66 @@
             }
 
             // ── 4. API Tab ────────────────
+            let _llmContextSettings = null;
+            let _llmContextLoading = false;
+            let _llmConnectionStatus = '';
+
+            function llmDefaultBaseUrl(type) {
+                if (type === 'anthropic') return 'https://api.anthropic.com/v1';
+                if (type === 'ollama') return 'http://localhost:11434';
+                if (type === 'llama_cpp') return 'http://127.0.0.1:8080';
+                return 'https://api.openai.com/v1';
+            }
+
+            function llmDefaultModel(type) {
+                if (type === 'anthropic') return 'claude-sonnet-4-20250514';
+                if (type === 'ollama') return 'llama3';
+                if (type === 'llama_cpp') return '';
+                return 'gpt-4';
+            }
+
+            function normalizeLlmProviderType(provider, type) {
+                const prevType = provider.provider_type || 'openai';
+                const next = { ...provider, provider_type: type, supports_native_tools: provider.supports_native_tools !== false };
+                if (!next.base_url || next.base_url === llmDefaultBaseUrl(prevType)) next.base_url = llmDefaultBaseUrl(type);
+                if (!next.model || next.model === llmDefaultModel(prevType)) next.model = llmDefaultModel(type);
+                if (type === 'openai') next.api_key_env = next.api_key_env || 'OPENAI_API_KEY';
+                if (type === 'anthropic') next.api_key_env = next.api_key_env || 'ANTHROPIC_API_KEY';
+                if (type === 'ollama' || type === 'llama_cpp') {
+                    delete next.api_key;
+                    delete next.api_key_env;
+                }
+                return next;
+            }
+
+            function loadLlmContextSettings() {
+                if (_llmContextSettings || _llmContextLoading) return;
+                _llmContextLoading = true;
+                Kokoro.invoke('get_context_settings').then(settings => {
+                    _llmContextSettings = settings || { strategy: 'window', max_message_chars: 2000 };
+                    _llmContextLoading = false;
+                    if (activeTab === 'api') render();
+                }).catch(e => {
+                    console.error('Failed to load context settings', e);
+                    _llmContextLoading = false;
+                });
+            }
+
+            function saveLlmContextSettings(settings) {
+                _llmContextSettings = settings;
+                Kokoro.invoke('set_context_settings', { settings }).catch(e => console.error('Failed to save context settings', e));
+            }
+
             function renderLLM() {
                 const config = state.llmConfig || {};
                 const providers = config.providers || [];
                 const activeId = config.active_provider || '';
                 const activeProv = providers.find(p => p.id === activeId) || providers[0] || {};
                 const isOllama = activeProv.provider_type === 'ollama';
+                const isLlamaCpp = activeProv.provider_type === 'llama_cpp';
+                const isAnthropic = activeProv.provider_type === 'anthropic';
+                const isCloud = activeProv.provider_type === 'openai' || isAnthropic;
+                loadLlmContextSettings();
 
                 // Provider selector buttons
                 const provSec = createSection("LLM 服务商");
@@ -869,21 +1189,92 @@
                         const btn = document.createElement('button');
                         btn.className = 'gi-btn' + (p.id === activeId ? ' primary' : '');
                         btn.style.flex = '1';
-                        btn.innerHTML = `<div>${p.id}</div><div style="font-size:10px;opacity:0.6">${p.provider_type === 'ollama' ? 'Local' : 'Cloud'}</div>`;
+                        btn.innerHTML = `<div>${p.id}</div><div style="font-size:10px;opacity:0.6">${escapeHtml(p.provider_type || 'openai')} · ${p.enabled === false ? '禁用' : '启用'}</div>`;
                         btn.onclick = () => {
                             config.active_provider = p.id;
+                            p.enabled = true;
                             Kokoro.action('save_llm_config', { config });
                         };
                         btnRow.appendChild(btn);
                     });
                     provSec.appendChild(btnRow);
                 }
+                const presetOpts = [{ value: '', label: '当前配置' }].concat((config.presets || []).map(p => ({ value: p.id, label: p.name || p.id })));
+                if ((config.presets || []).length > 0) {
+                    provSec.appendChild(createSelect("配置预设", "保存或切换多套 LLM 配置", presetOpts, '', (v) => {
+                        const preset = (config.presets || []).find(p => p.id === v);
+                        if (!preset) return;
+                        config.active_provider = preset.active_provider;
+                        config.system_provider = preset.system_provider;
+                        config.system_model = preset.system_model;
+                        config.providers = preset.providers;
+                        Kokoro.action('save_llm_config', { config });
+                        render();
+                    }));
+                }
+                const presetRow = document.createElement('div');
+                presetRow.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-top:8px';
+                const savePresetBtn = document.createElement('button');
+                savePresetBtn.className = 'gi-btn';
+                savePresetBtn.textContent = '保存为预设';
+                savePresetBtn.onclick = () => {
+                    const name = prompt('预设名称');
+                    if (!name) return;
+                    const preset = {
+                        id: crypto.randomUUID(),
+                        name,
+                        active_provider: config.active_provider,
+                        system_provider: config.system_provider,
+                        system_model: config.system_model,
+                        providers: JSON.parse(JSON.stringify(config.providers || []))
+                    };
+                    config.presets = [...(config.presets || []), preset];
+                    Kokoro.action('save_llm_config', { config });
+                    render();
+                };
+                presetRow.appendChild(savePresetBtn);
+                ['openai', 'anthropic', 'ollama', 'llama_cpp'].forEach(type => {
+                    const btn = document.createElement('button');
+                    btn.className = 'gi-btn';
+                    btn.textContent = '+ ' + type;
+                    btn.onclick = () => {
+                        const base = type === 'llama_cpp' ? 'llama-cpp' : type;
+                        let id = base;
+                        let n = 2;
+                        while ((config.providers || []).some(p => p.id === id)) id = `${base}-${n++}`;
+                        const provider = normalizeLlmProviderType({ id, enabled: true, supports_native_tools: true, extra: {} }, type);
+                        config.providers = [...(config.providers || []), provider];
+                        config.active_provider = id;
+                        Kokoro.action('save_llm_config', { config });
+                        render();
+                    };
+                    presetRow.appendChild(btn);
+                });
+                provSec.appendChild(presetRow);
                 body.appendChild(provSec);
 
                 // Active provider config
                 const cfgSec = createSection("模型配置");
 
-                if (!isOllama) {
+                cfgSec.appendChild(createToggle("启用当前服务商", "禁用后不会被主模型或系统模型使用", activeProv.enabled !== false, (v) => {
+                    activeProv.enabled = v;
+                    config.providers = providers.map(p => p.id === activeProv.id ? activeProv : p);
+                    Kokoro.action('save_llm_config', { config });
+                }));
+
+                cfgSec.appendChild(createSelect("服务商类型", "OpenAI / Anthropic / Ollama / llama.cpp", [
+                    { value: 'openai', label: 'OpenAI-Compatible' },
+                    { value: 'anthropic', label: 'Anthropic-Compatible' },
+                    { value: 'ollama', label: 'Ollama' },
+                    { value: 'llama_cpp', label: 'llama.cpp' }
+                ], activeProv.provider_type || 'openai', (v) => {
+                    const next = normalizeLlmProviderType(activeProv, v);
+                    config.providers = providers.map(p => p.id === activeProv.id ? next : p);
+                    Kokoro.action('save_llm_config', { config });
+                    render();
+                }));
+
+                if (isCloud) {
                     cfgSec.appendChild(createRow("API Key", `
                         <input class="gi-input" type="password" value="${escapeHtml(activeProv.api_key || '')}" id="llm_api_key">
                     `));
@@ -907,7 +1298,7 @@
 
                 cfgSec.appendChild(createRow("Base URL", `
                     <input class="gi-input" type="text" value="${escapeHtml(activeProv.base_url || '')}" id="llm_base_url"
-                        placeholder="${isOllama ? 'http://localhost:11434' : 'https://api.openai.com/v1'}">
+                        placeholder="${escapeHtml(llmDefaultBaseUrl(activeProv.provider_type || 'openai'))}">
                 `));
                 setTimeout(() => {
                     const el = document.getElementById('llm_base_url');
@@ -925,7 +1316,7 @@
                     <div class="setting-info"><div class="setting-label">模型名称</div></div>
                     <div class="setting-ctrl" style="display:flex; gap:6px; align-items:center">
                         <input class="gi-input" type="text" value="${escapeHtml(activeProv.model || '')}" id="llm_model"
-                            placeholder="${isOllama ? 'llama3' : 'gpt-4'}">
+                            placeholder="${escapeHtml(llmDefaultModel(activeProv.provider_type || 'openai') || 'current loaded model')}">
                         <button class="gi-btn" id="fetchModelsBtn" style="white-space:nowrap">获取模型</button>
                     </div>
                 `;
@@ -946,6 +1337,63 @@
                         });
                     };
                 }, 0);
+
+                cfgSec.appendChild(createToggle("原生工具调用", "允许该服务商使用 OpenAI/Anthropic 原生 tool calling", activeProv.supports_native_tools !== false, (v) => {
+                    activeProv.supports_native_tools = v;
+                    config.providers = providers.map(p => p.id === activeProv.id ? activeProv : p);
+                    Kokoro.action('save_llm_config', { config });
+                }));
+
+                if (isLlamaCpp) {
+                    const extra = activeProv.extra || {};
+                    cfgSec.appendChild(createRow("llama.cpp 当前模型", `
+                        <input class="gi-input" type="text" value="${escapeHtml(extra.llama_cpp_current_model || '')}" id="llm_llamacpp_current_model" placeholder="服务端当前加载模型">
+                    `));
+                    cfgSec.appendChild(createRow("llama.cpp 上下文长度", `
+                        <input class="gi-input" type="number" min="512" step="512" value="${escapeHtml(String(extra.llama_cpp_context_length || ''))}" id="llm_llamacpp_ctx" placeholder="例如 4096">
+                    `));
+                    setTimeout(() => {
+                        const cur = document.getElementById('llm_llamacpp_current_model');
+                        const ctx = document.getElementById('llm_llamacpp_ctx');
+                        const saveExtra = () => {
+                            activeProv.extra = {
+                                ...(activeProv.extra || {}),
+                                llama_cpp_current_model: cur?.value || undefined,
+                                llama_cpp_context_length: ctx?.value ? Number(ctx.value) : undefined
+                            };
+                            config.providers = providers.map(p => p.id === activeProv.id ? activeProv : p);
+                            Kokoro.action('save_llm_config', { config });
+                        };
+                        if (cur) cur.onchange = saveExtra;
+                        if (ctx) ctx.onchange = saveExtra;
+                    }, 0);
+                }
+
+                const testRow = document.createElement('div');
+                testRow.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:10px';
+                const testBtn = document.createElement('button');
+                testBtn.className = 'gi-btn';
+                testBtn.textContent = '测试连接';
+                testBtn.onclick = () => {
+                    _llmConnectionStatus = '测试中...';
+                    render();
+                    Kokoro.invoke('test_llm_connection', { config }).then(result => {
+                        const targets = (result?.tested_targets || []).map(t => `${t.role}:${t.provider_id}${t.model ? '/' + t.model : ''}`);
+                        _llmConnectionStatus = targets.length ? `连接正常：${targets.join(', ')}` : '连接正常';
+                        render();
+                    }).catch(e => {
+                        _llmConnectionStatus = '连接失败：' + String(e);
+                        render();
+                    });
+                };
+                testRow.appendChild(testBtn);
+                if (_llmConnectionStatus) {
+                    const status = document.createElement('span');
+                    status.style.cssText = 'font-size:11px;color:var(--gi-ink-muted)';
+                    status.textContent = _llmConnectionStatus;
+                    testRow.appendChild(status);
+                }
+                cfgSec.appendChild(testRow);
 
                 // Show fetched models from state
                 const fetched = state.fetchedLlmModels || [];
@@ -1007,6 +1455,22 @@
                     config.stream = v;
                     Kokoro.action('save_llm_config', { config });
                 }));
+                const nativeContext = _llmContextSettings || { strategy: 'window', max_message_chars: 2000 };
+                ctxSec.appendChild(createSelect("原生上下文策略", "控制聊天历史压缩方式", [
+                    { value: 'window', label: '滑动窗口' },
+                    { value: 'summary', label: '摘要压缩' }
+                ], nativeContext.strategy || 'window', (v) => {
+                    saveLlmContextSettings({ ...nativeContext, strategy: v });
+                }));
+                ctxSec.appendChild(createRow("单条消息最大字符", `
+                    <input class="gi-input" type="number" min="500" max="20000" step="100" value="${nativeContext.max_message_chars || 2000}" id="llm_context_max_chars">
+                `));
+                setTimeout(() => {
+                    const el = document.getElementById('llm_context_max_chars');
+                    if (el) el.onchange = function () {
+                        saveLlmContextSettings({ ...nativeContext, max_message_chars: Math.max(500, parseInt(this.value) || 2000) });
+                    };
+                }, 0);
                 body.appendChild(ctxSec);
 
                 // Save button
@@ -1017,7 +1481,9 @@
 
                 // Vision Mode toggle
                 const visionSec = createSection("视觉模式");
-                visionSec.appendChild(createToggle("Vision Mode", "允许 AI 使用视觉能力分析屏幕", state.visionEnabled, (v) => {
+                const visionModeEnabled = state.visionEnabled ?? state.visionConfig?.vlm_enabled ?? false;
+                visionSec.appendChild(createToggle("Vision Mode", "允许 AI 使用视觉能力分析屏幕", visionModeEnabled, (v) => {
+                    state.visionEnabled = v;
                     Kokoro.action('set_vision_enabled', { enabled: v });
                 }));
                 body.appendChild(visionSec);
@@ -1348,6 +1814,63 @@
                         }));
                     }
 
+                    // OmniVoice specific fields
+                    if (pType === 'omnivoice') {
+                        if (!provider.extra) provider.extra = {};
+                        [
+                            ['project_path', '项目路径', 'D:/path/to/OmniVoice'],
+                            ['python_executable', 'Python 路径', 'D:/path/to/OmniVoice/.venv/Scripts/python.exe'],
+                            ['ref_audio_path', '参考音频路径 *', 'D:/path/to/reference.wav'],
+                            ['prompt_text', '提示文本（可选）', '参考音频对应的文本']
+                        ].forEach(([key, label, placeholder]) => {
+                            const id = `tts_omni_${key}_${index}`;
+                            fieldsDiv.appendChild(createRow(label, `
+                                <input class="gi-input" type="text" value="${escapeHtml(provider.extra[key] || '')}" id="${id}" placeholder="${escapeHtml(placeholder)}">
+                            `));
+                            setTimeout(() => {
+                                const el = document.getElementById(id);
+                                if (el) el.onchange = function () {
+                                    provider.extra[key] = this.value;
+                                    ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                                    Kokoro.action('save_tts_config', { config: ttsConfig });
+                                };
+                            }, 0);
+                        });
+                        const omniLangOpts = [
+                            { value: '', label: '自动' },
+                            { value: 'zh', label: '中文' },
+                            { value: 'en', label: 'English' },
+                            { value: 'ja', label: '日本語' },
+                            { value: 'ko', label: '한국어' }
+                        ];
+                        fieldsDiv.appendChild(createSelect("输出语言", "", omniLangOpts, provider.extra.language || '', (v) => {
+                            provider.extra.language = v;
+                            ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                            Kokoro.action('save_tts_config', { config: ttsConfig });
+                        }));
+                        [['speed', '速度系数', 0.5, 1.5, 0.05, 1.0], ['duration', '持续时间', 0, 30, 0.1, 0], ['num_step', '推理步数', 4, 64, 1, 32], ['guidance_scale', 'Guidance Scale', 0, 4, 0.1, 2]].forEach(([key, label, min, max, step, fallback]) => {
+                            const id = `tts_omni_${key}_${index}`;
+                            fieldsDiv.appendChild(createRow(label, `
+                                <input class="gi-input" type="number" min="${min}" max="${max}" step="${step}" value="${provider.extra[key] ?? fallback}" id="${id}">
+                            `));
+                            setTimeout(() => {
+                                const el = document.getElementById(id);
+                                if (el) el.onchange = function () {
+                                    provider.extra[key] = this.value === '' ? undefined : Number(this.value);
+                                    ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                                    Kokoro.action('save_tts_config', { config: ttsConfig });
+                                };
+                            }, 0);
+                        });
+                        [['denoise', '降噪'], ['preprocess_prompt', '预处理提示词'], ['postprocess_output', '后处理输出']].forEach(([key, label]) => {
+                            fieldsDiv.appendChild(createToggle(label, "", provider.extra[key] !== false, (v) => {
+                                provider.extra[key] = v;
+                                ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                                Kokoro.action('save_tts_config', { config: ttsConfig });
+                            }));
+                        });
+                    }
+
                     // Model field (openai/azure)
                     if (['openai', 'azure'].includes(pType)) {
                         const mId = `tts_prov_model_${index}`;
@@ -1358,6 +1881,21 @@
                             const el = document.getElementById(mId);
                             if (el) el.onchange = function () {
                                 provider.model = this.value;
+                                ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
+                                Kokoro.action('save_tts_config', { config: ttsConfig });
+                            };
+                        }, 0);
+                    }
+
+                    if (['openai', 'edge_tts'].includes(pType)) {
+                        const voiceId = `tts_prov_voice_${index}`;
+                        fieldsDiv.appendChild(createRow("默认音色", `
+                            <input class="gi-input" type="text" value="${escapeHtml(provider.default_voice || '')}" id="${voiceId}" placeholder="${pType === 'edge_tts' ? 'zh-CN-XiaoyiNeural' : 'alloy'}">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById(voiceId);
+                            if (el) el.onchange = function () {
+                                provider.default_voice = this.value;
                                 ttsConfig.providers = ttsProviders.map((p, i) => i === index ? provider : p);
                                 Kokoro.action('save_tts_config', { config: ttsConfig });
                             };
@@ -1390,7 +1928,7 @@
                 addRow.style.display = 'grid';
                 addRow.style.gridTemplateColumns = 'repeat(2, 1fr)';
                 addRow.style.gap = '8px';
-                ['openai', 'local_vits', 'gpt_sovits', 'local_rvc', 'azure', 'elevenlabs'].forEach(type => {
+                ['openai', 'edge_tts', 'local_vits', 'gpt_sovits', 'omnivoice', 'local_rvc', 'azure', 'elevenlabs'].forEach(type => {
                     const btn = document.createElement('button');
                     btn.className = 'gi-btn';
                     btn.textContent = '+ ' + type.replace('_', ' ');
@@ -1403,6 +1941,7 @@
                             base_url: '',
                             api_key: '',
                             model: '',
+                            default_voice: type === 'edge_tts' ? 'zh-CN-XiaoyiNeural' : '',
                             extra: {}
                         });
                         Kokoro.action('save_tts_config', { config: ttsConfig });
@@ -1423,6 +1962,23 @@
             }
 
             // ── 6. STT Tab ────────────────
+            let _senseVoiceLocalStatus = null;
+            let _senseVoiceLocalLoading = false;
+            let _senseVoiceLocalDownloading = false;
+
+            function loadSenseVoiceLocalStatus() {
+                if (_senseVoiceLocalStatus || _senseVoiceLocalLoading) return;
+                _senseVoiceLocalLoading = true;
+                Kokoro.invoke('get_sensevoice_local_status').then(status => {
+                    _senseVoiceLocalStatus = status || null;
+                    _senseVoiceLocalLoading = false;
+                    if (activeTab === 'stt') render();
+                }).catch(e => {
+                    console.error('Failed to load SenseVoice Local status', e);
+                    _senseVoiceLocalLoading = false;
+                });
+            }
+
             function renderSTT() {
                 const config = state.sttConfig || {};
                 const sttProviders = config.providers || [];
@@ -1446,6 +2002,11 @@
 
                 sec.appendChild(createToggle("允许打断", "说话时是否打断 AI 回复", state.voiceInterrupt, (v) => {
                     Kokoro.action('set_voice_interrupt', { enabled: v });
+                }));
+
+                sec.appendChild(createToggle("连续聆听", "语音输入结束后继续保持监听", config.continuous_listening, (v) => {
+                    config.continuous_listening = v;
+                    Kokoro.action('save_stt_config', { config });
                 }));
 
                 // Language dropdown
@@ -1483,7 +2044,7 @@
                     provCfgSec.style.marginTop = '8px';
 
                     // Base URL (for non-openai_whisper)
-                    if (activeProv.provider_type !== 'openai_whisper') {
+                    if (activeProv.provider_type !== 'openai_whisper' && activeProv.provider_type !== 'sensevoice_local') {
                         const urlId = 'stt_prov_url';
                         provCfgSec.appendChild(createRow("服务器地址", `
                             <input class="gi-input" type="text" value="${escapeHtml(activeProv.base_url || '')}" id="${urlId}" placeholder="http://127.0.0.1:8080">
@@ -1528,6 +2089,67 @@
                         }, 0);
                     }
 
+                    if (activeProv.provider_type === 'sensevoice_local') {
+                        loadSenseVoiceLocalStatus();
+                        const status = _senseVoiceLocalStatus;
+                        const localSec = createSection("SenseVoice Local");
+                        localSec.style.background = 'rgba(0,0,0,0.03)';
+                        localSec.appendChild(createRow("模型状态", status ? (status.installed ? '已安装' : '未安装') : (_senseVoiceLocalLoading ? '检测中...' : '未知')));
+                        if (status?.install_dir) {
+                            localSec.appendChild(createRow("安装目录", `<div class="gi-input" style="overflow:hidden;text-overflow:ellipsis">${escapeHtml(status.install_dir)}</div>`));
+                        }
+                        const dlRow = document.createElement('div');
+                        dlRow.style.cssText = 'display:flex;gap:8px;margin:8px 0';
+                        const dlBtn = document.createElement('button');
+                        dlBtn.className = 'gi-btn primary';
+                        dlBtn.textContent = _senseVoiceLocalDownloading ? '下载中...' : '下载推荐模型';
+                        dlBtn.disabled = _senseVoiceLocalDownloading || status?.installed;
+                        dlBtn.onclick = () => {
+                            _senseVoiceLocalDownloading = true;
+                            render();
+                            Kokoro.invoke('download_sensevoice_local_model').then(next => {
+                                _senseVoiceLocalStatus = next;
+                                _senseVoiceLocalDownloading = false;
+                                render();
+                            }).catch(e => {
+                                _senseVoiceLocalDownloading = false;
+                                console.error('SenseVoice Local download failed', e);
+                                render();
+                            });
+                        };
+                        dlRow.appendChild(dlBtn);
+                        localSec.appendChild(dlRow);
+
+                        [['model_path', '模型路径', status?.model_path || ''], ['tokens_path', 'Tokens 路径', status?.tokens_path || '']].forEach(([key, label, placeholder]) => {
+                            const id = `stt_sv_${key}`;
+                            localSec.appendChild(createRow(label, `
+                                <input class="gi-input" type="text" value="${escapeHtml(activeProv[key] || '')}" id="${id}" placeholder="${escapeHtml(placeholder)}">
+                            `));
+                            setTimeout(() => {
+                                const el = document.getElementById(id);
+                                if (el) el.onchange = function () {
+                                    config.providers = sttProviders.map(p => p.id === activeProv.id ? { ...p, [key]: this.value || undefined } : p);
+                                    Kokoro.action('save_stt_config', { config });
+                                };
+                            }, 0);
+                        });
+                        localSec.appendChild(createRow("线程数", `
+                            <input class="gi-input" type="number" min="1" max="32" value="${activeProv.num_threads ?? 2}" id="stt_sv_threads">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById('stt_sv_threads');
+                            if (el) el.onchange = function () {
+                                config.providers = sttProviders.map(p => p.id === activeProv.id ? { ...p, num_threads: parseInt(this.value) || 2 } : p);
+                                Kokoro.action('save_stt_config', { config });
+                            };
+                        }, 0);
+                        localSec.appendChild(createToggle("ITN 文本规范化", "将识别出的数字、日期等转换为更自然的文本", activeProv.use_itn !== false, (v) => {
+                            config.providers = sttProviders.map(p => p.id === activeProv.id ? { ...p, use_itn: v } : p);
+                            Kokoro.action('save_stt_config', { config });
+                        }));
+                        provCfgSec.appendChild(localSec);
+                    }
+
                     sec.appendChild(provCfgSec);
                 }
 
@@ -1551,7 +2173,7 @@
                 sec.appendChild(wakeSec);
 
                 // SenseVoice settings
-                if (activeProv.provider_type === 'sense_voice') {
+                if (activeProv.provider_type === 'sense_voice' || activeProv.provider_type === 'sensevoice') {
                     const svSec = createSection("SenseVoice");
                     svSec.appendChild(createToggle("情感识别", "识别说话者情感", activeProv.emotion, (v) => {
                         config.providers = sttProviders.map(p => p.id === activeProv.id ? { ...p, emotion: v } : p);
@@ -1602,6 +2224,8 @@
             let singF0Method = 'rmvpe';
             let singIndexPath = '';
             let singIndexRate = 0.75;
+            let singResultPath = null;
+            let singPlayingAudio = null;
 
             function renderSing() {
                 const sec = createSection("RVC 唱歌转换");
@@ -1679,6 +2303,7 @@
                                 indexRate: singIndexRate
                             });
                             if (result && result.output_path) {
+                                singResultPath = result.output_path;
                                 convertBtn.textContent = '✓ 完成';
                             }
                         } catch (e) {
@@ -1697,6 +2322,29 @@
                     progRow.style.marginTop = '8px';
                     progRow.innerHTML = `进度: ${Math.round((progress.progress || 0) * 100)}% — ${progress.stage || ''}`;
                     sec.appendChild(progRow);
+                }
+
+                if (singResultPath) {
+                    const resultSec = createSection("转换结果");
+                    resultSec.style.background = 'rgba(0,0,0,0.03)';
+                    resultSec.appendChild(createRow("输出文件", `<div class="gi-input" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(singResultPath)}</div>`));
+                    const playRow = document.createElement('div');
+                    playRow.style.cssText = 'display:flex;gap:8px;margin-top:8px';
+                    const playBtn = document.createElement('button');
+                    playBtn.className = 'gi-btn primary';
+                    playBtn.textContent = '播放 / 暂停';
+                    playBtn.onclick = () => {
+                        const url = 'asset://localhost/' + singResultPath.replace(/\\/g, '/');
+                        if (!singPlayingAudio || singPlayingAudio.src !== url) {
+                            if (singPlayingAudio) singPlayingAudio.pause();
+                            singPlayingAudio = new Audio(url);
+                        }
+                        if (singPlayingAudio.paused) singPlayingAudio.play().catch(console.error);
+                        else singPlayingAudio.pause();
+                    };
+                    playRow.appendChild(playBtn);
+                    resultSec.appendChild(playRow);
+                    sec.appendChild(resultSec);
                 }
 
                 // ── Advanced Settings ──
@@ -1763,6 +2411,377 @@
             let _memoryEditImportance = 0.5;
             let _memoryEditTier = 'normal';
             const _memoryPageSize = 50;
+            let _memoryView = 'list';
+            let _memoryEnabled = null;
+            let _memoryToggleLoading = false;
+            let _memoryDreamConfig = null;
+            let _memoryDreamConfigLoading = false;
+            let _memoryDreamSummary = null;
+            let _memoryDreamJobs = [];
+            let _memoryDreamProposals = [];
+            let _memoryDreamLoading = false;
+            let _memoryDreamRunning = false;
+            let _memoryDreamError = '';
+            let _memoryDreamCharId = null;
+            let _memoryDreamLoaded = false;
+
+            function stripMemoryPrefix(content) {
+                return String(content || '').replace(/^\[((?:[a-z_]+:[^|\]]+)(?:\|[a-z_]+:[^|\]]+)*)\]\s*/i, '');
+            }
+
+            function memoryTimestampMs(value) {
+                const n = Number(value || 0);
+                if (!Number.isFinite(n) || n <= 0) return 0;
+                return n > 100000000000 ? n : n * 1000;
+            }
+
+            function getMemoryTimestamp(mem) {
+                return mem.created_at || mem.updated_at || mem.last_seen_at || mem.first_seen_at || 0;
+            }
+
+            function formatMemoryTime(value) {
+                const ms = memoryTimestampMs(value);
+                if (!ms) return '未知时间';
+                const diff = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+                if (diff < 60) return '刚刚';
+                if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+                if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+                if (diff < 604800) return `${Math.floor(diff / 86400)} 天前`;
+                return new Date(ms).toLocaleString();
+            }
+
+            function getMemoryImportanceLabel(value) {
+                const v = Number(value || 0);
+                if (v >= 0.7) return '高';
+                if (v >= 0.4) return '中';
+                return '低';
+            }
+
+            function loadMemoryRuntime() {
+                if (_memoryEnabled === null && !_memoryToggleLoading) {
+                    _memoryToggleLoading = true;
+                    Kokoro.invoke('get_memory_enabled').then(v => {
+                        _memoryEnabled = !!v;
+                        _memoryToggleLoading = false;
+                        if (activeTab === 'memory') render();
+                    }).catch(e => {
+                        console.error('Failed to load memory toggle', e);
+                        _memoryEnabled = true;
+                        _memoryToggleLoading = false;
+                    });
+                }
+                if (!_memoryDreamConfig && !_memoryDreamConfigLoading) {
+                    _memoryDreamConfigLoading = true;
+                    Kokoro.invoke('get_memory_upgrade_config').then(cfg => {
+                        _memoryDreamConfig = cfg || {};
+                        _memoryDreamConfigLoading = false;
+                        if (activeTab === 'memory') render();
+                    }).catch(e => {
+                        console.error('Failed to load memory upgrade config', e);
+                        _memoryDreamConfigLoading = false;
+                    });
+                }
+            }
+
+            function saveMemoryDreamConfig(next) {
+                _memoryDreamConfig = next;
+                Kokoro.invoke('set_memory_upgrade_config', { config: next }).catch(e => {
+                    console.error('Failed to save memory upgrade config', e);
+                    _memoryDreamError = String(e);
+                    if (activeTab === 'memory') render();
+                });
+            }
+
+            function loadMemoryDream(charId, force) {
+                if (!charId || _memoryDreamLoading) return;
+                if (!force && _memoryDreamLoaded && _memoryDreamCharId === charId) return;
+                _memoryDreamLoading = true;
+                _memoryDreamCharId = charId;
+                _memoryDreamError = '';
+                Promise.all([
+                    Kokoro.invoke('get_dreaming_summary', { request: { character_id: charId } }),
+                    Kokoro.invoke('list_dream_jobs', { request: { character_id: charId, limit: 5 } }),
+                    Kokoro.invoke('list_dream_proposals', { request: { character_id: charId, status: 'pending', limit: 50 } })
+                ]).then(([summary, jobs, proposals]) => {
+                    _memoryDreamSummary = summary || null;
+                    _memoryDreamJobs = jobs || [];
+                    _memoryDreamProposals = proposals || [];
+                    _memoryDreamLoaded = true;
+                    _memoryDreamLoading = false;
+                    if (activeTab === 'memory' && _memoryView === 'dream') render();
+                }).catch(e => {
+                    console.error('Failed to load dream state', e);
+                    _memoryDreamError = String(e);
+                    _memoryDreamLoading = false;
+                    if (activeTab === 'memory' && _memoryView === 'dream') render();
+                });
+            }
+
+            function parseDreamSourceIds(raw) {
+                if (!raw) return [];
+                try {
+                    const parsed = JSON.parse(raw);
+                    if (Array.isArray(parsed)) return parsed.map(Number).filter(Number.isFinite);
+                } catch (_) { }
+                return String(raw).split(',').map(v => Number(v.trim())).filter(Number.isFinite);
+            }
+
+            function memoryKeywordList(memories) {
+                const stop = new Set(['the', 'and', 'that', 'with', 'this', 'from', 'have', 'your', '我', '你', '他', '她', '的', '了', '是', '在', '和', '就', '都', '很', '也', '吗', '什么', '这个', '那个', '因为', '所以', '但是', '然后']);
+                const counts = {};
+                memories.forEach(mem => {
+                    const text = stripMemoryPrefix(mem.content).toLowerCase().replace(/[.,#!$%^&*;:{}=\-_`~()[\]"'?!？！。、，…～]/g, ' ');
+                    let words = [];
+                    if (/[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]/.test(text) && typeof Intl !== 'undefined' && Intl.Segmenter) {
+                        const seg = new Intl.Segmenter(undefined, { granularity: 'word' });
+                        words = Array.from(seg.segment(text)).filter(s => s.isWordLike).map(s => s.segment.trim());
+                    } else {
+                        words = text.split(/\s+/);
+                    }
+                    Array.from(new Set(words.filter(w => w.length >= 2 && !stop.has(w)))).forEach(w => {
+                        counts[w] = (counts[w] || 0) + 1;
+                    });
+                });
+                return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 40);
+            }
+
+            function renderMemoryTabs(sec) {
+                const tabs = [
+                    ['list', '列表'],
+                    ['timeline', '时间线'],
+                    ['graph', '图谱'],
+                    ['dream', 'Dream']
+                ];
+                const row = document.createElement('div');
+                row.style.cssText = 'display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:10px 0 12px';
+                tabs.forEach(([id, label]) => {
+                    const btn = document.createElement('button');
+                    btn.className = 'gi-btn' + (_memoryView === id ? ' primary' : '');
+                    btn.textContent = label;
+                    btn.onclick = () => {
+                        _memoryView = id;
+                        if (id === 'dream') loadMemoryDream(_memoryCharId, true);
+                        render();
+                    };
+                    row.appendChild(btn);
+                });
+                sec.appendChild(row);
+            }
+
+            function renderMemoryTimeline(sec, memories) {
+                const sorted = [...memories].sort((a, b) => getMemoryTimestamp(b) - getMemoryTimestamp(a));
+                const groups = {};
+                const today = new Date();
+                sorted.forEach(mem => {
+                    const date = new Date(memoryTimestampMs(getMemoryTimestamp(mem)));
+                    let key = '更早';
+                    if (date.toDateString() === today.toDateString()) key = '今天';
+                    else {
+                        const yesterday = new Date(today);
+                        yesterday.setDate(today.getDate() - 1);
+                        if (date.toDateString() === yesterday.toDateString()) key = '昨天';
+                        else if (date.getFullYear() === today.getFullYear()) key = `${date.getMonth() + 1} 月`;
+                        else key = `${date.getFullYear()} 年`;
+                    }
+                    if (!groups[key]) groups[key] = [];
+                    groups[key].push(mem);
+                });
+
+                Object.entries(groups).forEach(([label, items]) => {
+                    const group = createSection(label);
+                    group.style.background = 'rgba(0,0,0,0.03)';
+                    items.forEach(mem => {
+                        const text = stripMemoryPrefix(mem.content);
+                        const row = document.createElement('div');
+                        row.className = 'list-item';
+                        row.style.cursor = 'pointer';
+                        row.onclick = () => {
+                            _memoryView = 'list';
+                            _memorySearch = text.slice(0, 20);
+                            render();
+                        };
+                        row.innerHTML = `
+                            <div class="list-item-header">
+                                <span>${escapeHtml(text.slice(0, 48))}${text.length > 48 ? '...' : ''}</span>
+                                <span style="font-size:10px;opacity:.65">${escapeHtml(getMemoryImportanceLabel(mem.importance))}</span>
+                            </div>
+                            <div class="list-item-desc">${escapeHtml(formatMemoryTime(getMemoryTimestamp(mem)))} · ${escapeHtml(mem.memory_type || 'legacy_fact')} · ${escapeHtml(mem.tier || 'normal')}</div>
+                        `;
+                        group.appendChild(row);
+                    });
+                    sec.appendChild(group);
+                });
+            }
+
+            function renderMemoryGraph(sec, memories) {
+                const keywords = memoryKeywordList(memories);
+                const graphSec = createSection('关键词图谱');
+                graphSec.style.background = 'rgba(0,0,0,0.03)';
+                if (keywords.length === 0) {
+                    graphSec.appendChild(createRow('', '记忆数量不足，暂时无法生成图谱'));
+                } else {
+                    const cloud = document.createElement('div');
+                    cloud.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;min-height:120px;align-items:center';
+                    const max = Math.max(...keywords.map(([, c]) => c), 1);
+                    keywords.forEach(([word, count]) => {
+                        const tag = document.createElement('button');
+                        tag.className = 'gi-btn';
+                        tag.style.fontSize = `${10 + Math.round((count / max) * 8)}px`;
+                        tag.textContent = `${word} ×${count}`;
+                        tag.onclick = () => {
+                            _memorySearch = word;
+                            _memoryView = 'list';
+                            render();
+                        };
+                        cloud.appendChild(tag);
+                    });
+                    graphSec.appendChild(cloud);
+                }
+                sec.appendChild(graphSec);
+
+                const typeCounts = {};
+                memories.forEach(mem => {
+                    const key = mem.memory_type || mem.tier || 'legacy_fact';
+                    typeCounts[key] = (typeCounts[key] || 0) + 1;
+                });
+                const typeSec = createSection('类型分布');
+                typeSec.style.background = 'rgba(0,0,0,0.03)';
+                Object.entries(typeCounts).forEach(([type, count]) => {
+                    typeSec.appendChild(createRow(escapeHtml(type), `${count} 条`));
+                });
+                sec.appendChild(typeSec);
+            }
+
+            function renderMemoryDream(sec, charId) {
+                loadMemoryDream(charId, false);
+                const dreamSec = createSection('Dream 记忆整理');
+                const cfg = _memoryDreamConfig || {};
+                const summary = _memoryDreamSummary || {};
+                dreamSec.appendChild(createRow('待审提案', `${summary.pending_proposal_count || 0} 条`));
+                dreamSec.appendChild(createRow('自动应用', `${summary.auto_applied_proposal_count || 0} 条`));
+
+                const controls = document.createElement('div');
+                controls.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:10px 0';
+                const runBtn = document.createElement('button');
+                runBtn.className = 'gi-btn primary';
+                runBtn.textContent = _memoryDreamRunning ? '整理中...' : '立即运行 Dream';
+                runBtn.disabled = _memoryDreamRunning || _memoryEnabled === false;
+                runBtn.onclick = () => {
+                    _memoryDreamRunning = true;
+                    _memoryDreamError = '';
+                    render();
+                    Kokoro.invoke('run_dream_now', { request: { character_id: charId } }).then(() => {
+                        _memoryDreamRunning = false;
+                        _memoryFetched = false;
+                        loadMemoryDream(charId, true);
+                        Kokoro.action('list_memories', { characterId: charId, limit: _memoryPageSize, offset: _memoryPage * _memoryPageSize });
+                    }).catch(e => {
+                        _memoryDreamRunning = false;
+                        _memoryDreamError = String(e);
+                        render();
+                    });
+                };
+                controls.appendChild(runBtn);
+                const refreshBtn = document.createElement('button');
+                refreshBtn.className = 'gi-btn';
+                refreshBtn.textContent = _memoryDreamLoading ? '刷新中...' : '刷新 Dream';
+                refreshBtn.onclick = () => loadMemoryDream(charId, true);
+                controls.appendChild(refreshBtn);
+                dreamSec.appendChild(controls);
+
+                dreamSec.appendChild(createToggle('启用 Dream 定时整理', '每日自动整理重复、冲突和可合并的长期记忆', cfg.dreaming_enabled !== false, (v) => {
+                    saveMemoryDreamConfig({ ...cfg, dreaming_enabled: v });
+                }));
+                dreamSec.appendChild(createSelect('自动应用等级', '决定 Dream 是否自动应用合并建议', [
+                    { value: 'conservative', label: '保守' },
+                    { value: 'review_only', label: '仅人工审核' },
+                    { value: 'aggressive', label: '积极自动应用' }
+                ], cfg.dream_auto_apply_level || 'aggressive', (v) => {
+                    saveMemoryDreamConfig({ ...cfg, dream_auto_apply_level: v });
+                }));
+                dreamSec.appendChild(createSelect('每日整理时间', '本地时间 0-23 点', Array.from({ length: 24 }, (_, hour) => ({
+                    value: String(hour),
+                    label: `${String(hour).padStart(2, '0')}:00`
+                })), String(cfg.dream_daily_hour ?? 3), (v) => {
+                    saveMemoryDreamConfig({ ...cfg, dream_daily_hour: parseInt(v) });
+                }));
+
+                if (summary.latest_job) {
+                    const job = summary.latest_job;
+                    dreamSec.appendChild(createRow('最近任务', `${escapeHtml(job.status || 'unknown')} · 自动 ${job.auto_applied_count || 0} · 提案 ${job.proposal_count || 0} · ${escapeHtml(formatMemoryTime(job.started_at))}`));
+                    if (job.error) dreamSec.appendChild(createRow('任务错误', `<span style="color:#f87171">${escapeHtml(job.error)}</span>`));
+                }
+                if (_memoryDreamError) {
+                    dreamSec.appendChild(createRow('错误', `<span style="color:#f87171">${escapeHtml(_memoryDreamError)}</span>`));
+                }
+                sec.appendChild(dreamSec);
+
+                const proposalsSec = createSection(`待审提案 (${(_memoryDreamProposals || []).length})`);
+                if (!_memoryDreamProposals || _memoryDreamProposals.length === 0) {
+                    proposalsSec.appendChild(createRow('', _memoryDreamLoading ? '正在读取提案...' : '暂无待审提案'));
+                } else {
+                    _memoryDreamProposals.forEach(proposal => {
+                        const item = document.createElement('div');
+                        item.className = 'list-item';
+                        const ids = parseDreamSourceIds(proposal.source_memory_ids);
+                        const sourceMap = new Map((proposal.source_memories || []).map(m => [m.id, m]));
+                        item.innerHTML = `
+                            <div class="list-item-header">
+                                <span>${escapeHtml(proposal.title || proposal.proposal_type || 'Dream proposal')}</span>
+                                <span style="font-size:10px;opacity:.65">${Math.round(Number(proposal.confidence || 0) * 100)}%</span>
+                            </div>
+                            <div class="list-item-desc">${escapeHtml(proposal.rationale || '')}</div>
+                            ${proposal.proposed_content ? `<div class="list-item-desc" style="margin-top:6px;color:var(--gi-ink)">${escapeHtml(stripMemoryPrefix(proposal.proposed_content))}</div>` : ''}
+                        `;
+                        ids.forEach(id => {
+                            const source = sourceMap.get(id);
+                            const src = document.createElement('div');
+                            src.className = 'list-item-desc';
+                            src.style.marginTop = '6px';
+                            src.textContent = source ? `#${id} ${stripMemoryPrefix(source.content)}` : `#${id} 来源记忆未找到`;
+                            item.appendChild(src);
+                        });
+                        const actions = document.createElement('div');
+                        actions.style.cssText = 'display:flex;gap:6px;margin-top:8px;justify-content:flex-end';
+                        const rejectBtn = document.createElement('button');
+                        rejectBtn.className = 'gi-btn danger';
+                        rejectBtn.textContent = '拒绝';
+                        rejectBtn.onclick = () => {
+                            Kokoro.invoke('reject_dream_proposal', { request: { id: proposal.id } }).then(() => loadMemoryDream(charId, true)).catch(e => {
+                                _memoryDreamError = String(e);
+                                render();
+                            });
+                        };
+                        actions.appendChild(rejectBtn);
+                        const approveBtn = document.createElement('button');
+                        approveBtn.className = 'gi-btn primary';
+                        approveBtn.textContent = '应用';
+                        approveBtn.onclick = () => {
+                            Kokoro.invoke('approve_dream_proposal', { request: { id: proposal.id } }).then(() => {
+                                _memoryFetched = false;
+                                loadMemoryDream(charId, true);
+                                Kokoro.action('list_memories', { characterId: charId, limit: _memoryPageSize, offset: _memoryPage * _memoryPageSize });
+                            }).catch(e => {
+                                _memoryDreamError = String(e);
+                                render();
+                            });
+                        };
+                        actions.appendChild(approveBtn);
+                        item.appendChild(actions);
+                        proposalsSec.appendChild(item);
+                    });
+                }
+                sec.appendChild(proposalsSec);
+
+                if ((_memoryDreamJobs || []).length > 0) {
+                    const jobsSec = createSection('最近 Dream 任务');
+                    jobsSec.style.background = 'rgba(0,0,0,0.03)';
+                    _memoryDreamJobs.forEach(job => {
+                        jobsSec.appendChild(createRow(`#${job.id}`, `${escapeHtml(job.trigger || 'manual')} · ${escapeHtml(job.status || 'unknown')} · ${escapeHtml(formatMemoryTime(job.started_at))}`));
+                    });
+                    sec.appendChild(jobsSec);
+                }
+            }
 
             function renderMemory() {
                 const sec = createSection("长期记忆库");
@@ -1772,6 +2791,20 @@
                     _memoryCharId = state.activeCharacterId || 'default';
                 }
                 const charId = _memoryCharId;
+                loadMemoryRuntime();
+
+                sec.appendChild(createToggle("启用长期记忆", "允许聊天时写入和检索长期记忆", _memoryEnabled !== false, (v) => {
+                    _memoryEnabled = v;
+                    _memoryToggleLoading = true;
+                    Kokoro.invoke('set_memory_enabled', { enabled: v }).then(() => {
+                        _memoryToggleLoading = false;
+                    }).catch(e => {
+                        console.error('Failed to toggle memory', e);
+                        _memoryToggleLoading = false;
+                        _memoryEnabled = !v;
+                        render();
+                    });
+                }));
 
                 // Character selector dropdown
                 const characters = state.characters || [];
@@ -1783,9 +2816,20 @@
                     sec.appendChild(createSelect("角色", "选择查看记忆的角色", charOpts, String(charId), (v) => {
                         _memoryCharId = v;
                         _memoryPage = 0;
-                        _memoryFetched = true;
+                        _memoryFetched = false;
+                        _memoryDreamLoaded = false;
+                        if (_memoryView === 'dream') loadMemoryDream(v, true);
                         Kokoro.action('list_memories', { characterId: v, limit: _memoryPageSize, offset: 0 });
+                        render();
                     }));
+                }
+
+                renderMemoryTabs(sec);
+
+                if (_memoryView === 'dream') {
+                    renderMemoryDream(sec, charId);
+                    body.appendChild(sec);
+                    return;
                 }
 
                 // Search box
@@ -1810,6 +2854,26 @@
                 const filtered = _memorySearch.trim()
                     ? memories.filter(m => (m.content || '').toLowerCase().includes(_memorySearch.toLowerCase()))
                     : memories;
+
+                if (_memoryView === 'timeline') {
+                    const countNote = document.createElement('div');
+                    countNote.className = 'setting-desc';
+                    countNote.textContent = `共 ${total} 条记忆` + (_memorySearch ? ` (过滤显示 ${filtered.length} 条)` : '');
+                    sec.appendChild(countNote);
+                    renderMemoryTimeline(sec, filtered);
+                    body.appendChild(sec);
+                    return;
+                }
+
+                if (_memoryView === 'graph') {
+                    const countNote = document.createElement('div');
+                    countNote.className = 'setting-desc';
+                    countNote.textContent = `共 ${total} 条记忆` + (_memorySearch ? ` (过滤显示 ${filtered.length} 条)` : '');
+                    sec.appendChild(countNote);
+                    renderMemoryGraph(sec, filtered);
+                    body.appendChild(sec);
+                    return;
+                }
 
                 if (filtered.length === 0) {
                     sec.appendChild(createRow("", "<div style='text-align:center; color:var(--gi-ink-muted)'>暂无记忆记录</div>"));
@@ -1992,12 +3056,37 @@
             }
 
             // ── 9. Vision Tab ────────────────
+            let _visionScreens = null;
+            let _visionScreensLoading = false;
+            let _visionScreensError = '';
+
+            function loadVisionScreens() {
+                if (_visionScreens || _visionScreensLoading) return;
+                _visionScreensLoading = true;
+                _visionScreensError = '';
+                Kokoro.invoke('list_vision_screens').then(screens => {
+                    _visionScreens = screens || [];
+                    _visionScreensLoading = false;
+                    if (activeTab === 'vision') render();
+                }).catch(e => {
+                    _visionScreens = [];
+                    _visionScreensError = String(e);
+                    _visionScreensLoading = false;
+                    if (activeTab === 'vision') render();
+                });
+            }
+
             function renderVision() {
                 const config = state.visionConfig || {};
                 const sec = createSection("视觉能力");
+                const visionEnabled = config.vlm_enabled ?? config.enabled ?? false;
+                const captureInterval = config.capture_interval_secs ?? config.interval_secs ?? 5;
+                const proactiveVision = config.proactive_vision_enabled ?? config.proactive_enabled ?? false;
+                loadVisionScreens();
 
-                sec.appendChild(createToggle("启用视觉", "允许 AI 看见屏幕", config.enabled, (v) => {
-                    config.enabled = v;
+                sec.appendChild(createToggle("启用视觉", "允许 AI 看见屏幕", visionEnabled, (v) => {
+                    config.vlm_enabled = v;
+                    delete config.enabled;
                     Kokoro.action('save_vision_config', { config });
                 }));
 
@@ -2005,6 +3094,7 @@
                     { value: 'ollama', label: 'Ollama' },
                     { value: 'llama_cpp', label: 'llama.cpp' },
                     { value: 'openai', label: 'OpenAI' },
+                    { value: 'anthropic', label: 'Anthropic' },
                     { value: 'llm', label: '复用主 LLM' }
                 ];
                 sec.appendChild(createSelect("服务商", "Vision 模型后端", provOpts, config.vlm_provider, (v) => {
@@ -2020,6 +3110,9 @@
                     } else if (v === 'openai') {
                         config.vlm_base_url = 'https://api.openai.com/v1';
                         config.vlm_model = 'gpt-4o';
+                    } else if (v === 'anthropic') {
+                        config.vlm_base_url = 'https://api.anthropic.com/v1';
+                        config.vlm_model = 'claude-3-5-sonnet-latest';
                     } else {
                         config.vlm_base_url = null;
                         config.vlm_api_key = null;
@@ -2040,7 +3133,7 @@
                     }, 0);
                 }
 
-                if (config.vlm_provider === 'openai') {
+                if (config.vlm_provider === 'openai' || config.vlm_provider === 'anthropic') {
                     sec.appendChild(createRow("API Key", `
                         <input class="gi-input" type="password" value="${escapeHtml(config.vlm_api_key || '')}" id="vision_api_key">
                     `));
@@ -2066,8 +3159,21 @@
                     }, 0);
                 }
 
-                sec.appendChild(createSlider("检测间隔 (秒)", 5, 60, 5, config.interval_secs || 5, (v) => {
-                    config.interval_secs = parseInt(v);
+                const screenOpts = [{ value: '__auto__', label: '自动选择显示器' }].concat((_visionScreens || []).map(screen => ({
+                    value: screen.display_id,
+                    label: `${screen.label}${screen.is_primary ? ' · 主屏幕' : ''} (${screen.width}×${screen.height})`
+                })));
+                if (config.display_id && !screenOpts.some(o => o.value === config.display_id)) {
+                    screenOpts.push({ value: config.display_id, label: `缺失的显示器：${config.display_id}` });
+                }
+                sec.appendChild(createSelect("显示器", _visionScreensLoading ? "正在读取显示器列表..." : (_visionScreensError || "选择截图来源显示器"), screenOpts, config.display_id || '__auto__', (v) => {
+                    config.display_id = v === '__auto__' ? null : v;
+                    Kokoro.action('save_vision_config', { config });
+                }));
+
+                sec.appendChild(createSlider("检测间隔 (秒)", 5, 60, 5, captureInterval, (v) => {
+                    config.capture_interval_secs = parseInt(v);
+                    delete config.interval_secs;
                     Kokoro.action('save_vision_config', { config });
                 }));
 
@@ -2076,8 +3182,22 @@
                     Kokoro.action('save_vision_config', { config });
                 }, '%'));
 
-                sec.appendChild(createToggle("主动评论屏幕变化", "关闭后仍会识别屏幕并作为对话上下文，但不会主动发言", config.proactive_enabled === true, (v) => {
-                    config.proactive_enabled = v;
+                sec.appendChild(createToggle("后台自动观察", "定期捕捉屏幕变化，作为对话上下文", config.auto_vision_enabled !== false, (v) => {
+                    config.auto_vision_enabled = v;
+                    Kokoro.action('save_vision_config', { config });
+                }));
+
+                sec.appendChild(createSelect("视觉历史上下文", "发送最新一条或完整视觉历史", [
+                    { value: 'latest', label: '仅最新观察' },
+                    { value: 'full', label: '完整视觉历史' }
+                ], config.vision_context_history_mode || 'latest', (v) => {
+                    config.vision_context_history_mode = v;
+                    Kokoro.action('save_vision_config', { config });
+                }));
+
+                sec.appendChild(createToggle("主动评论屏幕变化", "关闭后仍会识别屏幕并作为对话上下文，但不会主动发言", proactiveVision === true, (v) => {
+                    config.proactive_vision_enabled = v;
+                    delete config.proactive_enabled;
                     Kokoro.action('save_vision_config', { config });
                 }));
 
@@ -2182,8 +3302,8 @@
                         };
                     }, 0);
 
-                    // API Key (for OpenAI providers)
-                    if (provType === 'openai') {
+                    // API Key (for online providers)
+                    if (provType === 'openai' || provType === 'google') {
                         const keyId = `imggen_key_${idx}`;
                         sub.appendChild(createRow("API Key", `
                             <input class="gi-input" type="password" value="${escapeHtml(p.api_key || '')}" id="${keyId}" placeholder="${p.api_key_env ? '环境变量回退: ' + p.api_key_env : ''}">
@@ -2217,7 +3337,7 @@
                             : '';
                         sub.appendChild(createRow("模型", `
                             <div style="display:flex;gap:0;align-items:center;width:100%">
-                                <input class="gi-input" type="text" value="${escapeHtml(p.model || '')}" id="${modelId}" style="flex:1" placeholder="${provType === 'openai' ? 'dall-e-3' : ''}">
+                                <input class="gi-input" type="text" value="${escapeHtml(p.model || '')}" id="${modelId}" style="flex:1" placeholder="${provType === 'openai' ? 'dall-e-3' : provType === 'google' ? 'imagen-3.0-generate-002' : ''}">
                                 ${fetchBtnHtml}
                             </div>
                         `));
@@ -2287,18 +3407,34 @@
                     }
 
 
-                    // Negative prompt (SD and OpenAI)
-                    const negId = `imggen_neg_${idx}`;
-                    sub.appendChild(createRow("负面提示词", `
-                        <input class="gi-input" type="text" value="${escapeHtml(p.negative_prompt || '')}" id="${negId}" placeholder="nsfw, blurry, ...">
-                    `));
-                    setTimeout(() => {
-                        const el = document.getElementById(negId);
-                        if (el) el.onchange = function () {
-                            config.providers[idx].negative_prompt = this.value;
-                            Kokoro.action('save_image_gen_config', { config });
-                        };
-                    }, 0);
+                    if (provType === 'stable_diffusion') {
+                        const prefixId = `imggen_prefix_${idx}`;
+                        sub.appendChild(createRow("提示词前缀", `
+                            <input class="gi-input" type="text" value="${escapeHtml(p.prompt_prefix || '')}" id="${prefixId}" placeholder="masterpiece, best quality">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById(prefixId);
+                            if (el) el.onchange = function () {
+                                config.providers[idx].prompt_prefix = this.value;
+                                Kokoro.action('save_image_gen_config', { config });
+                            };
+                        }, 0);
+                    }
+
+                    // Negative prompt (SD)
+                    if (provType === 'stable_diffusion') {
+                        const negId = `imggen_neg_${idx}`;
+                        sub.appendChild(createRow("负面提示词", `
+                            <input class="gi-input" type="text" value="${escapeHtml(p.negative_prompt || '')}" id="${negId}" placeholder="nsfw, blurry, ...">
+                        `));
+                        setTimeout(() => {
+                            const el = document.getElementById(negId);
+                            if (el) el.onchange = function () {
+                                config.providers[idx].negative_prompt = this.value;
+                                Kokoro.action('save_image_gen_config', { config });
+                            };
+                        }, 0);
+                    }
 
                     // Style (OpenAI dall-e-3: vivid/natural; Google: various)
                     if (provType === 'openai') {
@@ -2413,6 +3549,27 @@
                 };
                 addRow.appendChild(addOaiBtn);
 
+                const addGoogleBtn = document.createElement('button');
+                addGoogleBtn.className = 'gi-btn primary';
+                addGoogleBtn.textContent = '+ 添加 Google 后端';
+                addGoogleBtn.onclick = () => {
+                    if (!config.providers) config.providers = [];
+                    const existing = config.providers.filter(p => p.provider_type === 'google').length;
+                    config.providers.push({
+                        id: existing > 0 ? `google_${existing + 1}` : 'google',
+                        provider_type: "google",
+                        base_url: "",
+                        api_key: "",
+                        model: "imagen-3.0-generate-002",
+                        enabled: true,
+                        size: "auto",
+                        quality: "standard"
+                    });
+                    Kokoro.action('save_image_gen_config', { config });
+                    render();
+                };
+                addRow.appendChild(addGoogleBtn);
+
                 sec.appendChild(addRow);
 
                 // Save
@@ -2442,6 +3599,41 @@
                             </div>
                             <div class="list-item-desc">${escapeHtml(mod.description || '')}</div>
                         `;
+                        const badges = document.createElement('div');
+                        badges.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-top:8px';
+                        [
+                            mod.theme ? 'theme' : '',
+                            mod.layout ? 'layout' : '',
+                            mod.scripts && mod.scripts.length ? 'scripts' : '',
+                            mod.components && Object.keys(mod.components).length ? `components:${Object.keys(mod.components).length}` : '',
+                            mod.ui_entry ? 'ui' : ''
+                        ].filter(Boolean).forEach(label => {
+                            const badge = document.createElement('span');
+                            badge.style.cssText = 'font-size:9px;border:1px solid var(--gi-border-gold-dim);border-radius:4px;padding:1px 5px;color:var(--gi-ink-muted);text-transform:uppercase';
+                            badge.textContent = label;
+                            badges.appendChild(badge);
+                        });
+                        row.appendChild(badges);
+
+                        const rowActions = document.createElement('div');
+                        rowActions.style.cssText = 'display:flex;gap:6px;margin-top:8px;justify-content:flex-end';
+                        if (mod.entry || (mod.scripts && mod.scripts.length > 0) || mod.theme || mod.layout || (mod.components && Object.keys(mod.components).length > 0)) {
+                            const loadBtn = document.createElement('button');
+                            loadBtn.className = 'gi-btn primary';
+                            loadBtn.style.fontSize = '11px';
+                            loadBtn.textContent = '加载';
+                            loadBtn.onclick = () => Kokoro.action('load_mod', { id: mod.id });
+                            rowActions.appendChild(loadBtn);
+                        }
+                        if (mod.ui_entry) {
+                            const uiBtn = document.createElement('button');
+                            uiBtn.className = 'gi-btn';
+                            uiBtn.style.fontSize = '11px';
+                            uiBtn.textContent = '打开 UI';
+                            uiBtn.onclick = () => Kokoro.invoke('load_mod', { modId: mod.id });
+                            rowActions.appendChild(uiBtn);
+                        }
+                        row.appendChild(rowActions);
                         sec.appendChild(row);
                     });
                 }
@@ -2451,7 +3643,7 @@
                 actRow.style.marginTop = '12px';
                 actRow.style.display = 'flex';
                 actRow.style.gap = '8px';
-                actRow.innerHTML = '<button class="gi-btn" onclick="Kokoro.action(\'refresh_mods\')">刷新模组列表</button><button class="gi-btn" onclick="Kokoro.invoke(\'unload_mod\', {})" style="border-color:var(--gi-gold-dim);color:var(--gi-gold-dim)">卸载当前模组</button>';
+                actRow.innerHTML = '<button class="gi-btn" onclick="Kokoro.action(\'refresh_mods\')">刷新模组列表</button><button class="gi-btn primary" onclick="Kokoro.action(\'import_mod_archive\')">导入 ZIP 模组</button><button class="gi-btn" onclick="Kokoro.invoke(\'unload_mod\', {})" style="border-color:var(--gi-gold-dim);color:var(--gi-gold-dim)">卸载当前模组</button>';
                 sec.appendChild(actRow);
 
                 body.appendChild(sec);
@@ -2461,6 +3653,36 @@
             let _mcpShowAdd = false;
             let _mcpJsonInput = '';
             let _mcpPollTimer = null;
+            let _mcpTools = [];
+            let _mcpToolSettings = null;
+            let _mcpToolsLoading = false;
+
+            function loadMcpToolState() {
+                if (_mcpToolsLoading) return;
+                _mcpToolsLoading = true;
+                Promise.all([
+                    Kokoro.invoke('list_actions'),
+                    Kokoro.invoke('get_tool_settings')
+                ]).then(([tools, settings]) => {
+                    _mcpTools = tools || [];
+                    _mcpToolSettings = settings || {
+                        max_tool_rounds: 10,
+                        enabled_tools: {},
+                        max_permission_level: 'elevated',
+                        blocked_risk_tags: []
+                    };
+                    _mcpToolsLoading = false;
+                    if (activeTab === 'mcp') render();
+                }).catch(e => {
+                    console.error('Failed to load MCP tool state', e);
+                    _mcpToolsLoading = false;
+                });
+            }
+
+            function saveMcpToolSettings(next) {
+                _mcpToolSettings = next;
+                Kokoro.invoke('save_tool_settings', { settings: next }).catch(console.error);
+            }
 
             function renderMCP() {
                 const sec = createSection("MCP 服务器");
@@ -2631,54 +3853,247 @@
                     sec.appendChild(addSec);
                 }
 
+                loadMcpToolState();
+                const toolSec = createSection("工具调用");
+                toolSec.style.marginTop = '12px';
+                if (!_mcpToolSettings) {
+                    toolSec.appendChild(createRow("", _mcpToolsLoading ? "正在读取工具设置..." : "暂无工具设置"));
+                } else {
+                    const settings = _mcpToolSettings;
+                    toolSec.appendChild(createRow("最大工具轮数", `
+                        <input class="gi-input" type="number" min="1" max="20" value="${settings.max_tool_rounds || 10}" id="mcp_max_rounds">
+                    `));
+                    setTimeout(() => {
+                        const rounds = document.getElementById('mcp_max_rounds');
+                        if (rounds) rounds.onchange = function () {
+                            const next = { ...settings, max_tool_rounds: Math.max(1, Math.min(20, parseInt(this.value) || 10)) };
+                            saveMcpToolSettings(next);
+                        };
+                    }, 0);
+
+                    toolSec.appendChild(createSelect("权限上限", "限制工具可使用的最高权限", [
+                        { value: 'safe', label: 'Safe' },
+                        { value: 'elevated', label: 'Elevated' }
+                    ], settings.max_permission_level || 'elevated', (v) => {
+                        saveMcpToolSettings({ ...settings, max_permission_level: v });
+                    }));
+
+                    const riskSec = createSection("风险标签屏蔽");
+                    riskSec.style.background = 'rgba(0,0,0,0.03)';
+                    ['read', 'write', 'external', 'sensitive'].forEach(tag => {
+                        const blocked = (settings.blocked_risk_tags || []).includes(tag);
+                        riskSec.appendChild(createToggle(tag, blocked ? '当前已屏蔽' : '当前允许', blocked, (v) => {
+                            const set = new Set(settings.blocked_risk_tags || []);
+                            if (v) set.add(tag); else set.delete(tag);
+                            saveMcpToolSettings({ ...settings, blocked_risk_tags: Array.from(set) });
+                        }));
+                    });
+                    toolSec.appendChild(riskSec);
+
+                    const groups = {};
+                    (_mcpTools || []).forEach(tool => {
+                        const key = tool.source === 'mcp' ? `MCP: ${tool.server_name || 'unknown'}` : '内置工具';
+                        if (!groups[key]) groups[key] = [];
+                        groups[key].push(tool);
+                    });
+
+                    Object.entries(groups).forEach(([group, tools]) => {
+                        const groupSec = createSection(`${group} (${tools.length})`);
+                        groupSec.style.background = 'rgba(0,0,0,0.03)';
+                        tools.forEach(tool => {
+                            const enabled = settings.enabled_tools?.[tool.id] !== false;
+                            const row = document.createElement('div');
+                            row.className = 'list-item';
+                            const risk = (tool.risk_tags || []).join(', ') || 'none';
+                            row.innerHTML = `
+                                <div class="list-item-header">
+                                    <span>${escapeHtml(tool.name || tool.id)}</span>
+                                    <span style="font-size:10px;opacity:.65">${escapeHtml(tool.permission_level || 'safe')}</span>
+                                </div>
+                                <div class="list-item-desc">${escapeHtml(tool.description || tool.id)}</div>
+                                <div class="list-item-desc">ID: ${escapeHtml(tool.id)} · 风险: ${escapeHtml(risk)} · 来源: ${escapeHtml(tool.source || '')}</div>
+                            `;
+                            const toggle = createToggle("启用工具", "", enabled, (v) => {
+                                saveMcpToolSettings({
+                                    ...settings,
+                                    enabled_tools: { ...(settings.enabled_tools || {}), [tool.id]: v }
+                                });
+                            });
+                            row.appendChild(toggle);
+                            groupSec.appendChild(row);
+                        });
+                        toolSec.appendChild(groupSec);
+                    });
+                }
+                sec.appendChild(toolSec);
+
                 body.appendChild(sec);
             }
 
-            // ── 13. Telegram Tab ────────────────
-            function renderTelegram() {
-                const cfg = state.telegramConfig || {};
-                const sec = createSection("Telegram Bot");
+            // ── 13. Bot Tab ────────────────
+            function renderBot() {
+                const cfg = state.botConfig || {
+                    selected_platform: 'telegram',
+                    telegram: state.telegramConfig || { enabled: false, allowed_chat_ids: [], send_voice_reply: false },
+                    discord: { enabled: false, allowed_channel_ids: [], allow_direct_messages: true, send_voice_reply: false },
+                    line: { enabled: false, webhook_path: '/line/webhook', allowed_user_ids: [] },
+                    webhook: { enabled: false, bind_host: '127.0.0.1', port: 8787, endpoint_path: '/webhook/message', send_voice_reply: false }
+                };
+                const platform = cfg.selected_platform || 'telegram';
+                const sec = createSection("Bot 平台");
+                const status = state.botStatus || {};
+                const platformStatus = status[platform] || {};
 
-                sec.appendChild(createToggle("启用 Telegram Bot", "通过 Telegram 远程与角色交互", cfg.enabled, (v) => {
-                    cfg.enabled = v;
-                    Kokoro.action('save_telegram_config', { config: cfg });
+                const platformOpts = [
+                    { value: 'telegram', label: 'Telegram' },
+                    { value: 'discord', label: 'Discord' },
+                    { value: 'line', label: 'LINE' },
+                    { value: 'webhook', label: 'Webhook' }
+                ];
+                sec.appendChild(createSelect("平台", "选择远程聊天入口", platformOpts, platform, (v) => {
+                    cfg.selected_platform = v;
+                    state.botConfig = cfg;
+                    Kokoro.action('save_bot_config', { config: cfg });
+                    render();
                 }));
 
-                const tokenId = 'tg_token';
-                sec.appendChild(createRow("Bot Token", `
-                    <input class="gi-input" type="password" value="${escapeHtml(cfg.bot_token || '')}" id="${tokenId}" placeholder="123456:ABC-DEF...">
-                `));
-                setTimeout(() => {
-                    const el = document.getElementById(tokenId);
-                    if (el) el.onchange = function () {
-                        cfg.bot_token = this.value;
-                        Kokoro.action('save_telegram_config', { config: cfg });
-                    };
-                }, 0);
+                const statusRow = document.createElement('div');
+                statusRow.className = 'list-item';
+                statusRow.innerHTML = `
+                    <div class="list-item-header">
+                        <span><span class="status-dot ${platformStatus.running ? 'connected' : ''}"></span>${platform.toUpperCase()}</span>
+                        <span style="font-size:10px;opacity:.65">${platformStatus.running ? 'running' : (platformStatus.enabled ? 'enabled' : 'stopped')}</span>
+                    </div>
+                    <div class="list-item-desc">${platformStatus.configured ? '已配置' : '未完整配置'}</div>
+                `;
+                sec.appendChild(statusRow);
 
-                const chatId = 'tg_chat_id';
-                sec.appendChild(createRow("Chat ID 白名单", `
-                    <input class="gi-input" type="text" value="${escapeHtml((cfg.allowed_chat_ids || []).join(','))}" id="${chatId}" placeholder="123456789,987654321">
-                `));
-                setTimeout(() => {
-                    const el = document.getElementById(chatId);
-                    if (el) el.onchange = function () {
-                        cfg.allowed_chat_ids = this.value.split(',').map(s => s.trim()).filter(Boolean).map(Number);
-                        Kokoro.action('save_telegram_config', { config: cfg });
-                    };
-                }, 0);
+                const actionRow = document.createElement('div');
+                actionRow.style.cssText = 'display:flex;gap:8px;margin:10px 0 12px';
+                const startBtn = document.createElement('button');
+                startBtn.className = 'gi-btn primary';
+                startBtn.textContent = platformStatus.running ? '运行中' : '启动';
+                startBtn.disabled = !!platformStatus.running;
+                startBtn.onclick = () => Kokoro.action('start_bot_platform', { platform });
+                actionRow.appendChild(startBtn);
+                const stopBtn = document.createElement('button');
+                stopBtn.className = 'gi-btn';
+                stopBtn.textContent = '停止';
+                stopBtn.disabled = !platformStatus.running;
+                stopBtn.onclick = () => Kokoro.action('stop_bot_platform', { platform });
+                actionRow.appendChild(stopBtn);
+                const refreshBtn = document.createElement('button');
+                refreshBtn.className = 'gi-btn';
+                refreshBtn.textContent = '刷新状态';
+                refreshBtn.onclick = () => Kokoro.action('refresh_bot_status');
+                actionRow.appendChild(refreshBtn);
+                sec.appendChild(actionRow);
 
-                sec.appendChild(createToggle("允许语音消息", "接收并识别语音消息", cfg.send_voice_reply, (v) => {
-                    cfg.send_voice_reply = v;
-                    Kokoro.action('save_telegram_config', { config: cfg });
-                }));
+                function saveBot() {
+                    state.botConfig = cfg;
+                    Kokoro.action('save_bot_config', { config: cfg });
+                }
+
+                function characterSelect(current, onChange) {
+                    const chars = state.characters || [];
+                    const opts = [{ value: '', label: '自动 / 当前角色' }].concat(chars.map(c => ({ value: c.id, label: c.name || c.id })));
+                    return createSelect("绑定角色", "为空时使用当前角色", opts, current || '', (v) => onChange(v || undefined));
+                }
+
+                if (platform === 'telegram') {
+                    const tcfg = cfg.telegram || { enabled: false, allowed_chat_ids: [], send_voice_reply: false };
+                    cfg.telegram = tcfg;
+                    sec.appendChild(createToggle("自动启用 Telegram", "应用启动后允许 Telegram Bot 运行", tcfg.enabled, (v) => {
+                        tcfg.enabled = v;
+                        saveBot();
+                    }));
+                    sec.appendChild(createRow("Bot Token", `<input class="gi-input" type="password" value="${escapeHtml(tcfg.bot_token || '')}" id="bot_tg_token" placeholder="123456:ABC-DEF...">`));
+                    sec.appendChild(createRow("Chat ID 白名单", `<input class="gi-input" type="text" value="${escapeHtml((tcfg.allowed_chat_ids || []).join(','))}" id="bot_tg_chats" placeholder="123456789,987654321">`));
+                    sec.appendChild(characterSelect(tcfg.character_id, (v) => { tcfg.character_id = v; saveBot(); }));
+                    sec.appendChild(createToggle("允许语音消息", "接收并识别语音消息", tcfg.send_voice_reply, (v) => {
+                        tcfg.send_voice_reply = v;
+                        saveBot();
+                    }));
+                    setTimeout(() => {
+                        const token = document.getElementById('bot_tg_token');
+                        if (token) token.onchange = function () { tcfg.bot_token = this.value || undefined; saveBot(); };
+                        const chats = document.getElementById('bot_tg_chats');
+                        if (chats) chats.onchange = function () {
+                            tcfg.allowed_chat_ids = this.value.split(',').map(s => s.trim()).filter(Boolean).map(Number);
+                            saveBot();
+                        };
+                    }, 0);
+                }
+
+                if (platform === 'discord') {
+                    const dcfg = cfg.discord || { enabled: false, allowed_channel_ids: [], allow_direct_messages: true, send_voice_reply: false };
+                    cfg.discord = dcfg;
+                    sec.appendChild(createToggle("启用 Discord", "通过 Discord Bot 远程聊天", dcfg.enabled, (v) => { dcfg.enabled = v; saveBot(); }));
+                    sec.appendChild(createRow("Bot Token", `<input class="gi-input" type="password" value="${escapeHtml(dcfg.bot_token || '')}" id="bot_discord_token" placeholder="Discord bot token">`));
+                    sec.appendChild(createToggle("允许私信", "允许 Direct Message 触发对话", dcfg.allow_direct_messages, (v) => { dcfg.allow_direct_messages = v; saveBot(); }));
+                    sec.appendChild(createToggle("允许语音消息", "识别并回复语音消息", dcfg.send_voice_reply, (v) => { dcfg.send_voice_reply = v; saveBot(); }));
+                    sec.appendChild(createRow("频道白名单", `<input class="gi-input" type="text" value="${escapeHtml((dcfg.allowed_channel_ids || []).join(','))}" id="bot_discord_channels" placeholder="channel_id,channel_id">`));
+                    sec.appendChild(characterSelect(dcfg.character_id, (v) => { dcfg.character_id = v; saveBot(); }));
+                    setTimeout(() => {
+                        const token = document.getElementById('bot_discord_token');
+                        if (token) token.onchange = function () { dcfg.bot_token = this.value || undefined; saveBot(); };
+                        const channels = document.getElementById('bot_discord_channels');
+                        if (channels) channels.onchange = function () { dcfg.allowed_channel_ids = this.value.split(',').map(s => s.trim()).filter(Boolean); saveBot(); };
+                    }, 0);
+                }
+
+                if (platform === 'line') {
+                    const lcfg = cfg.line || { enabled: false, webhook_path: '/line/webhook', allowed_user_ids: [] };
+                    cfg.line = lcfg;
+                    sec.appendChild(createToggle("启用 LINE", "通过 LINE Messaging API 远程聊天", lcfg.enabled, (v) => { lcfg.enabled = v; saveBot(); }));
+                    sec.appendChild(createRow("Channel Access Token", `<input class="gi-input" type="password" value="${escapeHtml(lcfg.channel_access_token || '')}" id="bot_line_token">`));
+                    sec.appendChild(createRow("Channel Secret", `<input class="gi-input" type="password" value="${escapeHtml(lcfg.channel_secret || '')}" id="bot_line_secret">`));
+                    sec.appendChild(createRow("Webhook Path", `<input class="gi-input" type="text" value="${escapeHtml(lcfg.webhook_path || '/line/webhook')}" id="bot_line_path">`));
+                    sec.appendChild(createRow("用户白名单", `<input class="gi-input" type="text" value="${escapeHtml((lcfg.allowed_user_ids || []).join(','))}" id="bot_line_users" placeholder="user_id,user_id">`));
+                    sec.appendChild(characterSelect(lcfg.character_id, (v) => { lcfg.character_id = v; saveBot(); }));
+                    setTimeout(() => {
+                        const token = document.getElementById('bot_line_token');
+                        if (token) token.onchange = function () { lcfg.channel_access_token = this.value || undefined; saveBot(); };
+                        const secret = document.getElementById('bot_line_secret');
+                        if (secret) secret.onchange = function () { lcfg.channel_secret = this.value || undefined; saveBot(); };
+                        const path = document.getElementById('bot_line_path');
+                        if (path) path.onchange = function () { lcfg.webhook_path = this.value || '/line/webhook'; saveBot(); };
+                        const users = document.getElementById('bot_line_users');
+                        if (users) users.onchange = function () { lcfg.allowed_user_ids = this.value.split(',').map(s => s.trim()).filter(Boolean); saveBot(); };
+                    }, 0);
+                }
+
+                if (platform === 'webhook') {
+                    const wcfg = cfg.webhook || { enabled: false, bind_host: '127.0.0.1', port: 8787, endpoint_path: '/webhook/message', send_voice_reply: false };
+                    cfg.webhook = wcfg;
+                    sec.appendChild(createToggle("启用 Webhook", "启动 HTTP Webhook 接收消息", wcfg.enabled, (v) => { wcfg.enabled = v; saveBot(); }));
+                    sec.appendChild(createRow("Bind Host", `<input class="gi-input" type="text" value="${escapeHtml(wcfg.bind_host || '127.0.0.1')}" id="bot_webhook_host">`));
+                    sec.appendChild(createRow("Port", `<input class="gi-input" type="number" min="1" max="65535" value="${wcfg.port || 8787}" id="bot_webhook_port">`));
+                    sec.appendChild(createRow("Endpoint Path", `<input class="gi-input" type="text" value="${escapeHtml(wcfg.endpoint_path || '/webhook/message')}" id="bot_webhook_path">`));
+                    sec.appendChild(createRow("Bearer Token", `<input class="gi-input" type="password" value="${escapeHtml(wcfg.bearer_token || '')}" id="bot_webhook_token">`));
+                    sec.appendChild(createToggle("允许语音消息", "识别并回复语音消息", wcfg.send_voice_reply, (v) => { wcfg.send_voice_reply = v; saveBot(); }));
+                    sec.appendChild(characterSelect(wcfg.character_id, (v) => { wcfg.character_id = v; saveBot(); }));
+                    setTimeout(() => {
+                        const host = document.getElementById('bot_webhook_host');
+                        if (host) host.onchange = function () { wcfg.bind_host = this.value || '127.0.0.1'; saveBot(); };
+                        const port = document.getElementById('bot_webhook_port');
+                        if (port) port.onchange = function () { wcfg.port = parseInt(this.value) || 8787; saveBot(); };
+                        const path = document.getElementById('bot_webhook_path');
+                        if (path) path.onchange = function () { wcfg.endpoint_path = this.value || '/webhook/message'; saveBot(); };
+                        const token = document.getElementById('bot_webhook_token');
+                        if (token) token.onchange = function () { wcfg.bearer_token = this.value || undefined; saveBot(); };
+                    }, 0);
+                }
 
                 const note = document.createElement('div');
                 note.style.cssText = 'margin-top:12px;padding:10px;background:rgba(0,0,0,0.03);border-radius:6px;font-size:11px;color:var(--gi-ink-muted)';
-                note.textContent = 'ℹ️ 前往 @BotFather 创建 Bot 并获取 Token。Chat ID 可通过 @userinfobot 查询。';
+                note.textContent = '云平台 Token 也可以通过环境变量回退配置；保存后如状态未更新，请点击刷新状态。';
                 sec.appendChild(note);
-
                 body.appendChild(sec);
+            }
+
+            function renderTelegram() {
+                renderBot();
             }
 
             // ── 14. Jailbreak Tab ────────────────
@@ -2733,6 +4148,30 @@
                 };
                 btnRow.appendChild(saveBtn);
 
+                const exportBtn = document.createElement('button');
+                exportBtn.className = 'gi-btn';
+                exportBtn.textContent = '导出 TXT';
+                exportBtn.onclick = () => Kokoro.action('export_jailbreak_prompt');
+                btnRow.appendChild(exportBtn);
+
+                const importBtn = document.createElement('button');
+                importBtn.className = 'gi-btn';
+                importBtn.textContent = '导入 TXT';
+                importBtn.onclick = () => {
+                    Kokoro.action('import_jailbreak_prompt');
+                    setTimeout(async () => {
+                        const el = document.getElementById(textareaId);
+                        const cc = document.getElementById('jailbreak_charcount');
+                        if (!el) return;
+                        try {
+                            const current = await Kokoro.invoke('get_jailbreak_prompt');
+                            el.value = current || '';
+                            if (cc) cc.textContent = el.value.length + ' 字符';
+                        } catch (_) { }
+                    }, 1200);
+                };
+                btnRow.appendChild(importBtn);
+
                 const clearBtn = document.createElement('button');
                 clearBtn.className = 'gi-btn danger';
                 clearBtn.textContent = '清空';
@@ -2744,23 +4183,245 @@
                 btnRow.appendChild(clearBtn);
 
                 sec.appendChild(btnRow);
+
+                const example = createSection("示例");
+                example.style.marginTop = '12px';
+                example.style.background = 'rgba(0,0,0,0.03)';
+                const pre = document.createElement('pre');
+                pre.style.cssText = 'white-space:pre-wrap;font-size:11px;color:var(--gi-ink-muted);line-height:1.6;margin:0';
+                pre.textContent = '你正在进行角色扮演。保持角色设定、语气和世界观一致。避免跳出角色或提及系统规则。';
+                example.appendChild(pre);
+                sec.appendChild(example);
+
                 body.appendChild(sec);
             }
 
-            // ── 15. Backup Tab ────────────────
+            // ── 15. Pet Tab ────────────────
+            let _petConfig = null;
+            let _petLoading = false;
+
+            function formatShortcut(shortcut) {
+                return (shortcut || 'CmdOrCtrl+Shift+Space').replace(/CmdOrCtrl/g, navigator.platform.toUpperCase().includes('MAC') ? '⌘' : 'Ctrl').replace(/\+/g, ' + ');
+            }
+
+            function keysToShortcut(keys) {
+                const parts = [];
+                if (keys.has('Meta') || keys.has('Control')) parts.push('CmdOrCtrl');
+                if (keys.has('Shift')) parts.push('Shift');
+                if (keys.has('Alt')) parts.push('Alt');
+                const modifiers = new Set(['Meta', 'Control', 'Shift', 'Alt']);
+                keys.forEach(k => {
+                    if (!modifiers.has(k)) parts.push(k.length === 1 ? k.toUpperCase() : k);
+                });
+                return parts.join('+');
+            }
+
+            async function savePetConfig(config, toggleWindow) {
+                _petConfig = config;
+                await Kokoro.invoke('save_pet_config', { config });
+                if (toggleWindow === true) await Kokoro.invoke('show_pet_window');
+                if (toggleWindow === false) await Kokoro.invoke('hide_pet_window');
+                render();
+            }
+
+            function renderPet() {
+                const sec = createSection("Pet 小窗");
+                if (!_petConfig && !_petLoading) {
+                    _petLoading = true;
+                    sec.appendChild(createRow("", "正在读取 Pet 配置..."));
+                    Kokoro.invoke('get_pet_config').then(cfg => {
+                        _petConfig = cfg;
+                        _petLoading = false;
+                        if (activeTab === 'pet') render();
+                    }).catch(e => {
+                        _petLoading = false;
+                        sec.appendChild(createRow("错误", escapeHtml(String(e))));
+                    });
+                }
+
+                const cfg = _petConfig || {
+                    enabled: false,
+                    position_x: 100,
+                    position_y: 100,
+                    shortcut: 'CmdOrCtrl+Shift+Space',
+                    model_url: null,
+                    window_width: 0,
+                    window_height: 0,
+                    model_scale: 0,
+                    render_fps: 60
+                };
+
+                sec.appendChild(createToggle("启用 Pet 小窗", "在独立小窗显示当前 Live2D 角色", cfg.enabled, (v) => {
+                    savePetConfig({ ...cfg, enabled: v }, v).catch(console.error);
+                }));
+
+                sec.appendChild(createRow("快捷键", `
+                    <div style="display:flex;gap:8px;align-items:center;width:100%">
+                        <input class="gi-input" id="pet_shortcut" type="text" value="${escapeHtml(cfg.shortcut || 'CmdOrCtrl+Shift+Space')}" style="flex:1">
+                        <button class="gi-btn" id="pet_record_btn" style="white-space:nowrap">录制</button>
+                    </div>
+                    <div class="setting-desc" style="margin-top:4px">${escapeHtml(formatShortcut(cfg.shortcut))}</div>
+                `));
+
+                sec.appendChild(createRow("位置", `
+                    <div style="display:flex;gap:8px;align-items:center;width:100%">
+                        <input class="gi-input" id="pet_pos_x" type="number" value="${cfg.position_x ?? 100}" style="width:90px">
+                        <input class="gi-input" id="pet_pos_y" type="number" value="${cfg.position_y ?? 100}" style="width:90px">
+                        <button class="gi-btn" id="pet_reset_pos">重置位置</button>
+                    </div>
+                `));
+
+                sec.appendChild(createRow("渲染 FPS", `
+                    <input class="gi-input" id="pet_render_fps" type="number" min="1" max="240" value="${cfg.render_fps ?? 60}">
+                `));
+
+                setTimeout(() => {
+                    const shortcut = document.getElementById('pet_shortcut');
+                    if (shortcut) shortcut.onchange = function () {
+                        savePetConfig({ ...cfg, shortcut: this.value || 'CmdOrCtrl+Shift+Space' }).catch(console.error);
+                    };
+                    const record = document.getElementById('pet_record_btn');
+                    if (record) record.onclick = () => {
+                        record.textContent = '按下组合键...';
+                        const pressed = new Set();
+                        const onDown = (e) => {
+                            e.preventDefault();
+                            pressed.add(e.key);
+                            record.textContent = formatShortcut(keysToShortcut(pressed)) || '按下组合键...';
+                        };
+                        const onUp = (e) => {
+                            e.preventDefault();
+                            const next = keysToShortcut(pressed);
+                            document.removeEventListener('keydown', onDown, true);
+                            document.removeEventListener('keyup', onUp, true);
+                            record.textContent = '录制';
+                            if (next) savePetConfig({ ...cfg, shortcut: next }).catch(console.error);
+                        };
+                        document.addEventListener('keydown', onDown, true);
+                        document.addEventListener('keyup', onUp, true);
+                    };
+                    const x = document.getElementById('pet_pos_x');
+                    const y = document.getElementById('pet_pos_y');
+                    const savePos = () => savePetConfig({ ...cfg, position_x: parseInt(x.value) || 100, position_y: parseInt(y.value) || 100 }).catch(console.error);
+                    if (x) x.onchange = savePos;
+                    if (y) y.onchange = savePos;
+                    const reset = document.getElementById('pet_reset_pos');
+                    if (reset) reset.onclick = () => {
+                        Kokoro.invoke('move_pet_window', { x: 100, y: 100 }).finally(() => {
+                            savePetConfig({ ...cfg, position_x: 100, position_y: 100 }).catch(console.error);
+                        });
+                    };
+                    const fps = document.getElementById('pet_render_fps');
+                    if (fps) fps.onchange = function () {
+                        savePetConfig({ ...cfg, render_fps: parseInt(this.value) || 60 }).catch(console.error);
+                    };
+                }, 0);
+
+                body.appendChild(sec);
+            }
+
+            // ── 16. About Tab ────────────────
+            let _engineInfo = null;
+            let _releaseState = { status: 'idle', data: null, error: null };
+
+            function compareVersion(a, b) {
+                const pa = String(a || '').replace(/^[^\d]*/, '').split(/[.+-]/)[0].split('.').map(Number);
+                const pb = String(b || '').replace(/^[^\d]*/, '').split(/[.+-]/)[0].split('.').map(Number);
+                for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+                    const left = pa[i] || 0;
+                    const right = pb[i] || 0;
+                    if (left !== right) return left > right ? 1 : -1;
+                }
+                return 0;
+            }
+
+            function renderAbout() {
+                const sec = createSection("Kokoro Engine");
+                if (!_engineInfo) {
+                    Kokoro.invoke('get_engine_info').then(info => {
+                        _engineInfo = info;
+                        if (activeTab === 'about') render();
+                    }).catch(console.error);
+                }
+                const version = _engineInfo?.version || 'unknown';
+                const logo = document.createElement('div');
+                logo.style.cssText = 'text-align:center;padding:12px 0 18px';
+                logo.innerHTML = `
+                    <div style="font-size:20px;color:var(--gi-gold);font-family:var(--gi-font-serif);letter-spacing:.08em">Kokoro Engine</div>
+                    <div style="font-size:12px;color:var(--gi-ink-muted);margin-top:4px">当前版本：${escapeHtml(version)}</div>
+                `;
+                sec.appendChild(logo);
+
+                const links = document.createElement('div');
+                links.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px';
+                links.innerHTML = `
+                    <button class="gi-btn" id="about_github">GitHub</button>
+                    <button class="gi-btn" id="about_telegram">Telegram</button>
+                `;
+                sec.appendChild(links);
+
+                const updateSec = createSection("更新检查");
+                const checkBtn = document.createElement('button');
+                checkBtn.className = 'gi-btn primary';
+                checkBtn.textContent = _releaseState.status === 'checking' ? '检查中...' : '检查最新版本';
+                checkBtn.disabled = _releaseState.status === 'checking';
+                checkBtn.onclick = async () => {
+                    _releaseState = { status: 'checking', data: null, error: null };
+                    render();
+                    try {
+                        const res = await fetch('https://api.github.com/repos/chyinan/Kokoro-Engine/releases/latest', {
+                            headers: { Accept: 'application/vnd.github+json' }
+                        });
+                        if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+                        const data = await res.json();
+                        _releaseState = { status: compareVersion(data.tag_name, version) > 0 ? 'available' : 'latest', data, error: null };
+                    } catch (e) {
+                        _releaseState = { status: 'error', data: null, error: String(e) };
+                    }
+                    render();
+                };
+                updateSec.appendChild(checkBtn);
+                if (_releaseState.status === 'latest') updateSec.appendChild(createRow("状态", `已是最新版本 (${escapeHtml(_releaseState.data?.tag_name || version)})`));
+                if (_releaseState.status === 'available') updateSec.appendChild(createRow("发现新版本", `<a href="${escapeHtml(_releaseState.data?.html_url || 'https://github.com/chyinan/Kokoro-Engine/releases')}" target="_blank">${escapeHtml(_releaseState.data?.tag_name || '')}</a>`));
+                if (_releaseState.status === 'error') updateSec.appendChild(createRow("检查失败", escapeHtml(_releaseState.error)));
+                sec.appendChild(updateSec);
+
+                setTimeout(() => {
+                    const gh = document.getElementById('about_github');
+                    if (gh) gh.onclick = () => window.open('https://github.com/chyinan/Kokoro-Engine', '_blank', 'noopener,noreferrer');
+                    const tg = document.getElementById('about_telegram');
+                    if (tg) tg.onclick = () => window.open('https://t.me/+U39dgiUspCo2NDNh', '_blank', 'noopener,noreferrer');
+                }, 0);
+                body.appendChild(sec);
+            }
+
+            // ── 17. Backup Tab ────────────────
+            let _backupImportDb = true;
+            let _backupImportConfigs = true;
+            let _backupConflictStrategy = 'overwrite';
+
             function renderBackup() {
                 const sec = createSection("数据备份与恢复");
+                const status = state.backupStatus || {};
 
                 const desc = document.createElement('div');
                 desc.style.cssText = 'font-size:12px;color:var(--gi-ink-muted);margin-bottom:16px;line-height:1.6';
-                desc.textContent = '导出或导入 .kokoro 备份文件，包含所有配置、角色数据和记忆。';
+                desc.textContent = '导出或导入 .kokoro 备份文件，包含配置、角色数据、记忆和历史对话。';
                 sec.appendChild(desc);
+
+                if (status.message || status.error) {
+                    const msg = document.createElement('div');
+                    msg.style.cssText = `margin-bottom:12px;padding:10px;border-radius:6px;font-size:11px;line-height:1.5;background:${status.error ? 'rgba(248,113,113,.08)' : 'rgba(0,0,0,.03)'};color:${status.error ? '#b91c1c' : 'var(--gi-ink-muted)'}`;
+                    msg.textContent = status.error || status.message;
+                    sec.appendChild(msg);
+                }
 
                 const exportSec = createSection("导出备份");
                 const exportBtn = document.createElement('button');
                 exportBtn.className = 'gi-btn primary';
                 exportBtn.style.width = '100%';
-                exportBtn.textContent = '📦 导出 .kokoro 备份文件';
+                exportBtn.textContent = status.phase === 'exporting' ? '导出中...' : '导出 .kokoro 备份文件';
+                exportBtn.disabled = status.phase === 'exporting';
                 exportBtn.onclick = () => Kokoro.action('export_backup');
                 exportSec.appendChild(exportBtn);
                 sec.appendChild(exportSec);
@@ -2768,55 +4429,115 @@
                 const importSec = createSection("导入备份");
                 const importNote = document.createElement('div');
                 importNote.style.cssText = 'font-size:11px;color:var(--gi-ink-muted);margin-bottom:8px';
-                importNote.textContent = '⚠️ 导入将覆盖当前所有数据，操作不可撤销。';
+                importNote.textContent = '导入前会先读取备份清单。确认导入后可能覆盖当前数据，请谨慎操作。';
                 importSec.appendChild(importNote);
 
                 const importBtn = document.createElement('button');
-                importBtn.className = 'gi-btn danger';
+                importBtn.className = 'gi-btn';
                 importBtn.style.width = '100%';
-                importBtn.textContent = '📂 导入 .kokoro 备份文件';
-                importBtn.onclick = () => {
-                    if (confirm('确定要导入备份吗？这将覆盖当前所有数据！')) {
-                        Kokoro.action('import_backup');
-                    }
-                };
+                importBtn.textContent = '选择 .kokoro 备份文件';
+                importBtn.onclick = () => Kokoro.action('select_import_backup');
                 importSec.appendChild(importBtn);
+
+                if (status.preview) {
+                    const p = status.preview;
+                    _backupImportDb = p.has_database ? _backupImportDb : false;
+                    _backupImportConfigs = p.has_configs ? _backupImportConfigs : false;
+                    const previewBox = document.createElement('div');
+                    previewBox.style.cssText = 'margin-top:12px;padding:12px;border:1px solid rgba(0,0,0,.08);border-radius:8px;background:rgba(0,0,0,.03);font-size:11px;color:var(--gi-ink-muted);line-height:1.6';
+                    previewBox.innerHTML = `
+                        <div style="font-weight:600;color:var(--gi-ink)">备份版本：${escapeHtml(p.manifest?.app_version || 'unknown')}</div>
+                        <div>创建时间：${escapeHtml(p.manifest?.created_at ? new Date(p.manifest.created_at).toLocaleString() : 'unknown')}</div>
+                        <div>记忆 ${p.stats?.memories || 0} · 对话 ${p.stats?.conversations || 0} · 消息 ${p.stats?.messages || 0} · 配置 ${p.stats?.configs || 0}</div>
+                    `;
+                    importSec.appendChild(previewBox);
+
+                    if (p.has_database) importSec.appendChild(createToggle("导入数据库", "包含记忆、历史对话等数据", _backupImportDb, (v) => { _backupImportDb = v; }));
+                    if (p.has_configs) importSec.appendChild(createToggle("导入配置", "包含模型、TTS、STT、视觉等配置文件", _backupImportConfigs, (v) => { _backupImportConfigs = v; }));
+                    importSec.appendChild(createSelect("冲突策略", "遇到已有数据时的处理方式", [
+                        { value: 'overwrite', label: '覆盖' },
+                        { value: 'skip', label: '跳过' }
+                    ], _backupConflictStrategy, (v) => { _backupConflictStrategy = v; }));
+
+                    const confirmBtn = document.createElement('button');
+                    confirmBtn.className = 'gi-btn danger';
+                    confirmBtn.style.width = '100%';
+                    confirmBtn.style.marginTop = '10px';
+                    confirmBtn.textContent = status.phase === 'importing' ? '导入中...' : '确认导入';
+                    confirmBtn.disabled = status.phase === 'importing' || (!_backupImportDb && !_backupImportConfigs);
+                    confirmBtn.onclick = () => {
+                        if (!confirm('确定导入该备份吗？这可能覆盖当前数据。')) return;
+                        Kokoro.action('confirm_import_backup', {
+                            import_database: _backupImportDb,
+                            import_configs: _backupImportConfigs,
+                            conflict_strategy: _backupConflictStrategy
+                        });
+                    };
+                    importSec.appendChild(confirmBtn);
+                }
                 sec.appendChild(importSec);
 
                 // Auto-backup settings
                 const autoSec = createSection("自动备份");
-                const backupCfg = state.backupConfig || {};
-                autoSec.appendChild(createToggle("启用自动备份", "定期自动导出备份文件", backupCfg.auto_enabled, (v) => {
-                    backupCfg.auto_enabled = v;
-                    Kokoro.action('save_backup_config', { config: backupCfg });
+                const backupCfg = state.autoBackupConfig || {
+                    enabled: false,
+                    backup_dir: '',
+                    interval_days: 1,
+                    auto_cleanup: false,
+                    keep_days: 30
+                };
+                autoSec.appendChild(createToggle("启用自动备份", "定期自动导出备份文件", backupCfg.enabled, (v) => {
+                    backupCfg.enabled = v;
+                    Kokoro.action('save_auto_backup_config', { config: backupCfg });
                 }));
 
                 const intervalOpts = [
-                    { value: 'daily', label: '每天' },
-                    { value: 'weekly', label: '每周' },
-                    { value: 'monthly', label: '每月' }
+                    { value: '1', label: '每天' },
+                    { value: '2', label: '每 2 天' },
+                    { value: '3', label: '每 3 天' },
+                    { value: '7', label: '每周' }
                 ];
-                autoSec.appendChild(createSelect("备份频率", "自动备份的时间间隔", intervalOpts, backupCfg.interval || 'daily', (v) => {
-                    backupCfg.interval = v;
-                    Kokoro.action('save_backup_config', { config: backupCfg });
+                autoSec.appendChild(createSelect("备份频率", "自动备份的时间间隔", intervalOpts, String(backupCfg.interval_days || 1), (v) => {
+                    backupCfg.interval_days = parseInt(v) || 1;
+                    Kokoro.action('save_auto_backup_config', { config: backupCfg });
                 }));
 
-                autoSec.appendChild(createSlider("保留份数", 1, 20, 1, backupCfg.keep_count || 5, (v) => {
-                    backupCfg.keep_count = parseInt(v);
-                    Kokoro.action('save_backup_config', { config: backupCfg });
+                autoSec.appendChild(createToggle("自动清理旧备份", "超过保留天数后清理旧备份", backupCfg.auto_cleanup, (v) => {
+                    backupCfg.auto_cleanup = v;
+                    Kokoro.action('save_auto_backup_config', { config: backupCfg });
+                }));
+
+                autoSec.appendChild(createSlider("保留天数", 1, 365, 1, backupCfg.keep_days || 30, (v) => {
+                    backupCfg.keep_days = parseInt(v);
+                    Kokoro.action('save_auto_backup_config', { config: backupCfg });
                 }));
 
                 const backupDirId = 'backup_dir';
                 autoSec.appendChild(createRow("备份目录", `
-                    <input class="gi-input" type="text" value="${escapeHtml(backupCfg.backup_dir || '')}" id="${backupDirId}" placeholder="留空使用默认目录">
+                    <div style="display:flex;gap:8px;align-items:center;width:100%">
+                        <input class="gi-input" type="text" value="${escapeHtml(backupCfg.backup_dir || '')}" id="${backupDirId}" placeholder="留空使用默认目录" style="flex:1">
+                        <button class="gi-btn" id="backup_dir_pick" style="white-space:nowrap">选择</button>
+                    </div>
                 `));
                 setTimeout(() => {
                     const el = document.getElementById(backupDirId);
                     if (el) el.onchange = function () {
                         backupCfg.backup_dir = this.value;
-                        Kokoro.action('save_backup_config', { config: backupCfg });
+                        Kokoro.action('save_auto_backup_config', { config: backupCfg });
                     };
+                    const pick = document.getElementById('backup_dir_pick');
+                    if (pick) pick.onclick = () => Kokoro.action('pick_auto_backup_dir');
                 }, 0);
+
+                const autoRow = document.createElement('div');
+                autoRow.style.cssText = 'display:flex;gap:8px;margin-top:12px';
+                const runNowBtn = document.createElement('button');
+                runNowBtn.className = 'gi-btn primary';
+                runNowBtn.textContent = status.phase === 'auto-running' ? '备份中...' : '立即自动备份';
+                runNowBtn.disabled = status.phase === 'auto-running' || !backupCfg.backup_dir;
+                runNowBtn.onclick = () => Kokoro.action('run_auto_backup_now');
+                autoRow.appendChild(runNowBtn);
+                autoSec.appendChild(autoRow);
                 sec.appendChild(autoSec);
 
                 body.appendChild(sec);
