@@ -29,6 +29,8 @@ import type {
     ImageGenSystemConfig,
     SttConfig,
     BotConfig,
+    BotStatus,
+    AutoBackupConfig,
     TelegramConfig,
     TelegramStatus,
     Live2dModelInfo,
@@ -112,6 +114,10 @@ interface SettingsPanelProps {
     onVisionConfigChange?: (cfg: VisionConfig) => void;
     imageGenConfig?: ImageGenSystemConfig;
     telegramConfig?: TelegramConfig;
+    botConfig?: BotConfig;
+    botStatus?: BotStatus;
+    autoBackupConfig?: AutoBackupConfig;
+    backupStatus?: unknown;
     mcpServers?: McpServerStatus[];
     modList?: ModManifest[];
     ttsProviders?: ProviderStatus[];

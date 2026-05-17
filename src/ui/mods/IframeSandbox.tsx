@@ -84,9 +84,12 @@ const ALLOWED_MOD_COMMANDS = new Set([
     // Character state (read-only)
     'get_character_state',
     'get_engine_info',
+    'list_vision_screens',
     // Cue / motion control
     'play_cue',
     'play_motion',
+    'get_live2d_model_profile',
+    'save_live2d_model_profile',
     // Settings (scoped to MOD namespace)
     'get_mod_setting',
     'set_mod_setting',
@@ -100,6 +103,34 @@ const ALLOWED_MOD_COMMANDS = new Set([
     // Jailbreak prompt (settings page)
     'get_jailbreak_prompt',
     'set_jailbreak_prompt',
+    // Pet window
+    'get_pet_config',
+    'save_pet_config',
+    'show_pet_window',
+    'hide_pet_window',
+    'move_pet_window',
+    // Tool settings / MCP action directory
+    'list_actions',
+    'get_tool_settings',
+    'save_tool_settings',
+    // Memory settings and Dream review
+    'get_memory_enabled',
+    'set_memory_enabled',
+    'get_memory_upgrade_config',
+    'set_memory_upgrade_config',
+    'get_dreaming_summary',
+    'list_dream_jobs',
+    'list_dream_proposals',
+    'run_dream_now',
+    'approve_dream_proposal',
+    'reject_dream_proposal',
+    // API / context settings
+    'test_llm_connection',
+    'get_context_settings',
+    'set_context_settings',
+    // STT local model setup
+    'get_sensevoice_local_status',
+    'download_sensevoice_local_model',
     // TTS utilities
     'convert_singing',
     // Dialog (file picker)

@@ -21,6 +21,7 @@ import { useBackgroundSlideshow } from "./ui/hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "./features/live2d/Live2DViewer";
 import { live2dUrl } from "./lib/utils";
 import { MEMORY_MODEL_DIALOG_EVENT } from "./lib/memory-model-gate";
+import { characterDb } from "./lib/db";
 
 // Register components synchronously before first render
 registerCoreComponents();
@@ -75,6 +76,44 @@ function createLayout(displayMode: { mode: Live2DDisplayMode; modelUrl: string; 
   };
 }
 
+function parseMcpJson(raw: string): McpServerConfig[] {
+  let trimmed = raw.trim().replace(/,\s*$/, "");
+  if (trimmed.startsWith('"') && !trimmed.startsWith("{")) {
+    trimmed = `{${trimmed}}`;
+  }
+
+  const parsed = JSON.parse(trimmed);
+  const servers = parsed.mcpServers || parsed;
+  const configs: McpServerConfig[] = [];
+
+  for (const [name, entry] of Object.entries(servers)) {
+    const server = entry as {
+      type?: string;
+      transportType?: string;
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      url?: string;
+      disabled?: boolean;
+    };
+    let type = server.type || server.transportType || "stdio";
+    if (type === "stdio" && !server.command && server.url) {
+      type = server.url.replace(/\/+$/, "").endsWith("/sse") ? "sse" : "streamable_http";
+    }
+    configs.push({
+      name,
+      type,
+      command: server.command || "",
+      args: server.args || [],
+      env: server.env || {},
+      url: server.url,
+      enabled: server.disabled === true ? false : true,
+    });
+  }
+
+  return configs;
+}
+
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import {
   onImageGenDone,
@@ -89,12 +128,16 @@ import {
   streamChat,
   dispatchModEvent,
   unloadMod,
+  loadMod,
+  installMod,
   listLive2dModels,
   getTtsConfig,
   setPersona,
   setUserName,
   setUserPersona,
   setResponseLanguage,
+  getJailbreakPrompt,
+  setJailbreakPrompt,
   getProactiveEnabled,
   getUserProfileSettings,
   getMemoryEmbeddingModelStatus,
@@ -103,6 +146,10 @@ import {
   getImageGenConfig,
   getTelegramConfig,
   getTelegramStatus,
+  getBotConfig,
+  getBotStatus,
+  getAutoBackupConfig,
+  listCharacters,
   getVisionConfig,
   getSttConfig,
   listMcpServers,
@@ -121,14 +168,27 @@ import {
   saveImageGenConfig,
   saveVisionConfig,
   saveSttConfig,
+  saveTelegramConfig,
+  saveBotConfig,
+  saveAutoBackupConfig,
+  runAutoBackupNow,
+  exportData,
+  previewImport,
+  importData,
+  startTelegramBot,
+  stopTelegramBot,
+  startBotPlatform,
+  stopBotPlatform,
   // New: MCP Management
   addMcpServer,
   removeMcpServer,
   reconnectMcpServer,
   refreshMcpTools,
+  toggleMcpServer,
   // New: Memory
   listMemories,
   updateMemory,
+  updateMemoryTier,
   deleteMemory,
   downloadMemoryEmbeddingModel,
   // New: Singing (RVC)
@@ -141,11 +201,15 @@ import {
   setWindowSize,
   onChatImageGen,
   generateImage,
+  synthesize,
   // New: Vision
   captureScreenNow,
   // New: Live2D
   deleteLive2dModel,
   importLive2dZip,
+  importLive2dFolder,
+  exportLive2dModel,
+  renameLive2dModel,
   setActiveLive2dModel,
   BUILTIN_LIVE2D_MODEL_PATH,
   // New: Context
@@ -160,6 +224,7 @@ import {
   type VisionConfig,
   type ImageGenSystemConfig,
   type ModManifest,
+  type McpServerConfig,
   type McpServerStatus,
   type ProviderStatus,
   type VoiceProfile,
@@ -167,6 +232,11 @@ import {
   type MemoryRecord,
   type TelegramConfig,
   type TelegramStatus,
+  type BotConfig,
+  type BotPlatformId,
+  type BotStatus,
+  type AutoBackupConfig,
+  type ImportPreview,
   type RvcModelInfo,
   type SingingProgressEvent,
   type CharacterRecord,
@@ -277,6 +347,16 @@ function App() {
   const [imageGenConfig, setImageGenConfig] = useState<ImageGenSystemConfig | undefined>(undefined);
   const [telegramConfig, setTelegramConfig] = useState<TelegramConfig | undefined>(undefined);
   const [telegramStatus, setTelegramStatus] = useState<TelegramStatus | undefined>(undefined);
+  const [botConfig, setBotConfig] = useState<BotConfig | undefined>(undefined);
+  const [botStatus, setBotStatus] = useState<BotStatus | undefined>(undefined);
+  const [autoBackupConfig, setAutoBackupConfig] = useState<AutoBackupConfig | undefined>(undefined);
+  const [backupStatus, setBackupStatus] = useState<{
+    phase: "idle" | "exporting" | "exported" | "preview" | "importing" | "imported" | "auto-running" | "auto-ran" | "error";
+    message?: string;
+    error?: string;
+    preview?: ImportPreview;
+    importFilePath?: string;
+  }>({ phase: "idle" });
 
   // Lists
   const [mcpServers, setMcpServers] = useState<McpServerStatus[]>([]);
@@ -554,7 +634,10 @@ function App() {
       getProactiveEnabled(),
       getTelegramConfig(),
       getTelegramStatus(),
-    ]).then(([tts, llm, stt, vision, imageGen, mcp, mods, proactive, telegram, telegramStatus]) => {
+      getBotConfig(),
+      getBotStatus(),
+      getAutoBackupConfig(),
+    ]).then(([tts, llm, stt, vision, imageGen, mcp, mods, proactive, telegram, telegramStatus, botConfig, botStatus, autoBackup]) => {
       setTtsConfig(tts);
       setLlmConfig(llm);
       setSttConfig(stt);
@@ -566,6 +649,9 @@ function App() {
       localStorage.setItem("kokoro_proactive_enabled", String(proactive));
       setTelegramConfig(telegram);
       setTelegramStatus(telegramStatus);
+      setBotConfig(botConfig);
+      setBotStatus(botStatus);
+      setAutoBackupConfig(autoBackup);
     }).catch(err => console.error("[App] Failed to fetch initial configs:", err));
 
     // Sync language settings to backend on startup
@@ -736,6 +822,190 @@ function App() {
     };
   }, []);
 
+  const formatBytes = (bytes: number): string => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  };
+
+  const buildCharactersBackupJson = async (): Promise<string> => {
+    const sqliteChars = await listCharacters();
+    const idbChars = await characterDb.getAll();
+    const idbByStableId = new Map(idbChars.filter(c => c.stableId).map(c => [c.stableId, c]));
+    const userName = localStorage.getItem('kokoro_user_name') ?? 'User';
+    const userPersona = localStorage.getItem('kokoro_user_persona') ?? '';
+    const userLanguage = localStorage.getItem('kokoro_user_language');
+    const responseLanguage = localStorage.getItem('kokoro_response_language');
+    const voiceInterrupt = localStorage.getItem('kokoro_voice_interrupt');
+
+    await setUserName(userName);
+    await setUserPersona(userPersona);
+
+    const characters = await Promise.all(sqliteChars.map(async (char) => {
+      const idbChar = idbByStableId.get(char.id);
+      if (idbChar?.avatarBlob) {
+        return { ...char, stableId: char.id, avatarB64: arrayBufferToBase64(await idbChar.avatarBlob.arrayBuffer()) };
+      }
+      return { ...char, stableId: char.id };
+    }));
+
+    return JSON.stringify({
+      characters,
+      activeCharacterId: localStorage.getItem('kokoro_active_character_id'),
+      userName,
+      userPersona,
+      userLanguage,
+      responseLanguage,
+      voiceInterrupt,
+    });
+  };
+
+  const handleExportBackup = async () => {
+    setBackupStatus({ phase: "exporting", message: "正在导出备份..." });
+    try {
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      const filePath = await save({
+        defaultPath: `kokoro-backup-${new Date().toISOString().slice(0, 10)}.kokoro`,
+        filters: [{ name: 'Kokoro Backup', extensions: ['kokoro'] }],
+      });
+      if (!filePath) {
+        setBackupStatus({ phase: "idle" });
+        return;
+      }
+      const result = await exportData(filePath, await buildCharactersBackupJson());
+      setBackupStatus({
+        phase: "exported",
+        message: `已导出 ${formatBytes(result.size_bytes)} · 记忆 ${result.stats.memories} · 对话 ${result.stats.conversations} · 配置 ${result.stats.configs}`,
+      });
+    } catch (error) {
+      setBackupStatus({ phase: "error", error: getKokoroErrorMessage(error) });
+    }
+  };
+
+  const handleSelectImportBackup = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: 'Kokoro Backup', extensions: ['kokoro'] }],
+      });
+      if (!selected) return;
+      const filePath = Array.isArray(selected) ? selected[0] : selected;
+      const preview = await previewImport(filePath);
+      setBackupStatus({ phase: "preview", preview, importFilePath: filePath });
+    } catch (error) {
+      setBackupStatus({ phase: "error", error: getKokoroErrorMessage(error) });
+    }
+  };
+
+  const handleConfirmImportBackup = async (options: {
+    import_database?: boolean;
+    import_configs?: boolean;
+    conflict_strategy?: "skip" | "overwrite";
+  }) => {
+    const filePath = backupStatus.importFilePath;
+    if (!filePath) return;
+    setBackupStatus(prev => ({ ...prev, phase: "importing", message: "正在导入备份..." }));
+    try {
+      let payload: any = null;
+      let targetCharacterId: string | undefined;
+      const importDb = options.import_database ?? true;
+      const importConfigs = options.import_configs ?? true;
+      const conflictStrategy = options.conflict_strategy ?? "overwrite";
+
+      const firstPass = await importData(filePath, {
+        import_database: false,
+        import_configs: false,
+        conflict_strategy: conflictStrategy,
+      });
+
+      if (firstPass.characters_json && importDb) {
+        payload = JSON.parse(firstPass.characters_json);
+        const chars = payload.characters ?? payload;
+
+        if (payload.userName != null) {
+          localStorage.setItem('kokoro_user_name', payload.userName);
+          await setUserName(payload.userName);
+        }
+        if (payload.userPersona != null) {
+          localStorage.setItem('kokoro_user_persona', payload.userPersona);
+          await setUserPersona(payload.userPersona);
+        }
+        if (payload.userLanguage != null) localStorage.setItem('kokoro_user_language', payload.userLanguage);
+        if (payload.responseLanguage != null) localStorage.setItem('kokoro_response_language', payload.responseLanguage);
+        if (payload.voiceInterrupt != null) localStorage.setItem('kokoro_voice_interrupt', payload.voiceInterrupt);
+
+        const newIds: number[] = [];
+        for (const char of chars) {
+          let avatarBlob: Blob | undefined;
+          if (char.avatarB64) {
+            const bytes = Uint8Array.from(atob(char.avatarB64), c => c.charCodeAt(0));
+            avatarBlob = new Blob([bytes]);
+          }
+          const { avatarB64: _avatarB64, id: _oldId, ...rest } = char;
+          const newId = await characterDb.add({ ...rest, avatarBlob });
+          newIds.push(newId);
+        }
+        const existing = await characterDb.getAll();
+        for (const char of existing) {
+          if (char.id !== undefined && !newIds.includes(char.id)) await characterDb.remove(char.id);
+        }
+
+        targetCharacterId = payload.activeCharacterId || chars[0]?.stableId;
+        if (targetCharacterId) localStorage.setItem('kokoro_active_character_id', targetCharacterId);
+      }
+
+      if (!targetCharacterId) targetCharacterId = localStorage.getItem('kokoro_active_character_id') ?? undefined;
+
+      const result = await importData(filePath, {
+        import_database: importDb,
+        import_configs: importConfigs,
+        conflict_strategy: conflictStrategy,
+        target_character_id: targetCharacterId,
+      });
+
+      if (payload?.userName != null) {
+        localStorage.setItem('kokoro_user_name', payload.userName);
+        await setUserName(payload.userName);
+      }
+      if (payload?.userPersona != null) {
+        localStorage.setItem('kokoro_user_persona', payload.userPersona);
+        await setUserPersona(payload.userPersona);
+      }
+
+      setBackupStatus({
+        phase: "imported",
+        message: `导入完成 · 记忆 ${result.imported_memories} · 对话 ${result.imported_conversations} · 配置 ${result.imported_configs}`,
+      });
+      window.setTimeout(() => window.location.reload(), 1500);
+    } catch (error) {
+      setBackupStatus(prev => ({ ...prev, phase: "error", importFilePath: prev.importFilePath, preview: prev.preview, error: getKokoroErrorMessage(error) }));
+    }
+  };
+
+  const handlePickAutoBackupDir = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({ directory: true, multiple: false });
+      if (!selected || Array.isArray(selected)) return;
+      const next = {
+        ...(autoBackupConfig ?? { enabled: false, backup_dir: "", interval_days: 1, auto_cleanup: false, keep_days: 30 }),
+        backup_dir: selected,
+      };
+      setAutoBackupConfig(next);
+      await saveAutoBackupConfig(next);
+    } catch (error) {
+      setBackupStatus({ phase: "error", error: getKokoroErrorMessage(error) });
+    }
+  };
+
   // ── MOD System: Action listener for UI components ──
   const handleModAction = (e: Event) => {
     const detail = (e as CustomEvent).detail;
@@ -777,6 +1047,15 @@ function App() {
     if (detail.action === 'set_display_mode' && detail.data?.mode) {
       handleDisplayModeChange(detail.data.mode);
     }
+    if (detail.action === 'set_gaze_tracking') {
+      handleGazeTrackingChange(!!detail.data?.enabled);
+    }
+    if (detail.action === 'set_render_fps' && detail.data?.fps !== undefined) {
+      const fps = Number.parseInt(String(detail.data.fps), 10);
+      if (Number.isFinite(fps)) {
+        void handleRenderFpsChange(Math.max(0, fps));
+      }
+    }
     if (detail.action === 'set_background' && detail.data?.url) {
       setGeneratedImage(detail.data.url);
       bgSlideshow.setConfig({ mode: "generated" });
@@ -807,6 +1086,83 @@ function App() {
     if (detail.action === 'save_vision_config' && detail.data?.config) {
       setVisionConfig(detail.data.config);
       saveVisionConfig(detail.data.config).catch(console.error);
+    }
+    if (detail.action === 'save_telegram_config' && detail.data?.config) {
+      setTelegramConfig(detail.data.config);
+      saveTelegramConfig(detail.data.config)
+        .then(() => getTelegramStatus())
+        .then(setTelegramStatus)
+        .catch(console.error);
+    }
+    if (detail.action === 'save_bot_config' && detail.data?.config) {
+      setBotConfig(detail.data.config);
+      saveBotConfig(detail.data.config)
+        .then(() => Promise.all([getBotStatus(), getTelegramConfig(), getTelegramStatus()]))
+        .then(([status, telegram, telegramStatus]) => {
+          setBotStatus(status);
+          setTelegramConfig(telegram);
+          setTelegramStatus(telegramStatus);
+        })
+        .catch(console.error);
+    }
+    if (detail.action === 'refresh_bot_status') {
+      Promise.all([getBotConfig(), getBotStatus(), getTelegramStatus()])
+        .then(([config, status, telegramStatus]) => {
+          setBotConfig(config);
+          setBotStatus(status);
+          setTelegramStatus(telegramStatus);
+        })
+        .catch(console.error);
+    }
+    if (detail.action === 'start_bot_platform' && detail.data?.platform) {
+      const platform = detail.data.platform as BotPlatformId;
+      const start = platform === "telegram"
+        ? startTelegramBot()
+        : startBotPlatform(platform as Exclude<BotPlatformId, "telegram">);
+      start
+        .then(() => Promise.all([getBotStatus(), getTelegramStatus()]))
+        .then(([status, telegramStatus]) => {
+          setBotStatus(status);
+          setTelegramStatus(telegramStatus);
+        })
+        .catch(console.error);
+    }
+    if (detail.action === 'stop_bot_platform' && detail.data?.platform) {
+      const platform = detail.data.platform as BotPlatformId;
+      const stop = platform === "telegram"
+        ? stopTelegramBot()
+        : stopBotPlatform(platform as Exclude<BotPlatformId, "telegram">);
+      stop
+        .then(() => Promise.all([getBotStatus(), getTelegramStatus()]))
+        .then(([status, telegramStatus]) => {
+          setBotStatus(status);
+          setTelegramStatus(telegramStatus);
+        })
+        .catch(console.error);
+    }
+    if (detail.action === 'export_backup') {
+      void handleExportBackup();
+    }
+    if (detail.action === 'select_import_backup') {
+      void handleSelectImportBackup();
+    }
+    if (detail.action === 'confirm_import_backup') {
+      void handleConfirmImportBackup(detail.data ?? {});
+    }
+    if (detail.action === 'save_auto_backup_config' && detail.data?.config) {
+      setAutoBackupConfig(detail.data.config);
+      saveAutoBackupConfig(detail.data.config)
+        .then(() => setBackupStatus({ phase: "idle", message: "自动备份设置已保存" }))
+        .catch(error => setBackupStatus({ phase: "error", error: getKokoroErrorMessage(error) }));
+    }
+    if (detail.action === 'pick_auto_backup_dir') {
+      void handlePickAutoBackupDir();
+    }
+    if (detail.action === 'run_auto_backup_now') {
+      setBackupStatus({ phase: "auto-running", message: "正在执行自动备份..." });
+      runAutoBackupNow()
+        .then(path => setBackupStatus({ phase: "auto-ran", message: `自动备份完成：${path}` }))
+        .catch(error => setBackupStatus({ phase: "error", error: getKokoroErrorMessage(error) }));
     }
 
     // New Actions for Mod Settings
@@ -843,6 +1199,51 @@ function App() {
 
     if (detail.action === 'set_voice_interrupt') {
       setVoiceInterrupt(!!detail.data?.enabled);
+    }
+
+    if (detail.action === 'export_jailbreak_prompt') {
+      void (async () => {
+        try {
+          const [{ save }, { writeTextFile }, prompt] = await Promise.all([
+            import('@tauri-apps/plugin-dialog'),
+            import('@tauri-apps/plugin-fs'),
+            getJailbreakPrompt(),
+          ]);
+          const filePath = await save({
+            defaultPath: 'jailbreak_prompt.txt',
+            filters: [{ name: 'Text', extensions: ['txt'] }],
+          });
+          if (filePath) await writeTextFile(filePath, prompt);
+        } catch (err) {
+          console.error('[App] Jailbreak export failed:', err);
+        }
+      })();
+    }
+    if (detail.action === 'import_jailbreak_prompt') {
+      void (async () => {
+        try {
+          const [{ open }, { readTextFile }] = await Promise.all([
+            import('@tauri-apps/plugin-dialog'),
+            import('@tauri-apps/plugin-fs'),
+          ]);
+          const selected = await open({
+            multiple: false,
+            filters: [{ name: 'Text', extensions: ['txt'] }],
+          });
+          if (selected && typeof selected === 'string') {
+            const content = await readTextFile(selected);
+            await setJailbreakPrompt(content);
+          }
+        } catch (err) {
+          console.error('[App] Jailbreak import failed:', err);
+        }
+      })();
+    }
+
+    if (detail.action === 'set_vision_enabled') {
+      const enabled = !!detail.data?.enabled;
+      localStorage.setItem('kokoro_vision_enabled', enabled ? 'true' : 'false');
+      window.dispatchEvent(new Event('kokoro-vision-settings-changed'));
     }
 
     if (detail.action === 'set_proactive_enabled') {
@@ -890,8 +1291,60 @@ function App() {
         }
       }).catch(err => console.error('[App] import_bg_images failed:', err));
     }
+    if (detail.action === 'import_bg_folder') {
+      import('@tauri-apps/plugin-dialog').then(async ({ open }) => {
+        const selected = await open({ directory: true, multiple: false });
+        if (!selected || Array.isArray(selected)) return;
+        const { readDir, readFile } = await import('@tauri-apps/plugin-fs');
+        const imageExts = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']);
+        const mimeMap: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp' };
+        const files: File[] = [];
+        const joinPath = (base: string, name: string) => `${base.replace(/[\\/]+$/, '')}\\${name}`;
+        const walk = async (dir: string) => {
+          const entries = await readDir(dir);
+          for (const entry of entries) {
+            const childPath = joinPath(dir, entry.name);
+            if (entry.isDirectory) {
+              await walk(childPath);
+              continue;
+            }
+            const ext = entry.name.split('.').pop()?.toLowerCase() || '';
+            if (!imageExts.has(ext)) continue;
+            try {
+              const data = await readFile(childPath);
+              files.push(new File([data], entry.name, { type: mimeMap[ext] || 'image/png' }));
+            } catch (e) {
+              console.error('[App] Failed to read bg folder image:', childPath, e);
+            }
+          }
+        };
+        await walk(selected);
+        if (files.length > 0) {
+          const dt = new DataTransfer();
+          files.forEach(f => dt.items.add(f));
+          await bgSlideshow.importFiles(dt.files);
+        }
+      }).catch(err => console.error('[App] import_bg_folder failed:', err));
+    }
 
     // ── TTS Playback Actions ────────────────────────
+    if (detail.action === 'set_tts_enabled') {
+      localStorage.setItem('kokoro_tts_enabled', detail.data?.enabled ? 'true' : 'false');
+    }
+    if (detail.action === 'set_tts_speed' && detail.data?.speed !== undefined) {
+      localStorage.setItem('kokoro_tts_speed', String(detail.data.speed));
+    }
+    if (detail.action === 'set_tts_pitch' && detail.data?.pitch !== undefined) {
+      localStorage.setItem('kokoro_tts_pitch', String(detail.data.pitch));
+    }
+    if (detail.action === 'test_tts') {
+      synthesize("Hello! This is a test of the TTS system.", {
+        provider_id: localStorage.getItem('kokoro_tts_provider') || undefined,
+        voice: localStorage.getItem('kokoro_tts_voice') || undefined,
+        speed: Number.parseFloat(localStorage.getItem('kokoro_tts_speed') || "1.0"),
+        pitch: Number.parseFloat(localStorage.getItem('kokoro_tts_pitch') || "1.0"),
+      }).catch(err => console.error('[App] TTS test failed:', err));
+    }
     if (detail.action === 'set_tts_playback' && detail.data) {
       const { speed, pitch, voice, provider } = detail.data;
       if (speed !== undefined) localStorage.setItem('kokoro_tts_speed', String(speed));
@@ -901,8 +1354,20 @@ function App() {
     }
 
     // ── MCP Actions ────────────────────────────────
-    if (detail.action === 'add_mcp_server' && detail.data?.config) {
-      addMcpServer(detail.data.config)
+    if (detail.action === 'list_mcp_servers') {
+      listMcpServers()
+        .then(servers => setMcpServers(servers))
+        .catch(err => console.error('[App] MCP list failed:', err));
+    }
+    if (detail.action === 'add_mcp_server' && (detail.data?.config || detail.data?.json)) {
+      let configs: McpServerConfig[];
+      try {
+        configs = detail.data?.config ? [detail.data.config as McpServerConfig] : parseMcpJson(String(detail.data.json));
+      } catch (err) {
+        console.error('[App] MCP JSON parse failed:', err);
+        return;
+      }
+      Promise.all(configs.map(config => addMcpServer(config)))
         .then(() => listMcpServers())
         .then(servers => setMcpServers(servers))
         .catch(err => console.error('[App] MCP add failed:', err));
@@ -919,6 +1384,12 @@ function App() {
         .then(servers => setMcpServers(servers))
         .catch(err => console.error('[App] MCP reconnect failed:', err));
     }
+    if (detail.action === 'toggle_mcp_server' && detail.data?.name) {
+      toggleMcpServer(detail.data.name, !!detail.data.enabled)
+        .then(() => listMcpServers())
+        .then(servers => setMcpServers(servers))
+        .catch(err => console.error('[App] MCP toggle failed:', err));
+    }
     if (detail.action === 'refresh_mcp_tools') {
       refreshMcpTools()
         .then(() => listMcpServers())
@@ -929,6 +1400,34 @@ function App() {
     // ── Mod Unload Action ─────────────────────────────
     if (detail.action === 'unload_mod') {
       unloadMod().catch(err => console.error('[App] Mod unload failed:', err));
+    }
+    if (detail.action === 'refresh_mods') {
+      listMods()
+        .then(mods => setModList(mods))
+        .catch(err => console.error('[App] Mod list failed:', err));
+    }
+    if (detail.action === 'load_mod' && detail.data?.id) {
+      loadMod(detail.data.id)
+        .then(() => listMods())
+        .then(mods => setModList(mods))
+        .catch(err => console.error('[App] Mod load failed:', err));
+    }
+    if (detail.action === 'import_mod_archive') {
+      void (async () => {
+        try {
+          const { open } = await import('@tauri-apps/plugin-dialog');
+          const selected = await open({
+            multiple: false,
+            filters: [{ name: 'Mod Archive', extensions: ['zip'] }],
+          });
+          if (!selected || typeof selected !== 'string') return;
+          await installMod(selected);
+          const mods = await listMods();
+          setModList(mods);
+        } catch (err) {
+          console.error('[App] Mod import failed:', err);
+        }
+      })();
     }
 
     // ── Memory Actions ─────────────────────────────
@@ -941,6 +1440,9 @@ function App() {
     if (detail.action === 'update_memory' && detail.data) {
       const { id, content, importance } = detail.data;
       updateMemory(id, content, importance)
+        .then(() => {
+          if (detail.data?.tier) return updateMemoryTier(id, detail.data.tier);
+        })
         .catch(err => console.error('[App] Memory update failed:', err));
     }
     if (detail.action === 'delete_memory' && detail.data?.id !== undefined) {
@@ -972,6 +1474,11 @@ function App() {
         .then(models => setSdModels(models))
         .catch(err => console.error('[App] SD connection test failed:', err));
     }
+    if (detail.action === 'test_image_gen') {
+      generateImage("A cute chibi anime character, white background, high quality", detail.data?.providerId)
+        .then(result => console.log('[App] Image generation test completed:', result.image_url))
+        .catch(err => console.error('[App] Image generation test failed:', err));
+    }
 
     // ── Vision Actions ─────────────────────────────
     if (detail.action === 'capture_screen') {
@@ -1000,8 +1507,7 @@ function App() {
     }
     if (detail.action === 'set_custom_model') {
       const newPath = detail.data?.path ?? null;
-      setCustomModelPath(newPath);
-      localStorage.setItem('kokoro_custom_model', newPath || '');
+      handleCustomModelChange(newPath);
     }
     if (detail.action === 'import_model') {
       import('@tauri-apps/plugin-dialog').then(({ open }) => {
@@ -1017,17 +1523,49 @@ function App() {
               try {
                 const modelPath = await importLive2dZip(selected);
                 setCustomModelPath(modelPath);
-                localStorage.setItem('kokoro_custom_model', modelPath);
+                localStorage.setItem('kokoro_custom_model_path', modelPath);
                 const models = await listLive2dModels();
                 setAvailableModels(models);
               } catch (e) { console.error('[App] import zip failed:', e); }
             } else {
-              setCustomModelPath(selected);
-              localStorage.setItem('kokoro_custom_model', selected);
+              try {
+                const modelPath = await importLive2dFolder(selected);
+                setCustomModelPath(modelPath);
+                localStorage.setItem('kokoro_custom_model_path', modelPath);
+                const models = await listLive2dModels();
+                setAvailableModels(models);
+              } catch (e) { console.error('[App] import folder failed:', e); }
             }
           }
         });
       });
+    }
+    if (detail.action === 'export_live2d_model') {
+      void (async () => {
+        try {
+          const modelPath = detail.data?.path || customModelPath;
+          const selectedModel = availableModels.find(m => m.path === modelPath);
+          if (!modelPath || !selectedModel) return;
+          const { save } = await import('@tauri-apps/plugin-dialog');
+          const filePath = await save({
+            defaultPath: `${selectedModel.name}.zip`,
+            filters: [{ name: 'Live2D Package', extensions: ['zip'] }],
+          });
+          if (!filePath) return;
+          await exportLive2dModel(modelPath, filePath);
+        } catch (err) {
+          console.error('[App] Live2D export failed:', err);
+        }
+      })();
+    }
+    if (detail.action === 'rename_live2d_model' && detail.data?.path && detail.data?.newName) {
+      renameLive2dModel(detail.data.path, detail.data.newName)
+        .then(nextPath => {
+          if (customModelPath === detail.data.path) handleCustomModelChange(nextPath);
+          return listLive2dModels();
+        })
+        .then(models => setAvailableModels(models))
+        .catch(err => console.error('[App] Live2D rename failed:', err));
     }
 
     // ── Language Actions ───────────────────────────
@@ -1056,7 +1594,7 @@ function App() {
     }
     if (detail.action === 'select_character' && detail.data?.id != null) {
       import('./ui/widgets/CharacterManager').then(async ({ composeSystemPrompt }) => {
-        const { listCharacters } = await import('./lib/kokoro-bridge');
+        const { listCharacters, setActiveCharacterId, setCharacterName } = await import('./lib/kokoro-bridge');
         const all = await listCharacters();
         const char = all.find(c => c.id === detail.data.id);
         if (char) {
@@ -1064,12 +1602,14 @@ function App() {
           const prompt = composeSystemPrompt(char);
           setPersonaState(prompt);
           setPersona(prompt).catch(console.error);
+          setCharacterName(char.name).catch(console.error);
+          setActiveCharacterId(char.id).catch(console.error);
           setCharacters(all);
         }
       }).catch(console.error);
     }
     if (detail.action === 'create_character') {
-      import('./lib/kokoro-bridge').then(async ({ createCharacter, listCharacters }) => {
+      import('./lib/kokoro-bridge').then(async ({ createCharacter, listCharacters, setActiveCharacterId, setCharacterName }) => {
         const id = crypto.randomUUID();
         const now = Date.now();
         await createCharacter({ id, name: 'New Character', persona: '', user_nickname: 'User', source_format: 'manual', created_at: now, updated_at: now });
@@ -1082,6 +1622,8 @@ function App() {
           const prompt = composeSystemPrompt(newChar);
           setPersonaState(prompt);
           setPersona(prompt).catch(console.error);
+          setCharacterName(newChar.name).catch(console.error);
+          setActiveCharacterId(newChar.id).catch(console.error);
         }
       }).catch(console.error);
     }
@@ -1095,7 +1637,7 @@ function App() {
         if (!file) return;
         try {
           const { parseCharacterCard } = await import('./lib/character-card-parser');
-          const { createCharacter, listCharacters } = await import('./lib/kokoro-bridge');
+          const { createCharacter, listCharacters, setActiveCharacterId, setCharacterName } = await import('./lib/kokoro-bridge');
           const profile = await parseCharacterCard(file);
           const id = crypto.randomUUID();
           const now = Date.now();
@@ -1109,6 +1651,8 @@ function App() {
             const prompt = composeSystemPrompt(char);
             setPersonaState(prompt);
             setPersona(prompt).catch(console.error);
+            setCharacterName(char.name).catch(console.error);
+            setActiveCharacterId(char.id).catch(console.error);
           }
         } catch (err) {
           console.error('[App] import character failed:', err);
@@ -1219,6 +1763,10 @@ function App() {
             onVisionConfigChange={setVisionConfig}
             imageGenConfig={imageGenConfig}
             telegramConfig={telegramConfig}
+            botConfig={botConfig}
+            botStatus={botStatus}
+            autoBackupConfig={autoBackupConfig}
+            backupStatus={backupStatus}
             mcpServers={mcpServers}
             modList={modList}
             ttsProviders={ttsProviders}
