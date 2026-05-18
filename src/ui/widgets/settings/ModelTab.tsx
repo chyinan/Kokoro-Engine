@@ -666,7 +666,9 @@ export default function ModelTab({
                     ) : (
                         <FolderOpen size={16} strokeWidth={1.5} />
                     )}
-                    {isImporting ? t("settings.model.import.loading") : t("settings.model.import.button")}
+                    <span className="relative top-[2px]">
+                        {isImporting ? t("settings.model.import.loading") : t("settings.model.import.button")}
+                    </span>
                 </motion.button>
 
                 <motion.button
@@ -686,7 +688,9 @@ export default function ModelTab({
                     ) : (
                         <Download size={16} strokeWidth={1.5} />
                     )}
-                    {isExporting ? t("settings.model.export.loading") : t("settings.model.export.button")}
+                    <span className="relative top-[2px]">
+                        {isExporting ? t("settings.model.export.loading") : t("settings.model.export.button")}
+                    </span>
                 </motion.button>
             </div>
 
