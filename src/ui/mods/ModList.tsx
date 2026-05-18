@@ -205,7 +205,9 @@ export function ModList() {
                                             )}
                                         >
                                             <Play size={12} strokeWidth={2} />
-                                            {loadingMod === mod.id ? t("mods.actions.loading") : t("mods.actions.load")}
+                                            <span className="relative top-[1px]">
+                                                {loadingMod === mod.id ? t("mods.actions.loading") : t("mods.actions.load")}
+                                            </span>
                                         </motion.button>
                                     )}
                                     {mod.ui_entry && (
