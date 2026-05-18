@@ -431,12 +431,12 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                     </span>
                 </div>
                 <div className="rounded-lg border border-[var(--color-border)] bg-black/20 p-3">
-                    <div className="flex items-start justify-between gap-4">
-                        <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-4">
+                        <div className="min-w-0 flex-1 space-y-1">
                             <div className="text-sm font-heading font-semibold text-[var(--color-text-primary)]">
                                 {t("settings.memory.toggle.label")}
                             </div>
-                            <p className="text-xs text-[var(--color-text-muted)]">
+                            <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
                                 {t("settings.memory.toggle.desc")}
                             </p>
                         </div>
@@ -444,7 +444,7 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                             onClick={handleToggleMemory}
                             disabled={togglingMemory}
                             className={clsx(
-                                "relative h-6 w-11 rounded-full transition-colors disabled:opacity-60",
+                                "relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-60",
                                 memoryEnabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]"
                             )}
                             role="switch"
