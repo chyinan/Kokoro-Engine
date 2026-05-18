@@ -188,7 +188,7 @@ export default function WindowTitleBar() {
       />
       <div
         className={[
-          "fixed top-1 z-[80] bg-transparent",
+          "fixed top-1 z-[120] bg-transparent",
           isMac ? "left-0" : "right-0",
         ].join(" ")}
       >
