@@ -4134,17 +4134,6 @@
             let _engineInfo = null;
             let _releaseState = { status: 'idle', data: null, error: null };
 
-            function compareVersion(a, b) {
-                const pa = String(a || '').replace(/^[^\d]*/, '').split(/[.+-]/)[0].split('.').map(Number);
-                const pb = String(b || '').replace(/^[^\d]*/, '').split(/[.+-]/)[0].split('.').map(Number);
-                for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-                    const left = pa[i] || 0;
-                    const right = pb[i] || 0;
-                    if (left !== right) return left > right ? 1 : -1;
-                }
-                return 0;
-            }
-
             function renderAbout() {
                 const sec = createSection("Kokoro Engine");
                 if (!_engineInfo) {
@@ -4179,12 +4168,12 @@
                     _releaseState = { status: 'checking', data: null, error: null };
                     render();
                     try {
-                        const res = await fetch('https://api.github.com/repos/chyinan/Kokoro-Engine/releases/latest', {
-                            headers: { Accept: 'application/vnd.github+json' }
-                        });
-                        if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
-                        const data = await res.json();
-                        _releaseState = { status: compareVersion(data.tag_name, version) > 0 ? 'available' : 'latest', data, error: null };
+                        const result = await Kokoro.invoke('check_latest_release');
+                        _releaseState = {
+                            status: result.update_available ? 'available' : 'latest',
+                            data: { tag_name: result.latest_version, html_url: result.html_url },
+                            error: null
+                        };
                     } catch (e) {
                         _releaseState = { status: 'error', data: null, error: String(e) };
                     }

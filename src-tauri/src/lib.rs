@@ -82,6 +82,7 @@ pub fn run() {
         .register_uri_scheme_protocol("live2d", commands::live2d_protocol::handle_live2d_request())
         .invoke_handler(tauri::generate_handler![
             commands::system::get_engine_info,
+            commands::system::check_latest_release,
             commands::system::get_system_status,
             commands::system::set_window_size,
             commands::character::get_character_state,

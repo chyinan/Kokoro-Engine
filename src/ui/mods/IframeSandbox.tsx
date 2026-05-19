@@ -84,6 +84,7 @@ const ALLOWED_MOD_COMMANDS = new Set([
     // Character state (read-only)
     'get_character_state',
     'get_engine_info',
+    'check_latest_release',
     'list_vision_screens',
     // Cue / motion control
     'play_cue',
