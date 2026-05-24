@@ -1536,9 +1536,9 @@ async fn record_memory_retrieval_if_enabled(
 /// Local model directory path (relative to working dir).
 #[cfg(not(test))]
 const LOCAL_MODEL_DIR: &str = "models/models--Qdrant--all-MiniLM-L6-v2-onnx";
-#[cfg(not(test))]
 const MODEL_REPO: &str = "Qdrant/all-MiniLM-L6-v2-onnx";
 const MODEL_PAGE_URL: &str = "https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx";
+const MODEL_FALLBACK_ENDPOINT: &str = "https://hf-mirror.com";
 #[cfg(not(test))]
 const MODEL_AUX_FILES: &[&str] = &[
     "config.json",
@@ -1547,7 +1547,6 @@ const MODEL_AUX_FILES: &[&str] = &[
     "special_tokens_map.json",
     "vocab.txt",
 ];
-#[cfg(not(test))]
 const MODEL_REF_NAME: &str = "main";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1633,7 +1632,6 @@ fn ensure_default_model_repo_layout() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(test))]
 fn build_download_progress(
     stage: &str,
     message: String,
@@ -1697,7 +1695,23 @@ fn memory_model_endpoint() -> String {
         .to_string()
 }
 
+fn memory_model_endpoint_candidates(primary_endpoint: &str) -> Vec<String> {
+    let primary_endpoint = primary_endpoint.trim_end_matches('/').to_string();
+    let fallback_endpoint = MODEL_FALLBACK_ENDPOINT.to_string();
+    let mut endpoints = vec![primary_endpoint.clone()];
+
+    if !primary_endpoint.eq_ignore_ascii_case(MODEL_FALLBACK_ENDPOINT) {
+        endpoints.push(fallback_endpoint);
+    }
+
+    endpoints
+}
+
 #[cfg(not(test))]
+fn memory_model_endpoints() -> Vec<String> {
+    memory_model_endpoint_candidates(&memory_model_endpoint())
+}
+
 fn memory_model_file_url(endpoint: &str, file_name: &str) -> String {
     format!(
         "{}/{}/resolve/{}/{}",
@@ -1705,7 +1719,6 @@ fn memory_model_file_url(endpoint: &str, file_name: &str) -> String {
     )
 }
 
-#[cfg(not(test))]
 fn memory_model_file_path(
     snapshot_dir: &std::path::Path,
     file_name: &str,
@@ -1722,7 +1735,6 @@ fn memory_model_file_path(
     Ok(snapshot_dir.join(path))
 }
 
-#[cfg(not(test))]
 fn emit_memory_model_progress(
     emit_progress: &std::sync::Arc<
         dyn Fn(MemoryEmbeddingModelDownloadProgress) -> Result<(), String> + Send + Sync,
@@ -1743,10 +1755,9 @@ fn emit_memory_model_progress(
     ))
 }
 
-#[cfg(not(test))]
 async fn download_memory_model_file(
     client: &reqwest::Client,
-    endpoint: &str,
+    endpoints: &[String],
     snapshot_dir: &std::path::Path,
     file_name: &str,
     file_index: usize,
@@ -1756,39 +1767,77 @@ async fn download_memory_model_file(
     >,
 ) -> std::result::Result<(), String> {
     let target_path = memory_model_file_path(snapshot_dir, file_name)?;
-    let url = memory_model_file_url(endpoint, file_name);
-    let download_progress = emit_progress.clone();
-    let file_name_for_progress = file_name.to_string();
+    let mut errors = Vec::new();
 
-    let final_progress = crate::utils::download::download_file_with_progress(
-        client,
-        &url,
-        &target_path,
-        crate::utils::download::DownloadOptions::default(),
-        std::sync::Arc::new(move |progress| {
-            emit_memory_model_progress(
-                &download_progress,
-                &file_name_for_progress,
-                file_index,
-                file_count,
-                progress,
-            )
-        }),
-    )
-    .await
-    .map_err(|error| format!("Failed to download {}: {}", file_name, error))?;
+    for (attempt_index, endpoint) in endpoints.iter().enumerate() {
+        let url = memory_model_file_url(endpoint, file_name);
+        let download_progress = emit_progress.clone();
+        let file_name_for_progress = file_name.to_string();
 
-    emit_progress(build_download_progress(
-        "complete",
-        format!("Finished {} ({}/{})", file_name, file_index, file_count),
-        file_name.to_string(),
-        file_index,
-        file_count,
-        final_progress.downloaded_bytes,
-        final_progress.total_bytes,
-    ))?;
+        let result = crate::utils::download::download_file_with_progress(
+            client,
+            &url,
+            &target_path,
+            crate::utils::download::DownloadOptions::default(),
+            std::sync::Arc::new(move |progress| {
+                emit_memory_model_progress(
+                    &download_progress,
+                    &file_name_for_progress,
+                    file_index,
+                    file_count,
+                    progress,
+                )
+            }),
+        )
+        .await;
 
-    Ok(())
+        match result {
+            Ok(final_progress) => {
+                emit_progress(build_download_progress(
+                    "complete",
+                    format!("Finished {} ({}/{})", file_name, file_index, file_count),
+                    file_name.to_string(),
+                    file_index,
+                    file_count,
+                    final_progress.downloaded_bytes,
+                    final_progress.total_bytes,
+                ))?;
+
+                return Ok(());
+            }
+            Err(error) => {
+                errors.push(format!("{}: {}", url, error));
+                if let Some(next_endpoint) = endpoints.get(attempt_index + 1) {
+                    tracing::warn!(
+                        target: "memory",
+                        "[Memory] Download failed for {} from {}, retrying via {}: {}",
+                        file_name,
+                        endpoint,
+                        next_endpoint,
+                        error
+                    );
+                    emit_progress(build_download_progress(
+                        "downloading",
+                        format!(
+                            "Download failed from {}; retrying via {}",
+                            endpoint, next_endpoint
+                        ),
+                        file_name.to_string(),
+                        file_index,
+                        file_count,
+                        0,
+                        None,
+                    ))?;
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "Failed to download {} from all endpoints: {}",
+        file_name,
+        errors.join("; ")
+    ))
 }
 
 #[cfg(not(test))]
@@ -1831,7 +1880,7 @@ where
         None,
     ))?;
 
-    let endpoint = memory_model_endpoint();
+    let endpoints = memory_model_endpoints();
     let client = reqwest::Client::builder()
         .user_agent("kokoro-engine/0.2.7")
         .build()
@@ -1840,7 +1889,7 @@ where
     for (index, file_name) in missing_files.iter().enumerate() {
         download_memory_model_file(
             &client,
-            &endpoint,
+            &endpoints,
             &snapshot_dir,
             file_name,
             index + 1,
@@ -4792,6 +4841,109 @@ fn build_merge_facts_prompt(facts: &[&str], target_language: Option<&str>) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn memory_model_endpoint_candidates_adds_hf_mirror_fallback() {
+        assert_eq!(
+            memory_model_endpoint_candidates("https://huggingface.co/"),
+            vec![
+                "https://huggingface.co".to_string(),
+                "https://hf-mirror.com".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn memory_model_endpoint_candidates_deduplicates_hf_mirror() {
+        assert_eq!(
+            memory_model_endpoint_candidates("https://hf-mirror.com/"),
+            vec!["https://hf-mirror.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn memory_model_file_url_uses_original_repo_layout_for_mirror() {
+        assert_eq!(
+            memory_model_file_url("https://hf-mirror.com", "model.onnx"),
+            "https://hf-mirror.com/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main/model.onnx"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_memory_model_file_retries_mirror_after_primary_failure() {
+        let primary_server = MockServer::start().await;
+        let mirror_server = MockServer::start().await;
+        let model_path = format!("/{MODEL_REPO}/resolve/{MODEL_REF_NAME}/model.onnx");
+
+        Mock::given(method("GET"))
+            .and(path(model_path.clone()))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&primary_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(model_path))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes("mirror-model"))
+            .mount(&mirror_server)
+            .await;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let progress_events = Arc::new(StdMutex::new(Vec::new()));
+        let captured_events = Arc::clone(&progress_events);
+        let emit_progress: Arc<
+            dyn Fn(MemoryEmbeddingModelDownloadProgress) -> std::result::Result<(), String>
+                + Send
+                + Sync,
+        > = Arc::new(move |event| {
+            captured_events.lock().expect("progress lock").push(event);
+            Ok(())
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let endpoints = vec![primary_server.uri(), mirror_server.uri()];
+
+        download_memory_model_file(
+            &client,
+            &endpoints,
+            temp_dir.path(),
+            "model.onnx",
+            1,
+            1,
+            &emit_progress,
+        )
+        .await
+        .expect("mirror fallback should download the model file");
+
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.path().join("model.onnx")).expect("downloaded model"),
+            "mirror-model"
+        );
+        assert_eq!(
+            primary_server
+                .received_requests()
+                .await
+                .expect("primary requests")
+                .len(),
+            2
+        );
+        assert_eq!(
+            mirror_server
+                .received_requests()
+                .await
+                .expect("mirror requests")
+                .len(),
+            2
+        );
+        assert!(
+            progress_events
+                .lock()
+                .expect("progress lock")
+                .iter()
+                .any(|event| event.message.contains("retrying via")),
+            "retry progress event should be emitted"
+        );
+    }
 
     fn memory_snippet_for_sort(id: i64, importance: f64, created_at: i64) -> MemorySnippet {
         MemorySnippet {
