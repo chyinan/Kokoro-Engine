@@ -28,6 +28,9 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+      - name: Check IPC contract
+        run: npm run check:ipc
+
       - name: Run tests
         run: npm run test
 

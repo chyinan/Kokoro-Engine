@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "check:ipc": "node scripts/check-ipc-contract.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

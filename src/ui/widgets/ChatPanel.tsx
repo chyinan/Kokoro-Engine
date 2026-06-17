@@ -11,34 +11,34 @@ import { useTranslation } from "react-i18next";
 import ConversationSidebar from "./ConversationSidebar";
 import { ChatMessage } from "./ChatMessage";
 import { buildChatMessagesFromConversation } from "./chat-history";
-import { getStreamingRevealText, hasActiveKokoroBubble, hasVisibleAssistantContent, shouldRenderTypingIndicator, shouldRevealLiveTurnToolTrace } from "./chat-streaming-state";
+import { getStreamingRevealText, hasActiveKokoroBubble, shouldRenderTypingIndicator } from "./chat-streaming-state";
+import {
+    canSubmitApproval,
+    ensureTurnMessage,
+    getApprovalErrorMessage,
+    getApprovalRequestId,
+    getToolEventStateUpdate,
+    hasRenderableTurnContent,
+    removeTurnMessages,
+    stripStoredMarkup,
+    stripStreamingMarkup,
+    updateApprovalToolLocally,
+    updateTurnMessage,
+    type ChatPanelMessage,
+    type PendingTurnState,
+} from "./chat/turn-state";
 import { requestMemoryModelDialog } from "../../lib/memory-model-gate";
 import { audioPlayer } from "../../core/services";
+import {
+    APP_SETTING_KEYS,
+    readBooleanSetting,
+    readJsonSetting,
+    readNumberSetting,
+    readStringSetting,
+} from "../../lib/app-settings";
 
 // ── Types ──────────────────────────────────────────────────
-interface ChatMessage {
-    role: "user" | "kokoro" | "tool" | "context";
-    text: string;
-    images?: string[];
-    translation?: string;
-    translationPending?: boolean;
-    isError?: boolean;
-    tools?: ToolTraceItem[];
-    capturedAt?: string;
-    source?: string;
-    turnId?: string;
-}
-
-interface PendingTurnState {
-    turnId: string;
-    messageIndex: number | null;
-    rawText: string;
-    visibleTextStarted: boolean;
-    translation?: string;
-    translationPending: boolean;
-    tools: ToolTraceItem[];
-    pendingContext?: ChatMessage;
-}
+type ChatMessage = ChatPanelMessage;
 
 interface ChatPanelProps {
     width?: number;
@@ -47,7 +47,7 @@ interface ChatPanelProps {
     onWidthChange?: (width: number) => void;
 }
 
-export type { ChatMessage as ChatPanelMessage };
+export type { ChatPanelMessage };
 
 const DEFAULT_CHAT_PANEL_WIDTH = 350;
 const CHAT_PANEL_RESIZE_GUTTER = 160;
@@ -59,359 +59,6 @@ const getChatPanelResizeMaxWidth = (minWidth: number) => {
     }
     return Math.max(minWidth, window.innerWidth - CHAT_PANEL_RESIZE_GUTTER);
 };
-
-const stripStreamingMarkup = (text: string) =>
-    text
-        .replace(/\[ACTION:\w+\]\s*/g, "")
-        .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
-        .replace(/\[TRANSLATE:[^\]]*\]\s*/g, "")
-        .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "");
-
-const stripStoredMarkup = (text: string) =>
-    stripStreamingMarkup(text)
-        .replace(/\[EMOTION:[^\]]*\]/g, "")
-        .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-        .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "");
-
-const ensureTurnMessage = (messages: ChatMessage[], turn: PendingTurnState) => {
-    if (hasActiveKokoroBubble(messages, turn.messageIndex)) {
-        return [...messages];
-    }
-
-    const next = [...messages];
-    if (turn.pendingContext && !next.some(message => message.role === "context" && message.turnId === turn.turnId)) {
-        next.push({
-            ...turn.pendingContext,
-            turnId: turn.turnId,
-        });
-    }
-    next.push({
-        role: "kokoro" as const,
-        text: "",
-        tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
-    });
-    turn.messageIndex = next.length - 1;
-    return next;
-};
-
-const updateTurnMessage = (
-    messages: ChatMessage[],
-    turn: PendingTurnState,
-    updater: (current: ChatMessage) => ChatMessage
-) => {
-    if (!hasActiveKokoroBubble(messages, turn.messageIndex)) {
-        return messages;
-    }
-
-    const next = [...messages];
-    next[turn.messageIndex!] = updater(next[turn.messageIndex!]);
-    return next;
-};
-
-function mergeToolTraceItems(existing: ReadonlyArray<ToolTraceItem>, incoming: ToolTraceItem): Array<ToolTraceItem> {
-    if (incoming.approvalRequestId) {
-        const targetIndex = existing.findIndex(tool => tool.approvalRequestId === incoming.approvalRequestId);
-        if (targetIndex >= 0) {
-            const next = [...existing];
-            next[targetIndex] = incoming;
-            return next;
-        }
-    }
-    return [...existing, incoming];
-}
-
-function buildToolTraceItem(event: {
-    tool: string;
-    tool_name?: string;
-    tool_id?: string;
-    source?: ToolTraceItem["source"];
-    server_name?: string;
-    needs_feedback?: boolean;
-    permission_level?: ToolTraceItem["permissionLevel"];
-    risk_tags?: ToolTraceItem["riskTags"];
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): ToolTraceItem {
-    const baseTool = {
-        tool: event.tool,
-        toolName: event.tool_name ?? event.tool,
-        toolId: event.tool_id,
-        source: event.source,
-        serverName: event.server_name,
-        needsFeedback: event.needs_feedback,
-        permissionLevel: event.permission_level,
-        riskTags: event.risk_tags,
-        approvalRequestId: event.approval_request_id,
-        approvalStatus: event.approval_status,
-    } satisfies Omit<ToolTraceItem, "text">;
-
-    return event.result
-        ? {
-            ...baseTool,
-            text: event.result.message,
-            isError: false,
-        }
-        : {
-            ...baseTool,
-            text: event.error || "",
-            isError: true,
-            denyKind: event.deny_kind,
-        };
-}
-
-function getApprovalErrorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-}
-
-function getApprovalRequestId(tool: ToolTraceItem): string | null {
-    return typeof tool.approvalRequestId === "string" && tool.approvalRequestId.length > 0
-        ? tool.approvalRequestId
-        : null;
-}
-
-function updateMessageTools(messages: Array<ChatMessage>, globalIndex: number, updater: (tools: Array<ToolTraceItem>) => Array<ToolTraceItem>): Array<ChatMessage> {
-    if (globalIndex < 0 || globalIndex >= messages.length) {
-        return messages;
-    }
-    const current = messages[globalIndex];
-    const nextTools = updater(current.tools ? [...current.tools] : []);
-    const next = [...messages];
-    next[globalIndex] = {
-        ...current,
-        tools: nextTools.length > 0 ? nextTools : undefined,
-    };
-    return next;
-}
-
-function removePendingApprovalHint(text: string): string {
-    return text.replace(/\n等待用户审批后继续。$/, "");
-}
-
-function createRejectedToolTrace(tool: ToolTraceItem): ToolTraceItem {
-    return {
-        ...tool,
-        text: removePendingApprovalHint(tool.text),
-        isError: true,
-        approvalStatus: "rejected",
-    };
-}
-
-function createApprovedToolTrace(tool: ToolTraceItem): ToolTraceItem {
-    return {
-        ...tool,
-        text: removePendingApprovalHint(tool.text),
-        isError: false,
-        approvalStatus: "approved",
-    };
-}
-
-function getResolvedToolText(tool: ToolTraceItem, fallback: string): string {
-    return fallback || removePendingApprovalHint(tool.text);
-}
-
-function isApprovalRequested(event: { approval_status?: ToolTraceItem["approvalStatus"] }): boolean {
-    return event.approval_status === "requested";
-}
-
-function isApprovalResolved(event: { approval_status?: ToolTraceItem["approvalStatus"] }): boolean {
-    return event.approval_status === "approved" || event.approval_status === "rejected";
-}
-
-function shouldKeepToolEntryVisible(_tool: ToolTraceItem): boolean {
-    return true;
-}
-
-function filterVisibleTools(tools: Array<ToolTraceItem>): Array<ToolTraceItem> {
-    return tools.filter(shouldKeepToolEntryVisible);
-}
-
-function normalizeToolList(tools: Array<ToolTraceItem>): Array<ToolTraceItem> {
-    return filterVisibleTools(tools);
-}
-
-function hasRenderableTurnContent(turn: PendingTurnState, text: string): boolean {
-    return hasVisibleAssistantContent(text) || normalizeToolList(turn.tools).length > 0;
-}
-
-function removeTurnContext(messages: Array<ChatMessage>, turn: PendingTurnState): Array<ChatMessage> {
-    if (!turn.pendingContext) {
-        return messages;
-    }
-    return messages.filter(message => !(message.role === "context" && message.turnId === turn.turnId));
-}
-
-function removeTurnMessages(messages: Array<ChatMessage>, turn: PendingTurnState): Array<ChatMessage> {
-    const withoutAssistant = hasActiveKokoroBubble(messages, turn.messageIndex)
-        ? [...messages.slice(0, turn.messageIndex!), ...messages.slice(turn.messageIndex! + 1)]
-        : messages;
-    return removeTurnContext(withoutAssistant, turn);
-}
-
-function mergeToolIntoTurn(turn: PendingTurnState, incoming: ToolTraceItem): void {
-    turn.tools = normalizeToolList(mergeToolTraceItems(turn.tools, incoming));
-}
-
-function updateTurnToolsInMessages(prev: Array<ChatMessage>, turn: PendingTurnState, incoming: ToolTraceItem): Array<ChatMessage> {
-    if (!shouldRevealLiveTurnToolTrace({
-        messages: prev,
-        activeMessageIndex: turn.messageIndex,
-        approvalStatus: incoming.approvalStatus,
-    })) {
-        return prev;
-    }
-
-    const ensured = ensureTurnMessage(prev, turn);
-    return updateTurnMessage(ensured, turn, (current) => ({
-        ...current,
-        tools: normalizeToolList(mergeToolTraceItems(current.tools || [], incoming)),
-    }));
-}
-
-function isToolApprovalPending(tool: ToolTraceItem): boolean {
-    return tool.denyKind === "pending_approval" && tool.approvalStatus === "requested";
-}
-
-function findPendingToolIndex(message: ChatMessage, approvalRequestId: string): number {
-    return (message.tools || []).findIndex(tool => tool.approvalRequestId === approvalRequestId);
-}
-
-function replaceToolAtIndex(tools: Array<ToolTraceItem>, index: number, replacement: ToolTraceItem): Array<ToolTraceItem> {
-    if (index < 0 || index >= tools.length) {
-        return tools;
-    }
-    const next = [...tools];
-    next[index] = replacement;
-    return next;
-}
-
-function updatePendingToolStatus(messages: Array<ChatMessage>, globalIndex: number, approvalRequestId: string, replacement: ToolTraceItem): Array<ChatMessage> {
-    return updateMessageTools(messages, globalIndex, (tools) => {
-        const targetIndex = tools.findIndex(tool => tool.approvalRequestId === approvalRequestId);
-        return targetIndex >= 0 ? replaceToolAtIndex(tools, targetIndex, replacement) : tools;
-    });
-}
-
-function findToolMessageIndexByApprovalRequestId(messages: ReadonlyArray<ChatMessage>, approvalRequestId: string): number {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const message = messages[index];
-        if ((message.tools || []).some(tool => tool.approvalRequestId === approvalRequestId)) {
-            return index;
-        }
-    }
-    return -1;
-}
-
-function isKokoroMessage(message: ChatMessage | undefined): boolean {
-    return message?.role === "kokoro";
-}
-
-function shouldAppendEmptyKokoroBubble(messages: ReadonlyArray<ChatMessage>): boolean {
-    const last = messages[messages.length - 1];
-    return !isKokoroMessage(last);
-}
-
-function appendPendingApprovalBubble(messages: Array<ChatMessage>, tool: ToolTraceItem): Array<ChatMessage> {
-    if (shouldAppendEmptyKokoroBubble(messages)) {
-        return [...messages, { role: "kokoro", text: "", tools: [tool] }];
-    }
-    const next = [...messages];
-    const last = next[next.length - 1];
-    next[next.length - 1] = {
-        ...last,
-        tools: normalizeToolList(mergeToolTraceItems(last.tools || [], tool)),
-    };
-    return next;
-}
-
-function setPendingApprovalOnLatestMessage(messages: Array<ChatMessage>, tool: ToolTraceItem): Array<ChatMessage> {
-    const approvalRequestId = getApprovalRequestId(tool);
-    if (approvalRequestId) {
-        const existingIndex = findToolMessageIndexByApprovalRequestId(messages, approvalRequestId);
-        if (existingIndex >= 0) {
-            return updateMessageTools(messages, existingIndex, (tools) => normalizeToolList(mergeToolTraceItems(tools, tool)));
-        }
-    }
-    return appendPendingApprovalBubble(messages, tool);
-}
-
-function isToolResolvedStatus(status: ToolTraceItem["approvalStatus"] | undefined): boolean {
-    return status === "approved" || status === "rejected";
-}
-
-function getResolvedToolReplacement(event: { result?: { message: string }; error?: string; approval_status?: ToolTraceItem["approvalStatus"] }, current: ToolTraceItem): ToolTraceItem {
-    if (event.approval_status === "approved") {
-        if (event.error) {
-            return {
-                ...current,
-                text: getResolvedToolText(current, event.error),
-                isError: true,
-                denyKind: "execution_error",
-                approvalStatus: "approved",
-            };
-        }
-        return {
-            ...createApprovedToolTrace(current),
-            text: getResolvedToolText(current, event.result?.message || current.text),
-        };
-    }
-    return {
-        ...createRejectedToolTrace(current),
-        text: getResolvedToolText(current, event.error || current.text),
-    };
-}
-
-function updateLatestPendingApproval(messages: Array<ChatMessage>, event: {
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-    result?: { message: string };
-    error?: string;
-}): Array<ChatMessage> {
-    const approvalRequestId = typeof event.approval_request_id === "string" ? event.approval_request_id : null;
-    if (!approvalRequestId) {
-        return messages;
-    }
-
-    const targetMessageIndex = findToolMessageIndexByApprovalRequestId(messages, approvalRequestId);
-    if (targetMessageIndex < 0) {
-        return messages;
-    }
-
-    const targetMessage = messages[targetMessageIndex];
-    const toolIndex = findPendingToolIndex(targetMessage, approvalRequestId);
-    if (toolIndex < 0) {
-        return messages;
-    }
-
-    const currentTool = targetMessage.tools?.[toolIndex];
-    if (!currentTool) {
-        return messages;
-    }
-
-    const replacement = getResolvedToolReplacement(event, currentTool);
-    return updatePendingToolStatus(messages, targetMessageIndex, approvalRequestId, replacement);
-}
-
-function resolveApprovalEvent(messages: Array<ChatMessage>, toolEntry: ToolTraceItem, event: {
-    approval_status?: ToolTraceItem["approvalStatus"];
-    approval_request_id?: string;
-    result?: { message: string };
-    error?: string;
-}): Array<ChatMessage> {
-    if (isApprovalRequested(event)) {
-        return setPendingApprovalOnLatestMessage(messages, toolEntry);
-    }
-    if (isApprovalResolved(event)) {
-        return updateLatestPendingApproval(messages, event);
-    }
-    return messages;
-}
-
-function isLiveTurn(turn: PendingTurnState | null, turnId: string): turn is PendingTurnState {
-    return Boolean(turn && turn.turnId === turnId);
-}
 
 function shouldLogToolEventError(event: { result?: { message: string }; error?: string }): boolean {
     return !event.result && Boolean(event.error);
@@ -429,145 +76,6 @@ function getToolEventSuccessMessage(event: { result?: { message: string } }): st
     return event.result?.message || "";
 }
 
-function shouldHandleAsApprovalEvent(event: { approval_status?: ToolTraceItem["approvalStatus"] }): boolean {
-    return event.approval_status === "requested" || event.approval_status === "approved" || event.approval_status === "rejected";
-}
-
-function toolRequiresApprovalAction(tool: ToolTraceItem): boolean {
-    return isToolApprovalPending(tool);
-}
-
-function canSubmitApproval(tool: ToolTraceItem): boolean {
-    return toolRequiresApprovalAction(tool) && getApprovalRequestId(tool) !== null;
-}
-
-function clearApprovalWaitingSuffix(tool: ToolTraceItem): ToolTraceItem {
-    return {
-        ...tool,
-        text: removePendingApprovalHint(tool.text),
-    };
-}
-
-function setToolPendingResolutionState(messages: Array<ChatMessage>, globalIndex: number, tool: ToolTraceItem, approvalStatus: "approved" | "rejected"): Array<ChatMessage> {
-    const approvalRequestId = getApprovalRequestId(tool);
-    if (!approvalRequestId) {
-        return messages;
-    }
-    const replacement = approvalStatus === "approved"
-        ? createApprovedToolTrace(clearApprovalWaitingSuffix(tool))
-        : createRejectedToolTrace(clearApprovalWaitingSuffix(tool));
-    return updatePendingToolStatus(messages, globalIndex, approvalRequestId, replacement);
-}
-
-function getToolEntryFromEvent(event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): ToolTraceItem {
-    return buildToolTraceItem(event);
-}
-
-function updateMessagesForToolEvent(messages: Array<ChatMessage>, event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): Array<ChatMessage> {
-    const toolEntry = getToolEntryFromEvent(event);
-    if (shouldHandleAsApprovalEvent(event)) {
-        return resolveApprovalEvent(messages, toolEntry, event);
-    }
-    return messages;
-}
-
-function updateMessagesForApprovalFallback(messages: Array<ChatMessage>, event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): Array<ChatMessage> {
-    return updateMessagesForToolEvent(messages, event);
-}
-
-function getResolvedApprovalStatus(tool: ToolTraceItem): ToolTraceItem["approvalStatus"] {
-    return tool.approvalStatus;
-}
-
-function isToolAlreadyResolved(tool: ToolTraceItem): boolean {
-    return isToolResolvedStatus(getResolvedApprovalStatus(tool));
-}
-
-function updateApprovalToolLocally(messages: Array<ChatMessage>, globalIndex: number, tool: ToolTraceItem, approvalStatus: "approved" | "rejected"): Array<ChatMessage> {
-    if (isToolAlreadyResolved(tool)) {
-        return messages;
-    }
-    return setToolPendingResolutionState(messages, globalIndex, tool, approvalStatus);
-}
-
-function normalizeApprovalToolEntry(tool: ToolTraceItem): ToolTraceItem {
-    return tool;
-}
-
-function normalizeApprovalEventToolEntry(event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): ToolTraceItem {
-    return normalizeApprovalToolEntry(buildToolTraceItem(event));
-}
-
-function mergeApprovalEventIntoCurrentTurn(turn: PendingTurnState | null, eventTurnId: string, event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): ToolTraceItem | null {
-    if (!isLiveTurn(turn, eventTurnId)) {
-        return null;
-    }
-    const toolEntry = normalizeApprovalEventToolEntry(event);
-    mergeToolIntoTurn(turn, toolEntry);
-    return toolEntry;
-}
-
-function updateMessagesAfterApprovalMerge(prev: Array<ChatMessage>, turn: PendingTurnState | null, eventTurnId: string, toolEntry: ToolTraceItem | null, event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): Array<ChatMessage> {
-    if (toolEntry && isLiveTurn(turn, eventTurnId)) {
-        return updateTurnToolsInMessages(prev, turn, toolEntry);
-    }
-    return updateMessagesForApprovalFallback(prev, event);
-}
-
-function updateUiForToolEvent(prev: Array<ChatMessage>, turn: PendingTurnState | null, eventTurnId: string, event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): Array<ChatMessage> {
-    const toolEntry = mergeApprovalEventIntoCurrentTurn(turn, eventTurnId, event);
-    return updateMessagesAfterApprovalMerge(prev, turn, eventTurnId, toolEntry, event);
-}
-
 function logToolEvent(event: { tool: string; result?: { message: string }; error?: string }): void {
     if (shouldLogToolEventSuccess(event)) {
         console.log(`[ToolCall] ${event.tool}: ${getToolEventSuccessMessage(event)}`);
@@ -576,17 +84,6 @@ function logToolEvent(event: { tool: string; result?: { message: string }; error
     if (shouldLogToolEventError(event)) {
         console.error(`[ToolCall] ${event.tool} failed: ${getToolEventErrorMessage(event)}`);
     }
-}
-
-function getToolEventStateUpdate(event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}, turn: PendingTurnState | null, eventTurnId: string) {
-    return (prev: Array<ChatMessage>) => updateUiForToolEvent(prev, turn, eventTurnId, event);
 }
 
 function getAsyncErrorMessage(error: unknown): string {
@@ -606,6 +103,23 @@ function isTurnCancelledError(error: unknown): boolean {
 
 
 // ── Typing Indicator ───────────────────────────────────────
+const getActiveCharacterIdForRequest = () =>
+    readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || undefined;
+
+const getActiveCharacterIdForConversationRestore = () =>
+    readStringSetting(APP_SETTING_KEYS.activeCharacterId, "default") || "default";
+
+const getTtsPlaybackSettings = () => ({
+    enabled: readBooleanSetting(APP_SETTING_KEYS.ttsEnabled, false),
+    provider_id: readStringSetting(APP_SETTING_KEYS.ttsProvider, "") || undefined,
+    voice: readStringSetting(APP_SETTING_KEYS.ttsVoice, "") || undefined,
+    speed: readNumberSetting(APP_SETTING_KEYS.ttsSpeed, 1.0),
+    pitch: readNumberSetting(APP_SETTING_KEYS.ttsPitch, 1.0),
+});
+
+const isGeneratedBackgroundMode = () =>
+    readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated";
+
 function TypingIndicator() {
     return (
         <motion.div
@@ -795,10 +309,15 @@ export default function ChatPanel({
     }, [t]);
 
     // Vision Mode
-    const [visionEnabled, setVisionEnabled] = useState(() => localStorage.getItem("kokoro_vision_enabled") === "true");
-    const [cameraEnabled, setCameraEnabled] = useState(() => {
-        try { return JSON.parse(localStorage.getItem("kokoro_vision_config") || "{}").camera_enabled === true; } catch { return false; }
-    });
+    const [visionEnabled, setVisionEnabled] = useState(() =>
+        readBooleanSetting(APP_SETTING_KEYS.visionEnabled, false)
+    );
+    const [cameraEnabled, setCameraEnabled] = useState(() =>
+        readJsonSetting<{ camera_enabled?: boolean }>(
+            APP_SETTING_KEYS.visionConfig,
+            {},
+        ).camera_enabled === true
+    );
     const [pendingImages, setPendingImages] = useState<string[]>([]);
     const [isUploading, setIsUploading] = useState(false);
 
@@ -835,7 +354,7 @@ export default function ChatPanel({
 
     // 自动恢复最近对话
     useEffect(() => {
-        const characterId = localStorage.getItem("kokoro_active_character_id") || "default";
+        const characterId = getActiveCharacterIdForConversationRestore();
         listConversations(characterId).then(convs => {
             if (convs.length > 0) {
                 loadConversation(convs[0].id).then(loaded => {
@@ -848,19 +367,23 @@ export default function ChatPanel({
     }, []);
 
     // STT (Speech-to-Text) — Advanced VAD Mode
-    const [sttEnabled, setSttEnabled] = useState(() => localStorage.getItem("kokoro_stt_enabled") === "true");
-    const [sttAutoSend, setSttAutoSend] = useState(() => localStorage.getItem("kokoro_stt_auto_send") === "true");
+    const [sttEnabled, setSttEnabled] = useState(() =>
+        readBooleanSetting(APP_SETTING_KEYS.sttEnabled, false)
+    );
+    const [sttAutoSend, setSttAutoSend] = useState(() =>
+        readBooleanSetting(APP_SETTING_KEYS.sttAutoSend, false)
+    );
     const [continuousListening, setContinuousListening] = useState(
-        () => localStorage.getItem("kokoro_stt_continuous_listening") === "true"
+        () => readBooleanSetting(APP_SETTING_KEYS.sttContinuousListening, false)
     );
 
     useEffect(() => {
         const syncSttSettings = () => {
-            setSttEnabled(localStorage.getItem("kokoro_stt_enabled") === "true");
-            setSttAutoSend(localStorage.getItem("kokoro_stt_auto_send") === "true");
-            setContinuousListening(localStorage.getItem("kokoro_stt_continuous_listening") === "true");
-            setWakeWordEnabled(localStorage.getItem("kokoro_wake_word_enabled") === "true");
-            setWakeWord(localStorage.getItem("kokoro_wake_word") || "");
+            setSttEnabled(readBooleanSetting(APP_SETTING_KEYS.sttEnabled, false));
+            setSttAutoSend(readBooleanSetting(APP_SETTING_KEYS.sttAutoSend, false));
+            setContinuousListening(readBooleanSetting(APP_SETTING_KEYS.sttContinuousListening, false));
+            setWakeWordEnabled(readBooleanSetting(APP_SETTING_KEYS.wakeWordEnabled, false));
+            setWakeWord(readStringSetting(APP_SETTING_KEYS.wakeWord, ""));
         };
         window.addEventListener("kokoro-stt-settings-changed", syncSttSettings);
         window.addEventListener("storage", syncSttSettings);
@@ -890,17 +413,12 @@ export default function ChatPanel({
                 setIsThinking(true);
                 userScrolledRef.current = false;
 
-                const allowImageGen = (() => {
-                    try {
-                        const bgConfig = JSON.parse(localStorage.getItem("kokoro_bg_config") || "{}");
-                        return bgConfig.mode === "generated";
-                    } catch { return false; }
-                })();
+                const allowImageGen = isGeneratedBackgroundMode();
 
                 streamChat({
                     message: trimmed,
                     allow_image_gen: allowImageGen,
-                    character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
+                    character_id: getActiveCharacterIdForRequest(),
                 }).catch(err => {
                     if (isTurnCancelledError(err) || cancelRequestedRef.current) {
                         endTurnActivity();
@@ -951,8 +469,12 @@ export default function ChatPanel({
     }, []);
 
     // Wake word detection — starts main STT when keyword is heard
-    const [wakeWordEnabled, setWakeWordEnabled] = useState(() => localStorage.getItem("kokoro_wake_word_enabled") === "true");
-    const [wakeWord, setWakeWord] = useState(() => localStorage.getItem("kokoro_wake_word") || "");
+    const [wakeWordEnabled, setWakeWordEnabled] = useState(() =>
+        readBooleanSetting(APP_SETTING_KEYS.wakeWordEnabled, false)
+    );
+    const [wakeWord, setWakeWord] = useState(() =>
+        readStringSetting(APP_SETTING_KEYS.wakeWord, "")
+    );
     useWakeWord({
         enabled:
             sttEnabled &&
@@ -994,13 +516,14 @@ export default function ChatPanel({
     // Sync vision state when localStorage changes (from Settings panel)
     useEffect(() => {
         const checkVision = () => {
-            const nextVisionEnabled = localStorage.getItem("kokoro_vision_enabled") === "true";
+            const nextVisionEnabled = readBooleanSetting(APP_SETTING_KEYS.visionEnabled, false);
             setVisionEnabled(nextVisionEnabled);
             if (!nextVisionEnabled) setPendingImages([]);
-            try {
-                const cfg = JSON.parse(localStorage.getItem("kokoro_vision_config") || "{}");
-                setCameraEnabled(cfg.camera_enabled === true);
-            } catch { /* ignore */ }
+            const cfg = readJsonSetting<{ camera_enabled?: boolean }>(
+                APP_SETTING_KEYS.visionConfig,
+                {},
+            );
+            setCameraEnabled(cfg.camera_enabled === true);
         };
         window.addEventListener("kokoro-vision-settings-changed", checkVision);
         window.addEventListener("storage", checkVision);
@@ -1236,14 +759,11 @@ export default function ChatPanel({
 
                 currentTurnRef.current = null;
 
-                if (status === "completed" && localStorage.getItem("kokoro_tts_enabled") === "true" && cleanText.trim()) {
+                const playback = getTtsPlaybackSettings();
+                if (status === "completed" && playback.enabled && cleanText.trim()) {
                     console.log("[TTS] Auto-speak triggered, text length:", cleanText.length);
-                    synthesize(cleanText.trim(), {
-                        provider_id: localStorage.getItem("kokoro_tts_provider") || undefined,
-                        voice: localStorage.getItem("kokoro_tts_voice") || undefined,
-                        speed: parseFloat(localStorage.getItem("kokoro_tts_speed") || "1.0"),
-                        pitch: parseFloat(localStorage.getItem("kokoro_tts_pitch") || "1.0"),
-                    }).catch(err => console.error("[TTS] Auto-speak failed:", err));
+                    const { enabled: _enabled, ...ttsConfig } = playback;
+                    synthesize(cleanText.trim(), ttsConfig).catch(err => console.error("[TTS] Auto-speak failed:", err));
                 }
             });
             if (aborted) { unDone(); return; }
@@ -1354,7 +874,7 @@ export default function ChatPanel({
                     streamChat({
                         message: instruction,
                         hidden: true,
-                        character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
+                        character_id: getActiveCharacterIdForRequest(),
                     }).catch(err => {
                         if (isTurnCancelledError(err) || cancelRequestedRef.current) {
                             endTurnActivity();
@@ -1434,19 +954,14 @@ export default function ChatPanel({
         rawResponseRef.current = "";
         currentTurnRef.current = null;
 
-        // Check if background mode is "generated"
-        let allowImageGen = false;
-        try {
-            const bgConfig = JSON.parse(localStorage.getItem("kokoro_bg_config") || "{}");
-            allowImageGen = bgConfig.mode === "generated";
-        } catch { /* ignore */ }
+        const allowImageGen = isGeneratedBackgroundMode();
 
         try {
             await streamChat({
                 message: trimmed || "(image attached)",
                 allow_image_gen: allowImageGen,
                 images: imagesToSend.length > 0 ? imagesToSend : undefined,
-                character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
+                character_id: getActiveCharacterIdForRequest(),
             });
         } catch (err) {
             if (isTurnCancelledError(err) || cancelRequestedRef.current) {
@@ -1602,18 +1117,13 @@ export default function ChatPanel({
         rawResponseRef.current = "";
         currentTurnRef.current = null;
 
-        const allowImageGen = (() => {
-            try {
-                const bgConfig = JSON.parse(localStorage.getItem("kokoro_bg_config") || "{}");
-                return bgConfig.mode === "generated";
-            } catch { return false; }
-        })();
+        const allowImageGen = isGeneratedBackgroundMode();
 
         streamChat({
             message: userMsg.text,
             images: userMsg.images,
             allow_image_gen: allowImageGen,
-            character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
+            character_id: getActiveCharacterIdForRequest(),
         }).catch(err => {
             if (isTurnCancelledError(err) || cancelRequestedRef.current) {
                 endTurnActivity();

@@ -43,6 +43,14 @@ import type {
 } from "../../lib/kokoro-bridge";
 import { normalizeBackgroundConfigForImageCount, type BackgroundConfig } from "../hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "../../features/live2d/Live2DViewer";
+import {
+    APP_SETTING_KEYS,
+    dispatchRuntimeSettingsChanged,
+    readBooleanSetting,
+    readStringSetting,
+    writeBooleanSetting,
+    writeStringSetting,
+} from "../../lib/app-settings";
 
 const SETTINGS_TAB_IDS = [
     "api",
@@ -282,10 +290,13 @@ function normalizeTtsVoice(
     return getDefaultTtsVoice(providerId, voices);
 }
 
+const DEFAULT_PERSONA =
+    "You are a friendly, warm companion character. Respond with personality and emotion.";
+
 export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, initialTelegramStatus, onVisionConfigChange }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [internalActiveTab, setInternalActiveTab] = useState<SettingsTabId>(() => {
-        const saved = localStorage.getItem("kokoro_settings_active_tab");
+        const saved = readStringSetting(APP_SETTING_KEYS.settingsActiveTab, "");
         return normalizeSettingsTabId(saved);
     });
     const activeTab = activeTabProp ?? internalActiveTab;
@@ -322,16 +333,16 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             setLocalGazeTracking(gazeTrackingProp ?? true);
             bgConfigDirtyRef.current = false;
             setLocalBgConfig({ ...normalizeBackgroundConfigForImageCount(bg.config, bg.imageCount) });
-            setPersonaText(localStorage.getItem("kokoro_persona") || "You are a friendly, warm companion character. Respond with personality and emotion.");
-            setTtsVoice(localStorage.getItem("kokoro_tts_voice") || "");
-            setTtsSpeed(localStorage.getItem("kokoro_tts_speed") || "1.0");
-            setTtsPitch(localStorage.getItem("kokoro_tts_pitch") || "1.0");
-            setTtsProviderId(localStorage.getItem("kokoro_tts_provider") || "browser");
-            setTtsEnabled(localStorage.getItem("kokoro_tts_enabled") === "true");
-            setVisionEnabled(localStorage.getItem("kokoro_vision_enabled") === "true");
-            setVoiceInterrupt(localStorage.getItem("kokoro_voice_interrupt") === "true");
-            setResponseLang(localStorage.getItem("kokoro_response_language") || "");
-            setUserLang(localStorage.getItem("kokoro_user_language") || "");
+            setPersonaText(readStringSetting(APP_SETTING_KEYS.persona, DEFAULT_PERSONA));
+            setTtsVoice(readStringSetting(APP_SETTING_KEYS.ttsVoice, ""));
+            setTtsSpeed(readStringSetting(APP_SETTING_KEYS.ttsSpeed, "1.0"));
+            setTtsPitch(readStringSetting(APP_SETTING_KEYS.ttsPitch, "1.0"));
+            setTtsProviderId(readStringSetting(APP_SETTING_KEYS.ttsProvider, "browser"));
+            setTtsEnabled(readBooleanSetting(APP_SETTING_KEYS.ttsEnabled, false));
+            setVisionEnabled(readBooleanSetting(APP_SETTING_KEYS.visionEnabled, false));
+            setVoiceInterrupt(readBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, false));
+            setResponseLang(readStringSetting(APP_SETTING_KEYS.responseLanguage, ""));
+            setUserLang(readStringSetting(APP_SETTING_KEYS.userLanguage, ""));
             setLocalBotConfig(null);
             fetchData();
             fetchBotConfig();
@@ -347,7 +358,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
     // Persist active tab selection
     useEffect(() => {
-        localStorage.setItem("kokoro_settings_active_tab", activeTab);
+        writeStringSetting(APP_SETTING_KEYS.settingsActiveTab, activeTab);
     }, [activeTab]);
 
     // Keep visited tabs mounted to avoid remount flicker/reload on tab switch
@@ -368,14 +379,20 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
 
     // Persona state
-    const [persona, setPersonaText] = useState(() => localStorage.getItem("kokoro_persona") || "You are a friendly, warm companion character. Respond with personality and emotion.");
+    const [persona, setPersonaText] = useState(() =>
+        readStringSetting(APP_SETTING_KEYS.persona, DEFAULT_PERSONA)
+    );
 
     // TTS state
-    const [ttsVoice, setTtsVoice] = useState(() => localStorage.getItem("kokoro_tts_voice") || "");
-    const [ttsSpeed, setTtsSpeed] = useState(() => localStorage.getItem("kokoro_tts_speed") || "1.0");
-    const [ttsPitch, setTtsPitch] = useState(() => localStorage.getItem("kokoro_tts_pitch") || "1.0");
-    const [ttsProviderId, setTtsProviderId] = useState(() => localStorage.getItem("kokoro_tts_provider") || "browser");
-    const [ttsEnabled, setTtsEnabled] = useState(() => localStorage.getItem("kokoro_tts_enabled") === "true");
+    const [ttsVoice, setTtsVoice] = useState(() => readStringSetting(APP_SETTING_KEYS.ttsVoice, ""));
+    const [ttsSpeed, setTtsSpeed] = useState(() => readStringSetting(APP_SETTING_KEYS.ttsSpeed, "1.0"));
+    const [ttsPitch, setTtsPitch] = useState(() => readStringSetting(APP_SETTING_KEYS.ttsPitch, "1.0"));
+    const [ttsProviderId, setTtsProviderId] = useState(() =>
+        readStringSetting(APP_SETTING_KEYS.ttsProvider, "browser")
+    );
+    const [ttsEnabled, setTtsEnabled] = useState(() =>
+        readBooleanSetting(APP_SETTING_KEYS.ttsEnabled, false)
+    );
     const [ttsProviders, setTtsProviders] = useState<ProviderStatus[]>([]);
     const [ttsVoices, setTtsVoices] = useState<VoiceProfile[]>([]);
     const [isTtsLoading, setIsTtsLoading] = useState(false);
@@ -391,7 +408,9 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     }, [imageGenConfigProp]);
 
     // Vision Mode
-    const [visionEnabled, setVisionEnabled] = useState(() => localStorage.getItem("kokoro_vision_enabled") === "true");
+    const [visionEnabled, setVisionEnabled] = useState(() =>
+        readBooleanSetting(APP_SETTING_KEYS.visionEnabled, false)
+    );
 
     // Save feedback
     const [saved, setSaved] = useState(false);
@@ -399,16 +418,22 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
     // STT state
     const [localSttConfig, setLocalSttConfig] = useState<SttConfig | null>(sttConfigProp ?? null);
-    const [voiceInterrupt, setVoiceInterrupt] = useState(() => localStorage.getItem("kokoro_voice_interrupt") === "true");
+    const [voiceInterrupt, setVoiceInterrupt] = useState(() =>
+        readBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, false)
+    );
 
     // Bot config state
     const [localBotConfig, setLocalBotConfig] = useState<BotConfig | null>(null);
 
     // Response Language
-    const [responseLang, setResponseLang] = useState(() => localStorage.getItem("kokoro_response_language") || "");
+    const [responseLang, setResponseLang] = useState(() =>
+        readStringSetting(APP_SETTING_KEYS.responseLanguage, "")
+    );
 
     // User Language (for translation)
-    const [userLang, setUserLang] = useState(() => localStorage.getItem("kokoro_user_language") || "");
+    const [userLang, setUserLang] = useState(() =>
+        readStringSetting(APP_SETTING_KEYS.userLanguage, "")
+    );
 
     // Click outside to close
     useEffect(() => {
@@ -489,27 +514,27 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
     const handleSave = async () => {
         // Persist to localStorage (non-LLM settings)
-        localStorage.setItem("kokoro_persona", persona);
-        localStorage.setItem("kokoro_tts_voice", ttsVoice);
-        localStorage.setItem("kokoro_tts_speed", ttsSpeed);
-        localStorage.setItem("kokoro_tts_pitch", ttsPitch);
-        localStorage.setItem("kokoro_tts_provider", ttsProviderId);
-        localStorage.setItem("kokoro_tts_enabled", ttsEnabled ? "true" : "false");
-        localStorage.setItem("kokoro_vision_enabled", visionEnabled ? "true" : "false");
-        window.dispatchEvent(new Event("kokoro-vision-settings-changed"));
+        writeStringSetting(APP_SETTING_KEYS.persona, persona);
+        writeStringSetting(APP_SETTING_KEYS.ttsVoice, ttsVoice);
+        writeStringSetting(APP_SETTING_KEYS.ttsSpeed, ttsSpeed);
+        writeStringSetting(APP_SETTING_KEYS.ttsPitch, ttsPitch);
+        writeStringSetting(APP_SETTING_KEYS.ttsProvider, ttsProviderId);
+        writeBooleanSetting(APP_SETTING_KEYS.ttsEnabled, ttsEnabled);
+        writeBooleanSetting(APP_SETTING_KEYS.visionEnabled, visionEnabled);
+        dispatchRuntimeSettingsChanged("vision");
         if (localSttConfig) {
             const activeSttProvider = localSttConfig.providers?.find(p => p.id === localSttConfig.active_provider);
-            localStorage.setItem("kokoro_stt_enabled", activeSttProvider?.enabled ? "true" : "false");
-            localStorage.setItem("kokoro_stt_auto_send", localSttConfig.auto_send ? "true" : "false");
-            localStorage.setItem("kokoro_stt_language", localSttConfig.language || "");
-            localStorage.setItem("kokoro_stt_continuous_listening", localSttConfig.continuous_listening ? "true" : "false");
-            localStorage.setItem("kokoro_wake_word_enabled", localSttConfig.wake_word_enabled ? "true" : "false");
-            localStorage.setItem("kokoro_wake_word", localSttConfig.wake_word || "");
+            writeBooleanSetting(APP_SETTING_KEYS.sttEnabled, activeSttProvider?.enabled === true);
+            writeBooleanSetting(APP_SETTING_KEYS.sttAutoSend, localSttConfig.auto_send);
+            writeStringSetting(APP_SETTING_KEYS.sttLanguage, localSttConfig.language || "");
+            writeBooleanSetting(APP_SETTING_KEYS.sttContinuousListening, localSttConfig.continuous_listening);
+            writeBooleanSetting(APP_SETTING_KEYS.wakeWordEnabled, localSttConfig.wake_word_enabled);
+            writeStringSetting(APP_SETTING_KEYS.wakeWord, localSttConfig.wake_word || "");
         }
-        window.dispatchEvent(new Event("kokoro-stt-settings-changed"));
-        localStorage.setItem("kokoro_voice_interrupt", voiceInterrupt ? "true" : "false");
-        localStorage.setItem("kokoro_response_language", responseLang);
-        localStorage.setItem("kokoro_user_language", userLang);
+        dispatchRuntimeSettingsChanged("stt");
+        writeBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, voiceInterrupt);
+        writeStringSetting(APP_SETTING_KEYS.responseLanguage, responseLang);
+        writeStringSetting(APP_SETTING_KEYS.userLanguage, userLang);
 
         // Commit core settings
         onDisplayModeChange(localDisplayMode);
@@ -730,7 +755,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                             {mountedTabs.has("memory") && (
                                 <div className={activeTab === "memory" ? "block" : "hidden"}>
                                     <MemoryPanel
-                                        characterId={localStorage.getItem("kokoro_active_character_id") || "default"}
+                                        characterId={readStringSetting(APP_SETTING_KEYS.activeCharacterId, "default") || "default"}
                                     />
                                 </div>
                             )}
@@ -868,7 +893,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                     value={getAppLanguageSelectValue(i18n.resolvedLanguage || i18n.language)}
                                     onChange={(v) => {
                                         i18n.changeLanguage(v);
-                                        localStorage.setItem("kokoro_app_language", v);
+                                        writeStringSetting(APP_SETTING_KEYS.appLanguage, v);
                                     }}
                                     options={APP_LANGUAGE_OPTIONS}
                                     className="min-w-[120px]"

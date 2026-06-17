@@ -23,6 +23,22 @@ import type { Live2DDisplayMode } from "./features/live2d/Live2DViewer";
 import { live2dUrl } from "./lib/utils";
 import { MEMORY_MODEL_DIALOG_EVENT } from "./lib/memory-model-gate";
 import { characterDb } from "./lib/db";
+import {
+  APP_SETTING_KEYS,
+  dispatchRuntimeSettingsChanged,
+  readBooleanSetting,
+  readNumberSetting,
+  readOptionalStringSetting,
+  readStringSetting,
+  removeSetting,
+  writeBooleanSetting,
+  writeStringSetting,
+} from "./lib/app-settings";
+import {
+  createModActionDispatcher,
+  getModActionFromEvent,
+  type ModActionEnvelope,
+} from "./core/mod-actions/dispatcher";
 
 // Register components synchronously before first render
 registerCoreComponents();
@@ -292,6 +308,11 @@ interface PetConfig {
   render_fps?: number;
 }
 
+type ModActionData = Record<string, any>;
+type LegacyModActionEnvelope = ModActionEnvelope & {
+  data?: ModActionData;
+};
+
 const ONBOARDING_STATUS_KEY = "kokoro_onboarding_status";
 
 const ONBOARDING_LANGUAGE_NAMES: Record<OnboardingLanguageCode, string> = {
@@ -331,7 +352,7 @@ function App() {
   const { i18n } = useTranslation();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>(() => {
-    const saved = localStorage.getItem("kokoro_settings_active_tab");
+    const saved = readStringSetting(APP_SETTING_KEYS.settingsActiveTab, "");
     return normalizeSettingsTabId(saved);
   });
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep | null>(() =>
@@ -339,12 +360,12 @@ function App() {
   );
   const [onboardingLanguage, setOnboardingLanguage] = useState<OnboardingLanguageCode>(() =>
     normalizeOnboardingLanguageCode(
-      localStorage.getItem("kokoro_app_language")
+      readStringSetting(APP_SETTING_KEYS.appLanguage, "")
       || (typeof navigator !== "undefined" ? navigator.language : "zh")
     )
   );
   const [displayMode, setDisplayMode] = useState<Live2DDisplayMode>(
-    () => (localStorage.getItem("kokoro_display_mode") as Live2DDisplayMode) || "full"
+    () => readStringSetting(APP_SETTING_KEYS.displayMode, "full") as Live2DDisplayMode
   );
   const bgSlideshow = useBackgroundSlideshow();
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
@@ -353,11 +374,11 @@ function App() {
   useSyncExternalStore(_subscribeFn, _getSnap);
 
   const [customModelPath, setCustomModelPath] = useState<string | null>(
-    () => localStorage.getItem("kokoro_custom_model_path")
+    () => readStringSetting(APP_SETTING_KEYS.customModelPath, "") || null
   );
 
   const [gazeTracking, setGazeTracking] = useState<boolean>(
-    () => localStorage.getItem("kokoro_gaze_tracking") !== "false"
+    () => readBooleanSetting(APP_SETTING_KEYS.gazeTracking, true)
   );
   const [renderFps, setRenderFps] = useState<number>(60);
   const [chatPanelWidth, setChatPanelWidth] = useState(CHAT_PANEL_MIN_WIDTH);
@@ -373,7 +394,7 @@ function App() {
 
   const handleGazeTrackingChange = (enabled: boolean) => {
     setGazeTracking(enabled);
-    localStorage.setItem("kokoro_gaze_tracking", enabled ? "true" : "false");
+    writeBooleanSetting(APP_SETTING_KEYS.gazeTracking, enabled);
   };
 
   useEffect(() => {
@@ -387,8 +408,10 @@ function App() {
 
   // ── Global Settings State ──
   const [availableModels, setAvailableModels] = useState<Live2dModelInfo[]>([]);
-  const [persona, setPersonaState] = useState(() => localStorage.getItem("kokoro_persona") || "");
-  const [responseLanguage, setResponseLanguageState] = useState(() => localStorage.getItem("kokoro_response_language") || "zh");
+  const [persona, setPersonaState] = useState(() => readStringSetting(APP_SETTING_KEYS.persona, ""));
+  const [responseLanguage, setResponseLanguageState] = useState(() =>
+    readStringSetting(APP_SETTING_KEYS.responseLanguage, "zh")
+  );
 
   // Full Config State
   const [ttsConfig, setTtsConfig] = useState<TtsSystemConfig | undefined>(undefined);
@@ -427,10 +450,11 @@ function App() {
   const [memoryTotal, setMemoryTotal] = useState(0);
   const [sdModels, setSdModels] = useState<string[]>([]);
   const [capturedScreenUrl, setCapturedScreenUrl] = useState<string | null>(null);
-  const [userLanguage, setUserLanguageState] = useState(() => localStorage.getItem("kokoro_user_language") || "zh");
+  const [userLanguage, setUserLanguageState] = useState(() =>
+    readStringSetting(APP_SETTING_KEYS.userLanguage, "zh")
+  );
   const [proactiveEnabled, setProactiveEnabledState] = useState(() => {
-    const saved = localStorage.getItem("kokoro_proactive_enabled");
-    return saved !== null ? saved === "true" : true;
+    return readBooleanSetting(APP_SETTING_KEYS.proactiveEnabled, true);
   });
   const [memoryModelStatus, setMemoryModelStatus] = useState<MemoryEmbeddingModelStatus | null>(null);
   const [memoryModelProgress, setMemoryModelProgress] = useState<MemoryEmbeddingModelDownloadProgress | null>(null);
@@ -475,15 +499,15 @@ function App() {
 
   const handleDisplayModeChange = (mode: Live2DDisplayMode) => {
     setDisplayMode(mode);
-    localStorage.setItem("kokoro_display_mode", mode);
+    writeStringSetting(APP_SETTING_KEYS.displayMode, mode);
   };
 
   const handleCustomModelChange = (path: string | null) => {
     setCustomModelPath(path);
     if (path) {
-      localStorage.setItem("kokoro_custom_model_path", path);
+      writeStringSetting(APP_SETTING_KEYS.customModelPath, path);
     } else {
-      localStorage.removeItem("kokoro_custom_model_path");
+      removeSetting(APP_SETTING_KEYS.customModelPath);
     }
   };
 
@@ -504,9 +528,9 @@ function App() {
     const label = ONBOARDING_LANGUAGE_NAMES[language];
     setOnboardingLanguage(language);
     i18n.changeLanguage(language);
-    localStorage.setItem("kokoro_app_language", language);
-    localStorage.setItem("kokoro_response_language", label);
-    localStorage.setItem("kokoro_user_language", label);
+    writeStringSetting(APP_SETTING_KEYS.appLanguage, language);
+    writeStringSetting(APP_SETTING_KEYS.responseLanguage, label);
+    writeStringSetting(APP_SETTING_KEYS.userLanguage, label);
     setResponseLanguageState(label);
     setUserLanguageState(label);
     setResponseLanguage(label).catch(console.error);
@@ -703,7 +727,7 @@ function App() {
       setMcpServers(mcp);
       setModList(mods);
       setProactiveEnabledState(proactive);
-      localStorage.setItem("kokoro_proactive_enabled", String(proactive));
+      writeBooleanSetting(APP_SETTING_KEYS.proactiveEnabled, proactive);
       setTelegramConfig(telegram);
       setTelegramStatus(telegramStatus);
       setBotConfig(botConfig);
@@ -712,16 +736,16 @@ function App() {
     }).catch(err => console.error("[App] Failed to fetch initial configs:", err));
 
     // Sync language settings to backend on startup
-    const savedResponseLang = localStorage.getItem("kokoro_response_language") || "";
-    const savedUserLang = localStorage.getItem("kokoro_user_language") || "";
+    const savedResponseLang = readStringSetting(APP_SETTING_KEYS.responseLanguage, "");
+    const savedUserLang = readStringSetting(APP_SETTING_KEYS.userLanguage, "");
     if (savedResponseLang) setResponseLanguage(savedResponseLang).catch(console.error);
     if (savedUserLang) setUserLanguage(savedUserLang).catch(console.error);
 
     const userProfileHydration = getUserProfileSettings()
       .then((profile) => {
         if (!profile) return;
-        localStorage.setItem("kokoro_user_name", profile.user_name);
-        localStorage.setItem("kokoro_user_persona", profile.user_persona);
+        writeStringSetting(APP_SETTING_KEYS.userName, profile.user_name);
+        writeStringSetting(APP_SETTING_KEYS.userPersona, profile.user_persona);
       })
       .catch(err => console.error("[App] Failed to restore user profile:", err));
 
@@ -743,11 +767,11 @@ function App() {
       try {
         const all = await listCharacters();
         setCharacters(all);
-        const savedId = localStorage.getItem("kokoro_active_character_id");
+        const savedId = readStringSetting(APP_SETTING_KEYS.activeCharacterId, "");
         const char = savedId ? all.find(c => c.id === savedId) ?? all[0] : all[0];
         if (char) {
           const prompt = composeSystemPrompt(char);
-          localStorage.setItem("kokoro_persona", prompt);
+          writeStringSetting(APP_SETTING_KEYS.persona, prompt);
           setPersonaState(prompt);
           await setPersona(prompt);
           await setActiveCharacterId(char.id);
@@ -896,11 +920,11 @@ function App() {
     const sqliteChars = await listCharacters();
     const idbChars = await characterDb.getAll();
     const idbByStableId = new Map(idbChars.filter(c => c.stableId).map(c => [c.stableId, c]));
-    const userName = localStorage.getItem('kokoro_user_name') ?? 'User';
-    const userPersona = localStorage.getItem('kokoro_user_persona') ?? '';
-    const userLanguage = localStorage.getItem('kokoro_user_language');
-    const responseLanguage = localStorage.getItem('kokoro_response_language');
-    const voiceInterrupt = localStorage.getItem('kokoro_voice_interrupt');
+    const userName = readStringSetting(APP_SETTING_KEYS.userName, "User");
+    const userPersona = readStringSetting(APP_SETTING_KEYS.userPersona, "");
+    const userLanguage = readOptionalStringSetting(APP_SETTING_KEYS.userLanguage);
+    const responseLanguage = readOptionalStringSetting(APP_SETTING_KEYS.responseLanguage);
+    const voiceInterrupt = readOptionalStringSetting(APP_SETTING_KEYS.voiceInterrupt);
 
     await setUserName(userName);
     await setUserPersona(userPersona);
@@ -915,7 +939,7 @@ function App() {
 
     return JSON.stringify({
       characters,
-      activeCharacterId: localStorage.getItem('kokoro_active_character_id'),
+      activeCharacterId: readOptionalStringSetting(APP_SETTING_KEYS.activeCharacterId),
       userName,
       userPersona,
       userLanguage,
@@ -988,16 +1012,16 @@ function App() {
         const chars = payload.characters ?? payload;
 
         if (payload.userName != null) {
-          localStorage.setItem('kokoro_user_name', payload.userName);
+          writeStringSetting(APP_SETTING_KEYS.userName, payload.userName);
           await setUserName(payload.userName);
         }
         if (payload.userPersona != null) {
-          localStorage.setItem('kokoro_user_persona', payload.userPersona);
+          writeStringSetting(APP_SETTING_KEYS.userPersona, payload.userPersona);
           await setUserPersona(payload.userPersona);
         }
-        if (payload.userLanguage != null) localStorage.setItem('kokoro_user_language', payload.userLanguage);
-        if (payload.responseLanguage != null) localStorage.setItem('kokoro_response_language', payload.responseLanguage);
-        if (payload.voiceInterrupt != null) localStorage.setItem('kokoro_voice_interrupt', payload.voiceInterrupt);
+        if (payload.userLanguage != null) writeStringSetting(APP_SETTING_KEYS.userLanguage, payload.userLanguage);
+        if (payload.responseLanguage != null) writeStringSetting(APP_SETTING_KEYS.responseLanguage, payload.responseLanguage);
+        if (payload.voiceInterrupt != null) writeStringSetting(APP_SETTING_KEYS.voiceInterrupt, payload.voiceInterrupt);
 
         const newIds: number[] = [];
         for (const char of chars) {
@@ -1016,10 +1040,12 @@ function App() {
         }
 
         targetCharacterId = payload.activeCharacterId || chars[0]?.stableId;
-        if (targetCharacterId) localStorage.setItem('kokoro_active_character_id', targetCharacterId);
+        if (targetCharacterId) writeStringSetting(APP_SETTING_KEYS.activeCharacterId, targetCharacterId);
       }
 
-      if (!targetCharacterId) targetCharacterId = localStorage.getItem('kokoro_active_character_id') ?? undefined;
+      if (!targetCharacterId) {
+        targetCharacterId = readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || undefined;
+      }
 
       const result = await importData(filePath, {
         import_database: importDb,
@@ -1029,11 +1055,11 @@ function App() {
       });
 
       if (payload?.userName != null) {
-        localStorage.setItem('kokoro_user_name', payload.userName);
+        writeStringSetting(APP_SETTING_KEYS.userName, payload.userName);
         await setUserName(payload.userName);
       }
       if (payload?.userPersona != null) {
-        localStorage.setItem('kokoro_user_persona', payload.userPersona);
+        writeStringSetting(APP_SETTING_KEYS.userPersona, payload.userPersona);
         await setUserPersona(payload.userPersona);
       }
 
@@ -1064,12 +1090,61 @@ function App() {
   };
 
   // ── MOD System: Action listener for UI components ──
-  const handleModAction = (e: Event) => {
-    const detail = (e as CustomEvent).detail;
-    if (detail.action === 'close_settings') {
+  const dispatchSimpleModAction = createModActionDispatcher({
+    close_settings: () => {
       setSettingsOpen(false);
-    }
+    },
+    set_display_mode: ({ data }) => {
+      if (data && typeof data === "object") {
+        const mode = (data as { mode?: unknown }).mode;
+        if (mode) {
+          handleDisplayModeChange(String(mode) as Live2DDisplayMode);
+        }
+      }
+    },
+    set_gaze_tracking: ({ data }) => {
+      const enabled = Boolean((data as { enabled?: unknown } | undefined)?.enabled);
+      handleGazeTrackingChange(enabled);
+    },
+    set_render_fps: ({ data }) => {
+      const raw = (data as { fps?: unknown } | undefined)?.fps;
+      const fps = Number.parseInt(String(raw), 10);
+      if (Number.isFinite(fps)) {
+        void handleRenderFpsChange(Math.max(0, fps));
+      }
+    },
+    set_background: ({ data }) => {
+      const url = (data as { url?: unknown } | undefined)?.url;
+      if (typeof url === "string" && url) {
+        setGeneratedImage(url);
+        bgSlideshow.setConfig({ mode: "generated" });
+      }
+    },
+    set_voice_interrupt: ({ data }) => {
+      setVoiceInterrupt(Boolean((data as { enabled?: unknown } | undefined)?.enabled));
+    },
+    set_vision_enabled: ({ data }) => {
+      const enabled = Boolean((data as { enabled?: unknown } | undefined)?.enabled);
+      writeBooleanSetting(APP_SETTING_KEYS.visionEnabled, enabled);
+      dispatchRuntimeSettingsChanged("vision");
+    },
+  });
+
+  const handleModAction = (e: Event) => {
+    const action = getModActionFromEvent(e);
+    if (!action) return;
+
+    void dispatchSimpleModAction(action).then((handled) => {
+      if (handled) return;
+      handleLegacyModAction(action as LegacyModActionEnvelope);
+    }).catch((err) => {
+      console.error("[App] Mod action dispatch failed:", err);
+    });
+  };
+
+  const handleLegacyModAction = (detail: LegacyModActionEnvelope) => {
     if (detail.action === 'send_message' && detail.data?.message) {
+      const message = detail.data.message;
       void (async () => {
         try {
           const status = memoryModelStatus ?? await refreshMemoryModelStatus();
@@ -1078,8 +1153,8 @@ function App() {
             return;
           }
           await streamChat({
-            message: detail.data.message,
-            character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
+            message,
+            character_id: readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || undefined,
           });
         } catch (err) {
           console.error("[App] Mod send_message failed:", err);
@@ -1088,34 +1163,19 @@ function App() {
     }
     // New settings actions
     if (detail.action === 'set_model' && detail.data?.model) {
-      const target = availableModels.find(m => m.name === detail.data.model || m.path === detail.data.model);
+      const model = detail.data.model;
+      const target = availableModels.find(m => m.name === model || m.path === model);
       if (target) handleCustomModelChange(target.path);
     }
     if (detail.action === 'set_persona' && detail.data?.persona) {
       setPersonaState(detail.data.persona);
-      localStorage.setItem("kokoro_persona", detail.data.persona);
+      writeStringSetting(APP_SETTING_KEYS.persona, detail.data.persona);
       setPersona(detail.data.persona).catch(console.error);
     }
     if (detail.action === 'set_language' && detail.data?.language) {
       setResponseLanguageState(detail.data.language);
-      localStorage.setItem("kokoro_response_language", detail.data.language);
+      writeStringSetting(APP_SETTING_KEYS.responseLanguage, detail.data.language);
       setResponseLanguage(detail.data.language).catch(console.error);
-    }
-    if (detail.action === 'set_display_mode' && detail.data?.mode) {
-      handleDisplayModeChange(detail.data.mode);
-    }
-    if (detail.action === 'set_gaze_tracking') {
-      handleGazeTrackingChange(!!detail.data?.enabled);
-    }
-    if (detail.action === 'set_render_fps' && detail.data?.fps !== undefined) {
-      const fps = Number.parseInt(String(detail.data.fps), 10);
-      if (Number.isFinite(fps)) {
-        void handleRenderFpsChange(Math.max(0, fps));
-      }
-    }
-    if (detail.action === 'set_background' && detail.data?.url) {
-      setGeneratedImage(detail.data.url);
-      bgSlideshow.setConfig({ mode: "generated" });
     }
     // Full Config Save Handlers
     if (detail.action === 'save_llm_config' && detail.data?.config) {
@@ -1254,10 +1314,6 @@ function App() {
       }
     }
 
-    if (detail.action === 'set_voice_interrupt') {
-      setVoiceInterrupt(!!detail.data?.enabled);
-    }
-
     if (detail.action === 'export_jailbreak_prompt') {
       void (async () => {
         try {
@@ -1297,16 +1353,10 @@ function App() {
       })();
     }
 
-    if (detail.action === 'set_vision_enabled') {
-      const enabled = !!detail.data?.enabled;
-      localStorage.setItem('kokoro_vision_enabled', enabled ? 'true' : 'false');
-      window.dispatchEvent(new Event('kokoro-vision-settings-changed'));
-    }
-
     if (detail.action === 'set_proactive_enabled') {
       const enabled = !!detail.data?.enabled;
       setProactiveEnabledState(enabled);
-      localStorage.setItem("kokoro_proactive_enabled", String(enabled));
+      writeBooleanSetting(APP_SETTING_KEYS.proactiveEnabled, enabled);
       import("./lib/kokoro-bridge").then(({ setProactiveEnabled }) => {
         setProactiveEnabled(enabled).catch(console.error);
       });
@@ -1386,28 +1436,28 @@ function App() {
 
     // ── TTS Playback Actions ────────────────────────
     if (detail.action === 'set_tts_enabled') {
-      localStorage.setItem('kokoro_tts_enabled', detail.data?.enabled ? 'true' : 'false');
+      writeBooleanSetting(APP_SETTING_KEYS.ttsEnabled, !!detail.data?.enabled);
     }
     if (detail.action === 'set_tts_speed' && detail.data?.speed !== undefined) {
-      localStorage.setItem('kokoro_tts_speed', String(detail.data.speed));
+      writeStringSetting(APP_SETTING_KEYS.ttsSpeed, String(detail.data.speed));
     }
     if (detail.action === 'set_tts_pitch' && detail.data?.pitch !== undefined) {
-      localStorage.setItem('kokoro_tts_pitch', String(detail.data.pitch));
+      writeStringSetting(APP_SETTING_KEYS.ttsPitch, String(detail.data.pitch));
     }
     if (detail.action === 'test_tts') {
       synthesize("Hello! This is a test of the TTS system.", {
-        provider_id: localStorage.getItem('kokoro_tts_provider') || undefined,
-        voice: localStorage.getItem('kokoro_tts_voice') || undefined,
-        speed: Number.parseFloat(localStorage.getItem('kokoro_tts_speed') || "1.0"),
-        pitch: Number.parseFloat(localStorage.getItem('kokoro_tts_pitch') || "1.0"),
+        provider_id: readStringSetting(APP_SETTING_KEYS.ttsProvider, "") || undefined,
+        voice: readStringSetting(APP_SETTING_KEYS.ttsVoice, "") || undefined,
+        speed: readNumberSetting(APP_SETTING_KEYS.ttsSpeed, 1.0),
+        pitch: readNumberSetting(APP_SETTING_KEYS.ttsPitch, 1.0),
       }).catch(err => console.error('[App] TTS test failed:', err));
     }
     if (detail.action === 'set_tts_playback' && detail.data) {
       const { speed, pitch, voice, provider } = detail.data;
-      if (speed !== undefined) localStorage.setItem('kokoro_tts_speed', String(speed));
-      if (pitch !== undefined) localStorage.setItem('kokoro_tts_pitch', String(pitch));
-      if (voice !== undefined) localStorage.setItem('kokoro_tts_voice', voice);
-      if (provider !== undefined) localStorage.setItem('kokoro_tts_provider', provider);
+      if (speed !== undefined) writeStringSetting(APP_SETTING_KEYS.ttsSpeed, String(speed));
+      if (pitch !== undefined) writeStringSetting(APP_SETTING_KEYS.ttsPitch, String(pitch));
+      if (voice !== undefined) writeStringSetting(APP_SETTING_KEYS.ttsVoice, voice);
+      if (provider !== undefined) writeStringSetting(APP_SETTING_KEYS.ttsProvider, provider);
     }
 
     // ── MCP Actions ────────────────────────────────
@@ -1562,7 +1612,7 @@ function App() {
               try {
                 const modelPath = await importLive2dZip(selected);
                 setCustomModelPath(modelPath);
-                localStorage.setItem('kokoro_custom_model_path', modelPath);
+                writeStringSetting(APP_SETTING_KEYS.customModelPath, modelPath);
                 const models = await listLive2dModels();
                 setAvailableModels(models);
               } catch (e) { console.error('[App] import zip failed:', e); }
@@ -1570,7 +1620,7 @@ function App() {
               try {
                 const modelPath = await importLive2dFolder(selected);
                 setCustomModelPath(modelPath);
-                localStorage.setItem('kokoro_custom_model_path', modelPath);
+                writeStringSetting(APP_SETTING_KEYS.customModelPath, modelPath);
                 const models = await listLive2dModels();
                 setAvailableModels(models);
               } catch (e) { console.error('[App] import folder failed:', e); }
@@ -1598,9 +1648,11 @@ function App() {
       })();
     }
     if (detail.action === 'rename_live2d_model' && detail.data?.path && detail.data?.newName) {
-      renameLive2dModel(detail.data.path, detail.data.newName)
+      const modelPath = detail.data.path;
+      const newName = detail.data.newName;
+      renameLive2dModel(modelPath, newName)
         .then(nextPath => {
-          if (customModelPath === detail.data.path) handleCustomModelChange(nextPath);
+          if (customModelPath === modelPath) handleCustomModelChange(nextPath);
           return listLive2dModels();
         })
         .then(models => setAvailableModels(models))
@@ -1610,17 +1662,17 @@ function App() {
     // ── Language Actions ───────────────────────────
     if (detail.action === 'set_user_language' && detail.data?.language) {
       setUserLanguageState(detail.data.language);
-      localStorage.setItem('kokoro_user_language', detail.data.language);
+      writeStringSetting(APP_SETTING_KEYS.userLanguage, detail.data.language);
       setUserLanguage(detail.data.language).catch(console.error);
     }
 
     // ── User Profile Actions ───────────────────────
     if (detail.action === 'set_user_name' && detail.data?.name) {
-      localStorage.setItem('kokoro_user_name', detail.data.name);
+      writeStringSetting(APP_SETTING_KEYS.userName, detail.data.name);
       setUserName(detail.data.name).catch(console.error);
     }
     if (detail.action === 'set_user_persona' && detail.data?.persona) {
-      localStorage.setItem('kokoro_user_persona', detail.data.persona);
+      writeStringSetting(APP_SETTING_KEYS.userPersona, detail.data.persona);
       setUserPersona(detail.data.persona).catch(console.error);
     }
 
@@ -1632,12 +1684,13 @@ function App() {
       }).catch(console.error);
     }
     if (detail.action === 'select_character' && detail.data?.id != null) {
+      const characterId = detail.data.id;
       import('./ui/widgets/CharacterManager').then(async ({ composeSystemPrompt }) => {
         const { listCharacters, setActiveCharacterId, setCharacterName } = await import('./lib/kokoro-bridge');
         const all = await listCharacters();
-        const char = all.find(c => c.id === detail.data.id);
+        const char = all.find(c => c.id === characterId);
         if (char) {
-          localStorage.setItem('kokoro_active_character_id', char.id);
+          writeStringSetting(APP_SETTING_KEYS.activeCharacterId, char.id);
           const prompt = composeSystemPrompt(char);
           setPersonaState(prompt);
           setPersona(prompt).catch(console.error);
@@ -1656,7 +1709,7 @@ function App() {
         setCharacters(all);
         const newChar = all.find(c => c.id === id);
         if (newChar) {
-          localStorage.setItem('kokoro_active_character_id', newChar.id);
+          writeStringSetting(APP_SETTING_KEYS.activeCharacterId, newChar.id);
           const { composeSystemPrompt } = await import('./ui/widgets/CharacterManager');
           const prompt = composeSystemPrompt(newChar);
           setPersonaState(prompt);
@@ -1685,7 +1738,7 @@ function App() {
           setCharacters(all);
           const char = all.find(c => c.id === id);
           if (char) {
-            localStorage.setItem('kokoro_active_character_id', char.id);
+            writeStringSetting(APP_SETTING_KEYS.activeCharacterId, char.id);
             const { composeSystemPrompt } = await import('./ui/widgets/CharacterManager');
             const prompt = composeSystemPrompt(char);
             setPersonaState(prompt);
@@ -1823,11 +1876,11 @@ function App() {
             sdModels={sdModels}
             capturedScreenUrl={capturedScreenUrl}
             userLanguage={userLanguage}
-            activeCharacterId={localStorage.getItem('kokoro_active_character_id') || 'default'}
+            activeCharacterId={readStringSetting(APP_SETTING_KEYS.activeCharacterId, "default") || "default"}
             characters={characters}
             // User Profile (from localStorage)
-            userName={localStorage.getItem('kokoro_user_name') || ''}
-            userPersona={localStorage.getItem('kokoro_user_persona') || ''}
+            userName={readStringSetting(APP_SETTING_KEYS.userName, "")}
+            userPersona={readStringSetting(APP_SETTING_KEYS.userPersona, "")}
             proactiveEnabled={proactiveEnabled}
             initialTelegramStatus={telegramStatus}
           />

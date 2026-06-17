@@ -2,6 +2,7 @@
 // Reason: 应用入口文件需要同时声明模块、注册 Tauri 命令、初始化服务与恢复磁盘状态，天然属于编排层。
 pub mod actions;
 pub mod ai;
+pub mod chat;
 pub mod commands;
 pub mod config;
 pub mod error;
