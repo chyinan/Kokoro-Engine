@@ -264,3 +264,7 @@ Kokoro Engine에 기여해 주신 모든 분들께 감사드립니다.
 
 **Kokoro Engine** is an open-source project.
 Live2D is a registered trademark of Live2D Inc.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=chyinan/Kokoro-Engine&type=Date)](https://www.star-history.com/#chyinan/Kokoro-Engine&Date)

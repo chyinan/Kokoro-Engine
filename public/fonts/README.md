@@ -10,3 +10,7 @@ network availability at runtime.
 | JetBrains Mono | https://github.com/JetBrains/JetBrainsMono | SIL Open Font License 1.1 |
 
 The license text for each font is stored next to the font files as `OFL.txt`.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=chyinan/Kokoro-Engine&type=Date)](https://www.star-history.com/#chyinan/Kokoro-Engine&Date)
