@@ -4,10 +4,15 @@ import {
   getModActionFromEvent,
 } from "./dispatcher";
 
+function createEventWithDetail(detail: unknown): Event {
+  return Object.assign(new Event("kokoro:mod-action"), { detail });
+}
+
 describe("mod action dispatcher", () => {
-  it("extracts action envelope from CustomEvent detail", () => {
-    const event = new CustomEvent("kokoro:mod-action", {
-      detail: { action: "close_settings", data: { source: "test" } },
+  it("extracts action envelope from event detail", () => {
+    const event = createEventWithDetail({
+      action: "close_settings",
+      data: { source: "test" },
     });
 
     expect(getModActionFromEvent(event)).toEqual({
@@ -18,7 +23,16 @@ describe("mod action dispatcher", () => {
 
   it("ignores malformed events", () => {
     expect(getModActionFromEvent(new Event("kokoro:mod-action"))).toBeNull();
-    expect(getModActionFromEvent(new CustomEvent("kokoro:mod-action", { detail: {} }))).toBeNull();
+    expect(getModActionFromEvent(createEventWithDetail({}))).toBeNull();
+  });
+
+  it("does not require a global CustomEvent constructor", () => {
+    vi.stubGlobal("CustomEvent", undefined);
+
+    expect(getModActionFromEvent(createEventWithDetail({ action: "close_settings" }))).toEqual({
+      action: "close_settings",
+      data: undefined,
+    });
   });
 
   it("dispatches registered handler and ignores unknown action", async () => {

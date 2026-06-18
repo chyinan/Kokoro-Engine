@@ -11,8 +11,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function getModActionFromEvent(event: Event): ModActionEnvelope | null {
-  if (!(event instanceof CustomEvent)) return null;
-  const detail = event.detail;
+  if (!("detail" in event)) return null;
+  const detail = (event as Event & { detail: unknown }).detail;
   if (!isRecord(detail)) return null;
   if (typeof detail.action !== "string" || detail.action.trim() === "") return null;
   return {
