@@ -117,6 +117,7 @@ Nix 상세 내용은 [docs/nix.md](docs/nix.md)를 참고하세요.
 - MOD 프레임워크: HTML/CSS/JS UI 교체 + QuickJS 스크립트 샌드박스.
 - MCP 지원: MCP Server 연결 및 외부 도구 호출.
 - 공식 데모 MOD 내장: `mods/genshin-theme`.
+- SillyTavern 캐릭터 카드 가져오기 지원.
 
 ### 원격 상호작용
 

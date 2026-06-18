@@ -117,6 +117,7 @@ For more Nix usage, see [docs/nix.md](docs/nix.md).
 - MOD framework: HTML/CSS/JS UI replacement + QuickJS script sandbox.
 - MCP support: connect MCP servers and call external tools.
 - Built-in official demo MOD: `mods/genshin-theme`.
+- Supports SillyTavern character card import.
 
 ### Remote interaction
 

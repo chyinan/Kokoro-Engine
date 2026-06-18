@@ -118,6 +118,7 @@ npm run tauri dev
 - MOD 框架：HTML/CSS/JS 超高自由度 UI 主题替换 + QuickJS 脚本沙箱
 - MCP 支持：连接 MCP Server 并调用外部工具
 - 内置官方示范 MOD：`mods/genshin-theme`
+- 支持 SillyTavern 角色卡导入功能（酒馆）
 
 ### 远程连接
 
