@@ -57,6 +57,12 @@ export default function MemoryModelDownloadDialog({
         if (progress?.stage === "ready") {
             return 100;
         }
+        if (progress?.stage === "checking") {
+            return 0;
+        }
+        if (progress?.stage === "verifying") {
+            return 100;
+        }
         if (progress?.stage === "complete" && progress.file_count > 0) {
             return Math.max(0, Math.min(100, Math.round((progress.file_index / progress.file_count) * 100)));
         }
@@ -76,6 +82,14 @@ export default function MemoryModelDownloadDialog({
         return Math.max(0, Math.min(100, Math.round(aggregatePercent * 100)));
     }, [progress, status?.installed]);
 
+    const isIndeterminateDownload = progressPercent == null
+        && downloading
+        && progress?.stage === "downloading";
+
+    const isPartialFileComplete = progress?.stage === "complete"
+        && progress.file_count > 0
+        && progress.file_index < progress.file_count;
+
     const stageLabel = status?.installed
         ? t("onboarding.memory_model.status.ready")
         : progress?.stage === "checking"
@@ -83,7 +97,9 @@ export default function MemoryModelDownloadDialog({
             : progress?.stage === "verifying"
                 ? t("onboarding.memory_model.status.verifying")
                 : progress?.stage === "complete"
-                    ? t("onboarding.memory_model.status.complete")
+                    ? isPartialFileComplete
+                        ? t("onboarding.memory_model.status.downloading")
+                        : t("onboarding.memory_model.status.complete")
                     : progress?.stage === "downloading"
                         ? t("onboarding.memory_model.status.downloading")
                         : error
@@ -170,12 +186,12 @@ export default function MemoryModelDownloadDialog({
                                         initial={false}
                                         animate={{
                                             width: progressPercent == null
-                                                ? (downloading ? "35%" : status?.installed ? "100%" : "0%")
+                                                ? (isIndeterminateDownload ? "35%" : status?.installed ? "100%" : "0%")
                                                 : `${progressPercent}%`,
                                         }}
                                         transition={{
                                             duration: progressPercent == null ? 0.8 : 0.3,
-                                            repeat: progressPercent == null && downloading ? Infinity : 0,
+                                            repeat: isIndeterminateDownload ? Infinity : 0,
                                             repeatType: "reverse",
                                         }}
                                         className={clsx(
