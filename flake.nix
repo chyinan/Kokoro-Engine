@@ -22,7 +22,7 @@
         lib = pkgs.lib;
 
         pname = "kokoro-engine";
-        version = "0.1.4";
+        version = "0.2.9";
 
         src = lib.cleanSource ./.;
 
@@ -60,6 +60,49 @@
           pango
           webkitgtk_4_1
         ];
+
+        devNativeBuildInputs = with pkgs; [
+          cargo
+          cargo-tauri
+          clippy
+          nodejs
+          pkg-config
+          rust-analyzer
+          rustc
+          rustfmt
+        ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+          wrapGAppsHook4
+        ];
+
+        mkDevShell =
+          { withSherpaArchive ? false }:
+          pkgs.mkShell {
+            nativeBuildInputs = devNativeBuildInputs;
+            buildInputs = runtimeLibraries;
+
+            RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
+
+            shellHook = ''
+              export XDG_DATA_DIRS="$GSETTINGS_SCHEMAS_PATH''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+              export GIO_MODULE_DIR="${pkgs.glib-networking}/lib/gio/modules"
+              export GIO_EXTRA_MODULES="${pkgs.glib-networking}/lib/gio/modules''${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
+              export GST_PLUGIN_SYSTEM_PATH_1_0="${pkgs.gst_all_1.gst-plugins-bad}/lib/gstreamer-1.0:${pkgs.gst_all_1.gstreamer}/lib/gstreamer-1.0:${pkgs.gst_all_1.gst-plugins-base}/lib/gstreamer-1.0:${pkgs.gst_all_1.gst-plugins-good}/lib/gstreamer-1.0''${GST_PLUGIN_SYSTEM_PATH_1_0:+:$GST_PLUGIN_SYSTEM_PATH_1_0}"
+              export GST_PLUGIN_SCANNER="${pkgs.gst_all_1.gstreamer.out}/libexec/gstreamer-1.0/gst-plugin-scanner"
+              export ORT_LIB_LOCATION="${pkgs.onnxruntime}/lib"
+              export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime.so"
+              export ORT_PREFER_DYNAMIC_LINK=1
+              export ORT_SKIP_DOWNLOAD=1
+              ${lib.optionalString withSherpaArchive ''
+                export SHERPA_ONNX_ARCHIVE_DIR="${sherpaOnnxArchiveDir}"
+              ''}
+              ${lib.optionalString (!withSherpaArchive) ''
+                unset SHERPA_ONNX_ARCHIVE_DIR
+              ''}
+              bad_nix_rpath="-rpath $PWD/outputs/out/lib"
+              export NIX_LDFLAGS="''${NIX_LDFLAGS//$bad_nix_rpath/}"
+              export LD_LIBRARY_PATH=${lib.makeLibraryPath runtimeLibraries}:$LD_LIBRARY_PATH
+            '';
+          };
 
         app = pkgs.rustPlatform.buildRustPackage {
           inherit pname version src;
@@ -126,37 +169,9 @@
           meta = app.meta;
         };
 
-        devShells.default = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [
-            cargo
-            cargo-tauri
-            clippy
-            nodejs
-            pkg-config
-            rust-analyzer
-            rustc
-            rustfmt
-          ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-            wrapGAppsHook4
-          ];
-
-          buildInputs = runtimeLibraries;
-
-          RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
-
-          shellHook = ''
-            export XDG_DATA_DIRS="$GSETTINGS_SCHEMAS_PATH''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
-            export GIO_MODULE_DIR="${pkgs.glib-networking}/lib/gio/modules"
-            export GIO_EXTRA_MODULES="${pkgs.glib-networking}/lib/gio/modules''${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
-            export GST_PLUGIN_SYSTEM_PATH_1_0="${pkgs.gst_all_1.gst-plugins-bad}/lib/gstreamer-1.0:${pkgs.gst_all_1.gstreamer}/lib/gstreamer-1.0:${pkgs.gst_all_1.gst-plugins-base}/lib/gstreamer-1.0:${pkgs.gst_all_1.gst-plugins-good}/lib/gstreamer-1.0''${GST_PLUGIN_SYSTEM_PATH_1_0:+:$GST_PLUGIN_SYSTEM_PATH_1_0}"
-            export GST_PLUGIN_SCANNER="${pkgs.gst_all_1.gstreamer.out}/libexec/gstreamer-1.0/gst-plugin-scanner"
-            export ORT_LIB_LOCATION="${pkgs.onnxruntime}/lib"
-            export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime.so"
-            export ORT_PREFER_DYNAMIC_LINK=1
-            export ORT_SKIP_DOWNLOAD=1
-            export SHERPA_ONNX_ARCHIVE_DIR="${sherpaOnnxArchiveDir}"
-            export LD_LIBRARY_PATH=${lib.makeLibraryPath runtimeLibraries}:$LD_LIBRARY_PATH
-          '';
+        devShells = {
+          default = mkDevShell { };
+          full = mkDevShell { withSherpaArchive = true; };
         };
       }
     );

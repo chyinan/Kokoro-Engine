@@ -30,6 +30,20 @@ npm install
 npm run tauri dev
 ```
 
+The default development shell is optimized for day-to-day debugging. It
+provides Node.js, Rust, Tauri CLI, WebKitGTK, GStreamer, ONNX Runtime, and the
+GTK/GIO runtime variables required by Tauri on NixOS.
+
+For a fully pinned shell that also prefetches the `sherpa-onnx` native archive
+used by the Nix package build, run:
+
+```bash
+nix develop .#full
+```
+
+Use the full shell when debugging the offline Nix package build itself. The
+first run may take longer because it downloads the `sherpa-onnx` archive.
+
 ## Build
 
 ```bash
