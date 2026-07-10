@@ -72,6 +72,9 @@
         },
         "api": {
             "provider_label": "LLM 服務供應商",
+            "provider_types": {
+                "openai_responses": "OpenAI Responses 介面"
+            },
             "provider_id_label": "服務供應商 ID",
             "provider_id_hint": "該服務供應商的唯一識別碼（用於系統 LLM 選擇）。",
             "loading_config": "正在載入 LLM 設定...",
@@ -89,6 +92,7 @@
             "context_length_hint": "可以手動輸入，也可以點選「取得可用模型」從 llama.cpp 自動讀取。",
             "fetch_models": "取得可用模型",
             "fetching": "取得中...",
+            "responses_env_model_hint": "聊天可使用已設定的環境變數，但取得模型清單需要在此輸入 API 金鑰。",
             "native_tools": {
                 "label": "工具呼叫",
                 "toggle": "啟用原生工具呼叫",

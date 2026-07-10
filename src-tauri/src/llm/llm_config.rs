@@ -10,7 +10,7 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmProviderConfig {
     pub id: String,
-    /// "openai" | "anthropic" | "ollama" | "llama_cpp"
+    /// "openai" | "openai_responses" | "anthropic" | "ollama" | "llama_cpp"
     pub provider_type: String,
     #[serde(default = "default_true")]
     pub enabled: bool,

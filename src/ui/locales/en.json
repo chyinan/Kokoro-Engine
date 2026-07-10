@@ -72,6 +72,9 @@
         },
         "api": {
             "provider_label": "LLM Provider",
+            "provider_types": {
+                "openai_responses": "OpenAI Responses"
+            },
             "provider_id_label": "Provider ID",
             "provider_id_hint": "Unique identifier for this provider (used in system LLM selection)",
             "loading_config": "Loading LLM config...",
@@ -89,6 +92,7 @@
             "context_length_hint": "You can enter it manually or use \"Fetch Available\" to read it from llama.cpp.",
             "fetch_models": "Fetch Available",
             "fetching": "Fetching...",
+            "responses_env_model_hint": "Chat can use the configured environment variable, but model listing requires entering the API key here.",
             "native_tools": {
                 "label": "Tool Calling",
                 "toggle": "Enable native tool calling",

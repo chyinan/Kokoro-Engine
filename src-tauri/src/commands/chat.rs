@@ -1437,6 +1437,7 @@ pub async fn stream_chat(
     let mut draft_row_id: Option<i64> = None;
     let mut stream_failed = false;
     let mut all_reasoning_content = String::new();
+    let mut final_provider_data = Vec::new();
 
     for round in 0..max_tool_rounds {
         tracing::info!(target: "chat", "[Chat] Tool loop round {}", round + 1);
@@ -1460,6 +1461,7 @@ pub async fn stream_chat(
 
         let mut round_response = String::new();
         let mut round_reasoning_content = String::new();
+        let mut round_provider_data = Vec::new();
         let mut emit_buffer = String::new();
         let mut native_tool_calls = Vec::new();
 
@@ -1496,6 +1498,9 @@ pub async fn stream_chat(
                                 name: tool_call.name,
                                 args: tool_call.args,
                             });
+                        }
+                        LlmStreamEvent::ProviderData(value) => {
+                            round_provider_data.push(value);
                         }
                     }
                 }
@@ -1628,6 +1633,7 @@ pub async fn stream_chat(
 
         // No tool calls → final round
         if tool_calls.is_empty() {
+            final_provider_data = round_provider_data;
             break;
         }
 
@@ -1781,6 +1787,10 @@ pub async fn stream_chat(
                 assistant_tool_call_metadata_value["reasoning_content"] =
                     serde_json::Value::String(round_reasoning_content.clone());
             }
+            if !round_provider_data.is_empty() {
+                assistant_tool_call_metadata_value["provider_data"] =
+                    serde_json::Value::Array(round_provider_data.clone());
+            }
             let assistant_tool_call_metadata = assistant_tool_call_metadata_value.to_string();
             state
                 .add_message_with_metadata(
@@ -1814,6 +1824,7 @@ pub async fn stream_chat(
                 ),
                 reasoning_content: (!round_reasoning_content.trim().is_empty())
                     .then_some(round_reasoning_content.clone()),
+                provider_data: round_provider_data,
             });
             client_messages.extend(tool_result_messages.into_iter().map(plain_llm_message));
 
@@ -2039,6 +2050,9 @@ pub async fn stream_chat(
         if !all_reasoning_content.trim().is_empty() {
             metadata_value["reasoning_content"] =
                 serde_json::Value::String(all_reasoning_content.clone());
+        }
+        if !final_provider_data.is_empty() {
+            metadata_value["provider_data"] = serde_json::Value::Array(final_provider_data);
         }
         let metadata = Some(metadata_value.to_string());
 

@@ -64,7 +64,7 @@ bzip2 = "0.4"
 tar = "0.4"
 cpal = "0.15"
 rubato = "0.14"
-async-openai = { version = "0.34.0", features = ["rustls", "chat-completion", "model"] }
+async-openai = { version = "0.34.0", features = ["rustls", "chat-completion", "model", "responses", "byot"] }
 ndarray = "0.17"
 ort = { version = "2.0.0-rc.9", default-features = false, features = ["ndarray", "load-dynamic"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }

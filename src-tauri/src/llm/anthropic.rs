@@ -274,6 +274,7 @@ impl LlmProvider for AnthropicProvider {
                 Ok(LlmStreamEvent::Text(text)) => Some(Ok(text)),
                 Ok(LlmStreamEvent::ReasoningContent(_)) => None,
                 Ok(LlmStreamEvent::ToolCall(_)) => None,
+                Ok(LlmStreamEvent::ProviderData(_)) => None,
                 Err(error) => Some(Err(error)),
             }
         });

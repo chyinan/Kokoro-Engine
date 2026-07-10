@@ -7,6 +7,7 @@ use crate::llm::llm_config::{LlmConfig, LlmPreset, LlmProviderConfig};
 use crate::llm::messages::user_text_message;
 use crate::llm::ollama::OllamaProvider;
 use crate::llm::provider::{LlmProvider, OpenAIProvider};
+use crate::llm::responses::OpenAIResponsesProvider;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -519,6 +520,22 @@ fn try_build_from_provider_config(
                     .with_id(cfg.id.clone()),
             ))
         }
+        "openai_responses" => {
+            let api_key = cfg.resolve_api_key().unwrap_or_default();
+            let model = cfg.model.clone().unwrap_or_else(|| "gpt-4o".to_string());
+            tracing::info!(
+                target: "llm",
+                "Initializing OpenAI Responses provider: base_url={}, model={}",
+                cfg.base_url
+                    .as_deref()
+                    .unwrap_or("https://api.openai.com/v1"),
+                model
+            );
+            Ok(Box::new(
+                OpenAIResponsesProvider::new(api_key, cfg.base_url.clone(), Some(model))
+                    .with_id(cfg.id.clone()),
+            ))
+        }
         unsupported => Err(KokoroError::Config(format!(
             "Unsupported LLM provider type: {}",
             unsupported
@@ -544,6 +561,40 @@ mod tests {
 
         let active_provider_id = service.active_provider_id.read().await.clone();
         assert_eq!(active_provider_id, config.active_provider);
+    }
+
+    #[test]
+    fn try_build_provider_supports_openai_responses_without_changing_openai() {
+        let responses = LlmProviderConfig {
+            id: "responses".to_string(),
+            provider_type: "openai_responses".to_string(),
+            enabled: true,
+            supports_native_tools: true,
+            api_key: Some("test-key".to_string()),
+            api_key_env: None,
+            base_url: Some("https://api.openai.com/v1".to_string()),
+            model: Some("gpt-4o".to_string()),
+            extra: std::collections::HashMap::new(),
+        };
+        let openai = LlmProviderConfig {
+            id: "openai".to_string(),
+            provider_type: "openai".to_string(),
+            enabled: true,
+            supports_native_tools: true,
+            api_key: Some("test-key".to_string()),
+            api_key_env: None,
+            base_url: Some("https://api.openai.com/v1".to_string()),
+            model: Some("gpt-4o".to_string()),
+            extra: std::collections::HashMap::new(),
+        };
+
+        let responses_provider = try_build_from_provider_config(&responses)
+            .expect("Responses provider should be supported");
+        let openai_provider = try_build_from_provider_config(&openai)
+            .expect("OpenAI provider should remain supported");
+
+        assert_eq!(responses_provider.id(), "responses");
+        assert_eq!(openai_provider.id(), "openai");
     }
 
     #[tokio::test]

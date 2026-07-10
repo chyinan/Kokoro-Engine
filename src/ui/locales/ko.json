@@ -72,6 +72,9 @@
         },
         "api": {
             "provider_label": "LLM 제공자",
+            "provider_types": {
+                "openai_responses": "OpenAI Responses API"
+            },
             "provider_id_label": "제공자 ID",
             "provider_id_hint": "이 제공자의 고유 식별자입니다(시스템 LLM 선택에 사용).",
             "loading_config": "LLM 설정을 불러오는 중...",
@@ -89,6 +92,7 @@
             "context_length_hint": "직접 입력하거나 \"사용 가능 모델 가져오기\"를 눌러 llama.cpp에서 자동으로 읽어올 수 있습니다.",
             "fetch_models": "사용 가능 모델 가져오기",
             "fetching": "가져오는 중...",
+            "responses_env_model_hint": "채팅은 설정된 환경 변수를 사용할 수 있지만 모델 목록을 가져오려면 여기에 API 키를 입력해야 합니다.",
             "native_tools": {
                 "label": "도구 호출",
                 "toggle": "네이티브 tool calling 사용",

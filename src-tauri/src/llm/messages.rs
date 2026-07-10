@@ -110,9 +110,20 @@ pub fn history_message_to_llm_chat_message(
         None
     };
 
+    let provider_data = if role == "assistant" {
+        metadata
+            .and_then(|meta| meta.get("provider_data"))
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     Ok(LlmChatMessage {
         message,
         reasoning_content,
+        provider_data,
     })
 }
 
@@ -469,6 +480,7 @@ mod tests {
                 vec![("call-1".to_string(), "lookup".to_string(), "{}".to_string())],
             ),
             reasoning_content: Some("reasoning".to_string()),
+            provider_data: Vec::new(),
         }];
 
         let sanitized = sanitize_llm_tool_message_sequence(messages);

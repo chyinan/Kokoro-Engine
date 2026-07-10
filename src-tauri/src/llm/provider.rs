@@ -57,12 +57,14 @@ pub enum LlmStreamEvent {
     Text(String),
     ReasoningContent(String),
     ToolCall(LlmToolCall),
+    ProviderData(serde_json::Value),
 }
 
 #[derive(Debug, Clone)]
 pub struct LlmChatMessage {
     pub message: ChatCompletionRequestMessage,
     pub reasoning_content: Option<String>,
+    pub provider_data: Vec<serde_json::Value>,
 }
 
 impl From<ChatCompletionRequestMessage> for LlmChatMessage {
@@ -70,6 +72,7 @@ impl From<ChatCompletionRequestMessage> for LlmChatMessage {
         Self {
             message,
             reasoning_content: None,
+            provider_data: Vec::new(),
         }
     }
 }
@@ -463,7 +466,7 @@ fn emit_pending_tool_calls(
     Ok(())
 }
 
-fn parse_tool_call_arguments(raw: &str) -> HashMap<String, String> {
+pub(crate) fn parse_tool_call_arguments(raw: &str) -> HashMap<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return HashMap::new();
@@ -696,7 +699,9 @@ impl LlmProvider for OpenAIProvider {
         Ok(Box::pin(stream.filter_map(|event| async move {
             match event {
                 Ok(LlmStreamEvent::Text(text)) => Some(Ok(text)),
-                Ok(LlmStreamEvent::ReasoningContent(_)) | Ok(LlmStreamEvent::ToolCall(_)) => None,
+                Ok(LlmStreamEvent::ReasoningContent(_))
+                | Ok(LlmStreamEvent::ToolCall(_))
+                | Ok(LlmStreamEvent::ProviderData(_)) => None,
                 Err(error) => Some(Err(error)),
             }
         })))

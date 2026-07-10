@@ -5,4 +5,6 @@ pub mod llm_config;
 pub mod messages;
 pub mod ollama;
 pub mod provider;
+pub mod responses;
+mod responses_protocol;
 pub mod service;
