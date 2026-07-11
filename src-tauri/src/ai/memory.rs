@@ -3905,7 +3905,7 @@ impl MemoryManager {
         // Among records old enough to potentially be below threshold, check each one.
         // We do the exact per-row check in Rust to handle varying importance values.
         let rows = sqlx::query(
-            "SELECT rowid, created_at, importance FROM memories \
+            "SELECT id, created_at, importance FROM memories \
              WHERE character_id = ? AND tier = 'ephemeral' AND status = 'active' AND created_at < ?",
         )
         .bind(character_id)
@@ -3915,19 +3915,17 @@ impl MemoryManager {
 
         let mut deleted = 0u64;
         for row in rows {
-            let id: i64 = row.get("rowid");
+            let id: i64 = row.get("id");
             let created_at: i64 = row.get("created_at");
             let importance: f64 = row.get("importance");
             let age_days = (now - created_at) as f64 / 86400.0;
             let decay = (0.5_f64).powf(age_days / MEMORY_HALF_LIFE_DAYS);
             if importance * decay < threshold {
-                sqlx::query(
-                    "UPDATE memories SET status = 'archived', updated_at = ? WHERE rowid = ?",
-                )
-                .bind(now)
-                .bind(id)
-                .execute(&self.db)
-                .await?;
+                sqlx::query("UPDATE memories SET status = 'archived', updated_at = ? WHERE id = ?")
+                    .bind(now)
+                    .bind(id)
+                    .execute(&self.db)
+                    .await?;
                 deleted += 1;
             }
         }
@@ -4528,6 +4526,43 @@ mod tests {
             .await
             .expect("Failed to run migrations");
         pool
+    }
+
+    #[tokio::test]
+    async fn prune_decayed_memories_archives_expired_ephemeral_memory() {
+        let pool = setup_test_pool().await;
+        let manager = MemoryManager::new(pool.clone());
+        let created_at = chrono::Utc::now().timestamp() - 365 * 86_400;
+
+        let memory_id = sqlx::query(
+            "INSERT INTO memories \
+             (content, embedding, created_at, updated_at, importance, character_id, tier, status) \
+             VALUES (?, ?, ?, ?, ?, ?, 'ephemeral', 'active')",
+        )
+        .bind("expired memory")
+        .bind(Vec::<u8>::new())
+        .bind(created_at)
+        .bind(created_at)
+        .bind(0.01_f64)
+        .bind("test_char")
+        .execute(&pool)
+        .await
+        .expect("Failed to insert expired memory")
+        .last_insert_rowid();
+
+        let archived = manager
+            .prune_decayed_memories("test_char", 0.05)
+            .await
+            .expect("Failed to prune decayed memories");
+
+        let status: String = sqlx::query_scalar("SELECT status FROM memories WHERE id = ?")
+            .bind(memory_id)
+            .fetch_one(&pool)
+            .await
+            .expect("Failed to load pruned memory");
+
+        assert_eq!(archived, 1);
+        assert_eq!(status, "archived");
     }
 
     #[tokio::test]
