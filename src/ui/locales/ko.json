@@ -1123,13 +1123,16 @@
         "title": "Bot 연동",
         "status": {
             "enabled": "활성화됨",
-            "disabled": "비활성화됨"
+            "disabled": "비활성화됨",
+            "connecting": "연결 중"
         },
         "character_hint": "이 플랫폼의 대화 기억과 기록은 선택한 캐릭터에 귀속됩니다",
         "platform": {
             "label": "플랫폼",
             "telegram": "Telegram",
             "telegram_desc": "Telegram Bot API",
+            "qq": "QQ",
+            "qq_desc": "QQ 공식 Bot API v2",
             "discord": "Discord",
             "discord_desc": "Discord 봇 토큰 및 채널 접근",
             "line": "LINE",
@@ -1140,6 +1143,31 @@
         },
         "fields": {
             "enable_platform": "{{platform}} 활성화"
+        },
+        "qq": {
+            "app_id": "AppID",
+            "app_id_placeholder": "QQ Bot AppID",
+            "app_secret": "AppSecret",
+            "app_secret_placeholder": "QQ Bot AppSecret",
+            "allow_c2c": "QQ 개인 채팅 허용",
+            "allowed_users": "허용된 사용자 OpenID",
+            "allowed_users_desc": "QQ 개인 채팅은 목록의 사용자만 허용합니다. 비워두면 모든 개인 채팅을 거부하며, 입력하면 그룹 멤버도 제한합니다.",
+            "user_placeholder": "사용자 OpenID",
+            "allowed_groups": "허용된 그룹 OpenID",
+            "allowed_groups_desc": "목록의 QQ 그룹만 허용합니다. 비워두면 모든 그룹 채팅을 거부하며 그룹 메시지는 봇을 멘션해야 합니다.",
+            "group_placeholder": "그룹 OpenID",
+            "authorization": {
+                "title": "이 QQ 계정을 허용할까요?",
+                "description": "허용되지 않은 QQ 사용자가 Kokoro에 개인 메시지를 보내고 있습니다.",
+                "group_title": "이 QQ 그룹을 허용할까요?",
+                "group_description": "허용되지 않은 QQ 그룹에서 Kokoro를 멘션하고 있습니다.",
+                "openid": "사용자 OpenID",
+                "group_openid": "그룹 OpenID",
+                "security_note": "허용하면 QQ 사용자 허용 목록에 추가되고 첫 번째 메시지 처리를 계속합니다.",
+                "group_security_note": "허용하면 그룹 허용 목록에 추가되고 첫 메시지를 계속 처리합니다. 멤버 제한이 활성화된 경우 발신자도 사용자 허용 목록에 추가됩니다.",
+                "allow": "허용하고 계속",
+                "reject": "거부"
+            }
         },
         "discord": {
             "bot_token": "봇 토큰",

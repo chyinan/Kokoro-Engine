@@ -1,3 +1,5 @@
+// pattern: Mixed (needs refactoring)
+
 use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{builtin_tool_id, execute_tool_calls, ToolExecutionOutcome, ToolInvocation};
 use crate::ai::context::AIOrchestrator;
@@ -27,10 +29,11 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Emitter, Manager, State};
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use warp::{http::StatusCode, Filter, Reply};
 
@@ -45,8 +48,10 @@ const WEBHOOK_BEARER_TOKEN_ENV: &str = "KOKORO_WEBHOOK_TOKEN";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct BotConfig {
+    pub revision: u64,
     pub selected_platform: String,
     pub telegram: crate::telegram::TelegramConfig,
+    pub qq: crate::qqbot::QQBotConfig,
     pub discord: DiscordBotConfig,
     pub line: LineBotConfig,
     pub webhook: WebhookBotConfig,
@@ -55,8 +60,10 @@ pub struct BotConfig {
 impl Default for BotConfig {
     fn default() -> Self {
         Self {
+            revision: 0,
             selected_platform: "telegram".to_string(),
             telegram: crate::telegram::TelegramConfig::default(),
+            qq: crate::qqbot::QQBotConfig::default(),
             discord: DiscordBotConfig::default(),
             line: LineBotConfig::default(),
             webhook: WebhookBotConfig::default(),
@@ -149,14 +156,27 @@ impl Default for WebhookBotConfig {
 #[derive(Clone)]
 pub struct BotRuntimeService {
     config: Arc<RwLock<BotConfig>>,
+    qq_authorization_broker: crate::qqbot::QQAuthorizationBroker,
+    qq_runtime: Arc<Mutex<Option<QQRuntimeHandle>>>,
+    qq_runtime_generation: Arc<AtomicU64>,
+    qq_connected_generation: Arc<AtomicU64>,
     discord_shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
     http_shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
+}
+
+struct QQRuntimeHandle {
+    id: u64,
+    shutdown_tx: oneshot::Sender<()>,
 }
 
 impl BotRuntimeService {
     pub fn new(config: BotConfig) -> Self {
         Self {
             config: Arc::new(RwLock::new(config)),
+            qq_authorization_broker: crate::qqbot::QQAuthorizationBroker::default(),
+            qq_runtime: Arc::new(Mutex::new(None)),
+            qq_runtime_generation: Arc::new(AtomicU64::new(0)),
+            qq_connected_generation: Arc::new(AtomicU64::new(0)),
             discord_shutdown_tx: Arc::new(RwLock::new(None)),
             http_shutdown_tx: Arc::new(RwLock::new(None)),
         }
@@ -166,12 +186,131 @@ impl BotRuntimeService {
         *self.config.write().await = config;
     }
 
+    pub async fn save_config(&self, mut config: BotConfig) -> Result<BotConfig, String> {
+        let mut current = self.config.write().await;
+        if config.revision != current.revision {
+            return Err("Bot configuration changed; reload settings before saving".to_string());
+        }
+        config.revision = current.revision.saturating_add(1);
+        save_bot_config_file(&config).map_err(|error| error.to_string())?;
+        *current = config.clone();
+        Ok(config)
+    }
+
     pub async fn current_config(&self) -> BotConfig {
         self.config.read().await.clone()
     }
 
+    pub async fn respond_to_qq_authorization(
+        &self,
+        request_id: &str,
+        user_openid: &str,
+        group_openid: Option<&str>,
+        approved: bool,
+    ) -> Result<(u64, Option<String>, Option<String>), String> {
+        let request_id = request_id.trim();
+        let user_openid = user_openid.trim();
+        if request_id.is_empty() || request_id.len() > 256 {
+            return Err("invalid QQ authorization request ID".to_string());
+        }
+        if user_openid.is_empty()
+            || user_openid.len() > 128
+            || !user_openid.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+            })
+        {
+            return Err("invalid QQ user OpenID".to_string());
+        }
+        let group_openid = group_openid
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if group_openid.is_some_and(|value| {
+            value.len() > 128
+                || !value.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+                })
+        }) {
+            return Err("invalid QQ group OpenID".to_string());
+        }
+
+        let decision_tx = self
+            .qq_authorization_broker
+            .take(request_id, user_openid, group_openid)
+            .await
+            .ok_or_else(|| "QQ authorization request is no longer pending".to_string())?;
+
+        let mut approved_user_openid = None;
+        let mut approved_group_openid = None;
+        let revision = if approved {
+            let mut current = self.config.write().await;
+            let mut next = current.clone();
+            if let Some(group_openid) = group_openid {
+                approved_group_openid = Some(group_openid.to_string());
+                if !next
+                    .qq
+                    .allowed_group_openids
+                    .iter()
+                    .any(|allowed| allowed == group_openid)
+                {
+                    next.qq.allowed_group_openids.push(group_openid.to_string());
+                }
+                if !next.qq.allowed_user_openids.is_empty() {
+                    approved_user_openid = Some(user_openid.to_string());
+                    if !next
+                        .qq
+                        .allowed_user_openids
+                        .iter()
+                        .any(|allowed| allowed == user_openid)
+                    {
+                        next.qq.allowed_user_openids.push(user_openid.to_string());
+                    }
+                }
+            } else {
+                approved_user_openid = Some(user_openid.to_string());
+                if !next
+                    .qq
+                    .allowed_user_openids
+                    .iter()
+                    .any(|allowed| allowed == user_openid)
+                {
+                    next.qq.allowed_user_openids.push(user_openid.to_string());
+                }
+            }
+            if next != *current {
+                next.revision = current.revision.saturating_add(1);
+                if let Err(error) = save_bot_config_file(&next) {
+                    let _ = decision_tx.send(false);
+                    return Err(error.to_string());
+                }
+                *current = next;
+            }
+            current.revision
+        } else {
+            self.qq_authorization_broker
+                .mark_rejected(user_openid, group_openid)
+                .await;
+            self.config.read().await.revision
+        };
+        let _ = decision_tx.send(approved);
+        Ok((revision, approved_user_openid, approved_group_openid))
+    }
+
     pub async fn is_discord_running(&self) -> bool {
         self.discord_shutdown_tx.read().await.is_some()
+    }
+
+    pub async fn is_qq_started(&self) -> bool {
+        self.qq_runtime.lock().await.is_some()
+    }
+
+    pub async fn is_qq_connected(&self) -> bool {
+        let runtime_id = self
+            .qq_runtime
+            .lock()
+            .await
+            .as_ref()
+            .map(|runtime| runtime.id);
+        runtime_id.is_some_and(|id| self.qq_connected_generation.load(Ordering::SeqCst) == id)
     }
 
     pub async fn is_http_running(&self) -> bool {
@@ -180,6 +319,11 @@ impl BotRuntimeService {
 
     pub async fn start_enabled(&self, app: tauri::AppHandle) {
         let config = self.config.read().await.clone();
+        if config.qq.enabled {
+            if let Err(error) = self.start_qq(app.clone()).await {
+                tracing::error!(target: "bot::qq", "failed to auto-start QQ bot: {}", error);
+            }
+        }
         if config.discord.enabled {
             if let Err(error) = self.start_discord(app.clone()).await {
                 tracing::error!(target: "bot::discord", "failed to auto-start Discord bot: {}", error);
@@ -198,6 +342,7 @@ impl BotRuntimeService {
         app: tauri::AppHandle,
     ) -> Result<(), String> {
         match platform {
+            "qq" => self.start_qq(app).await,
             "discord" => self.start_discord(app).await,
             "line" | "webhook" => self.start_http(app).await,
             other => Err(format!("Unsupported bot platform runtime: {}", other)),
@@ -206,9 +351,78 @@ impl BotRuntimeService {
 
     pub async fn stop_platform(&self, platform: &str) -> Result<(), String> {
         match platform {
+            "qq" => self.stop_qq().await,
             "discord" => self.stop_discord().await,
             "line" | "webhook" => self.stop_http().await,
             other => Err(format!("Unsupported bot platform runtime: {}", other)),
+        }
+    }
+
+    async fn start_qq(&self, app: tauri::AppHandle) -> Result<(), String> {
+        let config = self.config.read().await.clone();
+        if !config.qq.enabled {
+            return Err("QQ bot is not enabled".to_string());
+        }
+        if !has_secret(&config.qq.app_id, &config.qq.app_id_env) {
+            return Err("No QQ AppID configured".to_string());
+        }
+        if !has_secret(&config.qq.app_secret, &config.qq.app_secret_env) {
+            return Err("No QQ AppSecret configured".to_string());
+        }
+
+        let mut runtime_guard = self.qq_runtime.lock().await;
+        if runtime_guard.is_some() {
+            return Err("QQ bot is already running or connecting".to_string());
+        }
+        let runtime_id = self
+            .qq_runtime_generation
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        let (tx, rx) = oneshot::channel();
+        *runtime_guard = Some(QQRuntimeHandle {
+            id: runtime_id,
+            shutdown_tx: tx,
+        });
+        drop(runtime_guard);
+
+        let config_ref = self.config.clone();
+        let authorization_broker = self.qq_authorization_broker.clone();
+        let runtime_ref = self.qq_runtime.clone();
+        let connected_generation = self.qq_connected_generation.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::qqbot::run_qq_gateway(
+                config_ref,
+                authorization_broker,
+                app,
+                runtime_id,
+                connected_generation.clone(),
+                rx,
+            )
+            .await;
+            let _ = connected_generation.compare_exchange(
+                runtime_id,
+                0,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+            let mut guard = runtime_ref.lock().await;
+            if guard
+                .as_ref()
+                .is_some_and(|runtime| runtime.id == runtime_id)
+            {
+                *guard = None;
+            }
+        });
+        Ok(())
+    }
+
+    async fn stop_qq(&self) -> Result<(), String> {
+        let mut guard = self.qq_runtime.lock().await;
+        if let Some(runtime) = guard.take() {
+            let _ = runtime.shutdown_tx.send(());
+            Ok(())
+        } else {
+            Err("QQ bot is not running".to_string())
         }
     }
 
@@ -285,6 +499,7 @@ impl BotRuntimeService {
 #[derive(Debug, Serialize)]
 pub struct BotStatus {
     pub telegram: BotPlatformStatus,
+    pub qq: BotPlatformStatus,
     pub discord: BotPlatformStatus,
     pub line: BotPlatformStatus,
     pub webhook: BotPlatformStatus,
@@ -295,6 +510,7 @@ pub struct BotPlatformStatus {
     pub enabled: bool,
     pub configured: bool,
     pub running: bool,
+    pub connected: bool,
 }
 
 fn app_data_dir() -> PathBuf {
@@ -371,6 +587,8 @@ pub(crate) fn normalize_telegram_config_env(
 
 pub(crate) fn normalize_bot_config_envs(mut config: BotConfig) -> BotConfig {
     config.telegram = normalize_telegram_config_env(config.telegram);
+    config.qq.app_id_env = Some(crate::qqbot::config::QQ_APP_ID_ENV.to_string());
+    config.qq.app_secret_env = Some(crate::qqbot::config::QQ_APP_SECRET_ENV.to_string());
     config.discord.bot_token_env = Some(DISCORD_BOT_TOKEN_ENV.to_string());
     config.line.channel_access_token_env = Some(LINE_CHANNEL_ACCESS_TOKEN_ENV.to_string());
     config.line.channel_secret_env = Some(LINE_CHANNEL_SECRET_ENV.to_string());
@@ -458,12 +676,42 @@ pub async fn save_bot_config(
     state: State<'_, TelegramService>,
     runtime: State<'_, BotRuntimeService>,
     config: BotConfig,
-) -> Result<(), KokoroError> {
+) -> Result<BotConfig, KokoroError> {
     let config = normalize_bot_config_envs(config);
-    save_bot_config_file(&config)?;
-    state.update_config(config.telegram.clone()).await;
-    runtime.update_config(config).await;
-    Ok(())
+    let saved = runtime
+        .save_config(config)
+        .await
+        .map_err(KokoroError::Config)?;
+    state.update_config(saved.telegram.clone()).await;
+    Ok(saved)
+}
+
+#[tauri::command]
+pub async fn respond_qq_authorization(
+    runtime: State<'_, BotRuntimeService>,
+    app: tauri::AppHandle,
+    request_id: String,
+    user_openid: String,
+    group_openid: Option<String>,
+    approved: bool,
+) -> Result<Value, KokoroError> {
+    let (revision, approved_user_openid, approved_group_openid) = runtime
+        .respond_to_qq_authorization(&request_id, &user_openid, group_openid.as_deref(), approved)
+        .await
+        .map_err(KokoroError::ExternalService)?;
+    let response = json!({
+        "user_openid": user_openid.trim(),
+        "group_openid": group_openid.as_deref().map(str::trim),
+        "approved_user_openid": approved_user_openid,
+        "approved_group_openid": approved_group_openid,
+        "revision": revision
+    });
+    if approved {
+        if let Err(error) = app.emit("qq-authorization-approved", response.clone()) {
+            tracing::warn!(target: "bot::qq", "failed to synchronize approved QQ OpenID to the settings UI: {}", error);
+        }
+    }
+    Ok(response)
 }
 
 #[tauri::command]
@@ -496,6 +744,8 @@ pub async fn get_bot_status(
 ) -> Result<BotStatus, KokoroError> {
     let config = runtime.current_config().await;
     let telegram_config = state.get_config().await;
+    let qq_running = runtime.is_qq_started().await;
+    let qq_connected = runtime.is_qq_connected().await;
     let discord_running = runtime.is_discord_running().await;
     let http_running = runtime.is_http_running().await;
     Ok(BotStatus {
@@ -503,11 +753,20 @@ pub async fn get_bot_status(
             enabled: telegram_config.enabled,
             configured: telegram_config.resolve_bot_token().is_some(),
             running: state.is_running().await,
+            connected: state.is_running().await,
+        },
+        qq: BotPlatformStatus {
+            enabled: config.qq.enabled,
+            configured: has_secret(&config.qq.app_id, &config.qq.app_id_env)
+                && has_secret(&config.qq.app_secret, &config.qq.app_secret_env),
+            running: qq_running,
+            connected: qq_connected,
         },
         discord: BotPlatformStatus {
             enabled: config.discord.enabled,
             configured: has_secret(&config.discord.bot_token, &config.discord.bot_token_env),
             running: discord_running,
+            connected: discord_running,
         },
         line: BotPlatformStatus {
             enabled: config.line.enabled,
@@ -519,11 +778,13 @@ pub async fn get_bot_status(
                 &config.line.channel_secret_env,
             ),
             running: http_running && config.line.enabled,
+            connected: http_running && config.line.enabled,
         },
         webhook: BotPlatformStatus {
             enabled: config.webhook.enabled,
             configured: !config.webhook.endpoint_path.trim().is_empty(),
             running: http_running && config.webhook.enabled,
+            connected: http_running && config.webhook.enabled,
         },
     })
 }
@@ -585,6 +846,7 @@ async fn generate_bot_reply(
     image_urls: Vec<String>,
     character_id: Option<&str>,
     conversation_key: Option<&str>,
+    orchestrator_override: Option<&AIOrchestrator>,
 ) -> Result<BotReply, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() && image_urls.is_empty() {
@@ -596,9 +858,10 @@ async fn generate_bot_reply(
         trimmed.to_string()
     };
 
-    let orchestrator = app
+    let managed_orchestrator = app
         .try_state::<AIOrchestrator>()
         .ok_or("AIOrchestrator not available")?;
+    let orchestrator = orchestrator_override.unwrap_or(&managed_orchestrator);
     let llm_service = app
         .try_state::<LlmService>()
         .ok_or("LlmService not available")?;
@@ -843,7 +1106,7 @@ async fn generate_bot_reply(
         &prompt_text,
         &char_id,
         &conversation_key,
-        &orchestrator,
+        orchestrator,
         &llm_service,
     )
     .await;
@@ -867,6 +1130,27 @@ async fn generate_bot_reply(
         audio: None,
         image_prompts: all_image_prompts,
     })
+}
+
+pub(crate) async fn generate_bot_text_reply(
+    app: &tauri::AppHandle,
+    platform: &str,
+    text: &str,
+    character_id: Option<&str>,
+    conversation_key: Option<&str>,
+    orchestrator: Option<&AIOrchestrator>,
+) -> Result<String, String> {
+    let reply = generate_bot_reply(
+        app,
+        platform,
+        text,
+        Vec::new(),
+        character_id,
+        conversation_key,
+        orchestrator,
+    )
+    .await?;
+    Ok(reply_text_with_translation(&reply))
 }
 
 async fn trigger_bot_memory_tasks(
@@ -1807,6 +2091,7 @@ async fn handle_generic_webhook(
         image_urls,
         request.character_id.as_deref(),
         conversation_key,
+        None,
     )
     .await
     {
@@ -1978,6 +2263,7 @@ async fn handle_line_webhook(
             image_urls,
             config.character_id.as_deref(),
             user_id.as_deref(),
+            None,
         )
         .await
         {
@@ -2330,6 +2616,7 @@ async fn handle_discord_message(
         image_urls,
         cfg.character_id.as_deref(),
         Some(&conversation_key),
+        None,
     )
     .await
     {

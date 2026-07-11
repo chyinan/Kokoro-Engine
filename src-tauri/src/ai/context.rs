@@ -1,3 +1,5 @@
+// pattern: Mixed (needs refactoring)
+
 use crate::ai::curiosity::CuriosityModule;
 use crate::ai::idle_behaviors::IdleBehaviorSystem;
 use crate::ai::initiative::InitiativeSystem;
@@ -164,6 +166,8 @@ pub struct AIOrchestrator {
     pub proactive_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// 当前活跃对话 ID
     pub current_conversation_id: Arc<Mutex<Option<String>>>,
+    /// Whether this orchestrator should update the desktop hot-reload conversation pointer.
+    persist_conversation_selection: bool,
     /// Context management strategy: "window" | "summary"
     pub context_strategy: Arc<Mutex<String>>,
     /// Max characters per message before truncation
@@ -216,10 +220,66 @@ impl AIOrchestrator {
             idle_behaviors: Arc::new(Mutex::new(IdleBehaviorSystem::new())),
             proactive_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             current_conversation_id: Arc::new(Mutex::new(None)),
+            persist_conversation_selection: true,
             context_strategy: Arc::new(Mutex::new("window".to_string())),
             max_message_chars: Arc::new(Mutex::new(2000)),
             vision_context_history_mode: Arc::new(Mutex::new("latest".to_string())),
         })
+    }
+
+    pub async fn fork_with_isolated_history(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            system_prompt: Arc::new(Mutex::new(self.system_prompt.lock().await.clone())),
+            history: Arc::new(Mutex::new(VecDeque::new())),
+            max_history_tokens: self.max_history_tokens,
+            memory_manager: self.memory_manager.clone(),
+            router: self.router.clone(),
+            message_count: Arc::new(Mutex::new(0)),
+            memory_trigger_count: Arc::new(Mutex::new(0)),
+            memory_history_boundary: Arc::new(Mutex::new(0)),
+            character_id: Arc::new(Mutex::new(self.character_id.lock().await.clone())),
+            memory_event_cooldowns: self.memory_event_cooldowns.clone(),
+            memory_enabled: self.memory_enabled.clone(),
+            last_activity: Arc::new(Mutex::new(Instant::now())),
+            conversation_count: Arc::new(Mutex::new(0)),
+            response_language: Arc::new(Mutex::new(self.response_language.lock().await.clone())),
+            user_language: Arc::new(Mutex::new(self.user_language.lock().await.clone())),
+            jailbreak_prompt: Arc::new(Mutex::new(self.jailbreak_prompt.lock().await.clone())),
+            character_name: Arc::new(Mutex::new(self.character_name.lock().await.clone())),
+            user_name: Arc::new(Mutex::new(self.user_name.lock().await.clone())),
+            curiosity: self.curiosity.clone(),
+            initiative: self.initiative.clone(),
+            idle_behaviors: self.idle_behaviors.clone(),
+            proactive_enabled: self.proactive_enabled.clone(),
+            current_conversation_id: Arc::new(Mutex::new(None)),
+            persist_conversation_selection: false,
+            context_strategy: self.context_strategy.clone(),
+            max_message_chars: self.max_message_chars.clone(),
+            vision_context_history_mode: self.vision_context_history_mode.clone(),
+        }
+    }
+
+    pub async fn apply_character_profile(&self, character_id: &str) -> Result<bool> {
+        let profile = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT name, persona, user_nickname FROM characters WHERE id = ?",
+        )
+        .bind(character_id)
+        .fetch_optional(&self.db)
+        .await?;
+        let Some((name, persona, user_nickname)) = profile else {
+            return Ok(false);
+        };
+
+        *self.system_prompt.lock().await = persona;
+        *self.character_name.lock().await = name;
+        *self.user_name.lock().await = if user_nickname.trim().is_empty() {
+            "User".to_string()
+        } else {
+            user_nickname
+        };
+        *self.character_id.lock().await = character_id.to_string();
+        Ok(true)
     }
 
     pub async fn set_system_prompt(&self, prompt: String) {
@@ -474,7 +534,9 @@ impl AIOrchestrator {
 
             *conv_id_lock = Some(new_id.clone());
             // Persist conversation_id to disk for hot-reload recovery
-            Self::persist_conversation_id(Some(&new_id));
+            if self.persist_conversation_selection {
+                Self::persist_conversation_id(Some(&new_id));
+            }
             new_id
         };
         drop(conv_id_lock);
@@ -579,7 +641,9 @@ impl AIOrchestrator {
             .execute(&self.db)
             .await?;
             *conv_id_lock = Some(new_id.clone());
-            Self::persist_conversation_id(Some(&new_id));
+            if self.persist_conversation_selection {
+                Self::persist_conversation_id(Some(&new_id));
+            }
             new_id
         };
         drop(conv_id_lock);
@@ -1058,7 +1122,9 @@ impl AIOrchestrator {
         // 清空当前对话 ID，下次发消息时会创建新对话
         let mut conv_id = self.current_conversation_id.lock().await;
         *conv_id = None;
-        Self::persist_conversation_id(None);
+        if self.persist_conversation_selection {
+            Self::persist_conversation_id(None);
+        }
     }
 
     pub async fn should_trigger_memory_event(
@@ -1088,6 +1154,73 @@ mod tests {
         AIOrchestrator::new("sqlite::memory:")
             .await
             .expect("Failed to create test orchestrator")
+    }
+
+    #[tokio::test]
+    async fn fork_keeps_history_and_conversation_state_isolated() {
+        let orchestrator = setup_test_orchestrator().await;
+        orchestrator
+            .push_history_message(Message {
+                role: "user".to_string(),
+                content: "desktop history".to_string(),
+                metadata: None,
+            })
+            .await;
+        *orchestrator.current_conversation_id.lock().await = Some("desktop".to_string());
+
+        let fork = orchestrator.fork_with_isolated_history().await;
+        fork.push_history_message(Message {
+            role: "user".to_string(),
+            content: "qq history".to_string(),
+            metadata: None,
+        })
+        .await;
+
+        assert_eq!(orchestrator.history.lock().await.len(), 1);
+        assert_eq!(fork.history.lock().await.len(), 1);
+        assert_eq!(
+            orchestrator.history.lock().await.front().unwrap().content,
+            "desktop history"
+        );
+        assert_eq!(
+            fork.history.lock().await.front().unwrap().content,
+            "qq history"
+        );
+        assert_eq!(
+            orchestrator.current_conversation_id.lock().await.as_deref(),
+            Some("desktop")
+        );
+        assert_eq!(*fork.current_conversation_id.lock().await, None);
+        assert!(!fork.persist_conversation_selection);
+    }
+
+    #[tokio::test]
+    async fn character_profile_updates_isolated_persona() {
+        let orchestrator = setup_test_orchestrator().await;
+        sqlx::query(
+            "INSERT INTO characters (id, name, persona, user_nickname, source_format, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("qq-character")
+        .bind("QQ Character")
+        .bind("QQ Persona")
+        .bind("QQ User")
+        .bind("test")
+        .bind(1_i64)
+        .bind(1_i64)
+        .execute(&orchestrator.db)
+        .await
+        .expect("character insert should succeed");
+
+        let fork = orchestrator.fork_with_isolated_history().await;
+        assert!(fork
+            .apply_character_profile("qq-character")
+            .await
+            .expect("profile should load"));
+
+        assert_eq!(*fork.system_prompt.lock().await, "QQ Persona");
+        assert_eq!(*fork.character_name.lock().await, "QQ Character");
+        assert_eq!(*fork.user_name.lock().await, "QQ User");
+        assert_ne!(*orchestrator.system_prompt.lock().await, "QQ Persona");
     }
 
     #[test]

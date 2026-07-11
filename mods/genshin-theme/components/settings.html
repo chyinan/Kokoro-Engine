@@ -3745,6 +3745,7 @@
                 const cfg = state.botConfig || {
                     selected_platform: 'telegram',
                     telegram: state.telegramConfig || { enabled: false, allowed_chat_ids: [], send_voice_reply: false },
+                    qq: { enabled: false, allow_c2c: true, allowed_user_openids: [], allowed_group_openids: [] },
                     discord: { enabled: false, allowed_channel_ids: [], allow_direct_messages: true, send_voice_reply: false },
                     line: { enabled: false, webhook_path: '/line/webhook', allowed_user_ids: [] },
                     webhook: { enabled: false, bind_host: '127.0.0.1', port: 8787, endpoint_path: '/webhook/message', send_voice_reply: false }
@@ -3756,6 +3757,7 @@
 
                 const platformOpts = [
                     { value: 'telegram', label: 'Telegram' },
+                    { value: 'qq', label: 'QQ' },
                     { value: 'discord', label: 'Discord' },
                     { value: 'line', label: 'LINE' },
                     { value: 'webhook', label: 'Webhook' }
@@ -3771,8 +3773,8 @@
                 statusRow.className = 'list-item';
                 statusRow.innerHTML = `
                     <div class="list-item-header">
-                        <span><span class="status-dot ${platformStatus.running ? 'connected' : ''}"></span>${platform.toUpperCase()}</span>
-                        <span style="font-size:10px;opacity:.65">${platformStatus.running ? 'running' : (platformStatus.enabled ? 'enabled' : 'stopped')}</span>
+                        <span><span class="status-dot ${platformStatus.connected ? 'connected' : ''}"></span>${platform.toUpperCase()}</span>
+                        <span style="font-size:10px;opacity:.65">${platformStatus.running ? (platformStatus.connected ? 'running' : 'connecting') : (platformStatus.enabled ? 'enabled' : 'stopped')}</span>
                     </div>
                     <div class="list-item-desc">${platformStatus.configured ? '已配置' : '未完整配置'}</div>
                 `;
@@ -3832,6 +3834,28 @@
                             tcfg.allowed_chat_ids = this.value.split(',').map(s => s.trim()).filter(Boolean).map(Number);
                             saveBot();
                         };
+                    }, 0);
+                }
+
+                if (platform === 'qq') {
+                    const qcfg = cfg.qq || { enabled: false, allow_c2c: true, allowed_user_openids: [], allowed_group_openids: [] };
+                    cfg.qq = qcfg;
+                    sec.appendChild(createToggle("启用 QQ", "通过 QQ 官方机器人 API v2 远程聊天", qcfg.enabled, (v) => { qcfg.enabled = v; saveBot(); }));
+                    sec.appendChild(createRow("AppID", `<input class="gi-input" type="text" value="${escapeHtml(qcfg.app_id || '')}" id="bot_qq_app_id" placeholder="QQ Bot AppID">`));
+                    sec.appendChild(createRow("AppSecret", `<input class="gi-input" type="password" value="${escapeHtml(qcfg.app_secret || '')}" id="bot_qq_secret" placeholder="QQ Bot AppSecret">`));
+                    sec.appendChild(createToggle("允许私聊", "允许 C2C 私聊触发对话", qcfg.allow_c2c !== false, (v) => { qcfg.allow_c2c = v; saveBot(); }));
+                    sec.appendChild(createRow("用户 OpenID 白名单", `<input class="gi-input" type="text" value="${escapeHtml((qcfg.allowed_user_openids || []).join(','))}" id="bot_qq_users" placeholder="openid,openid">`));
+                    sec.appendChild(createRow("群 OpenID 白名单", `<input class="gi-input" type="text" value="${escapeHtml((qcfg.allowed_group_openids || []).join(','))}" id="bot_qq_groups" placeholder="group_openid,group_openid">`));
+                    sec.appendChild(characterSelect(qcfg.character_id, (v) => { qcfg.character_id = v; saveBot(); }));
+                    setTimeout(() => {
+                        const appId = document.getElementById('bot_qq_app_id');
+                        if (appId) appId.onchange = function () { qcfg.app_id = this.value || undefined; saveBot(); };
+                        const secret = document.getElementById('bot_qq_secret');
+                        if (secret) secret.onchange = function () { qcfg.app_secret = this.value || undefined; saveBot(); };
+                        const users = document.getElementById('bot_qq_users');
+                        if (users) users.onchange = function () { qcfg.allowed_user_openids = this.value.split(',').map(s => s.trim()).filter(Boolean); saveBot(); };
+                        const groups = document.getElementById('bot_qq_groups');
+                        if (groups) groups.onchange = function () { qcfg.allowed_group_openids = this.value.split(',').map(s => s.trim()).filter(Boolean); saveBot(); };
                     }, 0);
                 }
 

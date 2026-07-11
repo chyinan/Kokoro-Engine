@@ -1,4 +1,7 @@
+// pattern: Imperative Shell
+
 import { useState, useEffect, useRef } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Sparkles, Brain, Mic, Eye, Server, Bot, Shield, HardDrive, Ghost, Info } from "lucide-react";
@@ -425,6 +428,51 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     // Bot config state
     const [localBotConfig, setLocalBotConfig] = useState<BotConfig | null>(null);
 
+    useEffect(() => {
+        let aborted = false;
+        let cleanup: (() => void) | null = null;
+        void listen<{
+            approved_user_openid?: string;
+            approved_group_openid?: string;
+            revision: number;
+        }>("qq-authorization-approved", event => {
+            if (aborted) return;
+            setLocalBotConfig(current => {
+                if (!current) {
+                    return current;
+                }
+                if (event.payload.revision <= current.revision) {
+                    return current;
+                }
+                const approvedUser = event.payload.approved_user_openid;
+                const approvedGroup = event.payload.approved_group_openid;
+                return {
+                    ...current,
+                    revision: event.payload.revision,
+                    qq: {
+                        ...current.qq,
+                        allowed_user_openids: !approvedUser || current.qq.allowed_user_openids.includes(approvedUser)
+                            ? current.qq.allowed_user_openids
+                            : [...current.qq.allowed_user_openids, approvedUser],
+                        allowed_group_openids: !approvedGroup || current.qq.allowed_group_openids.includes(approvedGroup)
+                            ? current.qq.allowed_group_openids
+                            : [...current.qq.allowed_group_openids, approvedGroup],
+                    },
+                };
+            });
+        }).then(unlisten => {
+            if (aborted) {
+                unlisten();
+                return;
+            }
+            cleanup = unlisten;
+        });
+        return () => {
+            aborted = true;
+            cleanup?.();
+        };
+    }, []);
+
     // Response Language
     const [responseLang, setResponseLang] = useState(() =>
         readStringSetting(APP_SETTING_KEYS.responseLanguage, "")
@@ -622,7 +670,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         // Commit Bot Config
         if (localBotConfig) {
             try {
-                await saveBotConfig(localBotConfig);
+                setLocalBotConfig(await saveBotConfig(localBotConfig));
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Bot config:", e);
             }

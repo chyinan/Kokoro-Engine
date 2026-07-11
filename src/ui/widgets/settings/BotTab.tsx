@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { clsx } from "clsx";
@@ -35,6 +37,7 @@ import type {
     CharacterRecord,
     DiscordBotConfig,
     LineBotConfig,
+    QQBotConfig,
     TelegramConfig,
     TelegramStatus,
     WebhookBotConfig,
@@ -71,6 +74,11 @@ export default function BotTab({
             value: "telegram",
             label: t("bot.platform.telegram"),
             description: t("bot.platform.telegram_desc"),
+        },
+        {
+            value: "qq",
+            label: t("bot.platform.qq"),
+            description: t("bot.platform.qq_desc"),
         },
         {
             value: "discord",
@@ -161,6 +169,10 @@ export default function BotTab({
         updateBotConfig({ ...botConfig, discord: { ...botConfig.discord, ...patch } });
     };
 
+    const updateQQ = (patch: Partial<QQBotConfig>) => {
+        updateBotConfig({ ...botConfig, qq: { ...botConfig.qq, ...patch } });
+    };
+
     const updateLine = (patch: Partial<LineBotConfig>) => {
         updateBotConfig({ ...botConfig, line: { ...botConfig.line, ...patch } });
     };
@@ -172,7 +184,7 @@ export default function BotTab({
     const handleStartTelegram = async () => {
         try {
             if (dirty) {
-                await saveBotConfig(botConfig);
+                onBotConfigChange(await saveBotConfig(botConfig));
                 setDirty(false);
             }
             await startTelegramBot();
@@ -196,7 +208,7 @@ export default function BotTab({
     const handleStartRuntime = async (platform: Exclude<BotPlatformId, "telegram">) => {
         try {
             if (dirty) {
-                await saveBotConfig(botConfig);
+                onBotConfigChange(await saveBotConfig(botConfig));
                 setDirty(false);
             }
             await startBotPlatform(platform);
@@ -254,6 +266,19 @@ export default function BotTab({
                 />
             )}
 
+            {selectedPlatform === "qq" && (
+                <QQSettings
+                    config={botConfig.qq}
+                    running={botStatus?.qq.running ?? false}
+                    connected={botStatus?.qq.connected ?? false}
+                    characterOptions={characterOptions}
+                    onUpdate={updateQQ}
+                    onStart={() => handleStartRuntime("qq")}
+                    onStop={() => handleStopRuntime("qq")}
+                    onRefresh={loadStatus}
+                />
+            )}
+
             {selectedPlatform === "discord" && (
                 <DiscordSettings
                     config={botConfig.discord}
@@ -302,6 +327,7 @@ function PlatformHeader({
     title,
     enabled,
     running,
+    connected = running,
     onStart,
     onStop,
     onRefresh,
@@ -310,6 +336,7 @@ function PlatformHeader({
     title: string;
     enabled: boolean;
     running: boolean;
+    connected?: boolean;
     onStart: () => void;
     onStop: () => void;
     onRefresh: () => void;
@@ -322,12 +349,18 @@ function PlatformHeader({
                 <div>
                     <div className="text-sm font-heading font-semibold">{title}</div>
                     <div className="text-xs text-[var(--color-text-muted)]">
-                        {running ? t("telegram.status.running") : enabled ? t("bot.status.enabled") : t("bot.status.disabled")}
+                        {running
+                            ? connected
+                                ? t("telegram.status.running")
+                                : t("bot.status.connecting")
+                            : enabled
+                                ? t("bot.status.enabled")
+                                : t("bot.status.disabled")}
                     </div>
                 </div>
                 <div className={clsx(
                     "w-2 h-2 rounded-full",
-                    running ? "bg-[var(--color-accent)]" : "bg-[var(--color-text-muted)]"
+                    connected ? "bg-[var(--color-accent)]" : "bg-[var(--color-text-muted)]"
                 )} />
             </div>
             <div className="flex items-center gap-2">
@@ -439,6 +472,7 @@ function SecretField({
                     </code>
                 </div>
             )}
+
         </div>
     );
 }
@@ -658,6 +692,106 @@ function TelegramSettings({
                 enabled={config.send_voice_reply}
                 onChange={send_voice_reply => onUpdate({ send_voice_reply })}
                 icon={Volume2}
+            />
+        </div>
+    );
+}
+
+function QQSettings({
+    config,
+    running,
+    connected,
+    characterOptions,
+    onUpdate,
+    onStart,
+    onStop,
+    onRefresh,
+}: {
+    config: QQBotConfig;
+    running: boolean;
+    connected: boolean;
+    characterOptions: Array<{ value: string; label: string }>;
+    onUpdate: (patch: Partial<QQBotConfig>) => void;
+    onStart: () => void;
+    onStop: () => void;
+    onRefresh: () => void;
+}) {
+    const { t } = useTranslation();
+    const [userInput, setUserInput] = useState("");
+    const [groupInput, setGroupInput] = useState("");
+
+    return (
+        <div className="space-y-6">
+            <PlatformHeader
+                icon={MessageCircle}
+                title={t("bot.platform.qq")}
+                enabled={config.enabled}
+                running={running}
+                connected={connected}
+                onStart={onStart}
+                onStop={onStop}
+                onRefresh={onRefresh}
+            />
+            <ToggleRow
+                label={t("bot.fields.enable_platform", { platform: t("bot.platform.qq") })}
+                enabled={config.enabled}
+                onChange={enabled => onUpdate({ enabled })}
+                icon={CheckCircle2}
+            />
+            <div>
+                <label className={labelClasses}>{t("bot.qq.app_id")}</label>
+                <input
+                    type="text"
+                    value={config.app_id ?? ""}
+                    onChange={event => onUpdate({ app_id: event.target.value || undefined })}
+                    placeholder={t("bot.qq.app_id_placeholder")}
+                    className={inputClasses}
+                />
+                <div className="mt-2 flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
+                    <KeyRound size={12} />
+                    <span>{t("settings.api.fallback_env")}</span>
+                    <code className="px-1.5 py-0.5 rounded bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-secondary)]">
+                        QQBOT_APP_ID
+                    </code>
+                </div>
+            </div>
+            <SecretField
+                label={t("bot.qq.app_secret")}
+                value={config.app_secret}
+                placeholder={t("bot.qq.app_secret_placeholder")}
+                fallbackEnv="QQBOT_APP_SECRET"
+                onValueChange={app_secret => onUpdate({ app_secret })}
+            />
+            <ToggleRow
+                label={t("bot.qq.allow_c2c")}
+                enabled={config.allow_c2c}
+                onChange={allow_c2c => onUpdate({ allow_c2c })}
+                icon={MessageCircle}
+            />
+            <StringListEditor
+                label={t("bot.qq.allowed_users")}
+                description={t("bot.qq.allowed_users_desc")}
+                placeholder={t("bot.qq.user_placeholder")}
+                addLabel={t("telegram.whitelist.add")}
+                values={config.allowed_user_openids}
+                input={userInput}
+                setInput={setUserInput}
+                onChange={allowed_user_openids => onUpdate({ allowed_user_openids })}
+            />
+            <StringListEditor
+                label={t("bot.qq.allowed_groups")}
+                description={t("bot.qq.allowed_groups_desc")}
+                placeholder={t("bot.qq.group_placeholder")}
+                addLabel={t("telegram.whitelist.add")}
+                values={config.allowed_group_openids}
+                input={groupInput}
+                setInput={setGroupInput}
+                onChange={allowed_group_openids => onUpdate({ allowed_group_openids })}
+            />
+            <CharacterSelect
+                value={config.character_id}
+                options={characterOptions}
+                onChange={character_id => onUpdate({ character_id })}
             />
         </div>
     );

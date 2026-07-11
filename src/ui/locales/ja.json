@@ -1123,13 +1123,16 @@
         "title": "Bot 連携",
         "status": {
             "enabled": "有効",
-            "disabled": "無効"
+            "disabled": "無効",
+            "connecting": "接続中"
         },
         "character_hint": "このプラットフォームの会話メモリと履歴は選択したキャラクターに紐付けられます",
         "platform": {
             "label": "プラットフォーム",
             "telegram": "Telegram",
             "telegram_desc": "Telegram Bot API",
+            "qq": "QQ",
+            "qq_desc": "QQ 公式 Bot API v2",
             "discord": "Discord",
             "discord_desc": "Discord ボットトークンとチャンネルアクセス",
             "line": "LINE",
@@ -1140,6 +1143,31 @@
         },
         "fields": {
             "enable_platform": "{{platform}} を有効化"
+        },
+        "qq": {
+            "app_id": "AppID",
+            "app_id_placeholder": "QQ Bot AppID",
+            "app_secret": "AppSecret",
+            "app_secret_placeholder": "QQ Bot AppSecret",
+            "allow_c2c": "QQ のプライベートチャットを許可",
+            "allowed_users": "許可するユーザー OpenID",
+            "allowed_users_desc": "QQ のプライベートチャットは一覧のユーザーのみ許可します。空欄の場合はすべて拒否します。入力時はグループメンバーも制限します。",
+            "user_placeholder": "ユーザー OpenID",
+            "allowed_groups": "許可するグループ OpenID",
+            "allowed_groups_desc": "一覧の QQ グループのみ許可します。空欄の場合はすべて拒否します。グループでは Bot へのメンションが必要です。",
+            "group_placeholder": "グループ OpenID",
+            "authorization": {
+                "title": "この QQ アカウントを許可しますか？",
+                "description": "未許可の QQ ユーザーが Kokoro にダイレクトメッセージを送信しています。",
+                "group_title": "この QQ グループを許可しますか？",
+                "group_description": "未許可の QQ グループが Kokoro をメンションしています。",
+                "openid": "ユーザー OpenID",
+                "group_openid": "グループ OpenID",
+                "security_note": "許可すると QQ ユーザー許可リストに追加され、最初のメッセージの処理を続行します。",
+                "group_security_note": "許可するとグループ許可リストに追加され、最初のメッセージを処理します。メンバー制限が有効な場合、送信者もユーザー許可リストに追加されます。",
+                "allow": "許可して続行",
+                "reject": "拒否"
+            }
         },
         "discord": {
             "bot_token": "ボットトークン",

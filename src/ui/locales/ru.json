@@ -1123,13 +1123,16 @@
     "title": "Интеграции Bot",
     "status": {
       "enabled": "Включено",
-      "disabled": "Отключено"
+      "disabled": "Отключено",
+      "connecting": "Подключение"
     },
     "character_hint": "Память и история диалога этой платформы будут отнесены к выбранному персонажу",
     "platform": {
       "label": "Платформа",
       "telegram": "Telegram",
       "telegram_desc": "Telegram Bot API",
+      "qq": "QQ",
+      "qq_desc": "Официальный QQ Bot API v2",
       "discord": "Discord",
       "discord_desc": "Токен бота Discord и доступ к каналам",
       "line": "LINE",
@@ -1140,6 +1143,31 @@
     },
     "fields": {
       "enable_platform": "Включить {{platform}}"
+    },
+    "qq": {
+      "app_id": "AppID",
+      "app_id_placeholder": "QQ Bot AppID",
+      "app_secret": "AppSecret",
+      "app_secret_placeholder": "QQ Bot AppSecret",
+      "allow_c2c": "Разрешить личные чаты QQ",
+      "allowed_users": "Разрешенные OpenID пользователей",
+      "allowed_users_desc": "Личные чаты QQ разрешены только указанным пользователям. Пустой список запрещает все личные чаты и при заполнении также ограничивает участников групп.",
+      "user_placeholder": "OpenID пользователя",
+      "allowed_groups": "Разрешенные OpenID групп",
+      "allowed_groups_desc": "Разрешены только указанные группы QQ. Пустой список запрещает все группы; в группе требуется упоминание бота.",
+            "group_placeholder": "OpenID группы",
+            "authorization": {
+                "title": "Разрешить эту учетную запись QQ?",
+                "description": "Неавторизованный пользователь QQ пытается отправить Kokoro личное сообщение.",
+                "group_title": "Разрешить эту группу QQ?",
+                "group_description": "Неавторизованная группа QQ упоминает Kokoro.",
+                "openid": "OpenID пользователя",
+                "group_openid": "OpenID группы",
+                "security_note": "После разрешения учетная запись будет добавлена в список доступа, а первое сообщение продолжит обрабатываться.",
+                "group_security_note": "После разрешения группа будет добавлена в список доступа, а первое сообщение продолжит обрабатываться. При ограничении участников отправитель также будет добавлен в список пользователей.",
+                "allow": "Разрешить и продолжить",
+                "reject": "Отклонить"
+            }
     },
     "discord": {
       "bot_token": "ТОКЕН БОТА",

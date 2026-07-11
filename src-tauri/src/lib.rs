@@ -11,6 +11,7 @@ pub mod imagegen;
 pub mod llm;
 pub mod mcp;
 pub mod mods;
+pub mod qqbot;
 pub mod stt;
 pub mod telegram;
 pub mod tts;
@@ -208,6 +209,7 @@ pub fn run() {
             commands::mcp::toggle_mcp_server,
             commands::bot::get_bot_config,
             commands::bot::save_bot_config,
+            commands::bot::respond_qq_authorization,
             commands::bot::start_bot_platform,
             commands::bot::stop_bot_platform,
             commands::bot::get_bot_status,

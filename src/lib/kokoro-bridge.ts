@@ -1368,7 +1368,34 @@ export async function renameConversation(id: string, title: string): Promise<voi
 
 // ── Bot Integrations ───────────────────────────────
 
-export type BotPlatformId = "telegram" | "discord" | "line" | "webhook";
+export type BotPlatformId = "telegram" | "qq" | "discord" | "line" | "webhook";
+
+export type QQBotConfig = {
+    enabled: boolean;
+    app_id?: string;
+    app_id_env?: string;
+    app_secret?: string;
+    app_secret_env?: string;
+    allow_c2c: boolean;
+    allowed_user_openids: Array<string>;
+    allowed_group_openids: Array<string>;
+    character_id?: string;
+};
+
+export type QQAuthorizationRequest = {
+    request_id: string;
+    user_openid: string;
+    conversation_kind: "c2c" | "group";
+    group_openid?: string;
+};
+
+export type QQAuthorizationResponse = {
+    user_openid: string;
+    group_openid?: string;
+    approved_user_openid?: string;
+    approved_group_openid?: string;
+    revision: number;
+};
 
 export interface DiscordBotConfig {
     enabled: boolean;
@@ -1403,8 +1430,10 @@ export interface WebhookBotConfig {
 }
 
 export interface BotConfig {
+    revision: number;
     selected_platform: BotPlatformId;
     telegram: TelegramConfig;
+    qq: QQBotConfig;
     discord: DiscordBotConfig;
     line: LineBotConfig;
     webhook: WebhookBotConfig;
@@ -1414,10 +1443,12 @@ export interface BotPlatformStatus {
     enabled: boolean;
     configured: boolean;
     running: boolean;
+    connected: boolean;
 }
 
 export interface BotStatus {
     telegram: BotPlatformStatus;
+    qq: BotPlatformStatus;
     discord: BotPlatformStatus;
     line: BotPlatformStatus;
     webhook: BotPlatformStatus;
@@ -1429,6 +1460,11 @@ function withFixedBotEnv(config: BotConfig): BotConfig {
         telegram: {
             ...config.telegram,
             bot_token_env: "TELEGRAM_BOT_TOKEN",
+        },
+        qq: {
+            ...config.qq,
+            app_id_env: "QQBOT_APP_ID",
+            app_secret_env: "QQBOT_APP_SECRET",
         },
         discord: {
             ...config.discord,
@@ -1450,8 +1486,20 @@ export async function getBotConfig(): Promise<BotConfig> {
     return invoke<BotConfig>("get_bot_config");
 }
 
-export async function saveBotConfig(config: BotConfig): Promise<void> {
-    return invoke("save_bot_config", { config: withFixedBotEnv(config) });
+export async function saveBotConfig(config: BotConfig): Promise<BotConfig> {
+    return invoke<BotConfig>("save_bot_config", { config: withFixedBotEnv(config) });
+}
+
+export async function respondQQAuthorization(
+    request: Readonly<QQAuthorizationRequest>,
+    approved: boolean,
+): Promise<QQAuthorizationResponse> {
+    return invoke<QQAuthorizationResponse>("respond_qq_authorization", {
+        requestId: request.request_id,
+        userOpenid: request.user_openid,
+        groupOpenid: request.group_openid ?? null,
+        approved,
+    });
 }
 
 export async function startBotPlatform(platform: Exclude<BotPlatformId, "telegram">): Promise<void> {

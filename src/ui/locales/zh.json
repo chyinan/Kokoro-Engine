@@ -1123,13 +1123,16 @@
         "title": "Bot 接入",
         "status": {
             "enabled": "已启用",
-            "disabled": "未启用"
+            "disabled": "未启用",
+            "connecting": "连接中"
         },
         "character_hint": "该平台对话的记忆和历史将归属于所选角色",
         "platform": {
             "label": "平台",
             "telegram": "Telegram",
             "telegram_desc": "Telegram Bot API",
+            "qq": "QQ",
+            "qq_desc": "QQ 官方机器人 API v2",
             "discord": "Discord",
             "discord_desc": "Discord Bot 令牌与频道访问",
             "line": "LINE",
@@ -1140,6 +1143,31 @@
         },
         "fields": {
             "enable_platform": "启用 {{platform}}"
+        },
+        "qq": {
+            "app_id": "AppID",
+            "app_id_placeholder": "QQ 机器人 AppID",
+            "app_secret": "AppSecret",
+            "app_secret_placeholder": "QQ 机器人 AppSecret",
+            "allow_c2c": "允许 QQ 私聊",
+            "allowed_users": "允许的用户 OpenID",
+            "allowed_users_desc": "QQ 私聊仅允许列表中的用户；留空 = 拒绝所有私聊。群聊填写后还会限制群成员。",
+            "user_placeholder": "用户 OpenID",
+            "allowed_groups": "允许的群 OpenID",
+            "allowed_groups_desc": "仅允许列表中的 QQ 群；留空 = 拒绝所有群聊。群消息仍需 @机器人。",
+            "group_placeholder": "群 OpenID",
+            "authorization": {
+                "title": "允许这个 QQ 账号吗？",
+                "description": "检测到一个尚未授权的 QQ 用户正在向 Kokoro 发送私聊消息。",
+                "group_title": "允许这个 QQ 群吗？",
+                "group_description": "检测到一个尚未授权的 QQ 群正在 @Kokoro。",
+                "openid": "用户 OpenID",
+                "group_openid": "群 OpenID",
+                "security_note": "允许后，该账号会加入 QQ 用户白名单，并自动继续处理刚才的第一条消息。",
+                "group_security_note": "允许后，该群会加入群白名单，并自动继续处理刚才的第一条群消息。若已启用成员限制，触发成员也会加入用户白名单。",
+                "allow": "允许并继续",
+                "reject": "拒绝"
+            }
         },
         "discord": {
             "bot_token": "机器人令牌",

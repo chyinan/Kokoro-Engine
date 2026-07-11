@@ -1,7 +1,9 @@
+// pattern: Imperative Shell
+
 import { useState, useEffect, useMemo, useSyncExternalStore, useCallback, useRef } from "react";
 import { motion } from "framer-motion";
 import { Settings } from "lucide-react";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { LayoutRenderer } from "./ui/layout/LayoutRenderer";
 import { LayoutConfig } from "./ui/layout/types";
@@ -18,6 +20,7 @@ import OnboardingOverlay, {
   type OnboardingStep,
 } from "./ui/widgets/OnboardingOverlay";
 import MemoryModelDownloadDialog from "./ui/widgets/MemoryModelDownloadDialog";
+import { QQAuthorizationDialog } from "./ui/widgets/QQAuthorizationDialog";
 import { useBackgroundSlideshow } from "./ui/hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "./features/live2d/Live2DViewer";
 import { live2dUrl } from "./lib/utils";
@@ -226,6 +229,7 @@ import {
   saveSttConfig,
   saveTelegramConfig,
   saveBotConfig,
+  respondQQAuthorization,
   saveAutoBackupConfig,
   runAutoBackupNow,
   exportData,
@@ -291,6 +295,7 @@ import {
   type CharacterRecord,
   type MemoryEmbeddingModelStatus,
   type MemoryEmbeddingModelDownloadProgress,
+  type QQAuthorizationRequest,
   getKokoroErrorMessage,
   onMemoryEmbeddingModelProgress,
 } from "./lib/kokoro-bridge";
@@ -462,6 +467,10 @@ function App() {
   const [memoryModelDownloading, setMemoryModelDownloading] = useState(false);
   const [memoryModelError, setMemoryModelError] = useState<string | null>(null);
   const memoryModelDownloadInFlightRef = useRef(false);
+  const [qqAuthorizationQueue, setQQAuthorizationQueue] = useState<Array<QQAuthorizationRequest>>([]);
+  const [qqAuthorizationBusy, setQQAuthorizationBusy] = useState(false);
+  const [qqAuthorizationError, setQQAuthorizationError] = useState<string | null>(null);
+  const currentQQAuthorization = qqAuthorizationQueue[0] ?? null;
 
   const modelUrl = useMemo(() => {
     if (customModelPath) {
@@ -679,6 +688,76 @@ function App() {
     window.addEventListener('resize', sync);
     return () => window.removeEventListener('resize', sync);
   }, []);
+
+  useEffect(() => {
+    let aborted = false;
+    let cleanup: (() => void) | null = null;
+    void listen<QQAuthorizationRequest>("qq-authorization-expired", event => {
+      if (aborted) return;
+      setQQAuthorizationQueue(current => current.filter(
+        request => request.request_id !== event.payload.request_id,
+      ));
+      setQQAuthorizationError(null);
+    }).then(unlisten => {
+      if (aborted) {
+        unlisten();
+        return;
+      }
+      cleanup = unlisten;
+    });
+    return () => {
+      aborted = true;
+      cleanup?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let aborted = false;
+    let cleanup: (() => void) | null = null;
+    void listen<QQAuthorizationRequest>("qq-authorization-request", event => {
+      if (aborted) return;
+      setQQAuthorizationError(null);
+      setQQAuthorizationQueue(current => {
+        if (current.some(request => request.request_id === event.payload.request_id)) {
+          return current;
+        }
+        return [...current, event.payload];
+      });
+    }).then(unlisten => {
+      if (aborted) {
+        unlisten();
+        return;
+      }
+      cleanup = unlisten;
+    });
+    return () => {
+      aborted = true;
+      cleanup?.();
+    };
+  }, []);
+
+  const respondToCurrentQQAuthorization = useCallback(async (approved: boolean) => {
+    if (!currentQQAuthorization || qqAuthorizationBusy) return;
+    setQQAuthorizationBusy(true);
+    setQQAuthorizationError(null);
+    try {
+      await respondQQAuthorization(currentQQAuthorization, approved);
+      setQQAuthorizationQueue(current => current.filter(
+        request => request.request_id !== currentQQAuthorization.request_id,
+      ));
+    } catch (error) {
+      const message = getKokoroErrorMessage(error);
+      if (message.includes("no longer pending")) {
+        setQQAuthorizationQueue(current => current.filter(
+          request => request.request_id !== currentQQAuthorization.request_id,
+        ));
+      } else {
+        setQQAuthorizationError(message);
+      }
+    } finally {
+      setQQAuthorizationBusy(false);
+    }
+  }, [currentQQAuthorization, qqAuthorizationBusy]);
 
   // Listen for pet window requesting main window to show
   useEffect(() => {
@@ -1214,7 +1293,10 @@ function App() {
     if (detail.action === 'save_bot_config' && detail.data?.config) {
       setBotConfig(detail.data.config);
       saveBotConfig(detail.data.config)
-        .then(() => Promise.all([getBotStatus(), getTelegramConfig(), getTelegramStatus()]))
+        .then(savedConfig => {
+          setBotConfig(savedConfig);
+          return Promise.all([getBotStatus(), getTelegramConfig(), getTelegramStatus()]);
+        })
         .then(([status, telegram, telegramStatus]) => {
           setBotStatus(status);
           setTelegramConfig(telegram);
@@ -1930,6 +2012,14 @@ function App() {
           }
           void startMemoryModelDownload();
         }}
+      />
+
+      <QQAuthorizationDialog
+        request={currentQQAuthorization}
+        busy={qqAuthorizationBusy}
+        error={qqAuthorizationError}
+        onAllow={() => { void respondToCurrentQQAuthorization(true); }}
+        onReject={() => { void respondToCurrentQQAuthorization(false); }}
       />
 
       {/* Camera watcher — lives at app root so it persists when settings panel closes */}

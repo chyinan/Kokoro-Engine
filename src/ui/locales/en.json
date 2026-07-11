@@ -1123,13 +1123,16 @@
         "title": "Bot Integrations",
         "status": {
             "enabled": "Enabled",
-            "disabled": "Disabled"
+            "disabled": "Disabled",
+            "connecting": "Connecting"
         },
         "character_hint": "Conversation memory and history from this platform will be attributed to the selected character",
         "platform": {
             "label": "Platform",
             "telegram": "Telegram",
             "telegram_desc": "Telegram Bot API",
+            "qq": "QQ",
+            "qq_desc": "Official QQ Bot API v2",
             "discord": "Discord",
             "discord_desc": "Discord bot token and channel access",
             "line": "LINE",
@@ -1140,6 +1143,31 @@
         },
         "fields": {
             "enable_platform": "Enable {{platform}}"
+        },
+        "qq": {
+            "app_id": "AppID",
+            "app_id_placeholder": "QQ Bot AppID",
+            "app_secret": "AppSecret",
+            "app_secret_placeholder": "QQ Bot AppSecret",
+            "allow_c2c": "Allow QQ private chats",
+            "allowed_users": "Allowed user OpenIDs",
+            "allowed_users_desc": "QQ private chats only allow listed users; empty rejects all private chats. When populated, this also restricts group members.",
+            "user_placeholder": "User OpenID",
+            "allowed_groups": "Allowed group OpenIDs",
+            "allowed_groups_desc": "Only listed QQ groups can interact; empty rejects all group chats. Group messages must still mention the bot.",
+            "group_placeholder": "Group OpenID",
+            "authorization": {
+                "title": "Allow this QQ account?",
+                "description": "An unauthorized QQ user is trying to send Kokoro a direct message.",
+                "group_title": "Allow this QQ group?",
+                "group_description": "An unauthorized QQ group is mentioning Kokoro.",
+                "openid": "User OpenID",
+                "group_openid": "Group OpenID",
+                "security_note": "Allowing adds this account to the QQ user allowlist and continues processing its first message.",
+                "group_security_note": "Allowing adds this group to the group allowlist and continues its first message. If member restrictions are active, the sender is also added to the user allowlist.",
+                "allow": "Allow and continue",
+                "reject": "Reject"
+            }
         },
         "discord": {
             "bot_token": "BOT TOKEN",
