@@ -121,8 +121,12 @@ npm run tauri dev
 
 ### Удалённое взаимодействие
 
-- Встроенные Bot-сервисы для Telegram, Discord, LINE и Webhook.
-- Мост для текстовых, голосовых и image-сообщений в полный AI-пайплайн.
+- Встроенные сервисы официального QQ Bot API, Telegram, Discord, LINE и Webhook.
+- QQ поддерживает личные сообщения C2C и групповые @упоминания с пассивными текстовыми ответами через ИИ-конвейер Kokoro.
+- При первом сообщении от неизвестного пользователя или группы Kokoro показывает запрос подтверждения. После разрешения OpenID сохраняется в списке доступа, а первое сообщение продолжает обрабатываться.
+- Поддерживаются списки OpenID пользователей и групп, привязка персонажей, раздельные диалоги, обновление токена, heartbeat и переподключение.
+- AppID и AppSecret QQ задаются в настройках Bot или через `QQBOT_APP_ID` / `QQBOT_APP_SECRET`.
+- Telegram, Discord, LINE и Webhook передают текстовые, голосовые и графические сообщения в ИИ-конвейер.
 
 ## 🏗️ Техническая архитектура
 
@@ -147,23 +151,23 @@ flowchart LR
     BE_ORCH["AI Orchestrator"]
     BE_MULTI["LLM / TTS / STT / Vision / ImageGen / MCP"]
     BE_MOD["MOD Runtime (QuickJS)"]
-    BE_TG["Telegram Bridge"]
+    BE_BOT["Bot Bridges (QQ / Telegram / Discord / LINE / Webhook)"]
     BE_CMD --> BE_ORCH
     BE_ORCH --> BE_MULTI
     BE_MOD --> BE_CMD
-    BE_TG --> BE_CMD
+    BE_BOT --> BE_CMD
   end
 
   subgraph DATA["Data & Runtime Config"]
     DB[("SQLite: memories / summaries / conversations / characters")]
-    CFG["Config Files: llm/tts/stt/vision/imagegen/mcp/telegram"]
+    CFG["Config Files: llm/tts/stt/vision/imagegen/mcp/bot"]
   end
 
   subgraph EXT["External Services"]
     EXT_LLM["OpenAI-Compatible / Ollama / llama.cpp"]
     EXT_TTS["TTS Providers"]
     EXT_MCP["MCP Servers"]
-    EXT_TG["Telegram"]
+    EXT_BOT["QQ / Telegram / Discord / LINE / Webhook"]
   end
 
   FE_BRIDGE <--> IPC_INVOKE
@@ -172,7 +176,7 @@ flowchart LR
   BE_MULTI <--> EXT_LLM
   BE_MULTI <--> EXT_TTS
   BE_MULTI <--> EXT_MCP
-  BE_TG <--> EXT_TG
+  BE_BOT <--> EXT_BOT
 
   BE_ORCH <--> DB
   BE_CMD <--> CFG

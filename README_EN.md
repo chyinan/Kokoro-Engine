@@ -121,8 +121,12 @@ For more Nix usage, see [docs/nix.md](docs/nix.md).
 
 ### Remote interaction
 
-- Built-in Telegram, Discord, LINE, and Webhook bot services.
-- Bridges text, voice, and image messages to the full AI pipeline.
+- Built-in official QQ Bot API, Telegram, Discord, LINE, and Webhook services.
+- QQ supports C2C direct messages and group @mentions, with passive text replies through Kokoro's AI pipeline.
+- When an unknown user or group sends its first message, Kokoro opens an approval dialog. Approval adds the OpenID to the allowlist and continues processing the first message.
+- Supports user and group OpenID allowlists, character binding, isolated conversations, token refresh, heartbeat, and reconnect.
+- Configure the QQ AppID and AppSecret in Bot settings or with `QQBOT_APP_ID` and `QQBOT_APP_SECRET`.
+- Telegram, Discord, LINE, and Webhook bridge text, voice, and image messages to the AI pipeline.
 
 ## 🏗️ Technical architecture
 
@@ -147,23 +151,23 @@ flowchart LR
     BE_ORCH["AI Orchestrator"]
     BE_MULTI["LLM / TTS / STT / Vision / ImageGen / MCP"]
     BE_MOD["MOD Runtime (QuickJS)"]
-    BE_TG["Telegram Bridge"]
+    BE_BOT["Bot Bridges (QQ / Telegram / Discord / LINE / Webhook)"]
     BE_CMD --> BE_ORCH
     BE_ORCH --> BE_MULTI
     BE_MOD --> BE_CMD
-    BE_TG --> BE_CMD
+    BE_BOT --> BE_CMD
   end
 
   subgraph DATA["Data & Runtime Config"]
     DB[("SQLite: memories / summaries / conversations / characters")]
-    CFG["Config Files: llm/tts/stt/vision/imagegen/mcp/telegram"]
+    CFG["Config Files: llm/tts/stt/vision/imagegen/mcp/bot"]
   end
 
   subgraph EXT["External Services"]
     EXT_LLM["OpenAI-Compatible / Ollama / llama.cpp"]
     EXT_TTS["TTS Providers"]
     EXT_MCP["MCP Servers"]
-    EXT_TG["Telegram"]
+    EXT_BOT["QQ / Telegram / Discord / LINE / Webhook"]
   end
 
   FE_BRIDGE <--> IPC_INVOKE
@@ -172,7 +176,7 @@ flowchart LR
   BE_MULTI <--> EXT_LLM
   BE_MULTI <--> EXT_TTS
   BE_MULTI <--> EXT_MCP
-  BE_TG <--> EXT_TG
+  BE_BOT <--> EXT_BOT
 
   BE_ORCH <--> DB
   BE_CMD <--> CFG

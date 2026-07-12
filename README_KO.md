@@ -121,8 +121,12 @@ Nix 상세 내용은 [docs/nix.md](docs/nix.md)를 참고하세요.
 
 ### 원격 상호작용
 
-- Telegram, Discord, LINE, Webhook 네 가지 Bot 서비스 내장.
-- 텍스트, 음성, 이미지 메시지를 전체 AI 파이프라인으로 브리지.
+- QQ 공식 Bot API, Telegram, Discord, LINE, Webhook 등 다섯 가지 Bot 서비스를 내장합니다.
+- QQ는 C2C 개인 메시지와 그룹 @멘션을 지원하며 Kokoro AI 파이프라인을 통해 수신 메시지에 텍스트로 답장합니다.
+- 허용되지 않은 사용자나 그룹이 처음 메시지를 보내면 Kokoro가 승인 대화 상자를 표시합니다. 승인하면 OpenID를 허용 목록에 저장하고 첫 메시지를 계속 처리합니다.
+- 사용자/그룹 OpenID 허용 목록, 캐릭터 연결, 대화 분리, 토큰 갱신, 하트비트, 재연결을 지원합니다.
+- QQ AppID와 AppSecret은 Bot 설정 또는 `QQBOT_APP_ID` / `QQBOT_APP_SECRET`에서 구성할 수 있습니다.
+- Telegram, Discord, LINE, Webhook은 텍스트, 음성, 이미지 메시지를 AI 파이프라인에 연결합니다.
 
 ## 🏗️ 기술 아키텍처
 
@@ -147,23 +151,23 @@ flowchart LR
     BE_ORCH["AI Orchestrator"]
     BE_MULTI["LLM / TTS / STT / Vision / ImageGen / MCP"]
     BE_MOD["MOD Runtime (QuickJS)"]
-    BE_TG["Telegram Bridge"]
+    BE_BOT["Bot Bridges (QQ / Telegram / Discord / LINE / Webhook)"]
     BE_CMD --> BE_ORCH
     BE_ORCH --> BE_MULTI
     BE_MOD --> BE_CMD
-    BE_TG --> BE_CMD
+    BE_BOT --> BE_CMD
   end
 
   subgraph DATA["Data & Runtime Config"]
     DB[("SQLite: memories / summaries / conversations / characters")]
-    CFG["Config Files: llm/tts/stt/vision/imagegen/mcp/telegram"]
+    CFG["Config Files: llm/tts/stt/vision/imagegen/mcp/bot"]
   end
 
   subgraph EXT["External Services"]
     EXT_LLM["OpenAI-Compatible / Ollama / llama.cpp"]
     EXT_TTS["TTS Providers"]
     EXT_MCP["MCP Servers"]
-    EXT_TG["Telegram"]
+    EXT_BOT["QQ / Telegram / Discord / LINE / Webhook"]
   end
 
   FE_BRIDGE <--> IPC_INVOKE
@@ -172,7 +176,7 @@ flowchart LR
   BE_MULTI <--> EXT_LLM
   BE_MULTI <--> EXT_TTS
   BE_MULTI <--> EXT_MCP
-  BE_TG <--> EXT_TG
+  BE_BOT <--> EXT_BOT
 
   BE_ORCH <--> DB
   BE_CMD <--> CFG

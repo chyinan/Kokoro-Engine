@@ -120,8 +120,12 @@ npm run tauri dev
 
 ### 遠端連線
 
-- 內建 Telegram、Discord、LINE、Webhook 四種 Bot 服務
-- 文字、語音、圖片訊息完整橋接到 AI 管線流
+- 內建 QQ 官方 Bot API、Telegram、Discord、LINE、Webhook 五種 Bot 服務
+- QQ 支援 C2C 私訊與群組 @ 訊息，並透過 Kokoro AI 管線傳送被動文字回覆
+- 未授權的使用者或群組首次傳送訊息時，Kokoro 會顯示確認視窗；允許後自動將 OpenID 寫入允許清單，並繼續處理第一則訊息
+- 支援使用者/群組 OpenID 允許清單、角色綁定、獨立對話、Token 更新、心跳與斷線重連
+- QQ AppID/AppSecret 可在 Bot 設定中填寫，或使用 `QQBOT_APP_ID` / `QQBOT_APP_SECRET` 環境變數
+- Telegram、Discord、LINE 與 Webhook 支援將文字、語音和圖片訊息橋接至 AI 管線
 
 ## 🏗️ 技術架構
 
@@ -146,23 +150,23 @@ flowchart LR
     BE_ORCH["AI Orchestrator"]
     BE_MULTI["LLM / TTS / STT / Vision / ImageGen / MCP"]
     BE_MOD["MOD Runtime (QuickJS)"]
-    BE_TG["Telegram Bridge"]
+    BE_BOT["Bot Bridges (QQ / Telegram / Discord / LINE / Webhook)"]
     BE_CMD --> BE_ORCH
     BE_ORCH --> BE_MULTI
     BE_MOD --> BE_CMD
-    BE_TG --> BE_CMD
+    BE_BOT --> BE_CMD
   end
 
   subgraph DATA["Data & Runtime Config"]
     DB[("SQLite: memories / summaries / conversations / characters")]
-    CFG["Config Files: llm/tts/stt/vision/imagegen/mcp/telegram"]
+    CFG["Config Files: llm/tts/stt/vision/imagegen/mcp/bot"]
   end
 
   subgraph EXT["External Services"]
     EXT_LLM["OpenAI-Compatible / Ollama / llama.cpp"]
     EXT_TTS["TTS Providers"]
     EXT_MCP["MCP Servers"]
-    EXT_TG["Telegram"]
+    EXT_BOT["QQ / Telegram / Discord / LINE / Webhook"]
   end
 
   FE_BRIDGE <--> IPC_INVOKE
@@ -171,7 +175,7 @@ flowchart LR
   BE_MULTI <--> EXT_LLM
   BE_MULTI <--> EXT_TTS
   BE_MULTI <--> EXT_MCP
-  BE_TG <--> EXT_TG
+  BE_BOT <--> EXT_BOT
 
   BE_ORCH <--> DB
   BE_CMD <--> CFG
