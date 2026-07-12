@@ -122,11 +122,7 @@ Nix 상세 내용은 [docs/nix.md](docs/nix.md)를 참고하세요.
 ### 원격 상호작용
 
 - QQ, Telegram, Discord, LINE, Webhook 등 다섯 가지 Bot 서비스를 내장합니다.
-- QQ는 C2C 개인 메시지와 그룹 @멘션을 지원하며 Kokoro AI 파이프라인을 통해 수신 메시지에 텍스트로 답장합니다.
-- 허용되지 않은 사용자나 그룹이 처음 메시지를 보내면 Kokoro가 승인 대화 상자를 표시합니다. 승인하면 OpenID를 허용 목록에 저장하고 첫 메시지를 계속 처리합니다.
-- 사용자/그룹 OpenID 허용 목록, 캐릭터 연결, 대화 분리, 토큰 갱신, 하트비트, 재연결을 지원합니다.
-- QQ AppID와 AppSecret은 Bot 설정 또는 `QQBOT_APP_ID` / `QQBOT_APP_SECRET`에서 구성할 수 있습니다.
-- Telegram, Discord, LINE, Webhook은 텍스트, 음성, 이미지 메시지를 AI 파이프라인에 연결합니다.
+- 각 플랫폼에서 지원하는 메시지 형식을 AI 파이프라인에 연결합니다.
 
 ## 🏗️ 기술 아키텍처
 

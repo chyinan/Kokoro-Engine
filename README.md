@@ -123,11 +123,7 @@ npm run tauri dev
 ### 远程连接
 
 - 内置 QQ、Telegram、Discord、LINE、Webhook 五种 Bot 服务
-- QQ 支持 C2C 私聊与群聊 @ 消息，并通过 Kokoro AI 管线发送被动文本回复
-- 未授权用户或群首次发消息时，Kokoro 会弹出确认框；允许后自动写入 OpenID 白名单并继续处理首条消息
-- 支持用户/群 OpenID 白名单、角色绑定、独立会话、Token 刷新、心跳与断线重连
-- QQ AppID/AppSecret 可在 Bot 设置中填写，或使用 `QQBOT_APP_ID` / `QQBOT_APP_SECRET` 环境变量
-- Telegram、Discord、LINE 与 Webhook 支持将文字、语音和图片消息桥接到 AI 管线
+- 将各平台支持的消息类型桥接到 AI 管线
 
 ## 🏗️ 技术架构
 

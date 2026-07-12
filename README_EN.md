@@ -122,11 +122,7 @@ For more Nix usage, see [docs/nix.md](docs/nix.md).
 ### Remote interaction
 
 - Built-in QQ, Telegram, Discord, LINE, and Webhook services.
-- QQ supports C2C direct messages and group @mentions, with passive text replies through Kokoro's AI pipeline.
-- When an unknown user or group sends its first message, Kokoro opens an approval dialog. Approval adds the OpenID to the allowlist and continues processing the first message.
-- Supports user and group OpenID allowlists, character binding, isolated conversations, token refresh, heartbeat, and reconnect.
-- Configure the QQ AppID and AppSecret in Bot settings or with `QQBOT_APP_ID` and `QQBOT_APP_SECRET`.
-- Telegram, Discord, LINE, and Webhook bridge text, voice, and image messages to the AI pipeline.
+- Bridges the message types supported by each platform to the AI pipeline.
 
 ## 🏗️ Technical architecture
 
