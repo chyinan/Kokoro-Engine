@@ -214,6 +214,8 @@ flowchart LR
 
 👉 [**Kokoro Engine 官方討論群（Telegram）**](https://t.me/+U39dgiUspCo2NDNh)
 
+👉 **Kokoro Engine 官方討論群（QQ）：810398532**
+
 ## ❤️ 贊助
 
 👉 [**查看贊助方式 / Sponsor**](SPONSOR.md)

@@ -215,6 +215,8 @@ flowchart LR
 
 👉 [**Kokoro Engine 공식 Telegram 그룹**](https://t.me/+U39dgiUspCo2NDNh)
 
+👉 **Kokoro Engine 공식 QQ 그룹: 810398532**
+
 ## ❤️ 후원
 
 👉 [**후원 방법 / Sponsor**](SPONSOR.md)

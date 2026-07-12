@@ -16,3 +16,7 @@ The license text for each font is stored next to the font files as `OFL.txt`.
 <a href="https://www.star-history.com/?type=date&repos=chyinan%2FKokoro-Engine">
  <img alt="Star History Chart" src="../../pictures/StarHistory.png" width="100%" />
 </a>
+
+## Community
+
+Kokoro Engine official QQ group: **810398532**
