@@ -215,7 +215,7 @@ flowchart LR
 
 👉 [**Официальная Telegram-группа Kokoro Engine**](https://t.me/+U39dgiUspCo2NDNh)
 
-👉 **Официальная QQ-группа Kokoro Engine: 810398532**
+👉 **Официальная QQ-группа Kokoro Engine**: [810398532](https://qm.qq.com/q/V8ljISeAUM)
 
 ## ❤️ Поддержка
 
