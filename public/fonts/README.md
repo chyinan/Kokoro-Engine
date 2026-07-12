@@ -19,4 +19,4 @@ The license text for each font is stored next to the font files as `OFL.txt`.
 
 ## Community
 
-Kokoro Engine official QQ group: [810398532](https://qm.qq.com/q/V8ljISeAUM)
+[**Kokoro Engine official QQ group: 810398532**](https://qm.qq.com/q/V8ljISeAUM)

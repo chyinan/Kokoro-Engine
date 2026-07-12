@@ -215,7 +215,7 @@ You can contribute in these ways:
 
 👉 [**Kokoro Engine official Telegram group**](https://t.me/+U39dgiUspCo2NDNh)
 
-👉 **Kokoro Engine official QQ group**: [810398532](https://qm.qq.com/q/V8ljISeAUM)
+👉 [**Kokoro Engine official QQ group: 810398532**](https://qm.qq.com/q/V8ljISeAUM)
 
 ## ❤️ Sponsor
 
