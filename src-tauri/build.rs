@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,6 +14,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=ORT_DYLIB_PATH");
     println!("cargo:rerun-if-env-changed=ORT_LIB_LOCATION");
     println!("cargo:rerun-if-env-changed=ORT_SKIP_DOWNLOAD");
+    println!("cargo:rerun-if-changed=migrations");
 
     // --- Auto-download ONNX Runtime shared library for `ort` (load-dynamic) ---
     let project_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());

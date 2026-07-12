@@ -1,5 +1,8 @@
+// pattern: Imperative Shell
+
 pub mod context;
 pub mod curiosity;
+pub mod database_migrations;
 pub mod heartbeat;
 pub mod idle_behaviors;
 pub mod initiative;
@@ -7,6 +10,7 @@ pub mod memory;
 pub mod memory_embedding_model;
 pub mod memory_event_ingress;
 pub mod memory_extractor;
+pub mod migration_compatibility;
 pub mod prompts;
 pub mod router;
 pub mod typing_sim;

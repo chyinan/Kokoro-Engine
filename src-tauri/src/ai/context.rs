@@ -1,6 +1,7 @@
 // pattern: Mixed (needs refactoring)
 
 use crate::ai::curiosity::CuriosityModule;
+use crate::ai::database_migrations;
 use crate::ai::idle_behaviors::IdleBehaviorSystem;
 use crate::ai::initiative::InitiativeSystem;
 use crate::ai::memory::MemoryManager;
@@ -183,7 +184,7 @@ impl AIOrchestrator {
         let pool = SqlitePool::connect_with(options).await?;
 
         // Run all database migrations
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        database_migrations::run(&pool).await?;
 
         let memory_manager = Arc::new(MemoryManager::new(pool.clone()));
         let interrupted = memory_manager.mark_interrupted_dream_jobs().await?;
