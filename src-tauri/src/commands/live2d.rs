@@ -243,8 +243,7 @@ pub async fn delete_live2d_model(
         .path()
         .app_data_dir()
         .map_err(|e| KokoroError::Internal(format!("Cannot resolve app data dir: {}", e)))?;
-    let models_dir = app_data.join("live2d_models");
-    let model_path = resolve_owned_model_for_deletion(&models_dir, &model_name)?;
+    let model_path = resolve_owned_model_for_deletion(&app_data, &model_name)?;
 
     if model_path.is_dir() {
         fs::remove_dir_all(&model_path).map_err(|e| {
@@ -877,18 +876,48 @@ fn normalize_model_folder_name(name: &str) -> Result<String, String> {
 }
 
 fn resolve_owned_model_for_deletion(
-    models_dir: &std::path::Path,
+    app_data_dir: &std::path::Path,
     model_name: &str,
 ) -> Result<PathBuf, KokoroError> {
     let normalized = normalize_model_folder_name(model_name).map_err(KokoroError::Validation)?;
-    let canonical_root = models_dir.canonicalize().map_err(|error| {
+    let canonical_app_data = app_data_dir.canonicalize().map_err(|error| {
+        KokoroError::Internal(format!("Failed to resolve app data directory: {}", error))
+    })?;
+    let expected_root = canonical_app_data.join("live2d_models");
+    let root_metadata = fs::symlink_metadata(&expected_root).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             KokoroError::NotFound(format!("Model '{}' not found", model_name))
         } else {
-            KokoroError::Internal(format!("Failed to resolve Live2D model root: {}", error))
+            KokoroError::Internal(format!("Failed to inspect Live2D model root: {}", error))
         }
     })?;
+    if is_symlink_or_reparse_point(&root_metadata) || !root_metadata.is_dir() {
+        return Err(KokoroError::Validation(
+            "Live2D model root must be a direct non-redirected app-data directory".to_string(),
+        ));
+    }
+    let canonical_root = expected_root.canonicalize().map_err(|error| {
+        KokoroError::Internal(format!("Failed to resolve Live2D model root: {}", error))
+    })?;
+    if canonical_root != expected_root {
+        return Err(KokoroError::Validation(
+            "Live2D model root resolves outside its direct app-data location".to_string(),
+        ));
+    }
     let expected_path = canonical_root.join(&normalized);
+    let model_metadata = fs::symlink_metadata(&expected_path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            KokoroError::NotFound(format!("Model '{}' not found", model_name))
+        } else {
+            KokoroError::Internal(format!(
+                "Failed to inspect Live2D model '{}': {}",
+                model_name, error
+            ))
+        }
+    })?;
+    if is_symlink_or_reparse_point(&model_metadata) {
+        return Err(KokoroError::Validation("Invalid model name".to_string()));
+    }
     let canonical_model = expected_path.canonicalize().map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             KokoroError::NotFound(format!("Model '{}' not found", model_name))
@@ -906,6 +935,20 @@ fn resolve_owned_model_for_deletion(
     }
 
     Ok(canonical_model)
+}
+
+#[cfg(not(windows))]
+fn is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+#[cfg(windows)]
+fn is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 fn normalize_semantic_key(raw_key: &str) -> String {
@@ -1032,7 +1075,7 @@ mod tests {
         let model_dir = models_dir.join("pico");
         fs::create_dir_all(&model_dir).expect("model dir");
 
-        let resolved = resolve_owned_model_for_deletion(&models_dir, "pico")
+        let resolved = resolve_owned_model_for_deletion(temp.path(), "pico")
             .expect("direct model should resolve");
 
         assert_eq!(resolved, model_dir.canonicalize().expect("canonical model"));
@@ -1044,7 +1087,7 @@ mod tests {
         let models_dir = temp.path().join("live2d_models");
         fs::create_dir_all(&models_dir).expect("models dir");
 
-        let error = resolve_owned_model_for_deletion(&models_dir, "missing")
+        let error = resolve_owned_model_for_deletion(temp.path(), "missing")
             .expect_err("missing model should fail");
 
         assert!(matches!(error, KokoroError::NotFound(_)));
@@ -1063,7 +1106,7 @@ mod tests {
             "../live2d_models_backup",
             "pico/../../live2d_models_backup",
         ] {
-            let error = resolve_owned_model_for_deletion(&models_dir, candidate)
+            let error = resolve_owned_model_for_deletion(temp.path(), candidate)
                 .expect_err("traversal should fail");
             assert!(matches!(error, KokoroError::Validation(_)));
         }
@@ -1082,9 +1125,55 @@ mod tests {
         fs::create_dir_all(&outside).expect("outside dir");
         symlink(&outside, models_dir.join("escape")).expect("symlink");
 
-        let error = resolve_owned_model_for_deletion(&models_dir, "escape")
+        let error = resolve_owned_model_for_deletion(temp.path(), "escape")
             .expect_err("outside symlink should fail");
         assert!(matches!(error, KokoroError::Validation(_)));
         assert!(outside.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deletion_rejects_a_redirected_models_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(outside.join("victim")).expect("outside model");
+        symlink(&outside, temp.path().join("live2d_models")).expect("root symlink");
+
+        let error = resolve_owned_model_for_deletion(temp.path(), "victim")
+            .expect_err("redirected model root should fail");
+
+        assert!(matches!(error, KokoroError::Validation(_)));
+        assert!(outside.join("victim").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn deletion_rejects_a_redirected_models_root_junction() {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let outside = temp.path().join("outside");
+        let models_dir = temp.path().join("live2d_models");
+        fs::create_dir_all(outside.join("victim")).expect("outside model");
+        let output = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&models_dir)
+            .arg(&outside)
+            .output()
+            .expect("create junction");
+        assert!(
+            output.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let error = resolve_owned_model_for_deletion(temp.path(), "victim")
+            .expect_err("redirected model root should fail");
+
+        assert!(matches!(error, KokoroError::Validation(_)));
+        assert!(outside.join("victim").exists());
+        fs::remove_dir(&models_dir).expect("remove junction without touching target");
     }
 }

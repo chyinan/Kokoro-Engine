@@ -421,11 +421,36 @@ pub fn run() {
 
                         app_handle.manage(orchestrator);
 
-                        // Restore active_character_id from disk
-                        if let Some(char_id) = crate::ai::context::AIOrchestrator::load_active_character_id() {
-                            let orch = app_handle.state::<crate::ai::context::AIOrchestrator>();
-                            orch.set_character_id(char_id.clone()).await;
-                            tracing::info!(target: "ai", "Restored active_character_id: {}", char_id);
+                        // The committed activation snapshot is authoritative for crash/window
+                        // recovery. Legacy ID-only persistence is used only before the first
+                        // coordinated activation exists.
+                        let coordinator = app_handle
+                            .state::<crate::characters::activation::ActivationCoordinator>();
+                        let orch = app_handle.state::<crate::ai::context::AIOrchestrator>();
+                        match crate::commands::characters::recover_committed_character_runtime_for_startup(
+                            &coordinator,
+                            &orch,
+                            &app_data_dir,
+                        )
+                        .await
+                        {
+                            Ok(Some(committed)) => tracing::info!(
+                                target: "ai",
+                                "Restored committed character runtime: character_id={} revision={}",
+                                committed.runtime.character_id,
+                                committed.revision
+                            ),
+                            Ok(None) => {
+                                if let Some(char_id) = crate::ai::context::AIOrchestrator::load_active_character_id() {
+                                    orch.set_character_id(char_id.clone()).await;
+                                    tracing::info!(target: "ai", "Restored legacy active_character_id: {}", char_id);
+                                }
+                            }
+                            Err(error) => tracing::error!(
+                                target: "ai",
+                                "Failed to restore committed character runtime: {}",
+                                error
+                            ),
                         }
 
                     }

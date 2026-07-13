@@ -28,6 +28,15 @@ function oldFrontendState(): FrontendRuntimeState {
   };
 }
 
+function packageAsset(path: string) {
+  return {
+    source: "package" as const,
+    template_id: "template",
+    template_version: "1.0.0",
+    path,
+  };
+}
+
 function preparedRuntime(characterId: string): PreparedCharacterRuntime {
   return {
     character_id: characterId,
@@ -37,9 +46,9 @@ function preparedRuntime(characterId: string): PreparedCharacterRuntime {
     response_language: "zh",
     proactive_enabled: true,
     current_conversation_id: `conversation-${characterId}`,
-    live2d_model: `models/${characterId}.model3.json`,
-    background: `backgrounds/${characterId}.webp`,
-    cue_profile: `cues/${characterId}.json`,
+    live2d_model: packageAsset(`models/${characterId}.model3.json`),
+    background: packageAsset(`backgrounds/${characterId}.webp`),
+    cue_profile: packageAsset(`cues/${characterId}.json`),
     tts: {
       mode: "configured_provider",
       provider_id: "edge-main",
@@ -57,6 +66,7 @@ function preparedRuntime(characterId: string): PreparedCharacterRuntime {
 function token(characterId: string, revision: number) {
   return {
     revision,
+    nonce: `nonce-${revision}`,
     character_updated_at: revision,
     previous_committed: preparedRuntime("old-character"),
     resolved_runtime: preparedRuntime(characterId),

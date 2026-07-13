@@ -1682,6 +1682,13 @@ export type ResolvedCharacterTts = {
     readonly requires_save_confirmation: boolean;
 };
 
+export type PackageAssetReference = {
+    readonly source: "package";
+    readonly template_id: string;
+    readonly template_version: string;
+    readonly path: string;
+};
+
 export type BackendCharacterRuntime = {
     readonly character_id: string;
     readonly character_name: string;
@@ -1690,14 +1697,15 @@ export type BackendCharacterRuntime = {
     readonly response_language: string;
     readonly proactive_enabled: boolean;
     readonly current_conversation_id: string | null;
-    readonly live2d_model: string | null;
-    readonly background: string | null;
-    readonly cue_profile: string | null;
+    readonly live2d_model: PackageAssetReference | null;
+    readonly background: PackageAssetReference | null;
+    readonly cue_profile: PackageAssetReference | null;
     readonly tts: ResolvedCharacterTts;
 };
 
 export type CharacterActivationToken = {
     readonly revision: number;
+    readonly nonce: string;
     readonly character_updated_at: number;
     readonly previous_committed: BackendCharacterRuntime;
     readonly resolved_runtime: BackendCharacterRuntime;

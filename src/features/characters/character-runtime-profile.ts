@@ -24,6 +24,12 @@ export type FrontendRuntimeState = {
   cueProfile: string | null;
 };
 
+function packageAssetPath(
+  reference: PreparedCharacterRuntime["live2d_model"],
+): string | null {
+  return reference?.source === "package" ? reference.path : null;
+}
+
 /**
  * Copies every frontend value owned by character activation so rollback cannot
  * observe later mutations from React state or settings adapters.
@@ -48,8 +54,8 @@ export function resolveFrontendRuntimeProfile(
   const isTtsEnabled = runtime.tts.mode !== "text_only";
   return {
     activeCharacterId: runtime.character_id,
-    live2dModel: runtime.live2d_model ?? fallback.live2dModel,
-    background: runtime.background ?? fallback.background,
+    live2dModel: packageAssetPath(runtime.live2d_model) ?? fallback.live2dModel,
+    background: packageAssetPath(runtime.background) ?? fallback.background,
     tts: {
       enabled: isTtsEnabled,
       mode: runtime.tts.mode,
@@ -58,7 +64,7 @@ export function resolveFrontendRuntimeProfile(
       speed: runtime.tts.speed ?? 1,
       pitch: runtime.tts.pitch ?? 1,
     },
-    cueProfile: runtime.cue_profile ?? fallback.cueProfile,
+    cueProfile: packageAssetPath(runtime.cue_profile) ?? fallback.cueProfile,
   };
 }
 

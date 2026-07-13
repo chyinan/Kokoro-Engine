@@ -1,7 +1,7 @@
 // pattern: Imperative Shell
 
 use crate::characters::manifest::{
-    CharacterAssets, CharacterRecommendations, CharacterRuntimeProfile, CharacterTemplateManifest,
+    CharacterRecommendations, CharacterRuntimeProfile, CharacterTemplateManifest,
     CharacterTtsProfile,
 };
 use crate::error::KokoroError;
@@ -9,6 +9,8 @@ use crate::tts::config::TtsSystemConfig;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
+use std::fs;
+use std::path::Path;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -23,13 +25,23 @@ pub struct BackendRuntimeSnapshot {
     pub response_language: String,
     pub proactive_enabled: bool,
     pub current_conversation_id: Option<String>,
-    pub live2d_model: Option<String>,
-    pub background: Option<String>,
-    pub cue_profile: Option<String>,
+    pub live2d_model: Option<PackageAssetReference>,
+    pub background: Option<PackageAssetReference>,
+    pub cue_profile: Option<PackageAssetReference>,
     pub tts: ResolvedTts,
 }
 
 pub type ResolvedCharacterRuntime = BackendRuntimeSnapshot;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum PackageAssetReference {
+    Package {
+        template_id: String,
+        template_version: String,
+        path: String,
+    },
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,12 +85,14 @@ pub struct CapabilityRecommendations {
 #[serde(rename_all = "snake_case")]
 pub enum GreetingAction {
     None,
+    ConsumeWithoutEmit,
     Emit { content: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CharacterActivationToken {
     pub revision: u64,
+    pub nonce: String,
     pub character_updated_at: i64,
     pub previous_committed: BackendRuntimeSnapshot,
     pub resolved_runtime: ResolvedCharacterRuntime,
@@ -109,11 +123,17 @@ pub trait ActivationRuntimeBackend: Send + Sync {
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError>;
 }
 
+#[derive(Clone)]
+struct PreparedActivation {
+    token: CharacterActivationToken,
+}
+
 #[derive(Default)]
 struct ActivationState {
     next_revision: u64,
     latest_prepared_revision: u64,
     committed_revision: u64,
+    prepared: Option<PreparedActivation>,
 }
 
 #[derive(Default)]
@@ -122,9 +142,43 @@ pub struct ActivationCoordinator {
 }
 
 impl ActivationCoordinator {
+    #[cfg(test)]
     pub async fn prepare<B: ActivationRuntimeBackend>(
         &self,
         pool: &SqlitePool,
+        character_id: &str,
+        tts_config: &TtsSystemConfig,
+        local_presets: &[LocalTtsPreset],
+        backend: &B,
+    ) -> Result<CharacterActivationToken, KokoroError> {
+        self.prepare_internal(pool, None, character_id, tts_config, local_presets, backend)
+            .await
+    }
+
+    pub async fn prepare_with_package_root<B: ActivationRuntimeBackend>(
+        &self,
+        pool: &SqlitePool,
+        package_root: &Path,
+        character_id: &str,
+        tts_config: &TtsSystemConfig,
+        local_presets: &[LocalTtsPreset],
+        backend: &B,
+    ) -> Result<CharacterActivationToken, KokoroError> {
+        self.prepare_internal(
+            pool,
+            Some(package_root),
+            character_id,
+            tts_config,
+            local_presets,
+            backend,
+        )
+        .await
+    }
+
+    async fn prepare_internal<B: ActivationRuntimeBackend>(
+        &self,
+        pool: &SqlitePool,
+        package_root: Option<&Path>,
         character_id: &str,
         tts_config: &TtsSystemConfig,
         local_presets: &[LocalTtsPreset],
@@ -182,6 +236,7 @@ impl ActivationCoordinator {
                 .as_deref(),
             row.try_get::<Option<String>, _>("template_snapshot_json")?
                 .as_deref(),
+            package_root,
         )?;
         let target_conversation_id = sqlx::query_scalar::<_, String>(
             "SELECT id FROM conversations WHERE character_id = ? ORDER BY updated_at DESC, id ASC LIMIT 1",
@@ -193,7 +248,10 @@ impl ActivationCoordinator {
             character_id: character_id.to_string(),
             character_name: character_name.clone(),
             user_name: user_name.clone(),
-            system_prompt: persona.clone(),
+            system_prompt: compose_system_prompt(
+                &persona,
+                &row.try_get::<String, _>("example_dialogue")?,
+            ),
             response_language: requested_runtime
                 .response_language
                 .unwrap_or_else(|| previous_committed.response_language.clone()),
@@ -201,23 +259,23 @@ impl ActivationCoordinator {
                 .proactive_enabled
                 .unwrap_or(previous_committed.proactive_enabled),
             current_conversation_id: target_conversation_id.clone(),
-            live2d_model: template_content.assets.live2d_model,
-            background: template_content.assets.background,
-            cue_profile: template_content.assets.cue_profile,
+            live2d_model: template_content.live2d_model,
+            background: template_content.background,
+            cue_profile: template_content.cue_profile,
             tts: resolve_tts(requested_runtime.tts.as_ref(), tts_config, local_presets),
         };
         let greeting = row.try_get::<String, _>("greeting")?;
-        let greeting_action = if row
-            .try_get::<Option<i64>, _>("greeting_consumed_at")?
-            .is_none()
-            && !greeting.trim().is_empty()
-        {
-            GreetingAction::Emit { content: greeting }
-        } else {
-            GreetingAction::None
+        let greeting_action = match (
+            row.try_get::<Option<i64>, _>("greeting_consumed_at")?,
+            greeting.trim().is_empty(),
+        ) {
+            (None, true) => GreetingAction::ConsumeWithoutEmit,
+            (None, false) => GreetingAction::Emit { content: greeting },
+            (Some(_), _) => GreetingAction::None,
         };
-        Ok(CharacterActivationToken {
+        let token = CharacterActivationToken {
             revision,
+            nonce: Uuid::new_v4().to_string(),
             character_updated_at: row.try_get("updated_at")?,
             previous_committed,
             resolved_runtime,
@@ -230,21 +288,38 @@ impl ActivationCoordinator {
             target_conversation_id,
             greeting_action,
             recommendations: template_content.recommendations,
-        })
+        };
+        state.prepared = Some(PreparedActivation {
+            token: token.clone(),
+        });
+        Ok(token)
     }
 
     pub async fn commit<B: ActivationRuntimeBackend>(
         &self,
         pool: &SqlitePool,
-        token: CharacterActivationToken,
+        submitted_token: CharacterActivationToken,
         backend: &B,
     ) -> Result<CommittedCharacterRuntime, KokoroError> {
         let mut state = self.state.lock().await;
-        if token.revision != state.latest_prepared_revision
-            || token.revision <= state.committed_revision
+        if submitted_token.revision != state.latest_prepared_revision
+            || submitted_token.revision <= state.committed_revision
         {
             return Err(stale_token_error());
         }
+        let prepared = state.prepared.as_ref().ok_or_else(stale_token_error)?;
+        if submitted_token.revision != prepared.token.revision
+            || submitted_token.nonce != prepared.token.nonce
+        {
+            return Err(stale_token_error());
+        }
+        let prepared = state
+            .prepared
+            .take()
+            .expect("validated prepared activation remains present");
+        // Only the opaque nonce and revision cross back into the trust boundary. All runtime,
+        // prompt, greeting, conversation, and rollback fields come from this server-owned copy.
+        let token = prepared.token;
 
         let mut transaction = pool.begin().await?;
         let live_updated_at =
@@ -308,6 +383,21 @@ impl ActivationCoordinator {
 
         state.committed_revision = token.revision;
         Ok(committed)
+    }
+
+    pub async fn recover_committed<B: ActivationRuntimeBackend>(
+        &self,
+        pool: &SqlitePool,
+        backend: &B,
+    ) -> Result<Option<CommittedCharacterRuntime>, KokoroError> {
+        let mut state = self.state.lock().await;
+        let Some(committed) = self.get_committed(pool).await? else {
+            return Ok(None);
+        };
+        backend.apply(&committed.runtime).await?;
+        state.next_revision = state.next_revision.max(committed.revision);
+        state.committed_revision = state.committed_revision.max(committed.revision);
+        Ok(Some(committed))
     }
 
     pub async fn get_committed(
@@ -433,7 +523,9 @@ fn resolve_tts(
 
 #[derive(Default)]
 struct ResolvedTemplateContent {
-    assets: CharacterAssets,
+    live2d_model: Option<PackageAssetReference>,
+    background: Option<PackageAssetReference>,
+    cue_profile: Option<PackageAssetReference>,
     recommendations: CapabilityRecommendations,
 }
 
@@ -442,6 +534,7 @@ fn resolve_template_content(
     template_id: Option<&str>,
     template_version: Option<&str>,
     snapshot: Option<&str>,
+    package_root: Option<&Path>,
 ) -> Result<ResolvedTemplateContent, KokoroError> {
     if source_format != "template" {
         return Ok(ResolvedTemplateContent::default());
@@ -459,15 +552,188 @@ fn resolve_template_content(
             "character template snapshot does not match instance origin".to_string(),
         ));
     }
-    let recommendations: CharacterRecommendations = manifest.recommendations.unwrap_or_default();
+    let recommendations: CharacterRecommendations =
+        manifest.recommendations.clone().unwrap_or_default();
+    let assets = manifest.assets.clone().unwrap_or_default();
+    let package_dir = package_root.and_then(|root| {
+        resolve_owned_package_directory(root, &manifest)
+            .map_err(|error| {
+                tracing::warn!(
+                    target: "characters",
+                    template_id,
+                    template_version,
+                    "character activation asset fallback: {}",
+                    error
+                );
+                error
+            })
+            .ok()
+    });
     Ok(ResolvedTemplateContent {
-        assets: manifest.assets.unwrap_or_default(),
+        live2d_model: resolve_package_asset(
+            package_dir.as_deref(),
+            template_id,
+            template_version,
+            assets.live2d_model.as_deref(),
+            PackageAssetRole::Live2dModel,
+        ),
+        background: resolve_package_asset(
+            package_dir.as_deref(),
+            template_id,
+            template_version,
+            assets.background.as_deref(),
+            PackageAssetRole::Background,
+        ),
+        cue_profile: resolve_package_asset(
+            package_dir.as_deref(),
+            template_id,
+            template_version,
+            assets.cue_profile.as_deref(),
+            PackageAssetRole::CueProfile,
+        ),
         recommendations: CapabilityRecommendations {
             vision: recommendations.vision,
             memory: recommendations.memory,
             mcp_servers: recommendations.mcp_servers.unwrap_or_default(),
         },
     })
+}
+
+#[derive(Clone, Copy)]
+enum PackageAssetRole {
+    Live2dModel,
+    Background,
+    CueProfile,
+}
+
+fn resolve_owned_package_directory(
+    package_root: &Path,
+    expected_manifest: &CharacterTemplateManifest,
+) -> Result<std::path::PathBuf, KokoroError> {
+    let canonical_root = package_root.canonicalize().map_err(|error| {
+        KokoroError::Validation(format!("character package root is unavailable: {error}"))
+    })?;
+    let expected_id_dir = canonical_root.join(&expected_manifest.id);
+    reject_redirected_directory(&expected_id_dir, "character package id directory")?;
+    let canonical_id_dir = expected_id_dir.canonicalize().map_err(|error| {
+        KokoroError::Validation(format!(
+            "character package id directory is unavailable: {error}"
+        ))
+    })?;
+    if canonical_id_dir != expected_id_dir || canonical_id_dir.parent() != Some(&canonical_root) {
+        return Err(KokoroError::Validation(
+            "character package id directory is not directly owned by the catalog".to_string(),
+        ));
+    }
+
+    let expected_package_dir = canonical_id_dir.join(&expected_manifest.version);
+    reject_redirected_directory(&expected_package_dir, "character package version directory")?;
+    let canonical_package_dir = expected_package_dir.canonicalize().map_err(|error| {
+        KokoroError::Validation(format!("character package version is unavailable: {error}"))
+    })?;
+    if canonical_package_dir != expected_package_dir
+        || canonical_package_dir.parent() != Some(&canonical_id_dir)
+    {
+        return Err(KokoroError::Validation(
+            "character package version is not directly owned by its template".to_string(),
+        ));
+    }
+
+    let installed_raw =
+        fs::read_to_string(canonical_package_dir.join("character.json")).map_err(|error| {
+            KokoroError::Validation(format!(
+                "installed character manifest is unavailable: {error}"
+            ))
+        })?;
+    let installed = CharacterTemplateManifest::from_json(&installed_raw).map_err(|error| {
+        KokoroError::Validation(format!("installed character manifest is invalid: {error}"))
+    })?;
+    if &installed != expected_manifest {
+        return Err(KokoroError::Validation(
+            "installed character package does not match the instance template snapshot".to_string(),
+        ));
+    }
+    Ok(canonical_package_dir)
+}
+
+fn reject_redirected_directory(path: &Path, label: &str) -> Result<(), KokoroError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| KokoroError::Validation(format!("{label} is unavailable: {error}")))?;
+    if asset_metadata_is_redirected(&metadata) || !metadata.is_dir() {
+        return Err(KokoroError::Validation(format!(
+            "{label} must be a non-redirected directory"
+        )));
+    }
+    Ok(())
+}
+
+fn resolve_package_asset(
+    package_dir: Option<&Path>,
+    template_id: &str,
+    template_version: &str,
+    relative: Option<&str>,
+    role: PackageAssetRole,
+) -> Option<PackageAssetReference> {
+    let (Some(package_dir), Some(relative)) = (package_dir, relative) else {
+        return None;
+    };
+    let expected = package_dir.join(relative);
+    let metadata = fs::symlink_metadata(&expected).ok()?;
+    if asset_metadata_is_redirected(&metadata) || !metadata.is_file() {
+        return None;
+    }
+    let canonical = expected.canonicalize().ok()?;
+    if !canonical.starts_with(package_dir) {
+        return None;
+    }
+    if matches!(role, PackageAssetRole::CueProfile) && !is_valid_cue_profile(&canonical) {
+        return None;
+    }
+    Some(PackageAssetReference::Package {
+        template_id: template_id.to_string(),
+        template_version: template_version.to_string(),
+        path: canonical.to_string_lossy().into_owned(),
+    })
+}
+
+fn is_valid_cue_profile(path: &Path) -> bool {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(1)
+        && value.get("cues").is_some_and(serde_json::Value::is_object)
+}
+
+#[cfg(not(windows))]
+fn asset_metadata_is_redirected(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+#[cfg(windows)]
+fn asset_metadata_is_redirected(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+fn compose_system_prompt(persona: &str, example_dialogue: &str) -> String {
+    let persona = persona.trim();
+    let example_dialogue = example_dialogue.trim();
+    if example_dialogue.is_empty() {
+        return format!("<character_persona>\n{persona}\n</character_persona>");
+    }
+    format!(
+        "<character_persona>\n{persona}\n</character_persona>\n\n\
+         <example_dialogue purpose=\"style_reference_only\">\n{example_dialogue}\n</example_dialogue>"
+    )
 }
 
 async fn ensure_owned_conversation(
@@ -506,10 +772,24 @@ async fn stage_greeting(
     token: &CharacterActivationToken,
     conversation_id: &str,
 ) -> Result<(), KokoroError> {
+    let now = chrono::Utc::now();
+    if token.greeting_action == GreetingAction::ConsumeWithoutEmit {
+        let updated = sqlx::query(
+            "UPDATE characters SET greeting_consumed_at = ?, greeting_message_id = NULL \
+             WHERE id = ? AND greeting_consumed_at IS NULL",
+        )
+        .bind(now.timestamp())
+        .bind(&token.resolved_runtime.character_id)
+        .execute(&mut **transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(stale_token_error());
+        }
+        return Ok(());
+    }
     let GreetingAction::Emit { content } = &token.greeting_action else {
         return Ok(());
     };
-    let now = chrono::Utc::now();
     let inserted = sqlx::query(
         "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) \
          SELECT ?, 'assistant', ?, NULL, ? WHERE EXISTS (\

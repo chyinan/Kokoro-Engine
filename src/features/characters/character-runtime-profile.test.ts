@@ -27,6 +27,15 @@ function frontendState(): FrontendRuntimeState {
   };
 }
 
+function packageAsset(path: string) {
+  return {
+    source: "package" as const,
+    template_id: "template",
+    template_version: "1.0.0",
+    path,
+  };
+}
+
 function preparedRuntime(
   overrides: Partial<PreparedCharacterRuntime> = {},
 ): PreparedCharacterRuntime {
@@ -38,9 +47,9 @@ function preparedRuntime(
     response_language: "zh",
     proactive_enabled: true,
     current_conversation_id: "conversation-new",
-    live2d_model: "models/new.model3.json",
-    background: "backgrounds/new.webp",
-    cue_profile: "cues/new.json",
+    live2d_model: packageAsset("models/new.model3.json"),
+    background: packageAsset("backgrounds/new.webp"),
+    cue_profile: packageAsset("cues/new.json"),
     tts: {
       mode: "configured_provider",
       provider_id: "edge-new",

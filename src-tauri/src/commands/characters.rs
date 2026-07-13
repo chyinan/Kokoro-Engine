@@ -16,12 +16,13 @@ use async_trait::async_trait;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 struct OrchestratorActivationBackend<'a> {
     orchestrator: &'a AIOrchestrator,
+    app_data: PathBuf,
 }
 
 #[async_trait]
@@ -62,20 +63,20 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
     }
 
     async fn apply(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
-        apply_orchestrator_runtime(self.orchestrator, snapshot).await;
-        Ok(())
+        apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await
     }
 
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
-        apply_orchestrator_runtime(self.orchestrator, snapshot).await;
-        Ok(())
+        apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await
     }
 }
 
 async fn apply_orchestrator_runtime(
     orchestrator: &AIOrchestrator,
     snapshot: &BackendRuntimeSnapshot,
-) {
+    app_data: &Path,
+) -> Result<(), KokoroError> {
+    persist_runtime_backend_snapshot(app_data, snapshot)?;
     orchestrator
         .set_system_prompt(snapshot.system_prompt.clone())
         .await;
@@ -92,6 +93,67 @@ async fn apply_orchestrator_runtime(
     orchestrator.set_proactive_enabled(snapshot.proactive_enabled);
     *orchestrator.current_conversation_id.lock().await = snapshot.current_conversation_id.clone();
     orchestrator.history.lock().await.clear();
+    Ok(())
+}
+
+fn persist_runtime_backend_snapshot(
+    app_data: &Path,
+    snapshot: &BackendRuntimeSnapshot,
+) -> Result<(), KokoroError> {
+    fs::create_dir_all(app_data).map_err(|error| {
+        KokoroError::Internal(format!("failed to create app data directory: {error}"))
+    })?;
+    replace_json_file(
+        app_data,
+        "active_character_id.json",
+        &serde_json::json!({ "character_id": snapshot.character_id }),
+    )?;
+    replace_json_file(
+        app_data,
+        "current_conversation_id.json",
+        &serde_json::json!({ "conversation_id": snapshot.current_conversation_id }),
+    )?;
+    let complete = serde_json::to_value(snapshot).map_err(|error| {
+        KokoroError::Internal(format!(
+            "failed to serialize backend runtime snapshot: {error}"
+        ))
+    })?;
+    replace_json_file(app_data, "character_runtime_backend.json", &complete)
+}
+
+fn replace_json_file(
+    directory: &Path,
+    file_name: &str,
+    value: &serde_json::Value,
+) -> Result<(), KokoroError> {
+    let target = directory.join(file_name);
+    let temporary = directory.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
+    let backup = directory.join(format!(".{file_name}.{}.backup", Uuid::new_v4()));
+    let bytes = serde_json::to_vec(value).map_err(|error| {
+        KokoroError::Internal(format!("failed to serialize {file_name}: {error}"))
+    })?;
+    fs::write(&temporary, bytes)
+        .map_err(|error| KokoroError::Internal(format!("failed to write {file_name}: {error}")))?;
+    if !target.exists() {
+        return fs::rename(&temporary, &target).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            KokoroError::Internal(format!("failed to persist {file_name}: {error}"))
+        });
+    }
+
+    fs::rename(&target, &backup).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        KokoroError::Internal(format!("failed to stage existing {file_name}: {error}"))
+    })?;
+    if let Err(error) = fs::rename(&temporary, &target) {
+        let _ = fs::rename(&backup, &target);
+        let _ = fs::remove_file(&temporary);
+        return Err(KokoroError::Internal(format!(
+            "failed to persist {file_name}: {error}"
+        )));
+    }
+    fs::remove_file(&backup)
+        .map_err(|error| KokoroError::Internal(format!("failed to finalize {file_name}: {error}")))
 }
 
 fn allowlisted_local_tts_presets() -> Vec<LocalTtsPreset> {
@@ -137,10 +199,12 @@ pub async fn prepare_character_activation(
     let tts_config = crate::tts::config::load_config(&app_data.join("tts_config.json"));
     let backend = OrchestratorActivationBackend {
         orchestrator: &orchestrator,
+        app_data: app_data.clone(),
     };
     coordinator
-        .prepare(
+        .prepare_with_package_root(
             &orchestrator.db,
+            &app_data.join("characters"),
             &character_id,
             &tts_config,
             &allowlisted_local_tts_presets(),
@@ -154,9 +218,12 @@ pub async fn commit_character_activation(
     token: CharacterActivationToken,
     coordinator: State<'_, ActivationCoordinator>,
     orchestrator: State<'_, AIOrchestrator>,
+    app: AppHandle,
 ) -> Result<CommittedCharacterRuntime, KokoroError> {
+    let app_data = resolve_app_data(&app)?;
     let backend = OrchestratorActivationBackend {
         orchestrator: &orchestrator,
+        app_data,
     };
     coordinator.commit(&orchestrator.db, token, &backend).await
 }
@@ -165,8 +232,29 @@ pub async fn commit_character_activation(
 pub async fn get_committed_character_runtime(
     coordinator: State<'_, ActivationCoordinator>,
     orchestrator: State<'_, AIOrchestrator>,
+    app: AppHandle,
 ) -> Result<Option<CommittedCharacterRuntime>, KokoroError> {
-    coordinator.get_committed(&orchestrator.db).await
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: resolve_app_data(&app)?,
+    };
+    coordinator
+        .recover_committed(&orchestrator.db, &backend)
+        .await
+}
+
+pub(crate) async fn recover_committed_character_runtime_for_startup(
+    coordinator: &ActivationCoordinator,
+    orchestrator: &AIOrchestrator,
+    app_data: &Path,
+) -> Result<Option<CommittedCharacterRuntime>, KokoroError> {
+    let backend = OrchestratorActivationBackend {
+        orchestrator,
+        app_data: app_data.to_path_buf(),
+    };
+    coordinator
+        .recover_committed(&orchestrator.db, &backend)
+        .await
 }
 
 #[tauri::command]

@@ -957,3 +957,45 @@ async fn reconciliation_deletes_owned_resource_and_restores_it_on_failure() {
         }
     }
 }
+
+#[tokio::test]
+async fn production_activation_backend_applies_and_persists_complete_selection() {
+    let orchestrator = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+    let temp = TempDir::new().unwrap();
+    let snapshot = BackendRuntimeSnapshot {
+        character_id: "persistent-character".into(),
+        character_name: "Persistent Character".into(),
+        user_name: "Owner".into(),
+        system_prompt: "<character_persona>\nPersistent\n</character_persona>".into(),
+        response_language: "ja".into(),
+        proactive_enabled: true,
+        current_conversation_id: Some("persistent-conversation".into()),
+        ..Default::default()
+    };
+
+    apply_orchestrator_runtime(&orchestrator, &snapshot, temp.path())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        orchestrator.get_character_id().await,
+        "persistent-character"
+    );
+    assert_eq!(
+        *orchestrator.system_prompt.lock().await,
+        snapshot.system_prompt
+    );
+    assert_eq!(
+        *orchestrator.current_conversation_id.lock().await,
+        Some("persistent-conversation".into())
+    );
+    let active: serde_json::Value =
+        serde_json::from_slice(&fs::read(temp.path().join("active_character_id.json")).unwrap())
+            .unwrap();
+    let conversation: serde_json::Value = serde_json::from_slice(
+        &fs::read(temp.path().join("current_conversation_id.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(active["character_id"], "persistent-character");
+    assert_eq!(conversation["conversation_id"], "persistent-conversation");
+}
