@@ -1,7 +1,8 @@
 // pattern: Imperative Shell
 
 use crate::characters::manifest::{
-    CharacterRecommendations, CharacterRuntimeProfile, CharacterTtsProfile,
+    CharacterAssets, CharacterRecommendations, CharacterRuntimeProfile, CharacterTemplateManifest,
+    CharacterTtsProfile,
 };
 use crate::error::KokoroError;
 use crate::tts::config::TtsSystemConfig;
@@ -22,6 +23,9 @@ pub struct BackendRuntimeSnapshot {
     pub response_language: String,
     pub proactive_enabled: bool,
     pub current_conversation_id: Option<String>,
+    pub live2d_model: Option<String>,
+    pub background: Option<String>,
+    pub cue_profile: Option<String>,
     pub tts: ResolvedTts,
 }
 
@@ -148,8 +152,9 @@ impl ActivationCoordinator {
         state.latest_prepared_revision = revision;
 
         let row = sqlx::query(
-            "SELECT name, persona, user_nickname, updated_at, greeting, greeting_consumed_at, \
-                    example_dialogue, runtime_profile_json, template_snapshot_json \
+            "SELECT name, persona, user_nickname, source_format, updated_at, greeting, \
+                    greeting_consumed_at, example_dialogue, runtime_profile_json, template_id, \
+                    template_version, template_snapshot_json \
              FROM characters WHERE id = ?",
         )
         .bind(character_id)
@@ -170,6 +175,14 @@ impl ActivationCoordinator {
         let character_name = row.try_get::<String, _>("name")?;
         let user_name = normalized_user_name(row.try_get::<String, _>("user_nickname")?);
         let persona = row.try_get::<String, _>("persona")?;
+        let template_content = resolve_template_content(
+            &row.try_get::<String, _>("source_format")?,
+            row.try_get::<Option<String>, _>("template_id")?.as_deref(),
+            row.try_get::<Option<String>, _>("template_version")?
+                .as_deref(),
+            row.try_get::<Option<String>, _>("template_snapshot_json")?
+                .as_deref(),
+        )?;
         let target_conversation_id = sqlx::query_scalar::<_, String>(
             "SELECT id FROM conversations WHERE character_id = ? ORDER BY updated_at DESC, id ASC LIMIT 1",
         )
@@ -188,6 +201,9 @@ impl ActivationCoordinator {
                 .proactive_enabled
                 .unwrap_or(previous_committed.proactive_enabled),
             current_conversation_id: target_conversation_id.clone(),
+            live2d_model: template_content.assets.live2d_model,
+            background: template_content.assets.background,
+            cue_profile: template_content.assets.cue_profile,
             tts: resolve_tts(requested_runtime.tts.as_ref(), tts_config, local_presets),
         };
         let greeting = row.try_get::<String, _>("greeting")?;
@@ -200,11 +216,6 @@ impl ActivationCoordinator {
         } else {
             GreetingAction::None
         };
-        let recommendations = recommendations_from_snapshot(
-            row.try_get::<Option<String>, _>("template_snapshot_json")?
-                .as_deref(),
-        );
-
         Ok(CharacterActivationToken {
             revision,
             character_updated_at: row.try_get("updated_at")?,
@@ -218,7 +229,7 @@ impl ActivationCoordinator {
             },
             target_conversation_id,
             greeting_action,
-            recommendations,
+            recommendations: template_content.recommendations,
         })
     }
 
@@ -420,17 +431,43 @@ fn resolve_tts(
     }
 }
 
-fn recommendations_from_snapshot(snapshot: Option<&str>) -> CapabilityRecommendations {
-    let recommendations = snapshot
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| value.get("recommendations").cloned())
-        .and_then(|value| serde_json::from_value::<CharacterRecommendations>(value).ok())
-        .unwrap_or_default();
-    CapabilityRecommendations {
-        vision: recommendations.vision,
-        memory: recommendations.memory,
-        mcp_servers: recommendations.mcp_servers.unwrap_or_default(),
+#[derive(Default)]
+struct ResolvedTemplateContent {
+    assets: CharacterAssets,
+    recommendations: CapabilityRecommendations,
+}
+
+fn resolve_template_content(
+    source_format: &str,
+    template_id: Option<&str>,
+    template_version: Option<&str>,
+    snapshot: Option<&str>,
+) -> Result<ResolvedTemplateContent, KokoroError> {
+    if source_format != "template" {
+        return Ok(ResolvedTemplateContent::default());
     }
+    let (Some(template_id), Some(template_version), Some(snapshot)) =
+        (template_id, template_version, snapshot)
+    else {
+        return Ok(ResolvedTemplateContent::default());
+    };
+    let manifest = CharacterTemplateManifest::from_json(snapshot).map_err(|error| {
+        KokoroError::Validation(format!("invalid character template snapshot: {error}"))
+    })?;
+    if manifest.id != template_id || manifest.version != template_version {
+        return Err(KokoroError::Validation(
+            "character template snapshot does not match instance origin".to_string(),
+        ));
+    }
+    let recommendations: CharacterRecommendations = manifest.recommendations.unwrap_or_default();
+    Ok(ResolvedTemplateContent {
+        assets: manifest.assets.unwrap_or_default(),
+        recommendations: CapabilityRecommendations {
+            vision: recommendations.vision,
+            memory: recommendations.memory,
+            mcp_servers: recommendations.mcp_servers.unwrap_or_default(),
+        },
+    })
 }
 
 async fn ensure_owned_conversation(

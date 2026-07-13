@@ -98,6 +98,35 @@ async fn insert_character(pool: &SqlitePool, id: &str, greeting: &str, runtime: 
     .unwrap();
 }
 
+async fn attach_template_snapshot(
+    pool: &SqlitePool,
+    character_id: &str,
+    assets: Option<serde_json::Value>,
+) {
+    let snapshot = json!({
+        "schema_version": 1,
+        "engine_version": ">=0.3.0, <0.4.0",
+        "id": "template-origin",
+        "version": "1.0.0",
+        "name": "Template",
+        "description": "Template description",
+        "author": "Test",
+        "license": "CC0-1.0",
+        "persona": "Template persona",
+        "greeting": "Hello",
+        "assets": assets,
+    });
+    sqlx::query(
+        "UPDATE characters SET source_format = 'template', template_id = 'template-origin', \
+         template_version = '1.0.0', template_snapshot_json = ? WHERE id = ?",
+    )
+    .bind(snapshot.to_string())
+    .bind(character_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 fn presets() -> Vec<LocalTtsPreset> {
     vec![LocalTtsPreset {
         id: "gpt-sovits-loopback".into(),
@@ -267,6 +296,138 @@ async fn tts_resolution_falls_back_to_browser_then_text_only() {
 
     assert_eq!(browser.resolved_runtime.tts.mode, ResolvedTtsMode::Browser);
     assert_eq!(text.resolved_runtime.tts.mode, ResolvedTtsMode::TextOnly);
+}
+
+#[tokio::test]
+async fn prepare_includes_validated_template_asset_references() {
+    let pool = pool().await;
+    insert_character(&pool, "templated", "", json!({})).await;
+    attach_template_snapshot(
+        &pool,
+        "templated",
+        Some(json!({
+            "live2d_model": "models/template.model3.json",
+            "background": "backgrounds/template.webp",
+            "cue_profile": "cues/template.json"
+        })),
+    )
+    .await;
+
+    let token = ActivationCoordinator::default()
+        .prepare(
+            &pool,
+            "templated",
+            &config(vec![], None),
+            &[],
+            &TestBackend::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        token.resolved_runtime.live2d_model.as_deref(),
+        Some("models/template.model3.json")
+    );
+    assert_eq!(
+        token.resolved_runtime.background.as_deref(),
+        Some("backgrounds/template.webp")
+    );
+    assert_eq!(
+        token.resolved_runtime.cue_profile.as_deref(),
+        Some("cues/template.json")
+    );
+}
+
+#[tokio::test]
+async fn prepare_uses_optional_asset_fallbacks_for_manual_and_assetless_instances() {
+    let pool = pool().await;
+    insert_character(&pool, "manual", "", json!({})).await;
+    insert_character(&pool, "assetless", "", json!({})).await;
+    attach_template_snapshot(&pool, "assetless", None).await;
+    let coordinator = ActivationCoordinator::default();
+
+    for character_id in ["manual", "assetless"] {
+        let token = coordinator
+            .prepare(
+                &pool,
+                character_id,
+                &config(vec![], None),
+                &[],
+                &TestBackend::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(token.resolved_runtime.live2d_model, None);
+        assert_eq!(token.resolved_runtime.background, None);
+        assert_eq!(token.resolved_runtime.cue_profile, None);
+    }
+}
+
+#[tokio::test]
+async fn prepare_rejects_unsafe_template_asset_references() {
+    let pool = pool().await;
+    insert_character(&pool, "unsafe", "", json!({})).await;
+    attach_template_snapshot(
+        &pool,
+        "unsafe",
+        Some(json!({
+            "live2d_model": "../outside.model3.json",
+            "background": null,
+            "cue_profile": null
+        })),
+    )
+    .await;
+
+    let error = ActivationCoordinator::default()
+        .prepare(
+            &pool,
+            "unsafe",
+            &config(vec![], None),
+            &[],
+            &TestBackend::default(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("unsafe package path"));
+}
+
+#[tokio::test]
+async fn committed_runtime_recovery_retains_template_asset_references() {
+    let pool = pool().await;
+    insert_character(&pool, "templated", "", json!({})).await;
+    attach_template_snapshot(
+        &pool,
+        "templated",
+        Some(json!({
+            "live2d_model": "models/recovered.model3.json",
+            "background": "backgrounds/recovered.webp",
+            "cue_profile": "cues/recovered.json"
+        })),
+    )
+    .await;
+    let coordinator = ActivationCoordinator::default();
+    let backend = TestBackend::default();
+    let token = coordinator
+        .prepare(&pool, "templated", &config(vec![], None), &[], &backend)
+        .await
+        .unwrap();
+    coordinator.commit(&pool, token, &backend).await.unwrap();
+
+    let recovered = coordinator.get_committed(&pool).await.unwrap().unwrap();
+
+    assert_eq!(
+        recovered.runtime.live2d_model.as_deref(),
+        Some("models/recovered.model3.json")
+    );
+    assert_eq!(
+        recovered.runtime.background.as_deref(),
+        Some("backgrounds/recovered.webp")
+    );
+    assert_eq!(
+        recovered.runtime.cue_profile.as_deref(),
+        Some("cues/recovered.json")
+    );
 }
 
 #[tokio::test]

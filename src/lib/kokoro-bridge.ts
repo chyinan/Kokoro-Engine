@@ -1690,6 +1690,9 @@ export type BackendCharacterRuntime = {
     readonly response_language: string;
     readonly proactive_enabled: boolean;
     readonly current_conversation_id: string | null;
+    readonly live2d_model: string | null;
+    readonly background: string | null;
+    readonly cue_profile: string | null;
     readonly tts: ResolvedCharacterTts;
 };
 
