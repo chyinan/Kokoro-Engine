@@ -1,8 +1,13 @@
+// pattern: Imperative Shell
+
 export const APP_SETTING_KEYS = {
   activeCharacterId: "kokoro_active_character_id",
   appLanguage: "kokoro_app_language",
   bgConfig: "kokoro_bg_config",
   customModelPath: "kokoro_custom_model_path",
+  characterBackground: "kokoro_character_background",
+  characterCueProfile: "kokoro_character_cue_profile",
+  characterRuntimeCache: "kokoro_character_runtime_cache",
   displayMode: "kokoro_display_mode",
   gazeTracking: "kokoro_gaze_tracking",
   persona: "kokoro_persona",

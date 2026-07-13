@@ -141,6 +141,7 @@ interface SettingsPanelProps {
     capturedScreenUrl?: string | null;
     userLanguage?: string;
     activeCharacterId?: string;
+    onActivateCharacter: (characterId: string) => Promise<void>;
     characters?: CharacterRecord[];
     // User Profile
     userName?: string;
@@ -296,7 +297,7 @@ function normalizeTtsVoice(
 const DEFAULT_PERSONA =
     "You are a friendly, warm companion character. Respond with personality and emotion.";
 
-export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, initialTelegramStatus, onVisionConfigChange }: SettingsPanelProps) {
+export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, initialTelegramStatus, onVisionConfigChange, onActivateCharacter }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [internalActiveTab, setInternalActiveTab] = useState<SettingsTabId>(() => {
         const saved = readStringSetting(APP_SETTING_KEYS.settingsActiveTab, "");
@@ -396,6 +397,18 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     const [ttsEnabled, setTtsEnabled] = useState(() =>
         readBooleanSetting(APP_SETTING_KEYS.ttsEnabled, false)
     );
+
+    useEffect(() => {
+        const syncCharacterRuntime = () => {
+            setTtsVoice(readStringSetting(APP_SETTING_KEYS.ttsVoice, ""));
+            setTtsSpeed(readStringSetting(APP_SETTING_KEYS.ttsSpeed, "1.0"));
+            setTtsPitch(readStringSetting(APP_SETTING_KEYS.ttsPitch, "1.0"));
+            setTtsProviderId(readStringSetting(APP_SETTING_KEYS.ttsProvider, "browser"));
+            setTtsEnabled(readBooleanSetting(APP_SETTING_KEYS.ttsEnabled, false));
+        };
+        window.addEventListener("kokoro-character-runtime-changed", syncCharacterRuntime);
+        return () => window.removeEventListener("kokoro-character-runtime-changed", syncCharacterRuntime);
+    }, []);
     const [ttsProviders, setTtsProviders] = useState<ProviderStatus[]>([]);
     const [ttsVoices, setTtsVoices] = useState<VoiceProfile[]>([]);
     const [isTtsLoading, setIsTtsLoading] = useState(false);
@@ -792,6 +805,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                 <div className={activeTab === "persona" ? "block" : "hidden"}>
                                     <CharacterManager
                                         onPersonaChange={(prompt) => setPersonaText(prompt)}
+                                        onActivateCharacter={onActivateCharacter}
                                         responseLanguage={responseLang}
                                         onResponseLanguageChange={setResponseLang}
                                         userLanguage={userLang}

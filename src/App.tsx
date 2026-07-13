@@ -34,8 +34,14 @@ import {
   readStringSetting,
   removeSetting,
   writeBooleanSetting,
+  writeJsonSetting,
   writeStringSetting,
 } from "./lib/app-settings";
+import {
+  createCharacterActivationService,
+  type CharacterActivationService,
+} from "./features/characters/character-activation";
+import type { FrontendRuntimeState } from "./features/characters/character-runtime-profile";
 import {
   createModActionDispatcher,
   getModActionFromEvent,
@@ -190,6 +196,12 @@ import {
   installMod,
   listLive2dModels,
   getTtsConfig,
+  prepareCharacterActivation,
+  commitCharacterActivation,
+  getCommittedCharacterRuntime,
+  listCharacters,
+  createCharacter,
+  createCharacterWithAvatar,
   setPersona,
   setUserName,
   setUserPersona,
@@ -294,6 +306,7 @@ import {
   type MemoryEmbeddingModelStatus,
   type MemoryEmbeddingModelDownloadProgress,
   type QQAuthorizationRequest,
+  type CharacterActivationToken,
   getKokoroErrorMessage,
   onMemoryEmbeddingModelProgress,
 } from "./lib/kokoro-bridge";
@@ -379,6 +392,10 @@ function App() {
   const [customModelPath, setCustomModelPath] = useState<string | null>(
     () => readStringSetting(APP_SETTING_KEYS.customModelPath, "") || null
   );
+  const [characterBackground, setCharacterBackground] = useState<string | null>(
+    () => readStringSetting(APP_SETTING_KEYS.characterBackground, "") || null
+  );
+  const [runtimeReady, setRuntimeReady] = useState(false);
 
   const [gazeTracking, setGazeTracking] = useState<boolean>(
     () => readBooleanSetting(APP_SETTING_KEYS.gazeTracking, true)
@@ -469,6 +486,129 @@ function App() {
   const [qqAuthorizationBusy, setQQAuthorizationBusy] = useState(false);
   const [qqAuthorizationError, setQQAuthorizationError] = useState<string | null>(null);
   const currentQQAuthorization = qqAuthorizationQueue[0] ?? null;
+
+  function readCharacterFrontendRuntime(): FrontendRuntimeState {
+    const providerId = readStringSetting(APP_SETTING_KEYS.ttsProvider, "") || null;
+    const isTtsEnabled = readBooleanSetting(APP_SETTING_KEYS.ttsEnabled, false);
+    return {
+      activeCharacterId: readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || null,
+      live2dModel: readStringSetting(APP_SETTING_KEYS.customModelPath, "") || null,
+      background: readStringSetting(APP_SETTING_KEYS.characterBackground, "") || null,
+      tts: {
+        enabled: isTtsEnabled,
+        mode: !isTtsEnabled
+          ? "text_only"
+          : providerId === "browser"
+            ? "browser"
+            : "configured_provider",
+        providerId,
+        voice: readStringSetting(APP_SETTING_KEYS.ttsVoice, "") || null,
+        speed: readNumberSetting(APP_SETTING_KEYS.ttsSpeed, 1),
+        pitch: readNumberSetting(APP_SETTING_KEYS.ttsPitch, 1),
+      },
+      cueProfile: readStringSetting(APP_SETTING_KEYS.characterCueProfile, "") || null,
+    };
+  }
+
+  async function applyCharacterFrontendRuntime(
+    runtime: Readonly<FrontendRuntimeState>,
+  ): Promise<void> {
+    if (runtime.activeCharacterId !== null) {
+      writeStringSetting(APP_SETTING_KEYS.activeCharacterId, runtime.activeCharacterId);
+    }
+    if (runtime.live2dModel === null) {
+      removeSetting(APP_SETTING_KEYS.customModelPath);
+    } else {
+      writeStringSetting(APP_SETTING_KEYS.customModelPath, runtime.live2dModel);
+    }
+    if (runtime.background === null) {
+      removeSetting(APP_SETTING_KEYS.characterBackground);
+    } else {
+      writeStringSetting(APP_SETTING_KEYS.characterBackground, runtime.background);
+    }
+    if (runtime.cueProfile === null) {
+      removeSetting(APP_SETTING_KEYS.characterCueProfile);
+    } else {
+      writeStringSetting(APP_SETTING_KEYS.characterCueProfile, runtime.cueProfile);
+    }
+    writeBooleanSetting(APP_SETTING_KEYS.ttsEnabled, runtime.tts.enabled);
+    writeStringSetting(APP_SETTING_KEYS.ttsProvider, runtime.tts.providerId ?? "");
+    writeStringSetting(APP_SETTING_KEYS.ttsVoice, runtime.tts.voice ?? "");
+    writeStringSetting(APP_SETTING_KEYS.ttsSpeed, String(runtime.tts.speed));
+    writeStringSetting(APP_SETTING_KEYS.ttsPitch, String(runtime.tts.pitch));
+    setCustomModelPath(runtime.live2dModel);
+    setCharacterBackground(runtime.background);
+  }
+
+  const activationServiceRef = useRef<CharacterActivationService | null>(null);
+  if (activationServiceRef.current === null) {
+    activationServiceRef.current = createCharacterActivationService({
+      prepareCharacterActivation,
+      commitCharacterActivation,
+      getCommittedCharacterRuntime,
+      readFrontendRuntime: readCharacterFrontendRuntime,
+      applyFrontendRuntime: applyCharacterFrontendRuntime,
+      restoreFrontendRuntime: applyCharacterFrontendRuntime,
+      writeRuntimeCache: (runtime) => {
+        writeJsonSetting(APP_SETTING_KEYS.characterRuntimeCache, runtime);
+      },
+      dispatchRuntimeChanged: (runtime) => {
+        writeStringSetting(APP_SETTING_KEYS.persona, runtime.runtime.system_prompt);
+        writeStringSetting(APP_SETTING_KEYS.responseLanguage, runtime.runtime.response_language);
+        writeBooleanSetting(APP_SETTING_KEYS.proactiveEnabled, runtime.runtime.proactive_enabled);
+        setPersonaState(runtime.runtime.system_prompt);
+        setResponseLanguageState(runtime.runtime.response_language);
+        setProactiveEnabledState(runtime.runtime.proactive_enabled);
+        window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
+          detail: runtime,
+        }));
+      },
+      probeLocalTtsPreset: async (endpoint) => {
+        try {
+          const response = await fetch(endpoint, { method: "GET" });
+          return response.ok;
+        } catch {
+          return false;
+        }
+      },
+      presentLocalTtsPresetProbe: ({ endpoint, available }) => {
+        console.info("[CharacterActivation] local TTS preset probe", { endpoint, available });
+      },
+      confirmLocalTtsPresetSave: async ({ endpoint, available }) => {
+        if (!available) return false;
+        return window.confirm(`Local TTS endpoint ${endpoint} is reachable. Save this preset?`);
+      },
+      saveConfirmedLocalTtsPreset: async (token: Readonly<CharacterActivationToken>) => {
+        const resolved = token.resolved_runtime.tts;
+        const id = resolved.local_preset;
+        const providerType = resolved.provider_type;
+        const endpoint = resolved.endpoint;
+        if (id === null || providerType === null || endpoint === null) return;
+        const config = await getTtsConfig();
+        const existing = config.providers.find((provider) => provider.id === id);
+        if (existing) return;
+        const nextConfig: TtsSystemConfig = {
+          ...config,
+          default_provider: id,
+          providers: [
+            ...config.providers,
+            {
+              id,
+              provider_type: providerType,
+              enabled: true,
+              endpoint,
+              base_url: endpoint,
+              default_voice: resolved.voice,
+              extra: {},
+            },
+          ],
+        };
+        await saveTtsConfig(nextConfig);
+        setTtsConfig(nextConfig);
+      },
+    });
+  }
+  const characterActivation = activationServiceRef.current;
 
   const modelUrl = useMemo(() => {
     if (customModelPath) {
@@ -837,27 +977,24 @@ function App() {
       .then(voices => setTtsVoices(voices))
       .catch(err => console.error("[App] Failed to list TTS voices:", err));
 
-    // Sync the active character's persona to the backend on startup
-    userProfileHydration.finally(() => {
-      import("./ui/widgets/CharacterManager").then(async ({ composeSystemPrompt }) => {
-      const { listCharacters, setPersona, setActiveCharacterId } = await import("./lib/kokoro-bridge");
+    // Backend committed runtime is authoritative for startup and window recreation.
+    userProfileHydration.finally(async () => {
       try {
         const all = await listCharacters();
         setCharacters(all);
-        const savedId = readStringSetting(APP_SETTING_KEYS.activeCharacterId, "");
-        const char = savedId ? all.find(c => c.id === savedId) ?? all[0] : all[0];
-        if (char) {
-          const prompt = composeSystemPrompt(char);
-          writeStringSetting(APP_SETTING_KEYS.persona, prompt);
-          setPersonaState(prompt);
-          await setPersona(prompt);
-          await setActiveCharacterId(char.id);
-          console.log("[App] Synced persona on startup:", char.name);
+        const recovered = await characterActivation.recoverCommittedRuntime();
+        if (recovered === null) {
+          const savedId = readStringSetting(APP_SETTING_KEYS.activeCharacterId, "");
+          const fallback = savedId ? all.find((character) => character.id === savedId) ?? all[0] : all[0];
+          if (fallback) {
+            await characterActivation.activateCharacter(fallback.id);
+          }
         }
       } catch (e) {
-        console.error("[App] Failed to sync persona on startup:", e);
+        console.error("[App] Failed to restore committed character runtime:", e);
+      } finally {
+        setRuntimeReady(true);
       }
-    });
     });
 
     // Listen for generated images
@@ -1078,7 +1215,6 @@ function App() {
         }
 
         targetCharacterId = payload.activeCharacterId || chars[0]?.stableId;
-        if (targetCharacterId) writeStringSetting(APP_SETTING_KEYS.activeCharacterId, targetCharacterId);
       }
 
       if (!targetCharacterId) {
@@ -1719,46 +1855,30 @@ function App() {
 
     // ── Character Actions ─────────────────────────
     if (detail.action === 'list_characters') {
-      import('./lib/kokoro-bridge').then(async ({ listCharacters }) => {
-        const all = await listCharacters();
+      listCharacters().then((all) => {
         setCharacters(all);
       }).catch(console.error);
     }
     if (detail.action === 'select_character' && detail.data?.id != null) {
-      const characterId = detail.data.id;
-      import('./ui/widgets/CharacterManager').then(async ({ composeSystemPrompt }) => {
-        const { listCharacters, setActiveCharacterId, setCharacterName } = await import('./lib/kokoro-bridge');
+      const characterId = String(detail.data.id);
+      void (async () => {
         const all = await listCharacters();
-        const char = all.find(c => c.id === characterId);
-        if (char) {
-          writeStringSetting(APP_SETTING_KEYS.activeCharacterId, char.id);
-          const prompt = composeSystemPrompt(char);
-          setPersonaState(prompt);
-          setPersona(prompt).catch(console.error);
-          setCharacterName(char.name).catch(console.error);
-          setActiveCharacterId(char.id).catch(console.error);
-          setCharacters(all);
-        }
-      }).catch(console.error);
+        if (!all.some((character) => character.id === characterId)) return;
+        await characterActivation.activateCharacter(characterId);
+        setCharacters(all);
+      })().catch(console.error);
     }
     if (detail.action === 'create_character') {
-      import('./lib/kokoro-bridge').then(async ({ createCharacter, listCharacters, setActiveCharacterId, setCharacterName }) => {
+      void (async () => {
         const id = crypto.randomUUID();
         const now = Date.now();
         await createCharacter({ id, name: 'New Character', persona: '', user_nickname: 'User', source_format: 'manual', created_at: now, updated_at: now });
         const all = await listCharacters();
         setCharacters(all);
-        const newChar = all.find(c => c.id === id);
-        if (newChar) {
-          writeStringSetting(APP_SETTING_KEYS.activeCharacterId, newChar.id);
-          const { composeSystemPrompt } = await import('./ui/widgets/CharacterManager');
-          const prompt = composeSystemPrompt(newChar);
-          setPersonaState(prompt);
-          setPersona(prompt).catch(console.error);
-          setCharacterName(newChar.name).catch(console.error);
-          setActiveCharacterId(newChar.id).catch(console.error);
+        if (all.some((character) => character.id === id)) {
+          await characterActivation.activateCharacter(id);
         }
-      }).catch(console.error);
+      })().catch(console.error);
     }
     if (detail.action === 'import_character') {
       // Trigger file input from host context
@@ -1770,7 +1890,6 @@ function App() {
         if (!file) return;
         try {
           const { parseCharacterCard } = await import('./lib/character-card-parser');
-          const { createCharacter, createCharacterWithAvatar, listCharacters, setActiveCharacterId, setCharacterName } = await import('./lib/kokoro-bridge');
           const profile = await parseCharacterCard(file);
           const id = crypto.randomUUID();
           const now = Date.now();
@@ -1797,15 +1916,8 @@ function App() {
           }
           const all = await listCharacters();
           setCharacters(all);
-          const char = all.find(c => c.id === id);
-          if (char) {
-            writeStringSetting(APP_SETTING_KEYS.activeCharacterId, char.id);
-            const { composeSystemPrompt } = await import('./ui/widgets/CharacterManager');
-            const prompt = composeSystemPrompt(char);
-            setPersonaState(prompt);
-            setPersona(prompt).catch(console.error);
-            setCharacterName(char.name).catch(console.error);
-            setActiveCharacterId(char.id).catch(console.error);
+          if (all.some((character) => character.id === id)) {
+            await characterActivation.activateCharacter(id);
           }
         } catch (err) {
           console.error('[App] import character failed:', err);
@@ -1821,11 +1933,11 @@ function App() {
   });
 
   // Determine active background based on mode
-  let activeBackgroundUrl = bgSlideshow.currentUrl;
+  let activeBackgroundUrl = characterBackground ?? bgSlideshow.currentUrl;
 
   if (bgSlideshow.config.mode === "generated" && generatedImage) {
     activeBackgroundUrl = generatedImage;
-  } else if (bgSlideshow.config.mode === "static") {
+  } else if (bgSlideshow.config.mode === "static" && characterBackground === null) {
     // For static, we might just use the first image in the list, or the current selected one?
     // Since 'static' usually implies 'user selected one image', but we don't have a specific UI for that yet
     // beyond the 'slideshow' list. 
@@ -1841,6 +1953,10 @@ function App() {
   // If in 'generated' mode but no generated image yet, fallback to current slideshow image (or blank?)
   // Better to fallback to slideshow image so it's not empty.
   // Code above does this: default is bgSlideshow.currentUrl, override if generated & mode is generated.
+
+  if (!runtimeReady) {
+    return <div className="h-screen w-screen bg-black" aria-label="Loading character runtime" />;
+  }
 
   return (
     <ThemeProvider initialTheme={defaultTheme}>
@@ -1938,6 +2054,9 @@ function App() {
             capturedScreenUrl={capturedScreenUrl}
             userLanguage={userLanguage}
             activeCharacterId={readStringSetting(APP_SETTING_KEYS.activeCharacterId, "default") || "default"}
+            onActivateCharacter={async (characterId: string) => {
+              await characterActivation.activateCharacter(characterId);
+            }}
             characters={characters}
             // User Profile (from localStorage)
             userName={readStringSetting(APP_SETTING_KEYS.userName, "")}

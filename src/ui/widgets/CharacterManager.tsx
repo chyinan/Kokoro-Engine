@@ -11,7 +11,7 @@ import { clsx } from "clsx";
 import { Plus, Upload, Trash2, UserCircle, Check, X, User } from "lucide-react";
 import { characterDb } from "../../lib/db";
 import { parseCharacterCard } from "../../lib/character-card-parser";
-import { setPersona, setCharacterName, setUserName, setUserPersona, setProactiveEnabled, getProactiveEnabled, setActiveCharacterId, listCharacters, createCharacter, createCharacterWithAvatar, updateCharacter, deleteCharacter } from "../../lib/kokoro-bridge";
+import { setPersona, setUserName, setUserPersona, setProactiveEnabled, getProactiveEnabled, listCharacters, createCharacter, createCharacterWithAvatar, updateCharacter, deleteCharacter } from "../../lib/kokoro-bridge";
 import type { CharacterRecord } from "../../lib/kokoro-bridge";
 import { Languages, MessageCircle } from "lucide-react";
 import { Select } from "@/components/ui/select";
@@ -123,6 +123,8 @@ const ACTIVE_CHAR_KEY = "kokoro_active_character_id";
 interface CharacterManagerProps {
     /** Called whenever the active character changes so SettingsPanel can update its persona buffer */
     onPersonaChange: (prompt: string) => void;
+    /** Routes every user-initiated selection through the activation transaction owner. */
+    onActivateCharacter: (characterId: string) => Promise<void>;
     /** Current response language setting */
     responseLanguage: string;
     /** Called when the response language dropdown changes */
@@ -135,7 +137,7 @@ interface CharacterManagerProps {
 
 // ── Component ──────────────────────────────────────
 
-export default function CharacterManager({ onPersonaChange, responseLanguage, onResponseLanguageChange, userLanguage, onUserLanguageChange }: CharacterManagerProps) {
+export default function CharacterManager({ onPersonaChange, onActivateCharacter, responseLanguage, onResponseLanguageChange, userLanguage, onUserLanguageChange }: CharacterManagerProps) {
     const { t } = useTranslation();
     const [characters, setCharacters] = useState<CharacterRecord[]>([]);
     const [activeId, setActiveId] = useState<string | null>(null);
@@ -196,10 +198,6 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
             setEditChar(active);
             const prompt = composeSystemPrompt(active);
             onPersonaChangeRef.current(prompt);
-            setPersona(prompt).catch(() => {});
-            setCharacterName(active.name).catch(() => {});
-            setActiveCharacterId(active.id).catch(() => {});
-            localStorage.setItem(ACTIVE_CHAR_KEY, active.id);
         } catch (err) {
             console.error("[CharacterManager] Failed to load characters:", err);
         } finally {
@@ -211,16 +209,17 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
         loadCharacters();
     }, [loadCharacters]);
 
-    const selectCharacter = (char: CharacterRecord) => {
-        setActiveId(char.id);
-        setEditChar({ ...char });
-        setConfirmDeleteId(null);
-        localStorage.setItem(ACTIVE_CHAR_KEY, char.id);
-        const prompt = composeSystemPrompt(char);
-        onPersonaChangeRef.current(prompt);
-        setPersona(prompt).catch(() => {});
-        setCharacterName(char.name).catch(() => {});
-        setActiveCharacterId(char.id).catch(() => {});
+    const selectCharacter = async (char: CharacterRecord) => {
+        try {
+            await onActivateCharacter(char.id);
+            setActiveId(char.id);
+            setEditChar({ ...char });
+            setConfirmDeleteId(null);
+            const prompt = composeSystemPrompt(char);
+            onPersonaChangeRef.current(prompt);
+        } catch (error) {
+            console.error("[CharacterManager] Failed to activate character:", error);
+        }
     };
 
     const handleCreate = async () => {
@@ -237,7 +236,7 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
         try {
             await createCharacter(newChar);
             setCharacters(prev => [...prev, newChar]);
-            selectCharacter(newChar);
+            await selectCharacter(newChar);
         } catch (err) {
             console.error("[CharacterManager] Failed to create character:", err);
         }
@@ -254,10 +253,10 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
             const updated = { ...editChar, updated_at: Date.now() };
             await updateCharacter(updated);
             setCharacters(prev => prev.map(c => c.id === updated.id ? updated : c));
-            const prompt = composeSystemPrompt(updated);
-            onPersonaChangeRef.current(prompt);
-            setPersona(prompt).catch(() => {});
-            setCharacterName(updated.name).catch(() => {});
+            if (activeId === updated.id) {
+                await onActivateCharacter(updated.id);
+                onPersonaChangeRef.current(composeSystemPrompt(updated));
+            }
         } catch (err) {
             console.error("[CharacterManager] Failed to update character:", err);
         }
@@ -272,12 +271,12 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
 
             if (activeId === charId || editChar?.id === charId) {
                 if (remaining.length > 0) {
-                    selectCharacter(remaining[0]);
+                    await selectCharacter(remaining[0]);
                 } else {
                     const defaultChar = makeDefaultCharacter();
                     await createCharacter(defaultChar);
                     setCharacters([defaultChar]);
-                    selectCharacter(defaultChar);
+                    await selectCharacter(defaultChar);
                 }
             }
         } catch (err) {
@@ -318,7 +317,7 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
                     await createCharacter(newChar);
                 }
                 setCharacters(prev => [...prev, newChar]);
-                selectCharacter(newChar);
+                await selectCharacter(newChar);
                 setImportFeedback(t("settings.persona.status.imported", { name: profile.name }));
                 setTimeout(() => setImportFeedback(null), 3000);
             } catch (err) {
