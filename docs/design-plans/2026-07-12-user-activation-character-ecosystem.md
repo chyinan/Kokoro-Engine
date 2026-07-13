@@ -2,7 +2,7 @@
 
 ## Summary
 
-Kokoro Engine will remain a single desktop application while gaining a first-class character content model. Versioned character templates provide avatars, personas, greetings, dialogue examples, and optional Live2D, background, voice, cue, and behavior presets. Users work with editable character instances, so template and application updates don't overwrite their changes, conversations, or memories.
+Kokoro Engine will remain a single desktop application while gaining a first-class character content model. Versioned character templates provide personas, greetings, dialogue examples, and optional avatars, Live2D, background, voice, cue, and behavior presets. Users work with editable character instances, so template and application updates don't overwrite their changes, conversations, or memories.
 
 The rollout starts with clearer positioning, three built-in characters, and a first-run path that reaches a successful reply without exposing the full settings surface or blocking on the memory model. The same package contract later supports a static official content registry. An AstrBot webhook adapter provides an external distribution channel without adding a new protocol to Kokoro.
 
@@ -12,7 +12,9 @@ The rollout starts with clearer positioning, three built-in characters, and a fi
 - A new user can choose a built-in character, connect an LLM provider, and receive a successful first reply within ten minutes without navigating the full settings surface.
 - The application ships with at least three distinct built-in character templates. Every template has a name, description, persona, greeting, example dialogue, and presentation metadata. An avatar may be included for visual polish, but character identity remains usable through the name and description. A template may embed its own Live2D model, but Live2D is optional and falls back to the built-in default model.
 - Selecting a character creates or activates a user-owned character instance. Application and template updates never overwrite user edits, conversations, or memories.
+- A character greeting is editable and can be inserted once for each newly created character instance. It becomes a normal assistant message in conversation history. New conversations don't repeat it, and deleting the message doesn't reset the consumed state.
 - Character activation can apply character-specific presentation and behavior settings, including Live2D, background, TTS, cues, language, and proactive behavior. Sensitive capabilities such as vision, MCP tools, or external bot access still require explicit user consent.
+- Backups exclude binary character resources by default. Users can enable an explicit "include character resources" option when they need a self-contained migration archive.
 - A minimal remote content registry supports browsing and installing official characters and MODs without introducing accounts, ratings, comments, or a marketplace backend.
 - An initial AstrBot adapter uses Kokoro's existing authenticated webhook contract and is released as a distribution experiment. A bidirectional real-time embodiment protocol is out of scope until adoption demonstrates demand.
 - README, quick-start documentation, repository metadata, release material, and community entry points explain Kokoro through user outcomes and demonstrable character experiences rather than its technology stack.
@@ -24,6 +26,10 @@ The rollout starts with clearer positioning, three built-in characters, and a fi
 - **Character package:** A ZIP archive containing `character.json`, license metadata, and optional presentation assets such as an avatar or Live2D model.
 - **Character activation:** The coordinated operation that makes a character active and applies its prompt and safe runtime profile.
 - **Runtime profile:** Optional per-character Live2D, background, TTS, cue, language, and proactive behavior settings.
+- **Template snapshot:** The template version stored when a user instance is created or last reconciled, used for three-way update merging.
+- **Consumed greeting:** A greeting that has already been inserted into conversation history for a character instance and won't be sent automatically again.
+- **Data-only backup:** The default backup mode, which stores character and conversation data without embedding binary character assets.
+- **Resource-inclusive backup:** An optional backup mode that also stores assets referenced by exported character instances.
 - **Capability recommendation:** A suggestion that a character works well with a sensitive feature. It doesn't grant permission or enable the feature.
 - **Content registry:** A static index of installable character packages and MODs with metadata, compatibility, checksums, and trust labels.
 - **Official label:** A registry trust marker for content reviewed and distributed by the Kokoro project. It doesn't apply to arbitrary install-from-URL packages.
@@ -67,6 +73,7 @@ character-id/
 ```typescript
 interface CharacterTemplateManifest {
   schema_version: 1;
+  engine_version: string;
   id: string;
   version: string;
   name: string;
@@ -84,10 +91,14 @@ interface CharacterTemplateManifest {
     cue_profile?: string;
   };
   runtime?: {
-    tts_provider?: string;       // reference to an existing configured provider ID
-    tts_voice?: string;
-    tts_speed?: number;
-    tts_pitch?: number;
+    tts?: {
+      provider_type?: string;
+      provider_id?: string;
+      local_preset?: string;
+      voice?: string;
+      speed?: number;
+      pitch?: number;
+    };
     response_language?: string;
     proactive_enabled?: boolean;
   };
@@ -99,7 +110,14 @@ interface CharacterTemplateManifest {
 }
 ```
 
-`runtime` contains settings that are safe to apply when a character becomes active. `tts_provider` and `tts_voice` are references to the user's existing TTS configuration; they never contain API keys, custom base URLs, credentials, or local filesystem paths. A package may request a known local-provider preset whose adapter supplies a conventional default endpoint, such as a loopback port, but the application must probe availability and let the user edit the provider configuration.
+`runtime` contains settings that are safe to apply when a character becomes active. TTS fields are recommendations and references; they never contain API keys, custom base URLs, credentials, or local filesystem paths.
+
+TTS resolution uses this order:
+
+1. Use `provider_id` when that configured provider exists and matches `provider_type`.
+2. Otherwise use the user's configured default provider of `provider_type`.
+3. Otherwise offer setup for an allowlisted `local_preset`, with the adapter supplying the conventional loopback endpoint. The endpoint is probed and shown to the user before it is saved.
+4. Otherwise fall back to browser TTS or text-only mode according to user settings.
 
 Cloud API keys, custom cloud endpoints, local model paths, and provider-specific secrets remain application-level user settings. Character activation may select an already configured provider or show a setup prompt when the reference is unavailable.
 
@@ -110,14 +128,18 @@ Cloud API keys, custom cloud endpoints, local model paths, and provider-specific
 The `characters` table remains the source of truth for user-owned instances. A migration adds:
 
 - `template_id` and `template_version` for origin tracking.
+- `template_snapshot_json` for three-way template updates.
 - `avatar_path` and `greeting` for first-class character presentation.
+- `greeting_consumed_at` and `greeting_message_id` so automatic greetings remain one-time even when their history message is later deleted.
 - `example_dialogue` for prompt composition without flattening it into `persona`.
 - `runtime_profile_json` for optional Live2D, background, TTS, cue, language, and proactive behavior bindings.
-- `user_modified_at` so updates can distinguish user edits from the original template snapshot.
+- `user_modified_at` for user-visible edit history and conflict reporting.
 
 Binary assets stay on disk. SQLite stores only normalized paths and structured metadata. Existing conversations and memories already use `character_id`, so their isolation model remains unchanged.
 
 Imported SillyTavern cards create custom user instances without a `template_id`. PNG imports retain the source PNG as the avatar. Greeting and example dialogue become separate fields instead of being appended to the persona string.
+
+Existing characters are migrated with their greeting state already consumed. The feature must not make established characters unexpectedly send a greeting after an application update.
 
 ### Character activation
 
@@ -125,14 +147,42 @@ A single character activation service owns switching behavior. Both the main UI 
 
 Activation performs these actions in order:
 
-1. Persist the active character ID.
-2. Compose and apply the character prompt.
-3. Resolve the character Live2D path, falling back to the built-in model when missing or invalid.
-4. Apply the character background, TTS selection, language, proactive behavior, and cue profile when configured.
-5. Emit one runtime settings event so chat, Live2D, TTS, bot, and MOD consumers refresh from the same state.
-6. Present capability recommendations separately. Activation does not silently enable vision, MCP servers, microphone access, or external bots.
+1. Resolve the character instance and build a complete candidate runtime profile.
+2. Preflight referenced assets, cue files, and configured providers. Optional failures resolve to documented fallbacks.
+3. Capture the previous active character and runtime profile.
+4. Apply the prompt, Live2D, background, TTS selection, language, proactive behavior, and cue profile as one coordinated operation.
+5. Persist the active character ID and resolved runtime profile only after the coordinated application succeeds.
+6. Emit one runtime settings event so chat, Live2D, TTS, bot, and MOD consumers refresh from the same state.
+7. If a required operation fails, restore the previous runtime snapshot. Present capability recommendations separately after successful activation.
 
 User overrides take precedence over template defaults. Switching back to a character restores that character's last saved runtime profile.
+
+### Greeting lifecycle
+
+The greeting belongs to the character instance, not to each conversation. A new instance starts with an unconsumed greeting unless the user clears it before first activation.
+
+On the instance's first successful activation:
+
+1. Ensure the instance has an active conversation, creating its first conversation when necessary.
+2. If the editable greeting is non-empty and unconsumed, insert it as a normal assistant message in that conversation.
+3. Persist the message, `greeting_consumed_at`, and the inserted message ID in one SQLite transaction so a crash can't produce duplicate greetings.
+4. If the greeting is empty, mark it consumed without inserting a message. The user becomes the conversation initiator.
+
+New conversations inherit the character's memory state and don't repeat the greeting. Deleting the greeting message from history doesn't clear `greeting_consumed_at`. Editing the template or instance greeting after consumption doesn't rewrite historical messages or trigger another automatic greeting.
+
+Imported SillyTavern `first_mes` content maps to the editable greeting field. Existing Kokoro characters are migrated as already consumed.
+
+### Live2D asset ownership
+
+Package-owned Live2D assets stay inside the installed character package directory. User-imported Live2D models remain in the global model library. Runtime profiles use typed references instead of arbitrary filesystem paths:
+
+```typescript
+type CharacterLive2dReference =
+  | { source: "package"; path: string }
+  | { source: "library"; model_id: string };
+```
+
+Removing a character package doesn't remove models from the user's global library. Removing an active package first switches the active instance to the built-in fallback. The instance, conversations, and memories remain; only the missing package presentation assets fall back. Cross-package asset deduplication is out of scope for the first version.
 
 ### Built-in character catalog
 
@@ -175,6 +225,26 @@ Each entry includes:
 The application supports browse, install, update, remove, and install-from-URL. It doesn't include accounts, ratings, comments, creator payouts, personalized recommendations, or a registry upload backend.
 
 Remote MOD installation retains the existing permission review. A checksum verifies transport integrity, but it doesn't make third-party code trusted.
+
+Character packages are declarative content. They can't contain QuickJS, HTML components, executable files, or arbitrary network endpoints. Archive validation accepts only the manifest, license files, supported media, Live2D data, and cue data.
+
+Characters and MODs use separate installation and trust paths. Install-from-URL is allowed for character packages after validation. Install-from-URL for executable MODs requires an explicit untrusted-code warning. The first version relies on an HTTPS official registry plus published checksums; a general package-signing or creator identity system remains out of scope.
+
+`engine_version` is validated from the package manifest even when the package is installed without the registry. The registry repeats compatibility metadata for browsing, but isn't the source of truth.
+
+### Backup policy
+
+The default `.kokoro` backup is data-only. It includes the database, character instances, template IDs and versions, template snapshots, runtime metadata, greetings, conversation history, memories, and the existing selected configuration scope. It doesn't embed character package directories, avatars, backgrounds, cue files, or Live2D assets.
+
+The backup UI provides an `include character resources` option. When enabled, the archive also includes assets referenced by the exported character instances:
+
+- Installed character package directories and their license files.
+- User-provided avatars, backgrounds, and cue profiles.
+- Package-owned or global-library Live2D models referenced by exported characters.
+
+The option changes resource inclusion only. Provider credentials remain governed by the existing configuration backup selection and must be called out separately in the backup warning.
+
+On data-only restore, Kokoro tries to resolve the exact official package version from the local catalog or registry. If it isn't available, the character instance still restores and uses default presentation fallbacks. A resource-inclusive restore validates archives and remaps asset references before committing restored instances.
 
 ### AstrBot adapter
 
@@ -239,14 +309,14 @@ GitHub Discussions provides feedback, character sharing, MOD sharing, and suppor
 **Components:**
 
 - New character package domain under `src-tauri/src/characters/`: manifest parsing, path validation, catalog discovery, built-in resource installation, and package metadata.
-- New SQLite migration under `src-tauri/migrations/` for template origin, avatar, greeting, example dialogue, runtime profile, and edit tracking.
+- New SQLite migration under `src-tauri/migrations/` for template origin and snapshot, avatar, one-time greeting state, example dialogue, runtime profile, and edit tracking.
 - Extended character commands in `src-tauri/src/commands/characters.rs` and matching contracts in `src/lib/kokoro-bridge.ts`.
 - Tauri resources in `src-tauri/tauri.conf.json` and first-run copy behavior in `src-tauri/src/lib.rs`.
 - Updated SillyTavern import behavior in `src/lib/character-card-parser.ts` and `src/ui/widgets/CharacterManager.tsx`.
 
 **Dependencies:** Phase 1 character asset and license decisions.
 
-**Done when:** Bundled and imported character packages validate safely; templates create editable instances; avatar, greeting, examples, and runtime profile round-trip through IPC and backup/restore; migrations preserve existing characters, conversations, and memories; focused frontend and Rust tests pass.
+**Done when:** Bundled and imported character packages validate safely; engine compatibility is enforced from the package manifest; templates create editable instances; three-way template merging preserves user-modified fields; greeting state and runtime profiles round-trip through IPC and data-only or resource-inclusive backup/restore; migrations preserve existing characters without triggering surprise greetings; focused frontend and Rust tests pass.
 <!-- END_PHASE_2 -->
 
 <!-- START_PHASE_3 -->
@@ -264,7 +334,7 @@ GitHub Discussions provides feedback, character sharing, MOD sharing, and suppor
 
 **Dependencies:** Phase 2 package and persistence foundation.
 
-**Done when:** Users can switch between three built-in characters from the main UI; each character has isolated conversations and memories; character-specific settings restore on return; a missing optional asset falls back without blocking chat; tests cover activation precedence and fallback behavior.
+**Done when:** Users can switch between three built-in characters from the main UI; activation preflights and commits a resolved runtime profile without leaving partial global state; rollback restores the previous character after a required failure; each character has isolated conversations and memories; a greeting is inserted at most once per new instance; character-specific settings restore on return; tests cover activation precedence, greeting consumption, rollback, and fallback behavior.
 <!-- END_PHASE_3 -->
 
 <!-- START_PHASE_4 -->
@@ -301,7 +371,7 @@ GitHub Discussions provides feedback, character sharing, MOD sharing, and suppor
 
 **Dependencies:** Phase 2 package contract. Phase 3 provides the user-facing character catalog patterns.
 
-**Done when:** Official character and MOD entries can be browsed, installed, updated, and removed; incompatible or corrupt packages are rejected; user instances and settings survive package updates; security and path traversal tests pass.
+**Done when:** Official character and MOD entries can be browsed, installed, updated, and removed through separate trust paths; character archives containing scripts or unsupported files are rejected; incompatible or corrupt packages are rejected; user instances and settings survive package updates; active package removal falls back safely; security and path traversal tests pass.
 <!-- END_PHASE_5 -->
 
 <!-- START_PHASE_6 -->
@@ -361,7 +431,15 @@ When included, avatars should use PNG or WebP and enforce pixel and file-size li
 
 ### Update policy
 
-Template updates are immutable versions. Existing user instances keep their data. The UI may offer three explicit actions: keep current instance, create a new instance from the updated template, or reset selected fields after showing a diff.
+Template updates are immutable versions. Each instance retains the template snapshot it was created or last reconciled from. Updating uses a three-way merge between the old template snapshot, the current user instance, and the new template:
+
+- A field unchanged from the old template can adopt the new template value automatically.
+- A field changed by the user keeps the user value.
+- A field changed by both the user and the template is shown as a conflict with old, user, and new values.
+
+Structured runtime settings are merged by normalized semantic fields, such as TTS voice or background reference, rather than treating `runtime_profile_json` as one indivisible value.
+
+The user can keep the current instance, accept selected template values, or create a new instance from the new template. No update rewrites conversations, memories, consumed greeting state, or historical messages.
 
 ### Failure policy
 
@@ -373,6 +451,8 @@ A character remains usable when optional presentation assets fail. The fallback 
 
 Manifest validation and archive extraction failures return specific errors and leave the previous installed version intact.
 
+Activation resolves optional presentation failures before committing state. A required persistence or prompt failure restores the previous active character and runtime snapshot. Missing TTS providers don't modify provider configuration; they fall back or open an explicit setup flow.
+
 ### Measurement policy
 
 The initial release doesn't add automatic remote analytics. Activation is measured with repeatable clean-machine tests and opt-in user feedback. Any later anonymous telemetry needs its own data inventory, consent UI, retention policy, endpoint security review, and documentation before implementation.
@@ -381,4 +461,4 @@ The initial release doesn't add automatic remote analytics. Activation is measur
 
 The main complexity increase is the relationship between immutable templates, editable instances, and per-character runtime settings. That complexity directly supports built-in characters, imports, registry updates, and safe switching.
 
-The design deliberately avoids accounts, server-side search, ratings, package signing infrastructure, and a bidirectional AstrBot protocol. Those features remain blocked until content supply or adoption proves the simpler design insufficient.
+The design deliberately avoids accounts, server-side search, ratings, cross-package asset deduplication, a general package-signing infrastructure, and a bidirectional AstrBot protocol. It uses template snapshots rather than a field-level mutation log, one consumed greeting state rather than per-conversation greeting rules, and one resource-backup toggle rather than multiple asset policies. Those omitted features remain blocked until real usage proves the simpler design insufficient.
