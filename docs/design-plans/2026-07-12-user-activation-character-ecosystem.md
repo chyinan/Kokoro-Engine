@@ -10,7 +10,7 @@ The rollout starts with clearer positioning, three built-in characters, and a fi
 
 - Kokoro Engine remains one application and one installer. It does not split into separate companion, developer, or VTuber editions.
 - A new user can choose a built-in character, connect an LLM provider, and receive a successful first reply within ten minutes without navigating the full settings surface.
-- The application ships with at least three distinct built-in character templates. Every template has an avatar, persona, greeting, example dialogue, and presentation metadata. A template may embed its own Live2D model, but Live2D is optional and falls back to the built-in default model.
+- The application ships with at least three distinct built-in character templates. Every template has a name, description, persona, greeting, example dialogue, and presentation metadata. An avatar may be included for visual polish, but character identity remains usable through the name and description. A template may embed its own Live2D model, but Live2D is optional and falls back to the built-in default model.
 - Selecting a character creates or activates a user-owned character instance. Application and template updates never overwrite user edits, conversations, or memories.
 - Character activation can apply character-specific presentation and behavior settings, including Live2D, background, TTS, cues, language, and proactive behavior. Sensitive capabilities such as vision, MCP tools, or external bot access still require explicit user consent.
 - A minimal remote content registry supports browsing and installing official characters and MODs without introducing accounts, ratings, comments, or a marketplace backend.
@@ -21,7 +21,7 @@ The rollout starts with clearer positioning, three built-in characters, and a fi
 
 - **Character template:** Versioned, read-only source content distributed with the application or through the registry.
 - **Character instance:** The user's editable character record, including conversations, memories, and runtime overrides.
-- **Character package:** A ZIP archive containing `character.json`, a required avatar, license metadata, and optional presentation assets.
+- **Character package:** A ZIP archive containing `character.json`, license metadata, and optional presentation assets such as an avatar or Live2D model.
 - **Character activation:** The coordinated operation that makes a character active and applies its prompt and safe runtime profile.
 - **Runtime profile:** Optional per-character Live2D, background, TTS, cue, language, and proactive behavior settings.
 - **Capability recommendation:** A suggestion that a character works well with a sensitive feature. It doesn't grant permission or enable the feature.
@@ -54,15 +54,15 @@ Character packages use a versioned ZIP format. Bundled packages live under `char
 ```text
 character-id/
 |-- character.json
-|-- avatar.webp
 |-- LICENSE.md
+|-- avatar.webp                      # optional
 |-- background.webp                 # optional
 |-- live2d/                         # optional
 |   `-- ...model3.json and assets
 `-- cues.json                       # optional
 ```
 
-`avatar` is required. `live2d` is optional. A character without a valid Live2D asset uses `BUILTIN_LIVE2D_MODEL_PATH`.
+`avatar` and `live2d` are optional. A character without an avatar uses a name-based or default thumbnail. A character without a valid Live2D asset uses `BUILTIN_LIVE2D_MODEL_PATH`.
 
 ```typescript
 interface CharacterTemplateManifest {
@@ -74,7 +74,7 @@ interface CharacterTemplateManifest {
   author: string;
   license: string;
   locale?: string;
-  avatar: string;
+  avatar?: string;
   persona: string;
   greeting: string;
   example_dialogue?: string;
@@ -84,7 +84,7 @@ interface CharacterTemplateManifest {
     cue_profile?: string;
   };
   runtime?: {
-    tts_provider?: string;
+    tts_provider?: string;       // reference to an existing configured provider ID
     tts_voice?: string;
     tts_speed?: number;
     tts_pitch?: number;
@@ -99,7 +99,11 @@ interface CharacterTemplateManifest {
 }
 ```
 
-`runtime` contains settings that are safe to apply when a character becomes active. `recommendations` never grants permissions or enables sensitive capabilities. The UI explains the recommendation and asks for confirmation.
+`runtime` contains settings that are safe to apply when a character becomes active. `tts_provider` and `tts_voice` are references to the user's existing TTS configuration; they never contain API keys, custom base URLs, credentials, or local filesystem paths. A package may request a known local-provider preset whose adapter supplies a conventional default endpoint, such as a loopback port, but the application must probe availability and let the user edit the provider configuration.
+
+Cloud API keys, custom cloud endpoints, local model paths, and provider-specific secrets remain application-level user settings. Character activation may select an already configured provider or show a setup prompt when the reference is unavailable.
+
+`recommendations` never grants permissions or enables sensitive capabilities. The UI explains the recommendation and asks for confirmation.
 
 ### Storage model
 
@@ -138,7 +142,7 @@ The first release ships at least three original or redistributable characters:
 2. A lively friend with concise replies, teasing humor, stronger expressions, and more frequent cues.
 3. An immersive role-play character with a defined world, scenario, greeting, and example dialogue.
 
-Each character must have a distinct avatar, description, greeting, persona, dialogue style, background, and cue behavior. Independent Live2D models are preferred when licensed assets are available, but aren't a release requirement.
+Each character must have a distinct name, description, greeting, persona, dialogue style, and cue behavior. Backgrounds and avatars improve presentation but are optional package assets. Independent Live2D models are preferred when licensed assets are available, but aren't a release requirement.
 
 The character selector appears in the first-run flow and in the main application surface. Users don't need to open the full settings panel to switch characters.
 
@@ -203,6 +207,7 @@ GitHub Discussions provides feedback, character sharing, MOD sharing, and suppor
 - SillyTavern v1/v2/v3 JSON and PNG parsing already exists in `src/lib/character-card-parser.ts`.
 - Live2D models already use filesystem assets, a custom protocol, profiles, import/export commands, and a built-in fallback in `src-tauri/src/commands/live2d.rs`.
 - Tauri bundle resources are declared in `src-tauri/tauri.conf.json`. Bundled MODs are copied into application data on first run in `src-tauri/src/lib.rs`; character packages follow the same lifecycle.
+- Provider credentials and custom endpoints remain application-level user configuration. Character packages can reference provider IDs or known local defaults, but never ship secrets or overwrite user provider settings.
 - MOD installation already accepts ZIP archives through `src-tauri/src/mods/` and `src/ui/mods/ModList.tsx`. The registry wraps this existing installation path rather than replacing the MOD runtime.
 - Runtime settings currently use `src/lib/app-settings.ts` and global state in `src/App.tsx`. Character activation introduces a controlled per-character overlay, then emits the same runtime settings events existing consumers use.
 - The generic authenticated webhook in `src-tauri/src/commands/bot.rs` already accepts text, images, and audio and returns a structured reply. AstrBot version one uses this contract.
@@ -352,7 +357,7 @@ The following work stays out of scope:
 
 Every bundled or official registry package includes author and license metadata. The official catalog accepts only assets with explicit redistribution rights. Package updates preserve previous license records for auditability.
 
-Avatars should use PNG or WebP and enforce pixel and file-size limits. Live2D packages retain their upstream license files and are checked independently from the character persona or avatar license.
+When included, avatars should use PNG or WebP and enforce pixel and file-size limits. Live2D packages retain their upstream license files and are checked independently from the character persona or avatar license.
 
 ### Update policy
 
