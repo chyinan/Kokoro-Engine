@@ -1,3 +1,4 @@
+// pattern: Imperative Shell
 /**
  * CharacterManager — Persona tab replacement
  *
@@ -10,7 +11,7 @@ import { clsx } from "clsx";
 import { Plus, Upload, Trash2, UserCircle, Check, X, User } from "lucide-react";
 import { characterDb } from "../../lib/db";
 import { parseCharacterCard } from "../../lib/character-card-parser";
-import { setPersona, setCharacterName, setUserName, setUserPersona, setProactiveEnabled, getProactiveEnabled, setActiveCharacterId, listCharacters, createCharacter, updateCharacter, deleteCharacter } from "../../lib/kokoro-bridge";
+import { setPersona, setCharacterName, setUserName, setUserPersona, setProactiveEnabled, getProactiveEnabled, setActiveCharacterId, listCharacters, createCharacter, createCharacterWithAvatar, updateCharacter, deleteCharacter } from "../../lib/kokoro-bridge";
 import type { CharacterRecord } from "../../lib/kokoro-bridge";
 import { Languages, MessageCircle } from "lucide-react";
 import { Select } from "@/components/ui/select";
@@ -294,16 +295,28 @@ export default function CharacterManager({ onPersonaChange, responseLanguage, on
             try {
                 const profile = await parseCharacterCard(file);
                 const now = Date.now();
-                const newChar: CharacterRecord = {
-                    id: crypto.randomUUID(),
+                const id = crypto.randomUUID();
+                const avatarPath = profile.avatar_bytes
+                    ? `character-instance-resource://${id}/avatar.png`
+                    : profile.avatar_path;
+                const newChar = {
+                    id,
                     name: profile.name,
                     persona: profile.persona,
+                    description: profile.description,
+                    avatar_path: avatarPath,
+                    greeting: profile.greeting,
+                    example_dialogue: profile.example_dialogue,
                     user_nickname: profile.user_nickname,
                     source_format: profile.source_format ?? "manual",
                     created_at: now,
                     updated_at: now,
                 };
-                await createCharacter(newChar);
+                if (profile.avatar_bytes) {
+                    await createCharacterWithAvatar(newChar, profile.avatar_bytes);
+                } else {
+                    await createCharacter(newChar);
+                }
                 setCharacters(prev => [...prev, newChar]);
                 selectCharacter(newChar);
                 setImportFeedback(t("settings.persona.status.imported", { name: profile.name }));

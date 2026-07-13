@@ -9,8 +9,8 @@
 </p>
 
 <h1 align="center">Kokoro Engine</h1>
-<p align="center"><strong>Open-source immersive character engine for desktop AI companions.</strong></p>
-<p align="center">A cross-platform virtual character interaction engine for users who want a personalized AI companion.</p>
+<p align="center"><strong>Run an AI character on your desktop with a body, voice, and long-term memory.</strong></p>
+<p align="center">Choose or import a character, connect your model provider, and start a conversation that can continue across sessions.</p>
 
 <p align="center">
   <a href="https://t.me/+U39dgiUspCo2NDNh"><img src="https://img.shields.io/badge/Telegram-Community-26A5E4?logo=telegram&logoColor=white" alt="Telegram community" /></a>
@@ -21,13 +21,22 @@
 </p>
 
 <p align="center">
-  <a href="#-quick-start">Quick start</a> ·
-  <a href="https://github.com/chyinan/Kokoro-Engine/releases">Download release</a> ·
+  <a href="https://github.com/chyinan/Kokoro-Engine/releases"><strong>Download release</strong></a> ·
+  <a href="docs/quick-start.md">10-minute setup</a> ·
+  <a href="docs/troubleshooting.md">Troubleshooting</a> ·
   <a href="#-technical-architecture">Architecture</a> ·
   <a href="#-contributing">Contributing</a>
 </p>
 
 ---
+
+## What you can do with Kokoro
+
+- Let a desktop character react to visible screen context.
+- Import SillyTavern character cards and keep separate conversations and memories.
+- Connect a local or cloud LLM, then opt into voice, vision, MCP, MOD, and bot features.
+
+> Three built-in characters, a main-screen selector, and first-reply onboarding are being implemented from the [character ecosystem design](docs/design-plans/2026-07-12-user-activation-character-ecosystem.md). The current release uses character management and import in Settings.
 
 ## What makes Kokoro Engine stand out
 

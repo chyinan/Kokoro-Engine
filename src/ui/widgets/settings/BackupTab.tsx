@@ -1,14 +1,17 @@
-import React, { useState, useEffect } from 'react';
+// pattern: Imperative Shell
+
+import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { clsx } from 'clsx';
 import { Download, Upload, Loader2, Check, AlertTriangle, Database, FileJson, Clock, FolderOpen, Trash2, Play } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { save, open, open as openDialog } from '@tauri-apps/plugin-dialog';
-import { exportData, previewImport, importData, getAutoBackupConfig, saveAutoBackupConfig, runAutoBackupNow, listCharacters, setUserName, setUserPersona } from '../../../lib/kokoro-bridge';
+import { exportData, previewImport, importData, getAutoBackupConfig, saveAutoBackupConfig, runAutoBackupNow, setUserName, setUserPersona } from '../../../lib/kokoro-bridge';
 import type { ImportPreview, AutoBackupConfig } from '../../../lib/kokoro-bridge';
 import { characterDb } from '../../../lib/db';
 import type { CharacterProfile } from '../../../lib/db';
 import { sectionHeadingClasses } from '../../styles/settings-primitives';
+import { backupCredentialWarningKey, buildManualExportOptions, type BackupResourceMode } from './backup-resource-options';
 
 function formatBytes(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -16,13 +19,14 @@ function formatBytes(bytes: number): string {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export const BackupTab: React.FC = () => {
+export function BackupTab() {
     const { t } = useTranslation();
 
     // Export state
     const [exporting, setExporting] = useState(false);
     const [exportResult, setExportResult] = useState<{ size: string; stats: string } | null>(null);
     const [exportError, setExportError] = useState<string | null>(null);
+    const [backupResourceMode, setBackupResourceMode] = useState<BackupResourceMode>('data-only');
 
     // Import state
     const [preview, setPreview] = useState<ImportPreview | null>(null);
@@ -98,41 +102,10 @@ export const BackupTab: React.FC = () => {
             if (!filePath) { setExporting(false); return; }
 
             // 序列化角色数据：从 SQLite 读文字数据，从 IndexedDB 匹配头像
-            const sqliteChars = await listCharacters();
-            const idbChars = await characterDb.getAll();
-            const idbByStableId = new Map(idbChars.filter(c => c.stableId).map(c => [c.stableId, c]));
-            const userName = localStorage.getItem('kokoro_user_name') ?? 'User';
-            const userPersona = localStorage.getItem('kokoro_user_persona') ?? '';
-            const userLanguage = localStorage.getItem('kokoro_user_language');
-            const responseLanguage = localStorage.getItem('kokoro_response_language');
-            const voiceInterrupt = localStorage.getItem('kokoro_voice_interrupt');
-
-            // Keep the on-disk profile config in sync with the localStorage payload
-            // so configs/user_profile.json and characters.json do not disagree.
-            await setUserName(userName);
-            await setUserPersona(userPersona);
-
-            const charsSerializable = await Promise.all(sqliteChars.map(async (c) => {
-                const idbChar = idbByStableId.get(c.id);
-                if (idbChar?.avatarBlob) {
-                    const buf = await idbChar.avatarBlob.arrayBuffer();
-                    const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-                    return { ...c, stableId: c.id, avatarB64: b64 };
-                }
-                return { ...c, stableId: c.id };
-            }));
-            const payload = {
-                characters: charsSerializable,
-                activeCharacterId: localStorage.getItem('kokoro_active_character_id'),
-                userName,
-                userPersona,
-                userLanguage,
-                responseLanguage,
-                voiceInterrupt,
-            };
-            const charactersJson = JSON.stringify(payload);
-
-            const result = await exportData(filePath, charactersJson);
+            const result = await exportData(
+                filePath,
+                buildManualExportOptions(backupResourceMode),
+            );
             setExportResult({
                 size: formatBytes(result.size_bytes),
                 stats: t('settings.backup.export_stats', {
@@ -181,11 +154,8 @@ export const BackupTab: React.FC = () => {
             let payload: any = null;
 
             // 先调用 importData 不带 target_character_id，拿到 characters_json
-            const firstPass = await importData(importFilePath, {
-                import_database: false,
-                import_configs: false,
-                conflict_strategy: conflictStrategy,
-            });
+            // Legacy characters.json is intentionally ignored; SQLite restore is authoritative.
+            const firstPass: { characters_json?: string } = {};
 
             if (firstPass.characters_json && importDb) {
                 try {
@@ -244,9 +214,8 @@ export const BackupTab: React.FC = () => {
             }
 
             // 若仍未确定目标角色，回退到当前 localStorage 里的活跃角色
-            if (!targetCharacterId) {
-                targetCharacterId = localStorage.getItem('kokoro_active_character_id') ?? undefined;
-            }
+            // Preserve the character IDs and relationships stored in SQLite.
+            targetCharacterId = undefined;
 
             // Phase 2: 用正确的 target_character_id 导入数据库和配置
             console.log('[Backup] Phase 2 importData options:', {
@@ -259,7 +228,6 @@ export const BackupTab: React.FC = () => {
                 import_database: importDb,
                 import_configs: importConfigs,
                 conflict_strategy: conflictStrategy,
-                target_character_id: targetCharacterId,
             });
             console.log('[Backup] Phase 2 result:', result);
 
@@ -285,7 +253,7 @@ export const BackupTab: React.FC = () => {
                     memories: result.imported_memories,
                     conversations: result.imported_conversations,
                     configs: result.imported_configs,
-                }) + '\n\n[debug]\n' + debugInfo
+                }) + `\n${t('settings.backup.restored_characters', { count: result.imported_characters })}` + '\n\n[debug]\n' + debugInfo
             );
             setPreview(null);
             setTimeout(() => window.location.reload(), 1500);
@@ -435,6 +403,20 @@ export const BackupTab: React.FC = () => {
             <div>
                 <div className={clsx(sectionHeadingClasses, "mb-3")}>{t('settings.backup.export_title')}</div>
                 <p className="text-xs text-[var(--color-text-muted)] mb-4">{t('settings.backup.export_desc')}</p>
+                <label className="mb-2 flex items-center gap-2 text-xs text-[var(--color-text-primary)] cursor-pointer">
+                    <input
+                        type="checkbox"
+                        checked={backupResourceMode === 'include-resources'}
+                        onChange={(event) => setBackupResourceMode(
+                            event.target.checked ? 'include-resources' : 'data-only',
+                        )}
+                    />
+                    {t('settings.backup.include_character_resources')}
+                </label>
+                <div className="mb-4 flex items-start gap-2 text-xs text-amber-300">
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                    <span>{t(backupCredentialWarningKey)}</span>
+                </div>
                 <motion.button
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
@@ -581,4 +563,4 @@ export const BackupTab: React.FC = () => {
             </div>
         </div>
     );
-};
+}

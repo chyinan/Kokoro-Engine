@@ -2,6 +2,7 @@
 // Reason: 应用入口文件需要同时声明模块、注册 Tauri 命令、初始化服务与恢复磁盘状态，天然属于编排层。
 pub mod actions;
 pub mod ai;
+pub mod characters;
 pub mod chat;
 pub mod commands;
 pub mod config;
@@ -171,8 +172,15 @@ pub fn run() {
             commands::memory::download_memory_embedding_model,
             commands::characters::list_characters,
             commands::characters::create_character,
+            commands::characters::create_character_with_avatar,
             commands::characters::update_character,
             commands::characters::delete_character,
+            commands::characters::duplicate_character,
+            commands::characters::restore_character_defaults,
+            commands::characters::list_character_templates,
+            commands::characters::instantiate_character_template,
+            commands::characters::reconcile_character_template,
+            commands::characters::apply_character_template_reconciliation,
             commands::conversation::list_conversations,
             commands::conversation::load_conversation,
             commands::conversation::delete_conversation,
@@ -440,6 +448,43 @@ pub fn run() {
             let app_data = dirs_next::data_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join("com.chyin.kokoro");
+
+            // Initialize the versioned character catalog before any IPC command can use it.
+            let character_catalog = crate::characters::catalog::CharacterCatalog::new(
+                app_data.join("characters"),
+                semver::Version::parse(env!("CARGO_PKG_VERSION"))
+                    .expect("Cargo package version must be semantic"),
+            );
+            let bundled_characters = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|root| root.join("characters"))
+                .filter(|path| path.is_dir())
+                .or_else(|| {
+                    [
+                        std::path::PathBuf::from("characters"),
+                        std::path::PathBuf::from("../characters"),
+                    ]
+                    .into_iter()
+                    .find(|path| path.is_dir())
+                });
+            if let Some(bundled_characters) = bundled_characters {
+                match character_catalog.install_bundled(&bundled_characters) {
+                    Ok(installed) if !installed.is_empty() => tracing::info!(
+                        target: "characters",
+                        "installed or refreshed {} bundled character package(s)",
+                        installed.len()
+                    ),
+                    Ok(_) => {}
+                    Err(error) => tracing::error!(
+                        target: "characters",
+                        "failed to initialize bundled character catalog: {}",
+                        error
+                    ),
+                }
+            }
+            app.manage(character_catalog);
 
             // TTS
             let tts_config_path = app_data.join("tts_config.json");

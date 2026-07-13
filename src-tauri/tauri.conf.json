@@ -33,6 +33,7 @@
     "active": true,
     "targets": "all",
     "resources": {
+      "../characters": "characters",
       "../mods": "mods",
       "../public/live2d": "live2d"
     },

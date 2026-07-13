@@ -31,7 +31,6 @@ import {
   dispatchRuntimeSettingsChanged,
   readBooleanSetting,
   readNumberSetting,
-  readOptionalStringSetting,
   readStringSetting,
   removeSetting,
   writeBooleanSetting,
@@ -208,7 +207,6 @@ import {
   getBotConfig,
   getBotStatus,
   getAutoBackupConfig,
-  listCharacters,
   getVisionConfig,
   getSttConfig,
   listMcpServers,
@@ -988,45 +986,6 @@ function App() {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
-  const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
-    const bytes = new Uint8Array(buffer);
-    let binary = "";
-    for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
-    return btoa(binary);
-  };
-
-  const buildCharactersBackupJson = async (): Promise<string> => {
-    const sqliteChars = await listCharacters();
-    const idbChars = await characterDb.getAll();
-    const idbByStableId = new Map(idbChars.filter(c => c.stableId).map(c => [c.stableId, c]));
-    const userName = readStringSetting(APP_SETTING_KEYS.userName, "User");
-    const userPersona = readStringSetting(APP_SETTING_KEYS.userPersona, "");
-    const userLanguage = readOptionalStringSetting(APP_SETTING_KEYS.userLanguage);
-    const responseLanguage = readOptionalStringSetting(APP_SETTING_KEYS.responseLanguage);
-    const voiceInterrupt = readOptionalStringSetting(APP_SETTING_KEYS.voiceInterrupt);
-
-    await setUserName(userName);
-    await setUserPersona(userPersona);
-
-    const characters = await Promise.all(sqliteChars.map(async (char) => {
-      const idbChar = idbByStableId.get(char.id);
-      if (idbChar?.avatarBlob) {
-        return { ...char, stableId: char.id, avatarB64: arrayBufferToBase64(await idbChar.avatarBlob.arrayBuffer()) };
-      }
-      return { ...char, stableId: char.id };
-    }));
-
-    return JSON.stringify({
-      characters,
-      activeCharacterId: readOptionalStringSetting(APP_SETTING_KEYS.activeCharacterId),
-      userName,
-      userPersona,
-      userLanguage,
-      responseLanguage,
-      voiceInterrupt,
-    });
-  };
-
   const handleExportBackup = async () => {
     setBackupStatus({ phase: "exporting", message: "正在导出备份..." });
     try {
@@ -1039,7 +998,7 @@ function App() {
         setBackupStatus({ phase: "idle" });
         return;
       }
-      const result = await exportData(filePath, await buildCharactersBackupJson());
+      const result = await exportData(filePath, { include_character_resources: false });
       setBackupStatus({
         phase: "exported",
         message: `已导出 ${formatBytes(result.size_bytes)} · 记忆 ${result.stats.memories} · 对话 ${result.stats.conversations} · 配置 ${result.stats.configs}`,
@@ -1811,11 +1770,31 @@ function App() {
         if (!file) return;
         try {
           const { parseCharacterCard } = await import('./lib/character-card-parser');
-          const { createCharacter, listCharacters, setActiveCharacterId, setCharacterName } = await import('./lib/kokoro-bridge');
+          const { createCharacter, createCharacterWithAvatar, listCharacters, setActiveCharacterId, setCharacterName } = await import('./lib/kokoro-bridge');
           const profile = await parseCharacterCard(file);
           const id = crypto.randomUUID();
           const now = Date.now();
-          await createCharacter({ id, ...profile, created_at: now, updated_at: now });
+          const avatarPath = profile.avatar_bytes
+            ? `character-instance-resource://${id}/avatar.png`
+            : profile.avatar_path;
+          const record = {
+            id,
+            name: profile.name,
+            description: profile.description,
+            persona: profile.persona,
+            avatar_path: avatarPath,
+            greeting: profile.greeting,
+            example_dialogue: profile.example_dialogue,
+            user_nickname: profile.user_nickname,
+            source_format: profile.source_format,
+            created_at: now,
+            updated_at: now,
+          };
+          if (profile.avatar_bytes) {
+            await createCharacterWithAvatar(record, profile.avatar_bytes);
+          } else {
+            await createCharacter(record);
+          }
           const all = await listCharacters();
           setCharacters(all);
           const char = all.find(c => c.id === id);

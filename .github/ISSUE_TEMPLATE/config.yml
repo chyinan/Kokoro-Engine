@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Kokoro Engine Discussions
+    url: https://github.com/chyinan/Kokoro-Engine/discussions
+    about: Product feedback, character sharing, MOD sharing, and community questions
+  - name: Security-sensitive report
+    url: https://github.com/chyinan/Kokoro-Engine/security/advisories/new
+    about: Report vulnerabilities privately. Do not open a public issue.

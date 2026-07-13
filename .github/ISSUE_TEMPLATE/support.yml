@@ -1,0 +1,72 @@
+name: Setup support / 使用帮助
+description: Ask for help installing, configuring, or running Kokoro Engine
+labels: ["support"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include API keys, bearer tokens, or private conversation content.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area / 领域
+      options:
+        - Installation / 安装
+        - LLM connection / 模型连接
+        - Character import / 角色导入
+        - Memory model / 记忆模型
+        - Live2D
+        - Voice / 语音
+        - Bot or webhook
+        - Other / 其他
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do? / 目标
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What happened? / 实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce / 复现步骤
+      description: List the smallest sequence that reaches the problem.
+      placeholder: |
+        1. Open Settings > API
+        2. Select provider ...
+        3. Run connection test
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration / 相关配置
+      description: Include provider type, endpoint host, model, and enabled feature flags. Remove keys and tokens.
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / 日志
+      description: Paste relevant frontend or backend logs after removing secrets and private content.
+      render: shell
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Kokoro Engine version
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+    validations:
+      required: true

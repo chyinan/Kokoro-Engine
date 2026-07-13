@@ -1,0 +1,47 @@
+name: Character submission / 角色投稿
+description: Propose an original or redistributable character for the official catalog
+labels: ["character-submission"]
+body:
+  - type: input
+    id: name
+    attributes:
+      label: Character name
+    validations:
+      required: true
+  - type: textarea
+    id: experience
+    attributes:
+      label: Character experience
+      description: Describe the persona, greeting, dialogue style, and intended user experience.
+    validations:
+      required: true
+  - type: textarea
+    id: assets
+    attributes:
+      label: Included assets and sources
+      description: List avatar, background, Live2D, voice, cue, and other files with their authors and source URLs.
+    validations:
+      required: true
+  - type: textarea
+    id: license
+    attributes:
+      label: License and redistribution permission
+      description: State the license for every submitted component and provide evidence that Kokoro may redistribute it.
+    validations:
+      required: true
+  - type: textarea
+    id: test_steps
+    attributes:
+      label: Import and verification steps
+      description: Explain how reviewers can install/import the package and verify its greeting, dialogue, and fallbacks.
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have the right to submit and redistribute every included component.
+          required: true
+        - label: The package contains no executable code, HTML, scripts, credentials, or arbitrary network endpoints.
+          required: true

@@ -1,8 +1,13 @@
+// pattern: Imperative Shell
+
 pub mod actions;
 pub mod auto_backup;
 pub mod backup;
+#[cfg(test)]
+mod backup_tests;
 pub mod bot;
 pub mod character;
+mod character_instance_core;
 pub mod characters;
 pub mod chat;
 pub mod context;

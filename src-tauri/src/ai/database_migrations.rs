@@ -92,6 +92,101 @@ mod tests {
     use sqlx::{Row, SqlitePool};
 
     #[tokio::test]
+    async fn character_ecosystem_migration_preserves_legacy_rows_and_consumes_greetings() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE characters (\
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, persona TEXT NOT NULL DEFAULT '', \
+                user_nickname TEXT NOT NULL DEFAULT 'User', source_format TEXT NOT NULL DEFAULT 'manual', \
+                created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0\
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO characters \
+             (id, name, persona, user_nickname, source_format, created_at, updated_at) \
+             VALUES ('legacy', 'Legacy', 'persona', 'Friend', 'manual', 10, 20)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0010_character_ecosystem.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let row = sqlx::query(
+            "SELECT name, persona, description, template_id, template_version, \
+                    template_snapshot_json, avatar_path, greeting, greeting_consumed_at, \
+                    greeting_message_id, example_dialogue, runtime_profile_json, user_modified_at \
+             FROM characters WHERE id = 'legacy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<String, _>("name"), "Legacy");
+        assert_eq!(row.get::<String, _>("persona"), "persona");
+        assert_eq!(row.get::<String, _>("description"), "");
+        assert_eq!(row.get::<Option<String>, _>("template_id"), None);
+        assert_eq!(row.get::<Option<String>, _>("template_version"), None);
+        assert_eq!(row.get::<Option<String>, _>("template_snapshot_json"), None);
+        assert_eq!(row.get::<Option<String>, _>("avatar_path"), None);
+        assert_eq!(row.get::<String, _>("greeting"), "");
+        assert!(row.get::<Option<i64>, _>("greeting_consumed_at").is_some());
+        assert_eq!(row.get::<Option<i64>, _>("greeting_message_id"), None);
+        assert_eq!(row.get::<String, _>("example_dialogue"), "");
+        assert_eq!(row.get::<String, _>("runtime_profile_json"), "{}");
+        assert_eq!(row.get::<Option<i64>, _>("user_modified_at"), None);
+    }
+
+    #[tokio::test]
+    async fn character_ecosystem_migration_leaves_future_greetings_unconsumed() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE characters (\
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, persona TEXT NOT NULL DEFAULT '', \
+                user_nickname TEXT NOT NULL DEFAULT 'User', source_format TEXT NOT NULL DEFAULT 'manual', \
+                created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0\
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0010_character_ecosystem.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query("INSERT INTO characters (id, name) VALUES ('future', 'Future')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let row = sqlx::query(
+            "SELECT description, avatar_path, greeting, greeting_consumed_at, \
+                    example_dialogue, runtime_profile_json, user_modified_at \
+             FROM characters WHERE id = 'future'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<String, _>("description"), "");
+        assert_eq!(row.get::<Option<String>, _>("avatar_path"), None);
+        assert_eq!(row.get::<String, _>("greeting"), "");
+        assert_eq!(row.get::<Option<i64>, _>("greeting_consumed_at"), None);
+        assert_eq!(row.get::<String, _>("example_dialogue"), "");
+        assert_eq!(row.get::<String, _>("runtime_profile_json"), "{}");
+        assert_eq!(row.get::<Option<i64>, _>("user_modified_at"), None);
+    }
+
+    #[tokio::test]
     async fn repairs_crlf_checksum_when_dream_memory_schema_is_complete() {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();

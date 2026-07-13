@@ -1,5 +1,7 @@
 //! Auto Backup — 定时自动备份记忆数据到指定目录
 
+// pattern: Imperative Shell
+
 use crate::commands::backup::export_data_to_path;
 use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
@@ -96,6 +98,7 @@ pub async fn do_backup(app_data: &Path, config: &AutoBackupConfig) -> Result<Str
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
     let filename = format!("kokoro-auto-{}.kokoro", timestamp);
     let out_path = dir.join(&filename);
+    // Auto backup is deliberately data-only; resource inclusion is a manual export choice.
     export_data_to_path(app_data, &out_path, None).await?;
     tracing::info!(target: "backup", "[AutoBackup] Backup saved to {}", out_path.display());
     if config.auto_cleanup && config.keep_days > 0 {

@@ -1,11 +1,12 @@
+// pattern: Imperative Shell
+
 /**
  * Kokoro Engine — IPC Bridge
  * 
  * Typed wrapper around Tauri's invoke API.
  * All backend commands are accessed through this module.
  */
-// pattern: Mixed (unavoidable)
-// Reason: 前端 bridge 同时承担 IPC 副作用封装与类型导出，是前端与 Tauri 边界的集中编排层。
+// Reason: This boundary module only declares IPC contracts and delegates side effects to Tauri.
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ModManifest, TtsConfig, ProviderStatus, VoiceProfile, TtsSystemConfig, ModThemeJson } from "../core/types/mod";
@@ -1588,6 +1589,7 @@ export interface BackupManifest {
     version: string;
     created_at: string;
     app_version: string;
+    includes_character_resources: boolean;
 }
 
 export interface ImportPreview {
@@ -1609,12 +1611,20 @@ export interface ImportResult {
     imported_memories: number;
     imported_conversations: number;
     imported_configs: number;
+    imported_characters: number;
     characters_json?: string;
     debug_log?: string[];
 }
 
-export async function exportData(exportPath: string, charactersJson?: string): Promise<ExportResult> {
-    return invoke<ExportResult>("export_data", { exportPath, charactersJson });
+export type ManualBackupExportOptions = {
+    readonly include_character_resources: boolean;
+};
+
+export async function exportData(
+    exportPath: string,
+    options: Readonly<ManualBackupExportOptions>,
+): Promise<ExportResult> {
+    return invoke<ExportResult>("export_data", { exportPath, options });
 }
 
 export async function previewImport(filePath: string): Promise<ImportPreview> {
@@ -1627,15 +1637,113 @@ export async function importData(filePath: string, options: ImportOptions): Prom
 
 // ── Character CRUD (SQLite-backed) ────────────────
 
-export interface CharacterRecord {
-    id: string;
-    name: string;
-    persona: string;
-    user_nickname: string;
-    source_format: string;
-    created_at: number;
-    updated_at: number;
-}
+export type CharacterRecord = {
+    readonly id: string;
+    readonly name: string;
+    readonly persona: string;
+    readonly user_nickname: string;
+    readonly source_format: string;
+    readonly created_at: number;
+    readonly updated_at: number;
+    readonly template_id?: string | null;
+    readonly template_version?: string | null;
+    readonly template_snapshot_json?: string | null;
+    readonly description?: string;
+    readonly avatar_path?: string | null;
+    readonly greeting?: string;
+    readonly greeting_consumed_at?: number | null;
+    readonly greeting_message_id?: number | null;
+    readonly example_dialogue?: string;
+    readonly runtime_profile_json?: string;
+    readonly user_modified_at?: number | null;
+};
+
+export type CharacterRuntimeProfile = {
+    readonly tts?: Readonly<Record<string, unknown>> | null;
+    readonly response_language?: string | null;
+    readonly proactive_enabled?: boolean | null;
+};
+
+export type CharacterTemplateManifest = {
+    readonly schema_version: number;
+    readonly engine_version: string;
+    readonly id: string;
+    readonly version: string;
+    readonly name: string;
+    readonly description: string;
+    readonly author: string;
+    readonly license: string;
+    readonly locale: string | null;
+    readonly avatar: string | null;
+    readonly persona: string;
+    readonly greeting: string;
+    readonly example_dialogue: string | null;
+    readonly assets: Readonly<Record<string, string | null>> | null;
+    readonly runtime: CharacterRuntimeProfile | null;
+    readonly recommendations: Readonly<Record<string, unknown>> | null;
+};
+
+export type DuplicateCharacterRequest = {
+    readonly source_id: string;
+    readonly new_id: string;
+    readonly new_name?: string | null;
+    readonly created_at: number;
+    readonly updated_at: number;
+};
+
+export type RestoreCharacterDefaultsRequest = {
+    readonly id: string;
+    readonly updated_at: number;
+};
+
+export type InstantiateCharacterTemplateRequest = {
+    readonly template_id: string;
+    readonly template_version: string;
+    readonly instance_id: string;
+    readonly user_nickname: string;
+    readonly created_at: number;
+    readonly updated_at: number;
+};
+
+export type ReconcileCharacterTemplateRequest = {
+    readonly instance_id: string;
+    readonly template_version: string;
+};
+
+export type ReconcileConflict = {
+    readonly field: string;
+    readonly old_value: unknown;
+    readonly user_value: unknown;
+    readonly new_value: unknown;
+};
+
+export type CharacterTemplateFields = {
+    readonly name: string;
+    readonly description: string;
+    readonly avatar: string | null;
+    readonly persona: string;
+    readonly greeting: string;
+    readonly example_dialogue: string | null;
+    readonly assets: Readonly<Record<string, string | null>> | null;
+    readonly runtime: CharacterRuntimeProfile | null;
+};
+
+export type ReconcileCharacterTemplatePreview = {
+    readonly instance_id: string;
+    readonly template_id: string;
+    readonly current_template_version: string;
+    readonly available_template_version: string;
+    readonly merged: CharacterTemplateFields;
+    readonly conflicts: ReadonlyArray<ReconcileConflict>;
+};
+
+export type ApplyCharacterTemplateReconciliationRequest = {
+    readonly instance_id: string;
+    readonly expected_current_template_version: string;
+    readonly expected_new_template_version: string;
+    readonly selected: CharacterTemplateFields;
+    readonly updated_at: number;
+};
 
 export async function listCharacters(): Promise<CharacterRecord[]> {
     return invoke<CharacterRecord[]>("list_characters");
@@ -1645,12 +1753,54 @@ export async function createCharacter(record: CharacterRecord): Promise<void> {
     return invoke("create_character", { request: record });
 }
 
+export async function createCharacterWithAvatar(
+    record: CharacterRecord,
+    bytes: Uint8Array,
+): Promise<void> {
+    return invoke("create_character_with_avatar", {
+        request: record,
+        avatarBytes: Array.from(bytes),
+    });
+}
+
 export async function updateCharacter(record: Omit<CharacterRecord, "created_at">): Promise<void> {
     return invoke("update_character", { request: record });
 }
 
 export async function deleteCharacter(id: string): Promise<void> {
     return invoke("delete_character", { id });
+}
+
+export async function duplicateCharacter(request: Readonly<DuplicateCharacterRequest>): Promise<void> {
+    return invoke("duplicate_character", { request });
+}
+
+export async function restoreCharacterDefaults(
+    request: Readonly<RestoreCharacterDefaultsRequest>,
+): Promise<void> {
+    return invoke("restore_character_defaults", { request });
+}
+
+export async function listCharacterTemplates(): Promise<Array<CharacterTemplateManifest>> {
+    return invoke<Array<CharacterTemplateManifest>>("list_character_templates");
+}
+
+export async function instantiateCharacterTemplate(
+    request: Readonly<InstantiateCharacterTemplateRequest>,
+): Promise<void> {
+    return invoke("instantiate_character_template", { request });
+}
+
+export async function reconcileCharacterTemplate(
+    request: Readonly<ReconcileCharacterTemplateRequest>,
+): Promise<ReconcileCharacterTemplatePreview> {
+    return invoke<ReconcileCharacterTemplatePreview>("reconcile_character_template", { request });
+}
+
+export async function applyCharacterTemplateReconciliation(
+    request: Readonly<ApplyCharacterTemplateReconciliationRequest>,
+): Promise<void> {
+    return invoke("apply_character_template_reconciliation", { request });
 }
 
 // ── Auto Backup ────────────────────────────────────

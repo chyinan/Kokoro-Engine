@@ -1,7 +1,7 @@
 # Kokoro Engine — Product Requirements Document
 
-> **Version:** 1.2
-> **Last Updated:** 2026-04-09
+> **Version:** 1.3
+> **Last Updated:** 2026-07-13
 > **Status:** Active Development
 
 ---
@@ -18,6 +18,16 @@
 ### Core Philosophy
 
 > High freedom · Modular · Offline-first where possible · Creator-friendly
+
+### Character product model
+
+Kokoro remains one desktop application and one installer. It doesn't split into companion, developer, or VTuber editions.
+
+- A **character template** is versioned, read-only source content shipped with the app or installed from the official registry.
+- A **character instance** is the user's editable copy. Its conversations, memories, greeting state, and runtime overrides aren't overwritten by template or application updates.
+- **Character activation** applies the instance prompt and safe presentation defaults as one coordinated operation. Vision, MCP, external bots, and other sensitive capabilities still require explicit consent.
+
+See the [user activation and character ecosystem design](design-plans/2026-07-12-user-activation-character-ecosystem.md) for the staged implementation.
 
 ---
 

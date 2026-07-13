@@ -1,0 +1,43 @@
+name: MOD submission / MOD 投稿
+description: Propose a MOD for the official registry
+labels: ["mod-submission"]
+body:
+  - type: input
+    id: name
+    attributes:
+      label: MOD name
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What does the MOD change?
+    validations:
+      required: true
+  - type: textarea
+    id: permissions
+    attributes:
+      label: Requested permissions
+      description: List filesystem, network, command, UI, or other capabilities and why each is needed.
+    validations:
+      required: true
+  - type: textarea
+    id: license
+    attributes:
+      label: License and third-party assets
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Test and review evidence
+      description: Include supported Kokoro versions, test commands, screenshots, and known limitations.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Installation and reproduction steps
+      description: Provide exact install, enable, exercise, disable, and rollback steps for reviewers.
+    validations:
+      required: true

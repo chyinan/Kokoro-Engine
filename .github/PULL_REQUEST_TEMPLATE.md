@@ -27,6 +27,16 @@
 - [ ] `cargo check` passes
 - [ ] Manually tested the feature
 
+## Behavioral impact / 行为影响
+
+<!-- Describe visible behavior, migration effects, config/model/network requirements, and rollback or fallback behavior. -->
+
+## Content and license review / 内容与授权检查
+
+- [ ] No secrets, local databases, model files, generated `dist`, or `target*` directories are included
+- [ ] New character, Live2D, voice, background, font, and MOD assets include author, source, license, and redistribution terms
+- [ ] Sensitive permissions or remote calls are listed and require explicit user consent
+
 ## Screenshots / 截图
 
 <!-- If applicable / 如有需要 -->

@@ -9,8 +9,8 @@
 </p>
 
 <h1 align="center">Kokoro Engine</h1>
-<p align="center"><strong>Open-source immersive character engine for desktop AI companions.</strong></p>
-<p align="center">전용 AI 채팅 동반자를 원하는 사용자를 위한 크로스플랫폼 가상 캐릭터 상호작용 엔진.</p>
+<p align="center"><strong>모습, 목소리, 장기 기억을 가진 AI 캐릭터를 데스크톱에서 실행합니다.</strong></p>
+<p align="center">캐릭터를 선택하거나 가져오고 모델 공급자를 연결해 세션을 넘어 이어지는 대화를 시작하세요.</p>
 
 <p align="center">
   <a href="https://t.me/+U39dgiUspCo2NDNh"><img src="https://img.shields.io/badge/Telegram-Community-26A5E4?logo=telegram&logoColor=white" alt="Telegram community" /></a>
@@ -21,13 +21,22 @@
 </p>
 
 <p align="center">
-  <a href="#-빠른-시작">빠른 시작</a> ·
-  <a href="https://github.com/chyinan/Kokoro-Engine/releases">릴리스 다운로드</a> ·
+  <a href="https://github.com/chyinan/Kokoro-Engine/releases"><strong>릴리스 다운로드</strong></a> ·
+  <a href="docs/quick-start.md">10분 설정</a> ·
+  <a href="docs/troubleshooting.md">문제 해결</a> ·
   <a href="#-기술-아키텍처">아키텍처</a> ·
   <a href="#-기여하기">기여하기</a>
 </p>
 
 ---
+
+## Kokoro로 할 수 있는 일
+
+- 데스크톱 캐릭터가 화면에 보이는 맥락에 반응하도록 합니다.
+- SillyTavern 캐릭터 카드를 가져오고 대화와 기억을 캐릭터별로 분리합니다.
+- 로컬 또는 클라우드 LLM을 연결한 뒤 음성, 비전, MCP, MOD, Bot 기능을 필요할 때만 켭니다.
+
+> 내장 캐릭터 3종, 메인 화면 선택기, 첫 응답 온보딩은 [캐릭터 생태계 설계](docs/design-plans/2026-07-12-user-activation-character-ecosystem.md)에 따라 구현 중입니다. 현재 릴리스에서는 설정의 캐릭터 관리와 가져오기를 사용하세요.
 
 ## Kokoro Engine의 차별점
 

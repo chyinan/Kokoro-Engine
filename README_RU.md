@@ -9,8 +9,8 @@
 </p>
 
 <h1 align="center">Kokoro Engine</h1>
-<p align="center"><strong>Open-source immersive character engine for desktop AI companions.</strong></p>
-<p align="center">Кроссплатформенный движок взаимодействия с виртуальным персонажем для пользователей, которым нужен персональный AI-компаньон.</p>
+<p align="center"><strong>Запускайте на рабочем столе AI-персонажа с образом, голосом и долговременной памятью.</strong></p>
+<p align="center">Выберите или импортируйте персонажа, подключите модель и начните разговор, который продолжается между сеансами.</p>
 
 <p align="center">
   <a href="https://t.me/+U39dgiUspCo2NDNh"><img src="https://img.shields.io/badge/Telegram-Community-26A5E4?logo=telegram&logoColor=white" alt="Telegram community" /></a>
@@ -21,13 +21,22 @@
 </p>
 
 <p align="center">
-  <a href="#-быстрый-старт">Быстрый старт</a> ·
-  <a href="https://github.com/chyinan/Kokoro-Engine/releases">Скачать релиз</a> ·
+  <a href="https://github.com/chyinan/Kokoro-Engine/releases"><strong>Скачать релиз</strong></a> ·
+  <a href="docs/quick-start.md">Настройка за 10 минут</a> ·
+  <a href="docs/troubleshooting.md">Решение проблем</a> ·
   <a href="#-техническая-архитектура">Архитектура</a> ·
   <a href="#-вклад-в-проект">Вклад</a>
 </p>
 
 ---
+
+## Что можно делать с Kokoro
+
+- Позволить персонажу реагировать на видимый контекст экрана.
+- Импортировать карточки SillyTavern и хранить разговоры и память раздельно для каждого персонажа.
+- Подключить локальную или облачную LLM, а затем по необходимости включать голос, vision, MCP, MOD и Bot.
+
+> Три встроенных персонажа, переключатель на главном экране и онбординг до первого ответа разрабатываются по [плану экосистемы персонажей](docs/design-plans/2026-07-12-user-activation-character-ecosystem.md). В текущем релизе используйте управление персонажами и импорт в Settings.
 
 ## Уникальность Kokoro Engine
 

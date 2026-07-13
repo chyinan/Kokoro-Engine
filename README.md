@@ -9,8 +9,8 @@
 </p>
 
 <h1 align="center">Kokoro Engine</h1>
-<p align="center"><strong>Open-source immersive character engine for desktop AI companions.</strong></p>
-<p align="center">为每一位想拥有专属AI聊天伴侣的用户打造的跨平台虚拟角色交互引擎。</p>
+<p align="center"><strong>在桌面上运行有形象、有声音、有长期记忆的 AI 角色。</strong></p>
+<p align="center">选择或导入角色，连接自己的模型服务，然后开始一段会延续下去的对话。</p>
 
 <p align="center">
   <a href="https://t.me/+U39dgiUspCo2NDNh"><img src="https://img.shields.io/badge/Telegram-Community-26A5E4?logo=telegram&logoColor=white" alt="Telegram community" /></a>
@@ -20,8 +20,9 @@
   <img src="https://img.shields.io/badge/License-MIT-2EA44F" alt="MIT License" />
 </p>
 <p align="center">
-  <a href="#-快速开始">快速开始</a> ·
-  <a href="https://github.com/chyinan/Kokoro-Engine/releases">下载安装</a> ·
+  <a href="https://github.com/chyinan/Kokoro-Engine/releases"><strong>下载安装</strong></a> ·
+  <a href="docs/quick-start.md">10 分钟快速开始</a> ·
+  <a href="docs/troubleshooting.md">故障排查</a> ·
   <a href="#-技术架构">架构</a> ·
   <a href="#-参与贡献">贡献</a>
 </p>
@@ -29,6 +30,14 @@
 
 
 ---
+
+## 你可以用 Kokoro 做什么
+
+- 让桌面角色根据当前屏幕内容作出反应。
+- 导入 SillyTavern 角色卡，用不同人格延续各自的对话与记忆。
+- 连接本地或云端 LLM，并按需开启语音、视觉、MCP、MOD 和 Bot 能力。
+
+> 三个内置角色、主界面角色选择和首次回复引导正在按[角色生态设计](docs/design-plans/2026-07-12-user-activation-character-ecosystem.md)实施，当前发布版请先使用设置中的角色管理与导入功能。
 
 ##  Kokoro Engine 的独到之处
 
@@ -212,7 +221,7 @@ flowchart LR
 
 👉 [**Kokoro Engine 官方讨论群（Telegram）**](https://t.me/+U39dgiUspCo2NDNh)
 
-👉 [**Kokoro Engine 官方讨论群（QQ）：810398532**](https://qm.qq.com/q/V8ljISeAUM)
+👉 [**Kokoro Engine 官方讨论群（QQ）**](https://qm.qq.com/q/V8ljISeAUM)
 
 ## ❤️ 赞助
 
