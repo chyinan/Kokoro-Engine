@@ -1,4 +1,29 @@
 {
+  "characterCatalog": {
+    "active": "현재 캐릭터",
+    "eyebrow": "캐릭터 덱",
+    "title": "동료 선택",
+    "import": "캐릭터 가져오기",
+    "close": "캐릭터 카탈로그 닫기",
+    "edit": "캐릭터 편집",
+    "duplicate": "캐릭터 복제",
+    "restoreDefault": "템플릿 기본값 복원",
+    "resolveConflict": "내 편집을 유지하고 템플릿 업데이트 적용",
+    "copySuffix": "복사본",
+    "recommendations": {
+      "eyebrow": "선택 기능",
+      "title": "{{name}}의 기능을 확장할까요?",
+      "description": "이는 제안일 뿐 권한이 아닙니다. 활성화를 선택하기 전에는 설정이 바뀌지 않습니다.",
+      "vision": "비전",
+      "memory": "메모리",
+      "mcp": "MCP: {{name}}",
+      "bot": "봇: {{name}}",
+      "dismiss": "기능 제안 닫기",
+      "notNow": "나중에",
+      "enable": "제안된 기능 활성화",
+      "enabling": "활성화 중…"
+    }
+  },
     "common": {
         "actions": {
             "save": "저장",

@@ -1,4 +1,29 @@
 {
+  "characterCatalog": {
+    "active": "目前角色",
+    "eyebrow": "角色卡組",
+    "title": "選擇你的夥伴",
+    "import": "匯入角色",
+    "close": "關閉角色目錄",
+    "edit": "編輯角色",
+    "duplicate": "複製角色",
+    "restoreDefault": "還原範本預設值",
+    "resolveConflict": "保留我的修改並套用範本更新",
+    "copySuffix": "副本",
+    "recommendations": {
+      "eyebrow": "選用能力",
+      "title": "增強 {{name}} 的能力？",
+      "description": "這些只是建議，並非授權。只有按下啟用後才會變更設定。",
+      "vision": "視覺",
+      "memory": "記憶",
+      "mcp": "MCP：{{name}}",
+      "bot": "機器人：{{name}}",
+      "dismiss": "關閉能力建議",
+      "notNow": "暫時不要",
+      "enable": "啟用建議的能力",
+      "enabling": "正在啟用……"
+    }
+  },
     "common": {
         "actions": {
             "save": "儲存",

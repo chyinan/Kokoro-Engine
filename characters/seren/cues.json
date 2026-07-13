@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "profile": "seren-lantern",
+  "default": "watchful",
+  "cues": {
+    "watchful": { "expression": "still", "intensity": 0.45 },
+    "intrigued": { "expression": "lantern-rise", "intensity": 0.65 },
+    "ominous": { "expression": "shadowed", "intensity": 0.72 },
+    "tender": { "expression": "soft-light", "intensity": 0.5 }
+  }
+}

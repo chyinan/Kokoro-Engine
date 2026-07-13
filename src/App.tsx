@@ -21,6 +21,11 @@ import OnboardingOverlay, {
 } from "./ui/widgets/OnboardingOverlay";
 import MemoryModelDownloadDialog from "./ui/widgets/MemoryModelDownloadDialog";
 import { QQAuthorizationDialog } from "./ui/widgets/QQAuthorizationDialog";
+import { CharacterCatalog, type CharacterCatalogActionDependencies } from "./ui/widgets/CharacterCatalog";
+import {
+  CharacterRecommendationDialog,
+  type CharacterCapabilityRecommendations,
+} from "./ui/widgets/CharacterRecommendationDialog";
 import { useBackgroundSlideshow } from "./ui/hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "./features/live2d/Live2DViewer";
 import { live2dUrl } from "./lib/utils";
@@ -200,6 +205,12 @@ import {
   commitCharacterActivation,
   getCommittedCharacterRuntime,
   listCharacters,
+  listCharacterTemplates,
+  instantiateCharacterTemplate,
+  duplicateCharacter,
+  restoreCharacterDefaults,
+  reconcileCharacterTemplate,
+  applyCharacterTemplateReconciliation,
   createCharacter,
   createCharacterWithAvatar,
   setPersona,
@@ -211,6 +222,7 @@ import {
   getProactiveEnabled,
   getUserProfileSettings,
   getMemoryEmbeddingModelStatus,
+  setMemoryEnabled,
   // Config Getters
   getLlmConfig,
   getImageGenConfig,
@@ -303,6 +315,7 @@ import {
   type AutoBackupConfig,
   type ImportPreview,
   type CharacterRecord,
+  type CharacterTemplateManifest,
   type MemoryEmbeddingModelStatus,
   type MemoryEmbeddingModelDownloadProgress,
   type QQAuthorizationRequest,
@@ -365,7 +378,7 @@ function normalizeOnboardingLanguageCode(language: string | null | undefined): O
 }
 
 function App() {
-  const { i18n } = useTranslation();
+  const { i18n, t } = useTranslation();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>(() => {
     const saved = readStringSetting(APP_SETTING_KEYS.settingsActiveTab, "");
@@ -394,6 +407,9 @@ function App() {
   );
   const [characterBackground, setCharacterBackground] = useState<string | null>(
     () => readStringSetting(APP_SETTING_KEYS.characterBackground, "") || null
+  );
+  const [activeCharacterId, setActiveCharacterIdState] = useState(
+    () => readStringSetting(APP_SETTING_KEYS.activeCharacterId, ""),
   );
   const [runtimeReady, setRuntimeReady] = useState(false);
 
@@ -460,6 +476,11 @@ function App() {
 
   // Character list for mod settings
   const [characters, setCharacters] = useState<CharacterRecord[]>([]);
+  const [characterTemplates, setCharacterTemplates] = useState<Array<CharacterTemplateManifest>>([]);
+  const [recommendedCapabilities, setRecommendedCapabilities] = useState<{
+    readonly characterName: string;
+    readonly recommendations: CharacterCapabilityRecommendations;
+  } | null>(null);
 
   // Mod-specific state exposed via props
   const [voiceInterrupt, setVoiceInterrupt] = useState(false);
@@ -515,6 +536,7 @@ function App() {
   ): Promise<void> {
     if (runtime.activeCharacterId !== null) {
       writeStringSetting(APP_SETTING_KEYS.activeCharacterId, runtime.activeCharacterId);
+      setActiveCharacterIdState(runtime.activeCharacterId);
     }
     if (runtime.live2dModel === null) {
       removeSetting(APP_SETTING_KEYS.customModelPath);
@@ -980,8 +1002,9 @@ function App() {
     // Backend committed runtime is authoritative for startup and window recreation.
     userProfileHydration.finally(async () => {
       try {
-        const all = await listCharacters();
+        const [all, templates] = await Promise.all([listCharacters(), listCharacterTemplates()]);
         setCharacters(all);
+        setCharacterTemplates(templates);
         const recovered = await characterActivation.recoverCommittedRuntime();
         if (recovered === null) {
           const savedId = readStringSetting(APP_SETTING_KEYS.activeCharacterId, "");
@@ -1932,6 +1955,137 @@ function App() {
     return () => document.removeEventListener('kokoro:mod-action', handleModAction);
   });
 
+  const characterCatalogActions: CharacterCatalogActionDependencies = {
+    activateCharacter: async (catalogId) => {
+      let targetId = catalogId;
+      let template = characterTemplates.find((candidate) => candidate.id === catalogId) ?? null;
+      if (catalogId.startsWith("template:")) {
+        const templateId = catalogId.slice("template:".length);
+        template = characterTemplates.find((candidate) => candidate.id === templateId) ?? null;
+        if (template === null) {
+          throw new Error(`character template '${templateId}' is unavailable`);
+        }
+        const existing = characters.find((candidate) => candidate.template_id === templateId);
+        if (existing) {
+          targetId = existing.id;
+        } else {
+          targetId = characters.some((candidate) => candidate.id === templateId)
+            ? `${templateId}-${crypto.randomUUID()}`
+            : templateId;
+          const now = Date.now();
+          await instantiateCharacterTemplate({
+            template_id: template.id,
+            template_version: template.version,
+            instance_id: targetId,
+            user_nickname: readStringSetting(APP_SETTING_KEYS.userName, "") || "User",
+            created_at: now,
+            updated_at: now,
+          });
+        }
+      } else if (template === null) {
+        const instance = characters.find((candidate) => candidate.id === targetId);
+        template = instance?.template_id
+          ? characterTemplates.find((candidate) => candidate.id === instance.template_id) ?? null
+          : null;
+      }
+
+      await characterActivation.activateCharacter(targetId);
+      setCharacters(await listCharacters());
+
+      const raw = template?.recommendations;
+      if (raw === null || raw === undefined) return null;
+      const recommendations: CharacterCapabilityRecommendations = {
+        vision: raw.vision === true,
+        memory: raw.memory === true,
+        mcpServers: Array.isArray(raw.mcp_servers)
+          ? raw.mcp_servers.filter((value): value is string => typeof value === "string")
+          : [],
+        botPlatforms: [],
+      };
+      return recommendations.vision
+        || recommendations.memory
+        || recommendations.mcpServers.length > 0
+        || recommendations.botPlatforms.length > 0
+        ? recommendations
+        : null;
+    },
+    importCharacter: async () => {
+      document.dispatchEvent(new CustomEvent("kokoro:mod-action", {
+        detail: { action: "import_character" },
+      }));
+    },
+    editCharacter: async () => {
+      setActiveSettingsTab("persona");
+      setSettingsOpen(true);
+    },
+    duplicateCharacter: async (characterId) => {
+      const source = characters.find((candidate) => candidate.id === characterId);
+      if (!source) throw new Error(`character '${characterId}' is unavailable`);
+      const now = Date.now();
+      await duplicateCharacter({
+        source_id: characterId,
+        new_id: crypto.randomUUID(),
+        new_name: `${source.name} ${t("characterCatalog.copySuffix")}`,
+        created_at: now,
+        updated_at: now,
+      });
+      setCharacters(await listCharacters());
+    },
+    restoreCharacterDefaults: async (characterId) => {
+      await restoreCharacterDefaults({ id: characterId, updated_at: Date.now() });
+      setCharacters(await listCharacters());
+      if (characterId === activeCharacterId) {
+        await characterActivation.activateCharacter(characterId);
+      }
+    },
+    resolveTemplateConflict: async (characterId) => {
+      const character = characters.find((candidate) => candidate.id === characterId);
+      if (!character?.template_id) throw new Error("character has no template origin");
+      const availableTemplates = characterTemplates
+        .filter((candidate) => candidate.id === character.template_id)
+        .sort((left, right) => left.version.localeCompare(right.version));
+      const available = availableTemplates[availableTemplates.length - 1];
+      if (!available) throw new Error(`template '${character.template_id}' is unavailable`);
+      const preview = await reconcileCharacterTemplate({
+        instance_id: characterId,
+        template_version: available.version,
+      });
+      await applyCharacterTemplateReconciliation({
+        instance_id: characterId,
+        expected_current_template_version: preview.current_template_version,
+        expected_new_template_version: preview.available_template_version,
+        selected: preview.merged,
+        updated_at: Date.now(),
+      });
+      setCharacters(await listCharacters());
+      if (characterId === activeCharacterId) {
+        await characterActivation.activateCharacter(characterId);
+      }
+    },
+  };
+
+  const enableRecommendedCapabilities = async (
+    recommendations: Readonly<CharacterCapabilityRecommendations>,
+  ): Promise<void> => {
+    const updates: Array<Promise<unknown>> = [];
+    if (recommendations.vision) {
+      const currentVision = visionConfig ?? await getVisionConfig();
+      const nextVision = { ...currentVision, vlm_enabled: true };
+      updates.push(saveVisionConfig(nextVision).then(() => setVisionConfig(nextVision)));
+    }
+    if (recommendations.memory) {
+      updates.push(setMemoryEnabled(true));
+    }
+    const availableMcpServers = new Set(mcpServers.map((server) => server.name));
+    for (const server of recommendations.mcpServers) {
+      if (availableMcpServers.has(server)) updates.push(toggleMcpServer(server, true));
+    }
+    await Promise.all(updates);
+    if (recommendations.mcpServers.length > 0) {
+      setMcpServers(await listMcpServers());
+    }
+  };
+
   // Determine active background based on mode
   let activeBackgroundUrl = characterBackground ?? bgSlideshow.currentUrl;
 
@@ -1971,6 +2125,27 @@ function App() {
             blurAmount={bgSlideshow.config.blurAmount}
           />
         }
+        overlayLayer={
+          <div className="absolute right-[92px] top-[52px]">
+            <CharacterCatalog
+              characters={characters}
+              templates={characterTemplates}
+              activeCharacterId={activeCharacterId}
+              actions={characterCatalogActions}
+              onRecommendations={(characterName, recommendations) => {
+                setRecommendedCapabilities({ characterName, recommendations });
+              }}
+            />
+          </div>
+        }
+      />
+
+      <CharacterRecommendationDialog
+        open={recommendedCapabilities !== null}
+        characterName={recommendedCapabilities?.characterName ?? ""}
+        recommendations={recommendedCapabilities?.recommendations ?? null}
+        onConfirm={enableRecommendedCapabilities}
+        onDismiss={() => setRecommendedCapabilities(null)}
       />
 
       {/* Floating settings gear — top-right corner */}

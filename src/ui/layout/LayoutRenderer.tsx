@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 import { useSyncExternalStore, memo } from "react";
 import { LayoutConfig, LayoutNode } from "./types";
 import { registry } from "../registry/ComponentRegistry";
@@ -133,7 +135,14 @@ const LayoutNodeRenderer = memo(({ node }: { node: LayoutNode }) => {
     return null;
 });
 
-export const LayoutRenderer = ({ config, transparent, backgroundLayer }: { config: LayoutConfig; transparent?: boolean; backgroundLayer?: React.ReactNode }) => {
+type LayoutRendererProps = {
+    readonly config: LayoutConfig;
+    readonly transparent?: boolean;
+    readonly backgroundLayer?: React.ReactNode;
+    readonly overlayLayer?: React.ReactNode;
+};
+
+export const LayoutRenderer = ({ config, transparent, backgroundLayer, overlayLayer }: LayoutRendererProps) => {
     return (
         <div className={clsx(
             "w-screen h-screen overflow-hidden text-[var(--color-text-primary)] font-body relative",
@@ -148,6 +157,12 @@ export const LayoutRenderer = ({ config, transparent, backgroundLayer }: { confi
             <AnimatePresence mode="wait">
                 <LayoutNodeRenderer node={config.root} />
             </AnimatePresence>
+
+            {overlayLayer && (
+                <div className="pointer-events-none absolute inset-0 z-30">
+                    {overlayLayer}
+                </div>
+            )}
         </div>
     );
 };

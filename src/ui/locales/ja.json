@@ -1,4 +1,29 @@
 {
+  "characterCatalog": {
+    "active": "現在のキャラクター",
+    "eyebrow": "キャラクターデッキ",
+    "title": "相棒を選ぶ",
+    "import": "キャラクターをインポート",
+    "close": "キャラクターカタログを閉じる",
+    "edit": "キャラクターを編集",
+    "duplicate": "キャラクターを複製",
+    "restoreDefault": "テンプレートの初期値に戻す",
+    "resolveConflict": "編集を保持してテンプレート更新を適用",
+    "copySuffix": "コピー",
+    "recommendations": {
+      "eyebrow": "任意の機能",
+      "title": "{{name}} の機能を追加しますか？",
+      "description": "これは提案であり、許可ではありません。有効にするまで設定は変わりません。",
+      "vision": "ビジョン",
+      "memory": "メモリ",
+      "mcp": "MCP：{{name}}",
+      "bot": "ボット：{{name}}",
+      "dismiss": "機能の提案を閉じる",
+      "notNow": "今はしない",
+      "enable": "提案された機能を有効にする",
+      "enabling": "有効化中…"
+    }
+  },
     "common": {
         "actions": {
             "save": "保存",

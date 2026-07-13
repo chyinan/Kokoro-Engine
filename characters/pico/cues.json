@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "profile": "pico-spark",
+  "default": "bright",
+  "cues": {
+    "bright": { "expression": "grin", "intensity": 0.75 },
+    "teasing": { "expression": "smirk", "intensity": 0.85 },
+    "surprised": { "expression": "wide-eyes", "intensity": 0.95 },
+    "focused": { "expression": "determined", "intensity": 0.7 }
+  }
+}

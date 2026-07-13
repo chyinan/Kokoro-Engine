@@ -1,4 +1,29 @@
 {
+  "characterCatalog": {
+    "active": "Active character",
+    "eyebrow": "Character deck",
+    "title": "Choose your companion",
+    "import": "Import character",
+    "close": "Close character catalog",
+    "edit": "Edit character",
+    "duplicate": "Duplicate character",
+    "restoreDefault": "Restore template defaults",
+    "resolveConflict": "Keep my edits and apply template update",
+    "copySuffix": "Copy",
+    "recommendations": {
+      "eyebrow": "Optional capabilities",
+      "title": "Make {{name}} more capable?",
+      "description": "These are suggestions, not permissions. Nothing changes until you choose Enable.",
+      "vision": "Vision",
+      "memory": "Memory",
+      "mcp": "MCP: {{name}}",
+      "bot": "Bot: {{name}}",
+      "dismiss": "Dismiss recommendations",
+      "notNow": "Not now",
+      "enable": "Enable selected capabilities",
+      "enabling": "Enabling..."
+    }
+  },
     "common": {
         "actions": {
             "save": "SAVE",

@@ -1,4 +1,29 @@
 {
+  "characterCatalog": {
+    "active": "当前角色",
+    "eyebrow": "角色卡组",
+    "title": "选择你的伙伴",
+    "import": "导入角色",
+    "close": "关闭角色目录",
+    "edit": "编辑角色",
+    "duplicate": "复制角色",
+    "restoreDefault": "恢复模板默认值",
+    "resolveConflict": "保留我的修改并应用模板更新",
+    "copySuffix": "副本",
+    "recommendations": {
+      "eyebrow": "可选能力",
+      "title": "增强 {{name}} 的能力？",
+      "description": "这些只是建议，并非授权。只有点击启用后才会更改设置。",
+      "vision": "视觉",
+      "memory": "记忆",
+      "mcp": "MCP：{{name}}",
+      "bot": "机器人：{{name}}",
+      "dismiss": "关闭能力建议",
+      "notNow": "暂不",
+      "enable": "启用所建议的能力",
+      "enabling": "正在启用……"
+    }
+  },
     "common": {
         "actions": {
             "save": "保存",

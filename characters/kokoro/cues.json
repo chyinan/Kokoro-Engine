@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "profile": "kokoro-gentle",
+  "default": "calm",
+  "cues": {
+    "calm": { "expression": "neutral", "intensity": 0.35 },
+    "listening": { "expression": "attentive", "intensity": 0.55 },
+    "encouraging": { "expression": "smile", "intensity": 0.65 },
+    "concerned": { "expression": "soft-concern", "intensity": 0.45 }
+  }
+}
