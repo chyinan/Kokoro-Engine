@@ -1,16 +1,18 @@
+// pattern: Imperative Shell
+
 import { useState, useRef, useEffect, useCallback, useDeferredValue, memo, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
 import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
-import type { FailureEvent, ToolTraceItem } from "../../lib/kokoro-bridge";
+import type { CommittedCharacterRuntime, FailureEvent, ToolTraceItem } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal, useWakeWord } from "../hooks";
 import { useTranslation } from "react-i18next";
 import ConversationSidebar from "./ConversationSidebar";
 import { ChatMessage } from "./ChatMessage";
-import { buildChatMessagesFromConversation } from "./chat-history";
+import { createChatCharacterSynchronizer, type ChatCharacterSynchronizer } from "./chat-character-sync";
 import { getStreamingRevealText, hasActiveKokoroBubble, shouldRenderTypingIndicator } from "./chat-streaming-state";
 import {
     canSubmitApproval,
@@ -213,6 +215,10 @@ export default function ChatPanel({
     const { t } = useTranslation();
     const [collapsed, setCollapsed] = useState(false);
     const [messages, setMessages] = useState<ChatMessage[]>([]);
+    const [activeCharacterId, setActiveCharacterId] = useState(
+        getActiveCharacterIdForConversationRestore,
+    );
+    const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
     const deferredMessages = useDeferredValue(messages);
     const [visibleCount, setVisibleCount] = useState(20);
     const [input, setInput] = useState("");
@@ -337,6 +343,38 @@ export default function ChatPanel({
         }
     }, [endTurnActivity]);
 
+    const conversationSyncRef = useRef<ChatCharacterSynchronizer | null>(null);
+    if (conversationSyncRef.current === null) {
+        conversationSyncRef.current = createChatCharacterSynchronizer({
+            listConversations,
+            loadConversation,
+            clearVisibleConversation: (characterId) => {
+                const turnId = currentTurnRef.current?.turnId;
+                endTurnActivity();
+                cancelRequestedRef.current = true;
+                if (turnId) {
+                    void cancelChatTurn(turnId, "character_switched")
+                        .catch(error => console.error("[ChatPanel] Failed to cancel prior character turn:", error));
+                }
+                currentTurnRef.current = null;
+                pendingVisionContextRef.current = null;
+                rawResponseRef.current = "";
+                resetReveal();
+                setIsThinking(false);
+                setActiveCharacterId(characterId);
+                setActiveConversationId(null);
+                setMessages([]);
+                setExpandedTranslations(new Set());
+            },
+            applyVisibleConversation: (conversation) => {
+                setActiveCharacterId(conversation.characterId);
+                setActiveConversationId(conversation.conversationId);
+                setMessages([...conversation.messages]);
+                setExpandedTranslations(new Set());
+            },
+        });
+    }
+
     const handleStopGeneration = useCallback(() => {
         if (!isStreamingRef.current || isStopping) {
             return;
@@ -354,17 +392,40 @@ export default function ChatPanel({
 
     // 自动恢复最近对话
     useEffect(() => {
-        const characterId = getActiveCharacterIdForConversationRestore();
-        listConversations(characterId).then(convs => {
-            if (convs.length > 0) {
-                loadConversation(convs[0].id).then(loaded => {
-                    setMessages(buildChatMessagesFromConversation(loaded.messages));
-                    setExpandedTranslations(new Set()); // Reset translation expand state on conversation load
-                }).catch(err => console.error("[ChatPanel] Failed to restore conversation:", err));
-            }
-        }).catch(() => { /* backend not ready */ });
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+        const synchronizer = conversationSyncRef.current;
+        if (synchronizer === null) return;
+        const activeSynchronizer = synchronizer;
+
+        function synchronize(characterId: string, preferredConversationId: string | null): void {
+            void activeSynchronizer.synchronize({ characterId, preferredConversationId })
+                .catch(err => console.error("[ChatPanel] Failed to restore conversation:", err));
+        }
+
+        synchronize(getActiveCharacterIdForConversationRestore(), null);
+        const handleRuntimeChanged = (event: Event): void => {
+            const detail = (event as CustomEvent<CommittedCharacterRuntime>).detail;
+            if (!detail?.runtime.character_id) return;
+            synchronize(detail.runtime.character_id, detail.target_conversation_id);
+        };
+        window.addEventListener("kokoro-character-runtime-changed", handleRuntimeChanged);
+        return () => {
+            window.removeEventListener("kokoro-character-runtime-changed", handleRuntimeChanged);
+            activeSynchronizer.invalidate();
+        };
     }, []);
+
+    const handleConversationSelection = useCallback(async (
+        preferredConversationId: string | null,
+    ): Promise<void> => {
+        await conversationSyncRef.current?.synchronize({
+            characterId: activeCharacterId,
+            preferredConversationId,
+        });
+    }, [activeCharacterId]);
+
+    const handleStartEmptyConversation = useCallback((): void => {
+        conversationSyncRef.current?.startEmptyConversation(activeCharacterId);
+    }, [activeCharacterId]);
 
     // STT (Speech-to-Text) — Advanced VAD Mode
     const [sttEnabled, setSttEnabled] = useState(() =>
@@ -604,6 +665,10 @@ export default function ChatPanel({
 
             const unTurnStart = await onChatTurnStart(({ turn_id }) => {
                 if (aborted) return;
+                if (cancelRequestedRef.current) {
+                    void requestTurnCancellation(turn_id);
+                    return;
+                }
                 currentTurnRef.current = {
                     turnId: turn_id,
                     messageIndex: null,
@@ -616,9 +681,6 @@ export default function ChatPanel({
                 };
                 pendingVisionContextRef.current = null;
                 rawResponseRef.current = "";
-                if (cancelRequestedRef.current) {
-                    void requestTurnCancellation(turn_id);
-                }
             });
             if (aborted) { unTurnStart(); return; }
             cleanups.push(unTurnStart);
@@ -1359,9 +1421,11 @@ export default function ChatPanel({
             <ConversationSidebar
                 open={sidebarOpen}
                 onClose={() => setSidebarOpen(false)}
-                onLoadMessages={(msgs) => {
-                    setMessages(msgs);
-                    setExpandedTranslations(new Set()); // Reset translation expand state
+                characterId={activeCharacterId}
+                activeConversationId={activeConversationId}
+                onStartEmptyConversation={handleStartEmptyConversation}
+                onSelectConversation={async (conversationId) => {
+                    await handleConversationSelection(conversationId);
                     setSidebarOpen(false);
                 }}
             />

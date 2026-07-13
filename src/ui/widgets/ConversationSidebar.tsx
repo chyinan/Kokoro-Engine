@@ -1,29 +1,35 @@
+// pattern: Imperative Shell
+
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Plus, Trash2, History, X, Check, Pencil, Pin } from "lucide-react";
-import { listConversations, loadConversation, deleteConversation, createConversation, renameConversation, getConversationDisplayTitle, hasPinnedConversationState } from "../../lib/kokoro-bridge";
+import { listConversations, deleteConversation, createConversation, renameConversation, getConversationDisplayTitle, hasPinnedConversationState } from "../../lib/kokoro-bridge";
 import type { Conversation } from "../../lib/kokoro-bridge";
 import { useTranslation } from "react-i18next";
-import { buildChatMessagesFromConversation } from "./chat-history";
 
-type ChatMessage = ReturnType<typeof buildChatMessagesFromConversation>[number];
-
-interface ConversationSidebarProps {
+type ConversationSidebarProps = {
     open: boolean;
     onClose: () => void;
-    onLoadMessages: (messages: ChatMessage[]) => void;
-}
+    characterId: string;
+    activeConversationId: string | null;
+    onStartEmptyConversation: () => void;
+    onSelectConversation: (conversationId: string | null) => Promise<void>;
+};
 
-export default function ConversationSidebar({ open, onClose, onLoadMessages }: ConversationSidebarProps) {
+export default function ConversationSidebar({
+    open,
+    onClose,
+    characterId,
+    activeConversationId,
+    onStartEmptyConversation,
+    onSelectConversation,
+}: ConversationSidebarProps) {
     const { t } = useTranslation();
     const [conversations, setConversations] = useState<Conversation[]>([]);
-    const [activeId, setActiveId] = useState<string | null>(null);
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editTitle, setEditTitle] = useState("");
     const editInputRef = useRef<HTMLInputElement>(null);
-
-    const characterId = localStorage.getItem("kokoro_active_character_id") || "default";
 
     const refresh = useCallback(async () => {
         try {
@@ -35,7 +41,8 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
     }, [characterId]);
 
     useEffect(() => {
-        if (open) refresh();
+        setConversations([]);
+        if (open) void refresh();
     }, [open, refresh]);
 
     useEffect(() => {
@@ -46,12 +53,9 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
     }, [editingId]);
 
     const handleLoad = async (id: string) => {
-        if (id === activeId) return;
+        if (id === activeConversationId) return;
         try {
-            const loaded = await loadConversation(id);
-            const chatMsgs: ChatMessage[] = buildChatMessagesFromConversation(loaded.messages);
-            setActiveId(id);
-            onLoadMessages(chatMsgs);
+            await onSelectConversation(id);
         } catch (err) {
             console.error("[ConversationSidebar] Failed to load conversation:", err);
         }
@@ -62,11 +66,10 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
         if (!confirm(t("chat.history.confirmDelete"))) return;
         try {
             await deleteConversation(id);
-            if (activeId === id) {
-                setActiveId(null);
-                onLoadMessages([]);
+            if (activeConversationId === id) {
+                await onSelectConversation(null);
             }
-            refresh();
+            await refresh();
         } catch (err) {
             console.error("[ConversationSidebar] Failed to delete:", err);
         }
@@ -75,9 +78,8 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
     const handleNew = async () => {
         try {
             await createConversation();
-            setActiveId(null);
-            onLoadMessages([]);
-            refresh();
+            onStartEmptyConversation();
+            await refresh();
         } catch (err) {
             console.error("[ConversationSidebar] Failed to create:", err);
         }
@@ -184,7 +186,7 @@ export default function ConversationSidebar({ open, onClose, onLoadMessages }: C
                                     onClick={() => handleLoad(conv.id)}
                                     className={clsx(
                                         "group flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer transition-colors",
-                                        activeId === conv.id
+                                        activeConversationId === conv.id
                                             ? "bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30"
                                             : "hover:bg-white/5 border border-transparent"
                                     )}
