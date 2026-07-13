@@ -6,6 +6,7 @@ use crate::characters::manifest::{
 use std::path::PathBuf;
 use thiserror::Error;
 
+pub mod activation;
 pub mod catalog;
 pub mod instance_resource;
 pub mod manifest;
@@ -72,5 +73,7 @@ pub fn validate_package_content(
     Ok(())
 }
 
+#[cfg(test)]
+mod activation_tests;
 #[cfg(test)]
 mod catalog_tests;

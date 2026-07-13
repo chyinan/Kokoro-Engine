@@ -1,6 +1,10 @@
 // pattern: Imperative Shell
 
 use crate::ai::context::AIOrchestrator;
+use crate::characters::activation::{
+    ActivationCoordinator, ActivationRuntimeBackend, BackendRuntimeSnapshot,
+    CharacterActivationToken, CommittedCharacterRuntime, LocalTtsPreset,
+};
 use crate::characters::catalog::{CatalogEntry, CharacterCatalog};
 use crate::characters::instance_resource::{
     instance_avatar_reference, parse_instance_avatar_reference, validate_avatar_bytes,
@@ -8,12 +12,95 @@ use crate::characters::instance_resource::{
 };
 use crate::characters::manifest::CharacterTemplateManifest;
 use crate::error::KokoroError;
+use async_trait::async_trait;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 use std::fs;
 use std::path::Path;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
+
+struct OrchestratorActivationBackend<'a> {
+    orchestrator: &'a AIOrchestrator,
+}
+
+#[async_trait]
+impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
+    async fn snapshot(&self) -> Result<BackendRuntimeSnapshot, KokoroError> {
+        let character_id = self.orchestrator.get_character_id().await;
+        let identity = sqlx::query_as::<_, (String, String)>(
+            "SELECT name, user_nickname FROM characters WHERE id = ?",
+        )
+        .bind(&character_id)
+        .fetch_optional(&self.orchestrator.db)
+        .await?;
+        let (character_name, user_name) = identity
+            .map(|(name, user)| {
+                let user = if user.trim().is_empty() {
+                    "User".to_string()
+                } else {
+                    user
+                };
+                (name, user)
+            })
+            .unwrap_or_else(|| ("Kokoro".to_string(), "User".to_string()));
+        Ok(BackendRuntimeSnapshot {
+            character_id,
+            character_name,
+            user_name,
+            system_prompt: self.orchestrator.system_prompt.lock().await.clone(),
+            response_language: self.orchestrator.response_language.lock().await.clone(),
+            proactive_enabled: self.orchestrator.is_proactive_enabled(),
+            current_conversation_id: self
+                .orchestrator
+                .current_conversation_id
+                .lock()
+                .await
+                .clone(),
+            ..Default::default()
+        })
+    }
+
+    async fn apply(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
+        apply_orchestrator_runtime(self.orchestrator, snapshot).await;
+        Ok(())
+    }
+
+    async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
+        apply_orchestrator_runtime(self.orchestrator, snapshot).await;
+        Ok(())
+    }
+}
+
+async fn apply_orchestrator_runtime(
+    orchestrator: &AIOrchestrator,
+    snapshot: &BackendRuntimeSnapshot,
+) {
+    orchestrator
+        .set_system_prompt(snapshot.system_prompt.clone())
+        .await;
+    orchestrator
+        .set_character_name(snapshot.character_name.clone())
+        .await;
+    orchestrator.set_user_name(snapshot.user_name.clone()).await;
+    orchestrator
+        .set_character_id(snapshot.character_id.clone())
+        .await;
+    orchestrator
+        .set_response_language(snapshot.response_language.clone())
+        .await;
+    orchestrator.set_proactive_enabled(snapshot.proactive_enabled);
+    *orchestrator.current_conversation_id.lock().await = snapshot.current_conversation_id.clone();
+    orchestrator.history.lock().await.clear();
+}
+
+fn allowlisted_local_tts_presets() -> Vec<LocalTtsPreset> {
+    vec![LocalTtsPreset {
+        id: "gpt-sovits-loopback".to_string(),
+        provider_type: "gpt_sovits".to_string(),
+        endpoint: "http://127.0.0.1:9880".to_string(),
+    }]
+}
 
 use super::character_instance_core::{
     build_reconcile_preview, create_request_from_manifest, parse_template_defaults,
@@ -37,6 +124,49 @@ pub async fn list_characters(
     orchestrator: State<'_, AIOrchestrator>,
 ) -> Result<Vec<CharacterRecord>, KokoroError> {
     list_characters_from_pool(&orchestrator.db).await
+}
+
+#[tauri::command]
+pub async fn prepare_character_activation(
+    character_id: String,
+    coordinator: State<'_, ActivationCoordinator>,
+    orchestrator: State<'_, AIOrchestrator>,
+    app: AppHandle,
+) -> Result<CharacterActivationToken, KokoroError> {
+    let app_data = resolve_app_data(&app)?;
+    let tts_config = crate::tts::config::load_config(&app_data.join("tts_config.json"));
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+    };
+    coordinator
+        .prepare(
+            &orchestrator.db,
+            &character_id,
+            &tts_config,
+            &allowlisted_local_tts_presets(),
+            &backend,
+        )
+        .await
+}
+
+#[tauri::command]
+pub async fn commit_character_activation(
+    token: CharacterActivationToken,
+    coordinator: State<'_, ActivationCoordinator>,
+    orchestrator: State<'_, AIOrchestrator>,
+) -> Result<CommittedCharacterRuntime, KokoroError> {
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+    };
+    coordinator.commit(&orchestrator.db, token, &backend).await
+}
+
+#[tauri::command]
+pub async fn get_committed_character_runtime(
+    coordinator: State<'_, ActivationCoordinator>,
+    orchestrator: State<'_, AIOrchestrator>,
+) -> Result<Option<CommittedCharacterRuntime>, KokoroError> {
+    coordinator.get_committed(&orchestrator.db).await
 }
 
 #[tauri::command]

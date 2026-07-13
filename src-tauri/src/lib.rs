@@ -76,6 +76,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .manage(crate::characters::activation::ActivationCoordinator::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -181,6 +182,9 @@ pub fn run() {
             commands::characters::instantiate_character_template,
             commands::characters::reconcile_character_template,
             commands::characters::apply_character_template_reconciliation,
+            commands::characters::prepare_character_activation,
+            commands::characters::commit_character_activation,
+            commands::characters::get_committed_character_runtime,
             commands::conversation::list_conversations,
             commands::conversation::load_conversation,
             commands::conversation::delete_conversation,

@@ -1664,6 +1664,63 @@ export type CharacterRuntimeProfile = {
     readonly proactive_enabled?: boolean | null;
 };
 
+export type ResolvedTtsMode =
+    | "configured_provider"
+    | "local_preset_confirmation"
+    | "browser"
+    | "text_only";
+
+export type ResolvedCharacterTts = {
+    readonly mode: ResolvedTtsMode;
+    readonly provider_id: string | null;
+    readonly provider_type: string | null;
+    readonly local_preset: string | null;
+    readonly endpoint: string | null;
+    readonly voice: string | null;
+    readonly speed: number | null;
+    readonly pitch: number | null;
+    readonly requires_save_confirmation: boolean;
+};
+
+export type BackendCharacterRuntime = {
+    readonly character_id: string;
+    readonly character_name: string;
+    readonly user_name: string;
+    readonly system_prompt: string;
+    readonly response_language: string;
+    readonly proactive_enabled: boolean;
+    readonly current_conversation_id: string | null;
+    readonly tts: ResolvedCharacterTts;
+};
+
+export type CharacterActivationToken = {
+    readonly revision: number;
+    readonly character_updated_at: number;
+    readonly previous_committed: BackendCharacterRuntime;
+    readonly resolved_runtime: BackendCharacterRuntime;
+    readonly prompt: {
+        readonly character_name: string;
+        readonly user_name: string;
+        readonly persona: string;
+        readonly example_dialogue: string;
+    };
+    readonly target_conversation_id: string | null;
+    readonly greeting_action:
+        | "none"
+        | { readonly emit: { readonly content: string } };
+    readonly recommendations: {
+        readonly vision: boolean | null;
+        readonly memory: boolean | null;
+        readonly mcp_servers: ReadonlyArray<string>;
+    };
+};
+
+export type CommittedCharacterRuntime = {
+    readonly revision: number;
+    readonly runtime: BackendCharacterRuntime;
+    readonly target_conversation_id: string;
+};
+
 export type CharacterTemplateManifest = {
     readonly schema_version: number;
     readonly engine_version: string;
@@ -1751,6 +1808,22 @@ export async function listCharacters(): Promise<CharacterRecord[]> {
 
 export async function createCharacter(record: CharacterRecord): Promise<void> {
     return invoke("create_character", { request: record });
+}
+
+export async function prepareCharacterActivation(
+    characterId: string,
+): Promise<CharacterActivationToken> {
+    return invoke<CharacterActivationToken>("prepare_character_activation", { characterId });
+}
+
+export async function commitCharacterActivation(
+    token: Readonly<CharacterActivationToken>,
+): Promise<CommittedCharacterRuntime> {
+    return invoke<CommittedCharacterRuntime>("commit_character_activation", { token });
+}
+
+export async function getCommittedCharacterRuntime(): Promise<CommittedCharacterRuntime | null> {
+    return invoke<CommittedCharacterRuntime | null>("get_committed_character_runtime");
 }
 
 export async function createCharacterWithAvatar(
