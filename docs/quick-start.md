@@ -6,7 +6,7 @@ This guide gets Kokoro Engine to a first reply through the focused onboarding fl
 
 Download the installer for your platform from [GitHub Releases](https://github.com/chyinan/Kokoro-Engine/releases). Start the app after installation.
 
-For a source build, install Node.js 18 or newer and stable Rust, then run:
+For a source build, install Node.js 20.19+ (or 22.12+) and stable Rust, then run:
 
 ```bash
 npm install
