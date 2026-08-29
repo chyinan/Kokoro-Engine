@@ -29,6 +29,8 @@ pub struct ModInstallResult {
     pub source: ModInstallSource,
 }
 
+const MAX_MOD_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Validate mod ID format: must be non-empty and contain only alphanumeric, underscore, or dash
 fn is_valid_mod_id(id: &str) -> bool {
     !id.is_empty()
@@ -180,6 +182,12 @@ pub fn install_mod_archive(
     permission_confirmed: bool,
     source: ModInstallSource,
 ) -> Result<ModInstallResult, KokoroError> {
+    if bytes.len() as u64 > MAX_MOD_ARCHIVE_BYTES {
+        return Err(KokoroError::Validation(format!(
+            "MOD archive exceeds the {}MB download limit",
+            MAX_MOD_ARCHIVE_BYTES / (1024 * 1024)
+        )));
+    }
     fs::create_dir_all(mods_dir).map_err(KokoroError::from)?;
     let (manifest, staging_dir) = extract_to_staging(bytes, mods_dir, engine_version)?;
     if let Err(error) = permission_review(&manifest, source, permission_confirmed) {
@@ -391,16 +399,32 @@ pub async fn install_mod_from_url(
     if !confirm_untrusted_code {
         return Err(KokoroError::Unauthorized(untrusted_mod_url_warning(&url)));
     }
-    let bytes = reqwest::Client::new()
+    let response = reqwest::Client::new()
         .get(parsed)
         .send()
         .await
         .map_err(|error| KokoroError::ExternalService(error.to_string()))?
         .error_for_status()
-        .map_err(|error| KokoroError::ExternalService(error.to_string()))?
+        .map_err(|error| KokoroError::ExternalService(error.to_string()))?;
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_MOD_ARCHIVE_BYTES)
+    {
+        return Err(KokoroError::Validation(format!(
+            "MOD archive exceeds the {}MB download limit",
+            MAX_MOD_ARCHIVE_BYTES / (1024 * 1024)
+        )));
+    }
+    let bytes = response
         .bytes()
         .await
         .map_err(|error| KokoroError::ExternalService(error.to_string()))?;
+    if bytes.len() as u64 > MAX_MOD_ARCHIVE_BYTES {
+        return Err(KokoroError::Validation(format!(
+            "MOD archive exceeds the {}MB download limit",
+            MAX_MOD_ARCHIVE_BYTES / (1024 * 1024)
+        )));
+    }
     let mods_dir = {
         let manager = mod_manager.lock().await;
         manager.mods_path.clone()

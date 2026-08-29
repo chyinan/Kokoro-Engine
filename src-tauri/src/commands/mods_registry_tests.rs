@@ -221,3 +221,19 @@ fn url_install_requires_explicit_untrusted_code_warning() {
     assert!(warning.contains("code"));
     assert!(warning.contains("https://example.test/mod.zip"));
 }
+
+#[test]
+fn oversized_mod_archive_is_rejected_before_zip_processing() {
+    let oversized = vec![0_u8; 64 * 1024 * 1024 + 1];
+    let temp = TempDir::new().unwrap();
+    let error = install_mod_archive(
+        &oversized,
+        temp.path(),
+        &engine(),
+        true,
+        ModInstallSource::Registry,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("64MB download limit"));
+    assert!(fs::read_dir(temp.path()).unwrap().next().is_none());
+}
