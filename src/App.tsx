@@ -364,7 +364,10 @@ import { CameraWatcher } from "./features/camera/CameraWatcher";
 import { mapCharacterAvatarUrl } from "./ui/widgets/character-avatar-url";
 import { shouldEnableChatPanel } from "./ui/layout/layout-interaction";
 import { isOnboardingTurnEvent } from "./features/onboarding/onboarding-turn-correlation";
-import { cancelOnboardingChat as cancelPendingOnboardingChat } from "./features/onboarding/onboarding-chat-cancellation";
+import {
+  cancelDeferredOnboardingChat,
+  cancelOnboardingChat as cancelPendingOnboardingChat,
+} from "./features/onboarding/onboarding-chat-cancellation";
 
 let _regSnap = 0;
 const _subscribeFn = (cb: () => void) => {
@@ -447,6 +450,7 @@ function App() {
     resolve: (reply: string) => void;
     reject: (error: Error) => void;
   } | null>(null);
+  const cancelledOnboardingRequestIdsRef = useRef<Set<string>>(new Set());
   const pendingOnboardingResponseLanguageRef = useRef<string | null>(null);
 
   const [gazeTracking, setGazeTracking] = useState<boolean>(
@@ -940,7 +944,11 @@ function App() {
     const pending = onboardingChatPendingRef.current;
     onboardingChatPendingRef.current = null;
     setOnboardingSubmittingChat(false);
-    cancelPendingOnboardingChat(pending, cancelChatTurn);
+    cancelPendingOnboardingChat(
+      pending,
+      cancelChatTurn,
+      (clientRequestId) => cancelledOnboardingRequestIdsRef.current.add(clientRequestId),
+    );
   };
 
   const refreshMemoryModelStatus = useCallback(async () => {
@@ -1299,6 +1307,14 @@ function App() {
 
     // ── MOD System: Engine event bridge → broadcast to iframes + forward to QuickJS ──
     const unlistenOnboardingChatStart = onChatTurnStart(({ turn_id, client_request_id }) => {
+      if (cancelDeferredOnboardingChat(
+        cancelledOnboardingRequestIdsRef.current,
+        client_request_id,
+        turn_id,
+        cancelChatTurn,
+      )) {
+        return;
+      }
       const onboardingPending = onboardingChatPendingRef.current;
       if (onboardingPending && isOnboardingTurnEvent(onboardingPending.clientRequestId, client_request_id)) {
         onboardingPending.turnId = turn_id;
