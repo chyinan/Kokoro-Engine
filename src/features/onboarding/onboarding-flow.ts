@@ -134,7 +134,9 @@ export function onboardingFlowReducer(
         "connection-test",
       );
     case "connection-test-succeeded":
-      if (draft.providerId === null) return continueOnboarding(draft);
+      if (draft.language === null || draft.characterId === null || draft.providerId === null) {
+        return continueOnboarding(draft);
+      }
       return withStep(
         { ...draft, connectionTest: { status: "success", error: null } },
         "chat",
@@ -149,7 +151,14 @@ export function onboardingFlowReducer(
         "connection-test",
       );
     case "chat-started":
-      if (draft.connectionTest.status !== "success") return continueOnboarding(draft);
+      if (
+        draft.language === null
+        || draft.characterId === null
+        || draft.providerId === null
+        || draft.connectionTest.status !== "success"
+      ) {
+        return continueOnboarding(draft);
+      }
       return withStep(
         { ...draft, chat: { status: "pending", reply: null, error: null }, completed: false },
         "chat",
@@ -164,7 +173,14 @@ export function onboardingFlowReducer(
         "chat",
       );
     case "first-reply-succeeded":
-      if (draft.connectionTest.status !== "success") return continueOnboarding(draft);
+      if (
+        draft.language === null
+        || draft.characterId === null
+        || draft.providerId === null
+        || draft.connectionTest.status !== "success"
+      ) {
+        return continueOnboarding(draft);
+      }
       return withStep(
         {
           ...draft,

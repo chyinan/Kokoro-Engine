@@ -101,4 +101,16 @@ describe("onboarding flow", () => {
       chat: { status: "success", reply: "Hello!", error: null },
     });
   });
+
+  test("keeps incomplete setup out of chat even when success events arrive early", () => {
+    const draft = onboardingFlowReducer(createOnboardingDraft(), {
+      type: "connection-test-succeeded",
+    });
+
+    expect(draft).toMatchObject({
+      completed: false,
+      step: "language",
+      connectionTest: { status: "idle", error: null },
+    });
+  });
 });
