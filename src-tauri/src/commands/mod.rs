@@ -20,6 +20,8 @@ pub mod llm;
 pub mod mcp;
 pub mod memory;
 pub mod mods;
+#[cfg(test)]
+mod mods_registry_tests;
 pub mod pet;
 pub mod registry;
 #[cfg(test)]

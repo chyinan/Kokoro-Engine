@@ -1,10 +1,33 @@
+// pattern: Imperative Shell
+
 use crate::error::KokoroError;
 use crate::mods::{ModManager, ModManifest, ModThemeJson};
+use crate::registry::manifest::RegistryEntry;
+use semver::Version;
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 use std::fs;
-use std::io;
+use std::io::{self, Cursor, Read, Seek};
+use std::path::{Path, PathBuf};
 use tauri::{command, AppHandle, State};
 use tokio::sync::Mutex;
+use uuid::Uuid;
+
+/// Origin controls trust messaging. URL MODs always require a separate
+/// acknowledgement because checksum/transport validation cannot establish
+/// that executable code is safe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModInstallSource {
+    Local,
+    Registry,
+    Url,
+}
+
+#[derive(Debug)]
+pub struct ModInstallResult {
+    pub manifest: ModManifest,
+    pub source: ModInstallSource,
+}
 
 /// Validate mod ID format: must be non-empty and contain only alphanumeric, underscore, or dash
 fn is_valid_mod_id(id: &str) -> bool {
@@ -21,6 +44,230 @@ fn is_allowed_mod_file(ext: &str) -> bool {
         "ttf", "otf", "txt", "md",
     ];
     ALLOWED_EXTENSIONS.contains(&ext.to_lowercase().as_str())
+}
+
+pub fn untrusted_mod_url_warning(url: &str) -> String {
+    format!(
+        "This URL install contains untrusted executable MOD code ({url}). Review requested permissions and continue only if you trust the source."
+    )
+}
+
+fn permission_review(
+    manifest: &ModManifest,
+    source: ModInstallSource,
+    confirmed: bool,
+) -> Result<(), KokoroError> {
+    let requires_confirmation =
+        source == ModInstallSource::Url || manifest.permission_review_required();
+    if requires_confirmation && !confirmed {
+        let reason = if source == ModInstallSource::Url {
+            untrusted_mod_url_warning("the supplied URL")
+        } else {
+            "This MOD requests permissions that require explicit review before installation."
+                .to_string()
+        };
+        return Err(KokoroError::Unauthorized(reason));
+    }
+    Ok(())
+}
+
+fn read_manifest<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<ModManifest, KokoroError> {
+    let mut content = String::new();
+    let mut file = archive
+        .by_name("mod.json")
+        .map_err(|_| KokoroError::Validation("mod.json not found in archive root".to_string()))?;
+    file.read_to_string(&mut content)
+        .map_err(KokoroError::from)?;
+    let manifest: ModManifest = serde_json::from_str(&content)
+        .map_err(|error| KokoroError::Validation(format!("Invalid mod.json: {error}")))?;
+    Ok(manifest)
+}
+
+fn extract_to_staging(
+    bytes: &[u8],
+    mods_dir: &Path,
+    engine_version: &Version,
+) -> Result<(ModManifest, PathBuf), KokoroError> {
+    let file = Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(file).map_err(KokoroError::from)?;
+    let manifest = read_manifest(&mut archive)?;
+    manifest
+        .validate_for_engine(engine_version)
+        .map_err(|error| KokoroError::Validation(error.to_string()))?;
+
+    let staging_dir = mods_dir.join(format!(".staging-{}", Uuid::new_v4()));
+    fs::create_dir_all(&staging_dir).map_err(KokoroError::from)?;
+    const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+    const MAX_TOTAL_SIZE: u64 = 50 * 1024 * 1024;
+    let mut total_size = 0_u64;
+    let extraction = (|| -> Result<(), KokoroError> {
+        for index in 0..archive.len() {
+            let mut file = archive
+                .by_index(index)
+                .map_err(|error| KokoroError::Validation(error.to_string()))?;
+            let relative = file.enclosed_name().ok_or_else(|| {
+                KokoroError::Validation(format!("unsafe archive path `{}`", file.name()))
+            })?;
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return Err(KokoroError::Validation(format!(
+                    "unsafe archive path `{}`",
+                    file.name()
+                )));
+            }
+            let outpath = staging_dir.join(relative);
+            if file.name().ends_with('/') {
+                fs::create_dir_all(&outpath).map_err(KokoroError::from)?;
+                continue;
+            }
+            let ext = outpath
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or_default();
+            if !is_allowed_mod_file(ext) {
+                return Err(KokoroError::Validation(format!(
+                    "unsupported MOD file `{}`",
+                    file.name()
+                )));
+            }
+            if file.size() > MAX_FILE_SIZE {
+                return Err(KokoroError::Validation(format!(
+                    "MOD file `{}` exceeds the 10MB limit",
+                    file.name()
+                )));
+            }
+            total_size = total_size.saturating_add(file.size());
+            if total_size > MAX_TOTAL_SIZE {
+                return Err(KokoroError::Validation(
+                    "MOD package exceeds the 50MB limit".to_string(),
+                ));
+            }
+            if let Some(parent) = outpath.parent() {
+                fs::create_dir_all(parent).map_err(KokoroError::from)?;
+            }
+            let mut output = fs::File::create(&outpath).map_err(KokoroError::from)?;
+            io::copy(&mut file, &mut output).map_err(KokoroError::from)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = extraction {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(error);
+    }
+    Ok((manifest, staging_dir))
+}
+
+fn inspect_mod_archive(bytes: &[u8], engine_version: &Version) -> Result<ModManifest, KokoroError> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(KokoroError::from)?;
+    let manifest = read_manifest(&mut archive)?;
+    manifest
+        .validate_for_engine(engine_version)
+        .map_err(|error| KokoroError::Validation(error.to_string()))?;
+    Ok(manifest)
+}
+
+/// Validate and atomically replace an installed MOD. The old directory is
+/// untouched until extraction and permission review have both succeeded.
+pub fn install_mod_archive(
+    bytes: &[u8],
+    mods_dir: &Path,
+    engine_version: &Version,
+    permission_confirmed: bool,
+    source: ModInstallSource,
+) -> Result<ModInstallResult, KokoroError> {
+    fs::create_dir_all(mods_dir).map_err(KokoroError::from)?;
+    let (manifest, staging_dir) = extract_to_staging(bytes, mods_dir, engine_version)?;
+    if let Err(error) = permission_review(&manifest, source, permission_confirmed) {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(error);
+    }
+    let target = mods_dir.join(&manifest.id);
+    let previous = mods_dir.join(format!(".previous-{}", Uuid::new_v4()));
+    let had_previous = target.exists();
+    if had_previous {
+        fs::rename(&target, &previous).map_err(|error| {
+            let _ = fs::remove_dir_all(&staging_dir);
+            KokoroError::Io(format!("failed to stage previous MOD: {error}"))
+        })?;
+    }
+    if let Err(error) = fs::rename(&staging_dir, &target) {
+        if had_previous {
+            let _ = fs::rename(&previous, &target);
+        }
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(KokoroError::Io(format!(
+            "failed to install staged MOD: {error}"
+        )));
+    }
+    if had_previous {
+        let _ = fs::remove_dir_all(previous);
+    }
+    Ok(ModInstallResult { manifest, source })
+}
+
+/// Verify registry metadata before handing a MOD archive to the same staged
+/// installer used by local and URL sources. Registry metadata is not trusted
+/// merely because it arrived over HTTPS: size, checksum, identity, version,
+/// and engine compatibility are all checked against the package itself.
+pub fn install_registry_mod_archive(
+    bytes: &[u8],
+    entry: &RegistryEntry,
+    mods_dir: &Path,
+    engine_version: &Version,
+    permission_confirmed: bool,
+) -> Result<ModInstallResult, KokoroError> {
+    entry
+        .validate()
+        .map_err(|error| KokoroError::Validation(error.to_string()))?;
+    if entry.content_type != "mod" {
+        return Err(KokoroError::Validation(
+            "registry entry is not a MOD package".to_string(),
+        ));
+    }
+    if entry.archive_size != bytes.len() as u64 {
+        return Err(KokoroError::Validation(format!(
+            "MOD archive size mismatch: expected {}, got {}",
+            entry.archive_size,
+            bytes.len()
+        )));
+    }
+    let actual_checksum = format!("{:x}", Sha256::digest(bytes));
+    if !entry.sha256.eq_ignore_ascii_case(&actual_checksum) {
+        return Err(KokoroError::Validation(format!(
+            "MOD archive checksum mismatch: expected {}, got {actual_checksum}",
+            entry.sha256
+        )));
+    }
+    let candidate = inspect_mod_archive(bytes, engine_version)?;
+    if candidate.id != entry.id || candidate.version != entry.version {
+        return Err(KokoroError::Validation(format!(
+            "registry MOD metadata does not match manifest {}@{}",
+            candidate.id, candidate.version
+        )));
+    }
+    install_mod_archive(
+        bytes,
+        mods_dir,
+        engine_version,
+        permission_confirmed,
+        ModInstallSource::Registry,
+    )
+}
+
+pub fn remove_installed_mod(mods_dir: &Path, mod_id: &str) -> Result<(), KokoroError> {
+    if !is_valid_mod_id(mod_id) {
+        return Err(KokoroError::Validation("invalid MOD id".to_string()));
+    }
+    let target = mods_dir.join(mod_id);
+    if !target.exists() {
+        return Err(KokoroError::NotFound(format!("MOD '{mod_id}' not found")));
+    }
+    fs::remove_dir_all(target).map_err(|error| KokoroError::Io(error.to_string()))
 }
 
 #[command]
@@ -70,86 +317,102 @@ pub async fn install_mod(
         manager.mods_path.clone()
     };
 
-    let archive_path = std::path::Path::new(&file_path);
+    let archive_path = Path::new(&file_path);
     if !archive_path.exists() {
         return Err(KokoroError::NotFound("File does not exist".to_string()));
     }
+    let bytes = fs::read(archive_path).map_err(KokoroError::from)?;
+    let result = install_mod_archive(
+        &bytes,
+        &mods_dir,
+        &Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 3, 1)),
+        true,
+        ModInstallSource::Local,
+    )?;
+    Ok(result.manifest)
+}
 
-    let file = fs::File::open(archive_path).map_err(KokoroError::from)?;
-    let mut archive = zip::ZipArchive::new(file).map_err(KokoroError::from)?;
-
-    let mut manifest_content = String::new();
-    {
-        let mut manifest_file = archive
-            .by_name("mod.json")
-            .map_err(|_| KokoroError::Mod("mod.json not found in archive root".to_string()))?;
-        std::io::Read::read_to_string(&mut manifest_file, &mut manifest_content)
-            .map_err(KokoroError::from)?;
+#[command]
+pub async fn update_mod(
+    mod_manager: State<'_, Mutex<ModManager>>,
+    mod_id: String,
+    file_path: String,
+    permission_confirmed: bool,
+) -> Result<ModManifest, KokoroError> {
+    let mods_dir = {
+        let manager = mod_manager.lock().await;
+        manager.mods_path.clone()
+    };
+    let bytes = fs::read(&file_path).map_err(KokoroError::from)?;
+    let engine =
+        Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 3, 1));
+    let candidate = inspect_mod_archive(&bytes, &engine)?;
+    if candidate.id != mod_id {
+        return Err(KokoroError::Validation(format!(
+            "update package id '{}' does not match requested MOD '{mod_id}'",
+            candidate.id
+        )));
     }
+    let result = install_mod_archive(
+        &bytes,
+        &mods_dir,
+        &engine,
+        permission_confirmed,
+        ModInstallSource::Registry,
+    )?;
+    Ok(result.manifest)
+}
 
-    let manifest: ModManifest = serde_json::from_str(&manifest_content)
-        .map_err(|e| KokoroError::Mod(format!("Invalid mod.json: {}", e)))?;
+#[command]
+pub async fn remove_mod(
+    mod_manager: State<'_, Mutex<ModManager>>,
+    mod_id: String,
+) -> Result<(), KokoroError> {
+    let mods_dir = {
+        let manager = mod_manager.lock().await;
+        manager.mods_path.clone()
+    };
+    remove_installed_mod(&mods_dir, &mod_id)
+}
 
-    if !is_valid_mod_id(&manifest.id) {
+#[command]
+pub async fn install_mod_from_url(
+    mod_manager: State<'_, Mutex<ModManager>>,
+    url: String,
+    confirm_untrusted_code: bool,
+) -> Result<ModManifest, KokoroError> {
+    let parsed = reqwest::Url::parse(&url)
+        .map_err(|error| KokoroError::Validation(format!("invalid MOD URL: {error}")))?;
+    if parsed.scheme() != "https" || parsed.username() != "" || parsed.password().is_some() {
         return Err(KokoroError::Validation(
-            "Invalid mod ID. Must be alphanumeric, underscore or dash.".to_string(),
+            "MOD URL installs require HTTPS without credentials".to_string(),
         ));
     }
-
-    let target_dir = mods_dir.join(&manifest.id);
-    if target_dir.exists() {
-        fs::remove_dir_all(&target_dir)
-            .map_err(|e| KokoroError::Mod(format!("Failed to remove old mod: {}", e)))?;
+    if !confirm_untrusted_code {
+        return Err(KokoroError::Unauthorized(untrusted_mod_url_warning(&url)));
     }
-    fs::create_dir_all(&target_dir).map_err(KokoroError::from)?;
-
-    const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
-    const MAX_TOTAL_SIZE: u64 = 50 * 1024 * 1024;
-
-    let mut total_size: u64 = 0;
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| KokoroError::Mod(e.to_string()))?;
-        let outpath = match file.enclosed_name() {
-            Some(path) => target_dir.join(path),
-            None => continue,
-        };
-
-        if file.name().ends_with('/') {
-            fs::create_dir_all(&outpath).map_err(KokoroError::from)?;
-        } else {
-            let ext = outpath
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            if !is_allowed_mod_file(&ext) {
-                continue;
-            }
-            if file.size() > MAX_FILE_SIZE {
-                return Err(KokoroError::Mod(format!(
-                    "File '{}' exceeds maximum size of 10MB",
-                    file.name()
-                )));
-            }
-            total_size += file.size();
-            if total_size > MAX_TOTAL_SIZE {
-                return Err(KokoroError::Mod(
-                    "MOD package total size exceeds 50MB limit".to_string(),
-                ));
-            }
-            if let Some(p) = outpath.parent() {
-                if !p.exists() {
-                    fs::create_dir_all(p).map_err(KokoroError::from)?;
-                }
-            }
-            let mut outfile = fs::File::create(&outpath).map_err(KokoroError::from)?;
-            io::copy(&mut file, &mut outfile).map_err(KokoroError::from)?;
-        }
-    }
-
-    Ok(manifest)
+    let bytes = reqwest::Client::new()
+        .get(parsed)
+        .send()
+        .await
+        .map_err(|error| KokoroError::ExternalService(error.to_string()))?
+        .error_for_status()
+        .map_err(|error| KokoroError::ExternalService(error.to_string()))?
+        .bytes()
+        .await
+        .map_err(|error| KokoroError::ExternalService(error.to_string()))?;
+    let mods_dir = {
+        let manager = mod_manager.lock().await;
+        manager.mods_path.clone()
+    };
+    let result = install_mod_archive(
+        &bytes,
+        &mods_dir,
+        &Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 3, 1)),
+        true,
+        ModInstallSource::Url,
+    )?;
+    Ok(result.manifest)
 }
 
 #[command]
