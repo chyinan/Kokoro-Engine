@@ -62,6 +62,14 @@ import {
   type CharacterRuntimeOverrides,
 } from "./features/characters/character-runtime-overrides";
 import {
+  createOnboardingDraft,
+  deserializeOnboardingDraft,
+  onboardingFlowReducer,
+  serializeOnboardingDraft,
+  type OnboardingDraft,
+  type OnboardingFlowEvent,
+} from "./features/onboarding/onboarding-flow";
+import {
   createModActionDispatcher,
   getModActionFromEvent,
   type ModActionEnvelope,
@@ -358,6 +366,7 @@ type LegacyModActionEnvelope = ModActionEnvelope & {
 };
 
 const ONBOARDING_STATUS_KEY = "kokoro_onboarding_status";
+const ONBOARDING_DRAFT_KEY = "kokoro_onboarding_draft";
 
 const ONBOARDING_LANGUAGE_NAMES: Record<OnboardingLanguageCode, string> = {
   en: "English",
@@ -401,6 +410,9 @@ function App() {
   });
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep | null>(() =>
     localStorage.getItem(ONBOARDING_STATUS_KEY) ? null : "language"
+  );
+  const [onboardingDraft, setOnboardingDraft] = useState<OnboardingDraft>(() =>
+    deserializeOnboardingDraft(localStorage.getItem(ONBOARDING_DRAFT_KEY)) ?? createOnboardingDraft()
   );
   const [onboardingLanguage, setOnboardingLanguage] = useState<OnboardingLanguageCode>(() =>
     normalizeOnboardingLanguageCode(
@@ -823,7 +835,16 @@ function App() {
     setUserLanguage(label).catch(console.error);
   };
 
+  function dispatchOnboardingEvent(event: OnboardingFlowEvent): void {
+    setOnboardingDraft((previous) => {
+      const next = onboardingFlowReducer(previous, event);
+      localStorage.setItem(ONBOARDING_DRAFT_KEY, serializeOnboardingDraft(next));
+      return next;
+    });
+  }
+
   const previewOnboardingLanguage = (language: OnboardingLanguageCode) => {
+    dispatchOnboardingEvent({ type: "select-language", language });
     applyOnboardingLanguage(language);
   };
 
@@ -883,6 +904,13 @@ function App() {
   }, [memoryModelError, memoryModelStatus, refreshMemoryModelStatus, startMemoryModelDownload]);
 
   const closeOnboarding = (status: "completed" | "dismissed") => {
+    if (status === "dismissed") {
+      dispatchOnboardingEvent({ type: "dismiss" });
+    } else if (!onboardingDraft.completed) {
+      // The flow is complete only after the chat layer reports its first
+      // successful reply; closing the legacy tour cannot bypass that gate.
+      return;
+    }
     localStorage.setItem(ONBOARDING_STATUS_KEY, status);
     setOnboardingStep(null);
   };
