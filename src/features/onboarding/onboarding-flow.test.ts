@@ -9,6 +9,7 @@ import {
   onboardingFlowReducer,
   resumeOnboarding,
   serializeOnboardingDraft,
+  shouldOpenOnboarding,
   type OnboardingDraft,
 } from "./onboarding-flow";
 
@@ -85,6 +86,14 @@ describe("onboarding flow", () => {
       characterId: "kokoro",
       providerId: "ollama",
     });
+  });
+
+  test("does not reopen a dismissed incomplete draft on restart", () => {
+    const configured = configureThroughProvider();
+    const dismissed = dismissOnboarding(configured);
+
+    expect(shouldOpenOnboarding(null, dismissed)).toBe(false);
+    expect(shouldOpenOnboarding("in-progress", dismissed)).toBe(false);
   });
 
   test("round-trips a draft through its serializable representation", () => {

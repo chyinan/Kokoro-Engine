@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
+use crate::characters::instance_resource::parse_instance_avatar_request;
+
 const BUILTIN_MODEL_PREFIX: &str = "__builtin__/";
 
 /// Handler for the `live2d://` custom protocol.
@@ -133,26 +135,22 @@ pub fn handle_character_instance_resource_request() -> impl Fn(
                     .unwrap();
             }
         };
-        let Some(instance_id) = request.uri().host() else {
+        let uri = request.uri();
+        if uri.host().is_none() {
             return tauri::http::Response::builder()
                 .status(400)
                 .body(b"Bad Request".to_vec())
                 .unwrap();
-        };
-        let relative = percent_decode(request.uri().path())
-            .trim_start_matches('/')
-            .to_string();
-        if instance_id.is_empty()
-            || instance_id.contains("..")
-            || instance_id.contains('/')
-            || instance_id.contains('\\')
-            || relative != "avatar.png"
-        {
+        }
+        let decoded_path = percent_decode(uri.path());
+        let Some((instance_id, relative)) =
+            parse_instance_avatar_request(uri.host(), &decoded_path)
+        else {
             return tauri::http::Response::builder()
                 .status(403)
                 .body(b"Forbidden".to_vec())
                 .unwrap();
-        }
+        };
 
         let root = app_data.join("character-instance-resources");
         let candidate = root.join(instance_id).join(relative);

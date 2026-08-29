@@ -191,11 +191,9 @@ describe("OnboardingOverlay workflow", () => {
     expect(container.querySelector('[data-onboarding-action="save-provider"]')?.hasAttribute("disabled")).toBe(false);
     click(container, '[data-onboarding-action="save-provider"]');
     expect(onProviderSave).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => {
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain("couldn't save");
     });
-
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain("couldn't save");
     click(container, '[data-onboarding-action="retry-provider"]');
     expect(onProviderSave).toHaveBeenCalledTimes(2);
     unmount();

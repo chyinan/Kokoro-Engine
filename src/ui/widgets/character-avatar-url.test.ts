@@ -1,4 +1,4 @@
-// pattern: Functional Core
+// pattern: Mixed — covers pure mapping and browser-platform URL translation
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -10,6 +10,14 @@ describe("character avatar URL mapping", () => {
 
     expect(mapCharacterAvatarUrl("character-instance-resource://custom/avatar.png", convertFileSrc))
       .toBe("character-instance-resource://custom/avatar.png");
+    expect(convertFileSrc).not.toHaveBeenCalled();
+  });
+
+  it("maps managed character protocol references to the Windows WebView2 origin", () => {
+    const convertFileSrc = vi.fn((path: string) => `asset://${path}`);
+
+    expect(mapCharacterAvatarUrl("character-instance-resource://custom/avatar.png", convertFileSrc, "windows"))
+      .toBe("http://character-instance-resource.localhost/custom/avatar.png");
     expect(convertFileSrc).not.toHaveBeenCalled();
   });
 

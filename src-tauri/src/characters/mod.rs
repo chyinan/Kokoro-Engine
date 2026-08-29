@@ -9,6 +9,8 @@ use thiserror::Error;
 pub mod activation;
 pub mod catalog;
 pub mod instance_resource;
+#[cfg(test)]
+mod instance_resource_tests;
 pub mod manifest;
 pub mod merge;
 

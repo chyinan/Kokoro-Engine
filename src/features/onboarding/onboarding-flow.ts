@@ -99,6 +99,14 @@ export function continueOnboarding(draft: Readonly<OnboardingDraft>): Onboarding
   return withStep(draft, "chat");
 }
 
+/** Decides whether startup should open the modal without discarding a resumable draft. */
+export function shouldOpenOnboarding(
+  status: string | null,
+  draft: Readonly<OnboardingDraft> | null,
+): boolean {
+  return status !== "completed" && draft?.completed !== true && draft?.dismissed !== true;
+}
+
 /** Advances the serializable onboarding state in response to a user/system event. */
 export function onboardingFlowReducer(
   draft: Readonly<OnboardingDraft>,

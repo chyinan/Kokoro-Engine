@@ -1,4 +1,4 @@
-// pattern: Functional Core
+// pattern: Mixed — exercises pure normalization and imperative bridge adapters
 
 import { describe, expect, test, vi } from "vitest";
 import type { LlmConfig, LlmConnectionTestResult, LlmProviderConfig } from "../../lib/kokoro-bridge";

@@ -66,6 +66,7 @@ import {
   deserializeOnboardingDraft,
   onboardingFlowReducer,
   serializeOnboardingDraft,
+  shouldOpenOnboarding,
   type OnboardingDraft,
   type OnboardingFlowEvent,
 } from "./features/onboarding/onboarding-flow";
@@ -403,7 +404,7 @@ function App() {
   const [onboardingOpen, setOnboardingOpen] = useState<boolean>(() => {
     const status = localStorage.getItem(ONBOARDING_STATUS_KEY);
     const draft = deserializeOnboardingDraft(localStorage.getItem(ONBOARDING_DRAFT_KEY));
-    return status !== "completed" && draft?.completed !== true;
+    return shouldOpenOnboarding(status, draft);
   });
   const [displayMode, setDisplayMode] = useState<Live2DDisplayMode>(
     () => readStringSetting(APP_SETTING_KEYS.displayMode, "full") as Live2DDisplayMode
