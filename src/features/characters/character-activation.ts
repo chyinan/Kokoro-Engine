@@ -20,6 +20,7 @@ export type LocalTtsPresetProbe = {
 export type CharacterActivationDependencies = {
   readonly prepareCharacterActivation: (
     characterId: string,
+    options?: Readonly<{ allowLocalPreset: boolean }>,
   ) => Promise<CharacterActivationToken>;
   readonly commitCharacterActivation: (
     token: Readonly<CharacterActivationToken>,
@@ -45,8 +46,12 @@ export type CharacterActivationDependencies = {
 };
 
 export type CharacterActivationService = {
-  readonly activateCharacter: (characterId: string) => Promise<CommittedCharacterRuntime>;
+  readonly activateCharacter: (characterId: string) => Promise<SuccessfulCharacterActivation>;
   readonly recoverCommittedRuntime: () => Promise<CommittedCharacterRuntime | null>;
+};
+
+export type SuccessfulCharacterActivation = CommittedCharacterRuntime & {
+  readonly recommendations: CharacterActivationToken["recommendations"];
 };
 
 function writeCacheBestEffort(
@@ -63,24 +68,42 @@ function writeCacheBestEffort(
 async function handleLocalPreset(
   dependencies: Readonly<CharacterActivationDependencies>,
   token: Readonly<CharacterActivationToken>,
-): Promise<void> {
+): Promise<CharacterActivationToken> {
   const tts = token.resolved_runtime.tts;
-  if (tts.mode !== "local_preset_confirmation") return;
+  if (tts.mode !== "local_preset_confirmation") return token;
 
   const endpoint = tts.endpoint;
   if (endpoint === null || !isConventionalLoopbackTtsEndpoint(endpoint)) {
     throw new Error("invalid local TTS preset endpoint");
   }
 
-  const probe = {
-    endpoint,
-    available: await dependencies.probeLocalTtsPreset(endpoint),
-  };
+  let available = false;
+  try {
+    available = await dependencies.probeLocalTtsPreset(endpoint);
+  } catch {
+    // A probe transport error is an unavailable preset, not an activation error.
+    available = false;
+  }
+  const probe = { endpoint, available };
   dependencies.presentLocalTtsPresetProbe(probe);
-  const isConfirmed = await dependencies.confirmLocalTtsPresetSave(probe);
+  const isConfirmed = probe.available
+    ? await dependencies.confirmLocalTtsPresetSave(probe)
+    : false;
   if (isConfirmed) {
     await dependencies.saveConfirmedLocalTtsPreset(token);
+    const resolved = await dependencies.prepareCharacterActivation(
+      token.resolved_runtime.character_id,
+      { allowLocalPreset: true },
+    );
+    if (resolved.resolved_runtime.tts.mode === "local_preset_confirmation") {
+      throw new Error("local TTS preset was not resolved after confirmation");
+    }
+    return resolved;
   }
+  return dependencies.prepareCharacterActivation(
+    token.resolved_runtime.character_id,
+    { allowLocalPreset: false },
+  );
 }
 
 /**
@@ -102,20 +125,22 @@ export function createCharacterActivationService(
     return result;
   }
 
-  async function activateNow(characterId: string): Promise<CommittedCharacterRuntime> {
-    const token = await dependencies.prepareCharacterActivation(characterId);
+  async function activateNow(characterId: string): Promise<SuccessfulCharacterActivation> {
+    let token = await dependencies.prepareCharacterActivation(characterId);
     currentRevision = Math.max(currentRevision, token.revision);
     const snapshot = snapshotFrontendRuntime(dependencies.readFrontendRuntime());
 
     try {
-      await handleLocalPreset(dependencies, token);
+      token = await handleLocalPreset(dependencies, token);
+      currentRevision = Math.max(currentRevision, token.revision);
       const nextRuntime = resolveFrontendRuntimeProfile(token.resolved_runtime, snapshot);
       await dependencies.applyFrontendRuntime(nextRuntime);
       const committed = await dependencies.commitCharacterActivation(token);
       currentRevision = Math.max(currentRevision, committed.revision);
-      writeCacheBestEffort(dependencies, committed);
-      dependencies.dispatchRuntimeChanged(committed);
-      return committed;
+      const successful = { ...committed, recommendations: token.recommendations };
+      writeCacheBestEffort(dependencies, successful);
+      dependencies.dispatchRuntimeChanged(successful);
+      return successful;
     } catch (error) {
       if (token.revision === currentRevision) {
         await dependencies.restoreFrontendRuntime(snapshot);
@@ -138,7 +163,7 @@ export function createCharacterActivationService(
   }
 
   return {
-    activateCharacter(characterId: string): Promise<CommittedCharacterRuntime> {
+    activateCharacter(characterId: string): Promise<SuccessfulCharacterActivation> {
       return serialize(() => activateNow(characterId));
     },
     recoverCommittedRuntime(): Promise<CommittedCharacterRuntime | null> {

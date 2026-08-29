@@ -47,6 +47,13 @@ import {
   type CharacterActivationService,
 } from "./features/characters/character-activation";
 import type { FrontendRuntimeState } from "./features/characters/character-runtime-profile";
+import { parseCharacterCueProfile } from "./features/characters/character-cue-profile";
+import { applyCharacterCapabilityRecommendations } from "./features/characters/character-capability-recommendations";
+import { createCharacterRuntimeOverrideService } from "./features/characters/character-runtime-override-service";
+import {
+  selectCharacterForEditing,
+  type CharacterRuntimeOverrides,
+} from "./features/characters/character-runtime-overrides";
 import {
   createModActionDispatcher,
   getModActionFromEvent,
@@ -213,7 +220,7 @@ import {
   applyCharacterTemplateReconciliation,
   createCharacter,
   createCharacterWithAvatar,
-  setPersona,
+  updateCharacter,
   setUserName,
   setUserPersona,
   setResponseLanguage,
@@ -481,6 +488,7 @@ function App() {
     readonly characterName: string;
     readonly recommendations: CharacterCapabilityRecommendations;
   } | null>(null);
+  const [characterToEditId, setCharacterToEditId] = useState<string | null>(null);
 
   // Mod-specific state exposed via props
   const [voiceInterrupt, setVoiceInterrupt] = useState(false);
@@ -550,8 +558,24 @@ function App() {
     }
     if (runtime.cueProfile === null) {
       removeSetting(APP_SETTING_KEYS.characterCueProfile);
+      removeSetting(APP_SETTING_KEYS.characterCueProfileCache);
+      window.dispatchEvent(new CustomEvent("kokoro-character-cue-profile-changed", {
+        detail: { cueMap: {}, semanticCueMap: {} },
+      }));
     } else {
       writeStringSetting(APP_SETTING_KEYS.characterCueProfile, runtime.cueProfile);
+      try {
+        const response = await fetch(convertFileSrc(runtime.cueProfile));
+        if (!response.ok) throw new Error(`cue profile returned ${response.status}`);
+        const applied = parseCharacterCueProfile(await response.json());
+        writeJsonSetting(APP_SETTING_KEYS.characterCueProfileCache, applied);
+        window.dispatchEvent(new CustomEvent("kokoro-character-cue-profile-changed", {
+          detail: applied,
+        }));
+      } catch (error) {
+        console.warn("[CharacterActivation] failed to apply optional cue profile", error);
+        removeSetting(APP_SETTING_KEYS.characterCueProfileCache);
+      }
     }
     writeBooleanSetting(APP_SETTING_KEYS.ttsEnabled, runtime.tts.enabled);
     writeStringSetting(APP_SETTING_KEYS.ttsProvider, runtime.tts.providerId ?? "");
@@ -594,11 +618,16 @@ function App() {
         }
       },
       presentLocalTtsPresetProbe: ({ endpoint, available }) => {
-        console.info("[CharacterActivation] local TTS preset probe", { endpoint, available });
+        window.alert(t(
+          available
+            ? "characterCatalog.ttsProbe.available"
+            : "characterCatalog.ttsProbe.unavailable",
+          { endpoint },
+        ));
       },
       confirmLocalTtsPresetSave: async ({ endpoint, available }) => {
         if (!available) return false;
-        return window.confirm(`Local TTS endpoint ${endpoint} is reachable. Save this preset?`);
+        return window.confirm(t("characterCatalog.ttsProbe.confirm", { endpoint }));
       },
       saveConfirmedLocalTtsPreset: async (token: Readonly<CharacterActivationToken>) => {
         const resolved = token.resolved_runtime.tts;
@@ -608,22 +637,32 @@ function App() {
         if (id === null || providerType === null || endpoint === null) return;
         const config = await getTtsConfig();
         const existing = config.providers.find((provider) => provider.id === id);
-        if (existing) return;
         const nextConfig: TtsSystemConfig = {
           ...config,
           default_provider: id,
-          providers: [
-            ...config.providers,
-            {
-              id,
-              provider_type: providerType,
-              enabled: true,
-              endpoint,
-              base_url: endpoint,
-              default_voice: resolved.voice,
-              extra: {},
-            },
-          ],
+          providers: existing
+            ? config.providers.map((provider) => provider.id === id
+              ? {
+                ...provider,
+                provider_type: providerType,
+                enabled: true,
+                endpoint: provider.endpoint ?? endpoint,
+                base_url: provider.base_url ?? endpoint,
+                default_voice: provider.default_voice ?? resolved.voice,
+              }
+              : provider)
+            : [
+              ...config.providers,
+              {
+                id,
+                provider_type: providerType,
+                enabled: true,
+                endpoint,
+                base_url: endpoint,
+                default_voice: resolved.voice,
+                extra: {},
+              },
+            ],
         };
         await saveTtsConfig(nextConfig);
         setTtsConfig(nextConfig);
@@ -631,6 +670,27 @@ function App() {
     });
   }
   const characterActivation = activationServiceRef.current;
+  const characterRuntimeOverrides = createCharacterRuntimeOverrideService({
+    getCharacter: async (characterId) => {
+      const all = await listCharacters();
+      return selectCharacterForEditing(all, characterId);
+    },
+    updateCharacter: async (character) => {
+      const { created_at: _createdAt, ...request } = character;
+      await updateCharacter(request);
+    },
+    activateCharacter: (characterId) => characterActivation.activateCharacter(characterId),
+    now: Date.now,
+  });
+
+  async function updateActiveCharacterRuntime(
+    overrides: Readonly<CharacterRuntimeOverrides>,
+  ): Promise<void> {
+    const characterId = readStringSetting(APP_SETTING_KEYS.activeCharacterId, "");
+    if (!characterId) throw new Error("active character is unavailable");
+    await characterRuntimeOverrides.update(characterId, overrides);
+    setCharacters(await listCharacters());
+  }
 
   const modelUrl = useMemo(() => {
     if (customModelPath) {
@@ -1362,17 +1422,13 @@ function App() {
     if (detail.action === 'set_model' && detail.data?.model) {
       const model = detail.data.model;
       const target = availableModels.find(m => m.name === model || m.path === model);
-      if (target) handleCustomModelChange(target.path);
+      if (target) void updateActiveCharacterRuntime({ live2dModel: target.path }).catch(console.error);
     }
     if (detail.action === 'set_persona' && detail.data?.persona) {
-      setPersonaState(detail.data.persona);
-      writeStringSetting(APP_SETTING_KEYS.persona, detail.data.persona);
-      setPersona(detail.data.persona).catch(console.error);
+      void updateActiveCharacterRuntime({ persona: detail.data.persona }).catch(console.error);
     }
     if (detail.action === 'set_language' && detail.data?.language) {
-      setResponseLanguageState(detail.data.language);
-      writeStringSetting(APP_SETTING_KEYS.responseLanguage, detail.data.language);
-      setResponseLanguage(detail.data.language).catch(console.error);
+      void updateActiveCharacterRuntime({ responseLanguage: detail.data.language }).catch(console.error);
     }
     // Full Config Save Handlers
     if (detail.action === 'save_llm_config' && detail.data?.config) {
@@ -1380,13 +1436,25 @@ function App() {
       saveLlmConfig(detail.data.config).catch(console.error);
     }
     if (detail.action === 'save_tts_config' && detail.data?.config) {
-      setTtsConfig(detail.data.config);
-      saveTtsConfig(detail.data.config).then(() => {
+      const config = detail.data.config as TtsSystemConfig;
+      setTtsConfig(config);
+      saveTtsConfig(config).then(() => {
         // Refresh providers & voices after save
         Promise.all([listTtsProviders(), listTtsVoices()]).then(([p, v]) => {
           setTtsProviders(p);
           setTtsVoices(v);
         }).catch(err => console.error("[App] Failed to refresh TTS lists:", err));
+        const provider = config.providers.find((candidate) => candidate.id === config.default_provider) ?? null;
+        return updateActiveCharacterRuntime({
+          tts: {
+            enabled: provider?.enabled === true,
+            providerId: provider?.id ?? null,
+            providerType: provider?.provider_type ?? null,
+            voice: provider?.default_voice ?? null,
+            speed: 1,
+            pitch: 1,
+          },
+        });
       }).catch(console.error);
     }
     if (detail.action === 'save_stt_config' && detail.data?.config) {
@@ -1555,11 +1623,7 @@ function App() {
 
     if (detail.action === 'set_proactive_enabled') {
       const enabled = !!detail.data?.enabled;
-      setProactiveEnabledState(enabled);
-      writeBooleanSetting(APP_SETTING_KEYS.proactiveEnabled, enabled);
-      import("./lib/kokoro-bridge").then(({ setProactiveEnabled }) => {
-        setProactiveEnabled(enabled).catch(console.error);
-      });
+      void updateActiveCharacterRuntime({ proactiveEnabled: enabled }).catch(console.error);
     }
 
     // ── Background Config Actions ────────────────────
@@ -1796,7 +1860,7 @@ function App() {
     }
     if (detail.action === 'set_custom_model') {
       const newPath = detail.data?.path ?? null;
-      handleCustomModelChange(newPath);
+      void updateActiveCharacterRuntime({ live2dModel: newPath }).catch(console.error);
     }
     if (detail.action === 'import_model') {
       import('@tauri-apps/plugin-dialog').then(({ open }) => {
@@ -1811,16 +1875,14 @@ function App() {
             if (selected.toLowerCase().endsWith('.zip')) {
               try {
                 const modelPath = await importLive2dZip(selected);
-                setCustomModelPath(modelPath);
-                writeStringSetting(APP_SETTING_KEYS.customModelPath, modelPath);
+                await updateActiveCharacterRuntime({ live2dModel: modelPath });
                 const models = await listLive2dModels();
                 setAvailableModels(models);
               } catch (e) { console.error('[App] import zip failed:', e); }
             } else {
               try {
                 const modelPath = await importLive2dFolder(selected);
-                setCustomModelPath(modelPath);
-                writeStringSetting(APP_SETTING_KEYS.customModelPath, modelPath);
+                await updateActiveCharacterRuntime({ live2dModel: modelPath });
                 const models = await listLive2dModels();
                 setAvailableModels(models);
               } catch (e) { console.error('[App] import folder failed:', e); }
@@ -1989,18 +2051,15 @@ function App() {
           : null;
       }
 
-      await characterActivation.activateCharacter(targetId);
+      const activation = await characterActivation.activateCharacter(targetId);
       setCharacters(await listCharacters());
 
-      const raw = template?.recommendations;
-      if (raw === null || raw === undefined) return null;
+      const raw = activation.recommendations;
       const recommendations: CharacterCapabilityRecommendations = {
         vision: raw.vision === true,
         memory: raw.memory === true,
-        mcpServers: Array.isArray(raw.mcp_servers)
-          ? raw.mcp_servers.filter((value): value is string => typeof value === "string")
-          : [],
-        botPlatforms: [],
+        mcpServers: raw.mcp_servers,
+        botPlatforms: raw.bot_platforms,
       };
       return recommendations.vision
         || recommendations.memory
@@ -2014,7 +2073,9 @@ function App() {
         detail: { action: "import_character" },
       }));
     },
-    editCharacter: async () => {
+    editCharacter: async (characterId) => {
+      selectCharacterForEditing(characters, characterId);
+      setCharacterToEditId(characterId);
       setActiveSettingsTab("persona");
       setSettingsOpen(true);
     },
@@ -2067,23 +2128,38 @@ function App() {
   const enableRecommendedCapabilities = async (
     recommendations: Readonly<CharacterCapabilityRecommendations>,
   ): Promise<void> => {
-    const updates: Array<Promise<unknown>> = [];
-    if (recommendations.vision) {
-      const currentVision = visionConfig ?? await getVisionConfig();
-      const nextVision = { ...currentVision, vlm_enabled: true };
-      updates.push(saveVisionConfig(nextVision).then(() => setVisionConfig(nextVision)));
-    }
-    if (recommendations.memory) {
-      updates.push(setMemoryEnabled(true));
-    }
-    const availableMcpServers = new Set(mcpServers.map((server) => server.name));
-    for (const server of recommendations.mcpServers) {
-      if (availableMcpServers.has(server)) updates.push(toggleMcpServer(server, true));
-    }
-    await Promise.all(updates);
-    if (recommendations.mcpServers.length > 0) {
-      setMcpServers(await listMcpServers());
-    }
+    await applyCharacterCapabilityRecommendations({
+      recommendations,
+      dependencies: {
+        enableVisionBackend: async () => {
+          const currentVision = visionConfig ?? await getVisionConfig();
+          const nextVision = { ...currentVision, vlm_enabled: true };
+          await saveVisionConfig(nextVision);
+          setVisionConfig(nextVision);
+        },
+        cacheVisionEnabled: (enabled) => writeBooleanSetting(APP_SETTING_KEYS.visionEnabled, enabled),
+        dispatchVisionChanged: () => dispatchRuntimeSettingsChanged("vision"),
+        setMemoryEnabled,
+        listMcpServerNames: () => mcpServers.map((server) => server.name),
+        toggleMcpServer,
+        refreshMcpServers: async () => setMcpServers(await listMcpServers()),
+        enableBotPlatforms: async (platforms) => {
+          const current = botConfig ?? await getBotConfig();
+          let next = current;
+          for (const platform of platforms) {
+            switch (platform) {
+              case "telegram": next = { ...next, telegram: { ...next.telegram, enabled: true } }; break;
+              case "qq": next = { ...next, qq: { ...next.qq, enabled: true } }; break;
+              case "discord": next = { ...next, discord: { ...next.discord, enabled: true } }; break;
+              case "line": next = { ...next, line: { ...next.line, enabled: true } }; break;
+              case "webhook": next = { ...next, webhook: { ...next.webhook, enabled: true } }; break;
+            }
+          }
+          const saved = await saveBotConfig(next);
+          setBotConfig(saved);
+        },
+      },
+    });
   };
 
   // Determine active background based on mode
@@ -2229,9 +2305,11 @@ function App() {
             capturedScreenUrl={capturedScreenUrl}
             userLanguage={userLanguage}
             activeCharacterId={readStringSetting(APP_SETTING_KEYS.activeCharacterId, "default") || "default"}
+            characterToEditId={characterToEditId}
             onActivateCharacter={async (characterId: string) => {
               await characterActivation.activateCharacter(characterId);
             }}
+            onCharacterRuntimeChange={updateActiveCharacterRuntime}
             characters={characters}
             // User Profile (from localStorage)
             userName={readStringSetting(APP_SETTING_KEYS.userName, "")}

@@ -2,7 +2,11 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { createChatCharacterSynchronizer } from "./chat-character-sync";
+import {
+  createChatCharacterSynchronizer,
+  getInitialCharacterConversationTarget,
+  isFailureForActiveChat,
+} from "./chat-character-sync";
 
 type PendingValue<TValue> = {
   readonly promise: Promise<TValue>;
@@ -42,6 +46,25 @@ function loaded(content: string) {
 }
 
 describe("character conversation synchronization", () => {
+  it("hydrates the backend-committed conversation when activation completed before mount", () => {
+    const target = getInitialCharacterConversationTarget("pico", {
+      revision: 9,
+      runtime: { character_id: "pico" },
+      target_conversation_id: "pico-committed",
+    });
+
+    expect(target).toEqual({
+      characterId: "pico",
+      preferredConversationId: "pico-committed",
+    });
+  });
+
+  it("ignores late failure events from an old character or old turn", () => {
+    expect(isFailureForActiveChat({ character_id: "kokoro", turn_id: "turn-new" }, "pico", "turn-new")).toBe(false);
+    expect(isFailureForActiveChat({ character_id: "pico", turn_id: "turn-old" }, "pico", "turn-new")).toBe(false);
+    expect(isFailureForActiveChat({ character_id: "pico", turn_id: "turn-new" }, "pico", "turn-new")).toBe(true);
+  });
+
   it("clears the prior character immediately and loads the activated conversation", async () => {
     const lists = pendingValue<Array<ReturnType<typeof conversation>>>();
     const clearVisibleConversation = vi.fn();

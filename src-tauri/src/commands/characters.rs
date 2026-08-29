@@ -191,6 +191,7 @@ pub async fn list_characters(
 #[tauri::command]
 pub async fn prepare_character_activation(
     character_id: String,
+    allow_local_preset: Option<bool>,
     coordinator: State<'_, ActivationCoordinator>,
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
@@ -201,13 +202,19 @@ pub async fn prepare_character_activation(
         orchestrator: &orchestrator,
         app_data: app_data.clone(),
     };
+    let local_presets = allowlisted_local_tts_presets();
+    let allowed_presets = if allow_local_preset.unwrap_or(true) {
+        local_presets.as_slice()
+    } else {
+        &[]
+    };
     coordinator
         .prepare_with_package_root(
             &orchestrator.db,
             &app_data.join("characters"),
             &character_id,
             &tts_config,
-            &allowlisted_local_tts_presets(),
+            allowed_presets,
             &backend,
         )
         .await

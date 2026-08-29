@@ -27,7 +27,9 @@ export type FrontendRuntimeState = {
 function packageAssetPath(
   reference: PreparedCharacterRuntime["live2d_model"],
 ): string | null {
-  return reference?.source === "package" ? reference.path : null;
+  if (reference?.source === "package") return reference.path;
+  if (reference?.source === "library") return reference.model_id;
+  return null;
 }
 
 /**

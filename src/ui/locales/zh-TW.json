@@ -10,6 +10,11 @@
     "restoreDefault": "還原範本預設值",
     "resolveConflict": "保留我的修改並套用範本更新",
     "copySuffix": "副本",
+    "ttsProbe": {
+      "available": "本機 TTS 已在 {{endpoint}} 回應。",
+      "unavailable": "本機 TTS 未在 {{endpoint}} 回應，將使用瀏覽器語音或純文字備援。",
+      "confirm": "{{endpoint}} 的本機 TTS 可用。要儲存此服務並用於這個角色嗎？"
+    },
     "recommendations": {
       "eyebrow": "選用能力",
       "title": "增強 {{name}} 的能力？",

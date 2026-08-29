@@ -41,6 +41,9 @@ pub enum PackageAssetReference {
         template_version: String,
         path: String,
     },
+    Library {
+        model_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +82,7 @@ pub struct CapabilityRecommendations {
     pub vision: Option<bool>,
     pub memory: Option<bool>,
     pub mcp_servers: Vec<String>,
+    pub bot_platforms: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,7 +263,11 @@ impl ActivationCoordinator {
                 .proactive_enabled
                 .unwrap_or(previous_committed.proactive_enabled),
             current_conversation_id: target_conversation_id.clone(),
-            live2d_model: template_content.live2d_model,
+            live2d_model: resolve_library_live2d_reference(
+                package_root,
+                requested_runtime.live2d_model.as_deref(),
+            )
+            .or(template_content.live2d_model),
             background: template_content.background,
             cue_profile: template_content.cue_profile,
             tts: resolve_tts(requested_runtime.tts.as_ref(), tts_config, local_presets),
@@ -442,6 +450,14 @@ fn resolve_tts(
     local_presets: &[LocalTtsPreset],
 ) -> ResolvedTts {
     let requested = requested.cloned().unwrap_or_default();
+    if requested.enabled == Some(false) {
+        return ResolvedTts {
+            voice: requested.voice,
+            speed: requested.speed,
+            pitch: requested.pitch,
+            ..Default::default()
+        };
+    }
     let enabled = |provider: &&crate::tts::config::ProviderConfig| provider.enabled;
     let matching_id = requested.provider_id.as_deref().and_then(|id| {
         config.providers.iter().filter(enabled).find(|provider| {
@@ -521,6 +537,48 @@ fn resolve_tts(
     }
 }
 
+fn resolve_library_live2d_reference(
+    package_root: Option<&Path>,
+    model_id: Option<&str>,
+) -> Option<PackageAssetReference> {
+    let (Some(package_root), Some(model_id)) = (package_root, model_id) else {
+        return None;
+    };
+    let relative = Path::new(model_id);
+    if model_id.trim().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return None;
+    }
+    let models_root = package_root.parent()?.join("live2d_models");
+    let metadata = fs::symlink_metadata(&models_root).ok()?;
+    if asset_metadata_is_redirected(&metadata) || !metadata.is_dir() {
+        return None;
+    }
+    let canonical_root = models_root.canonicalize().ok()?;
+    if canonical_root != models_root {
+        return None;
+    }
+    let expected = models_root.join(relative);
+    let metadata = fs::symlink_metadata(&expected).ok()?;
+    if asset_metadata_is_redirected(&metadata) || !metadata.is_file() {
+        return None;
+    }
+    let canonical = expected.canonicalize().ok()?;
+    if !canonical.starts_with(&canonical_root) {
+        return None;
+    }
+    Some(PackageAssetReference::Library {
+        model_id: model_id.to_string(),
+    })
+}
+
 #[derive(Default)]
 struct ResolvedTemplateContent {
     live2d_model: Option<PackageAssetReference>,
@@ -591,12 +649,39 @@ fn resolve_template_content(
             assets.cue_profile.as_deref(),
             PackageAssetRole::CueProfile,
         ),
-        recommendations: CapabilityRecommendations {
-            vision: recommendations.vision,
-            memory: recommendations.memory,
-            mcp_servers: recommendations.mcp_servers.unwrap_or_default(),
-        },
+        recommendations: sanitize_recommendations(&recommendations),
     })
+}
+
+fn sanitize_recommendations(
+    recommendations: &CharacterRecommendations,
+) -> CapabilityRecommendations {
+    const BOT_PLATFORM_ALLOWLIST: &[&str] = &["telegram", "qq", "discord", "line", "webhook"];
+
+    fn normalized_unique(values: Option<&Vec<String>>, allowlist: Option<&[&str]>) -> Vec<String> {
+        let mut normalized = Vec::new();
+        for value in values.into_iter().flatten() {
+            let value = value.trim();
+            if value.is_empty()
+                || allowlist.is_some_and(|allowed| !allowed.contains(&value))
+                || normalized.iter().any(|current| current == value)
+            {
+                continue;
+            }
+            normalized.push(value.to_string());
+        }
+        normalized
+    }
+
+    CapabilityRecommendations {
+        vision: recommendations.vision,
+        memory: recommendations.memory,
+        mcp_servers: normalized_unique(recommendations.mcp_servers.as_ref(), None),
+        bot_platforms: normalized_unique(
+            recommendations.bot_platforms.as_ref(),
+            Some(BOT_PLATFORM_ALLOWLIST),
+        ),
+    }
 }
 
 #[derive(Clone, Copy)]

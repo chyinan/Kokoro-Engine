@@ -10,6 +10,8 @@
 import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from "react";
 import { Live2DModel } from "pixi-live2d-display/cubism4";
 import { Live2DController, type IdleBehavior } from "./Live2DController";
+import { APP_SETTING_KEYS, readJsonSetting } from "../../lib/app-settings";
+import type { AppliedCharacterCueProfile } from "../characters/character-cue-profile";
 import { drawableHitTest, estimateRegionByY, REGION_DESCRIPTIONS } from "./DrawableHitTest";
 import { onChatCue, type Live2dModelProfile } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
@@ -117,8 +119,42 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
         useEffect(() => {
             const ctrl = getActiveController();
             if (!ctrl) return;
-            void ctrl.loadProfileForModel(modelPath);
+            void ctrl.loadProfileForModel(modelPath).then(() => {
+                const cached = readJsonSetting<AppliedCharacterCueProfile>(
+                    APP_SETTING_KEYS.characterCueProfileCache,
+                    { cueMap: {}, semanticCueMap: {} },
+                );
+                const profile = ctrl.getModelProfile();
+                if (!profile) return;
+                ctrl.setProfile({
+                    ...profile,
+                    cue_map: { ...profile.cue_map, ...cached.cueMap },
+                    semantic_cue_map: { ...profile.semantic_cue_map, ...cached.semanticCueMap },
+                });
+            });
         }, [getActiveController, modelPath]);
+
+        useEffect(() => {
+            const applyCharacterCues = (event: Event): void => {
+                const ctrl = getActiveController();
+                const profile = ctrl?.getModelProfile();
+                if (!ctrl || !profile) return;
+                const detail = (event as CustomEvent<AppliedCharacterCueProfile>).detail;
+                ctrl.setProfile({
+                    ...profile,
+                    cue_map: { ...profile.cue_map, ...(detail?.cueMap ?? {}) },
+                    semantic_cue_map: {
+                        ...profile.semantic_cue_map,
+                        ...(detail?.semanticCueMap ?? {}),
+                    },
+                });
+            };
+            window.addEventListener("kokoro-character-cue-profile-changed", applyCharacterCues);
+            return () => window.removeEventListener(
+                "kokoro-character-cue-profile-changed",
+                applyCharacterCues,
+            );
+        }, [getActiveController]);
 
         useEffect(() => {
             let unlisten: (() => void) | undefined;

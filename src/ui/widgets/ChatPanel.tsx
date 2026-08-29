@@ -13,6 +13,10 @@ import { useTranslation } from "react-i18next";
 import ConversationSidebar from "./ConversationSidebar";
 import { ChatMessage } from "./ChatMessage";
 import { createChatCharacterSynchronizer, type ChatCharacterSynchronizer } from "./chat-character-sync";
+import {
+    getInitialCharacterConversationTarget,
+    isFailureForActiveChat,
+} from "./chat-character-sync-core";
 import { getStreamingRevealText, hasActiveKokoroBubble, shouldRenderTypingIndicator } from "./chat-streaming-state";
 import {
     canSubmitApproval,
@@ -218,6 +222,7 @@ export default function ChatPanel({
     const [activeCharacterId, setActiveCharacterId] = useState(
         getActiveCharacterIdForConversationRestore,
     );
+    const activeCharacterIdRef = useRef(activeCharacterId);
     const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
     const deferredMessages = useDeferredValue(messages);
     const [visibleCount, setVisibleCount] = useState(20);
@@ -362,12 +367,14 @@ export default function ChatPanel({
                 resetReveal();
                 setIsThinking(false);
                 setActiveCharacterId(characterId);
+                activeCharacterIdRef.current = characterId;
                 setActiveConversationId(null);
                 setMessages([]);
                 setExpandedTranslations(new Set());
             },
             applyVisibleConversation: (conversation) => {
                 setActiveCharacterId(conversation.characterId);
+                activeCharacterIdRef.current = conversation.characterId;
                 setActiveConversationId(conversation.conversationId);
                 setMessages([...conversation.messages]);
                 setExpandedTranslations(new Set());
@@ -401,7 +408,13 @@ export default function ChatPanel({
                 .catch(err => console.error("[ChatPanel] Failed to restore conversation:", err));
         }
 
-        synchronize(getActiveCharacterIdForConversationRestore(), null);
+        const activeCharacter = getActiveCharacterIdForConversationRestore();
+        const committed = readJsonSetting<CommittedCharacterRuntime | null>(
+            APP_SETTING_KEYS.characterRuntimeCache,
+            null,
+        );
+        const initialTarget = getInitialCharacterConversationTarget(activeCharacter, committed);
+        synchronize(initialTarget.characterId, initialTarget.preferredConversationId);
         const handleRuntimeChanged = (event: Event): void => {
             const detail = (event as CustomEvent<CommittedCharacterRuntime>).detail;
             if (!detail?.runtime.character_id) return;
@@ -833,6 +846,11 @@ export default function ChatPanel({
 
             const unFailure = await onChatFailure((failure: FailureEvent) => {
                 if (aborted) return;
+                if (!isFailureForActiveChat(
+                    failure,
+                    activeCharacterIdRef.current,
+                    currentTurnRef.current?.turnId ?? null,
+                )) return;
                 endTurnActivity();
                 setIsThinking(false);
                 const suffix = failure.stage ? ` (${failure.stage})` : "";
@@ -844,6 +862,7 @@ export default function ChatPanel({
 
             const unError = await onChatError((err: string) => {
                 if (aborted) return;
+                if (currentTurnRef.current === null) return;
                 endTurnActivity();
                 setIsThinking(false);
                 setError(err);

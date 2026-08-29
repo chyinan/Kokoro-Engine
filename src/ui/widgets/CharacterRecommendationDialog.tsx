@@ -1,7 +1,7 @@
 // pattern: Imperative Shell
 
 import { Bot, Brain, Eye, PlugZap, ShieldCheck, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 export type CharacterCapabilityRecommendations = {
@@ -55,6 +55,15 @@ export async function applyRecommendationDecision(
   }
 }
 
+/** Identifies one open recommendation session so transient state cannot leak. */
+export function getRecommendationSessionKey(
+  open: boolean,
+  characterName: string,
+  recommendations: Readonly<CharacterCapabilityRecommendations> | null,
+): string {
+  return JSON.stringify([open, characterName, recommendations]);
+}
+
 function itemIcon(type: RecommendationItem["type"]) {
   switch (type) {
     case "vision":
@@ -75,6 +84,20 @@ export function CharacterRecommendationDialog(
   const { t } = useTranslation();
   const [isConfirming, setIsConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorSessionKey, setErrorSessionKey] = useState<string | null>(null);
+  const sessionKey = getRecommendationSessionKey(
+    props.open,
+    props.characterName,
+    props.recommendations,
+  );
+  const sessionKeyRef = useRef(sessionKey);
+  // Keep async confirmation callbacks scoped to the props currently rendered.
+  sessionKeyRef.current = sessionKey;
+  useEffect(() => {
+    setError(null);
+    setErrorSessionKey(null);
+    setIsConfirming(false);
+  }, [sessionKey]);
   if (!props.open || props.recommendations === null) return null;
 
   const items = getRecommendationItems(props.recommendations);
@@ -82,19 +105,24 @@ export function CharacterRecommendationDialog(
   const recommendations = props.recommendations;
 
   const handleConfirm = async (): Promise<void> => {
+    const confirmationSession = sessionKey;
     setIsConfirming(true);
     setError(null);
+    setErrorSessionKey(null);
     try {
       await applyRecommendationDecision({
         decision: "confirm",
         recommendations,
         enableCapabilities: props.onConfirm,
       });
-      props.onDismiss();
+      if (sessionKeyRef.current === confirmationSession) props.onDismiss();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      if (sessionKeyRef.current === confirmationSession) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+        setErrorSessionKey(confirmationSession);
+      }
     } finally {
-      setIsConfirming(false);
+      if (sessionKeyRef.current === confirmationSession) setIsConfirming(false);
     }
   };
 
@@ -154,7 +182,7 @@ export function CharacterRecommendationDialog(
           ))}
         </ul>
 
-        {error !== null && (
+        {error !== null && errorSessionKey === sessionKey && (
           <p role="alert" className="mx-5 mb-3 rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
             {error}
           </p>

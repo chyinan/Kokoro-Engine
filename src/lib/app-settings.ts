@@ -7,6 +7,7 @@ export const APP_SETTING_KEYS = {
   customModelPath: "kokoro_custom_model_path",
   characterBackground: "kokoro_character_background",
   characterCueProfile: "kokoro_character_cue_profile",
+  characterCueProfileCache: "kokoro_character_cue_profile_cache",
   characterRuntimeCache: "kokoro_character_runtime_cache",
   displayMode: "kokoro_display_mode",
   gazeTracking: "kokoro_gaze_tracking",

@@ -10,6 +10,11 @@
     "restoreDefault": "템플릿 기본값 복원",
     "resolveConflict": "내 편집을 유지하고 템플릿 업데이트 적용",
     "copySuffix": "복사본",
+    "ttsProbe": {
+      "available": "로컬 TTS가 {{endpoint}}에서 응답했습니다.",
+      "unavailable": "로컬 TTS가 {{endpoint}}에서 응답하지 않았습니다. 브라우저 음성 또는 텍스트로 전환합니다.",
+      "confirm": "{{endpoint}}의 로컬 TTS를 사용할 수 있습니다. 이 캐릭터용으로 저장할까요?"
+    },
     "recommendations": {
       "eyebrow": "선택 기능",
       "title": "{{name}}의 기능을 확장할까요?",

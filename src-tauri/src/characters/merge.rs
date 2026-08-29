@@ -88,6 +88,13 @@ pub fn merge_character_template(
     let user_tts = user_runtime.tts.clone().unwrap_or_default();
     let new_tts = new_runtime.tts.clone().unwrap_or_default();
     let tts = CharacterTtsProfile {
+        enabled: merge_leaf(
+            "runtime.tts.enabled",
+            &old_tts.enabled,
+            &user_tts.enabled,
+            &new_tts.enabled,
+            &mut conflicts,
+        ),
         provider_type: merge_leaf(
             "runtime.tts.provider_type",
             &old_tts.provider_type,
@@ -133,6 +140,27 @@ pub fn merge_character_template(
     };
     let tts = has_tts_values(&tts).then_some(tts);
     let runtime = CharacterRuntimeProfile {
+        live2d_model: merge_leaf(
+            "runtime.live2d_model",
+            &old_runtime.live2d_model,
+            &user_runtime.live2d_model,
+            &new_runtime.live2d_model,
+            &mut conflicts,
+        ),
+        background: merge_leaf(
+            "runtime.background",
+            &old_runtime.background,
+            &user_runtime.background,
+            &new_runtime.background,
+            &mut conflicts,
+        ),
+        cue_profile: merge_leaf(
+            "runtime.cue_profile",
+            &old_runtime.cue_profile,
+            &user_runtime.cue_profile,
+            &new_runtime.cue_profile,
+            &mut conflicts,
+        ),
         tts,
         response_language: merge_leaf(
             "runtime.response_language",
@@ -220,7 +248,8 @@ fn has_asset_values(assets: &CharacterAssets) -> bool {
 }
 
 fn has_tts_values(tts: &CharacterTtsProfile) -> bool {
-    tts.provider_type.is_some()
+    tts.enabled.is_some()
+        || tts.provider_type.is_some()
         || tts.provider_id.is_some()
         || tts.local_preset.is_some()
         || tts.voice.is_some()
@@ -257,6 +286,7 @@ mod tests {
             }),
             runtime: Some(CharacterRuntimeProfile {
                 tts: Some(CharacterTtsProfile {
+                    enabled: Some(true),
                     provider_type: Some("edge".into()),
                     provider_id: None,
                     local_preset: Some("edge-default".into()),
@@ -264,6 +294,9 @@ mod tests {
                     speed: Some(1.0),
                     pitch: Some(0.0),
                 }),
+                live2d_model: None,
+                background: None,
+                cue_profile: None,
                 response_language: Some("en".into()),
                 proactive_enabled: Some(false),
             }),

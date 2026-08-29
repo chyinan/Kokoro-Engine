@@ -10,6 +10,11 @@
     "restoreDefault": "Restore template defaults",
     "resolveConflict": "Keep my edits and apply template update",
     "copySuffix": "Copy",
+    "ttsProbe": {
+      "available": "Local TTS responded at {{endpoint}}.",
+      "unavailable": "Local TTS did not respond at {{endpoint}}. Browser or text fallback will be used.",
+      "confirm": "Local TTS at {{endpoint}} is reachable. Save this configured provider for this character?"
+    },
     "recommendations": {
       "eyebrow": "Optional capabilities",
       "title": "Make {{name}} more capable?",

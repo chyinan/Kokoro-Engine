@@ -10,6 +10,11 @@
     "restoreDefault": "恢复模板默认值",
     "resolveConflict": "保留我的修改并应用模板更新",
     "copySuffix": "副本",
+    "ttsProbe": {
+      "available": "本地 TTS 已在 {{endpoint}} 响应。",
+      "unavailable": "本地 TTS 未在 {{endpoint}} 响应，将使用浏览器语音或纯文本回退。",
+      "confirm": "{{endpoint}} 的本地 TTS 可用。要保存该服务并用于此角色吗？"
+    },
     "recommendations": {
       "eyebrow": "可选能力",
       "title": "增强 {{name}} 的能力？",

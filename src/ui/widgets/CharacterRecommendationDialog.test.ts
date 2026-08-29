@@ -10,6 +10,7 @@ import {
   CharacterRecommendationDialog,
   applyRecommendationDecision,
   getRecommendationItems,
+  getRecommendationSessionKey,
   type CharacterCapabilityRecommendations,
 } from "./CharacterRecommendationDialog";
 
@@ -23,6 +24,17 @@ function recommendations(): CharacterCapabilityRecommendations {
 }
 
 describe("character capability recommendation consent", () => {
+  it("changes session identity when the dialog reopens for a character", () => {
+    const suggested = recommendations();
+
+    expect(getRecommendationSessionKey(false, "Kokoro", suggested)).not.toBe(
+      getRecommendationSessionKey(true, "Kokoro", suggested),
+    );
+    expect(getRecommendationSessionKey(true, "Kokoro", suggested)).not.toBe(
+      getRecommendationSessionKey(true, "Pico", suggested),
+    );
+  });
+
   it("renders vision, memory, MCP, and bot recommendations as suggestions", async () => {
     await i18n.changeLanguage("en");
     expect(getRecommendationItems(recommendations())).toEqual([

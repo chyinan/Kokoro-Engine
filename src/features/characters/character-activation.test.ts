@@ -7,6 +7,10 @@ import {
   type CharacterActivationDependencies,
 } from "./character-activation";
 import type {
+  CharacterActivationToken,
+  CommittedCharacterRuntime,
+} from "@/lib/kokoro-bridge";
+import type {
   FrontendRuntimeState,
   PreparedCharacterRuntime,
 } from "./character-runtime-profile";
@@ -63,7 +67,7 @@ function preparedRuntime(characterId: string): PreparedCharacterRuntime {
   };
 }
 
-function token(characterId: string, revision: number) {
+function token(characterId: string, revision: number): CharacterActivationToken {
   return {
     revision,
     nonce: `nonce-${revision}`,
@@ -78,11 +82,11 @@ function token(characterId: string, revision: number) {
     },
     target_conversation_id: `conversation-${characterId}`,
     greeting_action: "none" as const,
-    recommendations: { vision: null, memory: null, mcp_servers: [] },
+    recommendations: { vision: null, memory: null, mcp_servers: [], bot_platforms: [] },
   };
 }
 
-function committed(characterId: string, revision: number) {
+function committed(characterId: string, revision: number): CommittedCharacterRuntime {
   return {
     revision,
     runtime: preparedRuntime(characterId),
@@ -252,7 +256,10 @@ describe("character activation shell", () => {
 
     const result = await createCharacterActivationService(deps).activateCharacter("new-character");
 
-    expect(result).toEqual(committed("new-character", 1));
+    expect(result).toEqual({
+      ...committed("new-character", 1),
+      recommendations: token("new-character", 1).recommendations,
+    });
     expect(deps.restoreFrontendRuntime).not.toHaveBeenCalled();
     expect(deps.dispatchRuntimeChanged).toHaveBeenCalledTimes(1);
   });
@@ -277,7 +284,9 @@ describe("character activation shell", () => {
       },
     };
     const deps = dependencies({
-      prepareCharacterActivation: vi.fn(async () => local),
+      prepareCharacterActivation: vi.fn()
+        .mockResolvedValueOnce(local)
+        .mockResolvedValueOnce(token("local-character", 2)),
       confirmLocalTtsPresetSave: vi.fn(async () => true),
     });
 
@@ -293,6 +302,171 @@ describe("character activation shell", () => {
       available: true,
     });
     expect(deps.saveConfirmedLocalTtsPreset).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-prepares after saving a local preset and commits only the server-resolved provider", async () => {
+    const first = token("local-character", 1);
+    const local = {
+      ...first,
+      resolved_runtime: {
+        ...first.resolved_runtime,
+        tts: {
+          ...first.resolved_runtime.tts,
+          mode: "local_preset_confirmation" as const,
+          provider_id: null,
+          provider_type: "gpt_sovits",
+          local_preset: "gpt-sovits-loopback",
+          endpoint: "http://127.0.0.1:9880",
+          requires_save_confirmation: true,
+        },
+      },
+    };
+    const configured: CharacterActivationToken = {
+      ...token("local-character", 2),
+      resolved_runtime: {
+        ...token("local-character", 2).resolved_runtime,
+        tts: {
+          ...token("local-character", 2).resolved_runtime.tts,
+          provider_id: "gpt-sovits-loopback",
+          provider_type: "gpt_sovits",
+        },
+      },
+    };
+    const deps = dependencies({
+      prepareCharacterActivation: vi.fn()
+        .mockResolvedValueOnce(local)
+        .mockResolvedValueOnce(configured),
+      confirmLocalTtsPresetSave: vi.fn(async () => true),
+    });
+
+    await createCharacterActivationService(deps).activateCharacter("local-character");
+
+    expect(deps.prepareCharacterActivation).toHaveBeenCalledTimes(2);
+    expect(deps.commitCharacterActivation).toHaveBeenCalledWith(configured);
+    expect(deps.applyFrontendRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      tts: expect.objectContaining({ providerId: "gpt-sovits-loopback" }),
+    }));
+  });
+
+  it.each([
+    [false, true],
+    [true, false],
+  ])("re-prepares an explicit fallback when probe availability is %s and confirmation is %s", async (available, confirmed) => {
+    const first = token("fallback-character", 1);
+    const local = {
+      ...first,
+      resolved_runtime: {
+        ...first.resolved_runtime,
+        tts: {
+          ...first.resolved_runtime.tts,
+          mode: "local_preset_confirmation" as const,
+          provider_id: null,
+          provider_type: "gpt_sovits",
+          local_preset: "gpt-sovits-loopback",
+          endpoint: "http://127.0.0.1:9880",
+          requires_save_confirmation: true,
+        },
+      },
+    };
+    const fallback: CharacterActivationToken = {
+      ...token("fallback-character", 2),
+      resolved_runtime: {
+        ...token("fallback-character", 2).resolved_runtime,
+        tts: {
+          ...token("fallback-character", 2).resolved_runtime.tts,
+          mode: "browser",
+          provider_id: "browser",
+          provider_type: "browser",
+        },
+      },
+    };
+    const deps = dependencies({
+      prepareCharacterActivation: vi.fn()
+        .mockResolvedValueOnce(local)
+        .mockResolvedValueOnce(fallback),
+      probeLocalTtsPreset: vi.fn(async () => available),
+      confirmLocalTtsPresetSave: vi.fn(async () => confirmed),
+    });
+
+    await createCharacterActivationService(deps).activateCharacter("fallback-character");
+
+    expect(deps.prepareCharacterActivation).toHaveBeenLastCalledWith(
+      "fallback-character",
+      { allowLocalPreset: false },
+    );
+    expect(deps.commitCharacterActivation).toHaveBeenCalledWith(fallback);
+    expect(deps.saveConfirmedLocalTtsPreset).not.toHaveBeenCalled();
+  });
+
+  it("treats a failed local probe as unavailable and still resolves the fallback", async () => {
+    const first = token("probe-failure", 1);
+    const local = {
+      ...first,
+      resolved_runtime: {
+        ...first.resolved_runtime,
+        tts: {
+          ...first.resolved_runtime.tts,
+          mode: "local_preset_confirmation" as const,
+          provider_id: null,
+          provider_type: "gpt_sovits",
+          local_preset: "gpt-sovits-loopback",
+          endpoint: "http://127.0.0.1:9880",
+          requires_save_confirmation: true,
+        },
+      },
+    };
+    const fallback: CharacterActivationToken = {
+      ...token("probe-failure", 2),
+      resolved_runtime: {
+        ...token("probe-failure", 2).resolved_runtime,
+        tts: {
+          ...token("probe-failure", 2).resolved_runtime.tts,
+          mode: "text_only",
+          provider_id: null,
+          provider_type: null,
+        },
+      },
+    };
+    const deps = dependencies({
+      prepareCharacterActivation: vi.fn()
+        .mockResolvedValueOnce(local)
+        .mockResolvedValueOnce(fallback),
+      probeLocalTtsPreset: vi.fn(async () => {
+        throw new Error("connection refused");
+      }),
+    });
+
+    await createCharacterActivationService(deps).activateCharacter("probe-failure");
+
+    expect(deps.presentLocalTtsPresetProbe).toHaveBeenCalledWith({
+      endpoint: "http://127.0.0.1:9880",
+      available: false,
+    });
+    expect(deps.prepareCharacterActivation).toHaveBeenLastCalledWith(
+      "probe-failure",
+      { allowLocalPreset: false },
+    );
+    expect(deps.commitCharacterActivation).toHaveBeenCalledWith(fallback);
+  });
+
+  it("returns the sanitized prepared recommendations only after commit succeeds", async () => {
+    const prepared: CharacterActivationToken = {
+      ...token("recommended", 1),
+      recommendations: {
+        vision: true,
+        memory: false,
+        mcp_servers: ["calendar"],
+        bot_platforms: ["telegram"],
+      },
+    };
+    const deps = dependencies({
+      prepareCharacterActivation: vi.fn(async () => prepared),
+    });
+
+    const result = await createCharacterActivationService(deps).activateCharacter("recommended");
+
+    expect(deps.commitCharacterActivation).toHaveBeenCalledTimes(1);
+    expect(result.recommendations).toEqual(prepared.recommendations);
   });
 
   it("never probes or saves a custom local-preset endpoint", async () => {

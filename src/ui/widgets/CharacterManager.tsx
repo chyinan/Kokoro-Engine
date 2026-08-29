@@ -11,8 +11,12 @@ import { clsx } from "clsx";
 import { Plus, Upload, Trash2, UserCircle, Check, X, User } from "lucide-react";
 import { characterDb } from "../../lib/db";
 import { parseCharacterCard } from "../../lib/character-card-parser";
-import { setPersona, setUserName, setUserPersona, setProactiveEnabled, getProactiveEnabled, listCharacters, createCharacter, createCharacterWithAvatar, updateCharacter, deleteCharacter } from "../../lib/kokoro-bridge";
+import { setUserName, setUserPersona, getProactiveEnabled, listCharacters, createCharacter, createCharacterWithAvatar, updateCharacter, deleteCharacter } from "../../lib/kokoro-bridge";
 import type { CharacterRecord } from "../../lib/kokoro-bridge";
+import {
+    readCharacterRuntimeProfile,
+    type CharacterRuntimeOverrides,
+} from "../../features/characters/character-runtime-overrides";
 import { Languages, MessageCircle } from "lucide-react";
 import { Select } from "@/components/ui/select";
 import { useTranslation, Trans } from "react-i18next";
@@ -125,6 +129,8 @@ interface CharacterManagerProps {
     onPersonaChange: (prompt: string) => void;
     /** Routes every user-initiated selection through the activation transaction owner. */
     onActivateCharacter: (characterId: string) => Promise<void>;
+    onCharacterRuntimeChange: (overrides: Readonly<CharacterRuntimeOverrides>) => Promise<void>;
+    characterToEditId?: string | null;
     /** Current response language setting */
     responseLanguage: string;
     /** Called when the response language dropdown changes */
@@ -137,7 +143,7 @@ interface CharacterManagerProps {
 
 // ── Component ──────────────────────────────────────
 
-export default function CharacterManager({ onPersonaChange, onActivateCharacter, responseLanguage, onResponseLanguageChange, userLanguage, onUserLanguageChange }: CharacterManagerProps) {
+export default function CharacterManager({ onPersonaChange, onActivateCharacter, onCharacterRuntimeChange, characterToEditId, responseLanguage, onResponseLanguageChange, userLanguage, onUserLanguageChange }: CharacterManagerProps) {
     const { t } = useTranslation();
     const [characters, setCharacters] = useState<CharacterRecord[]>([]);
     const [activeId, setActiveId] = useState<string | null>(null);
@@ -209,11 +215,20 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
         loadCharacters();
     }, [loadCharacters]);
 
+    useEffect(() => {
+        if (characterToEditId === null || characterToEditId === undefined) return;
+        const selected = characters.find((character) => character.id === characterToEditId);
+        if (selected) setEditChar({ ...selected });
+    }, [characterToEditId, characters]);
+
     const selectCharacter = async (char: CharacterRecord) => {
         try {
             await onActivateCharacter(char.id);
             setActiveId(char.id);
             setEditChar({ ...char });
+            setProactiveEnabledState(
+                readCharacterRuntimeProfile(char.runtime_profile_json).proactive_enabled ?? true,
+            );
             setConfirmDeleteId(null);
             const prompt = composeSystemPrompt(char);
             onPersonaChangeRef.current(prompt);
@@ -351,9 +366,10 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
         setUserPersona(userProfile.persona).catch(e => console.error("[CharacterManager] Failed to persist user profile:", e));
         // Re-compose the active character's prompt with updated user info
         if (editChar) {
-            onPersonaChangeRef.current(composeSystemPrompt(editChar, userProfile));
-            // Push updated persona to backend immediately
-            setPersona(composeSystemPrompt(editChar, userProfile)).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
+            const nextPersona = composeSystemPrompt(editChar, userProfile);
+            onPersonaChangeRef.current(nextPersona);
+            // Persist the per-character prompt and re-enter the activation owner.
+            void onCharacterRuntimeChange({ persona: nextPersona }).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
         }
     };
 
@@ -482,8 +498,9 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
                         aria-pressed={proactiveEnabled}
                         onClick={() => {
                             const next = !proactiveEnabled;
-                            setProactiveEnabledState(next);
-                            setProactiveEnabled(next).catch(e => console.error("[CharacterManager] Failed to set proactive:", e));
+                            void onCharacterRuntimeChange({ proactiveEnabled: next })
+                                .then(() => setProactiveEnabledState(next))
+                                .catch(e => console.error("[CharacterManager] Failed to set proactive:", e));
                         }}
                         className={clsx(
                             "relative inline-flex h-6 w-11 items-center rounded-full transition-colors shrink-0",

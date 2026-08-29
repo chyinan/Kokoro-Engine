@@ -10,6 +10,11 @@
     "restoreDefault": "テンプレートの初期値に戻す",
     "resolveConflict": "編集を保持してテンプレート更新を適用",
     "copySuffix": "コピー",
+    "ttsProbe": {
+      "available": "ローカル TTS が {{endpoint}} で応答しました。",
+      "unavailable": "ローカル TTS は {{endpoint}} で応答しませんでした。ブラウザー音声またはテキスト表示に切り替えます。",
+      "confirm": "{{endpoint}} のローカル TTS を利用できます。このキャラクター用に保存しますか？"
+    },
     "recommendations": {
       "eyebrow": "任意の機能",
       "title": "{{name}} の機能を追加しますか？",

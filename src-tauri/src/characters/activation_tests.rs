@@ -352,6 +352,39 @@ async fn tts_resolution_falls_back_to_browser_then_text_only() {
 }
 
 #[tokio::test]
+async fn prepare_sanitizes_capability_recommendations_and_allowlists_bot_platforms() {
+    let pool = pool().await;
+    insert_character(&pool, "recommended", "", json!({})).await;
+    let mut snapshot = template_snapshot(None);
+    snapshot["recommendations"] = json!({
+        "vision": true,
+        "memory": false,
+        "mcp_servers": [" calendar ", "", "calendar", "notes"],
+        "bot_platforms": ["telegram", "__proto__", "discord", "telegram"]
+    });
+    attach_snapshot_value(&pool, "recommended", &snapshot).await;
+
+    let token = ActivationCoordinator::default()
+        .prepare(
+            &pool,
+            "recommended",
+            &config(vec![], None),
+            &[],
+            &TestBackend::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(token.recommendations.vision, Some(true));
+    assert_eq!(token.recommendations.memory, Some(false));
+    assert_eq!(token.recommendations.mcp_servers, vec!["calendar", "notes"]);
+    assert_eq!(
+        token.recommendations.bot_platforms,
+        vec!["telegram", "discord"]
+    );
+}
+
+#[tokio::test]
 async fn prepare_includes_validated_template_asset_references() {
     let pool = pool().await;
     insert_character(&pool, "templated", "", json!({})).await;

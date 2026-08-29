@@ -8,6 +8,7 @@ import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Spa
 import { ModList } from "../mods/ModList";
 import { Select } from "@/components/ui/select";
 import CharacterManager from "./CharacterManager";
+import type { CharacterRuntimeOverrides } from "../../features/characters/character-runtime-overrides";
 import ImageGenSettings from "./ImageGenSettings";
 import MemoryPanel from "./MemoryPanel";
 import ApiTab from "./settings/ApiTab";
@@ -23,7 +24,7 @@ import { BackupTab } from "./settings/BackupTab";
 import PetTab from "./settings/PetTab";
 import AboutTab from "./settings/AboutTab";
 import { useTranslation } from "react-i18next";
-import { setPersona, setResponseLanguage, setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, getBotConfig, saveBotConfig, saveLlmConfig } from "../../lib/kokoro-bridge";
+import { setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, getBotConfig, saveBotConfig, saveLlmConfig } from "../../lib/kokoro-bridge";
 import type {
     ProviderStatus,
     VoiceProfile,
@@ -141,7 +142,9 @@ interface SettingsPanelProps {
     capturedScreenUrl?: string | null;
     userLanguage?: string;
     activeCharacterId?: string;
+    characterToEditId?: string | null;
     onActivateCharacter: (characterId: string) => Promise<void>;
+    onCharacterRuntimeChange: (overrides: Readonly<CharacterRuntimeOverrides>) => Promise<void>;
     characters?: CharacterRecord[];
     // User Profile
     userName?: string;
@@ -297,7 +300,7 @@ function normalizeTtsVoice(
 const DEFAULT_PERSONA =
     "You are a friendly, warm companion character. Respond with personality and emotion.";
 
-export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, initialTelegramStatus, onVisionConfigChange, onActivateCharacter }: SettingsPanelProps) {
+export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange: _onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, initialTelegramStatus, onVisionConfigChange, onActivateCharacter, onCharacterRuntimeChange, characterToEditId }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [internalActiveTab, setInternalActiveTab] = useState<SettingsTabId>(() => {
         const saved = readStringSetting(APP_SETTING_KEYS.settingsActiveTab, "");
@@ -575,12 +578,6 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
     const handleSave = async () => {
         // Persist to localStorage (non-LLM settings)
-        writeStringSetting(APP_SETTING_KEYS.persona, persona);
-        writeStringSetting(APP_SETTING_KEYS.ttsVoice, ttsVoice);
-        writeStringSetting(APP_SETTING_KEYS.ttsSpeed, ttsSpeed);
-        writeStringSetting(APP_SETTING_KEYS.ttsPitch, ttsPitch);
-        writeStringSetting(APP_SETTING_KEYS.ttsProvider, ttsProviderId);
-        writeBooleanSetting(APP_SETTING_KEYS.ttsEnabled, ttsEnabled);
         writeBooleanSetting(APP_SETTING_KEYS.visionEnabled, visionEnabled);
         dispatchRuntimeSettingsChanged("vision");
         if (localSttConfig) {
@@ -594,12 +591,10 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         }
         dispatchRuntimeSettingsChanged("stt");
         writeBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, voiceInterrupt);
-        writeStringSetting(APP_SETTING_KEYS.responseLanguage, responseLang);
         writeStringSetting(APP_SETTING_KEYS.userLanguage, userLang);
 
         // Commit core settings
         onDisplayModeChange(localDisplayMode);
-        onCustomModelChange(localCustomModelPath);
         onGazeTrackingChange?.(localGazeTracking);
 
         // Commit background config
@@ -607,20 +602,6 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         bgConfigDirtyRef.current = false;
 
         showSaveFeedback();
-
-        // Send persona to backend
-        try {
-            await setPersona(persona);
-        } catch (e) {
-            console.error("[SettingsPanel] Failed to set persona:", e);
-        }
-
-        // Send response language to backend
-        try {
-            await setResponseLanguage(responseLang);
-        } catch (e) {
-            console.error("[SettingsPanel] Failed to set response language:", e);
-        }
 
         // Send user language to backend
         try {
@@ -660,6 +641,27 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save TTS config:", e);
             }
+        }
+
+        const selectedTtsProvider = localTtsConfig?.providers.find(
+            (provider) => provider.id === ttsProviderId,
+        ) ?? null;
+        try {
+            await onCharacterRuntimeChange({
+                persona,
+                responseLanguage: responseLang,
+                live2dModel: localCustomModelPath,
+                tts: {
+                    enabled: ttsEnabled,
+                    providerId: ttsProviderId || null,
+                    providerType: selectedTtsProvider?.provider_type ?? null,
+                    voice: ttsVoice || null,
+                    speed: Number.parseFloat(ttsSpeed) || 1,
+                    pitch: Number.parseFloat(ttsPitch) || 1,
+                },
+            });
+        } catch (e) {
+            console.error("[SettingsPanel] Failed to apply character runtime:", e);
         }
 
         // Commit Image Gen Config
@@ -806,6 +808,8 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                     <CharacterManager
                                         onPersonaChange={(prompt) => setPersonaText(prompt)}
                                         onActivateCharacter={onActivateCharacter}
+                                        onCharacterRuntimeChange={onCharacterRuntimeChange}
+                                        characterToEditId={characterToEditId}
                                         responseLanguage={responseLang}
                                         onResponseLanguageChange={setResponseLang}
                                         userLanguage={userLang}

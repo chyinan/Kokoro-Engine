@@ -1659,6 +1659,9 @@ export type CharacterRecord = {
 };
 
 export type CharacterRuntimeProfile = {
+    readonly live2d_model?: string | null;
+    readonly background?: string | null;
+    readonly cue_profile?: string | null;
     readonly tts?: Readonly<Record<string, unknown>> | null;
     readonly response_language?: string | null;
     readonly proactive_enabled?: boolean | null;
@@ -1687,6 +1690,9 @@ export type PackageAssetReference = {
     readonly template_id: string;
     readonly template_version: string;
     readonly path: string;
+} | {
+    readonly source: "library";
+    readonly model_id: string;
 };
 
 export type BackendCharacterRuntime = {
@@ -1723,6 +1729,7 @@ export type CharacterActivationToken = {
         readonly vision: boolean | null;
         readonly memory: boolean | null;
         readonly mcp_servers: ReadonlyArray<string>;
+        readonly bot_platforms: ReadonlyArray<string>;
     };
 };
 
@@ -1730,6 +1737,10 @@ export type CommittedCharacterRuntime = {
     readonly revision: number;
     readonly runtime: BackendCharacterRuntime;
     readonly target_conversation_id: string;
+};
+
+export type PrepareCharacterActivationOptions = {
+    readonly allowLocalPreset: boolean;
 };
 
 export type CharacterTemplateManifest = {
@@ -1823,8 +1834,12 @@ export async function createCharacter(record: CharacterRecord): Promise<void> {
 
 export async function prepareCharacterActivation(
     characterId: string,
+    options?: Readonly<PrepareCharacterActivationOptions>,
 ): Promise<CharacterActivationToken> {
-    return invoke<CharacterActivationToken>("prepare_character_activation", { characterId });
+    return invoke<CharacterActivationToken>("prepare_character_activation", {
+        characterId,
+        allowLocalPreset: options?.allowLocalPreset ?? null,
+    });
 }
 
 export async function commitCharacterActivation(

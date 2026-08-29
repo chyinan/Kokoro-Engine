@@ -81,6 +81,12 @@ pub struct CharacterAssets {
 #[serde(deny_unknown_fields)]
 pub struct CharacterRuntimeProfile {
     #[serde(default)]
+    pub live2d_model: Option<String>,
+    #[serde(default)]
+    pub background: Option<String>,
+    #[serde(default)]
+    pub cue_profile: Option<String>,
+    #[serde(default)]
     pub tts: Option<CharacterTtsProfile>,
     #[serde(default)]
     pub response_language: Option<String>,
@@ -91,6 +97,8 @@ pub struct CharacterRuntimeProfile {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CharacterTtsProfile {
+    #[serde(default)]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub provider_type: Option<String>,
     #[serde(default)]
@@ -114,6 +122,8 @@ pub struct CharacterRecommendations {
     pub memory: Option<bool>,
     #[serde(default)]
     pub mcp_servers: Option<Vec<String>>,
+    #[serde(default)]
+    pub bot_platforms: Option<Vec<String>>,
 }
 
 impl CharacterTemplateManifest {

@@ -10,6 +10,11 @@ import {
   type ChatHistoryMessage,
 } from "./chat-history";
 
+export {
+  getInitialCharacterConversationTarget,
+  isFailureForActiveChat,
+} from "./chat-character-sync-core";
+
 export type CharacterConversationTarget = {
   readonly characterId: string;
   readonly preferredConversationId: string | null;
