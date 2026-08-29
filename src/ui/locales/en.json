@@ -1257,6 +1257,13 @@
         "stop": "Stop"
     },
     "onboarding": {
+        "workflow": {
+            "eyebrow": "Your first reply", "resume_title": "Pick up where you left off", "resume_description": "Your choices are saved. Resume whenever you are ready.", "progress": "Onboarding progress", "language_label": "Interface language", "saved_hint": "Your language, character, and provider selections are safe.", "keep_primary_surface": "Live2D + chat stay visible", "dismiss": "Save and close", "resume": "Resume setup", "retry": "Retry", "testing": "Testing", "test_connection": "Test connection", "connection_title": "Check the connection", "connection_description": "We will make one safe request to confirm your provider can answer.", "connection_success": "Connection looks good.", "chat_description": "Send one message so your companion can answer. On that first successful reply, onboarding is complete.", "chat_placeholder": "Say hello…", "send": "Send",
+            "steps": { "language": "Language", "character": "Character", "provider": "Provider", "connection-test": "Connection", "chat": "First chat" },
+            "titles": { "language": "Choose your language", "character": "Choose a companion", "provider": "Connect your provider", "connection-test": "Check the connection", "chat": "Send your first message" },
+            "descriptions": { "language": "Use Kokoro in the language that feels natural to you.", "character": "Pick the character whose voice and presence you want to meet first.", "provider": "Set only the endpoint, model, and key needed to get a reply.", "connection-test": "Confirm the provider responds before sending a chat turn.", "chat": "One successful reply completes setup." },
+            "provider": { "custom": "Custom endpoint", "provider_type": "Provider", "preset": "Preset", "endpoint": "Endpoint", "api_key": "API key", "model": "Model", "discover": "Discover models", "discovering": "Discovering", "testing": "Testing", "test": "Test connection", "test_success": "Connection test passed", "save": "Save provider" }
+        },
         "title": "Quick Tour",
         "dismiss": "Exit guide",
         "hints": {

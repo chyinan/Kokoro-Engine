@@ -17,8 +17,8 @@ import BackgroundLayer from "./ui/widgets/BackgroundLayer";
 import { mapBackgroundAssetUrl } from "./ui/widgets/background-asset-url";
 import WindowTitleBar from "./ui/widgets/WindowTitleBar";
 import OnboardingOverlay, {
+  type OnboardingCharacter,
   type OnboardingLanguageCode,
-  type OnboardingStep,
 } from "./ui/widgets/OnboardingOverlay";
 import MemoryModelDownloadDialog from "./ui/widgets/MemoryModelDownloadDialog";
 import { QQAuthorizationDialog } from "./ui/widgets/QQAuthorizationDialog";
@@ -69,6 +69,12 @@ import {
   type OnboardingDraft,
   type OnboardingFlowEvent,
 } from "./features/onboarding/onboarding-flow";
+import {
+  providerToSetup,
+  saveProviderSetup,
+  testProviderSetup,
+  type ProviderSetup,
+} from "./features/onboarding/provider-setup";
 import {
   createModActionDispatcher,
   getModActionFromEvent,
@@ -320,6 +326,7 @@ import {
   type Live2dModelInfo,
   type TtsSystemConfig,
   type LlmConfig,
+  type LlmConnectionTestResult,
   type SttConfig,
   type VisionConfig,
   type ImageGenSystemConfig,
@@ -377,30 +384,6 @@ const ONBOARDING_LANGUAGE_NAMES: Record<OnboardingLanguageCode, string> = {
   ru: "Русский",
 };
 
-function normalizeOnboardingLanguageCode(language: string | null | undefined): OnboardingLanguageCode {
-  const normalized = language?.trim().toLowerCase();
-  if (
-    normalized?.startsWith("zh-tw") ||
-    normalized?.startsWith("zh-hant") ||
-    normalized?.startsWith("zh-hk") ||
-    normalized?.startsWith("zh-mo")
-  ) {
-    return "zh-TW";
-  }
-
-  const base = normalized?.split("-")[0];
-  switch (base) {
-    case "en":
-    case "zh":
-    case "ja":
-    case "ko":
-    case "ru":
-      return base;
-    default:
-      return "zh";
-  }
-}
-
 function App() {
   const { i18n, t } = useTranslation();
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -408,18 +391,14 @@ function App() {
     const saved = readStringSetting(APP_SETTING_KEYS.settingsActiveTab, "");
     return normalizeSettingsTabId(saved);
   });
-  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep | null>(() =>
-    localStorage.getItem(ONBOARDING_STATUS_KEY) ? null : "language"
-  );
   const [onboardingDraft, setOnboardingDraft] = useState<OnboardingDraft>(() =>
     deserializeOnboardingDraft(localStorage.getItem(ONBOARDING_DRAFT_KEY)) ?? createOnboardingDraft()
   );
-  const [onboardingLanguage, setOnboardingLanguage] = useState<OnboardingLanguageCode>(() =>
-    normalizeOnboardingLanguageCode(
-      readStringSetting(APP_SETTING_KEYS.appLanguage, "")
-      || (typeof navigator !== "undefined" ? navigator.language : "zh")
-    )
-  );
+  const [onboardingOpen, setOnboardingOpen] = useState<boolean>(() => {
+    const status = localStorage.getItem(ONBOARDING_STATUS_KEY);
+    const draft = deserializeOnboardingDraft(localStorage.getItem(ONBOARDING_DRAFT_KEY));
+    return status !== "completed" && draft?.completed !== true;
+  });
   const [displayMode, setDisplayMode] = useState<Live2DDisplayMode>(
     () => readStringSetting(APP_SETTING_KEYS.displayMode, "full") as Live2DDisplayMode
   );
@@ -439,6 +418,22 @@ function App() {
     () => readStringSetting(APP_SETTING_KEYS.activeCharacterId, ""),
   );
   const [runtimeReady, setRuntimeReady] = useState(false);
+  const [onboardingProviderSetup, setOnboardingProviderSetup] = useState<ProviderSetup>({
+    providerType: "ollama",
+    presetId: null,
+    endpoint: "http://localhost:11434",
+    apiKey: null,
+    model: "llama3",
+  });
+  const [onboardingConnectionResult, setOnboardingConnectionResult] = useState<LlmConnectionTestResult | null>(null);
+  const [onboardingTestingConnection, setOnboardingTestingConnection] = useState(false);
+  const [onboardingSubmittingChat, setOnboardingSubmittingChat] = useState(false);
+  const onboardingChatPendingRef = useRef<{
+    turnId: string | null;
+    reply: string;
+    resolve: (reply: string) => void;
+    reject: (error: Error) => void;
+  } | null>(null);
   const pendingOnboardingResponseLanguageRef = useRef<string | null>(null);
 
   const [gazeTracking, setGazeTracking] = useState<boolean>(
@@ -819,7 +814,6 @@ function App() {
 
   const applyOnboardingLanguage = (language: OnboardingLanguageCode) => {
     const label = ONBOARDING_LANGUAGE_NAMES[language];
-    setOnboardingLanguage(language);
     i18n.changeLanguage(language);
     writeStringSetting(APP_SETTING_KEYS.appLanguage, language);
     writeStringSetting(APP_SETTING_KEYS.userLanguage, label);
@@ -846,6 +840,67 @@ function App() {
   const previewOnboardingLanguage = (language: OnboardingLanguageCode) => {
     dispatchOnboardingEvent({ type: "select-language", language });
     applyOnboardingLanguage(language);
+  };
+
+  const handleOnboardingCharacterSelect = async (characterId: string): Promise<void> => {
+    await characterActivation.activateCharacter(characterId);
+    dispatchOnboardingEvent({ type: "select-character", characterId });
+  };
+
+  const handleOnboardingProviderSave = async (): Promise<void> => {
+    if (!llmConfig) throw new Error("provider configuration is still loading");
+    const saved = await saveProviderSetup(llmConfig, onboardingProviderSetup);
+    setLlmConfig(saved);
+    dispatchOnboardingEvent({ type: "configure-provider", providerId: saved.active_provider });
+  };
+
+  const handleOnboardingConnectionTest = async (): Promise<void> => {
+    dispatchOnboardingEvent({ type: "connection-test-started" });
+    setOnboardingTestingConnection(true);
+    setOnboardingConnectionResult(null);
+    try {
+      if (!llmConfig) throw new Error("provider configuration is still loading");
+      const result = await testProviderSetup(llmConfig, onboardingProviderSetup);
+      setOnboardingConnectionResult(result);
+      dispatchOnboardingEvent({ type: "connection-test-succeeded" });
+    } catch (error) {
+      dispatchOnboardingEvent({ type: "connection-test-failed", error: getKokoroErrorMessage(error) });
+    } finally {
+      setOnboardingTestingConnection(false);
+    }
+  };
+
+  const handleOnboardingChatSubmit = async (message: string): Promise<string> => {
+    if (onboardingChatPendingRef.current) throw new Error("a chat turn is already in progress");
+    dispatchOnboardingEvent({ type: "chat-started" });
+    setOnboardingSubmittingChat(true);
+    return new Promise<string>((resolve, reject) => {
+      onboardingChatPendingRef.current = { turnId: null, reply: "", resolve, reject };
+      void streamChat({
+        message,
+        character_id: readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || undefined,
+      }).catch((error) => {
+        const pending = onboardingChatPendingRef.current;
+        onboardingChatPendingRef.current = null;
+        setOnboardingSubmittingChat(false);
+        pending?.reject(error instanceof Error ? error : new Error(getKokoroErrorMessage(error)));
+      });
+    });
+  };
+
+  const handleOnboardingFirstReplySucceeded = (reply: string): void => {
+    dispatchOnboardingEvent({ type: "first-reply-succeeded", reply });
+    localStorage.setItem(ONBOARDING_STATUS_KEY, "completed");
+    setOnboardingOpen(false);
+  };
+
+  const cancelOnboardingChat = (): void => {
+    const pending = onboardingChatPendingRef.current;
+    onboardingChatPendingRef.current = null;
+    setOnboardingSubmittingChat(false);
+    // Resolve with an empty reply so the overlay cannot accidentally mark the
+    // flow complete after the user dismissed the pending turn.
+    pending?.resolve("");
   };
 
   const refreshMemoryModelStatus = useCallback(async () => {
@@ -905,43 +960,15 @@ function App() {
 
   const closeOnboarding = (status: "completed" | "dismissed") => {
     if (status === "dismissed") {
+      cancelOnboardingChat();
       dispatchOnboardingEvent({ type: "dismiss" });
-    } else if (!onboardingDraft.completed) {
-      // The flow is complete only after the chat layer reports its first
-      // successful reply; closing the legacy tour cannot bypass that gate.
+      setOnboardingOpen(false);
       return;
     }
+    if (!onboardingDraft.completed) return;
     localStorage.setItem(ONBOARDING_STATUS_KEY, status);
-    setOnboardingStep(null);
+    setOnboardingOpen(false);
   };
-
-  const advanceOnboarding = () => {
-    switch (onboardingStep) {
-      case "language":
-        setOnboardingStep("open-settings");
-        break;
-      case "api":
-        setOnboardingStep("persona");
-        break;
-      case "persona":
-        setOnboardingStep("return-home");
-        break;
-      case "chat":
-        closeOnboarding("completed");
-        break;
-      default:
-        break;
-    }
-  };
-
-  useEffect(() => {
-    if (onboardingStep === "open-settings" && settingsOpen) {
-      setOnboardingStep("api");
-    }
-    if (onboardingStep === "return-home" && !settingsOpen) {
-      setOnboardingStep("chat");
-    }
-  }, [onboardingStep, settingsOpen]);
 
   useEffect(() => {
     refreshMemoryModelStatus().catch((err) => {
@@ -971,10 +998,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (onboardingStep === "chat" && memoryModelStatus && !memoryModelStatus.installed) {
+    if (onboardingOpen && onboardingDraft.step === "chat" && memoryModelStatus && !memoryModelStatus.installed) {
       void openMemoryModelDialog();
     }
-  }, [memoryModelStatus, onboardingStep, openMemoryModelDialog]);
+  }, [memoryModelStatus, onboardingDraft.step, onboardingOpen, openMemoryModelDialog]);
 
   useEffect(() => {
     const handleRequireDialog = () => {
@@ -1105,6 +1132,8 @@ function App() {
     ]).then(([tts, llm, stt, vision, imageGen, mcp, mods, proactive, telegram, telegramStatus, botConfig, botStatus, autoBackup]) => {
       setTtsConfig(tts);
       setLlmConfig(llm);
+      const activeProvider = llm.providers.find((provider) => provider.id === llm.active_provider) ?? llm.providers[0];
+      if (activeProvider) setOnboardingProviderSetup(providerToSetup(activeProvider));
       setSttConfig(stt);
       setVisionConfig(vision);
       setImageGenConfig(imageGen);
@@ -1230,6 +1259,11 @@ function App() {
 
     // ── MOD System: Engine event bridge → broadcast to iframes + forward to QuickJS ──
     const unlistenModChatDelta = onChatTurnDelta(({ turn_id, delta }) => {
+      const onboardingPending = onboardingChatPendingRef.current;
+      if (onboardingPending && (onboardingPending.turnId === null || onboardingPending.turnId === turn_id)) {
+        onboardingPending.turnId = turn_id;
+        onboardingPending.reply += delta;
+      }
       modMessageBus.broadcast({
         type: 'event',
         payload: { name: 'chat-delta', delta, turn_id },
@@ -1247,6 +1281,16 @@ function App() {
     });
 
     const unlistenModChatDone = onChatTurnFinish(({ turn_id, status }) => {
+      const onboardingPending = onboardingChatPendingRef.current;
+      if (onboardingPending && (onboardingPending.turnId === null || onboardingPending.turnId === turn_id)) {
+        onboardingChatPendingRef.current = null;
+        setOnboardingSubmittingChat(false);
+        if (status === "completed") {
+          onboardingPending.resolve(onboardingPending.reply);
+        } else {
+          onboardingPending.reject(new Error(`chat turn ${status}`));
+        }
+      }
       modMessageBus.broadcast({
         type: 'event',
         payload: { name: 'chat-done', turn_id, status },
@@ -2449,15 +2493,44 @@ function App() {
         return component;
       })()}
 
-      <OnboardingOverlay
-        step={onboardingStep}
-        selectedLanguage={onboardingLanguage}
-        settingsOpen={settingsOpen}
-        activeSettingsTab={activeSettingsTab}
-        onLanguageSelect={previewOnboardingLanguage}
-        onAdvance={advanceOnboarding}
-        onDismiss={() => closeOnboarding("dismissed")}
-      />
+      {onboardingDraft.dismissed && !onboardingOpen && (
+        <button
+          type="button"
+          onClick={() => setOnboardingOpen(true)}
+          className="pointer-events-auto fixed bottom-5 right-5 z-[130] rounded-full border border-[var(--color-border-accent)] bg-[var(--color-bg-surface)]/95 px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-accent)] shadow-lg backdrop-blur-xl transition hover:bg-[var(--color-accent)]/10"
+        >
+          {t("onboarding.workflow.resume", { defaultValue: "Resume setup" })}
+        </button>
+      )}
+      {onboardingOpen && (
+        <OnboardingOverlay
+          draft={onboardingDraft}
+          characters={characters.map<OnboardingCharacter>((character) => ({
+            id: character.id,
+            name: character.name,
+            description: character.description?.trim() || character.persona,
+            avatarPath: character.avatar_path ?? null,
+          }))}
+          providerSetup={onboardingProviderSetup}
+          connectionResult={onboardingConnectionResult}
+          isTestingConnection={onboardingTestingConnection}
+          isSubmittingChat={onboardingSubmittingChat}
+          onEvent={dispatchOnboardingEvent}
+          onLanguageSelect={previewOnboardingLanguage}
+          onCharacterSelect={(characterId) => {
+            void handleOnboardingCharacterSelect(characterId).catch((error) => {
+              console.error("[App] Failed to activate onboarding character:", error);
+            });
+          }}
+          onProviderChange={setOnboardingProviderSetup}
+          onProviderSave={() => void handleOnboardingProviderSave()}
+          onTestConnection={() => void handleOnboardingConnectionTest()}
+          onChatSubmit={handleOnboardingChatSubmit}
+          onFirstReplySucceeded={handleOnboardingFirstReplySucceeded}
+          onDismiss={() => closeOnboarding("dismissed")}
+          onResume={() => setOnboardingOpen(true)}
+        />
+      )}
 
       <MemoryModelDownloadDialog
         open={memoryModelDialogOpen}

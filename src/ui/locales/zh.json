@@ -1257,6 +1257,13 @@
         "stop": "停止"
     },
     "onboarding": {
+        "workflow": {
+            "eyebrow": "完成首次回复", "resume_title": "继续上次进度", "resume_description": "你的选择已保存，准备好后可继续。", "progress": "引导进度", "language_label": "界面语言", "saved_hint": "语言、角色和服务商选择都会保留。", "keep_primary_surface": "Live2D 与聊天保持可见", "dismiss": "保存并关闭", "resume": "继续设置", "retry": "重试", "testing": "测试中", "test_connection": "测试连接", "connection_title": "检查连接", "connection_description": "发送一次安全请求，确认服务商可以回复。", "connection_success": "连接正常。", "chat_description": "发送一条消息让角色回复。首次成功回复后，引导即完成。", "chat_placeholder": "打个招呼…", "send": "发送",
+            "steps": { "language": "语言", "character": "角色", "provider": "服务商", "connection-test": "连接", "chat": "首次聊天" },
+            "titles": { "language": "选择语言", "character": "选择角色", "provider": "连接服务商", "connection-test": "检查连接", "chat": "发送第一条消息" },
+            "descriptions": { "language": "选择你习惯的界面语言。", "character": "选择想先认识的角色。", "provider": "只配置获得回复所需的地址、模型和密钥。", "connection-test": "发送聊天前确认服务商可用。", "chat": "完成一次成功回复即可结束设置。" },
+            "provider": { "custom": "自定义地址", "provider_type": "服务商", "preset": "预设", "endpoint": "地址", "api_key": "API 密钥", "model": "模型", "discover": "发现模型", "discovering": "发现中", "testing": "测试中", "test": "测试连接", "test_success": "连接测试通过", "save": "保存服务商" }
+        },
         "title": "新手引导",
         "dismiss": "退出引导",
         "hints": {

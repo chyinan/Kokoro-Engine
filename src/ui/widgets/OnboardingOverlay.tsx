@@ -1,393 +1,266 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { AnimatePresence, motion } from "framer-motion";
-import { clsx } from "clsx";
-import { Languages, MousePointerClick, Sparkles, X } from "lucide-react";
-import { useTranslation } from "react-i18next";
-import type { SettingsTabId } from "./SettingsPanel";
+// pattern: Imperative Shell
 
-export type OnboardingStep = "language" | "open-settings" | "api" | "persona" | "return-home" | "chat";
+import { useState } from "react";
+import { useTranslation } from "react-i18next";
+import { Check, ChevronRight, Languages, Loader2, MessageCircle, RotateCcw, Sparkles, X } from "lucide-react";
+
+import {
+  type OnboardingDraft,
+  type OnboardingFlowEvent,
+  type OnboardingStep,
+} from "../../features/onboarding/onboarding-flow";
+import type { ProviderSetup } from "../../features/onboarding/provider-setup";
+import type { LlmConnectionTestResult } from "../../lib/kokoro-bridge";
+import { ProviderSetupStep } from "./onboarding/ProviderSetupStep";
+
 export type OnboardingLanguageCode = "en" | "zh" | "zh-TW" | "ja" | "ko" | "ru";
 
-interface OnboardingOverlayProps {
-    step: OnboardingStep | null;
-    selectedLanguage: OnboardingLanguageCode;
-    settingsOpen: boolean;
-    activeSettingsTab: SettingsTabId;
-    onLanguageSelect: (language: OnboardingLanguageCode) => void;
-    onAdvance: () => void;
-    onDismiss: () => void;
-}
+export type OnboardingCharacter = Readonly<{
+  id: string;
+  name: string;
+  description: string;
+  avatarPath: string | null;
+}>;
 
-interface SpotlightRect {
-    top: number;
-    left: number;
-    width: number;
-    height: number;
-}
+export type OnboardingOverlayProps = Readonly<{
+  draft: OnboardingDraft;
+  characters: ReadonlyArray<OnboardingCharacter>;
+  providerSetup: ProviderSetup;
+  connectionResult: LlmConnectionTestResult | null;
+  isTestingConnection: boolean;
+  isSubmittingChat: boolean;
+  onEvent: (event: OnboardingFlowEvent) => void;
+  onLanguageSelect: (language: OnboardingLanguageCode) => void;
+  onCharacterSelect: (characterId: string) => void;
+  onProviderChange: (setup: ProviderSetup) => void;
+  onProviderSave?: () => Promise<void> | void;
+  onTestConnection: () => Promise<void> | void;
+  onChatSubmit: (message: string) => Promise<string>;
+  onFirstReplySucceeded: (reply: string) => void;
+  onDismiss: () => void;
+  onResume: () => void;
+}>;
 
-interface StepMeta {
-    targetIds: string[];
-    title: string;
-    description: string;
-    actionLabel: string;
-    canAdvance: boolean;
-    helperText?: string;
-}
-
-const LANGUAGE_OPTIONS: Array<{ code: OnboardingLanguageCode; label: string }> = [
-    { code: "zh", label: "简体中文" },
-    { code: "zh-TW", label: "繁體中文" },
-    { code: "en", label: "English" },
-    { code: "ja", label: "日本語" },
-    { code: "ko", label: "한국어" },
-    { code: "ru", label: "Русский" },
+const LANGUAGE_OPTIONS: ReadonlyArray<{ code: OnboardingLanguageCode; label: string }> = [
+  { code: "en", label: "English" },
+  { code: "zh", label: "简体中文" },
+  { code: "zh-TW", label: "繁體中文" },
+  { code: "ja", label: "日本語" },
+  { code: "ko", label: "한국어" },
+  { code: "ru", label: "Русский" },
 ];
 
-const STEP_ORDER: Record<OnboardingStep, number> = {
-    language: 1,
-    "open-settings": 2,
-    api: 3,
-    persona: 4,
-    "return-home": 5,
-    chat: 6,
-};
+const STEP_ORDER: ReadonlyArray<OnboardingStep> = [
+  "language",
+  "character",
+  "provider",
+  "connection-test",
+  "chat",
+];
 
-function clamp(value: number, min: number, max: number) {
-    return Math.min(Math.max(value, min), max);
+function initials(name: string): string {
+  return Array.from(name.trim()).slice(0, 2).join("").toUpperCase() || "?";
 }
 
-function hasTarget(targetId: string) {
-    if (typeof document === "undefined") {
-        return false;
-    }
-
-    return Boolean(document.querySelector(`[data-onboarding-id="${targetId}"]`));
+function stepLabel(step: OnboardingStep, t: (key: string, options?: { defaultValue?: string }) => string): string {
+  return t(`onboarding.workflow.steps.${step}`, { defaultValue: step === "connection-test" ? "Test connection" : step });
 }
 
-function findTargetElement(targetIds: string[]) {
-    if (typeof document === "undefined") {
-        return null;
+/**
+ * Outcome-led first-run workflow. The shell renders the current draft and
+ * delegates persistence and side effects to App's onboarding service.
+ */
+export default function OnboardingOverlay(props: OnboardingOverlayProps) {
+  const { t } = useTranslation();
+  const [chatMessage, setChatMessage] = useState("");
+  const [chatError, setChatError] = useState<string | null>(null);
+
+  if (props.draft.completed) return null;
+
+  const isDismissed = props.draft.dismissed;
+  const activeStep = props.draft.step;
+  const activeStepIndex = STEP_ORDER.indexOf(activeStep);
+
+  const submitChat = async (): Promise<void> => {
+    const message = chatMessage.trim();
+    if (!message || props.isSubmittingChat) return;
+    setChatError(null);
+    try {
+      const reply = await props.onChatSubmit(message);
+      if (reply.trim().length > 0) {
+        props.onFirstReplySucceeded(reply);
+      }
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : String(error));
     }
+  };
 
-    for (const targetId of targetIds) {
-        const element = document.querySelector<HTMLElement>(`[data-onboarding-id="${targetId}"]`);
-        if (element) {
-            return element;
-        }
-    }
+  return (
+    <div className="pointer-events-none fixed inset-0 z-[140] flex items-center justify-center p-4">
+      <div className="pointer-events-auto w-full max-w-[520px] overflow-hidden rounded-3xl border border-[var(--color-border-accent)]/60 bg-[var(--color-bg-elevated)]/95 shadow-[0_24px_100px_rgba(0,0,0,0.6)] backdrop-blur-2xl">
+        <header className="flex items-start justify-between gap-4 border-b border-[var(--color-border)] px-6 py-5">
+          <div>
+            <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.24em] text-[var(--color-accent)]">
+              <Sparkles size={14} aria-hidden="true" />
+              {t("onboarding.workflow.eyebrow", { defaultValue: "Your first reply" })}
+              <span className="text-[var(--color-text-muted)]">{Math.max(activeStepIndex + 1, 1)}/5</span>
+            </div>
+            <h2 className="mt-2 font-heading text-xl font-bold tracking-wide text-[var(--color-text-primary)]">
+              {isDismissed
+                ? t("onboarding.workflow.resume_title", { defaultValue: "Pick up where you left off" })
+                : t(`onboarding.workflow.titles.${activeStep}`, { defaultValue: "Meet your companion" })}
+            </h2>
+            <p className="mt-1 text-sm leading-5 text-[var(--color-text-secondary)]">
+              {isDismissed
+                ? t("onboarding.workflow.resume_description", { defaultValue: "Your choices are saved. Resume whenever you are ready." })
+                : t(`onboarding.workflow.descriptions.${activeStep}`, { defaultValue: "A few focused steps are all it takes to start chatting." })}
+            </p>
+          </div>
+          <button
+            type="button"
+            data-onboarding-action="dismiss"
+            onClick={props.onDismiss}
+            className="rounded-xl p-2 text-[var(--color-text-muted)] transition hover:bg-white/5 hover:text-[var(--color-text-primary)]"
+            aria-label={t("onboarding.workflow.dismiss", { defaultValue: "Save and close" })}
+          >
+            <X size={17} aria-hidden="true" />
+          </button>
+        </header>
 
-    return null;
-}
+        <div className="flex gap-1 border-b border-[var(--color-border)] px-6 py-3" aria-label={t("onboarding.workflow.progress", { defaultValue: "Onboarding progress" })}>
+          {STEP_ORDER.map((step, index) => (
+            <div key={step} className="flex min-w-0 flex-1 items-center gap-1.5">
+              <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-full border text-[10px] font-semibold ${index < activeStepIndex || props.draft.completed ? "border-emerald-300/50 bg-emerald-400/15 text-emerald-200" : index === activeStepIndex ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]" : "border-[var(--color-border)] text-[var(--color-text-muted)]"}`}>
+                {index < activeStepIndex || props.draft.completed ? <Check size={12} aria-hidden="true" /> : index + 1}
+              </span>
+              <span className="hidden truncate text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-muted)] sm:block">{stepLabel(step, t)}</span>
+              {index < STEP_ORDER.length - 1 && <ChevronRight size={12} className="ml-auto text-[var(--color-border)]" aria-hidden="true" />}
+            </div>
+          ))}
+        </div>
 
-function rectEquals(a: SpotlightRect | null, b: SpotlightRect | null) {
-    if (a === b) {
-        return true;
-    }
+        {isDismissed ? (
+          <div className="space-y-4 px-6 py-7">
+            <div className="rounded-2xl border border-[var(--color-border)] bg-black/15 px-4 py-4 text-sm text-[var(--color-text-secondary)]">
+              <p>{t("onboarding.workflow.saved_hint", { defaultValue: "Your language, character, and provider selections are safe." })}</p>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={props.onDismiss} className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-accent)]">
+                {t("onboarding.workflow.dismiss", { defaultValue: "Save and close" })}
+              </button>
+              <button type="button" data-onboarding-action="resume" onClick={() => { props.onEvent({ type: "resume" }); props.onResume(); }} className="inline-flex items-center gap-2 rounded-xl bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-black transition hover:bg-white">
+                <RotateCcw size={13} aria-hidden="true" />
+                {t("onboarding.workflow.resume", { defaultValue: "Resume" })}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-5 px-6 py-6">
+            {activeStep === "language" && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-muted)]">
+                  <Languages size={14} aria-hidden="true" />
+                  {t("onboarding.workflow.language_label", { defaultValue: "Interface language" })}
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  {LANGUAGE_OPTIONS.map((option) => (
+                    <button
+                      key={option.code}
+                      type="button"
+                      data-onboarding-language={option.code}
+                      onClick={() => props.onLanguageSelect(option.code)}
+                      className={`rounded-xl border px-3 py-3 text-left text-sm transition ${props.draft.language === option.code ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]" : "border-[var(--color-border)] bg-black/15 text-[var(--color-text-secondary)] hover:border-[var(--color-border-accent)] hover:text-[var(--color-text-primary)]"}`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
-    if (!a || !b) {
-        return false;
-    }
+            {activeStep === "character" && (
+              <div className="grid gap-2 sm:grid-cols-2">
+                {props.characters.map((character) => (
+                  <button
+                    key={character.id}
+                    type="button"
+                    data-onboarding-character-id={character.id}
+                    onClick={() => props.onCharacterSelect(character.id)}
+                    className={`flex items-center gap-3 rounded-2xl border p-3 text-left transition ${props.draft.characterId === character.id ? "border-[var(--color-accent)] bg-[var(--color-accent)]/12" : "border-[var(--color-border)] bg-black/15 hover:border-[var(--color-border-accent)]"}`}
+                  >
+                    <span className="grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-accent)]/10 text-xs font-bold text-[var(--color-accent)]">
+                      {character.avatarPath ? <img src={character.avatarPath} alt="" className="h-full w-full object-cover" /> : initials(character.name)}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-semibold text-[var(--color-text-primary)]">{character.name}</span>
+                      <span className="mt-1 line-clamp-2 block text-xs leading-4 text-[var(--color-text-muted)]">{character.description}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
 
-    return a.top === b.top && a.left === b.left && a.width === b.width && a.height === b.height;
-}
+            {activeStep === "provider" && (
+              <ProviderSetupStep
+                setup={props.providerSetup}
+                onChange={props.onProviderChange}
+                onSave={props.onProviderSave}
+              />
+            )}
 
-export default function OnboardingOverlay({
-    step,
-    selectedLanguage,
-    settingsOpen,
-    activeSettingsTab,
-    onLanguageSelect,
-    onAdvance,
-    onDismiss,
-}: OnboardingOverlayProps) {
-    const { t } = useTranslation();
-    const [targetRect, setTargetRect] = useState<SpotlightRect | null>(null);
-
-    const stepMeta = useMemo<StepMeta | null>(() => {
-        if (!step) {
-            return null;
-        }
-
-        if (step === "language") {
-            return {
-                targetIds: [],
-                title: t("onboarding.language.title"),
-                description: t("onboarding.language.description"),
-                actionLabel: t("onboarding.actions.start"),
-                canAdvance: true,
-            };
-        }
-
-        if (step === "open-settings") {
-            return {
-                targetIds: ["settings-button"],
-                title: t("onboarding.steps.open_settings.title"),
-                description: t("onboarding.steps.open_settings.description"),
-                actionLabel: t("onboarding.actions.next"),
-                canAdvance: false,
-                helperText: t("onboarding.hints.click_highlighted"),
-            };
-        }
-
-        if (!settingsOpen && (step === "api" || step === "persona")) {
-            return {
-                targetIds: ["settings-button"],
-                title: t("onboarding.steps.open_settings.title"),
-                description: t("onboarding.steps.open_settings.description"),
-                actionLabel: t("onboarding.actions.next"),
-                canAdvance: false,
-                helperText: t("onboarding.hints.click_highlighted"),
-            };
-        }
-
-        if (step === "api") {
-            const opened = activeSettingsTab === "api";
-            return {
-                targetIds: ["settings-tab-api"],
-                title: opened ? t("onboarding.steps.api.done_title") : t("onboarding.steps.api.title"),
-                description: opened ? t("onboarding.steps.api.done_description") : t("onboarding.steps.api.description"),
-                actionLabel: t("onboarding.actions.next"),
-                canAdvance: opened,
-                helperText: opened ? undefined : t("onboarding.hints.click_highlighted"),
-            };
-        }
-
-        if (step === "persona") {
-            const opened = activeSettingsTab === "persona";
-            return {
-                targetIds: ["settings-tab-persona"],
-                title: opened ? t("onboarding.steps.persona.done_title") : t("onboarding.steps.persona.title"),
-                description: opened ? t("onboarding.steps.persona.done_description") : t("onboarding.steps.persona.description"),
-                actionLabel: t("onboarding.actions.next"),
-                canAdvance: opened,
-                helperText: opened ? undefined : t("onboarding.hints.click_highlighted"),
-            };
-        }
-
-        if (step === "return-home") {
-            return {
-                targetIds: ["settings-close-button", "settings-cancel-button"],
-                title: t("onboarding.steps.return_home.title"),
-                description: t("onboarding.steps.return_home.description"),
-                actionLabel: t("onboarding.actions.next"),
-                canAdvance: false,
-                helperText: t("onboarding.hints.click_highlighted"),
-            };
-        }
-
-        const chatExpanded = hasTarget("chat-input");
-        return {
-            targetIds: chatExpanded ? ["chat-input"] : ["chat-open-button"],
-            title: chatExpanded ? t("onboarding.steps.chat.title") : t("onboarding.steps.chat.collapsed_title"),
-            description: chatExpanded ? t("onboarding.steps.chat.description") : t("onboarding.steps.chat.collapsed_description"),
-            actionLabel: t("onboarding.actions.finish"),
-            canAdvance: chatExpanded,
-            helperText: chatExpanded ? undefined : t("onboarding.hints.click_highlighted"),
-        };
-    }, [activeSettingsTab, settingsOpen, step, t]);
-
-    useEffect(() => {
-        if (!stepMeta || stepMeta.targetIds.length === 0) {
-            setTargetRect(null);
-            return;
-        }
-
-        const updateRect = () => {
-            const element = findTargetElement(stepMeta.targetIds);
-            if (!element) {
-                setTargetRect((prev) => (prev === null ? prev : null));
-                return;
-            }
-
-            const bounds = element.getBoundingClientRect();
-            const nextRect = {
-                top: Math.round(bounds.top),
-                left: Math.round(bounds.left),
-                width: Math.round(bounds.width),
-                height: Math.round(bounds.height),
-            };
-
-            setTargetRect((prev) => (rectEquals(prev, nextRect) ? prev : nextRect));
-        };
-
-        updateRect();
-        window.addEventListener("resize", updateRect);
-        window.addEventListener("scroll", updateRect, true);
-        let frameId = 0;
-        const tick = () => {
-            updateRect();
-            frameId = window.requestAnimationFrame(tick);
-        };
-        frameId = window.requestAnimationFrame(tick);
-
-        return () => {
-            window.removeEventListener("resize", updateRect);
-            window.removeEventListener("scroll", updateRect, true);
-            window.cancelAnimationFrame(frameId);
-        };
-    }, [stepMeta]);
-
-    if (!step || !stepMeta) {
-        return null;
-    }
-
-    const viewportWidth = typeof window === "undefined" ? 1280 : window.innerWidth;
-    const viewportHeight = typeof window === "undefined" ? 720 : window.innerHeight;
-    const cardWidth = Math.min(360, Math.max(280, viewportWidth - 32));
-    const estimatedCardHeight = step === "language" ? 280 : 210;
-    let cardLeft = Math.round((viewportWidth - cardWidth) / 2);
-    let cardTop = Math.round((viewportHeight - estimatedCardHeight) / 2);
-
-    if (targetRect) {
-        const margin = 16;
-        cardLeft = Math.round(
-            clamp(
-                targetRect.left + targetRect.width / 2 - cardWidth / 2,
-                margin,
-                viewportWidth - cardWidth - margin,
-            )
-        );
-
-        const spaceBelow = viewportHeight - (targetRect.top + targetRect.height);
-        const placeBelow = spaceBelow >= estimatedCardHeight + 32 || spaceBelow >= targetRect.top;
-        cardTop = placeBelow
-            ? Math.round(clamp(targetRect.top + targetRect.height + 16, margin, viewportHeight - estimatedCardHeight - margin))
-            : Math.round(clamp(targetRect.top - estimatedCardHeight - 16, margin, viewportHeight - estimatedCardHeight - margin));
-    }
-
-    const cardStyle: CSSProperties = {
-        width: cardWidth,
-        left: cardLeft,
-        top: cardTop,
-    };
-
-    return (
-        <AnimatePresence>
-            <motion.div
-                key={step}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="fixed inset-0 z-[140] pointer-events-none"
-            >
-                {!targetRect && (
-                    <div className="absolute inset-0 bg-slate-950/72" />
+            {activeStep === "connection-test" && (
+              <div className="space-y-4">
+                <div className="rounded-2xl border border-[var(--color-border)] bg-black/15 px-4 py-4">
+                  <p className="text-sm font-semibold text-[var(--color-text-primary)]">{t("onboarding.workflow.connection_title", { defaultValue: "Check the connection" })}</p>
+                  <p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">{t("onboarding.workflow.connection_description", { defaultValue: "We will make one safe request to confirm your provider can answer." })}</p>
+                </div>
+                {(props.draft.connectionTest.error || props.connectionResult === null) && props.draft.connectionTest.error && (
+                  <p role="alert" className="rounded-xl border border-red-300/30 bg-red-400/10 px-3 py-2 text-xs leading-5 text-red-200">{props.draft.connectionTest.error}</p>
                 )}
+                {props.connectionResult && <p role="status" className="flex items-center gap-2 rounded-xl border border-emerald-300/25 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-200"><Check size={13} aria-hidden="true" />{t("onboarding.workflow.connection_success", { defaultValue: "Connection looks good." })}</p>}
+                <div className="flex flex-wrap justify-end gap-2">
+                  {props.draft.connectionTest.status === "error" && <button type="button" data-onboarding-action="retry" onClick={() => props.onEvent({ type: "retry" })} className="inline-flex items-center gap-2 rounded-xl border border-[var(--color-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-accent)]"><RotateCcw size={13} aria-hidden="true" />{t("onboarding.workflow.retry", { defaultValue: "Retry" })}</button>}
+                  <button type="button" data-onboarding-action="test-connection" onClick={() => void props.onTestConnection()} disabled={props.isTestingConnection} className="inline-flex items-center gap-2 rounded-xl bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-black transition hover:bg-white disabled:cursor-wait disabled:opacity-60">
+                    {props.isTestingConnection ? <Loader2 size={13} className="animate-spin" aria-hidden="true" /> : <ChevronRight size={13} aria-hidden="true" />}
+                    {props.isTestingConnection ? t("onboarding.workflow.testing", { defaultValue: "Testing" }) : t("onboarding.workflow.test_connection", { defaultValue: "Test connection" })}
+                  </button>
+                </div>
+              </div>
+            )}
 
-                {targetRect && (
-                    <div
-                        className="absolute rounded-2xl border border-[var(--color-border-accent)] bg-[var(--color-accent)]/6"
-                        style={{
-                            top: targetRect.top - 8,
-                            left: targetRect.left - 8,
-                            width: targetRect.width + 16,
-                            height: targetRect.height + 16,
-                            boxShadow: "0 0 0 9999px rgba(2, 6, 23, 0.72), 0 0 24px rgba(0, 240, 255, 0.35)",
-                        }}
-                    />
-                )}
+            {activeStep === "chat" && (
+              <div className="space-y-4">
+                <div className="flex items-start gap-3 rounded-2xl border border-[var(--color-border)] bg-black/15 px-4 py-4">
+                  <MessageCircle size={17} className="mt-0.5 shrink-0 text-[var(--color-accent)]" aria-hidden="true" />
+                  <p className="text-sm leading-6 text-[var(--color-text-secondary)]">{t("onboarding.workflow.chat_description", { defaultValue: "Send one message so your companion can answer. On that first successful reply, onboarding is complete." })}</p>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    data-onboarding-chat-input
+                    value={chatMessage}
+                    onChange={(event) => setChatMessage(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter") void submitChat(); }}
+                    placeholder={t("onboarding.workflow.chat_placeholder", { defaultValue: "Say hello…" })}
+                    className="min-w-0 flex-1 rounded-xl border border-[var(--color-border)] bg-black/20 px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-border-accent)]"
+                  />
+                  <button type="button" data-onboarding-action="send-chat" onClick={() => void submitChat()} disabled={props.isSubmittingChat || chatMessage.trim().length === 0} className="inline-flex items-center gap-2 rounded-xl bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-black transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50">
+                    {props.isSubmittingChat ? <Loader2 size={13} className="animate-spin" aria-hidden="true" /> : <ChevronRight size={13} aria-hidden="true" />}
+                    {t("onboarding.workflow.send", { defaultValue: "Send" })}
+                  </button>
+                </div>
+                {(chatError || props.draft.chat.error) && <p role="alert" className="rounded-xl border border-red-300/30 bg-red-400/10 px-3 py-2 text-xs leading-5 text-red-200">{chatError ?? props.draft.chat.error}</p>}
+              </div>
+            )}
 
-                <motion.div
-                    initial={{ opacity: 0, y: 16, scale: 0.97 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: 12, scale: 0.97 }}
-                    transition={{ type: "spring", stiffness: 280, damping: 28 }}
-                    className="absolute pointer-events-auto rounded-2xl border border-[var(--color-border-accent)] bg-[var(--color-bg-elevated)]/95 shadow-2xl backdrop-blur-xl"
-                    style={cardStyle}
-                >
-                    <div className="flex items-start justify-between gap-4 border-b border-[var(--color-border)] px-5 py-4">
-                        <div>
-                            <div className="mb-2 flex items-center gap-2 text-[11px] font-heading font-semibold uppercase tracking-[0.18em] text-[var(--color-accent)]">
-                                <Sparkles size={14} strokeWidth={1.6} />
-                                {step === "language" ? t("onboarding.language.eyebrow") : t("onboarding.title")}
-                                <span className="text-[var(--color-text-muted)]">
-                                    {STEP_ORDER[step]}/6
-                                </span>
-                            </div>
-                            <h2 className="font-heading text-lg font-bold tracking-wide text-[var(--color-text-primary)]">
-                                {stepMeta.title}
-                            </h2>
-                        </div>
-                        <button
-                            type="button"
-                            onClick={onDismiss}
-                            className="rounded-lg p-2 text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-accent)]"
-                            aria-label={t("onboarding.dismiss")}
-                            title={t("onboarding.dismiss")}
-                        >
-                            <X size={16} strokeWidth={1.7} />
-                        </button>
-                    </div>
-
-                    <div className="space-y-4 px-5 py-4">
-                        <p className="text-sm leading-6 text-[var(--color-text-secondary)]">
-                            {stepMeta.description}
-                        </p>
-
-                        {stepMeta.helperText && (
-                            <div className="relative h-10 rounded-xl border border-[var(--color-border-accent)] bg-[var(--color-accent)]/10 px-10 text-xs text-[var(--color-accent)]">
-                                <MousePointerClick
-                                    size={14}
-                                    strokeWidth={1.6}
-                                    className="absolute left-3.5 top-1/2 -translate-y-1/2"
-                                />
-                                <span className="absolute inset-0 flex items-center justify-center px-10 text-center font-heading font-semibold tracking-[0.08em] leading-none translate-y-px">
-                                    {stepMeta.helperText}
-                                </span>
-                            </div>
-                        )}
-
-                        {step === "language" && (
-                            <div className="space-y-4">
-                                <div className="flex items-center gap-2 text-xs font-heading font-semibold uppercase tracking-[0.18em] text-[var(--color-text-muted)]">
-                                    <Languages size={14} strokeWidth={1.5} />
-                                    {t("settings.app_language.label")}
-                                </div>
-                                <div className="flex flex-wrap gap-2">
-                                    {LANGUAGE_OPTIONS.map((option) => (
-                                        <button
-                                            key={option.code}
-                                            type="button"
-                                            onClick={() => onLanguageSelect(option.code)}
-                                            className={clsx(
-                                                "rounded-xl border px-3 py-2 text-sm transition-all",
-                                                selectedLanguage === option.code
-                                                    ? "border-[var(--color-border-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)] shadow-[var(--glow-accent)]"
-                                                    : "border-[var(--color-border)] bg-black/20 text-[var(--color-text-secondary)] hover:border-[var(--color-border-accent)] hover:text-[var(--color-text-primary)]"
-                                            )}
-                                        >
-                                            {option.label}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3 border-t border-[var(--color-border)] px-5 py-4">
-                        <button
-                            type="button"
-                            onClick={onDismiss}
-                            className="inline-flex h-10 items-center justify-center rounded-lg border border-[var(--color-border)] px-4 text-sm leading-none font-heading font-semibold uppercase tracking-[0.14em] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-border-accent)] hover:text-[var(--color-accent)]"
-                        >
-                            {t("onboarding.dismiss")}
-                        </button>
-                        <button
-                            type="button"
-                            onClick={onAdvance}
-                            disabled={!stepMeta.canAdvance}
-                            className={clsx(
-                                "inline-flex h-10 items-center justify-center rounded-lg px-4 text-sm leading-none font-heading font-semibold uppercase tracking-[0.14em] transition-colors",
-                                stepMeta.canAdvance
-                                    ? "bg-[var(--color-accent)] text-black hover:bg-white"
-                                    : "cursor-not-allowed bg-white/10 text-[var(--color-text-muted)]"
-                            )}
-                        >
-                            {stepMeta.actionLabel}
-                        </button>
-                    </div>
-                </motion.div>
-            </motion.div>
-        </AnimatePresence>
-    );
+            <div className="flex items-center justify-between gap-3 border-t border-[var(--color-border)] pt-4">
+              <button type="button" data-onboarding-action="dismiss" onClick={props.onDismiss} className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-accent)]">
+                {t("onboarding.workflow.dismiss", { defaultValue: "Save and close" })}
+              </button>
+              <span className="text-right text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-muted)]">{t("onboarding.workflow.keep_primary_surface", { defaultValue: "Live2D + chat stay visible" })}</span>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }

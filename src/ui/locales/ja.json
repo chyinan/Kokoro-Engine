@@ -1257,6 +1257,13 @@
         "stop": "停止"
     },
     "onboarding": {
+        "workflow": {
+            "eyebrow": "最初の返信", "resume_title": "続きから再開", "resume_description": "選択内容は保存されています。準備ができたら再開できます。", "progress": "オンボーディングの進捗", "language_label": "表示言語", "saved_hint": "言語、キャラクター、プロバイダーの選択は保持されます。", "keep_primary_surface": "Live2D とチャットは表示されたままです", "dismiss": "保存して閉じる", "resume": "設定を再開", "retry": "再試行", "testing": "テスト中", "test_connection": "接続をテスト", "connection_title": "接続を確認", "connection_description": "プロバイダーが応答できるか安全なリクエストで確認します。", "connection_success": "接続は正常です。", "chat_description": "メッセージを送り、キャラクターから返信を受け取ります。最初の成功した返信で完了します。", "chat_placeholder": "こんにちは…", "send": "送信",
+            "steps": { "language": "言語", "character": "キャラクター", "provider": "プロバイダー", "connection-test": "接続", "chat": "最初のチャット" },
+            "titles": { "language": "言語を選択", "character": "キャラクターを選択", "provider": "プロバイダーを接続", "connection-test": "接続を確認", "chat": "最初のメッセージを送信" },
+            "descriptions": { "language": "使いやすい表示言語を選択します。", "character": "最初に会いたいキャラクターを選びます。", "provider": "返信に必要なエンドポイント、モデル、キーだけを設定します。", "connection-test": "チャット前にプロバイダーの応答を確認します。", "chat": "成功した返信を一度受け取れば設定完了です。" },
+            "provider": { "custom": "カスタムエンドポイント", "provider_type": "プロバイダー", "preset": "プリセット", "endpoint": "エンドポイント", "api_key": "API キー", "model": "モデル", "discover": "モデルを検出", "discovering": "検出中", "testing": "テスト中", "test": "接続をテスト", "test_success": "接続テストに成功", "save": "プロバイダーを保存" }
+        },
         "title": "クイックガイド",
         "dismiss": "ガイドを終了",
         "hints": {
