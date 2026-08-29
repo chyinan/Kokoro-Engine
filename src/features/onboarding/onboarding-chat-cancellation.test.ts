@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   cancelDeferredOnboardingChat,
   cancelOnboardingChat,
+  releaseOnboardingChatRequest,
   type PendingOnboardingChat,
 } from "./onboarding-chat-cancellation";
 
@@ -54,5 +55,13 @@ describe("cancelOnboardingChat", () => {
     ).toBe(true);
     expect(cancelChatTurn).toHaveBeenCalledWith("turn-43", "onboarding_dismissed");
     expect(cancelledRequestIds.has("request-43")).toBe(false);
+  });
+
+  it("releases a deferred cancellation when streamChat rejects before turn start", () => {
+    const cancelledRequestIds = new Set(["request-44"]);
+
+    releaseOnboardingChatRequest(cancelledRequestIds, "request-44");
+
+    expect(cancelledRequestIds.has("request-44")).toBe(false);
   });
 });

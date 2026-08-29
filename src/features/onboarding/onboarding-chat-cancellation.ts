@@ -45,3 +45,11 @@ export function cancelDeferredOnboardingChat(
   });
   return true;
 }
+
+/** Drops a deferred cancellation once its stream has rejected before turn start. */
+export function releaseOnboardingChatRequest(
+  cancelledRequestIds: Set<string>,
+  clientRequestId: string,
+): void {
+  cancelledRequestIds.delete(clientRequestId);
+}

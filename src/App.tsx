@@ -367,6 +367,7 @@ import { isOnboardingTurnEvent } from "./features/onboarding/onboarding-turn-cor
 import {
   cancelDeferredOnboardingChat,
   cancelOnboardingChat as cancelPendingOnboardingChat,
+  releaseOnboardingChatRequest,
 } from "./features/onboarding/onboarding-chat-cancellation";
 
 let _regSnap = 0;
@@ -927,7 +928,12 @@ function App() {
         client_request_id: clientRequestId,
       }).catch((error) => {
         const pending = onboardingChatPendingRef.current;
+        if (pending?.clientRequestId !== clientRequestId) {
+          releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
+          return;
+        }
         onboardingChatPendingRef.current = null;
+        releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
         setOnboardingSubmittingChat(false);
         pending?.reject(error instanceof Error ? error : new Error(getKokoroErrorMessage(error)));
       });
@@ -1385,6 +1391,7 @@ function App() {
     });
 
     return () => {
+      cancelledOnboardingRequestIdsRef.current.clear();
       ttsService.cleanup();
       unlistenImageGen.then(unlisten => unlisten());
       unlistenChatImageGen.then(unlisten => unlisten());
