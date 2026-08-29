@@ -4,7 +4,7 @@ use crate::ai::curiosity::CuriosityModule;
 use crate::ai::database_migrations;
 use crate::ai::idle_behaviors::IdleBehaviorSystem;
 use crate::ai::initiative::InitiativeSystem;
-use crate::ai::memory::MemoryManager;
+use crate::ai::memory::{MemoryManager, MemoryRetrievalMode, MemorySearchResult};
 use crate::ai::router::{ModelRouter, ModelType};
 use crate::llm::messages::user_text_message;
 use crate::llm::provider::LlmProvider;
@@ -106,6 +106,14 @@ fn memory_write_language_instruction(response_language: &str) -> Option<String> 
          translate or summarize it into {language}; preserve proper nouns, code identifiers, \
          product names, and exact quoted phrases only when necessary."
     ))
+}
+
+/// Preserves keyword/BM25 snippets when semantic retrieval is unavailable.
+fn memory_context_for_prompt(result: MemorySearchResult) -> (Vec<MemorySnippet>, Option<String>) {
+    let warning = (result.mode == MemoryRetrievalMode::Unavailable).then(|| {
+        "memory semantic retrieval unavailable; keyword results still included".to_string()
+    });
+    (result.snippets, warning)
 }
 
 fn build_conversation_summary_prompt(transcript: &str, target_language: &str) -> String {
@@ -799,8 +807,18 @@ impl AIOrchestrator {
         let current_conversation_id = self.current_conversation_id.lock().await.clone();
         let mut warnings: Vec<String> = Vec::new();
         let memories = if self.is_memory_enabled() {
-            match self.memory_manager.search_memories(query, 5, cid).await {
-                Ok(m) => Some(m),
+            match self
+                .memory_manager
+                .search_memories_with_status(query, 5, cid)
+                .await
+            {
+                Ok(result) => {
+                    let (snippets, warning) = memory_context_for_prompt(result);
+                    if let Some(warning) = warning {
+                        warnings.push(warning);
+                    }
+                    Some(snippets)
+                }
                 Err(e) => {
                     warnings.push(format!("记忆检索失败（本次对话将不含记忆上下文）：{e}"));
                     None
@@ -1344,6 +1362,30 @@ mod tests {
             .all(|message| !message.content.contains("<long_term_memory>")
                 && !message.content.contains("<conversation_state>")
                 && !message.content.contains("<conversation_summary>")));
+    }
+
+    #[test]
+    fn unavailable_memory_search_keeps_keyword_snippets_for_chat() {
+        let result = MemorySearchResult {
+            snippets: vec![MemorySnippet {
+                id: 7,
+                content: "keyword match".to_string(),
+                embedding: Vec::new(),
+                created_at: 1,
+                importance: 0.5,
+                tier: "ephemeral".to_string(),
+            }],
+            mode: MemoryRetrievalMode::Unavailable,
+        };
+
+        let (snippets, warning) = memory_context_for_prompt(result);
+
+        assert_eq!(snippets.len(), 1);
+        assert_eq!(snippets[0].content, "keyword match");
+        assert_eq!(
+            warning.as_deref(),
+            Some("memory semantic retrieval unavailable; keyword results still included")
+        );
     }
 
     #[tokio::test]

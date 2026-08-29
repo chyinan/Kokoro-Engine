@@ -62,10 +62,13 @@ function renderOverlay(overrides: Partial<OnboardingOverlayProps> = {}): {
     connectionResult: null,
     isTestingConnection: false,
     isSubmittingChat: false,
+    providerError: null,
+    characterError: null,
     onEvent: vi.fn<(event: OnboardingFlowEvent) => void>(),
     onLanguageSelect: vi.fn(),
     onCharacterSelect: vi.fn(),
     onProviderChange: vi.fn(),
+    onProviderSave: vi.fn(),
     onTestConnection: vi.fn(),
     onChatSubmit: vi.fn().mockResolvedValue("Welcome to Kokoro"),
     onFirstReplySucceeded: vi.fn(),
@@ -128,6 +131,25 @@ describe("OnboardingOverlay workflow", () => {
     unmount();
   });
 
+  test("surfaces activation failure with a localized retry action", async () => {
+    const onCharacterSelect = vi
+      .fn<OnboardingOverlayProps["onCharacterSelect"]>()
+      .mockRejectedValueOnce(new Error("backend activation failed"))
+      .mockResolvedValueOnce(undefined);
+    const { container, rerender, unmount } = renderOverlay({ onCharacterSelect });
+
+    rerender({ draft: createDraft("character") });
+    click(container, '[data-onboarding-character-id="pico"]');
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("couldn't activate");
+    click(container, '[data-onboarding-action="retry-character"]');
+    expect(onCharacterSelect).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
   test("offers a retry after a failed connection test without losing provider setup", () => {
     const onEvent = vi.fn<(event: OnboardingFlowEvent) => void>();
     const onTestConnection = vi.fn();
@@ -143,6 +165,39 @@ describe("OnboardingOverlay workflow", () => {
 
     expect(onEvent).toHaveBeenCalledWith({ type: "retry" });
     expect(onTestConnection).toHaveBeenCalledTimes(1);
+    unmount();
+  });
+
+  test("offers a provider edit action after a failed connection test", () => {
+    const onEvent = vi.fn<(event: OnboardingFlowEvent) => void>();
+    const failed = onboardingFlowReducer(createDraft("connection-test"), {
+      type: "connection-test-failed",
+      error: "provider unavailable",
+    });
+    const { container, unmount } = renderOverlay({ draft: failed, onEvent });
+
+    click(container, '[data-onboarding-action="edit-provider"]');
+    expect(onEvent).toHaveBeenCalledWith({ type: "edit-provider" });
+    unmount();
+  });
+
+  test("surfaces provider save failures with a retry action", async () => {
+    const onProviderSave = vi.fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("save failed"))
+      .mockResolvedValueOnce(undefined);
+    const { container, rerender, unmount } = renderOverlay({ onProviderSave });
+
+    rerender({ draft: createDraft("provider") });
+    expect(container.querySelector('[data-onboarding-action="save-provider"]')?.hasAttribute("disabled")).toBe(false);
+    click(container, '[data-onboarding-action="save-provider"]');
+    expect(onProviderSave).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("couldn't save");
+    click(container, '[data-onboarding-action="retry-provider"]');
+    expect(onProviderSave).toHaveBeenCalledTimes(2);
     unmount();
   });
 
@@ -184,6 +239,39 @@ describe("OnboardingOverlay workflow", () => {
     expect(onChatSubmit).toHaveBeenCalledWith("Say hello");
     expect(onFirstReplySucceeded).toHaveBeenCalledWith("Hello from Kokoro");
     expect(onEvent).not.toHaveBeenCalledWith(expect.objectContaining({ type: "first-reply-succeeded" }));
+    unmount();
+  });
+
+  test("maps chat failures to actionable localized text and retries", async () => {
+    const onChatSubmit = vi.fn<OnboardingOverlayProps["onChatSubmit"]>()
+      .mockRejectedValueOnce(new Error("raw backend timeout"))
+      .mockResolvedValueOnce("Welcome back");
+    const onFirstReplySucceeded = vi.fn();
+    const { container, rerender, unmount } = renderOverlay({ onChatSubmit, onFirstReplySucceeded });
+
+    rerender({ draft: createDraft("chat") });
+    const input = container.querySelector<HTMLInputElement>('[data-onboarding-chat-input]');
+    act(() => {
+      if (input) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        setter?.call(input, "Hello again");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    click(container, '[data-onboarding-action="send-chat"]');
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("couldn't send");
+    expect(container.textContent).not.toContain("raw backend timeout");
+    click(container, '[data-onboarding-action="retry-chat"]');
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onChatSubmit).toHaveBeenCalledTimes(2);
+    expect(onFirstReplySucceeded).toHaveBeenCalledWith("Welcome back");
     unmount();
   });
 });

@@ -115,6 +115,7 @@ function createLayout(options: {
   gazeTracking: boolean;
   renderFps: number;
   chatPanelWidth: number;
+  chatPanelInteractive: boolean;
   onChatPanelWidthPreview: (width: number) => number;
   onChatPanelWidthChange: (width: number) => void;
 }): LayoutConfig {
@@ -164,8 +165,9 @@ function createLayout(options: {
                 width: options.chatPanelWidth,
                 onWidthPreview: options.onChatPanelWidthPreview,
                 onWidthChange: options.onChatPanelWidthChange,
+                interactionDisabled: !options.chatPanelInteractive,
               },
-              style: { pointerEvents: "auto", margin: "48px 0 20px 20px", padding: "0" },
+              style: { pointerEvents: options.chatPanelInteractive ? "auto" : "none", margin: "48px 0 20px 20px", padding: "0" },
               motion: "panelEntry"
             }
           ]
@@ -356,6 +358,8 @@ import {
 import type { ThemeConfig } from "./ui/layout/types";
 import { modMessageBus } from "./ui/mods/ModMessageBus";
 import { CameraWatcher } from "./features/camera/CameraWatcher";
+import { mapCharacterAvatarUrl } from "./ui/widgets/character-avatar-url";
+import { shouldEnableChatPanel } from "./ui/layout/layout-interaction";
 
 let _regSnap = 0;
 const _subscribeFn = (cb: () => void) => {
@@ -427,6 +431,8 @@ function App() {
   });
   const [onboardingConnectionResult, setOnboardingConnectionResult] = useState<LlmConnectionTestResult | null>(null);
   const [onboardingTestingConnection, setOnboardingTestingConnection] = useState(false);
+  const [onboardingSavingProvider, setOnboardingSavingProvider] = useState(false);
+  const [onboardingProviderError, setOnboardingProviderError] = useState<string | null>(null);
   const [onboardingSubmittingChat, setOnboardingSubmittingChat] = useState(false);
   const onboardingChatPendingRef = useRef<{
     turnId: string | null;
@@ -782,10 +788,11 @@ function App() {
       gazeTracking,
       renderFps,
       chatPanelWidth,
+      chatPanelInteractive: shouldEnableChatPanel(onboardingOpen),
       onChatPanelWidthPreview: handleChatPanelWidthPreview,
       onChatPanelWidthChange: handleChatPanelWidthChange,
     }),
-    [displayMode, modelUrl, activeLive2dModelPath, activeModelSource, gazeTracking, renderFps, chatPanelWidth, handleChatPanelWidthPreview, handleChatPanelWidthChange]
+    [displayMode, modelUrl, activeLive2dModelPath, activeModelSource, gazeTracking, renderFps, chatPanelWidth, onboardingOpen, handleChatPanelWidthPreview, handleChatPanelWidthChange]
   );
 
   const handleDisplayModeChange = (mode: Live2DDisplayMode) => {
@@ -848,10 +855,20 @@ function App() {
   };
 
   const handleOnboardingProviderSave = async (): Promise<void> => {
-    if (!llmConfig) throw new Error("provider configuration is still loading");
-    const saved = await saveProviderSetup(llmConfig, onboardingProviderSetup);
-    setLlmConfig(saved);
-    dispatchOnboardingEvent({ type: "configure-provider", providerId: saved.active_provider });
+    setOnboardingSavingProvider(true);
+    setOnboardingProviderError(null);
+    try {
+      if (!llmConfig) throw new Error("provider configuration is still loading");
+      const saved = await saveProviderSetup(llmConfig, onboardingProviderSetup);
+      setLlmConfig(saved);
+      dispatchOnboardingEvent({ type: "configure-provider", providerId: saved.active_provider });
+    } catch {
+      setOnboardingProviderError(t("onboarding.workflow.errors.provider_save", {
+        defaultValue: "We couldn't save this provider. Check the endpoint, model, and key, then retry.",
+      }));
+    } finally {
+      setOnboardingSavingProvider(false);
+    }
   };
 
   const handleOnboardingConnectionTest = async (): Promise<void> => {
@@ -2362,6 +2379,7 @@ function App() {
               templates={characterTemplates}
               activeCharacterId={activeCharacterId}
               actions={characterCatalogActions}
+              resolveAvatarUrl={(path) => mapCharacterAvatarUrl(path, convertFileSrc)}
               onRecommendations={(characterName, recommendations) => {
                 setRecommendedCapabilities({ characterName, recommendations });
               }}
@@ -2509,19 +2527,19 @@ function App() {
             id: character.id,
             name: character.name,
             description: character.description?.trim() || character.persona,
-            avatarPath: character.avatar_path ?? null,
+            avatarPath: character.avatar_path
+              ? mapCharacterAvatarUrl(character.avatar_path, convertFileSrc)
+              : null,
           }))}
           providerSetup={onboardingProviderSetup}
           connectionResult={onboardingConnectionResult}
           isTestingConnection={onboardingTestingConnection}
+          isSavingProvider={onboardingSavingProvider}
+          providerError={onboardingProviderError}
           isSubmittingChat={onboardingSubmittingChat}
           onEvent={dispatchOnboardingEvent}
           onLanguageSelect={previewOnboardingLanguage}
-          onCharacterSelect={(characterId) => {
-            void handleOnboardingCharacterSelect(characterId).catch((error) => {
-              console.error("[App] Failed to activate onboarding character:", error);
-            });
-          }}
+          onCharacterSelect={handleOnboardingCharacterSelect}
           onProviderChange={setOnboardingProviderSetup}
           onProviderSave={() => void handleOnboardingProviderSave()}
           onTestConnection={() => void handleOnboardingConnectionTest()}

@@ -84,6 +84,10 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .register_uri_scheme_protocol("mod", crate::mods::protocol::handle_mod_request)
         .register_uri_scheme_protocol("live2d", commands::live2d_protocol::handle_live2d_request())
+        .register_uri_scheme_protocol(
+            "character-instance-resource",
+            commands::live2d_protocol::handle_character_instance_resource_request(),
+        )
         .invoke_handler(tauri::generate_handler![
             commands::system::get_engine_info,
             commands::system::check_latest_release,

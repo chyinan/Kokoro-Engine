@@ -52,6 +52,21 @@ describe("onboarding flow", () => {
     });
   });
 
+  test("returns to provider editing after a failed connection test", () => {
+    const configured = configureThroughProvider();
+    const failed = onboardingFlowReducer(configured, {
+      type: "connection-test-failed",
+      error: "provider unavailable",
+    });
+    const editing = onboardingFlowReducer(failed, { type: "edit-provider" });
+
+    expect(editing).toMatchObject({
+      step: "provider",
+      providerId: "ollama",
+      connectionTest: { status: "error", error: "provider unavailable" },
+    });
+  });
+
   test("dismissal preserves the draft and resume returns to its step", () => {
     const configured = configureThroughProvider();
     const dismissed = dismissOnboarding(configured);

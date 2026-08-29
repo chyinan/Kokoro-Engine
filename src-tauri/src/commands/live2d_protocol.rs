@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
@@ -103,6 +105,79 @@ pub fn handle_live2d_request() -> impl Fn(
                 .unwrap(),
             Err(e) => {
                 tracing::error!(target: "live2d", "[live2d protocol] Read error for {:?}: {}", file_path, e);
+                tauri::http::Response::builder()
+                    .status(500)
+                    .body(b"Internal Server Error".to_vec())
+                    .unwrap()
+            }
+        }
+    }
+}
+
+/// Serves managed character avatars from the app data directory.
+pub fn handle_character_instance_resource_request() -> impl Fn(
+    tauri::UriSchemeContext<'_, tauri::Wry>,
+    tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>>
+       + Send
+       + Sync
+       + 'static {
+    move |ctx, request| {
+        let app_data = match ctx.app_handle().path().app_data_dir() {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::error!(target: "characters", "[avatar protocol] Cannot resolve app data dir: {}", error);
+                return tauri::http::Response::builder()
+                    .status(500)
+                    .body(b"Internal Server Error".to_vec())
+                    .unwrap();
+            }
+        };
+        let Some(instance_id) = request.uri().host() else {
+            return tauri::http::Response::builder()
+                .status(400)
+                .body(b"Bad Request".to_vec())
+                .unwrap();
+        };
+        let relative = percent_decode(request.uri().path())
+            .trim_start_matches('/')
+            .to_string();
+        if instance_id.is_empty()
+            || instance_id.contains("..")
+            || instance_id.contains('/')
+            || instance_id.contains('\\')
+            || relative != "avatar.png"
+        {
+            return tauri::http::Response::builder()
+                .status(403)
+                .body(b"Forbidden".to_vec())
+                .unwrap();
+        }
+
+        let root = app_data.join("character-instance-resources");
+        let candidate = root.join(instance_id).join(relative);
+        if !candidate.exists() || !candidate.is_file() {
+            return tauri::http::Response::builder()
+                .status(404)
+                .body(b"Not Found".to_vec())
+                .unwrap();
+        }
+        if let Err(error) = ensure_within_root(&root, &candidate) {
+            tracing::error!(target: "characters", "[avatar protocol] unsafe path: {}", error);
+            return tauri::http::Response::builder()
+                .status(403)
+                .body(b"Forbidden".to_vec())
+                .unwrap();
+        }
+
+        match fs::read(candidate) {
+            Ok(content) => tauri::http::Response::builder()
+                .header("Content-Type", "image/png")
+                .header("Access-Control-Allow-Origin", "*")
+                .body(content)
+                .unwrap(),
+            Err(error) => {
+                tracing::error!(target: "characters", "[avatar protocol] Read error: {}", error);
                 tauri::http::Response::builder()
                     .status(500)
                     .body(b"Internal Server Error".to_vec())

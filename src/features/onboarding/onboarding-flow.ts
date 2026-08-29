@@ -42,6 +42,7 @@ export type OnboardingFlowEvent =
   | Readonly<{ type: "connection-test-started" }>
   | Readonly<{ type: "connection-test-succeeded" }>
   | Readonly<{ type: "connection-test-failed"; error: string }>
+  | Readonly<{ type: "edit-provider" }>
   | Readonly<{ type: "chat-started" }>
   | Readonly<{ type: "chat-failed"; error: string }>
   | Readonly<{ type: "first-reply-succeeded"; reply: string }>
@@ -150,6 +151,8 @@ export function onboardingFlowReducer(
         },
         "connection-test",
       );
+    case "edit-provider":
+      return withStep({ ...draft, completed: false }, "provider");
     case "chat-started":
       if (
         draft.language === null

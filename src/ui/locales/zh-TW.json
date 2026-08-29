@@ -1262,7 +1262,9 @@
             "steps": { "language": "語言", "character": "角色", "provider": "服務商", "connection-test": "連線", "chat": "首次聊天" },
             "titles": { "language": "選擇語言", "character": "選擇角色", "provider": "連接服務商", "connection-test": "檢查連線", "chat": "送出第一則訊息" },
             "descriptions": { "language": "選擇你習慣的介面語言。", "character": "選擇想先認識的角色。", "provider": "只設定取得回覆所需的位址、模型與金鑰。", "connection-test": "聊天前確認服務商可用。", "chat": "完成一次成功回覆即可結束設定。" },
-            "provider": { "custom": "自訂位址", "provider_type": "服務商", "preset": "預設", "endpoint": "位址", "api_key": "API 金鑰", "model": "模型", "discover": "探索模型", "discovering": "探索中", "testing": "測試中", "test": "測試連線", "test_success": "連線測試通過", "save": "儲存服務商" }
+            "provider": { "custom": "自訂位址", "provider_type": "服務商", "openai": "OpenAI 相容", "ollama": "Ollama（本機）", "preset": "預設", "endpoint": "位址", "api_key": "API 金鑰", "model": "模型", "discover": "探索模型", "discovering": "探索中", "testing": "測試中", "test": "測試連線", "test_success": "連線測試通過", "save": "儲存服務商", "saving": "儲存中" },
+            "edit_provider": "編輯服務商",
+            "errors": { "provider_save": "無法儲存服務商，請檢查位址、模型與金鑰後重試。", "character_activate": "無法啟用角色，請檢查角色套件後重試。", "chat_failed": "無法傳送訊息，請檢查連線後重試。" }
         },
         "title": "新手引導",
         "dismiss": "退出引導",

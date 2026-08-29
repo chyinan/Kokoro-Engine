@@ -52,7 +52,7 @@ export function ProviderSetupStep({
     const keyRequired = requiresApiKey(normalized);
     const presetOptions = useMemo(
         () => [
-            { id: "", label: t("onboarding.provider.custom", { defaultValue: "Custom endpoint" }) },
+            { id: "", label: t("onboarding.workflow.provider.custom", { defaultValue: "Custom endpoint" }) },
             ...OPENAI_COMPATIBLE_PRESETS.map((preset) => ({ id: preset.id, label: preset.label })),
         ],
         [t],
@@ -84,7 +84,7 @@ export function ProviderSetupStep({
         <div className="space-y-4" data-onboarding-id="provider-setup">
             <div>
                 <label className={labelClasses} htmlFor="onboarding-provider-type">
-                    {t("onboarding.provider.provider_type", { defaultValue: "Provider" })}
+                    {t("onboarding.workflow.provider.provider_type", { defaultValue: "Provider" })}
                 </label>
                 <select
                     id="onboarding-provider-type"
@@ -92,15 +92,15 @@ export function ProviderSetupStep({
                     onChange={(event) => handleProviderTypeChange(event.target.value as SupportedProviderType)}
                     className={clsx(inputClasses, "font-mono")}
                 >
-                    <option value="openai">{t("settings.api.provider_types.openai", { defaultValue: "OpenAI-Compatible" })}</option>
-                    <option value="ollama">{t("settings.api.provider_types.ollama", { defaultValue: "Ollama (local)" })}</option>
+                    <option value="openai">{t("onboarding.workflow.provider.openai", { defaultValue: "OpenAI-Compatible" })}</option>
+                    <option value="ollama">{t("onboarding.workflow.provider.ollama", { defaultValue: "Ollama (local)" })}</option>
                 </select>
             </div>
 
             {normalized.providerType === "openai" && (
                 <div>
                     <label className={labelClasses} htmlFor="onboarding-provider-preset">
-                        {t("onboarding.provider.preset", { defaultValue: "Preset" })}
+                        {t("onboarding.workflow.provider.preset", { defaultValue: "Preset" })}
                     </label>
                     <select
                         id="onboarding-provider-preset"
@@ -115,7 +115,7 @@ export function ProviderSetupStep({
 
             <div>
                 <label className={labelClasses} htmlFor="onboarding-provider-endpoint">
-                    {t("onboarding.provider.endpoint", { defaultValue: "Endpoint" })}
+                    {t("onboarding.workflow.provider.endpoint", { defaultValue: "Endpoint" })}
                 </label>
                 <input
                     id="onboarding-provider-endpoint"
@@ -131,7 +131,7 @@ export function ProviderSetupStep({
             {keyRequired && (
                 <div>
                     <label className={labelClasses} htmlFor="onboarding-provider-key">
-                        {t("onboarding.provider.api_key", { defaultValue: "API key" })}
+                        {t("onboarding.workflow.provider.api_key", { defaultValue: "API key" })}
                     </label>
                     <input
                         id="onboarding-provider-key"
@@ -148,7 +148,7 @@ export function ProviderSetupStep({
             <div>
                 <div className="flex items-center justify-between gap-2">
                     <label className={labelClasses} htmlFor="onboarding-provider-model">
-                        {t("onboarding.provider.model", { defaultValue: "Model" })}
+                        {t("onboarding.workflow.provider.model", { defaultValue: "Model" })}
                     </label>
                     <button
                         type="button"
@@ -158,8 +158,8 @@ export function ProviderSetupStep({
                     >
                         <RefreshCw size={11} className={isDiscovering ? "animate-spin" : ""} />
                         {isDiscovering
-                            ? t("onboarding.provider.discovering", { defaultValue: "Discovering" })
-                            : t("onboarding.provider.discover", { defaultValue: "Discover models" })}
+                            ? t("onboarding.workflow.provider.discovering", { defaultValue: "Discovering" })
+                            : t("onboarding.workflow.provider.discover", { defaultValue: "Discover models" })}
                     </button>
                 </div>
                 <input
@@ -176,11 +176,11 @@ export function ProviderSetupStep({
                 </datalist>
             </div>
 
-            {error && <p className="rounded-lg bg-red-400/10 px-3 py-2 text-xs text-red-300">{error}</p>}
+            {error && <p role="alert" className="rounded-lg bg-red-400/10 px-3 py-2 text-xs text-red-300">{error}</p>}
             {connectionResult && (
                 <p className="flex items-center gap-2 rounded-lg bg-emerald-400/10 px-3 py-2 text-xs text-emerald-300" role="status">
                     <Check size={13} />
-                    {t("onboarding.provider.test_success", {
+                    {t("onboarding.workflow.provider.test_success", {
                         defaultValue: "Connection test passed",
                         count: connectionResult.tested_targets.length,
                     })}
@@ -190,21 +190,23 @@ export function ProviderSetupStep({
             <div className="grid grid-cols-2 gap-2 border-t border-[var(--color-border)] pt-3">
                 <button
                     type="button"
+                    data-onboarding-action="test-connection"
                     onClick={onTestConnection}
                     disabled={!onTestConnection || isTesting || isSaving || (keyRequired && !normalized.apiKey)}
                     className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-text-main)] transition-colors hover:border-[var(--color-accent)] disabled:opacity-50"
                 >
                     <Wifi size={12} />
-                    {isTesting ? t("onboarding.provider.testing", { defaultValue: "Testing" }) : t("onboarding.provider.test", { defaultValue: "Test connection" })}
+                    {isTesting ? t("onboarding.workflow.provider.testing", { defaultValue: "Testing" }) : t("onboarding.workflow.provider.test", { defaultValue: "Test connection" })}
                 </button>
                 <button
                     type="button"
+                    data-onboarding-action="save-provider"
                     onClick={onSave}
                     disabled={!onSave || isSaving || isTesting || !normalized.endpoint || !normalized.model || (keyRequired && !normalized.apiKey)}
                     className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-[var(--color-accent)] bg-[var(--color-accent)]/10 px-3 py-2 text-xs text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent)]/20 disabled:opacity-50"
                 >
                     <Save size={12} />
-                    {isSaving ? t("settings.api.saving", { defaultValue: "Saving" }) : t("onboarding.provider.save", { defaultValue: "Save provider" })}
+                    {isSaving ? t("onboarding.workflow.provider.saving", { defaultValue: "Saving" }) : t("onboarding.workflow.provider.save", { defaultValue: "Save provider" })}
                 </button>
             </div>
         </div>

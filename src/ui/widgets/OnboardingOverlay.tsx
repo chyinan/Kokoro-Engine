@@ -1,6 +1,6 @@
 // pattern: Imperative Shell
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Check, ChevronRight, Languages, Loader2, MessageCircle, RotateCcw, Sparkles, X } from "lucide-react";
 
@@ -29,6 +29,9 @@ export type OnboardingOverlayProps = Readonly<{
   connectionResult: LlmConnectionTestResult | null;
   isTestingConnection: boolean;
   isSubmittingChat: boolean;
+  isSavingProvider?: boolean;
+  providerError?: string | null;
+  characterError?: string | null;
   onEvent: (event: OnboardingFlowEvent) => void;
   onLanguageSelect: (language: OnboardingLanguageCode) => void;
   onCharacterSelect: (characterId: string) => void;
@@ -74,6 +77,49 @@ export default function OnboardingOverlay(props: OnboardingOverlayProps) {
   const { t } = useTranslation();
   const [chatMessage, setChatMessage] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
+  const [providerError, setProviderError] = useState<string | null>(props.providerError ?? null);
+  const [isSavingProvider, setIsSavingProvider] = useState(false);
+  const [characterError, setCharacterError] = useState<string | null>(props.characterError ?? null);
+  const [characterRetryId, setCharacterRetryId] = useState<string | null>(null);
+  const [isSelectingCharacter, setIsSelectingCharacter] = useState(false);
+
+  const selectCharacter = async (characterId: string): Promise<void> => {
+    setCharacterRetryId(characterId);
+    setCharacterError(null);
+    setIsSelectingCharacter(true);
+    try {
+      await props.onCharacterSelect(characterId);
+    } catch {
+      setCharacterError(t("onboarding.workflow.errors.character_activate", {
+        defaultValue: "We couldn't activate this character. Check the character package and retry.",
+      }));
+    } finally {
+      setIsSelectingCharacter(false);
+    }
+  };
+
+  const saveProvider = async (): Promise<void> => {
+    if (!props.onProviderSave) return;
+    setProviderError(null);
+    setIsSavingProvider(true);
+    try {
+      await props.onProviderSave();
+    } catch {
+      setProviderError(t("onboarding.workflow.errors.provider_save", {
+        defaultValue: "We couldn't save this provider. Check the endpoint, model, and key, then retry.",
+      }));
+    } finally {
+      setIsSavingProvider(false);
+    }
+  };
+
+  useEffect(() => {
+    if (props.providerError !== undefined) setProviderError(props.providerError);
+  }, [props.providerError]);
+
+  useEffect(() => {
+    if (props.characterError !== undefined) setCharacterError(props.characterError);
+  }, [props.characterError]);
 
   if (props.draft.completed) return null;
 
@@ -90,8 +136,12 @@ export default function OnboardingOverlay(props: OnboardingOverlayProps) {
       if (reply.trim().length > 0) {
         props.onFirstReplySucceeded(reply);
       }
-    } catch (error) {
-      setChatError(error instanceof Error ? error.message : String(error));
+    } catch {
+      const errorMessage = t("onboarding.workflow.errors.chat_failed", {
+        defaultValue: "We couldn't send that message. Check the provider connection and retry.",
+      });
+      setChatError(errorMessage);
+      props.onEvent({ type: "chat-failed", error: errorMessage });
     }
   };
 
@@ -185,7 +235,8 @@ export default function OnboardingOverlay(props: OnboardingOverlayProps) {
                     key={character.id}
                     type="button"
                     data-onboarding-character-id={character.id}
-                    onClick={() => props.onCharacterSelect(character.id)}
+                    onClick={() => void selectCharacter(character.id)}
+                    disabled={isSelectingCharacter}
                     className={`flex items-center gap-3 rounded-2xl border p-3 text-left transition ${props.draft.characterId === character.id ? "border-[var(--color-accent)] bg-[var(--color-accent)]/12" : "border-[var(--color-border)] bg-black/15 hover:border-[var(--color-border-accent)]"}`}
                   >
                     <span className="grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-accent)]/10 text-xs font-bold text-[var(--color-accent)]">
@@ -197,15 +248,36 @@ export default function OnboardingOverlay(props: OnboardingOverlayProps) {
                     </span>
                   </button>
                 ))}
+                {characterError && (
+                  <div className="col-span-full space-y-2">
+                    <p role="alert" className="rounded-xl border border-red-300/30 bg-red-400/10 px-3 py-2 text-xs leading-5 text-red-200">{characterError}</p>
+                    {characterRetryId && (
+                      <button type="button" data-onboarding-action="retry-character" onClick={() => void selectCharacter(characterRetryId)} disabled={isSelectingCharacter} className="inline-flex items-center gap-2 rounded-xl border border-[var(--color-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-accent)] disabled:opacity-50">
+                        <RotateCcw size={13} aria-hidden="true" />
+                        {t("onboarding.workflow.retry", { defaultValue: "Retry" })}
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
             {activeStep === "provider" && (
-              <ProviderSetupStep
-                setup={props.providerSetup}
-                onChange={props.onProviderChange}
-                onSave={props.onProviderSave}
-              />
+              <div className="space-y-2">
+                <ProviderSetupStep
+                  setup={props.providerSetup}
+                  onChange={props.onProviderChange}
+                  error={providerError}
+                  isSaving={props.isSavingProvider ?? isSavingProvider}
+                  onSave={props.onProviderSave ? saveProvider : undefined}
+                />
+                {providerError && (
+                  <button type="button" data-onboarding-action="retry-provider" onClick={() => void saveProvider()} disabled={props.isSavingProvider ?? isSavingProvider} className="inline-flex items-center gap-2 rounded-xl border border-[var(--color-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-accent)] disabled:opacity-50">
+                    <RotateCcw size={13} aria-hidden="true" />
+                    {t("onboarding.workflow.retry", { defaultValue: "Retry" })}
+                  </button>
+                )}
+              </div>
             )}
 
             {activeStep === "connection-test" && (
@@ -220,6 +292,7 @@ export default function OnboardingOverlay(props: OnboardingOverlayProps) {
                 {props.connectionResult && <p role="status" className="flex items-center gap-2 rounded-xl border border-emerald-300/25 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-200"><Check size={13} aria-hidden="true" />{t("onboarding.workflow.connection_success", { defaultValue: "Connection looks good." })}</p>}
                 <div className="flex flex-wrap justify-end gap-2">
                   {props.draft.connectionTest.status === "error" && <button type="button" data-onboarding-action="retry" onClick={() => props.onEvent({ type: "retry" })} className="inline-flex items-center gap-2 rounded-xl border border-[var(--color-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-accent)]"><RotateCcw size={13} aria-hidden="true" />{t("onboarding.workflow.retry", { defaultValue: "Retry" })}</button>}
+                  {props.draft.connectionTest.status === "error" && <button type="button" data-onboarding-action="edit-provider" onClick={() => props.onEvent({ type: "edit-provider" })} className="inline-flex items-center gap-2 rounded-xl border border-[var(--color-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-accent)]">{t("onboarding.workflow.edit_provider", { defaultValue: "Edit provider" })}</button>}
                   <button type="button" data-onboarding-action="test-connection" onClick={() => void props.onTestConnection()} disabled={props.isTestingConnection} className="inline-flex items-center gap-2 rounded-xl bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-black transition hover:bg-white disabled:cursor-wait disabled:opacity-60">
                     {props.isTestingConnection ? <Loader2 size={13} className="animate-spin" aria-hidden="true" /> : <ChevronRight size={13} aria-hidden="true" />}
                     {props.isTestingConnection ? t("onboarding.workflow.testing", { defaultValue: "Testing" }) : t("onboarding.workflow.test_connection", { defaultValue: "Test connection" })}
@@ -248,7 +321,15 @@ export default function OnboardingOverlay(props: OnboardingOverlayProps) {
                     {t("onboarding.workflow.send", { defaultValue: "Send" })}
                   </button>
                 </div>
-                {(chatError || props.draft.chat.error) && <p role="alert" className="rounded-xl border border-red-300/30 bg-red-400/10 px-3 py-2 text-xs leading-5 text-red-200">{chatError ?? props.draft.chat.error}</p>}
+                {(chatError || props.draft.chat.error) && (
+                  <div className="space-y-2">
+                    <p role="alert" className="rounded-xl border border-red-300/30 bg-red-400/10 px-3 py-2 text-xs leading-5 text-red-200">{chatError ?? props.draft.chat.error}</p>
+                    <button type="button" data-onboarding-action="retry-chat" onClick={() => void submitChat()} disabled={props.isSubmittingChat || chatMessage.trim().length === 0} className="inline-flex items-center gap-2 rounded-xl border border-[var(--color-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-accent)] disabled:opacity-50">
+                      <RotateCcw size={13} aria-hidden="true" />
+                      {t("onboarding.workflow.retry", { defaultValue: "Retry" })}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 

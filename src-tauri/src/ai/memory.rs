@@ -1608,8 +1608,8 @@ impl MemoryManager {
         Ok(count > 0)
     }
 
-    /// Lazily initializes the embedding model on first call.
-    /// Tries local files first, then falls back to HuggingFace download.
+    /// Lazily initializes the embedding model on first call from local files.
+    /// Explicit settings actions own any HuggingFace download work so chat is never blocked.
     #[cfg(not(test))]
     async fn get_embedder(&self) -> Result<&Mutex<TextEmbedding>> {
         self.embedder

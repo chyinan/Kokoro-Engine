@@ -52,6 +52,8 @@ interface ChatPanelProps {
     minWidth?: number;
     onWidthPreview?: (width: number) => number;
     onWidthChange?: (width: number) => void;
+    /** Blocks background interaction while onboarding owns the first turn. */
+    interactionDisabled?: boolean;
 }
 
 export type { ChatPanelMessage };
@@ -216,6 +218,7 @@ export default function ChatPanel({
     minWidth = DEFAULT_CHAT_PANEL_WIDTH,
     onWidthPreview,
     onWidthChange,
+    interactionDisabled = false,
 }: ChatPanelProps) {
     const { t } = useTranslation();
     const [collapsed, setCollapsed] = useState(false);
@@ -1013,6 +1016,7 @@ export default function ChatPanel({
     // ── Send message ───────────────────────────────────────
     const handleSend = async (e?: React.FormEvent) => {
         e?.preventDefault();
+        if (interactionDisabled) return;
         const trimmed = input.trim();
         const messageImages = visionEnabled ? [...pendingImages] : [];
         if ((!trimmed && messageImages.length === 0) || isBusy) return;
@@ -1356,7 +1360,7 @@ export default function ChatPanel({
     // ════════════════════════════════════════════════════════�?
     if (collapsed) {
         return (
-            <div className="flex flex-col items-start justify-start h-full pt-4 pl-4">
+            <div className={clsx("flex flex-col items-start justify-start h-full pt-4 pl-4", interactionDisabled && "pointer-events-none opacity-60")} aria-disabled={interactionDisabled}>
                 <motion.button
                     initial={{ scale: 0.8, opacity: 0 }}
                     animate={{ scale: 1, opacity: 1 }}
@@ -1398,6 +1402,7 @@ export default function ChatPanel({
 
     return (
         <motion.div
+            aria-disabled={interactionDisabled}
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ type: "spring", stiffness: 300, damping: 30 }}
@@ -1405,7 +1410,8 @@ export default function ChatPanel({
                 "flex flex-col h-full w-full",
                 "bg-[var(--color-bg-surface)] backdrop-blur-[var(--glass-blur)]",
                 "border border-[var(--color-border)] rounded-xl shadow-lg",
-                "relative overflow-hidden"
+                "relative overflow-hidden",
+                interactionDisabled && "pointer-events-none opacity-60"
             )}
         >
             {onWidthChange && (
