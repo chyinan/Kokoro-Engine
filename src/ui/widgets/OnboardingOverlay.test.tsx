@@ -199,6 +199,24 @@ describe("OnboardingOverlay workflow", () => {
     unmount();
   });
 
+  test("allows onboarding provider model discovery and shows discovered choices", () => {
+    const onDiscoverModels = vi.fn();
+    const { container, rerender, unmount } = renderOverlay({
+      onDiscoverModels,
+      discoveredModels: ["llama3", "qwen2.5"],
+    });
+
+    rerender({ draft: createDraft("provider") });
+
+    const discover = container.querySelector<HTMLButtonElement>("[data-onboarding-action=\"discover-models\"]");
+    expect(discover).not.toBeNull();
+    expect(discover?.disabled).toBe(false);
+    expect(container.querySelector('option[value="qwen2.5"]')).not.toBeNull();
+    click(container, '[data-onboarding-action="discover-models"]');
+    expect(onDiscoverModels).toHaveBeenCalledTimes(1);
+    unmount();
+  });
+
   test("supports dismissal and resume without changing the saved draft", () => {
     const onEvent = vi.fn<(event: OnboardingFlowEvent) => void>();
     const onDismiss = vi.fn();

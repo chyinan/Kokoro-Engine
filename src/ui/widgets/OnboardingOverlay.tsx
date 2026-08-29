@@ -29,6 +29,9 @@ export type OnboardingOverlayProps = Readonly<{
   connectionResult: LlmConnectionTestResult | null;
   isTestingConnection: boolean;
   isSubmittingChat: boolean;
+  discoveredModels?: ReadonlyArray<string>;
+  isDiscoveringModels?: boolean;
+  onDiscoverModels?: () => Promise<void> | void;
   isSavingProvider?: boolean;
   providerError?: string | null;
   characterError?: string | null;
@@ -267,6 +270,9 @@ export default function OnboardingOverlay(props: OnboardingOverlayProps) {
                 <ProviderSetupStep
                   setup={props.providerSetup}
                   onChange={props.onProviderChange}
+                  discoveredModels={props.discoveredModels}
+                  isDiscovering={props.isDiscoveringModels}
+                  onDiscoverModels={props.onDiscoverModels}
                   error={providerError}
                   isSaving={props.isSavingProvider ?? isSavingProvider}
                   onSave={props.onProviderSave ? saveProvider : undefined}

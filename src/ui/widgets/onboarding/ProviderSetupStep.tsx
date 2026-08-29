@@ -152,6 +152,7 @@ export function ProviderSetupStep({
                     </label>
                     <button
                         type="button"
+                        data-onboarding-action="discover-models"
                         onClick={onDiscoverModels}
                         disabled={!onDiscoverModels || isDiscovering || (keyRequired && !normalized.apiKey)}
                         className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-[var(--color-accent)] hover:underline disabled:opacity-50"

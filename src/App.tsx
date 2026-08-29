@@ -71,6 +71,7 @@ import {
   type OnboardingFlowEvent,
 } from "./features/onboarding/onboarding-flow";
 import {
+  discoverProviderModels,
   providerToSetup,
   saveProviderSetup,
   testProviderSetup,
@@ -442,6 +443,8 @@ function App() {
   const [onboardingTestingConnection, setOnboardingTestingConnection] = useState(false);
   const [onboardingSavingProvider, setOnboardingSavingProvider] = useState(false);
   const [onboardingProviderError, setOnboardingProviderError] = useState<string | null>(null);
+  const [onboardingDiscoveredModels, setOnboardingDiscoveredModels] = useState<string[]>([]);
+  const [onboardingDiscoveringModels, setOnboardingDiscoveringModels] = useState(false);
   const [onboardingCharacterError, setOnboardingCharacterError] = useState<string | null>(null);
   const [onboardingSubmittingChat, setOnboardingSubmittingChat] = useState(false);
   const onboardingChatPendingRef = useRef<{
@@ -891,6 +894,27 @@ function App() {
       throw new Error(message);
     } finally {
       setOnboardingSavingProvider(false);
+    }
+  };
+
+  const handleOnboardingProviderChange = (setup: ProviderSetup): void => {
+    setOnboardingProviderSetup(setup);
+    setOnboardingDiscoveredModels([]);
+    setOnboardingProviderError(null);
+  };
+
+  const handleOnboardingDiscoverModels = async (): Promise<void> => {
+    setOnboardingDiscoveringModels(true);
+    setOnboardingProviderError(null);
+    try {
+      const models = await discoverProviderModels(onboardingProviderSetup);
+      setOnboardingDiscoveredModels(models);
+    } catch {
+      setOnboardingProviderError(t("onboarding.workflow.errors.model_discovery", {
+        defaultValue: "We couldn't discover models from this provider. Check the endpoint and key, then retry.",
+      }));
+    } finally {
+      setOnboardingDiscoveringModels(false);
     }
   };
 
@@ -2598,7 +2622,10 @@ function App() {
           onEvent={dispatchOnboardingEvent}
           onLanguageSelect={previewOnboardingLanguage}
           onCharacterSelect={handleOnboardingCharacterSelect}
-          onProviderChange={setOnboardingProviderSetup}
+          onProviderChange={handleOnboardingProviderChange}
+          discoveredModels={onboardingDiscoveredModels}
+          isDiscoveringModels={onboardingDiscoveringModels}
+          onDiscoverModels={() => void handleOnboardingDiscoverModels()}
           onProviderSave={handleOnboardingProviderSave}
           onTestConnection={() => void handleOnboardingConnectionTest()}
           onChatSubmit={handleOnboardingChatSubmit}
