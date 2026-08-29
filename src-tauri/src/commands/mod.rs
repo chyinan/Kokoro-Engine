@@ -21,6 +21,9 @@ pub mod mcp;
 pub mod memory;
 pub mod mods;
 pub mod pet;
+pub mod registry;
+#[cfg(test)]
+mod registry_tests;
 pub mod stt;
 pub mod system;
 pub mod telegram;

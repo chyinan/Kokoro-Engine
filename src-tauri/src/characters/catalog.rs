@@ -51,6 +51,56 @@ impl CharacterCatalog {
         &self.root
     }
 
+    /// Resolve an exact immutable template version from the local catalog.
+    /// Invalid path segments simply behave as unavailable versions.
+    pub fn find_exact(&self, id: &str, version: &str) -> Option<CatalogEntry> {
+        if !is_safe_catalog_segment(id) || !is_safe_catalog_segment(version) {
+            return None;
+        }
+        let target = self.root.join(id).join(version);
+        self.validate_installed_directory(&target).ok()
+    }
+
+    /// Return a usable presentation directory, or `None` so callers can use
+    /// the built-in Live2D/background fallback when an archived version is
+    /// unavailable.
+    pub fn presentation_directory(&self, id: &str, version: &str) -> Option<PathBuf> {
+        self.find_exact(id, version).map(|entry| entry.package_dir)
+    }
+
+    /// Remove only package-owned resources. User instances, conversations,
+    /// memories, and settings live outside this directory and are untouched.
+    /// The target is staged by rename first, making an interrupted removal
+    /// recoverable until the final delete succeeds.
+    pub fn remove_package(&self, id: &str, version: &str) -> Result<(), CatalogError> {
+        if !is_safe_catalog_segment(id) || !is_safe_catalog_segment(version) {
+            return Err(CatalogError::Layout {
+                id: id.to_string(),
+                version: version.to_string(),
+            });
+        }
+        let target = self.root.join(id).join(version);
+        let metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(CatalogError::InvalidDeclaredAsset(
+                target.display().to_string(),
+            ));
+        }
+        let staging = self
+            .root
+            .join(format!(".delete-{id}-{version}-{}", Uuid::new_v4()));
+        fs::rename(&target, &staging)?;
+        if let Err(error) = fs::remove_dir_all(&staging) {
+            let _ = fs::rename(&staging, &target);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     pub fn discover(&self) -> Result<Vec<CatalogEntry>, CatalogError> {
         fs::create_dir_all(&self.root)?;
         let mut packages = Vec::new();
@@ -219,6 +269,16 @@ impl CharacterCatalog {
     fn staging_path(&self) -> PathBuf {
         self.root.join(format!(".staging-{}", Uuid::new_v4()))
     }
+}
+
+fn is_safe_catalog_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value != "."
+        && value != ".."
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'.'
+        })
 }
 
 pub(crate) fn validate_package_directory(

@@ -1908,6 +1908,85 @@ export async function applyCharacterTemplateReconciliation(
     return invoke("apply_character_template_reconciliation", { request });
 }
 
+// ── Content Registry ───────────────────────────────────────────────────────
+
+export interface RegistryRecommendations {
+    vision: boolean;
+    memory: boolean;
+    mcp_servers: string[];
+    bot_platforms: string[];
+}
+
+export interface RegistryEntry {
+    content_type: "character" | "mod";
+    id: string;
+    name: string;
+    version: string;
+    author: string;
+    description: string;
+    preview: string[];
+    engine_version: string;
+    download_url: string;
+    archive_size: number;
+    sha256: string;
+    trust: "official" | "community" | "unverified" | string;
+    trust_source: string;
+    registry_identity?: string;
+    permissions: string[];
+    recommendations: RegistryRecommendations;
+}
+
+export interface RegistryIndex {
+    schema_version: number;
+    registry_version: number;
+    generated_at?: string;
+    entries: RegistryEntry[];
+}
+
+export interface InstalledCharacterPackage {
+    id: string;
+    version: string;
+    name: string;
+    trust: string;
+    package_dir: string;
+}
+
+export interface CharacterPackageRemoval {
+    id: string;
+    version: string;
+    active_fallback?: string;
+}
+
+export async function listRegistryEntries(registryUrl?: string): Promise<RegistryIndex> {
+    return invoke<RegistryIndex>("list_registry_entries", { registryUrl });
+}
+
+export async function installCharacterFromRegistry(
+    characterId: string,
+    version: string,
+    registryUrl?: string,
+): Promise<InstalledCharacterPackage> {
+    return invoke<InstalledCharacterPackage>("install_character_from_registry", {
+        characterId,
+        version,
+        registryUrl,
+    });
+}
+
+export async function installCharacterFromUrl(url: string): Promise<InstalledCharacterPackage> {
+    return invoke<InstalledCharacterPackage>("install_character_from_url", { url });
+}
+
+export async function removeCharacterPackage(
+    characterId: string,
+    version: string,
+): Promise<CharacterPackageRemoval> {
+    return invoke<CharacterPackageRemoval>("remove_character_package", {
+        characterId,
+        version,
+    });
+}
+
 // ── Auto Backup ────────────────────────────────────
 
 export interface AutoBackupConfig {
