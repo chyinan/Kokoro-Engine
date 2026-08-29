@@ -1,6 +1,6 @@
 // pattern: Imperative Shell
 
-import { useState, useRef, useEffect, useCallback, useDeferredValue, memo, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useState, useRef, useEffect, useCallback, useDeferredValue, memo, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
@@ -35,6 +35,7 @@ import {
     type PendingTurnState,
 } from "./chat/turn-state";
 import { requestMemoryModelDialog } from "../../lib/memory-model-gate";
+import { getChatPanelInteractionProps } from "../layout/layout-interaction";
 import { audioPlayer } from "../../core/services";
 import {
     APP_SETTING_KEYS,
@@ -221,6 +222,15 @@ export default function ChatPanel({
     interactionDisabled = false,
 }: ChatPanelProps) {
     const { t } = useTranslation();
+    const interactionProps = getChatPanelInteractionProps(interactionDisabled);
+    const blockDisabledInteraction = useCallback((event: SyntheticEvent<HTMLElement>) => {
+        if (!interactionDisabled) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.target instanceof HTMLElement) {
+            event.target.blur();
+        }
+    }, [interactionDisabled]);
     const [collapsed, setCollapsed] = useState(false);
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [activeCharacterId, setActiveCharacterId] = useState(
@@ -1360,7 +1370,14 @@ export default function ChatPanel({
     // ════════════════════════════════════════════════════════�?
     if (collapsed) {
         return (
-            <div className={clsx("flex flex-col items-start justify-start h-full pt-4 pl-4", interactionDisabled && "pointer-events-none opacity-60")} aria-disabled={interactionDisabled}>
+            <div
+                {...interactionProps}
+                onClickCapture={blockDisabledInteraction}
+                onPointerDownCapture={blockDisabledInteraction}
+                onKeyDownCapture={blockDisabledInteraction}
+                onFocusCapture={blockDisabledInteraction}
+                className={clsx("flex flex-col items-start justify-start h-full pt-4 pl-4", interactionDisabled && "pointer-events-none opacity-60")}
+            >
                 <motion.button
                     initial={{ scale: 0.8, opacity: 0 }}
                     animate={{ scale: 1, opacity: 1 }}
@@ -1402,7 +1419,11 @@ export default function ChatPanel({
 
     return (
         <motion.div
-            aria-disabled={interactionDisabled}
+            {...interactionProps}
+            onClickCapture={blockDisabledInteraction}
+            onPointerDownCapture={blockDisabledInteraction}
+            onKeyDownCapture={blockDisabledInteraction}
+            onFocusCapture={blockDisabledInteraction}
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ type: "spring", stiffness: 300, damping: 30 }}

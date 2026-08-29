@@ -229,6 +229,7 @@ import {
   onChatTurnFinish,
   onChatCue,
   streamChat,
+  cancelChatTurn,
   dispatchModEvent,
   unloadMod,
   loadMod,
@@ -363,6 +364,7 @@ import { CameraWatcher } from "./features/camera/CameraWatcher";
 import { mapCharacterAvatarUrl } from "./ui/widgets/character-avatar-url";
 import { shouldEnableChatPanel } from "./ui/layout/layout-interaction";
 import { isOnboardingTurnEvent } from "./features/onboarding/onboarding-turn-correlation";
+import { cancelOnboardingChat as cancelPendingOnboardingChat } from "./features/onboarding/onboarding-chat-cancellation";
 
 let _regSnap = 0;
 const _subscribeFn = (cb: () => void) => {
@@ -938,9 +940,7 @@ function App() {
     const pending = onboardingChatPendingRef.current;
     onboardingChatPendingRef.current = null;
     setOnboardingSubmittingChat(false);
-    // Resolve with an empty reply so the overlay cannot accidentally mark the
-    // flow complete after the user dismissed the pending turn.
-    pending?.resolve("");
+    cancelPendingOnboardingChat(pending, cancelChatTurn);
   };
 
   const refreshMemoryModelStatus = useCallback(async () => {

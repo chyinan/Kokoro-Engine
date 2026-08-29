@@ -137,4 +137,16 @@ describe("onboarding flow", () => {
       connectionTest: { status: "idle", error: null },
     });
   });
+
+  test("rejects persisted drafts with empty required selections", () => {
+    const draft = serializeOnboardingDraft(configureThroughProvider());
+    const parsed = JSON.parse(draft) as Record<string, unknown>;
+
+    for (const field of ["language", "characterId", "providerId"] as const) {
+      expect(
+        deserializeOnboardingDraft(JSON.stringify({ ...parsed, [field]: "" })),
+        `expected empty ${field} to be rejected`,
+      ).toBeNull();
+    }
+  });
 });

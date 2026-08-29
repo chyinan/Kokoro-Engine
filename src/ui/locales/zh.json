@@ -1042,8 +1042,8 @@
             "only_images": "仅支持图片文件",
             "upload_failed": "图片上传失败",
             "connection_error": "连接出现问题，请检查 API 设置。 💭",
-            "memory_model_required": "本地记忆模型还没准备好。先完成下载，再开始聊天。",
-            "memory_model_check_failed": "暂时无法确认本地记忆模型状态，请先检查下载弹窗。"
+            "memory_model_required": "本地记忆模型还没准备好。聊天仍可继续，但暂时不会使用语义记忆。",
+            "memory_model_check_failed": "暂时无法确认本地记忆模型状态。聊天仍可继续，方便时再检查下载弹窗。"
         },
         "input": {
             "placeholder": "与你的同伴对话...",
@@ -1282,11 +1282,11 @@
             "description": "选择界面语言后，我也会同步设置默认聊天语言。之后你仍然可以在设置中修改。"
         },
         "memory_model": {
-            "eyebrow": "聊天前准备",
-            "title": "先下载本地记忆模型",
-            "description": "首次开始聊天前，需要先把本地记忆模型下载到电脑里。应用会用它做记忆检索（RAG），否则第一次对话可能会长时间卡在下载阶段。",
-            "warning_title": "未下载完成前不要直接开始聊天",
-            "warning": "模型没下好时，记忆检索无法正常工作；如果当前网络无法访问 HuggingFace，首次对话还可能长时间卡住，看起来像没有响应。",
+            "eyebrow": "记忆模型状态",
+            "title": "准备本地记忆模型（可选）",
+            "description": "应用会在后台下载这个模型，用于语义记忆检索（RAG）。下载期间仍可正常聊天。",
+            "warning_title": "你可以继续聊天",
+            "warning": "模型准备好前会跳过语义检索；如果下载失败，可在这里重试。",
             "progress_label": "下载进度",
             "current_file": "文件 {{index}}/{{total}}: {{file}}",
             "waiting": "等待下载开始",

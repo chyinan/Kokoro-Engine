@@ -269,14 +269,18 @@ function isOnboardingStep(value: unknown): value is OnboardingStep {
     || value === "chat";
 }
 
+function isNullableSelection(value: unknown): value is string | null {
+  return value === null || (typeof value === "string" && nonEmpty(value) !== null);
+}
+
 function isOnboardingDraft(value: unknown): value is OnboardingDraft {
   if (!isRecord(value)) return false;
   return (
     value.version === ONBOARDING_VERSION &&
     isOnboardingStep(value.step) &&
-    (typeof value.language === "string" || value.language === null) &&
-    (typeof value.characterId === "string" || value.characterId === null) &&
-    (typeof value.providerId === "string" || value.providerId === null) &&
+    isNullableSelection(value.language) &&
+    isNullableSelection(value.characterId) &&
+    isNullableSelection(value.providerId) &&
     isConnectionTest(value.connectionTest) &&
     isChat(value.chat) &&
     typeof value.dismissed === "boolean" &&

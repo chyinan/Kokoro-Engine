@@ -23,7 +23,7 @@ Pick one of the built-in characters from the main-surface catalog, or import a S
 
 ## 4. Connect an LLM
 
-1. In the onboarding provider step, choose an existing provider or add an OpenAI-compatible provider.
+1. In the onboarding provider step, review the preselected provider or choose an OpenAI-compatible preset/custom endpoint.
 2. Enter the endpoint, model, and API key required by that provider.
 3. For Ollama, start Ollama first and use its local endpoint.
 4. Use **Settings > API** later for advanced provider options.

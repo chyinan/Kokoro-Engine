@@ -1042,8 +1042,8 @@
             "only_images": "僅支援圖片檔案",
             "upload_failed": "圖片上傳失敗",
             "connection_error": "連線出現問題，請檢查 API 設定。 💭",
-            "memory_model_required": "本機記憶模型還沒準備好。請先完成下載，再開始聊天。",
-            "memory_model_check_failed": "暫時無法確認本機記憶模型狀態，請先檢查下載彈窗。"
+            "memory_model_required": "本機記憶模型還沒準備好。聊天仍可繼續，但暫時不會使用語意記憶。",
+            "memory_model_check_failed": "暫時無法確認本機記憶模型狀態。聊天仍可繼續，方便時再檢查下載視窗。"
         },
         "input": {
             "placeholder": "與你的同伴對話...",
@@ -1282,11 +1282,11 @@
             "description": "選擇介面語言後，我也會同步設定預設聊天語言。之後你仍然可以在設定中修改。"
         },
         "memory_model": {
-            "eyebrow": "聊天前準備",
-            "title": "先下載本機記憶模型",
-            "description": "首次開始聊天前，需要先把本機記憶模型下載到電腦裡。應用程式會用它做記憶檢索（RAG），否則第一次對話可能會長時間卡在下載階段。",
-            "warning_title": "未下載完成前不要直接開始聊天",
-            "warning": "模型沒下載完成時，記憶檢索無法正常工作；如果目前網路無法存取 HuggingFace，首次對話還可能長時間卡住，看起來像沒有回應。",
+            "eyebrow": "記憶模型狀態",
+            "title": "準備本機記憶模型（可選）",
+            "description": "應用程式會在背景下載這個模型，用於語意記憶檢索（RAG）。下載期間仍可正常聊天。",
+            "warning_title": "你可以繼續聊天",
+            "warning": "模型準備好前會跳過語意檢索；如果下載失敗，可在這裡重試。",
             "progress_label": "下載進度",
             "current_file": "檔案 {{index}}/{{total}}: {{file}}",
             "waiting": "等待下載開始",
