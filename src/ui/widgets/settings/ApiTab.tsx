@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 /**
  * ApiTab — Multi-provider LLM configuration.
  *
@@ -12,12 +14,10 @@ import { inputClasses, labelClasses } from "../../styles/settings-primitives";
 import { Select } from "@/components/ui/select";
 import { useTranslation } from "react-i18next";
 import {
-    fetchModels,
     getLlmConfig,
     saveLlmConfig,
     testLlmConnection,
     listAnthropicModels,
-    listOllamaModels,
     getLlamaCppStatus,
     getContextSettings,
     setContextSettings as saveContextSettings,
@@ -27,6 +27,21 @@ import {
     type LlmPreset,
     type ContextSettings,
 } from "../../../lib/kokoro-bridge";
+import {
+    createProvider,
+    discoverProviderModels,
+    getProviderTypeLabel,
+    providerToSetup,
+    saveProviderSetup,
+    testProviderSetup,
+} from "../../../features/onboarding/provider-setup";
+
+export {
+    createProvider,
+    getDefaultModel,
+    getProviderTypeLabel,
+    type SupportedProviderType,
+} from "../../../features/onboarding/provider-setup";
 
 export interface ApiTabProps {
     visionEnabled: boolean;
@@ -57,160 +72,8 @@ function normalizeSelectedProviders(config: LlmConfig): LlmConfig {
     return next;
 }
 
-export type SupportedProviderType =
-    | "openai"
-    | "openai_responses"
-    | "anthropic"
-    | "ollama"
-    | "llama_cpp";
-
 const LLAMA_CPP_CURRENT_MODEL_KEY = "llama_cpp_current_model";
 const LLAMA_CPP_CONTEXT_LENGTH_KEY = "llama_cpp_context_length";
-
-function buildProviderId(providerType: SupportedProviderType, providers: LlmProviderConfig[]): string {
-    const baseId = providerType === "llama_cpp"
-        ? "llama-cpp"
-        : providerType === "openai_responses"
-            ? "openai-responses"
-            : providerType;
-    if (!providers.some((provider) => provider.id === baseId)) {
-        return baseId;
-    }
-
-    let suffix = 2;
-    while (providers.some((provider) => provider.id === `${baseId}-${suffix}`)) {
-        suffix += 1;
-    }
-    return `${baseId}-${suffix}`;
-}
-
-function sanitizeProviderExtra(
-    providerType: SupportedProviderType,
-    extra?: Record<string, unknown>,
-): Record<string, unknown> {
-    const nextExtra = { ...(extra || {}) };
-    if (providerType !== "llama_cpp") {
-        delete nextExtra[LLAMA_CPP_CURRENT_MODEL_KEY];
-        delete nextExtra[LLAMA_CPP_CONTEXT_LENGTH_KEY];
-    }
-    return nextExtra;
-}
-
-function getDefaultBaseUrl(providerType: SupportedProviderType): string {
-    switch (providerType) {
-        case "anthropic":
-            return "https://api.anthropic.com/v1";
-        case "ollama":
-            return "http://localhost:11434";
-        case "llama_cpp":
-            return "http://127.0.0.1:8080";
-        default:
-            return "https://api.openai.com/v1";
-    }
-}
-
-export function getDefaultModel(providerType: SupportedProviderType): string {
-    switch (providerType) {
-        case "openai_responses":
-            return "gpt-4o";
-        case "anthropic":
-            return "claude-sonnet-4-20250514";
-        case "ollama":
-            return "llama3";
-        case "llama_cpp":
-            return "";
-        default:
-            return "gpt-4";
-    }
-}
-
-function normalizeProviderForType(
-    provider: LlmProviderConfig,
-    providerType: SupportedProviderType,
-): LlmProviderConfig {
-    const previousType = (provider.provider_type as SupportedProviderType) || "openai";
-    const previousDefaultBaseUrl = getDefaultBaseUrl(previousType);
-    const nextDefaultBaseUrl = getDefaultBaseUrl(providerType);
-    const previousDefaultModel = getDefaultModel(previousType);
-    const nextDefaultModel = getDefaultModel(providerType);
-    const baseUrl =
-        !provider.base_url || (previousType !== providerType && provider.base_url === previousDefaultBaseUrl)
-            ? nextDefaultBaseUrl
-            : provider.base_url;
-    const model =
-        provider.model === undefined || provider.model === null || provider.model === ""
-            ? nextDefaultModel
-            : previousType !== providerType && provider.model === previousDefaultModel
-                ? nextDefaultModel
-                : provider.model;
-    const base = {
-        ...provider,
-        provider_type: providerType,
-        base_url: baseUrl,
-        model,
-        extra: sanitizeProviderExtra(providerType, provider.extra),
-    };
-
-    if (providerType === "openai" || providerType === "openai_responses") {
-        return {
-            ...base,
-            api_key_env: provider.api_key_env || "OPENAI_API_KEY",
-        };
-    }
-
-    if (providerType === "anthropic") {
-        return {
-            ...base,
-            api_key_env: provider.api_key_env || "ANTHROPIC_API_KEY",
-        };
-    }
-
-    if (providerType === "ollama") {
-        return {
-            ...base,
-            api_key: undefined,
-            api_key_env: undefined,
-        };
-    }
-
-    return {
-        ...base,
-        api_key: undefined,
-        api_key_env: undefined,
-    };
-}
-
-export function createProvider(providerType: SupportedProviderType, providers: LlmProviderConfig[]): LlmProviderConfig {
-    return normalizeProviderForType(
-        {
-            id: buildProviderId(providerType, providers),
-            provider_type: providerType,
-            enabled: true,
-            supports_native_tools: true,
-            api_key: undefined,
-            api_key_env: undefined,
-            base_url: undefined,
-            model: undefined,
-            extra: {},
-        },
-        providerType,
-    );
-}
-
-export function getProviderTypeLabel(providerType: string): string {
-    switch (providerType) {
-        case "openai_responses":
-            return "OpenAI Responses";
-        case "anthropic":
-            return "Anthropic-Compatible";
-        case "ollama":
-            return "Ollama";
-        case "llama_cpp":
-            return "llama.cpp";
-        default:
-            return "OpenAI-Compatible";
-    }
-}
 
 function getProviderLocationLabel(providerType: string): string {
     return providerType === "openai"
@@ -497,9 +360,14 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
         setError(null);
         try {
             const updatedConfig = buildConfigForPersistence(config);
-            await saveLlmConfig(updatedConfig);
-            setConfig(updatedConfig);
-            onConfigSaved?.(updatedConfig);
+            const persistedProvider = updatedConfig.providers.find((provider) => provider.id === updatedConfig.active_provider)
+                ?? updatedConfig.providers[0];
+            const persistedConfig = persistedProvider
+                ? await saveProviderSetup(updatedConfig, providerToSetup(persistedProvider))
+                : updatedConfig;
+            if (!persistedProvider) await saveLlmConfig(updatedConfig);
+            setConfig(persistedConfig);
+            onConfigSaved?.(persistedConfig);
             setSaved(true);
             setTimeout(() => setSaved(false), 2000);
         } catch (e) {
@@ -516,7 +384,11 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
         setError(null);
         try {
             const updatedConfig = buildConfigForPersistence(config);
-            const result = await testLlmConnection(updatedConfig);
+            const testedProvider = updatedConfig.providers.find((provider) => provider.id === updatedConfig.active_provider)
+                ?? updatedConfig.providers[0];
+            const result = testedProvider
+                ? await testProviderSetup(updatedConfig, providerToSetup(testedProvider))
+                : await testLlmConnection(updatedConfig);
             setConnectionTestSummary(formatConnectionTestSummary(result));
         } catch (e) {
             console.error("Failed to test LLM connection:", e);
@@ -532,9 +404,8 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
         setIsLoadingModels(true);
         try {
             if (activeProvider.provider_type === "ollama") {
-                const baseUrl = activeProvider.base_url || "http://localhost:11434";
-                const models = await listOllamaModels(baseUrl);
-                setAvailableModels(models.map((m) => m.name));
+                const models = await discoverProviderModels(providerToSetup(activeProvider));
+                setAvailableModels(models);
             } else if (activeProvider.provider_type === "anthropic") {
                 const apiKey = activeProvider.api_key || "";
                 const baseUrl = activeProvider.base_url || "https://api.anthropic.com/v1";
@@ -559,10 +430,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                     },
                 });
             } else {
-                // OpenAI-compatible: use /v1/models
-                const apiKey = activeProvider.api_key || "";
-                const baseUrl = activeProvider.base_url || "https://api.openai.com/v1";
-                const models = await fetchModels(baseUrl, apiKey);
+                const models = await discoverProviderModels(providerToSetup(activeProvider));
                 setAvailableModels(models);
             }
         } catch (e) {
