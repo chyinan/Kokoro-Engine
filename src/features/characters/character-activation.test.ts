@@ -142,7 +142,9 @@ describe("character activation shell", () => {
     expect(deps.applyFrontendRuntime).toHaveBeenCalledWith({
       activeCharacterId: "new-character",
       live2dModel: "models/new-character.model3.json",
+      live2dModelSource: "package",
       background: "backgrounds/new-character.webp",
+      backgroundSource: "package",
       tts: {
         enabled: true,
         mode: "configured_provider",
@@ -152,6 +154,7 @@ describe("character activation shell", () => {
         pitch: 1,
       },
       cueProfile: "cues/new-character.json",
+      cueProfileSource: "package",
     });
   });
 

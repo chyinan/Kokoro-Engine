@@ -205,16 +205,14 @@ export function BackupTab() {
                         targetCharacterId = allRestored[0]?.stableId;
                     }
                     console.log('[Backup] targetCharacterId resolved to:', targetCharacterId);
-                    if (targetCharacterId) {
-                        localStorage.setItem('kokoro_active_character_id', targetCharacterId);
-                    }
                 } catch (e) {
                     console.error('[Backup] Failed to restore characters:', e);
                 }
             }
 
-            // 若仍未确定目标角色，回退到当前 localStorage 里的活跃角色
-            // Preserve the character IDs and relationships stored in SQLite.
+            // Backup restore is app-wide and commits SQLite atomically. Do not
+            // mutate the per-character runtime cache here; App startup will
+            // recover the backend committed runtime after the reload below.
             targetCharacterId = undefined;
 
             // Phase 2: 用正确的 target_character_id 导入数据库和配置

@@ -1724,6 +1724,7 @@ export type CharacterActivationToken = {
     readonly target_conversation_id: string | null;
     readonly greeting_action:
         | "none"
+        | "consume_without_emit"
         | { readonly emit: { readonly content: string } };
     readonly recommendations: {
         readonly vision: boolean | null;

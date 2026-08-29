@@ -13,6 +13,7 @@ import {
 export {
   getInitialCharacterConversationTarget,
   isFailureForActiveChat,
+  shouldIgnoreLegacyChatError,
 } from "./chat-character-sync-core";
 
 export type CharacterConversationTarget = {

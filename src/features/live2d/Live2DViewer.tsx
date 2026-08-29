@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 /**
  * Live2DViewer — React component wrapping PixiJS + pixi-live2d-display
  *
@@ -57,6 +59,8 @@ export interface Live2DViewerProps {
     modelUrl: string;
     /** Relative imported-model path used for cue profile loading. */
     modelPath?: string | null;
+    /** Source of modelPath; package paths are absolute filesystem assets. */
+    modelSource?: "user" | "package" | "builtin" | "none";
     /** Optional controller instance to manage the model state.
      * Chat cue events are routed through this controller when provided. */
     controller?: Live2DController;
@@ -87,7 +91,7 @@ export interface Live2DViewerProps {
 // ── Component ──────────────────────────────────────
 
 const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
-    ({ modelUrl, modelPath = null, controller, onHitAreaTap, className, backgroundAlpha = 0, displayMode = "full", gazeTracking = true, fixedSize, scaleMultiplier = 1, maxFps = 60, onModelLoaded, enableHorizontalDrag = false, horizontalOffsetStorageKey }, ref) => {
+    ({ modelUrl, modelPath = null, modelSource = "none", controller, onHitAreaTap, className, backgroundAlpha = 0, displayMode = "full", gazeTracking = true, fixedSize, scaleMultiplier = 1, maxFps = 60, onModelLoaded, enableHorizontalDrag = false, horizontalOffsetStorageKey }, ref) => {
         const containerRef = useRef<HTMLDivElement>(null);
         const appRef = useRef<PIXI.Application | null>(null);
         const modelRef = useRef<Live2DModel | null>(null);
@@ -119,6 +123,15 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
         useEffect(() => {
             const ctrl = getActiveController();
             if (!ctrl) return;
+            // Package model paths are absolute and are intentionally served
+            // through asset://; the library profile IPC only accepts library
+            // IDs, so rely on the validated package cue cache instead.
+            const absoluteModelPath = modelPath !== null && (
+                /^[A-Za-z]:[\\/]/.test(modelPath)
+                || modelPath.startsWith("\\\\")
+                || modelPath.startsWith("/")
+            );
+            if (modelSource === "package" || absoluteModelPath) return;
             void ctrl.loadProfileForModel(modelPath).then(() => {
                 const cached = readJsonSetting<AppliedCharacterCueProfile>(
                     APP_SETTING_KEYS.characterCueProfileCache,
@@ -132,7 +145,7 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                     semantic_cue_map: { ...profile.semantic_cue_map, ...cached.semanticCueMap },
                 });
             });
-        }, [getActiveController, modelPath]);
+        }, [getActiveController, modelPath, modelSource]);
 
         useEffect(() => {
             const applyCharacterCues = (event: Event): void => {
@@ -306,6 +319,34 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
                     const ctrl = getActiveController();
                     if (ctrl) {
                         ctrl.setModel(model);
+                        const absoluteModelPath = modelPath !== null && (
+                            /^[A-Za-z]:[\\/]/.test(modelPath)
+                            || modelPath.startsWith("\\\\")
+                            || modelPath.startsWith("/")
+                        );
+                        if (modelSource === "package" || absoluteModelPath) {
+                            // Clear any library profile from the previous
+                            // model before deriving native capabilities.
+                            ctrl.setProfile(null);
+                            const cached = readJsonSetting<AppliedCharacterCueProfile>(
+                                APP_SETTING_KEYS.characterCueProfileCache,
+                                { cueMap: {}, semanticCueMap: {} },
+                            );
+                            const profile = ctrl.getModelProfile() ?? {
+                                version: 1,
+                                model_path: modelPath ?? modelUrl,
+                                available_expressions: ctrl.getAvailableExpressions(),
+                                available_motion_groups: ctrl.getAvailableMotionGroupCounts(),
+                                available_hit_areas: [],
+                                cue_map: {},
+                                semantic_cue_map: {},
+                            };
+                            ctrl.setProfile({
+                                ...profile,
+                                cue_map: { ...profile.cue_map, ...cached.cueMap },
+                                semantic_cue_map: { ...profile.semantic_cue_map, ...cached.semanticCueMap },
+                            });
+                        }
                     }
 
                     // Capture original dimensions for consistent scaling

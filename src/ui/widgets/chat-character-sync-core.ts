@@ -40,3 +40,8 @@ export function isFailureForActiveChat(
   if (failure.turn_id) return activeTurnId !== null && failure.turn_id === activeTurnId;
   return activeTurnId !== null;
 }
+
+/** Legacy chat-error payloads carry no identity; structured failures are authoritative. */
+export function shouldIgnoreLegacyChatError(_activeTurnId: string | null): boolean {
+  return true;
+}

@@ -1,5 +1,7 @@
+// pattern: Imperative Shell
+
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
 import Live2DViewer from "../features/live2d/Live2DViewerLoader";
@@ -8,7 +10,10 @@ import { usePetChat } from "../features/pet/usePetChat";
 import type { Live2DViewerHandle } from "../features/live2d/Live2DViewer";
 import "../ui/i18n";
 import { live2dUrl } from "../lib/utils";
-import { BUILTIN_LIVE2D_MODEL_PATH, setActiveLive2dModel } from "../lib/kokoro-bridge";
+import { getCommittedCharacterRuntime, BUILTIN_LIVE2D_MODEL_PATH } from "../lib/kokoro-bridge";
+import type { CommittedCharacterRuntime } from "../lib/kokoro-bridge";
+import { mapLive2dModelUrl } from "../features/live2d/live2d-model-url";
+import { selectPetModelSelection } from "./pet-runtime-selection";
 
 type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
 
@@ -28,6 +33,7 @@ interface Live2dSelectionEvent {
     modelPath: string;
     customModelPath: string | null;
     modelUrl: string;
+    modelSource?: "user" | "package" | "builtin" | "none";
 }
 
 export default function PetWindow() {
@@ -35,23 +41,34 @@ export default function PetWindow() {
     const currentWindowRef = useRef(getCurrentWindow());
     const currentWindow = currentWindowRef.current;
 
-    const getModelSelection = () => {
-        const savedPath = localStorage.getItem("kokoro_custom_model_path");
-        return {
-            modelPath: savedPath ?? BUILTIN_LIVE2D_MODEL_PATH,
-            modelUrl: savedPath ? live2dUrl(savedPath) : live2dUrl(BUILTIN_LIVE2D_MODEL_PATH),
-        };
-    };
-    const [{ modelUrl, modelPath }, setModelSelection] = useState(getModelSelection);
+    const [{ modelUrl, modelPath, modelSource }, setModelSelection] = useState<{
+        modelPath: string;
+        modelUrl: string;
+        modelSource: "user" | "package" | "builtin" | "none";
+    }>(() => ({
+        modelPath: BUILTIN_LIVE2D_MODEL_PATH,
+        modelUrl: live2dUrl(BUILTIN_LIVE2D_MODEL_PATH),
+        modelSource: "builtin" as const,
+    }));
 
+    // The backend committed runtime is authoritative when this auxiliary
+    // window is recreated; localStorage remains only the first-paint fallback.
     useEffect(() => {
-        const onStorage = (e: StorageEvent) => {
-            if (e.key === "kokoro_custom_model_path") {
-                setModelSelection(getModelSelection());
-            }
+        let disposed = false;
+        void getCommittedCharacterRuntime()
+            .then((committed) => {
+                if (disposed) return;
+                const next = selectPetModelSelection(committed, BUILTIN_LIVE2D_MODEL_PATH);
+                setModelSelection({
+                    modelPath: next.modelPath,
+                    modelUrl: mapLive2dModelUrl(next.modelPath, next.source, convertFileSrc, live2dUrl),
+                    modelSource: next.source,
+                });
+            })
+            .catch((error) => console.warn("[PetWindow] failed to recover committed character runtime", error));
+        return () => {
+            disposed = true;
         };
-        window.addEventListener("storage", onStorage);
-        return () => window.removeEventListener("storage", onStorage);
     }, []);
 
     useEffect(() => {
@@ -59,19 +76,23 @@ export default function PetWindow() {
             setModelSelection({
                 modelPath: event.payload.modelPath,
                 modelUrl: event.payload.modelUrl,
+                modelSource: event.payload.modelSource ?? (event.payload.customModelPath ? "user" : "builtin"),
+            });
+        });
+        const unlistenCommitted = listen<CommittedCharacterRuntime>("character-runtime-committed", (event) => {
+            const next = selectPetModelSelection(event.payload, BUILTIN_LIVE2D_MODEL_PATH);
+            setModelSelection({
+                modelPath: next.modelPath,
+                modelUrl: mapLive2dModelUrl(next.modelPath, next.source, convertFileSrc, live2dUrl),
+                modelSource: next.source,
             });
         });
 
         return () => {
             unlisten.then(fn => fn()).catch(console.error);
+            unlistenCommitted.then(fn => fn()).catch(console.error);
         };
     }, []);
-
-    useEffect(() => {
-        setActiveLive2dModel(modelPath).catch((error) => {
-            console.error("[PetWindow] Failed to sync active Live2D model:", error);
-        });
-    }, [modelPath]);
     const [isDragMode, setIsDragMode] = useState(false);
     const [isResizeMode, setIsResizeMode] = useState(false);
     const [contextMenu, setContextMenu] = useState<{ visible: boolean; x: number; y: number }>({
@@ -607,6 +628,7 @@ export default function PetWindow() {
                     ref={viewerRef}
                     modelUrl={modelUrl}
                     modelPath={modelPath}
+                    modelSource={modelSource}
                     backgroundAlpha={0}
                     displayMode="full"
                     gazeTracking={true}

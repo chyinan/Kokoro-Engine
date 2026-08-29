@@ -300,7 +300,7 @@ function normalizeTtsVoice(
 const DEFAULT_PERSONA =
     "You are a friendly, warm companion character. Respond with personality and emotion.";
 
-export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange: _onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, initialTelegramStatus, onVisionConfigChange, onActivateCharacter, onCharacterRuntimeChange, characterToEditId }: SettingsPanelProps) {
+export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange: _onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, initialTelegramStatus, onVisionConfigChange, onActivateCharacter, onCharacterRuntimeChange, characterToEditId, activeCharacterId }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [internalActiveTab, setInternalActiveTab] = useState<SettingsTabId>(() => {
         const saved = readStringSetting(APP_SETTING_KEYS.settingsActiveTab, "");
@@ -810,6 +810,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                         onActivateCharacter={onActivateCharacter}
                                         onCharacterRuntimeChange={onCharacterRuntimeChange}
                                         characterToEditId={characterToEditId}
+                                        activeCharacterId={activeCharacterId}
                                         responseLanguage={responseLang}
                                         onResponseLanguageChange={setResponseLang}
                                         userLanguage={userLang}

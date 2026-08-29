@@ -131,6 +131,7 @@ interface CharacterManagerProps {
     onActivateCharacter: (characterId: string) => Promise<void>;
     onCharacterRuntimeChange: (overrides: Readonly<CharacterRuntimeOverrides>) => Promise<void>;
     characterToEditId?: string | null;
+    activeCharacterId?: string;
     /** Current response language setting */
     responseLanguage: string;
     /** Called when the response language dropdown changes */
@@ -143,7 +144,7 @@ interface CharacterManagerProps {
 
 // ── Component ──────────────────────────────────────
 
-export default function CharacterManager({ onPersonaChange, onActivateCharacter, onCharacterRuntimeChange, characterToEditId, responseLanguage, onResponseLanguageChange, userLanguage, onUserLanguageChange }: CharacterManagerProps) {
+export default function CharacterManager({ onPersonaChange, onActivateCharacter, onCharacterRuntimeChange, characterToEditId, activeCharacterId: activeCharacterIdProp, responseLanguage, onResponseLanguageChange, userLanguage, onUserLanguageChange }: CharacterManagerProps) {
     const { t } = useTranslation();
     const [characters, setCharacters] = useState<CharacterRecord[]>([]);
     const [activeId, setActiveId] = useState<string | null>(null);
@@ -220,6 +221,15 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
         const selected = characters.find((character) => character.id === characterToEditId);
         if (selected) setEditChar({ ...selected });
     }, [characterToEditId, characters]);
+
+    useEffect(() => {
+        if (!activeCharacterIdProp || characterToEditId) return;
+        const active = characters.find((character) => character.id === activeCharacterIdProp);
+        if (!active) return;
+        setActiveId(active.id);
+        setEditChar({ ...active });
+        onPersonaChangeRef.current(composeSystemPrompt(active, userProfile));
+    }, [activeCharacterIdProp, characterToEditId, characters, userProfile]);
 
     const selectCharacter = async (char: CharacterRecord) => {
         try {

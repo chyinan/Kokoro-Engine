@@ -4,11 +4,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   isConventionalLoopbackTtsEndpoint,
+  resolveFrontendAssetSource,
   resolveFrontendRuntimeProfile,
   snapshotFrontendRuntime,
   type FrontendRuntimeState,
   type PreparedCharacterRuntime,
 } from "./character-runtime-profile";
+import { BUILTIN_LIVE2D_MODEL_PATH } from "@/lib/kokoro-bridge";
 
 function frontendState(): FrontendRuntimeState {
   return {
@@ -86,7 +88,9 @@ describe("character runtime profile", () => {
     expect(resolved).toEqual({
       activeCharacterId: "new-character",
       live2dModel: "models/new.model3.json",
+      live2dModelSource: "package",
       background: "backgrounds/new.webp",
+      backgroundSource: "package",
       tts: {
         enabled: true,
         mode: "configured_provider",
@@ -96,6 +100,7 @@ describe("character runtime profile", () => {
         pitch: 0.9,
       },
       cueProfile: "cues/new.json",
+      cueProfileSource: "package",
     });
   });
 
@@ -121,9 +126,12 @@ describe("character runtime profile", () => {
       fallback,
     );
 
-    expect(resolved.live2dModel).toBe(fallback.live2dModel);
-    expect(resolved.background).toBe(fallback.background);
-    expect(resolved.cueProfile).toBe(fallback.cueProfile);
+    expect(resolved.live2dModel).toBe(BUILTIN_LIVE2D_MODEL_PATH);
+    expect(resolved.live2dModelSource).toBe("builtin");
+    expect(resolved.background).toBeNull();
+    expect(resolved.backgroundSource).toBe("none");
+    expect(resolved.cueProfile).toBeNull();
+    expect(resolved.cueProfileSource).toBe("none");
     expect(resolved.tts).toEqual({
       enabled: false,
       mode: "text_only",
@@ -132,6 +140,37 @@ describe("character runtime profile", () => {
       speed: 1,
       pitch: 1,
     });
+  });
+
+  it("retains only explicitly marked user assets when the next character has no assets", () => {
+    const fallback = {
+      ...frontendState(),
+      live2dModelSource: "user" as const,
+      backgroundSource: "user" as const,
+      cueProfileSource: "user" as const,
+    };
+
+    const resolved = resolveFrontendRuntimeProfile(
+      preparedRuntime({
+        live2d_model: null,
+        background: null,
+        cue_profile: null,
+      }),
+      fallback,
+    );
+
+    expect(resolved.live2dModel).toBe(fallback.live2dModel);
+    expect(resolved.live2dModelSource).toBe("user");
+    expect(resolved.background).toBe(fallback.background);
+    expect(resolved.backgroundSource).toBe("user");
+    expect(resolved.cueProfile).toBe(fallback.cueProfile);
+    expect(resolved.cueProfileSource).toBe("user");
+  });
+
+  it("migrates missing or invalid source markers without discarding legacy overrides", () => {
+    expect(resolveFrontendAssetSource(undefined, "legacy/model.model3.json")).toBe("user");
+    expect(resolveFrontendAssetSource("corrupt", "legacy/background.webp")).toBe("user");
+    expect(resolveFrontendAssetSource(undefined, null)).toBe("none");
   });
 
   it("allows local preset probes only at conventional loopback endpoints", () => {

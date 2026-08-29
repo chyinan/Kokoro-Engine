@@ -16,6 +16,7 @@ import { createChatCharacterSynchronizer, type ChatCharacterSynchronizer } from 
 import {
     getInitialCharacterConversationTarget,
     isFailureForActiveChat,
+    shouldIgnoreLegacyChatError,
 } from "./chat-character-sync-core";
 import { getStreamingRevealText, hasActiveKokoroBubble, shouldRenderTypingIndicator } from "./chat-streaming-state";
 import {
@@ -862,7 +863,7 @@ export default function ChatPanel({
 
             const unError = await onChatError((err: string) => {
                 if (aborted) return;
-                if (currentTurnRef.current === null) return;
+                if (shouldIgnoreLegacyChatError(currentTurnRef.current?.turnId ?? null)) return;
                 endTurnActivity();
                 setIsThinking(false);
                 setError(err);

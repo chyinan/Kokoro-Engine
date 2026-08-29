@@ -6,6 +6,7 @@ import {
   createChatCharacterSynchronizer,
   getInitialCharacterConversationTarget,
   isFailureForActiveChat,
+  shouldIgnoreLegacyChatError,
 } from "./chat-character-sync";
 
 type PendingValue<TValue> = {
@@ -46,6 +47,10 @@ function loaded(content: string) {
 }
 
 describe("character conversation synchronization", () => {
+  it("drops unverifiable legacy chat errors while a turn is active", () => {
+    expect(shouldIgnoreLegacyChatError("turn-1")).toBe(true);
+    expect(shouldIgnoreLegacyChatError(null)).toBe(true);
+  });
   it("hydrates the backend-committed conversation when activation completed before mount", () => {
     const target = getInitialCharacterConversationTarget("pico", {
       revision: 9,

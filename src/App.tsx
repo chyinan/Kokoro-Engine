@@ -14,6 +14,7 @@ import { registerCoreComponents } from "./core/init";
 import { ttsService } from "./core/services";
 import SettingsPanel, { normalizeSettingsTabId, type SettingsTabId } from "./ui/widgets/SettingsPanel";
 import BackgroundLayer from "./ui/widgets/BackgroundLayer";
+import { mapBackgroundAssetUrl } from "./ui/widgets/background-asset-url";
 import WindowTitleBar from "./ui/widgets/WindowTitleBar";
 import OnboardingOverlay, {
   type OnboardingLanguageCode,
@@ -28,11 +29,13 @@ import {
 } from "./ui/widgets/CharacterRecommendationDialog";
 import { useBackgroundSlideshow } from "./ui/hooks/useBackgroundSlideshow";
 import type { Live2DDisplayMode } from "./features/live2d/Live2DViewer";
+import { mapLive2dModelUrl, type Live2dModelSource } from "./features/live2d/live2d-model-url";
 import { live2dUrl } from "./lib/utils";
 import { MEMORY_MODEL_DIALOG_EVENT } from "./lib/memory-model-gate";
 import { characterDb } from "./lib/db";
 import {
   APP_SETTING_KEYS,
+  type AppSettingKey,
   dispatchRuntimeSettingsChanged,
   readBooleanSetting,
   readNumberSetting,
@@ -46,7 +49,11 @@ import {
   createCharacterActivationService,
   type CharacterActivationService,
 } from "./features/characters/character-activation";
-import type { FrontendRuntimeState } from "./features/characters/character-runtime-profile";
+import type {
+  FrontendAssetSource,
+  FrontendRuntimeState,
+} from "./features/characters/character-runtime-profile";
+import { resolveFrontendAssetSource } from "./features/characters/character-runtime-profile";
 import { parseCharacterCueProfile } from "./features/characters/character-cue-profile";
 import { applyCharacterCapabilityRecommendations } from "./features/characters/character-capability-recommendations";
 import { createCharacterRuntimeOverrideService } from "./features/characters/character-runtime-override-service";
@@ -90,6 +97,7 @@ function createLayout(options: {
   mode: Live2DDisplayMode;
   modelUrl: string;
   modelPath: string | null;
+  modelSource: Live2dModelSource;
   gazeTracking: boolean;
   renderFps: number;
   chatPanelWidth: number;
@@ -109,6 +117,7 @@ function createLayout(options: {
           props: {
             modelUrl: options.modelUrl,
             modelPath: options.modelPath,
+            modelSource: options.modelSource,
             displayMode: options.mode,
             gazeTracking: options.gazeTracking,
             maxFps: options.renderFps,
@@ -223,7 +232,6 @@ import {
   updateCharacter,
   setUserName,
   setUserPersona,
-  setResponseLanguage,
   getJailbreakPrompt,
   setJailbreakPrompt,
   getProactiveEnabled,
@@ -419,6 +427,7 @@ function App() {
     () => readStringSetting(APP_SETTING_KEYS.activeCharacterId, ""),
   );
   const [runtimeReady, setRuntimeReady] = useState(false);
+  const pendingOnboardingResponseLanguageRef = useRef<string | null>(null);
 
   const [gazeTracking, setGazeTracking] = useState<boolean>(
     () => readBooleanSetting(APP_SETTING_KEYS.gazeTracking, true)
@@ -519,10 +528,17 @@ function App() {
   function readCharacterFrontendRuntime(): FrontendRuntimeState {
     const providerId = readStringSetting(APP_SETTING_KEYS.ttsProvider, "") || null;
     const isTtsEnabled = readBooleanSetting(APP_SETTING_KEYS.ttsEnabled, false);
+    const readAssetSource = (key: AppSettingKey, value: string | null): FrontendAssetSource =>
+      resolveFrontendAssetSource(readStringSetting(key, "") || undefined, value);
+    const live2dModel = readStringSetting(APP_SETTING_KEYS.customModelPath, "") || null;
+    const background = readStringSetting(APP_SETTING_KEYS.characterBackground, "") || null;
+    const cueProfile = readStringSetting(APP_SETTING_KEYS.characterCueProfile, "") || null;
     return {
       activeCharacterId: readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || null,
-      live2dModel: readStringSetting(APP_SETTING_KEYS.customModelPath, "") || null,
-      background: readStringSetting(APP_SETTING_KEYS.characterBackground, "") || null,
+      live2dModel,
+      live2dModelSource: readAssetSource(APP_SETTING_KEYS.characterLive2dSource, live2dModel),
+      background,
+      backgroundSource: readAssetSource(APP_SETTING_KEYS.characterBackgroundSource, background),
       tts: {
         enabled: isTtsEnabled,
         mode: !isTtsEnabled
@@ -535,7 +551,8 @@ function App() {
         speed: readNumberSetting(APP_SETTING_KEYS.ttsSpeed, 1),
         pitch: readNumberSetting(APP_SETTING_KEYS.ttsPitch, 1),
       },
-      cueProfile: readStringSetting(APP_SETTING_KEYS.characterCueProfile, "") || null,
+      cueProfile,
+      cueProfileSource: readAssetSource(APP_SETTING_KEYS.characterCueProfileSource, cueProfile),
     };
   }
 
@@ -551,11 +568,19 @@ function App() {
     } else {
       writeStringSetting(APP_SETTING_KEYS.customModelPath, runtime.live2dModel);
     }
+    writeStringSetting(
+      APP_SETTING_KEYS.characterLive2dSource,
+      runtime.live2dModelSource ?? (runtime.live2dModel === null ? "none" : "user"),
+    );
     if (runtime.background === null) {
       removeSetting(APP_SETTING_KEYS.characterBackground);
     } else {
       writeStringSetting(APP_SETTING_KEYS.characterBackground, runtime.background);
     }
+    writeStringSetting(
+      APP_SETTING_KEYS.characterBackgroundSource,
+      runtime.backgroundSource ?? (runtime.background === null ? "none" : "user"),
+    );
     if (runtime.cueProfile === null) {
       removeSetting(APP_SETTING_KEYS.characterCueProfile);
       removeSetting(APP_SETTING_KEYS.characterCueProfileCache);
@@ -577,6 +602,10 @@ function App() {
         removeSetting(APP_SETTING_KEYS.characterCueProfileCache);
       }
     }
+    writeStringSetting(
+      APP_SETTING_KEYS.characterCueProfileSource,
+      runtime.cueProfileSource ?? (runtime.cueProfile === null ? "none" : "user"),
+    );
     writeBooleanSetting(APP_SETTING_KEYS.ttsEnabled, runtime.tts.enabled);
     writeStringSetting(APP_SETTING_KEYS.ttsProvider, runtime.tts.providerId ?? "");
     writeStringSetting(APP_SETTING_KEYS.ttsVoice, runtime.tts.voice ?? "");
@@ -608,6 +637,9 @@ function App() {
         window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
           detail: runtime,
         }));
+        void emit("character-runtime-committed", runtime).catch((error) => {
+          console.warn("[CharacterActivation] failed to notify auxiliary windows", error);
+        });
       },
       probeLocalTtsPreset: async (endpoint) => {
         try {
@@ -646,8 +678,10 @@ function App() {
                 ...provider,
                 provider_type: providerType,
                 enabled: true,
-                endpoint: provider.endpoint ?? endpoint,
-                base_url: provider.base_url ?? endpoint,
+                // The allowlisted preset owns its conventional loopback
+                // endpoint; never retain a stale custom/remote endpoint.
+                endpoint,
+                base_url: endpoint,
                 default_voice: provider.default_voice ?? resolved.voice,
               }
               : provider)
@@ -692,38 +726,59 @@ function App() {
     setCharacters(await listCharacters());
   }
 
+  function readActiveCharacterTtsRuntime(): NonNullable<CharacterRuntimeOverrides["tts"]> {
+    const providerId = readStringSetting(APP_SETTING_KEYS.ttsProvider, "") || null;
+    const provider = ttsConfig?.providers.find((candidate) => candidate.id === providerId);
+    return {
+      enabled: readBooleanSetting(APP_SETTING_KEYS.ttsEnabled, false),
+      providerId,
+      providerType: provider?.provider_type ?? null,
+      voice: readStringSetting(APP_SETTING_KEYS.ttsVoice, "") || null,
+      speed: readNumberSetting(APP_SETTING_KEYS.ttsSpeed, 1),
+      pitch: readNumberSetting(APP_SETTING_KEYS.ttsPitch, 1),
+    };
+  }
+
+  const activeModelSource: Live2dModelSource = (() => {
+    const rawSource = readStringSetting(APP_SETTING_KEYS.characterLive2dSource, "builtin");
+    return rawSource === "package" || rawSource === "user" ? rawSource : "builtin";
+  })();
   const modelUrl = useMemo(() => {
-    if (customModelPath) {
-      return live2dUrl(customModelPath);
-    }
-    return live2dUrl(BUILTIN_LIVE2D_MODEL_PATH);
-  }, [customModelPath]);
+    const path = customModelPath ?? BUILTIN_LIVE2D_MODEL_PATH;
+    return mapLive2dModelUrl(path, activeModelSource, convertFileSrc, live2dUrl);
+  }, [customModelPath, activeModelSource]);
 
   useEffect(() => {
-    setActiveLive2dModel(activeLive2dModelPath).catch((err) => {
+    const isAbsolutePath = /^[A-Za-z]:[\\/]/.test(activeLive2dModelPath)
+      || activeLive2dModelPath.startsWith("\\\\")
+      || activeLive2dModelPath.startsWith("/");
+    const backendModelPath = isAbsolutePath ? BUILTIN_LIVE2D_MODEL_PATH : activeLive2dModelPath;
+    setActiveLive2dModel(backendModelPath).catch((err) => {
       console.error("[App] Failed to sync active Live2D model:", err);
     });
     emit("live2d-model-selection-updated", {
       modelPath: activeLive2dModelPath,
       customModelPath,
       modelUrl,
+      modelSource: activeModelSource,
     }).catch((err) => {
       console.error("[App] Failed to broadcast Live2D model selection:", err);
     });
-  }, [activeLive2dModelPath, customModelPath, modelUrl]);
+  }, [activeLive2dModelPath, customModelPath, modelUrl, activeModelSource]);
 
   const layout = useMemo(
     () => createLayout({
       mode: displayMode,
       modelUrl,
       modelPath: activeLive2dModelPath,
+      modelSource: activeModelSource,
       gazeTracking,
       renderFps,
       chatPanelWidth,
       onChatPanelWidthPreview: handleChatPanelWidthPreview,
       onChatPanelWidthChange: handleChatPanelWidthChange,
     }),
-    [displayMode, modelUrl, activeLive2dModelPath, gazeTracking, renderFps, chatPanelWidth, handleChatPanelWidthPreview, handleChatPanelWidthChange]
+    [displayMode, modelUrl, activeLive2dModelPath, activeModelSource, gazeTracking, renderFps, chatPanelWidth, handleChatPanelWidthPreview, handleChatPanelWidthChange]
   );
 
   const handleDisplayModeChange = (mode: Live2DDisplayMode) => {
@@ -732,12 +787,9 @@ function App() {
   };
 
   const handleCustomModelChange = (path: string | null) => {
-    setCustomModelPath(path);
-    if (path) {
-      writeStringSetting(APP_SETTING_KEYS.customModelPath, path);
-    } else {
-      removeSetting(APP_SETTING_KEYS.customModelPath);
-    }
+    void updateActiveCharacterRuntime({ live2dModel: path }).catch((error) => {
+      console.error("[App] Failed to update active character model:", error);
+    });
   };
 
   const handleRenderFpsChange = async (fps: number) => {
@@ -758,11 +810,16 @@ function App() {
     setOnboardingLanguage(language);
     i18n.changeLanguage(language);
     writeStringSetting(APP_SETTING_KEYS.appLanguage, language);
-    writeStringSetting(APP_SETTING_KEYS.responseLanguage, label);
     writeStringSetting(APP_SETTING_KEYS.userLanguage, label);
     setResponseLanguageState(label);
     setUserLanguageState(label);
-    setResponseLanguage(label).catch(console.error);
+    if (runtimeReady) {
+      void updateActiveCharacterRuntime({ responseLanguage: label }).catch(console.error);
+    } else {
+      // Apply through the activation owner once the initial committed runtime
+      // has been recovered; never mutate the character response cache here.
+      pendingOnboardingResponseLanguageRef.current = label;
+    }
     setUserLanguage(label).catch(console.error);
   };
 
@@ -1034,10 +1091,9 @@ function App() {
       setAutoBackupConfig(autoBackup);
     }).catch(err => console.error("[App] Failed to fetch initial configs:", err));
 
-    // Sync language settings to backend on startup
-    const savedResponseLang = readStringSetting(APP_SETTING_KEYS.responseLanguage, "");
+    // User language is application-wide. Character response language is
+    // restored by the committed activation runtime below.
     const savedUserLang = readStringSetting(APP_SETTING_KEYS.userLanguage, "");
-    if (savedResponseLang) setResponseLanguage(savedResponseLang).catch(console.error);
     if (savedUserLang) setUserLanguage(savedUserLang).catch(console.error);
 
     const userProfileHydration = getUserProfileSettings()
@@ -1072,6 +1128,11 @@ function App() {
           if (fallback) {
             await characterActivation.activateCharacter(fallback.id);
           }
+        }
+        const pendingLanguage = pendingOnboardingResponseLanguageRef.current;
+        if (pendingLanguage !== null) {
+          pendingOnboardingResponseLanguageRef.current = null;
+          await updateActiveCharacterRuntime({ responseLanguage: pendingLanguage });
         }
       } catch (e) {
         console.error("[App] Failed to restore committed character runtime:", e);
@@ -1278,7 +1339,6 @@ function App() {
           await setUserPersona(payload.userPersona);
         }
         if (payload.userLanguage != null) writeStringSetting(APP_SETTING_KEYS.userLanguage, payload.userLanguage);
-        if (payload.responseLanguage != null) writeStringSetting(APP_SETTING_KEYS.responseLanguage, payload.responseLanguage);
         if (payload.voiceInterrupt != null) writeStringSetting(APP_SETTING_KEYS.voiceInterrupt, payload.voiceInterrupt);
 
         const newIds: number[] = [];
@@ -1700,13 +1760,19 @@ function App() {
 
     // ── TTS Playback Actions ────────────────────────
     if (detail.action === 'set_tts_enabled') {
-      writeBooleanSetting(APP_SETTING_KEYS.ttsEnabled, !!detail.data?.enabled);
+      void updateActiveCharacterRuntime({
+        tts: { ...readActiveCharacterTtsRuntime(), enabled: !!detail.data?.enabled },
+      }).catch(console.error);
     }
     if (detail.action === 'set_tts_speed' && detail.data?.speed !== undefined) {
-      writeStringSetting(APP_SETTING_KEYS.ttsSpeed, String(detail.data.speed));
+      void updateActiveCharacterRuntime({
+        tts: { ...readActiveCharacterTtsRuntime(), speed: Number(detail.data.speed) || 1 },
+      }).catch(console.error);
     }
     if (detail.action === 'set_tts_pitch' && detail.data?.pitch !== undefined) {
-      writeStringSetting(APP_SETTING_KEYS.ttsPitch, String(detail.data.pitch));
+      void updateActiveCharacterRuntime({
+        tts: { ...readActiveCharacterTtsRuntime(), pitch: Number(detail.data.pitch) || 1 },
+      }).catch(console.error);
     }
     if (detail.action === 'test_tts') {
       synthesize("Hello! This is a test of the TTS system.", {
@@ -1718,10 +1784,19 @@ function App() {
     }
     if (detail.action === 'set_tts_playback' && detail.data) {
       const { speed, pitch, voice, provider } = detail.data;
-      if (speed !== undefined) writeStringSetting(APP_SETTING_KEYS.ttsSpeed, String(speed));
-      if (pitch !== undefined) writeStringSetting(APP_SETTING_KEYS.ttsPitch, String(pitch));
-      if (voice !== undefined) writeStringSetting(APP_SETTING_KEYS.ttsVoice, voice);
-      if (provider !== undefined) writeStringSetting(APP_SETTING_KEYS.ttsProvider, provider);
+      const current = readActiveCharacterTtsRuntime();
+      const providerId = provider === undefined ? current.providerId : String(provider);
+      const providerConfig = ttsConfig?.providers.find((candidate) => candidate.id === providerId);
+      void updateActiveCharacterRuntime({
+        tts: {
+          ...current,
+          providerId,
+          providerType: providerConfig?.provider_type ?? current.providerType,
+          speed: speed === undefined ? current.speed : Number(speed) || 1,
+          pitch: pitch === undefined ? current.pitch : Number(pitch) || 1,
+          voice: voice === undefined ? current.voice : String(voice),
+        },
+      }).catch(console.error);
     }
 
     // ── MCP Actions ────────────────────────────────
@@ -1913,8 +1988,13 @@ function App() {
       const modelPath = detail.data.path;
       const newName = detail.data.newName;
       renameLive2dModel(modelPath, newName)
-        .then(nextPath => {
-          if (customModelPath === modelPath) handleCustomModelChange(nextPath);
+        .then(async nextPath => {
+          // A renamed model only belongs to the active character when its
+          // persisted selection still points at the old path. Keep unrelated
+          // character selections untouched.
+          if (readStringSetting(APP_SETTING_KEYS.customModelPath, "") === modelPath) {
+            await updateActiveCharacterRuntime({ live2dModel: nextPath });
+          }
           return listLive2dModels();
         })
         .then(models => setAvailableModels(models))
@@ -2184,6 +2264,8 @@ function App() {
   // Better to fallback to slideshow image so it's not empty.
   // Code above does this: default is bgSlideshow.currentUrl, override if generated & mode is generated.
 
+  const renderedBackgroundUrl = mapBackgroundAssetUrl(activeBackgroundUrl, convertFileSrc);
+
   if (!runtimeReady) {
     return <div className="h-screen w-screen bg-black" aria-label="Loading character runtime" />;
   }
@@ -2193,10 +2275,10 @@ function App() {
       {/* Background image rendered inside LayoutRenderer, behind Live2D */}
       <LayoutRenderer
         config={layout}
-        transparent={!!activeBackgroundUrl}
+        transparent={!!renderedBackgroundUrl}
         backgroundLayer={
           <BackgroundLayer
-            imageUrl={activeBackgroundUrl}
+            imageUrl={renderedBackgroundUrl}
             blur={bgSlideshow.config.blur}
             blurAmount={bgSlideshow.config.blurAmount}
           />
