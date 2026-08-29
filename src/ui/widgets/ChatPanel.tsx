@@ -298,26 +298,23 @@ export default function ChatPanel({
     // Store last failed request for retry
     const lastFailedRequestRef = useRef<{ message: string; images?: string[]; allowImageGen?: boolean } | null>(null);
 
-    const ensureMemoryModelReady = useCallback(async (options?: { silent?: boolean }) => {
-        try {
-            const status = await getMemoryEmbeddingModelStatus();
-            if (status.installed) {
-                return true;
-            }
-        } catch (err) {
-            console.error("[ChatPanel] Failed to query memory model status:", err);
-            if (!options?.silent) {
-                setError(t("chat.errors.memory_model_check_failed"));
-            }
-            requestMemoryModelDialog();
-            return false;
-        }
-
-        if (!options?.silent) {
-            setError(t("chat.errors.memory_model_required"));
-        }
-        requestMemoryModelDialog();
-        return false;
+    const ensureMemoryModelReady = useCallback((options?: { silent?: boolean }): boolean => {
+        // Semantic memory is an optional enhancement. Never hold a base LLM turn
+        // on model discovery; status and download continue in the application shell.
+        void getMemoryEmbeddingModelStatus()
+            .then((status) => {
+                if (!status.installed) {
+                    requestMemoryModelDialog();
+                }
+            })
+            .catch((err) => {
+                console.error("[ChatPanel] Failed to query memory model status:", err);
+                if (!options?.silent) {
+                    setError(t("chat.errors.memory_model_check_failed"));
+                }
+                requestMemoryModelDialog();
+            });
+        return true;
     }, [t]);
 
     // Vision Mode

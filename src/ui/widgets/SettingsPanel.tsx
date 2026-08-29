@@ -55,27 +55,13 @@ import {
     writeBooleanSetting,
     writeStringSetting,
 } from "../../lib/app-settings";
-
-const SETTINGS_TAB_IDS = [
-    "api",
-    "persona",
-    "tts",
-    "stt",
-    "mods",
-    "bg",
-    "model",
-    "imagegen",
-    "memory",
-    "vision",
-    "mcp",
-    "bot",
-    "jailbreak",
-    "backup",
-    "pet",
-    "about",
-] as const;
-
-export type SettingsTabId = typeof SETTINGS_TAB_IDS[number];
+import {
+    SETTINGS_GROUPS,
+    SETTINGS_TAB_IDS,
+    getSettingsGroupForTab,
+    type SettingsTabId,
+} from "./settings/settings-groups";
+export type { SettingsTabId } from "./settings/settings-groups";
 
 const SETTINGS_TAB_ID_SET = new Set<string>(SETTINGS_TAB_IDS);
 
@@ -758,30 +744,44 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                         </div>
 
                         {/* Tabs */}
-                        {/* Tabs */}
                         <div className="border-b border-[var(--color-border)] bg-[var(--color-bg-surface-soft)]/50">
-                            <div className="flex flex-wrap gap-1 p-2">
-                                {tabs.map(({ id, label, icon: Icon }) => (
-                                    <button
-                                        key={id}
-                                        onClick={() => handleActiveTabChange(id)}
-                                        data-onboarding-id={
-                                            id === "api"
-                                                ? "settings-tab-api"
-                                                : id === "persona"
-                                                    ? "settings-tab-persona"
-                                                    : undefined
-                                        }
-                                        className={clsx(
-                                            "flex items-center gap-2 px-3 py-2 text-[11px] font-heading font-semibold tracking-wider uppercase transition-all rounded-md flex-grow justify-center",
-                                            activeTab === id
-                                                ? "bg-[var(--color-bg-elevated)] text-[var(--color-accent)] shadow-sm border border-[var(--color-border)]"
-                                                : "text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-surface-soft)] border border-transparent"
-                                        )}
-                                    >
-                                        <Icon size={14} strokeWidth={1.5} />
-                                        <span className="relative top-[2px]">{t(label)}</span>
-                                    </button>
+                            <div className="space-y-2 p-2">
+                                {Object.values(SETTINGS_GROUPS).map((group) => (
+                                    <div key={group.id} data-settings-group={group.id}>
+                                        <div className="px-2 pb-1 text-[9px] font-heading font-semibold uppercase tracking-[0.18em] text-[var(--color-text-muted)]">
+                                            {t(group.label)}
+                                        </div>
+                                        <div className="flex flex-wrap gap-1">
+                                            {group.tabs.map((id) => {
+                                                const tab = tabs.find((candidate) => candidate.id === id);
+                                                if (!tab) return null;
+                                                const Icon = tab.icon;
+                                                return (
+                                                    <button
+                                                        key={id}
+                                                        onClick={() => handleActiveTabChange(id)}
+                                                        data-settings-group-tab={getSettingsGroupForTab(id)}
+                                                        data-onboarding-id={
+                                                            id === "api"
+                                                                ? "settings-tab-api"
+                                                                : id === "persona"
+                                                                    ? "settings-tab-persona"
+                                                                    : undefined
+                                                        }
+                                                        className={clsx(
+                                                            "flex items-center gap-2 px-3 py-2 text-[11px] font-heading font-semibold tracking-wider uppercase transition-all rounded-md flex-grow justify-center",
+                                                            activeTab === id
+                                                                ? "bg-[var(--color-bg-elevated)] text-[var(--color-accent)] shadow-sm border border-[var(--color-border)]"
+                                                                : "text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-surface-soft)] border border-transparent"
+                                                        )}
+                                                    >
+                                                        <Icon size={14} strokeWidth={1.5} />
+                                                        <span className="relative top-[2px]">{t(tab.label)}</span>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
                                 ))}
                             </div>
                         </div>

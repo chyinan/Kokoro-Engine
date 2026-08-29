@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 #[cfg(not(test))]
 use anyhow::Result;
 #[cfg(not(test))]
@@ -33,6 +35,23 @@ pub struct MemoryEmbeddingModelStatus {
     pub missing_files: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryEmbeddingModelAvailability {
+    Ready,
+    Unavailable,
+}
+
+/// Classifies model status without loading files or initiating any network work.
+pub fn memory_embedding_model_availability(
+    status: &MemoryEmbeddingModelStatus,
+) -> MemoryEmbeddingModelAvailability {
+    if status.installed && status.missing_files.is_empty() {
+        MemoryEmbeddingModelAvailability::Ready
+    } else {
+        MemoryEmbeddingModelAvailability::Unavailable
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryEmbeddingModelDownloadProgress {
     pub stage: String,
@@ -42,11 +61,6 @@ pub struct MemoryEmbeddingModelDownloadProgress {
     pub file_count: usize,
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
-}
-
-#[cfg(not(test))]
-pub(crate) fn local_model_dir() -> &'static str {
-    LOCAL_MODEL_DIR
 }
 
 #[cfg(not(test))]
@@ -366,49 +380,6 @@ async fn download_memory_model_file(
         file_name,
         errors.join("; ")
     ))
-}
-
-#[cfg(not(test))]
-pub(crate) async fn hydrate_missing_local_files(snapshot_dir: &Path) -> Result<bool> {
-    let missing: Vec<&str> = MODEL_AUX_FILES
-        .iter()
-        .copied()
-        .filter(|name| !snapshot_dir.join(name).exists())
-        .collect();
-
-    if missing.is_empty() {
-        return Ok(false);
-    }
-
-    tracing::info!(
-        target: "memory",
-        "[Memory] Hydrating missing tokenizer/config files in {}: {:?}",
-        snapshot_dir.display(),
-        missing
-    );
-
-    let client = reqwest::Client::builder()
-        .user_agent("kokoro-engine/0.1.4")
-        .build()?;
-
-    tokio::fs::create_dir_all(snapshot_dir).await?;
-
-    for file in &missing {
-        let url = format!(
-            "https://huggingface.co/{}/resolve/main/{}",
-            MODEL_REPO, file
-        );
-        let bytes = client
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
-        tokio::fs::write(snapshot_dir.join(file), &bytes).await?;
-    }
-
-    Ok(true)
 }
 
 #[cfg(not(test))]

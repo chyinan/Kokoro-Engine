@@ -2,7 +2,7 @@
 // Reason: 该文件同时包含记忆领域规则、SQLite 读写、嵌入计算与摘要状态机；Phase 1 先在现有集中实现上做低侵入扩展。
 use anyhow::Result;
 #[cfg(not(test))]
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::TextEmbedding;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::cmp::Ordering;
@@ -16,7 +16,8 @@ use crate::ai::memory_embedding_model;
 
 pub use crate::ai::memory_embedding_model::{
     download_memory_embedding_model, memory_embedding_model_status,
-    MemoryEmbeddingModelDownloadProgress, MemoryEmbeddingModelStatus,
+    MemoryEmbeddingModelAvailability, MemoryEmbeddingModelDownloadProgress,
+    MemoryEmbeddingModelStatus,
 };
 
 pub struct MemoryManager {
@@ -561,12 +562,34 @@ fn merge_retrieval_candidate_stats(
 #[derive(Debug, Clone)]
 struct SearchMemoriesOutcome {
     snippets: Vec<MemorySnippet>,
+    mode: MemoryRetrievalMode,
 }
 
 impl SearchMemoriesOutcome {
-    fn new(snippets: Vec<MemorySnippet>) -> Self {
-        Self { snippets }
+    fn new(snippets: Vec<MemorySnippet>, mode: MemoryRetrievalMode) -> Self {
+        Self { snippets, mode }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryRetrievalMode {
+    Ready,
+    Unavailable,
+}
+
+pub fn memory_retrieval_mode(
+    availability: MemoryEmbeddingModelAvailability,
+) -> MemoryRetrievalMode {
+    match availability {
+        MemoryEmbeddingModelAvailability::Ready => MemoryRetrievalMode::Ready,
+        MemoryEmbeddingModelAvailability::Unavailable => MemoryRetrievalMode::Unavailable,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MemorySearchResult {
+    pub snippets: Vec<MemorySnippet>,
+    pub mode: MemoryRetrievalMode,
 }
 
 #[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
@@ -1378,8 +1401,11 @@ fn build_observability_summary_from_counts(
     build_observability_summary_or_default(write_event_count, retrieval_log_count)
 }
 
-fn build_search_outcome(snippets: Vec<MemorySnippet>) -> SearchMemoriesOutcome {
-    SearchMemoriesOutcome::new(snippets)
+fn build_search_outcome(
+    snippets: Vec<MemorySnippet>,
+    mode: MemoryRetrievalMode,
+) -> SearchMemoriesOutcome {
+    SearchMemoriesOutcome::new(snippets, mode)
 }
 
 fn compare_scored_memory(
@@ -1588,60 +1614,15 @@ impl MemoryManager {
     async fn get_embedder(&self) -> Result<&Mutex<TextEmbedding>> {
         self.embedder
             .get_or_try_init(|| async {
-                // 1. Try local files (no network)
+                // Model initialization is intentionally local-only. Explicit download
+                // commands own network work so a normal chat turn never waits on it.
                 if let Some(model) = memory_embedding_model::try_load_local_embedding_model() {
                     return Ok(Mutex::new(model));
                 }
 
-                // 1.5 If a partial local cache exists, fill in the small tokenizer/config files
-                // and retry local loading before falling back to fastembed's downloader again.
-                for base in memory_embedding_model::model_search_roots() {
-                    let repo_dir = base.join(memory_embedding_model::local_model_dir());
-                    let Some(snapshot_dir) =
-                        memory_embedding_model::resolve_snapshot_dir(&repo_dir)
-                    else {
-                        continue;
-                    };
-                    if !snapshot_dir.join("model.onnx").exists() {
-                        continue;
-                    }
-                    if memory_embedding_model::hydrate_missing_local_files(&snapshot_dir).await? {
-                        if let Some(model) =
-                            memory_embedding_model::try_load_local_embedding_model()
-                        {
-                            return Ok(Mutex::new(model));
-                        }
-                    }
-                }
-
-                // 2. Fall back to HF download — cache into app data so build can find it next time
-                tracing::info!(target: "memory", "[Memory] Local model not found, downloading from HuggingFace...");
-                let cache_dir = dirs_next::data_dir()
-                    .map(|d| d.join("com.chyin.kokoro").join("models"))
-                    .unwrap_or_else(|| std::path::PathBuf::from("models"));
-                let _ = std::fs::create_dir_all(&cache_dir);
-                let model = TextEmbedding::try_new(
-                    InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_cache_dir(cache_dir),
-                )?;
-
-                // Persist any missing small files so the next startup can load locally
-                // instead of repeatedly treating the cache as incomplete.
-                let app_repo_dir = dirs_next::data_dir()
-                    .map(|d| {
-                        d.join("com.chyin.kokoro")
-                            .join(memory_embedding_model::local_model_dir())
-                    })
-                    .unwrap_or_else(|| {
-                        std::path::PathBuf::from(memory_embedding_model::local_model_dir())
-                    });
-                if let Some(snapshot_dir) =
-                    memory_embedding_model::resolve_snapshot_dir(&app_repo_dir)
-                {
-                    let _ = memory_embedding_model::hydrate_missing_local_files(&snapshot_dir).await;
-                }
-
-                tracing::info!(target: "memory", "[Memory] Embedding model downloaded and loaded successfully.");
-                Ok(Mutex::new(model))
+                Err(anyhow::anyhow!(
+                    "memory embedding model unavailable; download it from settings"
+                ))
             })
             .await
     }
@@ -2007,10 +1988,25 @@ impl MemoryManager {
         limit: usize,
         character_id: &str,
     ) -> Result<Vec<MemorySnippet>> {
+        Ok(self
+            .search_memories_with_status(query, limit, character_id)
+            .await?
+            .snippets)
+    }
+
+    pub async fn search_memories_with_status(
+        &self,
+        query: &str,
+        limit: usize,
+        character_id: &str,
+    ) -> Result<MemorySearchResult> {
         let outcome = self
             .search_memories_with_observability(query, limit, character_id)
             .await?;
-        Ok(outcome.snippets)
+        Ok(MemorySearchResult {
+            snippets: outcome.snippets,
+            mode: outcome.mode,
+        })
     }
 
     async fn search_memories_with_observability(
@@ -2019,7 +2015,16 @@ impl MemoryManager {
         limit: usize,
         character_id: &str,
     ) -> Result<SearchMemoriesOutcome> {
-        let semantic_results = self.semantic_search(query, limit * 2, character_id).await?;
+        let (semantic_results, mode) = match self
+            .semantic_search(query, limit * 2, character_id)
+            .await
+        {
+            Ok(results) => (results, MemoryRetrievalMode::Ready),
+            Err(error) => {
+                tracing::debug!(target: "memory", "[Memory] Semantic retrieval unavailable; continuing with keyword search: {}", error);
+                (Vec::new(), MemoryRetrievalMode::Unavailable)
+            }
+        };
         let bm25_results = self
             .bm25_search(query, character_id, limit * 2)
             .await
@@ -2062,7 +2067,7 @@ impl MemoryManager {
         );
         let _ = record_memory_retrieval_if_enabled(self, character_id, query, &stats).await;
 
-        Ok(build_search_outcome(snippets))
+        Ok(build_search_outcome(snippets, mode))
     }
 
     pub async fn record_memory_write_observation(

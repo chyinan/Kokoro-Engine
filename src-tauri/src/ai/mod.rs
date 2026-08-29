@@ -16,4 +16,7 @@ pub mod router;
 pub mod typing_sim;
 
 #[cfg(test)]
+mod memory_nonblocking_tests;
+
+#[cfg(test)]
 mod tests;
