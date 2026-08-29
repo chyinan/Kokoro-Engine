@@ -223,6 +223,7 @@ import {
   onModUiMessage,
   onModScriptEvent,
   onModUnload,
+  onChatTurnStart,
   onChatTurnDelta,
   onChatTurnFinish,
   onChatCue,
@@ -360,6 +361,7 @@ import { modMessageBus } from "./ui/mods/ModMessageBus";
 import { CameraWatcher } from "./features/camera/CameraWatcher";
 import { mapCharacterAvatarUrl } from "./ui/widgets/character-avatar-url";
 import { shouldEnableChatPanel } from "./ui/layout/layout-interaction";
+import { isOnboardingTurnEvent } from "./features/onboarding/onboarding-turn-correlation";
 
 let _regSnap = 0;
 const _subscribeFn = (cb: () => void) => {
@@ -433,8 +435,10 @@ function App() {
   const [onboardingTestingConnection, setOnboardingTestingConnection] = useState(false);
   const [onboardingSavingProvider, setOnboardingSavingProvider] = useState(false);
   const [onboardingProviderError, setOnboardingProviderError] = useState<string | null>(null);
+  const [onboardingCharacterError, setOnboardingCharacterError] = useState<string | null>(null);
   const [onboardingSubmittingChat, setOnboardingSubmittingChat] = useState(false);
   const onboardingChatPendingRef = useRef<{
+    clientRequestId: string;
     turnId: string | null;
     reply: string;
     resolve: (reply: string) => void;
@@ -850,8 +854,17 @@ function App() {
   };
 
   const handleOnboardingCharacterSelect = async (characterId: string): Promise<void> => {
-    await characterActivation.activateCharacter(characterId);
-    dispatchOnboardingEvent({ type: "select-character", characterId });
+    setOnboardingCharacterError(null);
+    try {
+      await characterActivation.activateCharacter(characterId);
+      dispatchOnboardingEvent({ type: "select-character", characterId });
+    } catch {
+      const message = t("onboarding.workflow.errors.character_activate", {
+        defaultValue: "We couldn't activate this character. Check the character package and retry.",
+      });
+      setOnboardingCharacterError(message);
+      throw new Error(message);
+    }
   };
 
   const handleOnboardingProviderSave = async (): Promise<void> => {
@@ -863,9 +876,11 @@ function App() {
       setLlmConfig(saved);
       dispatchOnboardingEvent({ type: "configure-provider", providerId: saved.active_provider });
     } catch {
-      setOnboardingProviderError(t("onboarding.workflow.errors.provider_save", {
+      const message = t("onboarding.workflow.errors.provider_save", {
         defaultValue: "We couldn't save this provider. Check the endpoint, model, and key, then retry.",
-      }));
+      });
+      setOnboardingProviderError(message);
+      throw new Error(message);
     } finally {
       setOnboardingSavingProvider(false);
     }
@@ -880,8 +895,13 @@ function App() {
       const result = await testProviderSetup(llmConfig, onboardingProviderSetup);
       setOnboardingConnectionResult(result);
       dispatchOnboardingEvent({ type: "connection-test-succeeded" });
-    } catch (error) {
-      dispatchOnboardingEvent({ type: "connection-test-failed", error: getKokoroErrorMessage(error) });
+    } catch {
+      dispatchOnboardingEvent({
+        type: "connection-test-failed",
+        error: t("onboarding.workflow.errors.connection_failed", {
+          defaultValue: "We couldn't reach this provider. Check the endpoint, model, and key, then retry.",
+        }),
+      });
     } finally {
       setOnboardingTestingConnection(false);
     }
@@ -892,10 +912,12 @@ function App() {
     dispatchOnboardingEvent({ type: "chat-started" });
     setOnboardingSubmittingChat(true);
     return new Promise<string>((resolve, reject) => {
-      onboardingChatPendingRef.current = { turnId: null, reply: "", resolve, reject };
+      const clientRequestId = crypto.randomUUID();
+      onboardingChatPendingRef.current = { clientRequestId, turnId: null, reply: "", resolve, reject };
       void streamChat({
         message,
         character_id: readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || undefined,
+        client_request_id: clientRequestId,
       }).catch((error) => {
         const pending = onboardingChatPendingRef.current;
         onboardingChatPendingRef.current = null;
@@ -1275,10 +1297,18 @@ function App() {
     });
 
     // ── MOD System: Engine event bridge → broadcast to iframes + forward to QuickJS ──
-    const unlistenModChatDelta = onChatTurnDelta(({ turn_id, delta }) => {
+    const unlistenOnboardingChatStart = onChatTurnStart(({ turn_id, client_request_id }) => {
       const onboardingPending = onboardingChatPendingRef.current;
-      if (onboardingPending && (onboardingPending.turnId === null || onboardingPending.turnId === turn_id)) {
+      if (onboardingPending && isOnboardingTurnEvent(onboardingPending.clientRequestId, client_request_id)) {
         onboardingPending.turnId = turn_id;
+      }
+    });
+
+    const unlistenModChatDelta = onChatTurnDelta(({ turn_id, delta, client_request_id }) => {
+      const onboardingPending = onboardingChatPendingRef.current;
+      if (onboardingPending
+        && isOnboardingTurnEvent(onboardingPending.clientRequestId, client_request_id)
+        && onboardingPending.turnId === turn_id) {
         onboardingPending.reply += delta;
       }
       modMessageBus.broadcast({
@@ -1297,9 +1327,11 @@ function App() {
       dispatchModEvent('cue', data).catch(() => { });
     });
 
-    const unlistenModChatDone = onChatTurnFinish(({ turn_id, status }) => {
+    const unlistenModChatDone = onChatTurnFinish(({ turn_id, status, client_request_id }) => {
       const onboardingPending = onboardingChatPendingRef.current;
-      if (onboardingPending && (onboardingPending.turnId === null || onboardingPending.turnId === turn_id)) {
+      if (onboardingPending
+        && isOnboardingTurnEvent(onboardingPending.clientRequestId, client_request_id)
+        && onboardingPending.turnId === turn_id) {
         onboardingChatPendingRef.current = null;
         setOnboardingSubmittingChat(false);
         if (status === "completed") {
@@ -1341,6 +1373,7 @@ function App() {
       unlistenChatImageGen.then(unlisten => unlisten());
       unlistenModTheme.then(unlisten => unlisten());
       unlistenModComponents.then(unlisten => unlisten());
+      unlistenOnboardingChatStart.then(unlisten => unlisten());
       unlistenModUiMessage.then(unlisten => unlisten());
       unlistenModChatDelta.then(unlisten => unlisten());
       unlistenModCue.then(unlisten => unlisten());
@@ -2536,12 +2569,13 @@ function App() {
           isTestingConnection={onboardingTestingConnection}
           isSavingProvider={onboardingSavingProvider}
           providerError={onboardingProviderError}
+          characterError={onboardingCharacterError}
           isSubmittingChat={onboardingSubmittingChat}
           onEvent={dispatchOnboardingEvent}
           onLanguageSelect={previewOnboardingLanguage}
           onCharacterSelect={handleOnboardingCharacterSelect}
           onProviderChange={setOnboardingProviderSetup}
-          onProviderSave={() => void handleOnboardingProviderSave()}
+          onProviderSave={handleOnboardingProviderSave}
           onTestConnection={() => void handleOnboardingConnectionTest()}
           onChatSubmit={handleOnboardingChatSubmit}
           onFirstReplySucceeded={handleOnboardingFirstReplySucceeded}

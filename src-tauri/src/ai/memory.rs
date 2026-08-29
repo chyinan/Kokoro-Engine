@@ -1609,7 +1609,8 @@ impl MemoryManager {
     }
 
     /// Lazily initializes the embedding model on first call from local files.
-    /// Explicit settings actions own any HuggingFace download work so chat is never blocked.
+    /// Initialization never downloads or contacts a remote model host; explicit
+    /// settings actions own any download work so a normal chat turn is non-blocking.
     #[cfg(not(test))]
     async fn get_embedder(&self) -> Result<&Mutex<TextEmbedding>> {
         self.embedder

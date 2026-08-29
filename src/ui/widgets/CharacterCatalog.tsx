@@ -55,7 +55,8 @@ export type CharacterCatalogProps = {
   readonly templates: ReadonlyArray<CharacterTemplateManifest>;
   readonly activeCharacterId: string;
   readonly actions: Readonly<CharacterCatalogActionDependencies>;
-  readonly resolveAvatarUrl?: (path: string) => string;
+  /** Converts persisted filesystem/protocol references at the Tauri boundary. */
+  readonly resolveAvatarUrl: (path: string) => string;
   readonly onRecommendations: (
     characterName: string,
     recommendations: Readonly<CharacterCapabilityRecommendations>,
@@ -178,7 +179,7 @@ export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
         className="ml-auto flex max-w-[240px] items-center gap-2 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-surface)]/90 py-1.5 pl-2 pr-3 text-left shadow-[0_10px_35px_rgba(0,0,0,0.28)] backdrop-blur-xl transition hover:border-[var(--color-border-accent)]"
       >
         <span className="grid h-7 w-7 shrink-0 place-items-center overflow-hidden rounded-full border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[10px] font-bold text-[var(--color-accent)]">
-          {active?.avatarPath && props.resolveAvatarUrl
+          {active?.avatarPath
             ? <img src={props.resolveAvatarUrl(active.avatarPath)} alt="" className="h-full w-full object-cover" />
             : initials(active?.name ?? "")}
         </span>
@@ -229,7 +230,7 @@ export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
                     className="flex w-full items-center gap-3 rounded-lg p-1.5 text-left disabled:opacity-55"
                   >
                     <span className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-xl border border-[var(--color-border)] bg-black/20 text-xs font-bold text-[var(--color-text-secondary)]">
-                      {entry.avatarPath && props.resolveAvatarUrl
+                      {entry.avatarPath
                         ? <img src={props.resolveAvatarUrl(entry.avatarPath)} alt="" className="h-full w-full object-cover" />
                         : entry.source === "template" ? <Sparkles size={17} aria-hidden="true" /> : <UserRound size={17} aria-hidden="true" />}
                     </span>

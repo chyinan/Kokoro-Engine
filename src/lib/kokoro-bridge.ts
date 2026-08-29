@@ -263,6 +263,8 @@ export interface ChatRequest {
     character_id?: string;
     /** If true, the user instruction is hidden; non-empty assistant replies may still be saved. */
     hidden?: boolean;
+    /** Optional caller correlation echoed on turn lifecycle events. */
+    client_request_id?: string;
 }
 
 export async function streamChat(request: ChatRequest): Promise<void> {
@@ -414,16 +416,19 @@ export function parseLegacyChatError(payload: unknown): string {
 
 export interface ChatTurnStartEvent {
     turn_id: string;
+    client_request_id?: string | null;
 }
 
 export interface ChatTurnDeltaEvent {
     turn_id: string;
     delta: string;
+    client_request_id?: string | null;
 }
 
 export interface ChatTurnFinishEvent {
     turn_id: string;
     status: "completed" | "error" | "cancelled";
+    client_request_id?: string | null;
 }
 
 export interface ChatTurnTranslationEvent {

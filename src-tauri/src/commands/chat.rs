@@ -245,10 +245,15 @@ async fn build_turn_delta_payload_if_not_cancelled(
     state: &TurnCancellationState,
     turn_id: &str,
     delta: String,
+    client_request_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
-    state
+    let mut payload = state
         .build_turn_delta_payload_if_not_cancelled(turn_id, delta)
-        .await
+        .await?;
+    if let Some(client_request_id) = client_request_id {
+        payload["client_request_id"] = serde_json::Value::String(client_request_id.to_string());
+    }
+    Ok(payload)
 }
 
 fn is_turn_cancelled_error_message(message: &str) -> bool {
@@ -502,6 +507,9 @@ pub struct ChatRequest {
     /// Used for touch interactions and proactive triggers where the instruction shouldn't appear in chat.
     #[serde(default)]
     pub hidden: bool,
+    /// Optional caller correlation echoed on turn lifecycle events.
+    #[serde(default)]
+    pub client_request_id: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1339,6 +1347,7 @@ pub async fn stream_chat(
         "chat-turn-start",
         serde_json::json!({
             "turn_id": assistant_turn_id,
+            "client_request_id": request.client_request_id,
         }),
     )
     .map_err(|e| KokoroError::Chat(e.to_string()))?;
@@ -1482,6 +1491,7 @@ pub async fn stream_chat(
                                     cancel_state.inner().as_ref(),
                                     &assistant_turn_id,
                                     to_emit,
+                                    request.client_request_id.as_deref(),
                                 )
                                 .await
                                 .map_err(KokoroError::Chat)?;
@@ -1542,6 +1552,7 @@ pub async fn stream_chat(
                     cancel_state.inner().as_ref(),
                     &assistant_turn_id,
                     cleaned_remainder,
+                    request.client_request_id.as_deref(),
                 )
                 .await
                 .map_err(KokoroError::Chat)?;
@@ -1888,6 +1899,7 @@ pub async fn stream_chat(
             serde_json::json!({
                 "turn_id": assistant_turn_id,
                 "status": "completed",
+                "client_request_id": request.client_request_id,
             }),
         )
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
@@ -2336,6 +2348,7 @@ pub async fn stream_chat(
         serde_json::json!({
             "turn_id": assistant_turn_id,
             "status": finish_status,
+            "client_request_id": request.client_request_id,
         }),
     )
     .map_err(|e| KokoroError::Chat(e.to_string()))?;
@@ -2357,6 +2370,7 @@ pub async fn stream_chat(
                 serde_json::json!({
                     "turn_id": assistant_turn_id,
                     "status": "cancelled",
+                    "client_request_id": request.client_request_id,
                 }),
             )
             .map_err(|e| KokoroError::Chat(e.to_string()))?;
@@ -3455,7 +3469,7 @@ mod tests {
             .expect("cancel should succeed");
 
         let payload =
-            build_turn_delta_payload_if_not_cancelled(&state, "turn-1", "hello".into()).await;
+            build_turn_delta_payload_if_not_cancelled(&state, "turn-1", "hello".into(), None).await;
         assert!(payload.is_err());
     }
 

@@ -1264,7 +1264,7 @@
             "descriptions": { "language": "选择你习惯的界面语言。", "character": "选择想先认识的角色。", "provider": "只配置获得回复所需的地址、模型和密钥。", "connection-test": "发送聊天前确认服务商可用。", "chat": "完成一次成功回复即可结束设置。" },
             "provider": { "custom": "自定义地址", "provider_type": "服务商", "openai": "OpenAI 兼容", "ollama": "Ollama（本地）", "preset": "预设", "endpoint": "地址", "api_key": "API 密钥", "model": "模型", "discover": "发现模型", "discovering": "发现中", "testing": "测试中", "test": "测试连接", "test_success": "连接测试通过", "save": "保存服务商", "saving": "保存中" },
             "edit_provider": "编辑服务商",
-            "errors": { "provider_save": "无法保存服务商，请检查地址、模型和密钥后重试。", "character_activate": "无法激活角色，请检查角色包后重试。", "chat_failed": "无法发送消息，请检查连接后重试。" }
+            "errors": { "provider_save": "无法保存服务商，请检查地址、模型和密钥后重试。", "character_activate": "无法激活角色，请检查角色包后重试。", "connection_failed": "无法连接服务商，请检查地址、模型和密钥后重试。", "chat_failed": "无法发送消息，请检查连接后重试。" }
         },
         "title": "新手引导",
         "dismiss": "退出引导",
