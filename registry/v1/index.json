@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "registry_version": 1,
+  "generated_at": "1970-01-01T00:00:00.000Z",
+  "entries": [
+    {
+      "content_type": "character",
+      "id": "kokoro",
+      "name": "Kokoro",
+      "version": "1.0.0",
+      "author": "Kokoro Engine",
+      "description": "A warm daily companion who remembers the small things and makes space for unhurried conversation.",
+      "preview": [],
+      "engine_version": ">=0.3.1, <0.4.0",
+      "download_url": "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/kokoro-1.0.0.zip",
+      "archive_size": 2585,
+      "sha256": "7392c1266db926138072dab774bd33fccb59279c0d8c8a4f6b7f1336838159e8",
+      "trust": "official",
+      "trust_source": "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/v1/index.json",
+      "registry_identity": "github.com/chyinan/Kokoro-Engine/registry-v1",
+      "permissions": [],
+      "recommendations": {
+        "vision": false,
+        "memory": true,
+        "mcp_servers": [],
+        "bot_platforms": []
+      }
+    },
+    {
+      "content_type": "character",
+      "id": "pico",
+      "name": "Pico",
+      "version": "1.0.0",
+      "author": "Kokoro Engine",
+      "description": "A bright, quick-witted friend with concise replies, playful teasing, and plenty of expressive energy.",
+      "preview": [],
+      "engine_version": ">=0.3.1, <0.4.0",
+      "download_url": "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/pico-1.0.0.zip",
+      "archive_size": 2636,
+      "sha256": "06d75eb065ad353ea431f8faa7fb3e9667b775b7e8f4ae9155901a3ff1a02e06",
+      "trust": "official",
+      "trust_source": "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/v1/index.json",
+      "registry_identity": "github.com/chyinan/Kokoro-Engine/registry-v1",
+      "permissions": [],
+      "recommendations": {
+        "vision": true,
+        "memory": false,
+        "mcp_servers": [],
+        "bot_platforms": []
+      }
+    },
+    {
+      "content_type": "character",
+      "id": "seren",
+      "name": "Seren Vale",
+      "version": "1.0.0",
+      "author": "Kokoro Engine",
+      "description": "A lantern-keeper from a rainbound archive, built for atmospheric role-play and story-rich conversation.",
+      "preview": [],
+      "engine_version": ">=0.3.1, <0.4.0",
+      "download_url": "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/seren-1.0.0.zip",
+      "archive_size": 2916,
+      "sha256": "5b4e6e153f764bffc272658d289796e9da6fefe0868926bc46d75fb9f0e6a134",
+      "trust": "official",
+      "trust_source": "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/v1/index.json",
+      "registry_identity": "github.com/chyinan/Kokoro-Engine/registry-v1",
+      "permissions": [],
+      "recommendations": {
+        "vision": false,
+        "memory": true,
+        "mcp_servers": [],
+        "bot_platforms": []
+      }
+    },
+    {
+      "content_type": "mod",
+      "id": "genshin-theme",
+      "name": "Genshin Impact Theme",
+      "version": "1.0.0",
+      "author": "Kokoro Engine",
+      "description": "原神风格的对话与设置 UI 主题 — Kokoro Engine 官方示范 MOD",
+      "preview": [],
+      "engine_version": "^0.2.0",
+      "download_url": "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/genshin-theme-1.0.0.zip",
+      "archive_size": 3583358,
+      "sha256": "25ad6d262475170bf991f24fc367a1b780f6fe441eb352b1a4eec17605fbd3cb",
+      "trust": "official",
+      "trust_source": "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/v1/index.json",
+      "registry_identity": "github.com/chyinan/Kokoro-Engine/registry-v1",
+      "permissions": [],
+      "recommendations": {
+        "vision": false,
+        "memory": false,
+        "mcp_servers": [],
+        "bot_platforms": []
+      }
+    }
+  ]
+}

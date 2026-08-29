@@ -13,6 +13,7 @@ pub mod llm;
 pub mod mcp;
 pub mod mods;
 pub mod qqbot;
+pub mod registry;
 pub mod stt;
 pub mod telegram;
 pub mod tts;

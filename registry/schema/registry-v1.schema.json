@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/schema/registry-v1.schema.json",
+  "title": "Kokoro Engine static content registry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "registry_version", "entries"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "registry_version": { "const": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entry" },
+      "minItems": 1
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content_type", "id", "name", "version", "author", "description",
+        "preview", "engine_version", "download_url", "archive_size", "sha256",
+        "trust", "trust_source", "permissions", "recommendations"
+      ],
+      "properties": {
+        "content_type": { "enum": ["character", "mod"] },
+        "id": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$" },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$" },
+        "author": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "preview": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "engine_version": { "type": "string", "minLength": 1 },
+        "download_url": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "archive_size": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "trust": { "enum": ["official", "community", "unverified"] },
+        "trust_source": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "registry_identity": { "type": ["string", "null"] },
+        "permissions": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "recommendations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["vision", "memory", "mcp_servers", "bot_platforms"],
+          "properties": {
+            "vision": { "type": "boolean" },
+            "memory": { "type": "boolean" },
+            "mcp_servers": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" }, "uniqueItems": true },
+            "bot_platforms": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" }, "uniqueItems": true }
+          }
+        }
+      }
+    }
+  }
+}
