@@ -1,0 +1,40 @@
+{
+  "endpoint": {
+    "description": "Kokoro webhook endpoint",
+    "type": "string",
+    "default": "http://127.0.0.1:8787/webhook/message",
+    "hint": "Use the loopback address when Kokoro runs on this machine."
+  },
+  "bearer_token": {
+    "description": "Kokoro webhook bearer token",
+    "type": "string",
+    "default": "",
+    "hint": "Must match Kokoro's webhook token; it is never written to logs."
+  },
+  "character_id": {
+    "description": "Default Kokoro character ID",
+    "type": "string",
+    "default": "kokoro"
+  },
+  "conversation_strategy": {
+    "description": "Conversation mapping strategy",
+    "type": "string",
+    "default": "character_session",
+    "options": ["character_session", "platform_session"]
+  },
+  "enable_text": {
+    "description": "Forward text messages and replies",
+    "type": "bool",
+    "default": true
+  },
+  "enable_images": {
+    "description": "Forward and return image messages",
+    "type": "bool",
+    "default": true
+  },
+  "enable_audio": {
+    "description": "Forward and return audio messages",
+    "type": "bool",
+    "default": true
+  }
+}

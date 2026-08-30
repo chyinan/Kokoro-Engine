@@ -1,0 +1,7 @@
+name: astrbot-kokoro
+display_name: Kokoro Engine
+desc: Forward AstrBot conversations to a selected Kokoro Engine character.
+author: Kokoro Engine Contributors
+version: 0.1.0
+repo: https://github.com/chyinan/Kokoro-Engine
+astrbot_version: ">=4.5.0"
