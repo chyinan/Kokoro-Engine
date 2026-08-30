@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Sparkles, Brain, Mic, Eye, Server, Bot, Shield, HardDrive, Ghost, Info } from "lucide-react";
 import { ModList } from "../mods/ModList";
+import ContentLibrary from "./ContentLibrary";
 import { Select } from "@/components/ui/select";
 import CharacterManager from "./CharacterManager";
 import type { CharacterRuntimeOverrides } from "../../features/characters/character-runtime-overrides";
@@ -886,8 +887,15 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                             )}
 
                             {mountedTabs.has("mods") && (
-                                <div className={clsx(activeTab === "mods" ? "block" : "hidden", "h-[400px]")}>
-                                    <ModList />
+                                <div className={clsx(activeTab === "mods" ? "block" : "hidden", "min-h-[812px]")}>
+                                    <div className="flex min-h-[812px] flex-col gap-3">
+                                        <div className="h-[400px] shrink-0">
+                                            <ContentLibrary />
+                                        </div>
+                                        <div className="h-[400px] shrink-0">
+                                            <ModList />
+                                        </div>
+                                    </div>
                                 </div>
                             )}
 

@@ -29,6 +29,29 @@
       "enabling": "Enabling..."
     }
   },
+  "contentLibrary": {
+    "eyebrow": "Content library",
+    "title": "Characters & MODs",
+    "characters": "Characters",
+    "mods": "MODs",
+    "refresh": "Refresh registry",
+    "loading": "Loading registry…",
+    "emptyCharacters": "No character packages in this registry.",
+    "emptyMods": "No MOD packages in this registry.",
+    "urlPlaceholder": "Install a character package from HTTPS URL",
+    "installUrl": "Install URL",
+    "urlWarningTitle": "Review external package",
+    "confirmUrl": "Trust and install",
+    "cancel": "Cancel",
+    "retry": "Retry",
+    "dismissError": "Dismiss error",
+    "compatibility": "Engine",
+    "source": "Source",
+    "statusAvailable": "available",
+    "statusInstalled": "installed",
+    "statusUpdate": "update available",
+    "working": "Working"
+  },
     "common": {
         "actions": {
             "save": "SAVE",

@@ -29,6 +29,29 @@
       "enabling": "正在啟用……"
     }
   },
+  "contentLibrary": {
+    "eyebrow": "內容庫",
+    "title": "角色與模組",
+    "characters": "角色",
+    "mods": "模組",
+    "refresh": "重新整理註冊表",
+    "loading": "正在載入註冊表…",
+    "emptyCharacters": "註冊表中沒有角色套件。",
+    "emptyMods": "註冊表中沒有模組套件。",
+    "urlPlaceholder": "從 HTTPS 位址安裝角色套件",
+    "installUrl": "安裝位址",
+    "urlWarningTitle": "檢查外部套件",
+    "confirmUrl": "信任並安裝",
+    "cancel": "取消",
+    "retry": "重試",
+    "dismissError": "關閉錯誤",
+    "compatibility": "引擎",
+    "source": "來源",
+    "statusAvailable": "可安裝",
+    "statusInstalled": "已安裝",
+    "statusUpdate": "有可用更新",
+    "working": "處理中"
+  },
     "common": {
         "actions": {
             "save": "儲存",

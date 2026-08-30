@@ -29,6 +29,29 @@
       "enabling": "有効化中…"
     }
   },
+  "contentLibrary": {
+    "eyebrow": "コンテンツライブラリ",
+    "title": "キャラクターとMOD",
+    "characters": "キャラクター",
+    "mods": "MOD",
+    "refresh": "レジストリを更新",
+    "loading": "レジストリを読み込み中…",
+    "emptyCharacters": "このレジストリにキャラクターパッケージはありません。",
+    "emptyMods": "このレジストリにMODパッケージはありません。",
+    "urlPlaceholder": "HTTPS URLからキャラクターパッケージをインストール",
+    "installUrl": "URLをインストール",
+    "urlWarningTitle": "外部パッケージを確認",
+    "confirmUrl": "信頼してインストール",
+    "cancel": "キャンセル",
+    "retry": "再試行",
+    "dismissError": "エラーを閉じる",
+    "compatibility": "エンジン",
+    "source": "ソース",
+    "statusAvailable": "利用可能",
+    "statusInstalled": "インストール済み",
+    "statusUpdate": "更新あり",
+    "working": "処理中"
+  },
     "common": {
         "actions": {
             "save": "保存",

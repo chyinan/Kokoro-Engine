@@ -29,6 +29,29 @@
       "enabling": "正在启用……"
     }
   },
+  "contentLibrary": {
+    "eyebrow": "内容库",
+    "title": "角色与模组",
+    "characters": "角色",
+    "mods": "模组",
+    "refresh": "刷新注册表",
+    "loading": "正在加载注册表…",
+    "emptyCharacters": "注册表中没有角色包。",
+    "emptyMods": "注册表中没有模组包。",
+    "urlPlaceholder": "从 HTTPS 地址安装角色包",
+    "installUrl": "安装地址",
+    "urlWarningTitle": "检查外部软件包",
+    "confirmUrl": "信任并安装",
+    "cancel": "取消",
+    "retry": "重试",
+    "dismissError": "关闭错误",
+    "compatibility": "引擎",
+    "source": "来源",
+    "statusAvailable": "可安装",
+    "statusInstalled": "已安装",
+    "statusUpdate": "有可用更新",
+    "working": "处理中"
+  },
     "common": {
         "actions": {
             "save": "保存",

@@ -1,0 +1,165 @@
+// pattern: Functional Core
+
+import type { RegistryEntry } from "@/lib/kokoro-bridge";
+
+export const CONTENT_LIBRARY_OFFICIAL_REGISTRY =
+  "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/v1/index.json";
+export const CONTENT_LIBRARY_OFFICIAL_IDENTITY = "github.com/chyinan/Kokoro-Engine/registry-v1";
+
+export type ContentLibraryTab = "character" | "mod";
+export type ContentOperation = "install" | "update" | "remove";
+export type ContentVersionState = "available" | "installed" | "update-available";
+
+export type ContentPendingOperation = {
+  readonly operation: ContentOperation;
+  readonly entryId: string;
+};
+
+export type ContentActionableError = {
+  readonly message: string;
+  readonly action: "retry" | "review";
+};
+
+export type ContentLibraryState = {
+  readonly activeTab: ContentLibraryTab;
+  readonly pending: ContentPendingOperation | null;
+  readonly installedVersions: Readonly<Record<string, string>>;
+  readonly error: ContentActionableError | null;
+  readonly urlWarning: string | null;
+};
+
+export type ContentLibraryEvent =
+  | { readonly type: "tab-selected"; readonly tab: ContentLibraryTab }
+  | { readonly type: "operation-started"; readonly operation: ContentOperation; readonly entryId: string }
+  | { readonly type: "operation-succeeded"; readonly operation: ContentOperation; readonly entryId: string; readonly version?: string }
+  | { readonly type: "operation-failed"; readonly operation: ContentOperation; readonly entryId: string; readonly error: unknown }
+  | { readonly type: "url-warning-opened"; readonly url: string }
+  | { readonly type: "url-warning-dismissed" }
+  | { readonly type: "error-dismissed" };
+
+export function createContentLibraryState(
+  installedVersions: Readonly<Record<string, string>> = {},
+): ContentLibraryState {
+  return {
+    activeTab: "character",
+    pending: null,
+    installedVersions: { ...installedVersions },
+    error: null,
+    urlWarning: null,
+  };
+}
+
+export function reduceContentLibraryState(
+  state: ContentLibraryState,
+  event: ContentLibraryEvent,
+): ContentLibraryState {
+  switch (event.type) {
+    case "tab-selected":
+      return { ...state, activeTab: event.tab };
+    case "operation-started":
+      return {
+        ...state,
+        pending: { operation: event.operation, entryId: event.entryId },
+        error: null,
+      };
+    case "operation-succeeded": {
+      const installedVersions = { ...state.installedVersions };
+      if (event.operation === "remove") {
+        delete installedVersions[event.entryId];
+      } else if (event.version) {
+        installedVersions[event.entryId] = event.version;
+      }
+      return { ...state, pending: null, installedVersions, error: null };
+    }
+    case "operation-failed":
+      return {
+        ...state,
+        pending: null,
+        error: getActionableContentError(event.error),
+      };
+    case "url-warning-opened":
+      return { ...state, urlWarning: event.url };
+    case "url-warning-dismissed":
+      return { ...state, urlWarning: null };
+    case "error-dismissed":
+      return { ...state, error: null };
+  }
+}
+
+export function selectRegistryEntries(
+  entries: ReadonlyArray<RegistryEntry>,
+  tab: ContentLibraryTab,
+): Array<RegistryEntry> {
+  return entries.filter((entry) => entry.content_type === tab);
+}
+
+/** Never trust a self-asserted official label from a custom registry or URL. */
+export function getContentTrustLabel(
+  entry: Readonly<RegistryEntry>,
+  registryUrl: string = CONTENT_LIBRARY_OFFICIAL_REGISTRY,
+): "official" | "community" | "unverified" {
+  if (
+    entry.trust === "official" &&
+    registryUrl === CONTENT_LIBRARY_OFFICIAL_REGISTRY &&
+    entry.trust_source === CONTENT_LIBRARY_OFFICIAL_REGISTRY &&
+    entry.registry_identity === CONTENT_LIBRARY_OFFICIAL_IDENTITY
+  ) {
+    return "official";
+  }
+  if (entry.trust === "unverified") return "unverified";
+  return "community";
+}
+
+function compareVersions(left: string, right: string): number {
+  const parse = (value: string): number[] => value.split(/[.+-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const a = parse(left);
+  const b = parse(right);
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+export function getContentVersionState(
+  entry: Readonly<RegistryEntry>,
+  installedVersion: string | null | undefined,
+): ContentVersionState {
+  if (!installedVersion) return "available";
+  return compareVersions(entry.version, installedVersion) > 0 ? "update-available" : "installed";
+}
+
+export function getUrlInstallWarning(url: string): string {
+  return `This URL is not part of the official registry. The package is untrusted until validation succeeds (${url}). Continue only if you trust the source.`;
+}
+
+export function getActionableContentError(error: unknown): ContentActionableError {
+  const raw = error instanceof Error
+    ? error.message
+    : typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
+      ? error.message
+      : String(error);
+  const normalized = raw.toLowerCase();
+  if (normalized.includes("incompatible") || normalized.includes("engine version")) {
+    return {
+      message: "This package is not compatible with the current engine. Review the compatibility range and choose another version.",
+      action: "review",
+    };
+  }
+  if (normalized.includes("checksum") || normalized.includes("validation") || normalized.includes("corrupt")) {
+    return {
+      message: "Package validation failed. Check the source and checksum, then review before retrying.",
+      action: "review",
+    };
+  }
+  if (normalized.includes("network") || normalized.includes("timeout") || normalized.includes("download")) {
+    return {
+      message: "download failed. Check your connection and retry.",
+      action: "retry",
+    };
+  }
+  return {
+    message: "Content operation failed. Review the package and retry.",
+    action: "retry",
+  };
+}

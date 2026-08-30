@@ -29,6 +29,29 @@
       "enabling": "Включение…"
     }
   },
+  "contentLibrary": {
+    "eyebrow": "Библиотека контента",
+    "title": "Персонажи и моды",
+    "characters": "Персонажи",
+    "mods": "Моды",
+    "refresh": "Обновить реестр",
+    "loading": "Загрузка реестра…",
+    "emptyCharacters": "В этом реестре нет пакетов персонажей.",
+    "emptyMods": "В этом реестре нет пакетов модов.",
+    "urlPlaceholder": "Установить пакет персонажа по HTTPS-адресу",
+    "installUrl": "Установить URL",
+    "urlWarningTitle": "Проверить внешний пакет",
+    "confirmUrl": "Доверять и установить",
+    "cancel": "Отмена",
+    "retry": "Повторить",
+    "dismissError": "Закрыть ошибку",
+    "compatibility": "Движок",
+    "source": "Источник",
+    "statusAvailable": "доступен",
+    "statusInstalled": "установлен",
+    "statusUpdate": "доступно обновление",
+    "working": "Выполняется"
+  },
   "common": {
     "actions": {
       "save": "Сохранить",

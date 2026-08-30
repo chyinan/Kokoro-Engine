@@ -29,6 +29,29 @@
       "enabling": "활성화 중…"
     }
   },
+  "contentLibrary": {
+    "eyebrow": "콘텐츠 라이브러리",
+    "title": "캐릭터 및 MOD",
+    "characters": "캐릭터",
+    "mods": "MOD",
+    "refresh": "레지스트리 새로 고침",
+    "loading": "레지스트리 로드 중…",
+    "emptyCharacters": "이 레지스트리에 캐릭터 패키지가 없습니다.",
+    "emptyMods": "이 레지스트리에 MOD 패키지가 없습니다.",
+    "urlPlaceholder": "HTTPS URL에서 캐릭터 패키지 설치",
+    "installUrl": "URL 설치",
+    "urlWarningTitle": "외부 패키지 검토",
+    "confirmUrl": "신뢰하고 설치",
+    "cancel": "취소",
+    "retry": "재시도",
+    "dismissError": "오류 닫기",
+    "compatibility": "엔진",
+    "source": "소스",
+    "statusAvailable": "사용 가능",
+    "statusInstalled": "설치됨",
+    "statusUpdate": "업데이트 가능",
+    "working": "처리 중"
+  },
     "common": {
         "actions": {
             "save": "저장",
