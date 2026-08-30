@@ -190,6 +190,13 @@ describe("content library state", () => {
     expect(getContentVersionState({ ...character, version: "1.0.0+build.2" }, "1.0.0+build.1")).toBe("installed");
   });
 
+  it("rejects SemVer numeric components that overflow the Rust u64 contract", () => {
+    expect(selectRegistryEntries([
+      { ...character, version: "18446744073709551616.0.0" },
+      { ...character, version: "1.0.0-18446744073709551616" },
+    ], "character")).toEqual([]);
+  });
+
   it("turns transport and compatibility failures into actionable recovery text", () => {
     expect(getActionableContentError(new Error("network timeout"))).toMatchObject({
       message: expect.stringContaining("download"),

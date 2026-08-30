@@ -1,6 +1,7 @@
 // pattern: Functional Core
 
-import { mkdtemp, mkdir, readdir, symlink, writeFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, mkdir, readFile, readdir, symlink, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -9,6 +10,7 @@ import {
   OFFICIAL_REGISTRY_IDENTITY,
   OFFICIAL_REGISTRY_URL,
   normalizeTrustSource,
+  verifyRegistryArtifact,
   validateContentFileNames,
   validateContentFileSizes,
   validateRegistryEntry,
@@ -16,6 +18,59 @@ import {
 } from './build-content-registry.mjs';
 
 const temporaryRoots = [];
+
+function storedZip(files) {
+  const chunks = [];
+  for (const file of files) {
+    const name = Buffer.from(file.name, 'utf8');
+    const data = Buffer.from(file.data);
+    const header = Buffer.alloc(30 + name.length);
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(20, 4);
+    header.writeUInt32LE(data.length, 18);
+    header.writeUInt32LE(data.length, 22);
+    header.writeUInt16LE(name.length, 26);
+    name.copy(header, 30);
+    chunks.push(header, data);
+  }
+  return Buffer.concat(chunks);
+}
+
+function artifactFor(files, overrides = {}) {
+  const bytes = storedZip(files);
+  const manifest = files.find((file) => file.name === 'character.json' || file.name === 'mod.json');
+  const contentType = manifest?.name === 'mod.json' ? 'mod' : 'character';
+  const parsed = JSON.parse(Buffer.from(manifest.data).toString('utf8'));
+  const base = {
+    ...archive,
+    content_type: contentType,
+    id: parsed.id,
+    version: parsed.version,
+    engine_version: parsed.engine_version,
+    download_url: `${OFFICIAL_REGISTRY_URL}/../packages/${parsed.id}-${parsed.version}.zip`,
+    archive_size: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    preview: [],
+    ...overrides,
+  };
+  return { entry: base, bytes };
+}
+
+function characterManifest(overrides = {}) {
+  return {
+    schema_version: 1,
+    engine_version: '>=0.3.1, <0.4.0',
+    id: 'artifact-character',
+    version: '1.0.0',
+    name: 'Artifact Character',
+    description: 'A character',
+    author: 'Kokoro',
+    license: 'MIT',
+    persona: 'Be helpful.',
+    greeting: 'Hello.',
+    ...overrides,
+  };
+}
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -271,5 +326,108 @@ describe('content registry contract', () => {
     await writeFile(join(packageRoot, 'LICENSE.md'), 'MIT');
     await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
       .rejects.toThrow(/preview|avatar|missing|package/i);
+  });
+
+  it('verifies the complete archive content policy, including duplicate and unsupported paths', () => {
+    const manifest = Buffer.from(JSON.stringify(characterManifest()));
+    const unsupported = artifactFor([
+      { name: 'character.json', data: manifest },
+      { name: 'LICENSE.md', data: 'MIT' },
+      { name: 'scripts/install.js', data: 'alert(1)' },
+    ]);
+    expect(verifyRegistryArtifact(unsupported.entry, unsupported.bytes).valid).toBe(false);
+
+    const duplicate = artifactFor([
+      { name: 'character.json', data: manifest },
+      { name: 'LICENSE.md', data: 'MIT' },
+      { name: 'license.md', data: 'shadow' },
+    ]);
+    expect(verifyRegistryArtifact(duplicate.entry, duplicate.bytes)).toMatchObject({
+      valid: false,
+      error: expect.stringMatching(/duplicate/i),
+    });
+  });
+
+  it('rejects artifact manifests with unknown CharacterTemplateManifest fields', () => {
+    const manifest = Buffer.from(JSON.stringify(characterManifest({ unexpected: true })));
+    const candidate = artifactFor([
+      { name: 'character.json', data: manifest },
+      { name: 'LICENSE.md', data: 'MIT' },
+    ]);
+
+    expect(verifyRegistryArtifact(candidate.entry, candidate.bytes)).toMatchObject({
+      valid: false,
+      error: expect.stringMatching(/unknown|manifest/i),
+    });
+
+    const nested = artifactFor([
+      {
+        name: 'character.json',
+        data: JSON.stringify(characterManifest({ assets: { cue_profile: 'cues.json', unexpected: true } })),
+      },
+      { name: 'LICENSE.md', data: 'MIT' },
+      { name: 'cues.json', data: '{}' },
+    ]);
+    expect(verifyRegistryArtifact(nested.entry, nested.bytes)).toMatchObject({
+      valid: false,
+      error: expect.stringMatching(/unknown|manifest/i),
+    });
+  });
+
+  it('applies MOD per-file limits while verifying generated artifacts', () => {
+    const manifest = Buffer.from(JSON.stringify({
+      id: 'large-mod', name: 'Large MOD', version: '1.0.0', description: 'A MOD',
+      engine_version: '>=0.3.1, <0.4.0', permissions: [],
+    }));
+    const candidate = artifactFor([
+      { name: 'mod.json', data: manifest },
+      { name: 'main.js', data: Buffer.alloc(10 * 1024 * 1024 + 1, 0x61) },
+    ]);
+
+    expect(verifyRegistryArtifact(candidate.entry, candidate.bytes)).toMatchObject({
+      valid: false,
+      error: expect.stringMatching(/10 MiB|size|limit/i),
+    });
+  });
+
+  it('refuses to write registry output through symlinked registry directories or archives', async () => {
+    const makeMod = async (root) => {
+      const packageRoot = join(root, 'mods', 'safe-mod');
+      await mkdir(packageRoot, { recursive: true });
+      await writeFile(join(packageRoot, 'mod.json'), JSON.stringify({
+        id: 'safe-mod', name: 'Safe Mod', version: '1.0.0', description: 'A MOD',
+        engine_version: '>=0.3.1, <0.4.0', permissions: [],
+      }));
+    };
+
+    const registryLinkRoot = await mkdtemp(join(tmpdir(), 'kokoro-registry-output-link-'));
+    temporaryRoots.push(registryLinkRoot);
+    await makeMod(registryLinkRoot);
+    const registryOutside = await mkdtemp(join(tmpdir(), 'kokoro-registry-output-outside-'));
+    temporaryRoots.push(registryOutside);
+    await symlink(registryOutside, join(registryLinkRoot, 'registry'), 'dir');
+    await expect(buildContentRegistry({ root: registryLinkRoot, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+      .rejects.toThrow(/symlink|regular directory|output/i);
+
+    const packageLinkRoot = await mkdtemp(join(tmpdir(), 'kokoro-package-output-link-'));
+    temporaryRoots.push(packageLinkRoot);
+    await makeMod(packageLinkRoot);
+    await mkdir(join(packageLinkRoot, 'registry', 'packages'), { recursive: true });
+    const packageOutside = await mkdtemp(join(tmpdir(), 'kokoro-package-output-outside-'));
+    temporaryRoots.push(packageOutside);
+    await writeFile(join(packageOutside, 'archive.zip'), 'must not be overwritten');
+    await symlink(join(packageOutside, 'archive.zip'), join(packageLinkRoot, 'registry', 'packages', 'safe-mod-1.0.0.zip'), 'file');
+    await expect(buildContentRegistry({ root: packageLinkRoot, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+      .rejects.toThrow(/symlink|regular file|output/i);
+
+    const v1LinkRoot = await mkdtemp(join(tmpdir(), 'kokoro-v1-output-link-'));
+    temporaryRoots.push(v1LinkRoot);
+    await makeMod(v1LinkRoot);
+    await mkdir(join(v1LinkRoot, 'registry', 'packages'), { recursive: true });
+    const v1Outside = await mkdtemp(join(tmpdir(), 'kokoro-v1-output-outside-'));
+    temporaryRoots.push(v1Outside);
+    await symlink(v1Outside, join(v1LinkRoot, 'registry', 'v1'), 'dir');
+    await expect(buildContentRegistry({ root: v1LinkRoot, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+      .rejects.toThrow(/symlink|regular directory|output/i);
   });
 });

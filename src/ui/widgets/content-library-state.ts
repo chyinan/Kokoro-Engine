@@ -165,6 +165,7 @@ type ParsedContentVersion = {
 };
 
 const CONTENT_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+const MAX_SEMVER_NUMBER = 18446744073709551615n;
 
 function isValidContentType(value: string): value is ContentLibraryTab {
   return value === "character" || value === "mod";
@@ -177,10 +178,13 @@ function isValidContentId(value: string): boolean {
 function parseContentVersion(value: string): ParsedContentVersion | null {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(value);
   if (!match) return null;
+  const core = [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])] as const;
+  if (core.some((number) => number > MAX_SEMVER_NUMBER)) return null;
   const prerelease = (match[4] ?? "").split(".").filter(Boolean).map((identifier) => {
     if (/^\d+$/.test(identifier)) {
       if (identifier.length > 1 && identifier.startsWith("0")) return null;
-      return BigInt(identifier);
+      const number = BigInt(identifier);
+      return number > MAX_SEMVER_NUMBER ? null : number;
     }
     return identifier;
   });
@@ -188,7 +192,7 @@ function parseContentVersion(value: string): ParsedContentVersion | null {
     return null;
   }
   return {
-    core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])],
+    core,
     prerelease: prerelease as ReadonlyArray<bigint | string>,
   };
 }

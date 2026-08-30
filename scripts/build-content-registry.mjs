@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto';
 import { lstat, readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { basename, extname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const REGISTRY_SCHEMA_VERSION = 1;
@@ -63,9 +63,128 @@ const CHARACTER_ALLOWED_SUFFIXES = [
 ];
 const MAX_SEMVER_NUMBER = 18446744073709551615n;
 const SEMVER_IDENTIFIER = /^[0-9A-Za-z-]+$/;
+const CHARACTER_MANIFEST_FIELDS = new Set([
+  'schema_version', 'engine_version', 'id', 'version', 'name', 'description', 'author',
+  'license', 'locale', 'avatar', 'persona', 'greeting', 'example_dialogue', 'assets',
+  'runtime', 'recommendations',
+]);
+const CHARACTER_ASSET_FIELDS = new Set(['live2d_model', 'background', 'cue_profile']);
+const CHARACTER_RUNTIME_FIELDS = new Set([
+  'live2d_model', 'background', 'cue_profile', 'tts', 'response_language', 'proactive_enabled',
+]);
+const CHARACTER_TTS_FIELDS = new Set([
+  'enabled', 'provider_type', 'provider_id', 'local_preset', 'voice', 'speed', 'pitch',
+]);
+const CHARACTER_RECOMMENDATION_FIELDS = new Set(['vision', 'memory', 'mcp_servers', 'bot_platforms']);
 
 function invalid(message) {
   return { valid: false, error: message };
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasOnlyFields(value, fields, label) {
+  if (!isObject(value)) return invalid(`${label} must be an object`);
+  const unknown = Object.keys(value).find((field) => !fields.has(field));
+  return unknown ? invalid(`${label} contains unknown field: ${unknown}`) : { valid: true };
+}
+
+function validateOptionalField(value, field, predicate, label) {
+  if (value === undefined || value === null) return { valid: true };
+  return predicate(value) ? { valid: true } : invalid(`invalid ${label} ${field}`);
+}
+
+function validateCharacterManifestValue(value) {
+  const shape = hasOnlyFields(value, CHARACTER_MANIFEST_FIELDS, 'character manifest');
+  if (!shape.valid) return shape;
+  if (value.schema_version !== CHARACTER_SCHEMA_VERSION) return invalid('invalid character manifest schema_version');
+  for (const field of ['engine_version', 'id', 'version', 'name', 'description', 'author', 'license', 'persona', 'greeting']) {
+    if (typeof value[field] !== 'string' || value[field].trim() === '') return invalid(`invalid character manifest ${field}`);
+  }
+  if (!ID_PATTERN.test(value.id)) return invalid('invalid character manifest id');
+  if (!isValidSemVer(value.version)) return invalid('invalid character manifest version');
+  if (!isValidEngineRange(value.engine_version)) return invalid('invalid character manifest engine_version');
+  for (const field of ['locale', 'avatar', 'example_dialogue']) {
+    const result = validateOptionalField(value[field], field, (candidate) => typeof candidate === 'string', 'character manifest');
+    if (!result.valid) return result;
+  }
+  if (value.assets !== undefined && value.assets !== null) {
+    const assets = hasOnlyFields(value.assets, CHARACTER_ASSET_FIELDS, 'character manifest assets');
+    if (!assets.valid) return assets;
+    for (const field of CHARACTER_ASSET_FIELDS) {
+      const result = validateOptionalField(value.assets[field], field, (candidate) => typeof candidate === 'string', 'character manifest assets');
+      if (!result.valid) return result;
+    }
+  }
+  if (value.runtime !== undefined && value.runtime !== null) {
+    const runtime = hasOnlyFields(value.runtime, CHARACTER_RUNTIME_FIELDS, 'character manifest runtime');
+    if (!runtime.valid) return runtime;
+    for (const field of ['live2d_model', 'background', 'cue_profile', 'response_language']) {
+      const result = validateOptionalField(value.runtime[field], field, (candidate) => typeof candidate === 'string', 'character manifest runtime');
+      if (!result.valid) return result;
+    }
+    const proactive = validateOptionalField(value.runtime.proactive_enabled, 'proactive_enabled', (candidate) => typeof candidate === 'boolean', 'character manifest runtime');
+    if (!proactive.valid) return proactive;
+    if (value.runtime.tts !== undefined && value.runtime.tts !== null) {
+      const tts = hasOnlyFields(value.runtime.tts, CHARACTER_TTS_FIELDS, 'character manifest runtime.tts');
+      if (!tts.valid) return tts;
+      for (const field of ['provider_type', 'provider_id', 'local_preset', 'voice']) {
+        const result = validateOptionalField(value.runtime.tts[field], field, (candidate) => typeof candidate === 'string', 'character manifest runtime.tts');
+        if (!result.valid) return result;
+      }
+      for (const field of ['enabled']) {
+        const result = validateOptionalField(value.runtime.tts[field], field, (candidate) => typeof candidate === 'boolean', 'character manifest runtime.tts');
+        if (!result.valid) return result;
+      }
+      for (const field of ['speed', 'pitch']) {
+        const result = validateOptionalField(value.runtime.tts[field], field, (candidate) => typeof candidate === 'number' && Number.isFinite(candidate), 'character manifest runtime.tts');
+        if (!result.valid) return result;
+      }
+    }
+  }
+  if (value.recommendations !== undefined && value.recommendations !== null) {
+    const recommendations = hasOnlyFields(value.recommendations, CHARACTER_RECOMMENDATION_FIELDS, 'character manifest recommendations');
+    if (!recommendations.valid) return recommendations;
+    for (const field of ['vision', 'memory']) {
+      const result = validateOptionalField(value.recommendations[field], field, (candidate) => typeof candidate === 'boolean', 'character manifest recommendations');
+      if (!result.valid) return result;
+    }
+    for (const field of ['mcp_servers', 'bot_platforms']) {
+      const result = validateOptionalField(value.recommendations[field], field, (candidate) => Array.isArray(candidate) && candidate.every((item) => typeof item === 'string'), 'character manifest recommendations');
+      if (!result.valid) return result;
+    }
+  }
+  return { valid: true };
+}
+
+function validateModManifestValue(value) {
+  if (!isObject(value)) return invalid('mod manifest must be an object');
+  for (const field of ['id', 'name', 'version', 'description']) {
+    if (typeof value[field] !== 'string' || value[field].trim() === '') return invalid(`invalid mod manifest ${field}`);
+  }
+  if (!ID_PATTERN.test(value.id)) return invalid('invalid mod manifest id');
+  if (!isValidSemVer(value.version)) return invalid('invalid mod manifest version');
+  if (value.engine_version !== undefined && value.engine_version !== null && !isValidEngineRange(value.engine_version)) return invalid('invalid mod manifest engine_version');
+  for (const field of ['layout', 'theme', 'entry', 'ui_entry']) {
+    if (value[field] !== undefined && value[field] !== null && typeof value[field] !== 'string') return invalid(`invalid mod manifest ${field}`);
+    if (typeof value[field] === 'string' && !isSafePackageRelativePath(value[field])) return invalid(`unsafe mod manifest ${field}`);
+  }
+  if (value.components !== undefined && value.components !== null) {
+    if (!isObject(value.components) || Object.entries(value.components).some(([slot, path]) => typeof slot !== 'string' || typeof path !== 'string' || !isSafePackageRelativePath(path))) return invalid('invalid mod manifest components');
+  }
+  for (const field of ['scripts', 'permissions']) {
+    if (value[field] !== undefined && value[field] !== null && (!Array.isArray(value[field]) || value[field].some((item) => typeof item !== 'string'))) return invalid(`invalid mod manifest ${field}`);
+  }
+  if (value.permissions?.some((permission) => !PERMISSIONS.has(permission))) return invalid('invalid mod manifest permissions');
+  if (value.capabilities !== undefined && value.capabilities !== null) {
+    if (!Array.isArray(value.capabilities)) return invalid('invalid mod manifest capabilities');
+    for (const capability of value.capabilities) {
+      if (!isObject(capability) || typeof capability.name !== 'string' || (capability.risk !== undefined && capability.risk !== null && typeof capability.risk !== 'string') || (capability.requires_confirmation !== undefined && typeof capability.requires_confirmation !== 'boolean')) return invalid('invalid mod manifest capability');
+    }
+  }
+  return { valid: true };
 }
 
 function entrySize(entry) {
@@ -356,6 +475,7 @@ function zipStored(files) {
 
 function readStoredZip(archive) {
   const files = new Map();
+  const canonicalNames = new Set();
   let offset = 0;
   while (offset + 4 <= archive.length && archive.readUInt32LE(offset) === 0x04034b50) {
     if (offset + 30 > archive.length) throw new Error('truncated ZIP local header');
@@ -369,7 +489,9 @@ function readStoredZip(archive) {
     const dataEnd = dataStart + compressedSize;
     if (dataEnd > archive.length) throw new Error('truncated ZIP entry');
     const name = archive.subarray(nameStart, nameStart + nameLength).toString('utf8');
-    if (files.has(name)) throw new Error(`registry archive contains duplicate path: ${name}`);
+    const canonicalName = name.replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase();
+    if (canonicalNames.has(canonicalName)) throw new Error(`registry archive contains case-insensitive duplicate path: ${name}`);
+    canonicalNames.add(canonicalName);
     files.set(name, archive.subarray(dataStart, dataEnd));
     offset = dataEnd;
   }
@@ -380,12 +502,27 @@ function readStoredZip(archive) {
 /** Verify generated bytes against the registry metadata and embedded manifest. */
 export function verifyRegistryArtifact(entry, archive) {
   if (!Buffer.isBuffer(archive)) return invalid('archive must be a Buffer');
+  const entryValidation = validateRegistryEntry(entry);
+  if (!entryValidation.valid) return entryValidation;
   if (archive.length !== entrySize(entry)) return invalid('archive size mismatch');
   if (createHash('sha256').update(archive).digest('hex') !== entry.sha256) return invalid('archive checksum mismatch');
   try {
     const download = new URL(entry.download_url);
     if (basename(download.pathname) !== archiveName(entry)) return invalid('download URL basename mismatch');
     const files = readStoredZip(archive);
+    const fileEntries = [...files.entries()].map(([name, data]) => ({ name, data, size: data.length }));
+    const filePolicy = validateContentFileNames(fileEntries.map((file) => file.name), entry.content_type);
+    if (!filePolicy.valid) return filePolicy;
+    const sizePolicy = validateContentFileSizes(fileEntries, entry.content_type);
+    if (!sizePolicy.valid) return sizePolicy;
+    for (const file of fileEntries) {
+      const lowerName = basename(file.name).toLowerCase();
+      const extension = extname(lowerName);
+      if (BLOCKED_NAMES.has(lowerName) || NATIVE_EXECUTABLE_EXTENSIONS.has(extension)
+        || (entry.content_type === 'character' && CHARACTER_SCRIPT_EXTENSIONS.has(extension))) {
+        return invalid(`blocked executable or secret resource: ${file.name}`);
+      }
+    }
     const manifestName = entry.content_type === 'character' ? 'character.json' : 'mod.json';
     const manifestBytes = files.get(manifestName);
     if (!manifestBytes) return invalid(`archive missing ${manifestName}`);
@@ -398,6 +535,11 @@ export function verifyRegistryArtifact(entry, archive) {
       }
     }
     const manifest = JSON.parse(manifestBytes.toString('utf8'));
+    const manifestValidation = entry.content_type === 'character'
+      ? validateCharacterManifestValue(manifest)
+      : validateModManifestValue(manifest);
+    if (!manifestValidation.valid) return manifestValidation;
+    validateManifestReferences(manifest, [...files.keys()]);
     if (manifest.id !== entry.id || manifest.version !== entry.version || manifest.engine_version !== entry.engine_version) return invalid('manifest metadata mismatch');
   } catch (error) {
     return invalid(error instanceof Error ? error.message : 'invalid archive');
@@ -445,20 +587,11 @@ async function readManifest(root, contentType) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`invalid ${manifestName} object`);
   }
-  if (contentType === 'character') {
-    if (value.schema_version !== CHARACTER_SCHEMA_VERSION) {
-      throw new Error(`invalid ${manifestName} schema_version`);
-    }
-    for (const field of ['engine_version', 'id', 'version', 'name', 'description', 'author', 'license', 'persona', 'greeting']) {
-      if (typeof value[field] !== 'string' || value[field].trim() === '') throw new Error(`invalid ${manifestName} ${field}`);
-    }
-  }
-  if (typeof value.id !== 'string' || !ID_PATTERN.test(value.id)) throw new Error(`invalid ${manifestName} id`);
-  if (typeof value.version !== 'string' || !isValidSemVer(value.version)) throw new Error(`invalid ${manifestName} version`);
+  const validation = contentType === 'character'
+    ? validateCharacterManifestValue(value)
+    : validateModManifestValue(value);
+  if (!validation.valid) throw new Error(validation.error);
   if (typeof value.engine_version !== 'string' || !isValidEngineRange(value.engine_version)) throw new Error(`invalid ${manifestName} engine_version`);
-  for (const field of ['name', 'description']) {
-    if (typeof value[field] !== 'string' || value[field].trim() === '') throw new Error(`invalid ${manifestName} ${field}`);
-  }
   return value;
 }
 
@@ -513,6 +646,41 @@ function registryEntry(manifest, contentType, archive, sourceUrl, packageBaseUrl
   };
 }
 
+async function ensureSafeDirectory(path, label) {
+  const target = resolve(path);
+  const missing = [];
+  let current = target;
+  while (true) {
+    try {
+      const metadata = await lstat(current);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        throw new Error(`${label} contains a symlink or non-directory path: ${current}`);
+      }
+      break;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      missing.push(current);
+      const parent = dirname(current);
+      if (parent === current) throw new Error(`${label} has no safe parent: ${current}`);
+      current = parent;
+    }
+  }
+  for (const directory of missing.reverse()) await mkdir(directory);
+}
+
+async function writeSafeFile(path, data, label) {
+  await ensureSafeDirectory(dirname(path), `${label} parent`);
+  try {
+    const metadata = await lstat(path);
+    if (metadata.isSymbolicLink() || !metadata.isFile()) {
+      throw new Error(`${label} is not a regular file: ${path}`);
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  await writeFile(path, data);
+}
+
 /** Build deterministic archives and publish a validated local index. */
 export async function buildContentRegistry({ root = resolve(fileURLToPath(new URL('..', import.meta.url))), sourceUrl = OFFICIAL_REGISTRY_URL } = {}) {
   const registryRoot = join(root, 'registry');
@@ -526,8 +694,9 @@ export async function buildContentRegistry({ root = resolve(fileURLToPath(new UR
       return OFFICIAL_PACKAGE_BASE_URL;
     }
   })();
-  await mkdir(packageRoot, { recursive: true });
+  await ensureSafeDirectory(packageRoot, 'registry package output');
   const entries = [];
+  const outputNames = new Set();
   for (const contentType of ['character', 'mod']) {
     const sourceRoot = join(root, `${contentType === 'character' ? 'characters' : 'mods'}`);
     if (!existsSync(sourceRoot)) continue;
@@ -545,11 +714,14 @@ export async function buildContentRegistry({ root = resolve(fileURLToPath(new UR
       if (contentType === 'character' && child.name.toLowerCase() === 'template') continue;
       const manifest = await readManifest(source, contentType);
       const archivePath = join(packageRoot, `${manifest.id}-${manifest.version}.zip`);
+      const outputKey = basename(archivePath).toLowerCase();
+      if (outputNames.has(outputKey)) throw new Error(`duplicate registry archive output: ${basename(archivePath)}`);
+      outputNames.add(outputKey);
       const archive = await buildArchive(source, contentType, manifest);
       const entry = registryEntry(manifest, contentType, archive, sourceUrl, packageBaseUrl);
       const artifact = verifyRegistryArtifact(entry, archive);
       if (!artifact.valid) throw new Error(`generated archive ${child.name} is invalid: ${artifact.error}`);
-      await writeFile(archivePath, archive);
+      await writeSafeFile(archivePath, archive, 'registry archive output');
       entries.push(entry);
     }
   }
@@ -561,8 +733,9 @@ export async function buildContentRegistry({ root = resolve(fileURLToPath(new UR
   const index = { schema_version: REGISTRY_SCHEMA_VERSION, registry_version: REGISTRY_VERSION, generated_at: '1970-01-01T00:00:00.000Z', entries };
   const validation = validateRegistryIndex(index);
   if (!validation.valid) throw new Error(`generated registry is invalid: ${validation.error}`);
-  await mkdir(join(registryRoot, 'v1'), { recursive: true });
-  await writeFile(join(registryRoot, 'v1', 'index.json'), `${JSON.stringify(index, null, 2)}\n`, 'utf8');
+  const versionRoot = join(registryRoot, 'v1');
+  await ensureSafeDirectory(versionRoot, 'registry index output');
+  await writeSafeFile(join(versionRoot, 'index.json'), `${JSON.stringify(index, null, 2)}\n`, 'registry index output');
   return index;
 }
 
