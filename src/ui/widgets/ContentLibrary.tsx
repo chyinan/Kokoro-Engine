@@ -188,6 +188,7 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
       }
       setUrl("");
     } catch (error) {
+      setLastAction(() => confirmUrlInstall);
       dispatch({ type: "operation-failed", operation: "install", contentType: target.contentType, entryId: `url:${target.url}`, error });
     }
   };

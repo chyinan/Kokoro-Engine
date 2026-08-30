@@ -175,6 +175,39 @@ describe("ContentLibrary", () => {
     act(() => root.unmount());
   });
 
+  it("retries the failed URL install instead of replaying an unrelated prior action", async () => {
+    const installCharacter = vi.fn(async () => ({ id: "kokoro", version: "1.0.0", name: "Kokoro", trust: "official", package_dir: "" }));
+    const installModFromUrl = vi.fn()
+      .mockRejectedValueOnce(new Error("network timeout"))
+      .mockResolvedValueOnce({ id: "night-theme", name: "Night Theme", version: "2.0.0", description: "A calm dark theme" });
+    const { container, root } = renderLibrary({ dependencies: deps({ installCharacter, installModFromUrl }) });
+    await act(async () => { await Promise.resolve(); });
+
+    click(container, '[data-content-action="install:kokoro"]');
+    await act(async () => { await Promise.resolve(); });
+    click(container, '[data-content-tab="mod"]');
+    const input = container.querySelector<HTMLInputElement>("[data-content-url-input]");
+    act(() => {
+      if (input) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        setter?.call(input, "https://community.example/retry-theme.zip");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    click(container, '[data-content-action="install-url"]');
+    click(container, '[data-content-action="confirm-url"]');
+    await act(async () => { await Promise.resolve(); });
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("download");
+
+    click(container, '[data-content-action="retry"]');
+    await act(async () => { await Promise.resolve(); });
+
+    expect(installModFromUrl).toHaveBeenCalledTimes(2);
+    expect(installCharacter).toHaveBeenCalledTimes(1);
+    act(() => root.unmount());
+  });
+
   it("offers registry reload after an initial download failure", async () => {
     const listRegistry = vi.fn()
       .mockRejectedValueOnce(new Error("network timeout"))
