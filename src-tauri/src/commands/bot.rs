@@ -44,6 +44,7 @@ const DISCORD_BOT_TOKEN_ENV: &str = "DISCORD_BOT_TOKEN";
 const LINE_CHANNEL_ACCESS_TOKEN_ENV: &str = "LINE_CHANNEL_ACCESS_TOKEN";
 const LINE_CHANNEL_SECRET_ENV: &str = "LINE_CHANNEL_SECRET";
 const WEBHOOK_BEARER_TOKEN_ENV: &str = "KOKORO_WEBHOOK_TOKEN";
+pub(crate) const MAX_GENERIC_WEBHOOK_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -1681,6 +1682,38 @@ fn normalize_image_reference(value: &str, fallback_mime: &str) -> Option<String>
     }
 }
 
+fn validate_image_reference(value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Invalid image base64: empty payload".to_string());
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Ok(());
+    }
+    let payload = if let Some((header, data)) = trimmed.split_once(',') {
+        if !header.starts_with("data:image/") || !header.contains(";base64") {
+            return Err("Invalid image base64: unsupported data URL".to_string());
+        }
+        data
+    } else {
+        trimmed
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|error| format!("Invalid image base64: {error}"))?;
+    Ok(())
+}
+
+fn validate_generic_webhook_body(body: &[u8]) -> Result<(), String> {
+    if body.len() > MAX_GENERIC_WEBHOOK_BODY_BYTES {
+        return Err(format!(
+            "Webhook body exceeds the {} byte limit",
+            MAX_GENERIC_WEBHOOK_BODY_BYTES
+        ));
+    }
+    Ok(())
+}
+
 fn decode_base64_payload(value: &str) -> Result<Vec<u8>, String> {
     let trimmed = value.trim();
     let payload = if let Some((_, data)) = trimmed.split_once(',') {
@@ -1954,6 +1987,9 @@ async fn run_http_bot_server(
         .and(warp::path::full())
         .and(warp::header::optional::<String>("authorization"))
         .and(warp::header::optional::<String>("x-line-signature"))
+        .and(warp::body::content_length_limit(
+            MAX_GENERIC_WEBHOOK_BODY_BYTES as u64,
+        ))
         .and(warp::body::bytes())
         .and(warp::any().map(move || config.clone()))
         .and(warp::any().map(move || app.clone()))
@@ -2113,18 +2149,21 @@ fn parse_generic_webhook_payload(body: &[u8]) -> Result<ParsedGenericWebhookPayl
     let image_mime_type = request.image_mime_type.as_deref().unwrap_or("image/jpeg");
     let mut images = Vec::new();
     if let Some(image) = request.image.as_deref() {
+        validate_image_reference(image)?;
         if let Some(normalized) = normalize_image_reference(image, image_mime_type) {
             images.push(normalized);
         }
     }
     if let Some(request_images) = request.images.as_ref() {
         for image in request_images {
+            validate_image_reference(image)?;
             if let Some(normalized) = normalize_image_reference(image, image_mime_type) {
                 images.push(normalized);
             }
         }
     }
     if let Some(image_base64) = request.image_base64.as_deref() {
+        validate_image_reference(image_base64)?;
         if let Some(normalized) = normalize_image_reference(image_base64, image_mime_type) {
             images.push(normalized);
         }
@@ -2233,6 +2272,9 @@ async fn handle_generic_webhook(
     body: bytes::Bytes,
     app: tauri::AppHandle,
 ) -> warp::reply::Response {
+    if let Err(error) = validate_generic_webhook_body(&body) {
+        return bad_request(&error);
+    }
     if let Err(error) = verify_webhook_bearer(
         authorization.as_deref(),
         resolve_secret(&config.bearer_token, &config.bearer_token_env).as_deref(),
@@ -2276,9 +2318,29 @@ async fn handle_generic_webhook(
         None => return server_error("AIOrchestrator not available"),
     };
     let webhook_orchestrator = base_orchestrator.fork_with_isolated_history().await;
-    webhook_orchestrator
-        .set_character_id(character_id.clone())
-        .await;
+    let explicit_character_id = parsed
+        .character_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .or(config
+            .character_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty()));
+    match webhook_orchestrator
+        .apply_character_profile(&character_id)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) if explicit_character_id.is_some() => {
+            return bad_request(&format!("Unknown character: {character_id}"));
+        }
+        Ok(false) => {
+            webhook_orchestrator
+                .set_character_id(character_id.clone())
+                .await;
+        }
+        Err(error) => return server_error(&format!("Failed to load character profile: {error}")),
+    }
     if let Err(error) = prepare_webhook_conversation(
         &webhook_orchestrator,
         &character_id,
@@ -3268,5 +3330,25 @@ mod tests {
             .expect_err("empty webhook messages must be rejected");
 
         assert_eq!(error, "Missing text or media");
+    }
+
+    #[test]
+    fn webhook_payload_parser_rejects_invalid_image_base64() {
+        let error = parse_generic_webhook_payload(
+            br#"{"image_base64":"not*base64","image_mime_type":"image/png"}"#,
+        )
+        .expect_err("invalid image base64 must be rejected");
+
+        assert!(error.starts_with("Invalid image base64:"));
+    }
+
+    #[test]
+    fn webhook_body_limit_rejects_payloads_over_four_megabytes() {
+        let body = vec![b'x'; MAX_GENERIC_WEBHOOK_BODY_BYTES + 1];
+
+        assert_eq!(
+            validate_generic_webhook_body(&body).unwrap_err(),
+            "Webhook body exceeds the 4194304 byte limit"
+        );
     }
 }

@@ -150,7 +150,23 @@ async def test_maps_group_and_private_media_to_supported_webhook_fields(plugin_m
     assert payload["conversation_id"] == "group-9"
     assert payload["images"] == ["data:image/png;base64,aW1hZ2U="]
     assert payload["audio_base64"] == "YXVkaW8="
-    assert payload["audio_format"] == "ogg"
+    assert payload["audio_format"] == "wav"
+
+
+@pytest.mark.asyncio
+async def test_platform_session_uses_platform_origin_instead_of_character_session(plugin_module, monkeypatch):
+    client = FakeAsyncClient(FakeResponse(200, {"reply": "ok"}))
+    monkeypatch.setattr(plugin_module.httpx, "AsyncClient", lambda **_: client)
+    plugin = plugin_module.Main(FakeContext(), config() | {"conversation_strategy": "platform_session"})
+    event = FakeEvent([Plain("hello")], message_str="hello")
+    event.unified_msg_origin = "test:private:user-1"
+
+    await collect(plugin.on_message, event)
+
+    payload = client.calls[0]["json"]
+    assert payload["conversation_type"] == "private"
+    assert payload["conversation_id"] == "test:private:user-1"
+    assert payload["conversation_id"] != "user-1"
 
 
 @pytest.mark.asyncio

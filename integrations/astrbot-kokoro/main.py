@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import mimetypes
 from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlparse
@@ -47,17 +46,8 @@ def _safe_endpoint(value: Any) -> str:
 
 
 def _media_format(component: Any) -> str:
-    mime_type = _clean_text(getattr(component, "mime_type", ""))
-    if "/" in mime_type:
-        subtype = mime_type.split("/", 1)[1].split(";", 1)[0].strip().lower()
-        if subtype:
-            return {"mpeg": "mp3", "x-wav": "wav", "x-m4a": "m4a"}.get(subtype, subtype)
-    source = _clean_text(getattr(component, "file", ""))
-    guessed = mimetypes.guess_type(source)[0] if source else None
-    if guessed:
-        extension = mimetypes.guess_extension(guessed) or ""
-        if extension:
-            return extension.removeprefix(".")
+    # AstrBot Record.convert_to_base64() provides the normalized WAV payload;
+    # the source filename/MIME describes the original upload, not the bytes.
     return "wav"
 
 

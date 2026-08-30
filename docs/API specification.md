@@ -833,6 +833,8 @@ The tables below list the current IPC commands. The `Bridge` column shows whethe
 The optional generic webhook is served by the Bot HTTP runtime. Its endpoint
 defaults to `http://127.0.0.1:8787/webhook/message` and can be changed in the
 Webhook settings. It must be enabled before requests are accepted.
+Requests are limited to 4 MiB; larger bodies are rejected before authentication
+and JSON parsing.
 
 When a bearer token is configured, clients must send:
 
