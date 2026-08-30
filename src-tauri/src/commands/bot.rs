@@ -24,7 +24,7 @@ use hmac::{Hmac, Mac};
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
@@ -2005,8 +2005,226 @@ struct GenericWebhookMessage {
     audio_format: Option<String>,
     character_id: Option<String>,
     conversation_id: Option<String>,
+    conversation_type: Option<String>,
     user_id: Option<String>,
     source: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedGenericWebhookPayload {
+    text: String,
+    images: Vec<String>,
+    audio: Option<Vec<u8>>,
+    audio_format: Option<String>,
+    character_id: Option<String>,
+    conversation_key: Option<String>,
+}
+
+/// Resolve the character for one webhook request without allowing a blank
+/// override to shadow the configured or active character.
+fn resolve_webhook_character_id(
+    request_character_id: Option<&str>,
+    configured_character_id: Option<&str>,
+    active_character_id: Option<&str>,
+) -> String {
+    [
+        request_character_id,
+        configured_character_id,
+        active_character_id,
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    .unwrap_or("default")
+    .to_string()
+}
+
+/// Validate the optional bearer token at the HTTP boundary. The auth scheme
+/// is case-insensitive per RFC 7235, while the token itself remains exact.
+fn verify_webhook_bearer(
+    authorization: Option<&str>,
+    expected_token: Option<&str>,
+) -> Result<(), String> {
+    let Some(expected_token) = expected_token.filter(|token| !token.trim().is_empty()) else {
+        return Ok(());
+    };
+    let Some(authorization) = authorization else {
+        return Err("Missing Authorization header".to_string());
+    };
+    let Some((scheme, token)) = authorization.trim().split_once(char::is_whitespace) else {
+        return Err("Invalid bearer token".to_string());
+    };
+    if !scheme.eq_ignore_ascii_case("Bearer") || token.trim() != expected_token {
+        return Err("Invalid bearer token".to_string());
+    }
+    Ok(())
+}
+
+/// Build a stable external conversation key that is safe to scope to one
+/// character. Private chats use the user identity; group chats use the group
+/// identity so all members share one character-owned conversation.
+fn webhook_conversation_key(
+    conversation_type: Option<&str>,
+    conversation_id: Option<&str>,
+    user_id: Option<&str>,
+    source: Option<&str>,
+) -> Option<String> {
+    let conversation_type = conversation_type
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("private")
+        .to_ascii_lowercase();
+    let (prefix, identity) = if matches!(conversation_type.as_str(), "group" | "channel") {
+        ("group", conversation_id.or(source).or(user_id))
+    } else {
+        ("private", user_id.or(conversation_id).or(source))
+    };
+    identity
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("{prefix}:{value}"))
+}
+
+/// Scope an external conversation identity to a character before it reaches
+/// the persistence boundary. This prevents one bot identity from mixing
+/// histories across characters.
+fn map_webhook_conversation_to_character(
+    character_id: &str,
+    conversation_key: Option<&str>,
+) -> String {
+    let character_id = character_id.trim();
+    let conversation_key = conversation_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("webhook");
+    format!("{character_id}:{conversation_key}")
+}
+
+fn parse_generic_webhook_payload(body: &[u8]) -> Result<ParsedGenericWebhookPayload, String> {
+    let request: GenericWebhookMessage =
+        serde_json::from_slice(body).map_err(|error| format!("Invalid JSON: {error}"))?;
+    let text = request
+        .text
+        .or(request.message)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let image_mime_type = request.image_mime_type.as_deref().unwrap_or("image/jpeg");
+    let mut images = Vec::new();
+    if let Some(image) = request.image.as_deref() {
+        if let Some(normalized) = normalize_image_reference(image, image_mime_type) {
+            images.push(normalized);
+        }
+    }
+    if let Some(request_images) = request.images.as_ref() {
+        for image in request_images {
+            if let Some(normalized) = normalize_image_reference(image, image_mime_type) {
+                images.push(normalized);
+            }
+        }
+    }
+    if let Some(image_base64) = request.image_base64.as_deref() {
+        if let Some(normalized) = normalize_image_reference(image_base64, image_mime_type) {
+            images.push(normalized);
+        }
+    }
+
+    let audio = request
+        .audio_base64
+        .as_deref()
+        .map(decode_base64_payload)
+        .transpose()?;
+    let audio_format = audio.as_ref().map(|_| {
+        request
+            .audio_format
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| audio_format_from_mime_or_name(None, None))
+    });
+    let text = if text.is_empty() && !images.is_empty() {
+        "The user sent an image:".to_string()
+    } else {
+        text
+    };
+    if text.is_empty() && audio.is_none() && images.is_empty() {
+        return Err("Missing text or media".to_string());
+    }
+
+    Ok(ParsedGenericWebhookPayload {
+        text,
+        images,
+        audio,
+        audio_format,
+        character_id: request
+            .character_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        conversation_key: webhook_conversation_key(
+            request.conversation_type.as_deref(),
+            request.conversation_id.as_deref(),
+            request.user_id.as_deref(),
+            request.source.as_deref(),
+        ),
+    })
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Select and hydrate a stable character-owned conversation for a webhook
+/// request before the first message is persisted by the orchestrator.
+async fn prepare_webhook_conversation(
+    orchestrator: &AIOrchestrator,
+    character_id: &str,
+    conversation_key: Option<&str>,
+) -> Result<String, String> {
+    let scoped_key = map_webhook_conversation_to_character(character_id, conversation_key);
+    let mut digest = Sha256::new();
+    digest.update(scoped_key.as_bytes());
+    let conversation_id = format!("webhook-{}", hex_digest(&digest.finalize()));
+
+    sqlx::query(
+        "INSERT OR IGNORE INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, '新对话', '', '{}', ?, ?)",
+    )
+    .bind(&conversation_id)
+    .bind(character_id.trim())
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&orchestrator.db)
+    .await
+    .map_err(|error| format!("failed to prepare webhook conversation: {error}"))?;
+
+    let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
+    )
+    .bind(&conversation_id)
+    .fetch_all(&orchestrator.db)
+    .await
+    .map_err(|error| format!("failed to load webhook conversation: {error}"))?;
+
+    for (role, content, metadata) in rows {
+        orchestrator
+            .push_history_message(crate::ai::context::Message {
+                role,
+                content,
+                metadata: metadata
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok()),
+            })
+            .await;
+    }
+    *orchestrator.current_conversation_id.lock().await = Some(conversation_id.clone());
+    Ok(conversation_id)
 }
 
 async fn handle_generic_webhook(
@@ -2015,83 +2233,70 @@ async fn handle_generic_webhook(
     body: bytes::Bytes,
     app: tauri::AppHandle,
 ) -> warp::reply::Response {
-    if let Some(expected) = resolve_secret(&config.bearer_token, &config.bearer_token_env) {
-        let Some(actual) = authorization else {
-            return unauthorized("Missing Authorization header");
-        };
-        if actual.trim() != format!("Bearer {}", expected) {
-            return unauthorized("Invalid bearer token");
-        }
+    if let Err(error) = verify_webhook_bearer(
+        authorization.as_deref(),
+        resolve_secret(&config.bearer_token, &config.bearer_token_env).as_deref(),
+    ) {
+        return unauthorized(&error);
     }
 
-    let request: GenericWebhookMessage = match serde_json::from_slice(&body) {
+    let parsed = match parse_generic_webhook_payload(&body) {
         Ok(value) => value,
-        Err(error) => return bad_request(&format!("Invalid JSON: {}", error)),
+        Err(error) => return bad_request(&error),
     };
-    let text = request
-        .text
-        .or(request.message)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let image_mime_type = request.image_mime_type.as_deref().unwrap_or("image/jpeg");
-    let mut image_urls = Vec::new();
-    if let Some(image) = request.image.as_deref() {
-        if let Some(normalized) = normalize_image_reference(image, image_mime_type) {
-            image_urls.push(normalized);
-        }
-    }
-    if let Some(images) = request.images.as_ref() {
-        for image in images {
-            if let Some(normalized) = normalize_image_reference(image, image_mime_type) {
-                image_urls.push(normalized);
-            }
-        }
-    }
-    if let Some(image_base64) = request.image_base64.as_deref() {
-        if let Some(normalized) = normalize_image_reference(image_base64, image_mime_type) {
-            image_urls.push(normalized);
-        }
-    }
-
-    let mut text = if let Some(audio_base64) = request.audio_base64.as_deref() {
-        let audio = match decode_base64_payload(audio_base64) {
-            Ok(audio) => audio,
-            Err(error) => return bad_request(&error),
-        };
-        let format = request
+    let text = if let Some(audio) = parsed.audio {
+        let format = parsed
             .audio_format
-            .as_deref()
-            .map(str::to_string)
             .unwrap_or_else(|| audio_format_from_mime_or_name(None, None));
         match transcribe_bot_audio(&app, "webhook", audio, format).await {
-            Ok(transcription) => text_with_transcription(text, transcription),
+            Ok(transcription) => text_with_transcription(parsed.text, transcription),
             Err(error) => return server_error(&error),
         }
     } else {
-        text
+        parsed.text
     };
 
-    if text.trim().is_empty() && !image_urls.is_empty() {
-        text = "The user sent an image:".to_string();
-    }
     if text.trim().is_empty() {
         return bad_request("Missing text or media");
     }
 
-    let conversation_key = request
-        .conversation_id
-        .as_deref()
-        .or(request.user_id.as_deref())
-        .or(request.source.as_deref());
+    let active_character_id = if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
+        orchestrator.get_character_id().await
+    } else {
+        AIOrchestrator::load_active_character_id().unwrap_or_else(|| "default".to_string())
+    };
+    let character_id = resolve_webhook_character_id(
+        parsed.character_id.as_deref(),
+        config.character_id.as_deref(),
+        Some(&active_character_id),
+    );
+
+    let base_orchestrator = match app.try_state::<AIOrchestrator>() {
+        Some(orchestrator) => orchestrator,
+        None => return server_error("AIOrchestrator not available"),
+    };
+    let webhook_orchestrator = base_orchestrator.fork_with_isolated_history().await;
+    webhook_orchestrator
+        .set_character_id(character_id.clone())
+        .await;
+    if let Err(error) = prepare_webhook_conversation(
+        &webhook_orchestrator,
+        &character_id,
+        parsed.conversation_key.as_deref(),
+    )
+    .await
+    {
+        return server_error(&error);
+    }
+
     match generate_bot_reply(
         &app,
         "webhook",
         &text,
-        image_urls,
-        request.character_id.as_deref(),
-        conversation_key,
-        None,
+        parsed.images,
+        Some(&character_id),
+        parsed.conversation_key.as_deref(),
+        Some(&webhook_orchestrator),
     )
     .await
     {
@@ -2970,5 +3175,98 @@ mod tests {
         );
 
         assert_eq!(cleaned, "Hello  happy  world");
+    }
+
+    #[test]
+    fn webhook_character_resolution_prefers_request_then_config_then_active() {
+        assert_eq!(
+            resolve_webhook_character_id(Some("request"), Some("configured"), Some("active")),
+            "request"
+        );
+        assert_eq!(
+            resolve_webhook_character_id(None, Some("configured"), Some("active")),
+            "configured"
+        );
+        assert_eq!(
+            resolve_webhook_character_id(None, None, Some("active")),
+            "active"
+        );
+    }
+
+    #[test]
+    fn webhook_bearer_auth_requires_exact_bearer_token() {
+        assert!(verify_webhook_bearer(Some("Bearer secret"), Some("secret")).is_ok());
+        assert_eq!(
+            verify_webhook_bearer(None, Some("secret")).unwrap_err(),
+            "Missing Authorization header"
+        );
+        assert_eq!(
+            verify_webhook_bearer(Some("Basic secret"), Some("secret")).unwrap_err(),
+            "Invalid bearer token"
+        );
+        assert!(verify_webhook_bearer(None, None).is_ok());
+    }
+
+    #[test]
+    fn webhook_payload_parser_normalizes_text_images_and_audio() {
+        let parsed = parse_generic_webhook_payload(
+            br#"{
+                "message": "  hello  ",
+                "images": ["https://example.com/photo.png", "abcd"],
+                "image_mime_type": "image/png",
+                "audio_base64": "aGVsbG8=",
+                "audio_format": "wav",
+                "conversation_type": "private",
+                "user_id": "user-7"
+            }"#,
+        )
+        .expect("valid webhook payload");
+
+        assert_eq!(parsed.text, "hello");
+        assert_eq!(
+            parsed.images,
+            vec![
+                "https://example.com/photo.png".to_string(),
+                "data:image/png;base64,abcd".to_string()
+            ]
+        );
+        assert_eq!(parsed.audio.as_deref(), Some(&b"hello"[..]));
+        assert_eq!(parsed.audio_format.as_deref(), Some("wav"));
+        assert_eq!(parsed.conversation_key.as_deref(), Some("private:user-7"));
+    }
+
+    #[test]
+    fn webhook_payload_parser_maps_group_identity_before_persistence() {
+        let parsed = parse_generic_webhook_payload(
+            br#"{
+                "text": "hello",
+                "conversation_type": "group",
+                "conversation_id": "group-42",
+                "user_id": "user-7"
+            }"#,
+        )
+        .expect("valid group webhook payload");
+
+        assert_eq!(parsed.conversation_key.as_deref(), Some("group:group-42"));
+        assert_eq!(
+            map_webhook_conversation_to_character("char-2", parsed.conversation_key.as_deref()),
+            "char-2:group:group-42"
+        );
+    }
+
+    #[test]
+    fn webhook_payload_parser_returns_json_error_for_malformed_input() {
+        let error = parse_generic_webhook_payload(br#"{"text":"unterminated}"#)
+            .expect_err("malformed JSON must be rejected");
+
+        assert!(error.starts_with("Invalid JSON:"));
+    }
+
+    #[test]
+    fn webhook_payload_parser_rejects_empty_text_without_media() {
+        let error = parse_generic_webhook_payload(br#"{"text":"   "}"#)
+            .expect_err("empty webhook messages must be rejected");
+
+        assert_eq!(error, "Missing text or media");
     }
 }

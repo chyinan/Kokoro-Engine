@@ -19,6 +19,7 @@
 7. [Error handling](#error-handling)
 8. [Bridge reference](#bridge-reference)
 9. [Compatibility notes](#compatibility-notes)
+10. [Authenticated generic webhook](#authenticated-generic-webhook)
 
 ---
 
@@ -463,6 +464,51 @@ interface TelegramConfig {
 }
 ```
 
+### `WebhookMessageRequest`
+
+```ts
+interface WebhookMessageRequest {
+  text?: string;
+  message?: string;                 // legacy alias for text
+  image?: string;                   // URL or base64 payload
+  images?: string[];                // URLs or base64 payloads
+  image_base64?: string;
+  image_mime_type?: string;         // defaults to image/jpeg for raw base64
+  audio_base64?: string;            // raw or data: base64 payload
+  audio_format?: string;            // ogg, mp3, wav, webm, or m4a
+  character_id?: string;
+  conversation_id?: string;
+  conversation_type?: "private" | "group" | "channel";
+  user_id?: string;
+  source?: string;
+}
+```
+
+`text` takes precedence over `message`. A request may contain text, image
+media, audio, or any combination. Audio is transcribed by the configured STT
+service before the request is sent to the LLM. An image-only request uses the
+placeholder `The user sent an image:` when no caption is supplied.
+
+### `WebhookReply`
+
+```ts
+interface WebhookReply {
+  reply: string;
+  translation?: string;
+  images?: Array<{
+    prompt: string;
+    mime_type: string;
+    file_name: string;
+    data_base64: string;
+  }>;
+  audio?: {
+    mime_type: string;
+    file_name: string;
+    data_base64: string;
+  };
+}
+```
+
 ### `TelegramStatus`
 
 ```ts
@@ -781,6 +827,57 @@ The tables below list the current IPC commands. The `Bridge` column shows whethe
 | `get_auto_backup_config` | `getAutoBackupConfig` | none | `AutoBackupConfig` | Returns auto backup config. |
 | `save_auto_backup_config` | `saveAutoBackupConfig` | `config: AutoBackupConfig` | `void` | Saves auto backup config. |
 | `run_auto_backup_now` | `runAutoBackupNow` | none | `string` | Runs a backup immediately. |
+
+## Authenticated generic webhook
+
+The optional generic webhook is served by the Bot HTTP runtime. Its endpoint
+defaults to `http://127.0.0.1:8787/webhook/message` and can be changed in the
+Webhook settings. It must be enabled before requests are accepted.
+
+When a bearer token is configured, clients must send:
+
+```http
+Authorization: Bearer <configured-token>
+Content-Type: application/json
+```
+
+The character selection order is request `character_id`, configured Webhook
+default character, then the active Kokoro character. Blank values are ignored;
+no provider credentials or filesystem paths are accepted in the request.
+
+Private and group sessions are isolated per character before persistence. A
+private request maps `user_id` (falling back to `conversation_id` or `source`)
+to `private:<identity>`. A group or channel request maps
+`conversation_id` (falling back to `source` or `user_id`) to
+`group:<identity>`. The resulting identity is scoped to the resolved character
+and reused on subsequent requests.
+
+Successful requests return `WebhookReply` with HTTP `200`. Missing or invalid
+JSON, invalid base64, and requests without text or media return HTTP `400` with
+`{"error":"..."}`. Missing or invalid bearer credentials return HTTP `401`
+with the same JSON error shape. LLM, STT, or other runtime failures return HTTP
+`500`.
+
+Example text request:
+
+```bash
+curl -X POST http://127.0.0.1:8787/webhook/message \
+  -H "Authorization: Bearer $KOKORO_WEBHOOK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Hello Kokoro","user_id":"astrbot-user-1","conversation_type":"private"}'
+```
+
+Example group image request:
+
+```json
+{
+  "text": "What do you see?",
+  "images": ["https://example.test/photo.png"],
+  "conversation_type": "group",
+  "conversation_id": "astrbot-group-7",
+  "character_id": "kokoro"
+}
+```
 
 ### Commands registered in Rust but not exposed by the bridge
 
