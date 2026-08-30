@@ -55,6 +55,12 @@ const CONFIG_FILES: &[&str] = &[
 pub(crate) const MAX_BACKUP_RESOURCE_PACKAGES: usize = 64;
 pub(crate) const MAX_BACKUP_RESOURCE_FILES: usize = 2_048;
 pub(crate) const MAX_BACKUP_RESOURCE_BYTES: u64 = 512 * 1024 * 1024;
+/// Bound decompressed database payloads before writing them to a temporary file.
+pub(crate) const MAX_BACKUP_DATABASE_BYTES: u64 = 512 * 1024 * 1024;
+/// Configuration files are small JSON documents; never inflate an archive entry
+/// without a strict per-file bound.
+pub(crate) const MAX_BACKUP_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_BACKUP_MANIFEST_BYTES: u64 = 64 * 1024;
 
 // ── Types ────────────────────────────────────────────
 
@@ -364,6 +370,81 @@ fn db_path(app_data: &Path) -> PathBuf {
 
 pub fn db_path_pub(app_data: &Path) -> PathBuf {
     db_path(app_data)
+}
+
+/// Read at most `max_bytes + 1` decompressed bytes from an archive entry. The
+/// extra byte lets us distinguish an exact-limit payload from an oversized one
+/// without trusting ZIP header sizes alone.
+pub(crate) fn read_limited_bytes<R: Read>(
+    input: R,
+    max_bytes: u64,
+    label: &str,
+) -> Result<Vec<u8>, KokoroError> {
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| KokoroError::Validation(format!("{label} limit overflow")))?;
+    let mut bytes = Vec::new();
+    input
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| KokoroError::Validation(format!("failed to read {label}: {error}")))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(KokoroError::Validation(format!(
+            "{label} exceeds decompressed size limit of {max_bytes} bytes"
+        )));
+    }
+    Ok(bytes)
+}
+
+/// Exports must never overwrite the database, configuration, or any managed
+/// character resource. Canonicalizing the existing parent also catches `..`,
+/// case aliases, and Windows junction/reparse-point aliases before opening the
+/// output. `ensure_non_redirected_parent_chain` remains the final Windows
+/// junction protection when the file is created.
+pub(crate) fn validate_export_target(app_data: &Path, out_path: &Path) -> Result<(), KokoroError> {
+    let canonical_root = fs::canonicalize(app_data).map_err(|error| {
+        KokoroError::Validation(format!(
+            "managed app data root is not canonicalizable: {} ({error})",
+            app_data.display()
+        ))
+    })?;
+    let parent = out_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let canonical_parent = fs::canonicalize(parent).map_err(|error| {
+        KokoroError::Validation(format!(
+            "backup export parent is not canonicalizable: {} ({error})",
+            parent.display()
+        ))
+    })?;
+    let file_name = out_path.file_name().ok_or_else(|| {
+        KokoroError::Validation("backup export target has no filename".to_string())
+    })?;
+    let canonical_target = canonical_parent.join(file_name);
+    if path_is_same_or_descendant(&canonical_target, &canonical_root) {
+        return Err(KokoroError::Validation(format!(
+            "backup export target is inside managed app data: {}",
+            out_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn path_is_same_or_descendant(path: &Path, root: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let path = path.to_string_lossy().to_ascii_lowercase();
+        let root = root.to_string_lossy().to_ascii_lowercase();
+        path == root
+            || path
+                .strip_prefix(&root)
+                .is_some_and(|suffix| suffix.starts_with('\\') || suffix.starts_with('/'))
+    }
+    #[cfg(not(windows))]
+    {
+        path == root || path.starts_with(root)
+    }
 }
 
 fn open_regular_non_redirected_file(path: &Path, label: &str) -> Result<Option<File>, KokoroError> {
@@ -696,13 +777,45 @@ fn validate_catalog_segment(value: &str, field: &str) -> Result<(), String> {
     }
 }
 
-fn archive_path_key(name: &str, is_directory: bool) -> String {
-    let normalized = if is_directory {
-        name.trim_end_matches('/')
+fn archive_path_key(name: &str, is_directory: bool) -> Result<String, KokoroError> {
+    let normalized = canonical_archive_path(name, is_directory)?;
+    Ok(normalized.to_lowercase())
+}
+
+fn canonical_archive_path(name: &str, is_directory: bool) -> Result<String, KokoroError> {
+    if name.is_empty() || name.contains('\\') {
+        return Err(KokoroError::Validation(format!(
+            "archive path uses a non-canonical separator: {name}"
+        )));
+    }
+    let without_directory_suffix = if is_directory {
+        name.strip_suffix('/').unwrap_or(name)
     } else {
         name
     };
-    normalized.replace('\\', "/").to_lowercase()
+    if without_directory_suffix.is_empty()
+        || without_directory_suffix.starts_with('/')
+        || without_directory_suffix.ends_with('/')
+    {
+        return Err(KokoroError::Validation(format!(
+            "archive path contains repeated or absolute separators: {name}"
+        )));
+    }
+    let mut components = Vec::new();
+    for component in without_directory_suffix.split('/') {
+        if component.is_empty() || matches!(component, "." | "..") {
+            return Err(KokoroError::Validation(format!(
+                "archive path contains a non-canonical separator or component: {name}"
+            )));
+        }
+        components.push(component);
+    }
+    let canonical = components.join("/");
+    Ok(if is_directory {
+        format!("{canonical}/")
+    } else {
+        canonical
+    })
 }
 
 fn validate_archive_path_uniqueness<R: Read + Seek>(
@@ -713,7 +826,8 @@ fn validate_archive_path_uniqueness<R: Read + Seek>(
         let entry = archive
             .by_index(index)
             .map_err(|error| KokoroError::Validation(format!("invalid backup entry: {error}")))?;
-        if !seen.insert(archive_path_key(entry.name(), entry.is_dir())) {
+        let path_key = archive_path_key(entry.name(), entry.is_dir())?;
+        if !seen.insert(path_key) {
             return Err(KokoroError::Validation(format!(
                 "duplicate backup archive path: {}",
                 entry.name()
@@ -782,8 +896,12 @@ pub(crate) fn stage_backup_configs(
                 "duplicate config filename: {filename}"
             )));
         }
-        let mut content = String::new();
-        entry.read_to_string(&mut content).map_err(|error| {
+        let content = String::from_utf8(read_limited_bytes(
+            &mut entry,
+            MAX_BACKUP_CONFIG_BYTES,
+            &format!("config {filename}"),
+        )?)
+        .map_err(|error| {
             KokoroError::Validation(format!("invalid UTF-8 config {filename}: {error}"))
         })?;
         serde_json::from_str::<serde_json::Value>(&content).map_err(|error| {
@@ -1841,6 +1959,7 @@ pub async fn export_data(
     let db = db_path(&app_data);
 
     let out_path = PathBuf::from(&export_path);
+    validate_export_target(&app_data, &out_path)?;
     let file = create_regular_export_file(&out_path)?;
     let mut zip = zip::ZipWriter::new(file);
     let zip_options =
@@ -1892,11 +2011,11 @@ pub async fn export_data(
             }
         }
 
-        let mut db_bytes = Vec::new();
-        fs::File::open(&tmp_db)
-            .map_err(KokoroError::from)?
-            .read_to_end(&mut db_bytes)
-            .map_err(KokoroError::from)?;
+        let db_bytes = read_limited_bytes(
+            fs::File::open(&tmp_db).map_err(KokoroError::from)?,
+            MAX_BACKUP_DATABASE_BYTES,
+            "database",
+        )?;
 
         // Clean up temp files
         let _ = fs::remove_file(&tmp_db);
@@ -1917,10 +2036,12 @@ pub async fn export_data(
     for name in CONFIG_FILES {
         let cfg_path = app_data.join(name);
         if let Some(mut input) = open_regular_non_redirected_file(&cfg_path, "config")? {
-            let mut content = String::new();
-            input
-                .read_to_string(&mut content)
-                .map_err(KokoroError::from)?;
+            let content = String::from_utf8(read_limited_bytes(
+                &mut input,
+                MAX_BACKUP_CONFIG_BYTES,
+                "config",
+            )?)
+            .map_err(|error| KokoroError::Validation(format!("config is not UTF-8: {error}")))?;
             let entry = format!("configs/{}", name);
             zip.start_file(&entry, zip_options)
                 .map_err(|e| KokoroError::Internal(format!("ZIP error: {}", e)))?;
@@ -1958,6 +2079,7 @@ pub async fn export_data_to_path(
     ensure_non_redirected_parent_chain(app_data, app_data)?;
     let db = db_path(app_data);
 
+    validate_export_target(app_data, out_path)?;
     let file = create_regular_export_file(out_path)?;
     let mut zip = zip::ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -2000,11 +2122,11 @@ pub async fn export_data_to_path(
                 }
             }
         }
-        let mut db_bytes = Vec::new();
-        fs::File::open(&tmp_db)
-            .map_err(KokoroError::from)?
-            .read_to_end(&mut db_bytes)
-            .map_err(KokoroError::from)?;
+        let db_bytes = read_limited_bytes(
+            fs::File::open(&tmp_db).map_err(KokoroError::from)?,
+            MAX_BACKUP_DATABASE_BYTES,
+            "database",
+        )?;
         let _ = fs::remove_file(&tmp_db);
         let _ = fs::remove_file(tmp_db.with_extension("db-wal"));
         let _ = fs::remove_file(tmp_db.with_extension("db-shm"));
@@ -2016,10 +2138,12 @@ pub async fn export_data_to_path(
     for name in CONFIG_FILES {
         let cfg_path = app_data.join(name);
         if let Some(mut input) = open_regular_non_redirected_file(&cfg_path, "config")? {
-            let mut content = String::new();
-            input
-                .read_to_string(&mut content)
-                .map_err(KokoroError::from)?;
+            let content = String::from_utf8(read_limited_bytes(
+                &mut input,
+                MAX_BACKUP_CONFIG_BYTES,
+                "config",
+            )?)
+            .map_err(|error| KokoroError::Validation(format!("config is not UTF-8: {error}")))?;
             let entry = format!("configs/{}", name);
             zip.start_file(&entry, options)
                 .map_err(|e| KokoroError::Internal(format!("ZIP error: {}", e)))?;
@@ -2055,8 +2179,12 @@ pub async fn preview_import(file_path: String) -> Result<ImportPreview, KokoroEr
         let mut entry = archive.by_name("manifest.json").map_err(|_| {
             KokoroError::Validation("Missing manifest.json in backup file".to_string())
         })?;
-        let mut buf = String::new();
-        entry.read_to_string(&mut buf).map_err(KokoroError::from)?;
+        let buf = String::from_utf8(read_limited_bytes(
+            &mut entry,
+            MAX_BACKUP_MANIFEST_BYTES,
+            "backup manifest",
+        )?)
+        .map_err(|error| KokoroError::Validation(format!("invalid UTF-8 manifest: {error}")))?;
         serde_json::from_str(&buf)
             .map_err(|e| KokoroError::Internal(format!("Invalid manifest: {}", e)))?
     };
@@ -2085,8 +2213,9 @@ pub async fn preview_import(file_path: String) -> Result<ImportPreview, KokoroEr
             let mut entry = archive
                 .by_name("kokoro.db")
                 .map_err(|e| KokoroError::Internal(format!("Failed to read DB from ZIP: {}", e)))?;
+            let bytes = read_limited_bytes(&mut entry, MAX_BACKUP_DATABASE_BYTES, "database")?;
             let mut out = fs::File::create(&tmp_db).map_err(KokoroError::from)?;
-            std::io::copy(&mut entry, &mut out).map_err(KokoroError::from)?;
+            out.write_all(&bytes).map_err(KokoroError::from)?;
         }
 
         gather_stats(&tmp_db).await
@@ -2153,8 +2282,9 @@ pub async fn import_data(
             let mut entry = archive
                 .by_name("kokoro.db")
                 .map_err(|e| KokoroError::Internal(format!("Failed to read DB: {}", e)))?;
+            let bytes = read_limited_bytes(&mut entry, MAX_BACKUP_DATABASE_BYTES, "database")?;
             let mut out = fs::File::create(tmp_dir.join("import.db")).map_err(KokoroError::from)?;
-            std::io::copy(&mut entry, &mut out).map_err(KokoroError::from)?;
+            out.write_all(&bytes).map_err(KokoroError::from)?;
         }
     }
     // archive is dropped here — safe to .await below

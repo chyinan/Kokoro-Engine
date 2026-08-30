@@ -10,7 +10,8 @@ use crate::characters::manifest::{
 };
 use crate::characters::{package_path_key, MAX_PACKAGE_FILE_COUNT, MAX_PACKAGE_UNCOMPRESSED_BYTES};
 use crate::registry::manifest::{
-    RegistryEntry, RegistryIndex, OFFICIAL_REGISTRY_IDENTITY, OFFICIAL_REGISTRY_URL,
+    RegistryEntry, RegistryIndex, OFFICIAL_REGISTRY_IDENTITY,
+    OFFICIAL_REGISTRY_METADATA_UNVERIFIED_SOURCE, OFFICIAL_REGISTRY_URL,
 };
 use semver::{Version, VersionReq};
 use sha2::{Digest, Sha256};
@@ -96,7 +97,7 @@ pub fn normalize_registry_index(
             };
             entry.registry_identity = None;
             entry.trust_source = if official {
-                "registry-entry-metadata-unverified".to_string()
+                OFFICIAL_REGISTRY_METADATA_UNVERIFIED_SOURCE.to_string()
             } else {
                 source_url.to_string()
             };
@@ -150,6 +151,11 @@ pub fn verify_character_archive(
             .map_err(|error| RegistryClientError::Archive(error.to_string()))?;
         let name = file.name().to_string();
         let path = normalized_archive_path(&name, file.is_dir());
+        if has_repeated_archive_separator(&name, file.is_dir()) {
+            return Err(RegistryClientError::UnsafeContent(format!(
+                "non-canonical archive path `{name}`"
+            )));
+        }
         validate_package_path(&path)
             .map_err(|error| RegistryClientError::UnsafeContent(error.to_string()))?;
         if !seen_paths.insert(package_path_key(&path)) {
@@ -256,6 +262,15 @@ fn normalized_archive_path(name: &str, is_directory: bool) -> PathBuf {
     } else {
         PathBuf::from(name)
     }
+}
+
+fn has_repeated_archive_separator(name: &str, is_directory: bool) -> bool {
+    let value = if is_directory {
+        name.strip_suffix('/').unwrap_or(name)
+    } else {
+        name
+    };
+    value.is_empty() || value.starts_with('/') || value.ends_with('/') || value.contains("//")
 }
 
 // Keep this generic helper private so archive readers cannot accidentally be

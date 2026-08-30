@@ -12,6 +12,10 @@ pub const OFFICIAL_REGISTRY_URL: &str =
 pub const OFFICIAL_PACKAGE_BASE_URL: &str =
     "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages";
 pub const OFFICIAL_REGISTRY_IDENTITY: &str = "github.com/chyinan/Kokoro-Engine/registry-v1";
+/// URI sentinel for entries fetched from the canonical endpoint whose
+/// self-asserted trust metadata was incomplete or inconsistent.
+pub const OFFICIAL_REGISTRY_METADATA_UNVERIFIED_SOURCE: &str =
+    "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/v1/index.json#metadata-unverified";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RegistryManifestError {
@@ -211,6 +215,14 @@ impl RegistryEntry {
         }
         if !is_sha256(&self.sha256) {
             return Err(RegistryManifestError::InvalidChecksum(self.sha256.clone()));
+        }
+        let trust_source_url = reqwest::Url::parse(&self.trust_source)
+            .map_err(|_| RegistryManifestError::InvalidUrl(self.trust_source.clone()))?;
+        if trust_source_url.scheme() != "https"
+            || !trust_source_url.username().is_empty()
+            || trust_source_url.password().is_some()
+        {
+            return Err(RegistryManifestError::InvalidUrl(self.trust_source.clone()));
         }
         let source = normalize_trust_source(&self.trust_source);
         if !matches!(self.trust.as_str(), "official" | "community" | "unverified") {
@@ -472,6 +484,19 @@ mod tests {
             Err(RegistryManifestError::InvalidOfficialTrust)
         ));
         let normalized = normalize_trust_source("https://mirror.example.test/index.json");
+        assert_eq!(normalized.trust, "community");
+        assert_eq!(normalized.registry_identity, None);
+    }
+
+    #[test]
+    fn shared_unverified_trust_source_sentinel_remains_non_official_and_schema_safe() {
+        let mut entry = valid_entry();
+        entry.trust = "community".to_string();
+        entry.trust_source = OFFICIAL_REGISTRY_METADATA_UNVERIFIED_SOURCE.to_string();
+        entry.registry_identity = None;
+
+        assert!(entry.validate().is_ok());
+        let normalized = normalize_trust_source(OFFICIAL_REGISTRY_METADATA_UNVERIFIED_SOURCE);
         assert_eq!(normalized.trust, "community");
         assert_eq!(normalized.registry_identity, None);
     }

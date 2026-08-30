@@ -37,6 +37,8 @@ pub enum CatalogError {
     InvalidDeclaredAsset(String),
     #[error("character archive contains duplicate path `{0}`")]
     DuplicateArchivePath(String),
+    #[error("character archive contains a non-canonical path `{0}`")]
+    NonCanonicalArchivePath(String),
 }
 
 pub struct CharacterCatalog {
@@ -264,7 +266,7 @@ impl CharacterCatalog {
         let extraction = (|| -> Result<(), CatalogError> {
             for index in 0..archive.len() {
                 let mut source = archive.by_index(index)?;
-                let relative = normalized_archive_path(source.name(), source.is_dir());
+                let relative = normalized_archive_path(source.name(), source.is_dir())?;
                 let destination = staging.join(relative);
                 if source.is_dir() {
                     fs::create_dir_all(destination)?;
@@ -635,7 +637,7 @@ fn archive_entries<R: Read + Seek>(
     let mut seen = std::collections::HashSet::new();
     for index in 0..archive.len() {
         let file = archive.by_index(index)?;
-        let path = normalized_archive_path(file.name(), file.is_dir());
+        let path = normalized_archive_path(file.name(), file.is_dir())?;
         if !seen.insert(archive_path_key(&path)) {
             return Err(CatalogError::DuplicateArchivePath(file.name().to_string()));
         }
@@ -648,12 +650,16 @@ fn archive_entries<R: Read + Seek>(
     Ok(entries)
 }
 
-fn normalized_archive_path(name: &str, is_directory: bool) -> PathBuf {
-    if is_directory {
-        PathBuf::from(name.trim_end_matches('/'))
+fn normalized_archive_path(name: &str, is_directory: bool) -> Result<PathBuf, CatalogError> {
+    let value = if is_directory {
+        name.strip_suffix('/').unwrap_or(name)
     } else {
-        PathBuf::from(name)
+        name
+    };
+    if value.is_empty() || value.starts_with('/') || value.ends_with('/') || value.contains("//") {
+        return Err(CatalogError::NonCanonicalArchivePath(name.to_string()));
     }
+    Ok(PathBuf::from(value))
 }
 
 fn archive_path_key(path: &Path) -> String {

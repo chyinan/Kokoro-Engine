@@ -11,7 +11,8 @@ use crate::registry::client::{
     verify_registry_entry_archive, InstallTrust, RegistryClientError, MAX_ARCHIVE_BYTES,
 };
 use crate::registry::manifest::{
-    RegistryEntry, RegistryRecommendations, OFFICIAL_REGISTRY_IDENTITY, OFFICIAL_REGISTRY_URL,
+    RegistryEntry, RegistryRecommendations, OFFICIAL_REGISTRY_IDENTITY,
+    OFFICIAL_REGISTRY_METADATA_UNVERIFIED_SOURCE, OFFICIAL_REGISTRY_URL,
 };
 use semver::Version;
 use std::io::{Cursor, Write};
@@ -300,6 +301,10 @@ fn official_index_normalization_does_not_upgrade_incomplete_trust_metadata() {
 
     assert_eq!(normalized.entries[0].trust, "community");
     assert_eq!(normalized.entries[0].registry_identity, None);
+    assert_eq!(
+        normalized.entries[0].trust_source,
+        OFFICIAL_REGISTRY_METADATA_UNVERIFIED_SOURCE
+    );
 
     let mut wrong_source = normalized.entries[0].clone();
     wrong_source.trust = "official".to_string();
@@ -360,6 +365,26 @@ fn registry_character_validation_rejects_case_folded_duplicate_paths() {
         &[
             ("assets/avatar.png", b"first"),
             ("assets/AVATAR.PNG", b"second"),
+        ],
+    );
+
+    let error = verify_character_archive(
+        &bytes,
+        Some((bytes.len() as u64, checksum(&bytes))),
+        &Version::parse("0.3.1").unwrap(),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("duplicate"), "{error}");
+}
+
+#[test]
+fn registry_character_validation_rejects_repeated_separator_aliases() {
+    let bytes = archive_with_entries(
+        ">=0.3.0, <0.4.0",
+        &[
+            ("assets/panel.png", b"first"),
+            ("assets//panel.png", b"alias"),
         ],
     );
 

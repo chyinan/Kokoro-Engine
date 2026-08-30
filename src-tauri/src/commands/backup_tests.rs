@@ -4,8 +4,8 @@ use super::backup::{
     export_data_to_path, inspect_backup_archive, load_template_references, restore_character_rows,
     stage_backup_configs, stage_character_resources, BackupManifest, CharacterPackageResolver,
     ConflictStrategy, ExportOptions, ImportOptions, LocalCatalogPackageResolver,
-    ResolvedCharacterPackage, MAX_BACKUP_RESOURCE_BYTES, MAX_BACKUP_RESOURCE_FILES,
-    MAX_BACKUP_RESOURCE_PACKAGES,
+    ResolvedCharacterPackage, MAX_BACKUP_CONFIG_BYTES, MAX_BACKUP_DATABASE_BYTES,
+    MAX_BACKUP_RESOURCE_BYTES, MAX_BACKUP_RESOURCE_FILES, MAX_BACKUP_RESOURCE_PACKAGES,
 };
 use crate::registry::client::sha256_hex;
 use crate::registry::manifest::{RegistryEntry, RegistryRecommendations};
@@ -433,6 +433,72 @@ fn config_import_rejects_duplicate_allowed_names() {
     let error = stage_backup_configs(&backup).unwrap_err();
 
     assert!(error.to_string().contains("duplicate config"), "{error}");
+}
+
+#[test]
+fn backup_paths_with_repeated_separators_are_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backup = tmp.path().join("repeated-separator.kokoro");
+    write_config_archive(&backup, &[("configs//llm_config.json", b"{}")]);
+
+    let error = stage_backup_configs(&backup).unwrap_err();
+
+    assert!(
+        error.to_string().contains("separator") || error.to_string().contains("path"),
+        "{error}"
+    );
+}
+
+#[test]
+fn backup_archive_payload_limits_are_enforced_before_decompression() {
+    assert!(MAX_BACKUP_CONFIG_BYTES > 0);
+    assert!(MAX_BACKUP_DATABASE_BYTES > MAX_BACKUP_CONFIG_BYTES);
+    let error =
+        super::backup::read_limited_bytes(std::io::Cursor::new(vec![b'x'; 17]), 16, "config")
+            .unwrap_err();
+    assert!(
+        error.to_string().contains("config") && error.to_string().contains("limit"),
+        "{error}"
+    );
+}
+
+#[test]
+fn compressed_config_payload_cannot_inflate_past_the_config_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backup = tmp.path().join("compressed-config.kokoro");
+    let file = fs::File::create(&backup).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    zip.start_file("configs/llm_config.json", options).unwrap();
+    let payload = vec![b' '; (MAX_BACKUP_CONFIG_BYTES + 1) as usize];
+    zip.write_all(&payload).unwrap();
+    zip.finish().unwrap();
+
+    let error = stage_backup_configs(&backup).unwrap_err();
+
+    assert!(
+        error.to_string().contains("decompressed size limit"),
+        "{error}"
+    );
+}
+
+#[test]
+fn backup_export_target_cannot_be_managed_database_or_resource_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_data = tmp.path().join("app-data");
+    fs::create_dir_all(app_data.join("characters")).unwrap();
+
+    for target in [
+        app_data.clone(),
+        app_data.join("kokoro.db"),
+        app_data.join("llm_config.json"),
+        app_data.join("characters/export.kokoro"),
+        app_data.join("character-instance-resources/export.kokoro"),
+    ] {
+        let error = super::backup::validate_export_target(&app_data, &target).unwrap_err();
+        assert!(error.to_string().contains("managed"), "{error}");
+    }
 }
 
 #[test]

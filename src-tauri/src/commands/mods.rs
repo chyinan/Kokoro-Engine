@@ -108,7 +108,7 @@ fn read_manifest<R: Read + Seek>(
         let file = archive
             .by_index(index)
             .map_err(|error| KokoroError::Validation(format!("invalid MOD archive: {error}")))?;
-        let path_key = archive_path_key(file.name(), file.is_dir());
+        let path_key = archive_path_key(file.name(), file.is_dir())?;
         if !paths.insert(path_key) {
             return Err(KokoroError::Validation(format!(
                 "MOD archive contains duplicate path `{}`",
@@ -135,13 +135,40 @@ fn read_manifest<R: Read + Seek>(
     Ok(manifest)
 }
 
-fn archive_path_key(name: &str, is_directory: bool) -> String {
-    let normalized = if is_directory {
-        name.trim_end_matches('/')
+fn archive_path_key(name: &str, is_directory: bool) -> Result<String, KokoroError> {
+    let normalized = canonical_archive_path(name, is_directory)?;
+    Ok(normalized.to_lowercase())
+}
+
+fn canonical_archive_path(name: &str, is_directory: bool) -> Result<String, KokoroError> {
+    if name.is_empty() || name.contains('\\') {
+        return Err(KokoroError::Validation(format!(
+            "MOD archive path uses a non-canonical separator: {name}"
+        )));
+    }
+    let without_directory_suffix = if is_directory {
+        name.strip_suffix('/').unwrap_or(name)
     } else {
         name
     };
-    normalized.replace('\\', "/").to_lowercase()
+    if without_directory_suffix.is_empty()
+        || without_directory_suffix.starts_with('/')
+        || without_directory_suffix.ends_with('/')
+    {
+        return Err(KokoroError::Validation(format!(
+            "MOD archive path contains repeated or absolute separators: {name}"
+        )));
+    }
+    let mut components = Vec::new();
+    for component in without_directory_suffix.split('/') {
+        if component.is_empty() || matches!(component, "." | "..") {
+            return Err(KokoroError::Validation(format!(
+                "MOD archive path contains a non-canonical separator or component: {name}"
+            )));
+        }
+        components.push(component);
+    }
+    Ok(components.join("/"))
 }
 
 fn extract_to_staging(
@@ -166,19 +193,7 @@ fn extract_to_staging(
             let mut file = archive
                 .by_index(index)
                 .map_err(|error| KokoroError::Validation(error.to_string()))?;
-            let relative = file.enclosed_name().ok_or_else(|| {
-                KokoroError::Validation(format!("unsafe archive path `{}`", file.name()))
-            })?;
-            if relative.is_absolute()
-                || relative
-                    .components()
-                    .any(|component| matches!(component, std::path::Component::ParentDir))
-            {
-                return Err(KokoroError::Validation(format!(
-                    "unsafe archive path `{}`",
-                    file.name()
-                )));
-            }
+            let relative = PathBuf::from(canonical_archive_path(file.name(), file.is_dir())?);
             let outpath = staging_dir.join(relative);
             if file.name().ends_with('/') {
                 fs::create_dir_all(&outpath).map_err(KokoroError::from)?;
@@ -364,6 +379,23 @@ pub fn install_registry_mod_archive(
             entry.engine_version,
             candidate.engine_version.as_deref().unwrap_or("missing")
         )));
+    }
+    let mut candidate_permissions = candidate.permissions.clone();
+    candidate_permissions.sort_unstable();
+    if candidate_permissions
+        .windows(2)
+        .any(|pair| pair[0] == pair[1])
+    {
+        return Err(KokoroError::Validation(
+            "registry MOD manifest contains duplicate permissions".to_string(),
+        ));
+    }
+    let mut registry_permissions = entry.permissions.clone();
+    registry_permissions.sort_unstable();
+    if candidate_permissions != registry_permissions {
+        return Err(KokoroError::Validation(
+            "registry MOD permissions do not match manifest permissions".to_string(),
+        ));
     }
     install_mod_archive(
         bytes,

@@ -181,6 +181,43 @@ fn registry_mod_rejects_entry_engine_range_that_does_not_match_manifest() {
 }
 
 #[test]
+fn registry_mod_rejects_manifest_permissions_that_do_not_match_index() {
+    let raw = manifest_json("permission-drift", Some(">=0.3.0, <0.4.0"), &[]);
+    let bytes = archive(&raw, None);
+    let mut entry = registry_entry("permission-drift", "1.0.0", &bytes);
+    entry.permissions.clear();
+    let temp = TempDir::new().unwrap();
+
+    let error = install_registry_mod_archive(&bytes, &entry, temp.path(), &engine(), true)
+        .expect_err("registry permissions must be authoritative");
+
+    assert!(error.to_string().contains("permissions"), "{error}");
+    assert!(!temp.path().join("permission-drift").exists());
+}
+
+#[test]
+fn repeated_archive_separators_are_rejected_before_mod_extraction() {
+    let raw = manifest_json("repeated-separator", Some(">=0.3.0, <0.4.0"), &[]);
+    let bytes = archive_with_entries(&raw, &[("assets//panel.js", b"unsafe alias")]);
+    let temp = TempDir::new().unwrap();
+
+    let error = install_mod_archive(
+        &bytes,
+        temp.path(),
+        &engine(),
+        true,
+        ModInstallSource::Local,
+    )
+    .expect_err("repeated archive separators must not be aliases");
+
+    assert!(
+        error.to_string().contains("separator") || error.to_string().contains("path"),
+        "{error}"
+    );
+    assert!(!temp.path().join("repeated-separator").exists());
+}
+
+#[test]
 fn registry_mod_requires_explicit_permission_confirmation() {
     let raw = manifest_json("permissioned", Some(">=0.3.0, <0.4.0"), &[]);
     let bytes = archive(&raw, None);

@@ -275,6 +275,26 @@ fn rejects_case_folded_duplicate_archive_paths_before_extraction() {
 }
 
 #[test]
+fn rejects_repeated_separator_archive_aliases_before_extraction() {
+    let temp = TempDir::new().unwrap();
+    let archive = zip_package_with_entries(
+        "1.0.0",
+        &[
+            ("assets/panel.png", b"first"),
+            ("assets//panel.png", b"alias"),
+        ],
+    );
+
+    let error = test_catalog(&temp).install_zip(archive).unwrap_err();
+
+    assert!(error.to_string().contains("duplicate"), "{error}");
+    assert!(!temp
+        .path()
+        .join("app-data-characters/kokoro/1.0.0")
+        .exists());
+}
+
+#[test]
 fn shared_package_content_validation_rejects_case_folded_duplicate_paths() {
     let entries = vec![
         PackageContentEntry {
