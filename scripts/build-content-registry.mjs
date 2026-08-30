@@ -18,6 +18,8 @@ export const MAX_CHARACTER_FILE_COUNT = 2048;
 export const MAX_CHARACTER_TOTAL_BYTES = 128 * 1024 * 1024;
 export const MAX_MOD_FILE_BYTES = 10 * 1024 * 1024;
 export const MAX_MOD_TOTAL_BYTES = 50 * 1024 * 1024;
+// Keep generated artifacts below the strictest registry installer download cap.
+export const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 
 const ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
@@ -107,9 +109,9 @@ function validateCharacterManifestValue(value) {
   if (!isValidSemVer(value.version)) return invalid('invalid character manifest version');
   if (!isValidEngineRange(value.engine_version)) return invalid('invalid character manifest engine_version');
   for (const field of ['locale', 'avatar', 'example_dialogue']) {
-    const result = validateOptionalField(value[field], field, (candidate) => typeof candidate === 'string', 'character manifest');
-    if (!result.valid) return result;
-  }
+      const result = validateOptionalField(value[field], field, (candidate) => typeof candidate === 'string', 'character manifest');
+      if (!result.valid) return result;
+    }
   if (value.assets !== undefined && value.assets !== null) {
     const assets = hasOnlyFields(value.assets, CHARACTER_ASSET_FIELDS, 'character manifest assets');
     if (!assets.valid) return assets;
@@ -122,7 +124,7 @@ function validateCharacterManifestValue(value) {
     const runtime = hasOnlyFields(value.runtime, CHARACTER_RUNTIME_FIELDS, 'character manifest runtime');
     if (!runtime.valid) return runtime;
     for (const field of ['live2d_model', 'background', 'cue_profile', 'response_language']) {
-      const result = validateOptionalField(value.runtime[field], field, (candidate) => typeof candidate === 'string', 'character manifest runtime');
+      const result = validateOptionalField(value.runtime[field], field, (candidate) => typeof candidate === 'string' && candidate.trim() !== '', 'character manifest runtime');
       if (!result.valid) return result;
     }
     const proactive = validateOptionalField(value.runtime.proactive_enabled, 'proactive_enabled', (candidate) => typeof candidate === 'boolean', 'character manifest runtime');
@@ -131,9 +133,11 @@ function validateCharacterManifestValue(value) {
       const tts = hasOnlyFields(value.runtime.tts, CHARACTER_TTS_FIELDS, 'character manifest runtime.tts');
       if (!tts.valid) return tts;
       for (const field of ['provider_type', 'provider_id', 'local_preset', 'voice']) {
-        const result = validateOptionalField(value.runtime.tts[field], field, (candidate) => typeof candidate === 'string', 'character manifest runtime.tts');
+        const result = validateOptionalField(value.runtime.tts[field], field, (candidate) => typeof candidate === 'string' && candidate.trim() !== '', 'character manifest runtime.tts');
         if (!result.valid) return result;
       }
+      const localPreset = validateOptionalField(value.runtime.tts.local_preset, 'local_preset', (candidate) => isSafeIdentifier(candidate), 'character manifest runtime.tts');
+      if (!localPreset.valid) return localPreset;
       for (const field of ['enabled']) {
         const result = validateOptionalField(value.runtime.tts[field], field, (candidate) => typeof candidate === 'boolean', 'character manifest runtime.tts');
         if (!result.valid) return result;
@@ -152,7 +156,9 @@ function validateCharacterManifestValue(value) {
       if (!result.valid) return result;
     }
     for (const field of ['mcp_servers', 'bot_platforms']) {
-      const result = validateOptionalField(value.recommendations[field], field, (candidate) => Array.isArray(candidate) && candidate.every((item) => typeof item === 'string'), 'character manifest recommendations');
+      const result = validateOptionalField(value.recommendations[field], field, (candidate) => Array.isArray(candidate)
+        && new Set(candidate).size === candidate.length
+        && candidate.every((item) => isSafeIdentifier(item)), 'character manifest recommendations');
       if (!result.valid) return result;
     }
   }
@@ -174,14 +180,27 @@ function validateModManifestValue(value) {
   if (value.components !== undefined && value.components !== null) {
     if (!isObject(value.components) || Object.entries(value.components).some(([slot, path]) => typeof slot !== 'string' || typeof path !== 'string' || !isSafePackageRelativePath(path))) return invalid('invalid mod manifest components');
   }
-  for (const field of ['scripts', 'permissions']) {
-    if (value[field] !== undefined && value[field] !== null && (!Array.isArray(value[field]) || value[field].some((item) => typeof item !== 'string'))) return invalid(`invalid mod manifest ${field}`);
+  if (value.scripts !== undefined && value.scripts !== null
+    && (!Array.isArray(value.scripts) || value.scripts.some((item) => typeof item !== 'string' || !isSafePackageRelativePath(item)))) {
+    return invalid('invalid mod manifest scripts');
+  }
+  if (value.permissions !== undefined && value.permissions !== null
+    && (!Array.isArray(value.permissions) || new Set(value.permissions).size !== value.permissions.length || value.permissions.some((item) => typeof item !== 'string'))) {
+    return invalid('invalid mod manifest permissions');
   }
   if (value.permissions?.some((permission) => !PERMISSIONS.has(permission))) return invalid('invalid mod manifest permissions');
   if (value.capabilities !== undefined && value.capabilities !== null) {
     if (!Array.isArray(value.capabilities)) return invalid('invalid mod manifest capabilities');
+    const names = new Set();
     for (const capability of value.capabilities) {
-      if (!isObject(capability) || typeof capability.name !== 'string' || (capability.risk !== undefined && capability.risk !== null && typeof capability.risk !== 'string') || (capability.requires_confirmation !== undefined && typeof capability.requires_confirmation !== 'boolean')) return invalid('invalid mod manifest capability');
+      if (!isObject(capability) || typeof capability.name !== 'string' || capability.name.trim() === '' || names.has(capability.name)
+        || (capability.risk !== undefined && capability.risk !== null && (typeof capability.risk !== 'string' || capability.risk.trim() === ''))
+        || (capability.requires_confirmation !== undefined && typeof capability.requires_confirmation !== 'boolean')) return invalid('invalid mod manifest capability');
+      names.add(capability.name);
+      const permission = PERMISSIONS.has(capability.name) ? capability.name : capability.name.split('.')[0];
+      if (!value.permissions?.includes(permission) && !value.permissions?.includes(capability.name)) {
+        return invalid(`MOD capability requires matching permission: ${capability.name}`);
+      }
     }
   }
   return { valid: true };
@@ -255,6 +274,13 @@ function isSafePackageRelativePath(value) {
   return value.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..');
 }
 
+function isSafeIdentifier(value) {
+  return typeof value === 'string'
+    && value.trim() !== ''
+    && value.length <= 64
+    && /^[a-z0-9][a-z0-9._-]*$/i.test(value);
+}
+
 function isRootLicenseName(value) {
   const lower = basename(value).toLowerCase();
   return !value.includes('/') && (lower === 'license' || lower.startsWith('license.'));
@@ -323,6 +349,22 @@ function isValidHttpsUrl(value) {
   }
 }
 
+function isOfficialPackageUrl(value, expectedName) {
+  try {
+    const expected = new URL(`${OFFICIAL_PACKAGE_BASE_URL}/${expectedName}`);
+    return value.protocol === expected.protocol
+      && value.hostname === expected.hostname
+      && value.port === expected.port
+      && value.username === ''
+      && value.password === ''
+      && value.search === ''
+      && value.hash === ''
+      && value.pathname === expected.pathname;
+  } catch {
+    return false;
+  }
+}
+
 function isSafePreviewReference(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 512 || /\s/.test(value)) return false;
   if (value.startsWith('https://')) {
@@ -368,7 +410,7 @@ export function validateRegistryEntry(entry) {
     return invalid('invalid download_url');
   }
   if (basename(download.pathname) !== archiveName(entry)) return invalid('download URL basename mismatch');
-  if (!Number.isInteger(entrySize(entry)) || entrySize(entry) <= 0) return invalid('invalid archive size');
+  if (!Number.isInteger(entrySize(entry)) || entrySize(entry) <= 0 || entrySize(entry) > MAX_ARCHIVE_BYTES) return invalid('invalid archive size');
   if (!SHA256_PATTERN.test(entry.sha256)) return invalid('invalid sha256');
   if (!TRUST_LABELS.has(entry.trust)) return invalid('invalid trust label');
   if (!isValidHttpsUrl(entry.trust_source)) return invalid('invalid trust_source');
@@ -376,6 +418,7 @@ export function validateRegistryEntry(entry) {
   if (!Array.isArray(preview) || preview.some(value => !isSafePreviewReference(value))) return invalid('invalid preview reference');
   const official = normalizeTrustSource(entry.trust_source);
   if (entry.trust === 'official' && (official.trust !== 'official' || entry.registry_identity !== OFFICIAL_REGISTRY_IDENTITY)) return invalid('official trust requires canonical registry identity');
+  if (entry.trust === 'official' && !isOfficialPackageUrl(download, archiveName(entry))) return invalid('official trust requires canonical package URL');
   if (entry.trust !== 'official' && entry.registry_identity !== null && entry.registry_identity !== undefined) return invalid('non-official entry cannot claim registry identity');
   if (!Array.isArray(entry.permissions)
     || new Set(entry.permissions).size !== entry.permissions.length
@@ -504,6 +547,7 @@ export function verifyRegistryArtifact(entry, archive) {
   if (!Buffer.isBuffer(archive)) return invalid('archive must be a Buffer');
   const entryValidation = validateRegistryEntry(entry);
   if (!entryValidation.valid) return entryValidation;
+  if (archive.length > MAX_ARCHIVE_BYTES) return invalid('archive exceeds the 64 MiB download limit');
   if (archive.length !== entrySize(entry)) return invalid('archive size mismatch');
   if (createHash('sha256').update(archive).digest('hex') !== entry.sha256) return invalid('archive checksum mismatch');
   try {
@@ -539,7 +583,7 @@ export function verifyRegistryArtifact(entry, archive) {
       ? validateCharacterManifestValue(manifest)
       : validateModManifestValue(manifest);
     if (!manifestValidation.valid) return manifestValidation;
-    validateManifestReferences(manifest, [...files.keys()]);
+    validateManifestReferences(manifest, [...files.keys()], entry.content_type);
     if (manifest.id !== entry.id || manifest.version !== entry.version || manifest.engine_version !== entry.engine_version) return invalid('manifest metadata mismatch');
   } catch (error) {
     return invalid(error instanceof Error ? error.message : 'invalid archive');
@@ -595,28 +639,50 @@ async function readManifest(root, contentType) {
   return value;
 }
 
-function validateManifestReferences(manifest, files) {
+function validateManifestReferences(manifest, files, contentType = manifest?.schema_version !== undefined ? 'character' : 'mod') {
   const available = new Set(files);
   const image = value => typeof value === 'string' && /\.(?:png|jpe?g|webp)$/i.test(value);
-  const references = [
-    ['avatar', manifest.avatar, image],
-    ['assets.live2d_model', manifest.assets?.live2d_model, value => /\.model3\.json$/i.test(value)],
-    ['assets.background', manifest.assets?.background, image],
-    ['assets.cue_profile', manifest.assets?.cue_profile, value => /\.json$/i.test(value)],
-  ];
+  const references = contentType === 'character'
+    ? [
+      ['avatar', manifest.avatar, image],
+      ['assets.live2d_model', manifest.assets?.live2d_model, value => /\.model3\.json$/i.test(value)],
+      ['assets.background', manifest.assets?.background, image],
+      ['assets.cue_profile', manifest.assets?.cue_profile, value => /\.json$/i.test(value)],
+      ['runtime.live2d_model', manifest.runtime?.live2d_model, value => /\.model3\.json$/i.test(value)],
+      ['runtime.background', manifest.runtime?.background, image],
+      ['runtime.cue_profile', manifest.runtime?.cue_profile, value => /\.json$/i.test(value)],
+    ]
+    : [
+      ['layout', manifest.layout, () => true],
+      ['theme', manifest.theme, () => true],
+      ['entry', manifest.entry, () => true],
+      ['ui_entry', manifest.ui_entry, () => true],
+      ...Object.entries(manifest.components ?? {}).map(([slot, value]) => [`components.${slot}`, value, () => true]),
+      ...((manifest.scripts ?? []).map((value, index) => [`scripts[${index}]`, value, value => /\.(?:js|mjs|cjs)$/i.test(value)])),
+    ];
   for (const [label, value, extensionCheck] of references) {
     if (value === undefined || value === null) continue;
     if (!isSafePackageRelativePath(value) || !extensionCheck(value) || !available.has(value)) {
       throw new Error(`invalid or missing ${label} package reference: ${value}`);
     }
   }
+  if (contentType === 'character') {
+    for (const field of ['live2d_model', 'background', 'cue_profile']) {
+      const runtimeValue = manifest.runtime?.[field];
+      if (runtimeValue !== undefined && runtimeValue !== null && runtimeValue !== manifest.assets?.[field]) {
+        throw new Error(`runtime.${field} must match assets.${field} for package parity`);
+      }
+    }
+  }
 }
 
 async function buildArchive(root, contentType, manifest) {
   const files = await collectFiles(root, contentType);
-  validateManifestReferences(manifest, files.map(file => file.name));
+  validateManifestReferences(manifest, files.map(file => file.name), contentType);
   files.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
-  return zipStored(files);
+  const archive = zipStored(files);
+  if (archive.length > MAX_ARCHIVE_BYTES) throw new Error('archive exceeds the 64 MiB download limit');
+  return archive;
 }
 
 function registryEntry(manifest, contentType, archive, sourceUrl, packageBaseUrl) {
@@ -635,7 +701,10 @@ function registryEntry(manifest, contentType, archive, sourceUrl, packageBaseUrl
     version: manifest.version,
     author: manifest.author ?? 'Kokoro Engine',
     description: manifest.description,
-    preview: manifest.avatar ? [manifest.avatar] : [],
+    // Package-relative assets are inside the ZIP and cannot be linked from a
+    // published registry page. Leave preview empty until a real public asset
+    // URL exists; never emit a URL that points to `<archive>.zip/avatar.webp`.
+    preview: typeof manifest.avatar === 'string' && manifest.avatar.startsWith('https://') ? [manifest.avatar] : [],
     engine_version: manifest.engine_version,
     download_url: `${packageBaseUrl}/${manifest.id}-${manifest.version}.zip`,
     archive_size: archive.length,

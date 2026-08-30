@@ -248,13 +248,13 @@ export function getSafePreviewUrl(value: string, downloadUrl?: string): string |
   if (!value || value.trim() !== value || /\s/.test(value)) return null;
   try {
     const isAbsolute = value.startsWith("https://");
-    if (!isAbsolute) {
-      if (!downloadUrl || value.startsWith("/") || value.startsWith("//") || value.includes("\\") || value.includes(":") || value.includes("%")) return null;
-      if (value.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) return null;
-    }
+    // A registry archive is not an HTTP directory. Relative package paths
+    // must stay metadata-only until the publisher supplies a public preview
+    // URL; resolving them against `<archive>.zip` creates a broken link.
+    if (!isAbsolute) return null;
     const base = downloadUrl ? new URL(downloadUrl) : undefined;
     if (base && (base.protocol !== "https:" || base.username !== "" || base.password !== "")) return null;
-    const parsed = new URL(value, base);
+    const parsed = new URL(value);
     if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "") return null;
     return parsed.toString();
   } catch {

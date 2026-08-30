@@ -35,18 +35,18 @@
           "type": "array",
           "items": {
             "oneOf": [
-              { "type": "string", "format": "uri", "pattern": "^https://[^/@?#]+(?:/|$)" },
+              { "type": "string", "format": "uri", "pattern": "^https://[^/@?#]+(?:/[^\\s]*)?$" },
               { "type": "string", "pattern": "^(?!/)(?!//)(?!.*(?:^|/)\\.(?:\\.|/|$))(?!.*\\\\)(?!.*:)(?!.*//)[^\\s/]+(?:/[^\\s/]+)*$" }
             ]
           },
           "uniqueItems": true
         },
         "engine_version": { "type": "string", "minLength": 1 },
-        "download_url": { "type": "string", "format": "uri", "pattern": "^https://" },
-        "archive_size": { "type": "integer", "minimum": 1 },
+        "download_url": { "type": "string", "format": "uri", "pattern": "^https://[^/@?#]+(?:/[^\\s]*)?$" },
+        "archive_size": { "type": "integer", "minimum": 1, "maximum": 67108864 },
         "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "trust": { "enum": ["official", "community", "unverified"] },
-        "trust_source": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "trust_source": { "type": "string", "format": "uri", "pattern": "^https://[^/@?#]+(?:/[^\\s]*)?$" },
         "registry_identity": { "type": ["string", "null"] },
         "permissions": {
           "type": "array",

@@ -174,7 +174,7 @@ describe("content library state", () => {
 
   it("accepts only safe HTTPS preview URLs", () => {
     expect(getSafePreviewUrl("https://cdn.example.test/avatar.webp")).toBe("https://cdn.example.test/avatar.webp");
-    expect(getSafePreviewUrl("assets/avatar.webp", "https://cdn.example.test/packages/kokoro-1.0.0.zip")).toBe("https://cdn.example.test/packages/assets/avatar.webp");
+    expect(getSafePreviewUrl("assets/avatar.webp", "https://cdn.example.test/packages/kokoro-1.0.0.zip")).toBeNull();
     expect(getSafePreviewUrl("http://cdn.example.test/avatar.webp")).toBeNull();
     expect(getSafePreviewUrl("javascript:alert(1)")).toBeNull();
     expect(getSafePreviewUrl("data:image/svg+xml,<svg/onload=alert(1)>")).toBeNull();

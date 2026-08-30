@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildContentRegistry,
+  OFFICIAL_PACKAGE_BASE_URL,
   OFFICIAL_REGISTRY_IDENTITY,
   OFFICIAL_REGISTRY_URL,
   normalizeTrustSource,
@@ -47,7 +48,7 @@ function artifactFor(files, overrides = {}) {
     id: parsed.id,
     version: parsed.version,
     engine_version: parsed.engine_version,
-    download_url: `${OFFICIAL_REGISTRY_URL}/../packages/${parsed.id}-${parsed.version}.zip`,
+    download_url: `${OFFICIAL_PACKAGE_BASE_URL}/${parsed.id}-${parsed.version}.zip`,
     archive_size: bytes.length,
     sha256: createHash('sha256').update(bytes).digest('hex'),
     preview: [],
@@ -84,7 +85,7 @@ const archive = {
   author: 'Kokoro Engine',
   description: 'A warm daily companion.',
   engine_version: '>=0.3.1, <0.4.0',
-  download_url: `${OFFICIAL_REGISTRY_URL}/../packages/kokoro-1.0.0.zip`,
+  download_url: `${OFFICIAL_PACKAGE_BASE_URL}/kokoro-1.0.0.zip`,
   archive_size: 1234,
   sha256: 'a'.repeat(64),
   trust: 'official',
@@ -326,6 +327,121 @@ describe('content registry contract', () => {
     await writeFile(join(packageRoot, 'LICENSE.md'), 'MIT');
     await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
       .rejects.toThrow(/preview|avatar|missing|package/i);
+  });
+
+  it('rejects empty, unsafe, missing, and mismatched character runtime asset references', async () => {
+    const cases = [
+      {
+        name: 'empty runtime response language',
+        manifest: characterManifest({ runtime: { response_language: '  ' } }),
+        files: [],
+      },
+      {
+        name: 'unsafe runtime background',
+        manifest: characterManifest({ runtime: { background: '../outside.webp' } }),
+        files: [],
+      },
+      {
+        name: 'missing runtime cue profile',
+        manifest: characterManifest({ runtime: { cue_profile: 'cues.json' } }),
+        files: [],
+      },
+      {
+        name: 'runtime background must agree with package assets',
+        manifest: characterManifest({
+          assets: { background: 'background.webp' },
+          runtime: { background: 'other.webp' },
+        }),
+        files: [
+          { name: 'background.webp', data: 'background' },
+          { name: 'other.webp', data: 'other' },
+        ],
+      },
+    ];
+
+    for (const [index, candidate] of cases.entries()) {
+      const root = await mkdtemp(join(tmpdir(), `kokoro-registry-runtime-${index}-`));
+      temporaryRoots.push(root);
+      const packageRoot = join(root, 'characters', 'candidate');
+      await mkdir(packageRoot, { recursive: true });
+      await writeFile(join(packageRoot, 'character.json'), JSON.stringify(candidate.manifest));
+      await writeFile(join(packageRoot, 'LICENSE.md'), 'MIT');
+      for (const file of candidate.files) await writeFile(join(packageRoot, file.name), file.data);
+
+      await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+        .rejects.toThrow(new RegExp(candidate.name.split(' ').join('|'), 'i'));
+    }
+  });
+
+  it('rejects MOD script paths that are empty, unsafe, or absent from the archive', async () => {
+    const cases = [
+      { scripts: [''], files: [] },
+      { scripts: ['../install.js'], files: [] },
+      { scripts: ['scripts/install.js'], files: [] },
+    ];
+    for (const [index, candidate] of cases.entries()) {
+      const root = await mkdtemp(join(tmpdir(), `kokoro-registry-mod-scripts-${index}-`));
+      temporaryRoots.push(root);
+      const packageRoot = join(root, 'mods', 'candidate');
+      await mkdir(packageRoot, { recursive: true });
+      await writeFile(join(packageRoot, 'mod.json'), JSON.stringify({
+        id: 'candidate', name: 'Candidate MOD', version: '1.0.0', description: 'A MOD',
+        engine_version: '>=0.3.1, <0.4.0', scripts: candidate.scripts, permissions: [],
+      }));
+      for (const file of candidate.files) await writeFile(join(packageRoot, file), 'export {}');
+
+      await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+        .rejects.toThrow(/script|path|missing|unsupported|manifest/i);
+    }
+  });
+
+  it('requires non-empty MOD capabilities and keeps capability permissions in parity', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kokoro-registry-mod-capabilities-'));
+    temporaryRoots.push(root);
+    const packageRoot = join(root, 'mods', 'candidate');
+    await mkdir(packageRoot, { recursive: true });
+    const manifest = {
+      id: 'candidate', name: 'Candidate MOD', version: '1.0.0', description: 'A MOD',
+      engine_version: '>=0.3.1, <0.4.0', scripts: [], permissions: ['tts'],
+      capabilities: [{ name: '  ', risk: 'write', requires_confirmation: true }],
+    };
+    await writeFile(join(packageRoot, 'mod.json'), JSON.stringify(manifest));
+    await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+      .rejects.toThrow(/capabilit|permission|empty/i);
+
+    await writeFile(join(packageRoot, 'mod.json'), JSON.stringify({
+      ...manifest,
+      capabilities: [{ name: 'vision.capture', risk: 'read', requires_confirmation: true }],
+      permissions: [],
+    }));
+    await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+      .rejects.toThrow(/capabilit|permission|parity/i);
+  });
+
+  it('keeps official entries on the canonical package origin and within the installer archive ceiling', () => {
+    expect(validateRegistryEntry({
+      ...archive,
+      download_url: 'https://evil.example.test/kokoro-1.0.0.zip',
+    }).valid).toBe(false);
+    expect(validateRegistryEntry({
+      ...archive,
+      archive_size: 64 * 1024 * 1024 + 1,
+    }).valid).toBe(false);
+  });
+
+  it('does not publish a package-relative avatar as a broken ZIP-relative preview URL', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kokoro-registry-preview-publish-'));
+    temporaryRoots.push(root);
+    const packageRoot = join(root, 'characters', 'preview');
+    await mkdir(packageRoot, { recursive: true });
+    await writeFile(join(packageRoot, 'character.json'), JSON.stringify(characterManifest({
+      id: 'preview', avatar: 'avatar.webp',
+    })));
+    await writeFile(join(packageRoot, 'LICENSE.md'), 'MIT');
+    await writeFile(join(packageRoot, 'avatar.webp'), 'image');
+
+    const index = await buildContentRegistry({ root, sourceUrl: OFFICIAL_REGISTRY_URL });
+    expect(index.entries[0].preview).toEqual([]);
   });
 
   it('verifies the complete archive content policy, including duplicate and unsupported paths', () => {
