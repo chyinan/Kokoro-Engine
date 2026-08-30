@@ -2,6 +2,7 @@
 
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use thiserror::Error;
 
 pub const REGISTRY_SCHEMA_VERSION: u32 = 1;
@@ -163,6 +164,19 @@ impl RegistryEntry {
         if !is_valid_id(&self.id) {
             return Err(RegistryManifestError::InvalidId(self.id.clone()));
         }
+        if self
+            .preview
+            .iter()
+            .any(|preview| !is_valid_preview_reference(preview))
+        {
+            let invalid = self
+                .preview
+                .iter()
+                .find(|preview| !is_valid_preview_reference(preview))
+                .cloned()
+                .unwrap_or_default();
+            return Err(RegistryManifestError::InvalidUrl(invalid));
+        }
         Version::parse(&self.version).map_err(|error| RegistryManifestError::InvalidVersion {
             value: self.version.clone(),
             reason: error.to_string(),
@@ -208,8 +222,12 @@ impl RegistryEntry {
         if self.trust != "official" && self.registry_identity.is_some() {
             return Err(RegistryManifestError::NonOfficialIdentity);
         }
+        let mut seen_permissions = HashSet::new();
         for permission in &self.permissions {
             if !is_allowed_permission(permission) {
+                return Err(RegistryManifestError::InvalidPermission(permission.clone()));
+            }
+            if !seen_permissions.insert(permission) {
                 return Err(RegistryManifestError::InvalidPermission(permission.clone()));
             }
         }
@@ -220,9 +238,12 @@ impl RegistryEntry {
 
 impl RegistryRecommendations {
     fn validate(&self) -> Result<(), RegistryManifestError> {
-        for value in self.mcp_servers.iter().chain(self.bot_platforms.iter()) {
-            if !is_valid_identifier(value) {
-                return Err(RegistryManifestError::InvalidRecommendation(value.clone()));
+        for values in [&self.mcp_servers, &self.bot_platforms] {
+            let mut seen = HashSet::new();
+            for value in values {
+                if !is_valid_identifier(value) || !seen.insert(value) {
+                    return Err(RegistryManifestError::InvalidRecommendation(value.clone()));
+                }
             }
         }
         Ok(())
@@ -263,7 +284,10 @@ fn is_valid_id(value: &str) -> bool {
 }
 
 fn is_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn is_allowed_permission(value: &str) -> bool {
@@ -287,6 +311,31 @@ fn is_valid_identifier(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn is_valid_preview_reference(value: &str) -> bool {
+    if value.is_empty() || value.len() > 512 {
+        return false;
+    }
+    if value.starts_with("https://") {
+        let Ok(parsed) = reqwest::Url::parse(value) else {
+            return false;
+        };
+        return parsed.scheme() == "https"
+            && parsed.host_str().is_some_and(|host| !host.is_empty())
+            && parsed.username().is_empty()
+            && parsed.password().is_none();
+    }
+    if value.starts_with('/')
+        || value.starts_with("//")
+        || value.contains('\\')
+        || value.contains(':')
+    {
+        return false;
+    }
+    value
+        .split('/')
+        .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
 #[cfg(test)]
@@ -364,6 +413,25 @@ mod tests {
     }
 
     #[test]
+    fn validates_preview_references_without_allowing_active_content() {
+        let mut entry = valid_entry();
+        entry.preview = vec!["https://cdn.example.test/kokoro.webp".to_string()];
+        assert!(entry.validate().is_ok());
+        entry.preview = vec!["assets/kokoro.webp".to_string()];
+        assert!(entry.validate().is_ok());
+        entry.preview = vec!["javascript:alert(1)".to_string()];
+        assert!(matches!(
+            entry.validate(),
+            Err(RegistryManifestError::InvalidUrl(_))
+        ));
+        entry.preview = vec!["../outside.webp".to_string()];
+        assert!(matches!(
+            entry.validate(),
+            Err(RegistryManifestError::InvalidUrl(_))
+        ));
+    }
+
+    #[test]
     fn validates_trust_permissions_and_recommendations() {
         let mut entry = valid_entry();
         entry.permissions = vec!["exec.shell".to_string()];
@@ -426,6 +494,31 @@ mod tests {
         assert!(matches!(
             RegistryIndex::from_json(&value.to_string()),
             Err(RegistryManifestError::UnsupportedSchema(2))
+        ));
+    }
+
+    #[test]
+    fn requires_lowercase_checksums_and_unique_permission_recommendation_lists() {
+        let mut uppercase = valid_entry();
+        uppercase.sha256 = "A".repeat(64);
+        assert!(matches!(
+            uppercase.validate(),
+            Err(RegistryManifestError::InvalidChecksum(_))
+        ));
+
+        let mut duplicate_permission = valid_entry();
+        duplicate_permission.permissions = vec!["tts".to_string(), "tts".to_string()];
+        assert!(matches!(
+            duplicate_permission.validate(),
+            Err(RegistryManifestError::InvalidPermission(_))
+        ));
+
+        let mut duplicate_recommendation = valid_entry();
+        duplicate_recommendation.recommendations.mcp_servers =
+            vec!["calendar".to_string(), "calendar".to_string()];
+        assert!(matches!(
+            duplicate_recommendation.validate(),
+            Err(RegistryManifestError::InvalidRecommendation(_))
         ));
     }
 }

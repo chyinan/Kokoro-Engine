@@ -140,6 +140,7 @@ pub fn run() {
             commands::mods::load_mod,
             commands::mods::install_mod,
             commands::mods::update_mod,
+            commands::mods::install_mod_from_registry,
             commands::mods::remove_mod,
             commands::mods::install_mod_from_url,
             commands::mods::get_mod_theme,

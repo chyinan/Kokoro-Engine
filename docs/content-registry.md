@@ -88,13 +88,11 @@ cargo test --manifest-path src-tauri/Cargo.toml characters::manifest -- --nocapt
 ```
 
 `characters/template` is documentation scaffolding, not a publishable entry.
-The current builder walks every child directory under `characters/`, so a
-registry build from this checkout will also see the scaffold. Generate the
-official index from a package-only source tree (or a clean checkout with the
-scaffold absent), then copy the generated index and ZIPs into the release
-checkout. Review the generated entry list and abort if `my-character` or any
-other scaffold appears. Copy the template to a new package directory only
-after the package-only build input has been prepared. Do not hand-edit a
+The builder explicitly skips that directory (case-insensitively) before reading
+its manifest, so incomplete documentation scaffolding cannot block a registry
+build or appear in the generated index. Review the generated entry list and
+abort if `template` or any other scaffold appears. Copy the template to a new
+package directory before preparing a creator submission. Do not hand-edit a
 published checksum or archive size.
 
 This is an input-layout rule, not a trust bypass: the template is still

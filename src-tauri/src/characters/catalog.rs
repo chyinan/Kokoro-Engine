@@ -39,6 +39,50 @@ pub struct CharacterCatalog {
     engine_version: Version,
 }
 
+pub struct StagedPackageRemoval {
+    target: PathBuf,
+    staging: Option<PathBuf>,
+}
+
+impl StagedPackageRemoval {
+    pub fn rollback(mut self) -> Result<(), CatalogError> {
+        self.rollback_inner()
+    }
+
+    pub fn finalize(mut self) -> Result<(), CatalogError> {
+        let Some(staging) = self.staging.take() else {
+            return Ok(());
+        };
+        if let Err(error) = fs::remove_dir_all(&staging) {
+            let _ = fs::rename(&staging, &self.target);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    fn rollback_inner(&mut self) -> Result<(), CatalogError> {
+        let Some(staging) = self.staging.take() else {
+            return Ok(());
+        };
+        fs::rename(staging, &self.target)?;
+        Ok(())
+    }
+}
+
+impl Drop for StagedPackageRemoval {
+    fn drop(&mut self) {
+        if self.staging.is_some() {
+            if let Err(error) = self.rollback_inner() {
+                tracing::error!(
+                    target: "characters",
+                    path = %self.target.display(),
+                    "failed to roll back staged package removal: {error}"
+                );
+            }
+        }
+    }
+}
+
 impl CharacterCatalog {
     pub fn new(root: PathBuf, engine_version: Version) -> Self {
         Self {
@@ -73,6 +117,17 @@ impl CharacterCatalog {
     /// The target is staged by rename first, making an interrupted removal
     /// recoverable until the final delete succeeds.
     pub fn remove_package(&self, id: &str, version: &str) -> Result<(), CatalogError> {
+        if let Some(staged) = self.stage_package_removal(id, version)? {
+            staged.finalize()?;
+        }
+        Ok(())
+    }
+
+    pub fn stage_package_removal(
+        &self,
+        id: &str,
+        version: &str,
+    ) -> Result<Option<StagedPackageRemoval>, CatalogError> {
         if !is_safe_catalog_segment(id) || !is_safe_catalog_segment(version) {
             return Err(CatalogError::Layout {
                 id: id.to_string(),
@@ -82,7 +137,7 @@ impl CharacterCatalog {
         let target = self.root.join(id).join(version);
         let metadata = match fs::symlink_metadata(&target) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -94,11 +149,10 @@ impl CharacterCatalog {
             .root
             .join(format!(".delete-{id}-{version}-{}", Uuid::new_v4()));
         fs::rename(&target, &staging)?;
-        if let Err(error) = fs::remove_dir_all(&staging) {
-            let _ = fs::rename(&staging, &target);
-            return Err(error.into());
-        }
-        Ok(())
+        Ok(Some(StagedPackageRemoval {
+            target,
+            staging: Some(staging),
+        }))
     }
 
     pub fn discover(&self) -> Result<Vec<CatalogEntry>, CatalogError> {

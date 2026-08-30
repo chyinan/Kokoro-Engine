@@ -1,9 +1,11 @@
 // pattern: Imperative Shell
 
+use crate::commands::registry::append_limited_chunk;
 use crate::error::KokoroError;
 use crate::mods::{ModManager, ModManifest, ModThemeJson};
 use crate::registry::manifest::RegistryEntry;
-use semver::Version;
+use futures::StreamExt;
+use semver::{Version, VersionReq};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -48,6 +50,28 @@ fn is_allowed_mod_file(ext: &str) -> bool {
     ALLOWED_EXTENSIONS.contains(&ext.to_lowercase().as_str())
 }
 
+fn is_blocked_mod_file(path: &Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        file_name.as_str(),
+        ".env" | ".env.local" | "id_rsa" | "id_ed25519" | "credentials.json" | "secrets.json"
+    ) {
+        return true;
+    }
+    matches!(
+        path.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "exe" | "dll" | "so" | "dylib" | "bat" | "cmd" | "ps1" | "sh"
+    )
+}
+
 pub fn untrusted_mod_url_warning(url: &str) -> String {
     format!(
         "This URL install contains untrusted executable MOD code ({url}). Review requested permissions and continue only if you trust the source."
@@ -60,7 +84,7 @@ fn permission_review(
     confirmed: bool,
 ) -> Result<(), KokoroError> {
     let requires_confirmation =
-        source == ModInstallSource::Url || manifest.permission_review_required();
+        source != ModInstallSource::Local || manifest.permission_review_required();
     if requires_confirmation && !confirmed {
         let reason = if source == ModInstallSource::Url {
             untrusted_mod_url_warning("the supplied URL")
@@ -131,7 +155,7 @@ fn extract_to_staging(
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .unwrap_or_default();
-            if !is_allowed_mod_file(ext) {
+            if is_blocked_mod_file(&outpath) || !is_allowed_mod_file(ext) {
                 return Err(KokoroError::Validation(format!(
                     "unsupported MOD file `{}`",
                     file.name()
@@ -237,6 +261,15 @@ pub fn install_registry_mod_archive(
             "registry entry is not a MOD package".to_string(),
         ));
     }
+    let entry_requirement = VersionReq::parse(&entry.engine_version).map_err(|error| {
+        KokoroError::Validation(format!("invalid registry MOD engine range: {error}"))
+    })?;
+    if !entry_requirement.matches(engine_version) {
+        return Err(KokoroError::Validation(format!(
+            "registry MOD is incompatible with engine {engine_version}: {}",
+            entry.engine_version
+        )));
+    }
     if entry.archive_size != bytes.len() as u64 {
         return Err(KokoroError::Validation(format!(
             "MOD archive size mismatch: expected {}, got {}",
@@ -256,6 +289,13 @@ pub fn install_registry_mod_archive(
         return Err(KokoroError::Validation(format!(
             "registry MOD metadata does not match manifest {}@{}",
             candidate.id, candidate.version
+        )));
+    }
+    if candidate.engine_version.as_deref() != Some(entry.engine_version.as_str()) {
+        return Err(KokoroError::Validation(format!(
+            "registry MOD engine range `{}` does not match manifest range `{}`",
+            entry.engine_version,
+            candidate.engine_version.as_deref().unwrap_or("missing")
         )));
     }
     install_mod_archive(
@@ -372,6 +412,59 @@ pub async fn update_mod(
 }
 
 #[command]
+pub async fn install_mod_from_registry(
+    mod_manager: State<'_, Mutex<ModManager>>,
+    entry: RegistryEntry,
+    registry_url: Option<String>,
+    permission_confirmed: bool,
+) -> Result<ModManifest, KokoroError> {
+    if entry.content_type != "mod" {
+        return Err(KokoroError::Validation(
+            "registry entry is not a MOD package".to_string(),
+        ));
+    }
+    let source_url = crate::commands::registry::normalize_registry_url(registry_url)?;
+    let index = crate::commands::registry::fetch_index(&source_url).await?;
+    let authoritative = index
+        .entries
+        .iter()
+        .find(|candidate| {
+            candidate.content_type == "mod"
+                && candidate.id == entry.id
+                && candidate.version == entry.version
+        })
+        .cloned()
+        .ok_or_else(|| {
+            KokoroError::NotFound(format!(
+                "MOD package '{}@{}' not found in registry",
+                entry.id, entry.version
+            ))
+        })?;
+    if authoritative.download_url != entry.download_url
+        || authoritative.archive_size != entry.archive_size
+        || authoritative.sha256 != entry.sha256
+        || authoritative.engine_version != entry.engine_version
+    {
+        return Err(KokoroError::Validation(
+            "selected registry MOD metadata is stale; refresh the registry and retry".to_string(),
+        ));
+    }
+    let bytes = crate::commands::registry::fetch_bytes(&authoritative.download_url).await?;
+    let mods_dir = {
+        let manager = mod_manager.lock().await;
+        manager.mods_path.clone()
+    };
+    let result = install_registry_mod_archive(
+        &bytes,
+        &authoritative,
+        &mods_dir,
+        &Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 3, 1)),
+        permission_confirmed,
+    )?;
+    Ok(result.manifest)
+}
+
+#[command]
 pub async fn remove_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
     mod_id: String,
@@ -415,15 +508,16 @@ pub async fn install_mod_from_url(
             MAX_MOD_ARCHIVE_BYTES / (1024 * 1024)
         )));
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| KokoroError::ExternalService(error.to_string()))?;
-    if bytes.len() as u64 > MAX_MOD_ARCHIVE_BYTES {
-        return Err(KokoroError::Validation(format!(
-            "MOD archive exceeds the {}MB download limit",
-            MAX_MOD_ARCHIVE_BYTES / (1024 * 1024)
-        )));
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| KokoroError::ExternalService(error.to_string()))?;
+        if append_limited_chunk(&mut bytes, &chunk, MAX_MOD_ARCHIVE_BYTES).is_err() {
+            return Err(KokoroError::Validation(format!(
+                "MOD archive exceeds the {}MB download limit",
+                MAX_MOD_ARCHIVE_BYTES / (1024 * 1024)
+            )));
+        }
     }
     let mods_dir = {
         let manager = mod_manager.lock().await;
@@ -433,7 +527,7 @@ pub async fn install_mod_from_url(
         &bytes,
         &mods_dir,
         &Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 3, 1)),
-        true,
+        confirm_untrusted_code,
         ModInstallSource::Url,
     )?;
     Ok(result.manifest)

@@ -10,6 +10,7 @@ use super::mods::{
     install_mod_archive, install_registry_mod_archive, remove_installed_mod,
     untrusted_mod_url_warning, ModInstallSource,
 };
+use crate::error::KokoroError;
 use crate::mods::manifest::{ModManifest, ModManifestError};
 use crate::registry::manifest::{RegistryEntry, RegistryRecommendations};
 use semver::Version;
@@ -119,6 +120,36 @@ fn registry_entry_must_be_a_valid_mod_and_match_archive_metadata() {
 
     entry.content_type = "character".to_string();
     assert!(install_registry_mod_archive(&bytes, &entry, temp.path(), &engine(), true).is_err());
+}
+
+#[test]
+fn registry_mod_rejects_entry_engine_range_that_does_not_match_manifest() {
+    let raw = manifest_json("registry-engine", Some(">=0.3.0, <0.4.0"), &[]);
+    let bytes = archive(&raw, None);
+    let mut entry = registry_entry("registry-engine", "1.0.0", &bytes);
+    entry.engine_version = ">=0.4.0, <0.5.0".to_string();
+    let temp = TempDir::new().unwrap();
+
+    let result = install_registry_mod_archive(&bytes, &entry, temp.path(), &engine(), true);
+
+    assert!(
+        result.is_err(),
+        "entry and manifest engine ranges must agree"
+    );
+    assert!(!temp.path().join("registry-engine").exists());
+}
+
+#[test]
+fn registry_mod_requires_explicit_permission_confirmation() {
+    let raw = manifest_json("permissioned", Some(">=0.3.0, <0.4.0"), &[]);
+    let bytes = archive(&raw, None);
+    let entry = registry_entry("permissioned", "1.0.0", &bytes);
+    let temp = TempDir::new().unwrap();
+
+    let result = install_registry_mod_archive(&bytes, &entry, temp.path(), &engine(), false);
+
+    assert!(matches!(result, Err(KokoroError::Unauthorized(_))));
+    assert!(!temp.path().join("permissioned").exists());
 }
 
 #[test]
@@ -236,4 +267,39 @@ fn oversized_mod_archive_is_rejected_before_zip_processing() {
     .unwrap_err();
     assert!(error.to_string().contains("64MB download limit"));
     assert!(fs::read_dir(temp.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn mod_archive_rejects_native_executables_and_secret_files_but_allows_js() {
+    let temp = TempDir::new().unwrap();
+    let manifest = manifest_json("content-policy", Some(">=0.3.0, <0.4.0"), &["main.js"]);
+    assert!(install_mod_archive(
+        &archive(
+            &manifest,
+            Some(("main.js", b"export function activate() {}"))
+        ),
+        temp.path(),
+        &engine(),
+        true,
+        ModInstallSource::Registry,
+    )
+    .is_ok());
+
+    for path in ["payload.dll", ".env", "secrets.json"] {
+        let candidate = archive(
+            &manifest_json("content-policy", Some(">=0.3.0, <0.4.0"), &[]),
+            Some((path, b"secret")),
+        );
+        assert!(
+            install_mod_archive(
+                &candidate,
+                temp.path(),
+                &engine(),
+                true,
+                ModInstallSource::Registry,
+            )
+            .is_err(),
+            "unsafe MOD file should be rejected: {path}"
+        );
+    }
 }

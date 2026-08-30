@@ -50,7 +50,28 @@
     "statusAvailable": "사용 가능",
     "statusInstalled": "설치됨",
     "statusUpdate": "업데이트 가능",
-    "working": "처리 중"
+    "working": "처리 중",
+    "install": "설치",
+    "update": "업데이트",
+    "remove": "제거",
+    "modUrlPlaceholder": "HTTPS URL에서 MOD 설치",
+    "modUrlWarningTitle": "외부 MOD 검토",
+    "urlWarning": "이 URL은 공식 레지스트리에 속하지 않습니다. 검증이 완료될 때까지 패키지는 신뢰되지 않습니다({{url}}). 출처를 신뢰할 때만 계속하세요.",
+    "permissionWarningTitle": "MOD 권한 검토",
+    "permissionWarning": "이 MOD에는 실행 가능한 코드와 권한 요청이 포함되어 있습니다. 설치 전에 레지스트리 항목을 검토하세요.",
+    "confirmPermissions": "검토 후 설치",
+    "recommendations": {
+      "vision": "비전",
+      "memory": "메모리",
+      "mcp": "MCP: {{name}}",
+      "bot": "봇: {{name}}"
+    },
+    "errors": {
+      "incompatible": "이 패키지는 현재 엔진과 호환되지 않습니다. 호환 범위를 확인하고 다른 버전을 선택하세요.",
+      "validation": "패키지 검증에 실패했습니다. 소스와 체크섬을 확인한 후 다시 시도하세요.",
+      "download": "다운로드에 실패했습니다. 연결을 확인한 후 다시 시도하세요.",
+      "generic": "콘텐츠 작업에 실패했습니다. 패키지를 확인한 후 다시 시도하세요."
+    }
   },
     "common": {
         "actions": {

@@ -50,7 +50,28 @@
     "statusAvailable": "可安裝",
     "statusInstalled": "已安裝",
     "statusUpdate": "有可用更新",
-    "working": "處理中"
+    "working": "處理中",
+    "install": "安裝",
+    "update": "更新",
+    "remove": "移除",
+    "modUrlPlaceholder": "從 HTTPS 位址安裝 MOD",
+    "modUrlWarningTitle": "檢查外部 MOD",
+    "urlWarning": "此位址不屬於官方註冊表。通過驗證前，內容包皆不受信任（{{url}}）。只有在信任來源時才繼續。",
+    "permissionWarningTitle": "檢查 MOD 權限",
+    "permissionWarning": "此 MOD 包含可執行程式碼並要求權限。安裝前請檢查註冊表項目。",
+    "confirmPermissions": "檢查並安裝",
+    "recommendations": {
+      "vision": "視覺",
+      "memory": "記憶",
+      "mcp": "MCP：{{name}}",
+      "bot": "機器人：{{name}}"
+    },
+    "errors": {
+      "incompatible": "此內容包與目前引擎不相容。請檢查相容範圍並選擇其他版本。",
+      "validation": "內容包驗證失敗。請檢查來源與校驗碼後重試。",
+      "download": "下載失敗。請檢查網路連線後重試。",
+      "generic": "內容操作失敗。請檢查內容包後重試。"
+    }
   },
     "common": {
         "actions": {

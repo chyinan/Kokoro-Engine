@@ -50,7 +50,28 @@
     "statusAvailable": "利用可能",
     "statusInstalled": "インストール済み",
     "statusUpdate": "更新あり",
-    "working": "処理中"
+    "working": "処理中",
+    "install": "インストール",
+    "update": "更新",
+    "remove": "削除",
+    "modUrlPlaceholder": "HTTPS URL から MOD をインストール",
+    "modUrlWarningTitle": "外部 MOD を確認",
+    "urlWarning": "この URL は公式レジストリの一部ではありません。検証が成功するまでパッケージは信頼されません（{{url}}）。信頼できる場合のみ続行してください。",
+    "permissionWarningTitle": "MOD の権限を確認",
+    "permissionWarning": "この MOD には実行可能コードと権限要求が含まれます。インストール前に登録情報を確認してください。",
+    "confirmPermissions": "確認してインストール",
+    "recommendations": {
+      "vision": "ビジョン",
+      "memory": "メモリ",
+      "mcp": "MCP: {{name}}",
+      "bot": "ボット: {{name}}"
+    },
+    "errors": {
+      "incompatible": "このパッケージは現在のエンジンと互換性がありません。互換範囲を確認して別のバージョンを選んでください。",
+      "validation": "パッケージの検証に失敗しました。ソースとチェックサムを確認してから再試行してください。",
+      "download": "ダウンロードに失敗しました。接続を確認して再試行してください。",
+      "generic": "コンテンツ操作に失敗しました。パッケージを確認して再試行してください。"
+    }
   },
     "common": {
         "actions": {

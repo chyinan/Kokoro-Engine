@@ -51,8 +51,10 @@ const mod: RegistryEntry = {
 function deps(overrides: Partial<ContentLibraryDependencies> = {}): ContentLibraryDependencies {
   return {
     listRegistry: vi.fn(async () => ({ schema_version: 1, registry_version: 1, entries: [character, mod] })),
+    listInstalled: vi.fn(async () => []),
     installCharacter: vi.fn(async () => ({ id: "kokoro", version: "1.0.0", name: "Kokoro", trust: "official", package_dir: "" })),
     installMod: vi.fn(async () => undefined),
+    installModFromUrl: vi.fn(async () => undefined),
     update: vi.fn(async () => undefined),
     remove: vi.fn(async () => undefined),
     ...overrides,
@@ -115,7 +117,12 @@ describe("ContentLibrary", () => {
     const update = vi.fn(async () => undefined);
     const { container, dependencies, root } = renderLibrary({
       installedVersions: { kokoro: "0.9.0" },
-      dependencies: deps({ installCharacter, removeCharacter, update }),
+      dependencies: deps({
+        installCharacter,
+        removeCharacter,
+        update,
+        listInstalled: vi.fn(async () => [{ content_type: "character" as const, id: "kokoro", version: "0.9.0" }]),
+      }),
     });
     await act(async () => { await Promise.resolve(); });
     click(container, '[data-content-action="update:kokoro"]');
@@ -179,6 +186,58 @@ describe("ContentLibrary", () => {
     await act(async () => { await Promise.resolve(); });
     expect(listRegistry).toHaveBeenCalledTimes(2);
     expect(container.textContent).toContain("Kokoro");
+    act(() => root.unmount());
+  });
+
+  it("requires explicit permission confirmation before installing a registry MOD", async () => {
+    const installMod = vi.fn(async (_entry: Readonly<RegistryEntry>, _permissionConfirmed: boolean) => undefined);
+    const { container, root } = renderLibrary({
+      dependencies: deps({ installMod }),
+    });
+    await act(async () => { await Promise.resolve(); });
+    click(container, '[data-content-tab="mod"]');
+    click(container, '[data-content-action="install:night-theme"]');
+    expect(container.textContent).toContain("permission");
+    expect(installMod).not.toHaveBeenCalled();
+    click(container, '[data-content-action="confirm-permission"]');
+    await act(async () => { await Promise.resolve(); });
+    expect(installMod).toHaveBeenCalledWith(mod, true, undefined);
+    act(() => root.unmount());
+  });
+
+  it("uses the active MOD tab for URL installs and keeps the warning separate", async () => {
+    const installModFromUrl = vi.fn(async (_url: string, _permissionConfirmed: boolean) => undefined);
+    const { container, root } = renderLibrary({ dependencies: deps({ installModFromUrl }) });
+    await act(async () => { await Promise.resolve(); });
+    click(container, '[data-content-tab="mod"]');
+    const input = container.querySelector<HTMLInputElement>("[data-content-url-input]");
+    expect(input).not.toBeNull();
+    act(() => {
+      if (input) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        setter?.call(input, "https://community.example/theme.zip");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    click(container, '[data-content-action="install-url"]');
+    expect(container.textContent).toContain("untrusted");
+    expect(installModFromUrl).not.toHaveBeenCalled();
+    click(container, '[data-content-action="confirm-url"]');
+    await act(async () => { await Promise.resolve(); });
+    expect(installModFromUrl).toHaveBeenCalledWith("https://community.example/theme.zip", true);
+    act(() => root.unmount());
+  });
+
+  it("hydrates installed packages from authoritative state after restart", async () => {
+    const listInstalled = vi.fn(async () => [
+      { content_type: "mod" as const, id: "night-theme", version: "1.0.0" },
+    ]);
+    const { container, root } = renderLibrary({ dependencies: deps({ listInstalled }) });
+    await act(async () => { await Promise.resolve(); });
+    click(container, '[data-content-tab="mod"]');
+    expect(container.textContent).toContain("installed");
+    expect(listInstalled).toHaveBeenCalledTimes(1);
     act(() => root.unmount());
   });
 });

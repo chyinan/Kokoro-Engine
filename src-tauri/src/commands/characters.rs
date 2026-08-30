@@ -264,6 +264,30 @@ pub(crate) async fn recover_committed_character_runtime_for_startup(
         .await
 }
 
+pub(crate) async fn activate_character_for_package_removal(
+    coordinator: &ActivationCoordinator,
+    orchestrator: &AIOrchestrator,
+    app_data: &Path,
+    character_id: &str,
+) -> Result<CommittedCharacterRuntime, KokoroError> {
+    let backend = OrchestratorActivationBackend {
+        orchestrator,
+        app_data: app_data.to_path_buf(),
+    };
+    let tts_config = crate::tts::config::load_config(&app_data.join("tts_config.json"));
+    let token = coordinator
+        .prepare_with_package_root(
+            &orchestrator.db,
+            &app_data.join("characters"),
+            character_id,
+            &tts_config,
+            &allowlisted_local_tts_presets(),
+            &backend,
+        )
+        .await?;
+    coordinator.commit(&orchestrator.db, token, &backend).await
+}
+
 #[tauri::command]
 pub async fn create_character(
     request: CreateCharacterRequest,

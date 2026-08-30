@@ -37,7 +37,7 @@ const BLOCKED_NAMES = new Set([
   'credentials.json',
   'secrets.json',
 ]);
-const BLOCKED_EXTENSIONS = new Set([
+const NATIVE_EXECUTABLE_EXTENSIONS = new Set([
   '.exe',
   '.dll',
   '.so',
@@ -46,10 +46,8 @@ const BLOCKED_EXTENSIONS = new Set([
   '.cmd',
   '.ps1',
   '.sh',
-  '.js',
-  '.mjs',
-  '.cjs',
 ]);
+const CHARACTER_SCRIPT_EXTENSIONS = new Set(['.js', '.mjs', '.cjs']);
 
 function invalid(message) {
   return { valid: false, error: message };
@@ -85,11 +83,27 @@ function isValidHttpsUrl(value) {
   }
 }
 
+function isSafePreviewReference(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 512) return false;
+  if (value.startsWith('https://')) {
+    try {
+      const parsed = new URL(value);
+      return parsed.protocol === 'https:' && parsed.hostname !== '' && parsed.username === '' && parsed.password === '';
+    } catch {
+      return false;
+    }
+  }
+  if (value.startsWith('/') || value.startsWith('//') || value.includes('\\') || value.includes(':')) return false;
+  return value.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..');
+}
+
 function validateRecommendations(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   if (typeof value.vision !== 'boolean' || typeof value.memory !== 'boolean') return false;
   for (const key of ['mcp_servers', 'bot_platforms']) {
-    if (!Array.isArray(value[key]) || value[key].some(item => typeof item !== 'string' || !/^[a-z0-9][a-z0-9._-]*$/i.test(item))) {
+    if (!Array.isArray(value[key])
+      || new Set(value[key]).size !== value[key].length
+      || value[key].some(item => typeof item !== 'string' || !/^[a-z0-9][a-z0-9._-]*$/i.test(item))) {
       return false;
     }
   }
@@ -118,10 +132,14 @@ export function validateRegistryEntry(entry) {
   if (!SHA256_PATTERN.test(entry.sha256)) return invalid('invalid sha256');
   if (!TRUST_LABELS.has(entry.trust)) return invalid('invalid trust label');
   if (!isValidHttpsUrl(entry.trust_source)) return invalid('invalid trust_source');
+  const preview = entry.preview ?? [];
+  if (!Array.isArray(preview) || preview.some(value => !isSafePreviewReference(value))) return invalid('invalid preview reference');
   const official = normalizeTrustSource(entry.trust_source);
   if (entry.trust === 'official' && (official.trust !== 'official' || entry.registry_identity !== OFFICIAL_REGISTRY_IDENTITY)) return invalid('official trust requires canonical registry identity');
   if (entry.trust !== 'official' && entry.registry_identity !== null && entry.registry_identity !== undefined) return invalid('non-official entry cannot claim registry identity');
-  if (!Array.isArray(entry.permissions) || entry.permissions.some(permission => typeof permission !== 'string' || !PERMISSIONS.has(permission))) return invalid('invalid permissions');
+  if (!Array.isArray(entry.permissions)
+    || new Set(entry.permissions).size !== entry.permissions.length
+    || entry.permissions.some(permission => typeof permission !== 'string' || !PERMISSIONS.has(permission))) return invalid('invalid permissions');
   if (!validateRecommendations(entry.recommendations)) return invalid('invalid recommendations');
   return { valid: true };
 }
@@ -130,7 +148,7 @@ export function validateRegistryEntry(entry) {
 export function validateRegistryIndex(index) {
   if (index === null || typeof index !== 'object' || Array.isArray(index)) return invalid('index must be an object');
   if (index.schema_version !== REGISTRY_SCHEMA_VERSION || index.registry_version !== REGISTRY_VERSION) return invalid('unsupported registry version');
-  if (!Array.isArray(index.entries)) return invalid('entries must be an array');
+  if (!Array.isArray(index.entries) || index.entries.length === 0) return invalid('entries must contain at least one item');
   const seen = new Set();
   for (const entry of index.entries) {
     const result = validateRegistryEntry(entry);
@@ -257,7 +275,7 @@ export function verifyRegistryArtifact(entry, archive) {
   return { valid: true };
 }
 
-async function collectFiles(root) {
+async function collectFiles(root, contentType) {
   const result = [];
   async function walk(directory) {
     const entries = await readdir(directory, { withFileTypes: true });
@@ -265,10 +283,16 @@ async function collectFiles(root) {
     for (const entry of entries) {
       const fullPath = join(directory, entry.name);
       if (entry.isDirectory()) await walk(fullPath);
+      else if (entry.isSymbolicLink() || !entry.isFile()) throw new Error(`registry source contains symlink or non-regular file: ${relative(root, fullPath)}`);
       else {
         const relativePath = relative(root, fullPath).split(sep).join('/');
         const lowerName = entry.name.toLowerCase();
-        if (BLOCKED_NAMES.has(lowerName) || BLOCKED_EXTENSIONS.has(extname(lowerName))) throw new Error(`blocked executable or secret resource: ${relativePath}`);
+        const extension = extname(lowerName);
+        if (BLOCKED_NAMES.has(lowerName)
+          || NATIVE_EXECUTABLE_EXTENSIONS.has(extension)
+          || (contentType === 'character' && CHARACTER_SCRIPT_EXTENSIONS.has(extension))) {
+          throw new Error(`blocked executable or secret resource: ${relativePath}`);
+        }
         result.push({ name: relativePath, data: await readFile(fullPath) });
       }
     }
@@ -284,8 +308,8 @@ async function readManifest(root, contentType) {
   return value;
 }
 
-async function buildArchive(root, outputPath) {
-  const files = await collectFiles(root);
+async function buildArchive(root, outputPath, contentType) {
+  const files = await collectFiles(root, contentType);
   files.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
   const archive = zipStored(files);
   await writeFile(outputPath, archive);
@@ -340,9 +364,10 @@ export async function buildContentRegistry({ root = resolve(fileURLToPath(new UR
     const children = (await readdir(sourceRoot, { withFileTypes: true })).filter(entry => entry.isDirectory()).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
     for (const child of children) {
       const source = join(sourceRoot, child.name);
+      if (contentType === 'character' && child.name.toLowerCase() === 'template') continue;
       const manifest = await readManifest(source, contentType);
       const archivePath = join(packageRoot, `${manifest.id}-${manifest.version}.zip`);
-      const archive = await buildArchive(source, archivePath);
+      const archive = await buildArchive(source, archivePath, contentType);
       const entry = registryEntry(manifest, contentType, archive, sourceUrl, packageBaseUrl);
       const artifact = verifyRegistryArtifact(entry, archive);
       if (!artifact.valid) throw new Error(`generated archive ${child.name} is invalid: ${artifact.error}`);

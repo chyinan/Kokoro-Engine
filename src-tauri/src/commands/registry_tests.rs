@@ -1,9 +1,12 @@
 // pattern: Imperative Shell
 
 use crate::characters::catalog::CharacterCatalog;
+use crate::commands::registry::append_limited_chunk;
 use crate::registry::client::{
-    install_trust, verify_character_archive, InstallTrust, RegistryClientError, MAX_ARCHIVE_BYTES,
+    install_trust, verify_character_archive, verify_registry_entry_archive, InstallTrust,
+    RegistryClientError, MAX_ARCHIVE_BYTES,
 };
+use crate::registry::manifest::{RegistryEntry, RegistryRecommendations};
 use semver::Version;
 use std::io::{Cursor, Write};
 use tempfile::TempDir;
@@ -50,6 +53,32 @@ fn checksum(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn registry_entry(bytes: &[u8], engine_version: &str) -> RegistryEntry {
+    RegistryEntry {
+        content_type: "character".to_string(),
+        id: "remote-character".to_string(),
+        name: "Remote Character".to_string(),
+        version: "1.0.0".to_string(),
+        author: "Kokoro".to_string(),
+        description: "A test character".to_string(),
+        preview: Vec::new(),
+        engine_version: engine_version.to_string(),
+        download_url: "https://example.test/remote-character-1.0.0.zip".to_string(),
+        archive_size: bytes.len() as u64,
+        sha256: checksum(bytes),
+        trust: "community".to_string(),
+        trust_source: "https://example.test/index.json".to_string(),
+        registry_identity: None,
+        permissions: Vec::new(),
+        recommendations: RegistryRecommendations {
+            vision: false,
+            memory: false,
+            mcp_servers: Vec::new(),
+            bot_platforms: Vec::new(),
+        },
+    }
+}
+
 #[test]
 fn rejects_checksum_mismatch_before_install() {
     let bytes = archive(None, ">=0.3.0, <0.4.0");
@@ -75,6 +104,15 @@ fn rejects_incompatible_manifest() {
     )
     .unwrap_err();
     assert!(matches!(error, RegistryClientError::Incompatible(_)));
+}
+
+#[test]
+fn rejects_registry_entry_with_engine_range_different_from_manifest() {
+    let bytes = archive(None, ">=0.3.0, <0.4.0");
+    let entry = registry_entry(&bytes, ">=0.3.1, <0.4.0");
+    let error = verify_registry_entry_archive(&bytes, &entry, &Version::parse("0.3.1").unwrap())
+        .unwrap_err();
+    assert!(matches!(error, RegistryClientError::MetadataMismatch(_)));
 }
 
 #[test]
@@ -123,6 +161,14 @@ fn rejects_archives_over_download_size_limit() {
 }
 
 #[test]
+fn cumulative_download_limit_is_checked_before_buffer_growth() {
+    let mut buffer = Vec::new();
+    assert!(append_limited_chunk(&mut buffer, b"1234", 5).is_ok());
+    assert!(append_limited_chunk(&mut buffer, b"56", 5).is_err());
+    assert_eq!(buffer, b"1234");
+}
+
+#[test]
 fn custom_registry_and_url_installs_cannot_claim_official() {
     assert_eq!(
         install_trust("https://example.test/index.json", true),
@@ -165,6 +211,32 @@ fn atomic_install_and_remove_preserve_user_data_and_settings() {
     );
     assert_eq!(std::fs::read(&settings).unwrap(), b"user override");
     assert!(!temp
+        .path()
+        .join("characters/remote-character/1.0.0")
+        .exists());
+}
+
+#[test]
+fn active_package_removal_stages_before_fallback_can_be_persisted_and_rolls_back() {
+    let temp = TempDir::new().unwrap();
+    let catalog = CharacterCatalog::new(
+        temp.path().join("characters"),
+        Version::parse("0.3.1").unwrap(),
+    );
+    catalog
+        .install_zip(Cursor::new(archive(None, ">=0.3.0, <0.4.0")))
+        .unwrap();
+
+    let staged = catalog
+        .stage_package_removal("remote-character", "1.0.0")
+        .unwrap()
+        .expect("installed active package should be staged");
+    assert!(!temp
+        .path()
+        .join("characters/remote-character/1.0.0")
+        .exists());
+    staged.rollback().unwrap();
+    assert!(temp
         .path()
         .join("characters/remote-character/1.0.0")
         .exists());

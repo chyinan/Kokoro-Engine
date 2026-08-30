@@ -12,7 +12,7 @@ use crate::characters::{MAX_PACKAGE_FILE_COUNT, MAX_PACKAGE_UNCOMPRESSED_BYTES};
 use crate::registry::manifest::{
     RegistryEntry, RegistryIndex, OFFICIAL_REGISTRY_IDENTITY, OFFICIAL_REGISTRY_URL,
 };
-use semver::Version;
+use semver::{Version, VersionReq};
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
@@ -203,6 +203,14 @@ pub fn verify_registry_entry_archive(
     if entry.content_type != "character" {
         return Err(RegistryClientError::WrongContentType);
     }
+    let entry_requirement = VersionReq::parse(&entry.engine_version)
+        .map_err(|error| RegistryClientError::Incompatible(error.to_string()))?;
+    if !entry_requirement.matches(engine_version) {
+        return Err(RegistryClientError::Incompatible(format!(
+            "registry entry requires engine `{}`, current engine is `{engine_version}`",
+            entry.engine_version
+        )));
+    }
     let package = verify_character_archive(
         bytes,
         Some((entry.archive_size, entry.sha256.clone())),
@@ -212,6 +220,12 @@ pub fn verify_registry_entry_archive(
         return Err(RegistryClientError::MetadataMismatch(format!(
             "entry {}@{} does not match manifest {}@{}",
             entry.id, entry.version, package.manifest.id, package.manifest.version
+        )));
+    }
+    if package.manifest.engine_version != entry.engine_version {
+        return Err(RegistryClientError::MetadataMismatch(format!(
+            "entry engine range `{}` does not match manifest engine range `{}`",
+            entry.engine_version, package.manifest.engine_version
         )));
     }
     Ok(package)

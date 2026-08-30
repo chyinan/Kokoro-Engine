@@ -31,7 +31,16 @@
         "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$" },
         "author": { "type": "string", "minLength": 1 },
         "description": { "type": "string", "minLength": 1 },
-        "preview": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "preview": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "string", "format": "uri", "pattern": "^https://[^/@?#]+(?:/|$)" },
+              { "type": "string", "pattern": "^(?!/)(?!//)(?!.*(?:^|/)\\.\\.?/)(?!.*(?:^|/)\\.\\.?$)(?!.*\\\\)(?!.*:)[^\\s]+$" }
+            ]
+          },
+          "uniqueItems": true
+        },
         "engine_version": { "type": "string", "minLength": 1 },
         "download_url": { "type": "string", "format": "uri", "pattern": "^https://" },
         "archive_size": { "type": "integer", "minimum": 1 },

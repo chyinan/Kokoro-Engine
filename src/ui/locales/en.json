@@ -50,7 +50,28 @@
     "statusAvailable": "available",
     "statusInstalled": "installed",
     "statusUpdate": "update available",
-    "working": "Working"
+    "working": "Working",
+    "install": "Install",
+    "update": "Update",
+    "remove": "Remove",
+    "modUrlPlaceholder": "Install a MOD from an HTTPS URL",
+    "modUrlWarningTitle": "Review external MOD",
+    "urlWarning": "This URL is not part of the official registry. The package is untrusted until validation succeeds ({{url}}). Continue only if you trust the source.",
+    "permissionWarningTitle": "Review MOD permissions",
+    "permissionWarning": "This MOD contains executable code and requests permissions. Review the registry entry before installing.",
+    "confirmPermissions": "Review and install",
+    "recommendations": {
+      "vision": "Vision",
+      "memory": "Memory",
+      "mcp": "MCP: {{name}}",
+      "bot": "Bot: {{name}}"
+    },
+    "errors": {
+      "incompatible": "This package is not compatible with the current engine. Review the compatibility range and choose another version.",
+      "validation": "Package validation failed. Check the source and checksum, then review before retrying.",
+      "download": "Download failed. Check your connection and retry.",
+      "generic": "Content operation failed. Review the package and retry."
+    }
   },
     "common": {
         "actions": {

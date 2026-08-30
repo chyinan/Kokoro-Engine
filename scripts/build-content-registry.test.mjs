@@ -1,13 +1,23 @@
 // pattern: Functional Core
 
-import { describe, expect, it } from 'vitest';
+import { mkdtemp, mkdir, symlink, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
+  buildContentRegistry,
   OFFICIAL_REGISTRY_IDENTITY,
   OFFICIAL_REGISTRY_URL,
   normalizeTrustSource,
   validateRegistryEntry,
   validateRegistryIndex,
 } from './build-content-registry.mjs';
+
+const temporaryRoots = [];
+
+afterEach(async () => {
+  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
 
 const archive = {
   content_type: 'character',
@@ -45,14 +55,24 @@ describe('content registry contract', () => {
     expect(validateRegistryEntry({ ...archive, download_url: `${OFFICIAL_REGISTRY_URL}/../packages/kokoro-1.0.0.tar.gz` }).valid).toBe(false);
   });
 
+  it('accepts only safe preview references', () => {
+    expect(validateRegistryEntry({ ...archive, preview: ['https://cdn.example.test/kokoro.webp'] })).toEqual({ valid: true });
+    expect(validateRegistryEntry({ ...archive, preview: ['assets/kokoro.webp'] })).toEqual({ valid: true });
+    expect(validateRegistryEntry({ ...archive, preview: ['javascript:alert(1)'] }).valid).toBe(false);
+    expect(validateRegistryEntry({ ...archive, preview: ['http://cdn.example.test/kokoro.webp'] }).valid).toBe(false);
+    expect(validateRegistryEntry({ ...archive, preview: ['../outside.webp'] }).valid).toBe(false);
+  });
+
   it('validates checksum, archive size, trust label, permissions, and recommendations', () => {
     for (const field of ['sha256', 'archive_size', 'trust']) {
       const invalid = { ...archive, [field]: field === 'archive_size' ? 0 : field === 'trust' ? 'community' : 'not-a-checksum' };
       expect(validateRegistryEntry(invalid).valid).toBe(false);
     }
     expect(validateRegistryEntry({ ...archive, permissions: ['tts', 'system.info'] }).valid).toBe(true);
+    expect(validateRegistryEntry({ ...archive, permissions: ['tts', 'tts'] }).valid).toBe(false);
     expect(validateRegistryEntry({ ...archive, permissions: ['exec.shell'] }).valid).toBe(false);
     expect(validateRegistryEntry({ ...archive, recommendations: { vision: 'yes' } }).valid).toBe(false);
+    expect(validateRegistryEntry({ ...archive, recommendations: { ...archive.recommendations, mcp_servers: ['calendar', 'calendar'] } }).valid).toBe(false);
   });
 
   it('rejects duplicate IDs within a content type', () => {
@@ -73,5 +93,59 @@ describe('content registry contract', () => {
       registry_identity: null,
     });
     expect(validateRegistryEntry({ ...archive, trust: 'official', trust_source: 'https://mirror.example.test/index.json' }).valid).toBe(false);
+  });
+
+  it('allows documented MOD JavaScript but rejects character scripts', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kokoro-registry-policy-'));
+    temporaryRoots.push(root);
+    await mkdir(join(root, 'mods', 'script-mod'), { recursive: true });
+    await writeFile(join(root, 'mods', 'script-mod', 'mod.json'), JSON.stringify({
+      id: 'script-mod', name: 'Script Mod', version: '1.0.0', description: 'A documented MOD script',
+      engine_version: '>=0.3.1, <0.4.0', scripts: ['main.js'], permissions: [],
+    }));
+    await writeFile(join(root, 'mods', 'script-mod', 'main.js'), 'export function activate() {}\n');
+    const index = await buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' });
+    expect(index.entries).toHaveLength(1);
+    expect(index.entries[0].content_type).toBe('mod');
+
+    await mkdir(join(root, 'characters', 'script-character'), { recursive: true });
+    await writeFile(join(root, 'characters', 'script-character', 'character.json'), JSON.stringify({
+      schema_version: 1, id: 'script-character', version: '1.0.0', name: 'Script Character',
+      description: 'A character', author: 'Kokoro', license: 'MIT', engine_version: '>=0.3.1, <0.4.0',
+      persona: 'Be helpful.', greeting: 'Hello.',
+    }));
+    await writeFile(join(root, 'characters', 'script-character', 'script.js'), 'alert(1);\n');
+    await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+      .rejects.toThrow(/blocked|unsupported|executable/i);
+  });
+
+  it('rejects a symlink that would include content outside the package', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kokoro-registry-symlink-'));
+    temporaryRoots.push(root);
+    const packageRoot = join(root, 'mods', 'linked-mod');
+    await mkdir(packageRoot, { recursive: true });
+    await writeFile(join(root, 'outside.txt'), 'must not be archived');
+    await writeFile(join(packageRoot, 'mod.json'), JSON.stringify({
+      id: 'linked-mod', name: 'Linked Mod', version: '1.0.0', description: 'A MOD',
+      engine_version: '>=0.3.1, <0.4.0', permissions: [],
+    }));
+    await symlink(join(root, 'outside.txt'), join(packageRoot, 'linked.txt'), 'file');
+    await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+      .rejects.toThrow(/symlink|link|outside/i);
+  });
+
+  it('does not publish the creator template directory by default', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kokoro-registry-template-'));
+    temporaryRoots.push(root);
+    await mkdir(join(root, 'characters', 'template'), { recursive: true });
+    await writeFile(join(root, 'characters', 'template', 'character.json'), '{ this is documentation scaffolding, not a package }');
+    await mkdir(join(root, 'characters', 'kokoro'), { recursive: true });
+    await writeFile(join(root, 'characters', 'kokoro', 'character.json'), JSON.stringify({
+      schema_version: 1, id: 'kokoro', version: '1.0.0', name: 'Kokoro',
+      description: 'Built-in character', author: 'Kokoro', license: 'MIT', engine_version: '>=0.3.1, <0.4.0',
+      persona: 'Kokoro', greeting: 'Hello',
+    }));
+    const index = await buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' });
+    expect(index.entries.map((entry) => entry.id)).toEqual(['kokoro']);
   });
 });

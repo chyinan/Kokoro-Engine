@@ -10,7 +10,7 @@ Do not change a `Pending` status until a maintainer has the stated evidence.
 | --- | --- |
 | Official JSON URL | `https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/v1/index.json` |
 | Official registry identity | `github.com/chyinan/Kokoro-Engine/registry-v1` |
-| Source index | `registry/v1/index.json` at commit `148af89` |
+| Source index | `registry/v1/index.json` at the `Harden registry content flows` working tree checkpoint |
 | Review date | 2026-08-30 |
 | External publication owner | Kokoro Engine maintainer (GitHub credentials required) |
 
@@ -22,17 +22,17 @@ been uploaded or fetched successfully.
 
 | Type | ID/version | Official archive URL | Archive size | SHA-256 |
 | --- | --- | --- | ---: | --- |
-| Character | `kokoro` 1.0.0 | `https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/kokoro-1.0.0.zip` | 2585 | `7392c1266db926138072dab774bd33fccb59279c0d8c8a4f6b7f1336838159e8` |
-| Character | `pico` 1.0.0 | `https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/pico-1.0.0.zip` | 2636 | `06d75eb065ad353ea431f8faa7fb3e9667b775b7e8f4ae9155901a3ff1a02e06` |
-| Character | `seren` 1.0.0 | `https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/seren-1.0.0.zip` | 2916 | `5b4e6e153f764bffc272658d289796e9da6fefe0868926bc46d75fb9f0e6a134` |
-| MOD | `genshin-theme` 1.0.0 | `https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/genshin-theme-1.0.0.zip` | 3583358 | `25ad6d262475170bf991f24fc367a1b780f6fe441eb352b1a4eec17605fbd3cb` |
+| Character | `kokoro` 1.0.0 | `https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/kokoro-1.0.0.zip` | 2585 | `8c81ba5a0e11ce8b2ce9b26513a656323e21257464a5740c0cd70869ed2d57b9` |
+| Character | `pico` 1.0.0 | `https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/pico-1.0.0.zip` | 2636 | `6d4c3bc7bf2e5605183f76d1ab7efaf3beec4fc923829053d101eb1c5619134c` |
+| Character | `seren` 1.0.0 | `https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/seren-1.0.0.zip` | 2916 | `371da43c12acc2bcd77fd6c2fadfb8d1773c8cbba0f8d00af09cc271e22d5b61` |
+| MOD | `genshin-theme` 1.0.0 | `https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/genshin-theme-1.0.0.zip` | 3583367 | `3bc1e51a121c53699562a04cd14768035ff92e519c901e37fbdd662c217502df` |
 
 ## Evidence status
 
 | Check | Status | Owner | Date | Evidence and next action |
 | --- | --- | --- | --- | --- |
-| Deterministic local registry generation | Pass | Task 5 maintainer | 2026-08-30 | `node scripts/build-content-registry.mjs` generated 4 entries at commit `148af89`, before the documentation scaffold was added. The generated archive metadata matches the committed index. |
-| Registry contract tests | Pass | Task 5 maintainer | 2026-08-30 | `npm test -- scripts/build-content-registry.test.mjs`: 1 file, 5 tests passed. |
+| Deterministic local registry generation | Pass | Task 5 maintainer | 2026-08-30 | `node scripts/build-content-registry.mjs` generated 4 entries. The generated archive metadata matches the working-tree index, including the compatible Genshin MOD engine range. |
+| Registry contract tests | Pass | Task 5 maintainer | 2026-08-30 | `npm test -- scripts/build-content-registry.test.mjs`: 1 file, 9 tests passed. |
 | Official JSON publication | Pending | Kokoro Engine maintainer | Pending | No GitHub branch/release upload was performed in this task. Publish the index and record the commit or release URL. |
 | Official archive publication | Pending | Kokoro Engine maintainer | Pending | The four archive URLs and checksums above are copied from the local index. Fetch each URL from a clean environment after publication and record HTTP status, byte count, and digest. |
 | Browse smoke test | Pending | Kokoro Engine maintainer | Pending | Requires a published index and a running Kokoro application. Record registry endpoint, engine version, date, and screenshot or test log after a maintainer runs it. |

@@ -8,19 +8,24 @@
 
 use crate::characters::catalog::{CatalogEntry, CharacterCatalog};
 use crate::characters::manifest::CharacterTemplateManifest;
+use crate::commands::characters::activate_character_for_package_removal;
 use crate::error::KokoroError;
 use crate::registry::client::{
     install_trust, normalize_registry_index, verify_character_archive,
     verify_registry_entry_archive, InstallTrust, RegistryClientError, MAX_ARCHIVE_BYTES,
 };
 use crate::registry::manifest::{RegistryIndex, OFFICIAL_REGISTRY_URL};
+use futures::StreamExt;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use tauri::{command, AppHandle, Manager};
+use tauri::{command, AppHandle, Manager, State};
 use uuid::Uuid;
+
+const MAX_REGISTRY_INDEX_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstalledCharacterPackage {
@@ -55,7 +60,7 @@ fn catalog_for_app(app: &AppHandle) -> Result<CharacterCatalog, KokoroError> {
     ))
 }
 
-fn normalize_registry_url(url: Option<String>) -> Result<String, KokoroError> {
+pub(crate) fn normalize_registry_url(url: Option<String>) -> Result<String, KokoroError> {
     let value = url.unwrap_or_else(|| OFFICIAL_REGISTRY_URL.to_string());
     let parsed = reqwest::Url::parse(&value)
         .map_err(|error| KokoroError::Validation(format!("invalid registry URL: {error}")))?;
@@ -67,7 +72,7 @@ fn normalize_registry_url(url: Option<String>) -> Result<String, KokoroError> {
     Ok(value)
 }
 
-async fn fetch_bytes(url: &str) -> Result<Vec<u8>, KokoroError> {
+pub(crate) async fn fetch_bytes(url: &str) -> Result<Vec<u8>, KokoroError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|error| KokoroError::Validation(format!("invalid download URL: {error}")))?;
     if parsed.scheme() != "https" || parsed.username() != "" || parsed.password().is_some() {
@@ -94,18 +99,10 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, KokoroError> {
             "archive exceeds download size limit of {MAX_ARCHIVE_BYTES} bytes"
         )));
     }
-    let bytes = response.bytes().await.map_err(|error| {
-        KokoroError::ExternalService(format!("failed to read registry content: {error}"))
-    })?;
-    if bytes.len() as u64 > MAX_ARCHIVE_BYTES {
-        return Err(KokoroError::Validation(format!(
-            "archive exceeds download size limit of {MAX_ARCHIVE_BYTES} bytes"
-        )));
-    }
-    Ok(bytes.to_vec())
+    read_response_bytes(response, MAX_ARCHIVE_BYTES, "archive").await
 }
 
-async fn fetch_index(source_url: &str) -> Result<RegistryIndex, KokoroError> {
+pub(crate) async fn fetch_index(source_url: &str) -> Result<RegistryIndex, KokoroError> {
     let json = fetch_text(source_url).await?;
     normalize_registry_index(&json, source_url).map_err(client_error)
 }
@@ -129,9 +126,51 @@ async fn fetch_text(url: &str) -> Result<String, KokoroError> {
         .map_err(|error| {
             KokoroError::ExternalService(format!("registry index request failed: {error}"))
         })?;
-    response.text().await.map_err(|error| {
-        KokoroError::ExternalService(format!("failed to read registry index: {error}"))
+    let bytes = read_response_bytes(response, MAX_REGISTRY_INDEX_BYTES, "registry index").await?;
+    String::from_utf8(bytes).map_err(|error| {
+        KokoroError::Validation(format!("registry index is not valid UTF-8: {error}"))
     })
+}
+
+async fn read_response_bytes(
+    response: reqwest::Response,
+    limit: u64,
+    label: &str,
+) -> Result<Vec<u8>, KokoroError> {
+    if response.content_length().is_some_and(|size| size > limit) {
+        return Err(KokoroError::Validation(format!(
+            "{label} exceeds download size limit of {limit} bytes"
+        )));
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
+            KokoroError::ExternalService(format!("failed to read {label}: {error}"))
+        })?;
+        if append_limited_chunk(&mut bytes, &chunk, limit).is_err() {
+            return Err(KokoroError::Validation(format!(
+                "{label} exceeds download size limit of {limit} bytes"
+            )));
+        }
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn append_limited_chunk(
+    buffer: &mut Vec<u8>,
+    chunk: &[u8],
+    limit: u64,
+) -> Result<(), ()> {
+    let next_size = u64::try_from(buffer.len())
+        .ok()
+        .and_then(|size| size.checked_add(chunk.len() as u64))
+        .ok_or(())?;
+    if next_size > limit {
+        return Err(());
+    }
+    buffer.extend_from_slice(chunk);
+    Ok(())
 }
 
 fn persist_download_temp(bytes: &[u8]) -> Result<PathBuf, KokoroError> {
@@ -239,6 +278,7 @@ fn read_active_character_id(app_data: &Path) -> Option<String> {
 fn write_active_character_id(app_data: &Path, id: &str) -> Result<(), KokoroError> {
     let target = app_data.join("active_character_id.json");
     let temporary = app_data.join(format!(".active-character-{}.tmp", Uuid::new_v4()));
+    let backup = app_data.join(format!(".active-character-{}.backup", Uuid::new_v4()));
     fs::write(
         &temporary,
         serde_json::to_vec(&serde_json::json!({ "character_id": id }))?,
@@ -248,21 +288,72 @@ fn write_active_character_id(app_data: &Path, id: &str) -> Result<(), KokoroErro
             "failed to stage active character fallback: {error}"
         ))
     })?;
-    fs::rename(&temporary, &target).map_err(|error| {
+    if !target.exists() {
+        return fs::rename(&temporary, &target).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            KokoroError::Io(format!(
+                "failed to apply active character fallback: {error}"
+            ))
+        });
+    }
+    fs::rename(&target, &backup).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
         KokoroError::Io(format!(
+            "failed to stage active character fallback: {error}"
+        ))
+    })?;
+    if let Err(error) = fs::rename(&temporary, &target) {
+        let _ = fs::rename(&backup, &target);
+        let _ = fs::remove_file(&temporary);
+        return Err(KokoroError::Io(format!(
             "failed to apply active character fallback: {error}"
+        )));
+    }
+    fs::remove_file(&backup).map_err(|error| {
+        KokoroError::Io(format!(
+            "failed to finalize active character fallback: {error}"
         ))
     })
 }
 
-fn choose_fallback(catalog: &CharacterCatalog, removed_id: &str) -> Option<String> {
-    catalog
-        .discover()
-        .ok()?
+async fn active_character_uses_package(
+    pool: &SqlitePool,
+    active_id: Option<&str>,
+    package_id: &str,
+    package_version: &str,
+) -> Result<bool, KokoroError> {
+    let Some(active_id) = active_id else {
+        return Ok(false);
+    };
+    if active_id == package_id {
+        return Ok(true);
+    }
+    let origin = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT template_id, template_version FROM characters WHERE id = ?",
+    )
+    .bind(active_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(origin.is_some_and(|(template_id, template_version)| {
+        template_id.as_deref() == Some(package_id)
+            && template_version.as_deref() == Some(package_version)
+    }))
+}
+
+async fn choose_fallback(
+    pool: &SqlitePool,
+    removed_id: &str,
+    removed_version: &str,
+) -> Result<Option<String>, KokoroError> {
+    let characters = crate::commands::characters::list_characters_from_pool(pool).await?;
+    Ok(characters
         .into_iter()
-        .find(|entry| entry.manifest.id != removed_id)
-        .map(|entry| entry.manifest.id)
-        .or_else(|| Some("kokoro".to_string()).filter(|id| id != removed_id))
+        .find(|character| {
+            character.id != removed_id
+                && !(character.template_id.as_deref() == Some(removed_id)
+                    && character.template_version.as_deref() == Some(removed_version))
+        })
+        .map(|character| character.id))
 }
 
 #[command]
@@ -270,23 +361,79 @@ pub async fn remove_character_package(
     app: AppHandle,
     character_id: String,
     version: String,
+    coordinator: State<'_, crate::characters::activation::ActivationCoordinator>,
+    orchestrator: State<'_, crate::ai::context::AIOrchestrator>,
 ) -> Result<CharacterPackageRemoval, KokoroError> {
     let app_data = app_data_dir(&app)?;
     let catalog = CharacterCatalog::new(app_data.join("characters"), engine_version());
     let active = read_active_character_id(&app_data);
-    let fallback = if active.as_deref() == Some(character_id.as_str()) {
-        choose_fallback(&catalog, &character_id)
+    let is_active =
+        active_character_uses_package(&orchestrator.db, active.as_deref(), &character_id, &version)
+            .await?;
+    let staged = catalog
+        .stage_package_removal(&character_id, &version)
+        .map_err(|error| {
+            KokoroError::Validation(format!(
+                "failed to stage character package removal: {error}"
+            ))
+        })?;
+    let is_active = staged.is_some() && is_active;
+    let fallback = if is_active {
+        choose_fallback(&orchestrator.db, &character_id, &version).await?
     } else {
         None
     };
-    if let Some(id) = fallback.as_deref() {
-        write_active_character_id(&app_data, id)?;
+    let previous_active = active.clone();
+    let Some(staged) = staged else {
+        return Ok(CharacterPackageRemoval {
+            id: character_id,
+            version,
+            active_fallback: None,
+        });
+    };
+    if is_active {
+        let fallback_id = match fallback.as_deref() {
+            Some(id) => id,
+            None => {
+                let _ = staged.rollback();
+                return Err(KokoroError::Validation(
+                    "cannot remove active character package without a fallback instance"
+                        .to_string(),
+                ));
+            }
+        };
+        if let Err(error) = activate_character_for_package_removal(
+            &coordinator,
+            &orchestrator,
+            &app_data,
+            fallback_id,
+        )
+        .await
+        {
+            let _ = staged.rollback();
+            if let Some(previous) = previous_active.as_deref() {
+                let _ = write_active_character_id(&app_data, previous);
+            }
+            return Err(error);
+        }
     }
-    catalog
-        .remove_package(&character_id, &version)
-        .map_err(|error| {
-            KokoroError::Validation(format!("failed to remove character package: {error}"))
-        })?;
+    if let Err(error) = staged.finalize() {
+        if let Some(previous) = previous_active.as_deref() {
+            let _ = write_active_character_id(&app_data, previous);
+            if is_active {
+                let _ = activate_character_for_package_removal(
+                    &coordinator,
+                    &orchestrator,
+                    &app_data,
+                    previous,
+                )
+                .await;
+            }
+        }
+        return Err(KokoroError::Validation(format!(
+            "failed to remove character package: {error}"
+        )));
+    }
     Ok(CharacterPackageRemoval {
         id: character_id,
         version,

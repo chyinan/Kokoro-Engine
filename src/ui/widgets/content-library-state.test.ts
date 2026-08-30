@@ -10,6 +10,7 @@ import {
   getActionableContentError,
   getContentTrustLabel,
   getContentVersionState,
+  getSafePreviewUrl,
   getUrlInstallWarning,
   reduceContentLibraryState,
   selectRegistryEntries,
@@ -87,10 +88,44 @@ describe("content library state", () => {
     const warning = getUrlInstallWarning("https://community.example/kokoro.zip");
     expect(warning).toContain("untrusted");
     let state = createContentLibraryState();
-    state = reduceContentLibraryState(state, { type: "url-warning-opened", url: "https://community.example/kokoro.zip" });
-    expect(state.urlWarning).toBe("https://community.example/kokoro.zip");
+    state = reduceContentLibraryState(state, {
+      type: "url-warning-opened",
+      url: "https://community.example/kokoro.zip",
+      contentType: "character",
+    });
+    expect(state.urlWarning).toEqual({ url: "https://community.example/kokoro.zip", contentType: "character" });
     state = reduceContentLibraryState(state, { type: "url-warning-dismissed" });
     expect(state.urlWarning).toBeNull();
+  });
+
+  it("keeps URL installation scoped to the selected content tab", () => {
+    let state = createContentLibraryState();
+    state = reduceContentLibraryState(state, { type: "tab-selected", tab: "mod" });
+    state = reduceContentLibraryState(state, {
+      type: "url-warning-opened",
+      url: "https://community.example/theme.zip",
+      contentType: "mod",
+    });
+    expect(state.urlWarning).toEqual({ url: "https://community.example/theme.zip", contentType: "mod" });
+  });
+
+  it("refreshes installed versions from authoritative package state", () => {
+    let state = createContentLibraryState();
+    state = reduceContentLibraryState(state, {
+      type: "installed-refreshed",
+      packages: [
+        { contentType: "character", id: "kokoro", version: "1.0.0" },
+        { contentType: "mod", id: "night-theme", version: "2.0.0" },
+      ],
+    });
+    expect(state.installedVersions).toEqual({ kokoro: "1.0.0", "night-theme": "2.0.0" });
+  });
+
+  it("accepts only safe HTTPS preview URLs", () => {
+    expect(getSafePreviewUrl("https://cdn.example.test/avatar.webp")).toBe("https://cdn.example.test/avatar.webp");
+    expect(getSafePreviewUrl("http://cdn.example.test/avatar.webp")).toBeNull();
+    expect(getSafePreviewUrl("javascript:alert(1)")).toBeNull();
+    expect(getSafePreviewUrl("data:image/svg+xml,<svg/onload=alert(1)>")).toBeNull();
   });
 
   it("turns transport and compatibility failures into actionable recovery text", () => {

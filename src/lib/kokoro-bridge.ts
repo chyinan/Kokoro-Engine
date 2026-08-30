@@ -567,6 +567,22 @@ export async function installMod(filePath: string): Promise<ModManifest> {
     return invoke("install_mod", { filePath });
 }
 
+export type RegistryModInstallRequest = {
+    readonly entry: Readonly<RegistryEntry>;
+    readonly registryUrl?: string | null;
+    readonly permissionConfirmed: boolean;
+};
+
+export async function installModFromRegistry(
+    request: Readonly<RegistryModInstallRequest>,
+): Promise<ModManifest> {
+    return invoke<ModManifest>("install_mod_from_registry", {
+        entry: request.entry,
+        registryUrl: request.registryUrl ?? null,
+        permissionConfirmed: request.permissionConfirmed,
+    });
+}
+
 export async function getModTheme(): Promise<ModThemeJson | null> {
     return invoke("get_mod_theme");
 }
@@ -1888,6 +1904,28 @@ export async function restoreCharacterDefaults(
 
 export async function listCharacterTemplates(): Promise<Array<CharacterTemplateManifest>> {
     return invoke<Array<CharacterTemplateManifest>>("list_character_templates");
+}
+
+export type InstalledContentPackage = {
+    readonly content_type: "character" | "mod";
+    readonly id: string;
+    readonly version: string;
+};
+
+export async function listInstalledContent(): Promise<Array<InstalledContentPackage>> {
+    const [characters, mods] = await Promise.all([listCharacterTemplates(), listMods()]);
+    return [
+        ...characters.map((character) => ({
+            content_type: "character" as const,
+            id: character.id,
+            version: character.version,
+        })),
+        ...mods.map((mod) => ({
+            content_type: "mod" as const,
+            id: mod.id,
+            version: mod.version,
+        })),
+    ];
 }
 
 export async function instantiateCharacterTemplate(

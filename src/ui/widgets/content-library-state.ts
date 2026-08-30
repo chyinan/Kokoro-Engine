@@ -17,7 +17,19 @@ export type ContentPendingOperation = {
 
 export type ContentActionableError = {
   readonly message: string;
+  readonly messageKey: string;
   readonly action: "retry" | "review";
+};
+
+export type ContentUrlWarning = {
+  readonly url: string;
+  readonly contentType: ContentLibraryTab;
+};
+
+export type InstalledContentPackage = {
+  readonly contentType: ContentLibraryTab;
+  readonly id: string;
+  readonly version: string;
 };
 
 export type ContentLibraryState = {
@@ -25,7 +37,7 @@ export type ContentLibraryState = {
   readonly pending: ContentPendingOperation | null;
   readonly installedVersions: Readonly<Record<string, string>>;
   readonly error: ContentActionableError | null;
-  readonly urlWarning: string | null;
+  readonly urlWarning: ContentUrlWarning | null;
 };
 
 export type ContentLibraryEvent =
@@ -33,7 +45,8 @@ export type ContentLibraryEvent =
   | { readonly type: "operation-started"; readonly operation: ContentOperation; readonly entryId: string }
   | { readonly type: "operation-succeeded"; readonly operation: ContentOperation; readonly entryId: string; readonly version?: string }
   | { readonly type: "operation-failed"; readonly operation: ContentOperation; readonly entryId: string; readonly error: unknown }
-  | { readonly type: "url-warning-opened"; readonly url: string }
+  | { readonly type: "url-warning-opened"; readonly url: string; readonly contentType: ContentLibraryTab }
+  | { readonly type: "installed-refreshed"; readonly packages: ReadonlyArray<InstalledContentPackage> }
   | { readonly type: "url-warning-dismissed" }
   | { readonly type: "error-dismissed" };
 
@@ -71,6 +84,15 @@ export function reduceContentLibraryState(
       }
       return { ...state, pending: null, installedVersions, error: null };
     }
+    case "installed-refreshed": {
+      const installedVersions: Record<string, string> = {};
+      for (const packageEntry of event.packages) {
+        if (packageEntry.id.trim() && packageEntry.version.trim()) {
+          installedVersions[packageEntry.id] = packageEntry.version;
+        }
+      }
+      return { ...state, installedVersions };
+    }
     case "operation-failed":
       return {
         ...state,
@@ -78,7 +100,7 @@ export function reduceContentLibraryState(
         error: getActionableContentError(event.error),
       };
     case "url-warning-opened":
-      return { ...state, urlWarning: event.url };
+      return { ...state, urlWarning: { url: event.url, contentType: event.contentType } };
     case "url-warning-dismissed":
       return { ...state, urlWarning: null };
     case "error-dismissed":
@@ -133,6 +155,16 @@ export function getUrlInstallWarning(url: string): string {
   return `This URL is not part of the official registry. The package is untrusted until validation succeeds (${url}). Continue only if you trust the source.`;
 }
 
+export function getSafePreviewUrl(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "") return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 export function getActionableContentError(error: unknown): ContentActionableError {
   const raw = error instanceof Error
     ? error.message
@@ -143,23 +175,27 @@ export function getActionableContentError(error: unknown): ContentActionableErro
   if (normalized.includes("incompatible") || normalized.includes("engine version")) {
     return {
       message: "This package is not compatible with the current engine. Review the compatibility range and choose another version.",
+      messageKey: "contentLibrary.errors.incompatible",
       action: "review",
     };
   }
   if (normalized.includes("checksum") || normalized.includes("validation") || normalized.includes("corrupt")) {
     return {
       message: "Package validation failed. Check the source and checksum, then review before retrying.",
+      messageKey: "contentLibrary.errors.validation",
       action: "review",
     };
   }
   if (normalized.includes("network") || normalized.includes("timeout") || normalized.includes("download")) {
     return {
       message: "download failed. Check your connection and retry.",
+      messageKey: "contentLibrary.errors.download",
       action: "retry",
     };
   }
   return {
     message: "Content operation failed. Review the package and retry.",
+    messageKey: "contentLibrary.errors.generic",
     action: "retry",
   };
 }

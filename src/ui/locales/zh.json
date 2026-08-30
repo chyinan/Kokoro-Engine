@@ -50,7 +50,28 @@
     "statusAvailable": "可安装",
     "statusInstalled": "已安装",
     "statusUpdate": "有可用更新",
-    "working": "处理中"
+    "working": "处理中",
+    "install": "安装",
+    "update": "更新",
+    "remove": "移除",
+    "modUrlPlaceholder": "从 HTTPS 地址安装 MOD",
+    "modUrlWarningTitle": "检查外部 MOD",
+    "urlWarning": "此地址不属于官方注册表。通过校验前，内容包均不受信任（{{url}}）。只有在信任来源时才继续。",
+    "permissionWarningTitle": "检查 MOD 权限",
+    "permissionWarning": "此 MOD 包含可执行代码并请求权限。请在安装前检查注册表条目。",
+    "confirmPermissions": "检查并安装",
+    "recommendations": {
+      "vision": "视觉",
+      "memory": "记忆",
+      "mcp": "MCP：{{name}}",
+      "bot": "机器人：{{name}}"
+    },
+    "errors": {
+      "incompatible": "此内容包与当前引擎不兼容。请检查兼容范围并选择其他版本。",
+      "validation": "内容包校验失败。请检查来源和校验和后重试。",
+      "download": "下载失败。请检查网络连接后重试。",
+      "generic": "内容操作失败。请检查内容包后重试。"
+    }
   },
     "common": {
         "actions": {
