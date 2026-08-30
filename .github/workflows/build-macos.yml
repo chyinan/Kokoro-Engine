@@ -97,6 +97,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download DMG artifacts
         uses: actions/download-artifact@v4
         with:
@@ -107,9 +109,19 @@ jobs:
       - name: List release assets
         run: find release-assets -type f | sort
 
+      - name: Validate release notes
+        run: |
+          release_notes="release-notes/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$release_notes" ]; then
+            echo "::error::Missing matching release notes: $release_notes"
+            exit 1
+          fi
+          echo "Using release notes: $release_notes"
+
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes/${{ github.ref_name }}.md
           files: |
             release-assets/*.dmg
         env:

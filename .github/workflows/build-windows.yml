@@ -63,10 +63,21 @@ jobs:
             Rename-Item -Path $_.FullName -NewName $new_name
           }
 
+      - name: Validate release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $release_notes = "release-notes/${{ github.ref_name }}.md"
+          if (-not (Test-Path -LiteralPath $release_notes -PathType Leaf)) {
+            throw "Missing matching release notes: $release_notes"
+          }
+          Write-Output "Using release notes: $release_notes"
+
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
+          body_path: release-notes/${{ github.ref_name }}.md
           files: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-windows.exe
         env:
