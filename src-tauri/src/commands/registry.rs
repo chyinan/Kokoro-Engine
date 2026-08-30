@@ -15,7 +15,8 @@ use crate::registry::client::{
     InstallTrust, RegistryClientError, MAX_ARCHIVE_BYTES,
 };
 use crate::registry::manifest::{
-    RegistryEntry, RegistryIndex, OFFICIAL_REGISTRY_IDENTITY, OFFICIAL_REGISTRY_URL,
+    RegistryEntry, RegistryIndex, OFFICIAL_PACKAGE_BASE_URL, OFFICIAL_REGISTRY_IDENTITY,
+    OFFICIAL_REGISTRY_URL,
 };
 use futures::StreamExt;
 use semver::Version;
@@ -28,6 +29,8 @@ use tauri::{command, AppHandle, Manager, State};
 use uuid::Uuid;
 
 const MAX_REGISTRY_INDEX_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const REGISTRY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const REGISTRY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstalledCharacterPackage {
@@ -79,6 +82,8 @@ pub(crate) fn normalize_registry_url(url: Option<String>) -> Result<String, Koko
 /// redirect could otherwise turn an official URL into an untrusted origin.
 fn registry_http_client() -> Result<reqwest::Client, KokoroError> {
     reqwest::Client::builder()
+        .connect_timeout(REGISTRY_CONNECT_TIMEOUT)
+        .timeout(REGISTRY_REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| {
@@ -250,14 +255,39 @@ fn client_error(error: RegistryClientError) -> KokoroError {
 
 pub(crate) fn trust_for_registry_entry(source_url: &str, entry: &RegistryEntry) -> InstallTrust {
     if source_url == OFFICIAL_REGISTRY_URL
+        && entry.validate().is_ok()
         && entry.trust == "official"
         && entry.trust_source == OFFICIAL_REGISTRY_URL
         && entry.registry_identity.as_deref() == Some(OFFICIAL_REGISTRY_IDENTITY)
+        && official_package_url_matches_entry(entry)
     {
         InstallTrust::Official
     } else {
         InstallTrust::Community
     }
+}
+
+fn official_package_url_matches_entry(entry: &RegistryEntry) -> bool {
+    let Ok(base) = reqwest::Url::parse(OFFICIAL_PACKAGE_BASE_URL) else {
+        return false;
+    };
+    let Ok(download) = reqwest::Url::parse(&entry.download_url) else {
+        return false;
+    };
+    download.scheme() == base.scheme()
+        && download.host_str() == base.host_str()
+        && download.port() == base.port()
+        && download.username().is_empty()
+        && download.password().is_none()
+        && download.query().is_none()
+        && download.fragment().is_none()
+        && download.path()
+            == format!(
+                "{}/{}-{}.zip",
+                base.path().trim_end_matches('/'),
+                entry.id,
+                entry.version
+            )
 }
 
 fn installed_result(entry: CatalogEntry, trust: InstallTrust) -> InstalledCharacterPackage {

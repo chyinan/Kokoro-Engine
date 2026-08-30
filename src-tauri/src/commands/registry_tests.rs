@@ -3,7 +3,8 @@
 use crate::characters::catalog::CharacterCatalog;
 use crate::commands::registry::{
     append_limited_chunk, persist_download_temp_at, removal_activation_target,
-    revalidate_staged_character_bytes, trust_for_registry_entry,
+    revalidate_staged_character_bytes, trust_for_registry_entry, REGISTRY_CONNECT_TIMEOUT,
+    REGISTRY_REQUEST_TIMEOUT,
 };
 use crate::registry::client::{
     install_trust, normalize_registry_index, verify_character_archive,
@@ -256,6 +257,8 @@ fn official_install_trust_requires_canonical_source_and_entry_identity() {
     let mut entry = registry_entry(&bytes, ">=0.3.0, <0.4.0");
     entry.trust = "official".to_string();
     entry.trust_source = OFFICIAL_REGISTRY_URL.to_string();
+    entry.download_url =
+        "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/remote-character-1.0.0.zip".to_string();
 
     assert_eq!(
         trust_for_registry_entry(OFFICIAL_REGISTRY_URL, &entry),
@@ -313,6 +316,34 @@ fn official_index_normalization_does_not_upgrade_incomplete_trust_metadata() {
 
     assert_eq!(normalized.entries[0].trust, "community");
     assert_eq!(normalized.entries[0].registry_identity, None);
+}
+
+#[test]
+fn official_trust_requires_the_canonical_package_origin_and_exact_path() {
+    let bytes = archive(None, ">=0.3.0, <0.4.0");
+    let mut entry = registry_entry(&bytes, ">=0.3.0, <0.4.0");
+    entry.trust = "official".to_string();
+    entry.trust_source = OFFICIAL_REGISTRY_URL.to_string();
+    entry.registry_identity = Some(OFFICIAL_REGISTRY_IDENTITY.to_string());
+    entry.download_url = "https://example.test/remote-character-1.0.0.zip".to_string();
+
+    assert_eq!(
+        trust_for_registry_entry(OFFICIAL_REGISTRY_URL, &entry),
+        InstallTrust::Community
+    );
+
+    entry.download_url =
+        "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/remote-character-1.0.0.zip?redirect=evil".to_string();
+    assert_eq!(
+        trust_for_registry_entry(OFFICIAL_REGISTRY_URL, &entry),
+        InstallTrust::Community
+    );
+}
+
+#[test]
+fn registry_client_has_bounded_connect_and_request_timeouts() {
+    assert!(REGISTRY_CONNECT_TIMEOUT > std::time::Duration::ZERO);
+    assert!(REGISTRY_REQUEST_TIMEOUT >= REGISTRY_CONNECT_TIMEOUT);
 }
 
 #[test]

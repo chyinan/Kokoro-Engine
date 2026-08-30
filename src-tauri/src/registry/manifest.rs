@@ -203,6 +203,9 @@ impl RegistryEntry {
                 actual: actual_name.to_string(),
             });
         }
+        if self.trust == "official" && !is_official_package_url(&parsed, &archive_name) {
+            return Err(RegistryManifestError::InvalidOfficialTrust);
+        }
         if self.archive_size == 0 {
             return Err(RegistryManifestError::InvalidArchiveSize(self.archive_size));
         }
@@ -336,6 +339,20 @@ fn is_valid_preview_reference(value: &str) -> bool {
     value
         .split('/')
         .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn is_official_package_url(parsed: &reqwest::Url, archive_name: &str) -> bool {
+    let Ok(base) = reqwest::Url::parse(OFFICIAL_PACKAGE_BASE_URL) else {
+        return false;
+    };
+    parsed.scheme() == base.scheme()
+        && parsed.host_str() == base.host_str()
+        && parsed.port() == base.port()
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && parsed.path() == format!("{}/{}", base.path().trim_end_matches('/'), archive_name)
 }
 
 #[cfg(test)]

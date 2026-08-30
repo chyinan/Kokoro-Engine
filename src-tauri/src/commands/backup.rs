@@ -107,8 +107,22 @@ impl CharacterPackageResolver for LocalCatalogPackageResolver {
         validate_catalog_segment(template_id, "template id")?;
         validate_catalog_segment(template_version, "template version")?;
         let package_dir = self.root.join(template_id).join(template_version);
-        if !package_dir.is_dir() {
-            return Ok(None);
+        let package_parent = package_dir
+            .parent()
+            .ok_or_else(|| "character package has no parent".to_string())?;
+        ensure_non_redirected_parent_chain(&self.root, package_parent)
+            .map_err(|error| error.to_string())?;
+        reject_case_folded_sibling(package_parent, "template id")
+            .map_err(|error| error.to_string())?;
+        reject_case_folded_sibling(&package_dir, "template version")
+            .map_err(|error| error.to_string())?;
+        let package_metadata = match fs::symlink_metadata(&package_dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        if is_filesystem_redirect(&package_metadata) || !package_metadata.is_dir() {
+            return Err("character package is not a regular directory".to_string());
         }
         let engine_version = Version::parse(env!("CARGO_PKG_VERSION"))
             .map_err(|error| format!("invalid engine version: {error}"))?;
@@ -135,6 +149,8 @@ impl CharacterPackageResolver for LocalCatalogPackageResolver {
         let directory = avatar
             .parent()
             .ok_or_else(|| "managed character avatar has no resource directory".to_string())?;
+        ensure_non_redirected_parent_chain(app_data, directory)
+            .map_err(|error| error.to_string())?;
         match fs::symlink_metadata(directory) {
             Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
             }
@@ -452,12 +468,103 @@ fn ensure_non_redirected_parent_chain(
     Ok(())
 }
 
+fn reject_case_folded_sibling(path: &Path, label: &str) -> Result<(), std::io::Error> {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid {label} path"),
+        ));
+    };
+    let Some(parent) = path.parent() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{label} has no parent"),
+        ));
+    };
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let existing = entry?.file_name();
+        let existing = existing.to_string_lossy();
+        if existing != name && existing.eq_ignore_ascii_case(name) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("case-insensitive {label} collision between `{name}` and `{existing}`"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn create_non_redirected_directory_chain(path: &Path) -> Result<(), KokoroError> {
+    let mut missing = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                    return Err(KokoroError::Validation(format!(
+                        "restore parent is not a regular directory: {}",
+                        current.display()
+                    )));
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(current.clone());
+                current = current
+                    .parent()
+                    .ok_or_else(|| {
+                        KokoroError::Validation("restore path has no parent".to_string())
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => return Err(KokoroError::from(error)),
+        }
+    }
+    for directory in missing.into_iter().rev() {
+        match fs::create_dir(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(KokoroError::from(error)),
+        }
+        let metadata = fs::symlink_metadata(&directory).map_err(KokoroError::from)?;
+        if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+            return Err(KokoroError::Validation(format!(
+                "restore parent is not a regular directory: {}",
+                directory.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn remove_non_redirected_directory(path: &Path) -> Result<(), std::io::Error> {
+    let metadata = fs::symlink_metadata(path)?;
+    if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to remove redirected directory: {}",
+                path.display()
+            ),
+        ));
+    }
+    fs::remove_dir_all(path)
+}
+
 fn validate_catalog_segment(value: &str, field: &str) -> Result<(), String> {
     let valid = if field == "template version" {
+        let path = Path::new(value);
         !value.is_empty()
             && value.len() <= 128
             && value != "."
             && value != ".."
+            && path.components().count() == 1
+            && path.file_name().and_then(|name| name.to_str()) == Some(value)
             && Version::parse(value).is_ok()
     } else {
         !value.is_empty()
@@ -600,10 +707,11 @@ fn replace_configs_atomically(
     app_data: &Path,
     configs: &[(String, String)],
 ) -> Result<ConfigReplacementGuard, KokoroError> {
+    ensure_non_redirected_parent_chain(app_data, app_data)?;
+    create_non_redirected_directory_chain(app_data)?;
     for (filename, _) in configs {
         let target = app_data.join(filename);
-        if target.exists() {
-            let metadata = fs::symlink_metadata(&target).map_err(KokoroError::from)?;
+        if let Ok(metadata) = fs::symlink_metadata(&target) {
             if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
                 return Err(KokoroError::Validation(format!(
                     "config target is not a regular non-symlink file: {filename}"
@@ -628,7 +736,15 @@ fn replace_configs_atomically(
 
     let result = (|| -> Result<(), std::io::Error> {
         for (target, temporary, backup, had_original, was_installed) in &mut plans {
-            if target.exists() {
+            ensure_non_redirected_parent_chain(app_data, app_data)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if let Ok(metadata) = fs::symlink_metadata(&*target) {
+                if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("config target is not a regular file: {}", target.display()),
+                    ));
+                }
                 fs::rename(&*target, &*backup)?;
                 *had_original = true;
             }
@@ -727,7 +843,7 @@ impl ResourcePromotionGuard {
             return;
         }
         for (_, backup) in &self.replaced_targets {
-            let _ = fs::remove_dir_all(backup);
+            let _ = remove_non_redirected_directory(backup);
         }
         self.is_armed = false;
     }
@@ -737,10 +853,10 @@ impl Drop for ResourcePromotionGuard {
     fn drop(&mut self) {
         if self.is_armed {
             for target in self.created_targets.iter().rev() {
-                let _ = fs::remove_dir_all(target);
+                let _ = remove_non_redirected_directory(target);
             }
             for (target, backup) in self.replaced_targets.iter().rev() {
-                let _ = fs::remove_dir_all(target);
+                let _ = remove_non_redirected_directory(target);
                 let _ = fs::rename(backup, target);
             }
         }
@@ -761,6 +877,9 @@ fn promote_staged_resources(
             KokoroError::Validation("character package target has no parent".to_string())
         })?;
         ensure_non_redirected_parent_chain(catalog_root, target_parent)?;
+        reject_case_folded_sibling(target_parent, "template id").map_err(KokoroError::from)?;
+        reject_case_folded_sibling(&target, "template version").map_err(KokoroError::from)?;
+        ensure_staged_directory(&source)?;
         if let Some(metadata) = match fs::symlink_metadata(&target) {
             Ok(metadata) => Some(metadata),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -782,7 +901,16 @@ fn promote_staged_resources(
                     .unwrap_or("avatar"),
                 Uuid::new_v4()
             ));
+            ensure_non_redirected_parent_chain(catalog_root, target_parent)?;
+            let current = fs::symlink_metadata(&target).map_err(KokoroError::from)?;
+            if is_filesystem_redirect(&current) || !current.is_dir() {
+                return Err(KokoroError::Validation(format!(
+                    "installed character package target {id}@{version} changed during restore"
+                )));
+            }
             fs::rename(&target, &backup).map_err(KokoroError::from)?;
+            ensure_non_redirected_parent_chain(catalog_root, target_parent)?;
+            ensure_staged_directory(&source)?;
             if let Err(error) = fs::rename(&source, &target) {
                 let _ = fs::rename(&backup, &target);
                 return Err(error.into());
@@ -790,7 +918,9 @@ fn promote_staged_resources(
             guard.replaced_targets.push((target, backup));
             continue;
         }
-        fs::create_dir_all(target_parent).map_err(KokoroError::from)?;
+        create_non_redirected_directory_chain(target_parent)?;
+        ensure_non_redirected_parent_chain(catalog_root, target_parent)?;
+        ensure_staged_directory(&source)?;
         fs::rename(&source, &target).map_err(KokoroError::from)?;
         guard.created_targets.push(target);
     }
@@ -806,6 +936,11 @@ fn promote_staged_resources(
             KokoroError::Validation("managed avatar target has no parent".to_string())
         })?;
         ensure_non_redirected_parent_chain(app_data, target_parent)?;
+        reject_case_folded_sibling(target_parent, "managed character instance id")
+            .map_err(KokoroError::from)?;
+        reject_case_folded_sibling(&target, "managed character instance id")
+            .map_err(KokoroError::from)?;
+        ensure_staged_directory(&source)?;
         if let Some(metadata) = match fs::symlink_metadata(&target) {
             Ok(metadata) => Some(metadata),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -821,7 +956,16 @@ fn promote_staged_resources(
             }
             let backup =
                 target.with_file_name(format!(".{}.import-backup-{}", instance_id, Uuid::new_v4()));
+            ensure_non_redirected_parent_chain(app_data, target_parent)?;
+            let current = fs::symlink_metadata(&target).map_err(KokoroError::from)?;
+            if is_filesystem_redirect(&current) || !current.is_dir() {
+                return Err(KokoroError::Validation(format!(
+                    "installed managed avatar target for {instance_id} changed during restore"
+                )));
+            }
             fs::rename(&target, &backup).map_err(KokoroError::from)?;
+            ensure_non_redirected_parent_chain(app_data, target_parent)?;
+            ensure_staged_directory(&source)?;
             if let Err(error) = fs::rename(&source, &target) {
                 let _ = fs::rename(&backup, &target);
                 return Err(error.into());
@@ -829,11 +973,24 @@ fn promote_staged_resources(
             guard.replaced_targets.push((target, backup));
             continue;
         }
-        fs::create_dir_all(target_parent).map_err(KokoroError::from)?;
+        create_non_redirected_directory_chain(target_parent)?;
+        ensure_non_redirected_parent_chain(app_data, target_parent)?;
+        ensure_staged_directory(&source)?;
         fs::rename(source, &target).map_err(KokoroError::from)?;
         guard.created_targets.push(target);
     }
     Ok(guard)
+}
+
+fn ensure_staged_directory(path: &Path) -> Result<(), KokoroError> {
+    let metadata = fs::symlink_metadata(path).map_err(KokoroError::from)?;
+    if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+        return Err(KokoroError::Validation(format!(
+            "staged restore source is not a regular directory: {}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn package_directory_entries(root: &Path) -> Result<Vec<PackageContentEntry>, String> {
@@ -913,10 +1070,20 @@ pub(crate) fn stage_character_resources(
     backup_path: &Path,
     staging_root: &Path,
 ) -> Result<StagedCharacterResources, KokoroError> {
-    if staging_root.exists() {
-        fs::remove_dir_all(staging_root).map_err(KokoroError::from)?;
+    match fs::symlink_metadata(staging_root) {
+        Ok(metadata) => {
+            if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                return Err(KokoroError::Validation(format!(
+                    "resource staging root is not a regular directory: {}",
+                    staging_root.display()
+                )));
+            }
+            remove_non_redirected_directory(staging_root).map_err(KokoroError::from)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(KokoroError::from(error)),
     }
-    fs::create_dir_all(staging_root).map_err(KokoroError::from)?;
+    create_non_redirected_directory_chain(staging_root)?;
     let result = (|| -> Result<StagedCharacterResources, KokoroError> {
         let file = fs::File::open(backup_path).map_err(KokoroError::from)?;
         let mut archive = zip::ZipArchive::new(file)

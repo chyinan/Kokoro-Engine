@@ -84,6 +84,17 @@ fn engine() -> Version {
     Version::parse("0.3.1").unwrap()
 }
 
+fn create_directory_redirect(link: &std::path::Path, destination: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(destination, link).is_ok()
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(destination, link).is_ok()
+    }
+}
+
 fn registry_entry(id: &str, version: &str, bytes: &[u8]) -> RegistryEntry {
     use sha2::{Digest, Sha256};
     RegistryEntry {
@@ -395,4 +406,66 @@ fn case_folded_duplicate_mod_manifests_are_rejected_before_manifest_lookup() {
 
     assert!(error.to_string().contains("duplicate"), "{error}");
     assert!(!temp.path().join("case-manifest").exists());
+}
+
+#[test]
+fn mod_install_rejects_a_redirected_managed_root_before_writing_outside_it() {
+    let temp = TempDir::new().unwrap();
+    let managed = temp.path().join("mods");
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    if !create_directory_redirect(&managed, &outside) {
+        return;
+    }
+
+    let raw = manifest_json("redirected-root", Some(">=0.3.0, <0.4.0"), &[]);
+    let error = install_mod_archive(
+        &archive(&raw, None),
+        &managed,
+        &engine(),
+        true,
+        ModInstallSource::Local,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("regular directory"), "{error}");
+    assert!(!outside.join(".staging-").exists());
+    assert!(fs::read_dir(&outside).unwrap().next().is_none());
+}
+
+#[test]
+fn mod_remove_rejects_a_redirected_managed_root_without_deleting_outside_data() {
+    let temp = TempDir::new().unwrap();
+    let managed = temp.path().join("mods");
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(outside.join("keep-me")).unwrap();
+    if !create_directory_redirect(&managed, &outside) {
+        return;
+    }
+
+    let error = remove_installed_mod(&managed, "keep-me").unwrap_err();
+
+    assert!(error.to_string().contains("regular directory"), "{error}");
+    assert!(outside.join("keep-me").is_dir());
+}
+
+#[test]
+fn mod_install_rejects_case_folded_existing_id_instead_of_replacing_another_mod() {
+    let temp = TempDir::new().unwrap();
+    let existing = temp.path().join("Foo");
+    fs::create_dir_all(&existing).unwrap();
+    fs::write(existing.join("sentinel.txt"), b"keep").unwrap();
+
+    let raw = manifest_json("foo", Some(">=0.3.0, <0.4.0"), &[]);
+    let error = install_mod_archive(
+        &archive(&raw, None),
+        temp.path(),
+        &engine(),
+        true,
+        ModInstallSource::Local,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("case-insensitive"), "{error}");
+    assert_eq!(fs::read(existing.join("sentinel.txt")).unwrap(), b"keep");
 }

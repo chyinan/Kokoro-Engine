@@ -215,6 +215,62 @@ fn local_catalog_resolver_rejects_template_path_traversal_before_joining() {
     assert!(!tmp.path().join("outside").exists());
 }
 
+#[test]
+fn local_catalog_resolver_rejects_a_redirected_catalog_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog_root = tmp.path().join("characters");
+    let outside = tmp.path().join("outside");
+    let package = outside.join("kokoro").join("1.0.0");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("character.json"),
+        r#"{"schema_version":1,"engine_version":">=0.1.0","id":"kokoro","version":"1.0.0","name":"Kokoro","description":"desc","author":"team","license":"CC0","persona":"persona","greeting":"hello"}"#,
+    )
+    .unwrap();
+    fs::write(package.join("LICENSE.md"), "license").unwrap();
+    #[cfg(windows)]
+    if std::os::windows::fs::symlink_dir(&outside, &catalog_root).is_err() {
+        return;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &catalog_root).unwrap();
+
+    let resolver = LocalCatalogPackageResolver::new(catalog_root);
+
+    let error = resolver.resolve_exact("kokoro", "1.0.0").unwrap_err();
+
+    assert!(
+        error.contains("redirect") || error.contains("regular directory"),
+        "{error}"
+    );
+}
+
+#[test]
+fn local_catalog_resolver_rejects_a_redirected_app_data_parent_for_instance_avatar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_data = tmp.path().join("app-data");
+    let outside = tmp.path().join("outside-app-data");
+    let avatar = outside.join("character-instance-resources/instance/avatar.png");
+    fs::create_dir_all(avatar.parent().unwrap()).unwrap();
+    fs::write(&avatar, [137, 80, 78, 71, 13, 10, 26, 10]).unwrap();
+    let catalog_root = app_data.join("characters");
+    #[cfg(windows)]
+    if std::os::windows::fs::symlink_dir(&outside, &app_data).is_err() {
+        return;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &app_data).unwrap();
+
+    let resolver = LocalCatalogPackageResolver::new(catalog_root);
+
+    let error = resolver.resolve_instance_avatar("instance").unwrap_err();
+
+    assert!(
+        error.contains("redirect") || error.contains("regular directory"),
+        "{error}"
+    );
+}
+
 #[tokio::test]
 async fn legacy_character_database_without_template_columns_has_no_reference_query() {
     let pool = SqlitePoolOptions::new()

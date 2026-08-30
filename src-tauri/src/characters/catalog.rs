@@ -107,6 +107,13 @@ impl CharacterCatalog {
             return None;
         }
         let target = self.root.join(id).join(version);
+        let target_parent = target.parent()?;
+        if ensure_catalog_parent_chain(&self.root, target_parent).is_err()
+            || reject_case_folded_sibling(target_parent, "character id").is_err()
+            || reject_case_folded_sibling(&target, "character version").is_err()
+        {
+            return None;
+        }
         self.validate_installed_directory(&target).ok()
     }
 
@@ -165,7 +172,7 @@ impl CharacterCatalog {
     }
 
     pub fn discover(&self) -> Result<Vec<CatalogEntry>, CatalogError> {
-        fs::create_dir_all(&self.root)?;
+        ensure_catalog_directory(&self.root)?;
         let mut packages = Vec::new();
         for id_entry in fs::read_dir(&self.root)? {
             let id_entry = id_entry?;
@@ -202,7 +209,7 @@ impl CharacterCatalog {
     }
 
     pub fn install_bundled(&self, bundled_root: &Path) -> Result<Vec<CatalogEntry>, CatalogError> {
-        fs::create_dir_all(&self.root)?;
+        ensure_catalog_directory(&self.root)?;
         if !bundled_root.is_dir() {
             return Ok(Vec::new());
         }
@@ -219,7 +226,7 @@ impl CharacterCatalog {
     }
 
     pub fn install_zip<R: Read + Seek>(&self, reader: R) -> Result<CatalogEntry, CatalogError> {
-        fs::create_dir_all(&self.root)?;
+        ensure_catalog_directory(&self.root)?;
         let mut archive = zip::ZipArchive::new(reader)?;
         let entries = archive_entries(&mut archive)?;
         validate_package_content(&entries)?;
@@ -292,6 +299,11 @@ impl CharacterCatalog {
             &self.root,
             target.parent().expect("catalog target has parent"),
         )?;
+        reject_case_folded_sibling(
+            target.parent().expect("catalog target has parent"),
+            "character id",
+        )?;
+        reject_case_folded_sibling(&target, "character version")?;
         if let Ok(metadata) = fs::symlink_metadata(&target) {
             if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
                 return Err(CatalogError::InvalidDeclaredAsset(
@@ -300,7 +312,7 @@ impl CharacterCatalog {
             }
         }
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
+            create_directory_chain(parent)?;
         }
         atomic_replace_directory(&staging, &target)?;
         Ok(CatalogEntry {
@@ -356,10 +368,13 @@ fn is_safe_catalog_id(value: &str) -> bool {
 }
 
 fn is_safe_catalog_version(value: &str) -> bool {
+    let path = Path::new(value);
     !value.is_empty()
         && value.len() <= 128
         && value != "."
         && value != ".."
+        && path.components().count() == 1
+        && path.file_name().and_then(|name| name.to_str()) == Some(value)
         && Version::parse(value).is_ok()
 }
 
@@ -452,6 +467,92 @@ fn ensure_catalog_parent_chain(root: &Path, target_parent: &Path) -> Result<(), 
         ancestor = parent.to_path_buf();
     }
 
+    Ok(())
+}
+
+fn ensure_catalog_directory(root: &Path) -> Result<(), io::Error> {
+    ensure_catalog_parent_chain(root, root)?;
+    create_directory_chain(root)
+}
+
+fn create_directory_chain(path: &Path) -> Result<(), io::Error> {
+    let mut missing = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "catalog parent is not a regular directory: {}",
+                            current.display()
+                        ),
+                    ));
+                }
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                missing.push(current.clone());
+                current = current
+                    .parent()
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "catalog path has no parent")
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    for directory in missing.into_iter().rev() {
+        match fs::create_dir(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let metadata = fs::symlink_metadata(&directory)?;
+        if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "catalog parent is not a regular directory: {}",
+                    directory.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reject_case_folded_sibling(path: &Path, label: &str) -> Result<(), io::Error> {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid {label} path"),
+        ));
+    };
+    let Some(parent) = path.parent() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} has no parent"),
+        ));
+    };
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let existing = entry.file_name();
+        let existing = existing.to_string_lossy();
+        if existing != name && existing.eq_ignore_ascii_case(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("case-insensitive {label} collision between `{name}` and `{existing}`"),
+            ));
+        }
+    }
     Ok(())
 }
 

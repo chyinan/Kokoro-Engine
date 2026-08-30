@@ -14,6 +14,9 @@ use tauri::{command, AppHandle, State};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
 /// Origin controls trust messaging. URL MODs always require a separate
 /// acknowledgement because checksum/transport validation cannot establish
 /// that executable code is safe.
@@ -242,15 +245,32 @@ pub fn install_mod_archive(
             MAX_MOD_ARCHIVE_BYTES / (1024 * 1024)
         )));
     }
-    fs::create_dir_all(mods_dir).map_err(KokoroError::from)?;
+    ensure_mod_directory(mods_dir)?;
     let (manifest, staging_dir) = extract_to_staging(bytes, mods_dir, engine_version)?;
     if let Err(error) = permission_review(&manifest, source, permission_confirmed) {
         let _ = fs::remove_dir_all(&staging_dir);
         return Err(error);
     }
     let target = mods_dir.join(&manifest.id);
+    if let Err(error) = reject_case_folded_sibling(&target, "MOD id") {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(error);
+    }
+    if let Ok(metadata) = fs::symlink_metadata(&target) {
+        if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+            let _ = fs::remove_dir_all(&staging_dir);
+            return Err(KokoroError::Validation(format!(
+                "installed MOD target is not a regular directory: {}",
+                target.display()
+            )));
+        }
+    }
+    if let Err(error) = ensure_mod_directory(mods_dir) {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(error);
+    }
     let previous = mods_dir.join(format!(".previous-{}", Uuid::new_v4()));
-    let had_previous = target.exists();
+    let had_previous = fs::symlink_metadata(&target).is_ok();
     if had_previous {
         fs::rename(&target, &previous).map_err(|error| {
             let _ = fs::remove_dir_all(&staging_dir);
@@ -341,11 +361,107 @@ pub fn remove_installed_mod(mods_dir: &Path, mod_id: &str) -> Result<(), KokoroE
     if !is_valid_mod_id(mod_id) {
         return Err(KokoroError::Validation("invalid MOD id".to_string()));
     }
+    ensure_mod_directory(mods_dir)?;
     let target = mods_dir.join(mod_id);
-    if !target.exists() {
-        return Err(KokoroError::NotFound(format!("MOD '{mod_id}' not found")));
+    reject_case_folded_sibling(&target, "MOD id")?;
+    let metadata = match fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(KokoroError::NotFound(format!("MOD '{mod_id}' not found")));
+        }
+        Err(error) => return Err(KokoroError::Io(error.to_string())),
+    };
+    if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+        return Err(KokoroError::Validation(format!(
+            "installed MOD target is not a regular directory: {}",
+            target.display()
+        )));
     }
+    ensure_mod_directory(mods_dir)?;
     fs::remove_dir_all(target).map_err(|error| KokoroError::Io(error.to_string()))
+}
+
+fn is_filesystem_redirect(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+fn ensure_mod_directory(path: &Path) -> Result<(), KokoroError> {
+    let mut missing = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                    return Err(KokoroError::Validation(format!(
+                        "MOD managed root is not a regular directory: {}",
+                        current.display()
+                    )));
+                }
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                missing.push(current.clone());
+                current = current
+                    .parent()
+                    .ok_or_else(|| {
+                        KokoroError::Validation("MOD managed root has no parent".to_string())
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => return Err(KokoroError::Io(error.to_string())),
+        }
+    }
+    for directory in missing.into_iter().rev() {
+        match fs::create_dir(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(KokoroError::Io(error.to_string())),
+        }
+        let metadata =
+            fs::symlink_metadata(&directory).map_err(|error| KokoroError::Io(error.to_string()))?;
+        if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+            return Err(KokoroError::Validation(format!(
+                "MOD managed root is not a regular directory: {}",
+                directory.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn reject_case_folded_sibling(path: &Path, label: &str) -> Result<(), KokoroError> {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return Err(KokoroError::Validation(format!("invalid {label} path")));
+    };
+    let Some(parent) = path.parent() else {
+        return Err(KokoroError::Validation(format!("{label} has no parent")));
+    };
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(KokoroError::Io(error.to_string())),
+    };
+    for entry in entries {
+        let existing = entry
+            .map_err(|error| KokoroError::Io(error.to_string()))?
+            .file_name();
+        let existing = existing.to_string_lossy();
+        if existing != name && existing.eq_ignore_ascii_case(name) {
+            return Err(KokoroError::Validation(format!(
+                "case-insensitive {label} collision between `{name}` and `{existing}`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[command]

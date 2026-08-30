@@ -333,3 +333,20 @@ fn rejects_redirected_character_parent_before_commit_and_removal() {
     assert!(!redirected.join("1.0.0").exists());
     assert!(catalog.stage_package_removal("kokoro", "1.0.0").is_err());
 }
+
+#[test]
+fn exact_lookup_rejects_a_redirected_catalog_root() {
+    let temp = TempDir::new().unwrap();
+    let catalog_root = temp.path().join("app-data-characters");
+    let outside = temp.path().join("outside");
+    let package = outside.join("kokoro").join("1.0.0");
+    write_package_dir(&package, "1.0.0", "outside");
+    if !create_directory_redirect(&catalog_root, &outside) {
+        return;
+    }
+
+    assert!(test_catalog(&temp).find_exact("kokoro", "1.0.0").is_none());
+    assert!(test_catalog(&temp)
+        .presentation_directory("kokoro", "1.0.0")
+        .is_none());
+}
