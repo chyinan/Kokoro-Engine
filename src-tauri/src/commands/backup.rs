@@ -9,7 +9,7 @@ use crate::characters::instance_resource::{
 use crate::characters::{validate_package_content, PackageContentEntry};
 use crate::error::KokoroError;
 use crate::registry::client::verify_registry_entry_archive;
-use crate::registry::manifest::{RegistryEntry, OFFICIAL_REGISTRY_URL};
+use crate::registry::manifest::{RegistryEntry, RegistryIndex, OFFICIAL_REGISTRY_URL};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteConnectOptions;
@@ -17,12 +17,15 @@ use sqlx::{Acquire, Row, SqliteConnection, SqlitePool};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Cursor, Read, Seek, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use tauri::AppHandle;
 use tauri::Manager;
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
+
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 
 // pattern: Imperative Shell
 
@@ -101,6 +104,8 @@ impl CharacterPackageResolver for LocalCatalogPackageResolver {
         template_id: &str,
         template_version: &str,
     ) -> Result<Option<ResolvedCharacterPackage>, String> {
+        validate_catalog_segment(template_id, "template id")?;
+        validate_catalog_segment(template_version, "template version")?;
         let package_dir = self.root.join(template_id).join(template_version);
         if !package_dir.is_dir() {
             return Ok(None);
@@ -165,6 +170,23 @@ pub(crate) struct OfficialRegistryPackageResolver {
     root: PathBuf,
 }
 
+fn find_official_character_package<'a>(
+    index: &'a RegistryIndex,
+    template_id: &str,
+    template_version: &str,
+) -> Option<&'a RegistryEntry> {
+    if validate_catalog_segment(template_id, "template id").is_err()
+        || validate_catalog_segment(template_version, "template version").is_err()
+    {
+        return None;
+    }
+    index.entries.iter().find(|entry| {
+        entry.content_type == "character"
+            && entry.id == template_id
+            && entry.version == template_version
+    })
+}
+
 impl OfficialRegistryPackageResolver {
     pub(crate) fn new(root: PathBuf) -> Self {
         Self { root }
@@ -185,11 +207,8 @@ impl OfficialRegistryPackageResolver {
                 return Ok(None);
             }
         };
-        let Some(entry) = index.entries.iter().find(|entry| {
-            entry.content_type == "character"
-                && entry.id == template_id
-                && entry.version == template_version
-        }) else {
+        let Some(entry) = find_official_character_package(&index, template_id, template_version)
+        else {
             return Ok(None);
         };
         let bytes = match crate::commands::registry::fetch_bytes(&entry.download_url).await {
@@ -326,6 +345,126 @@ fn db_path(app_data: &Path) -> PathBuf {
 
 pub fn db_path_pub(app_data: &Path) -> PathBuf {
     db_path(app_data)
+}
+
+fn is_filesystem_redirect(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+fn ensure_non_redirected_parent_chain(
+    root: &Path,
+    target_parent: &Path,
+) -> Result<(), KokoroError> {
+    let relative = target_parent.strip_prefix(root).map_err(|_| {
+        KokoroError::Validation(format!(
+            "restore target escapes managed root: {}",
+            target_parent.display()
+        ))
+    })?;
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(KokoroError::Validation(format!(
+            "restore target contains unsafe parent path: {}",
+            target_parent.display()
+        )));
+    }
+
+    // Walk to the nearest existing ancestor first, because create_dir_all can
+    // otherwise follow a redirected ancestor while creating a missing root.
+    let mut existing = target_parent.to_path_buf();
+    loop {
+        match fs::symlink_metadata(&existing) {
+            Ok(metadata) => {
+                if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                    return Err(KokoroError::Validation(format!(
+                        "restore parent is not a regular directory: {}",
+                        existing.display()
+                    )));
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| {
+                        KokoroError::Validation("restore target has no existing parent".to_string())
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => return Err(KokoroError::from(error)),
+        }
+    }
+
+    // Validate every existing ancestor, including the managed root's parents,
+    // before any rename or directory creation is attempted.
+    let mut ancestor = existing.clone();
+    loop {
+        let metadata = fs::symlink_metadata(&ancestor).map_err(KokoroError::from)?;
+        if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+            return Err(KokoroError::Validation(format!(
+                "restore parent is not a regular directory: {}",
+                ancestor.display()
+            )));
+        }
+        let Some(parent) = ancestor.parent() else {
+            break;
+        };
+        if parent == ancestor {
+            break;
+        }
+        ancestor = parent.to_path_buf();
+    }
+
+    // Validate each already-existing component below the nearest ancestor.
+    let mut current = existing;
+    let remaining = target_parent.strip_prefix(&current).map_err(|_| {
+        KokoroError::Validation(format!(
+            "restore target escapes existing parent: {}",
+            target_parent.display()
+        ))
+    })?;
+    for component in remaining.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                    return Err(KokoroError::Validation(format!(
+                        "restore parent is not a regular directory: {}",
+                        current.display()
+                    )));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(KokoroError::from(error)),
+        }
+    }
+    Ok(())
+}
+
+fn validate_catalog_segment(value: &str, field: &str) -> Result<(), String> {
+    let valid = !value.is_empty()
+        && value.len() <= 128
+        && value != "."
+        && value != ".."
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'.'
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("invalid {field} path segment"))
+    }
 }
 
 /// Validate that a filename from a ZIP entry is safe (no path traversal).
@@ -582,9 +721,16 @@ fn promote_staged_resources(
     for (id, version) in &staged.packages {
         let source = staging_root.join(id).join(version);
         let target = catalog_root.join(id).join(version);
-        if target.exists() {
-            let metadata = fs::symlink_metadata(&target)?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        let target_parent = target.parent().ok_or_else(|| {
+            KokoroError::Validation("character package target has no parent".to_string())
+        })?;
+        ensure_non_redirected_parent_chain(catalog_root, target_parent)?;
+        if let Some(metadata) = match fs::symlink_metadata(&target) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(KokoroError::from(error)),
+        } {
+            if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
                 return Err(KokoroError::Validation(format!(
                     "installed character package target {id}@{version} is unsafe"
                 )));
@@ -608,9 +754,7 @@ fn promote_staged_resources(
             guard.replaced_targets.push((target, backup));
             continue;
         }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(KokoroError::from)?;
-        }
+        fs::create_dir_all(target_parent).map_err(KokoroError::from)?;
         fs::rename(&source, &target).map_err(KokoroError::from)?;
         guard.created_targets.push(target);
     }
@@ -622,9 +766,16 @@ fn promote_staged_resources(
         let target = app_data
             .join("character-instance-resources")
             .join(instance_id);
-        if target.exists() {
-            let metadata = fs::symlink_metadata(&target)?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        let target_parent = target.parent().ok_or_else(|| {
+            KokoroError::Validation("managed avatar target has no parent".to_string())
+        })?;
+        ensure_non_redirected_parent_chain(app_data, target_parent)?;
+        if let Some(metadata) = match fs::symlink_metadata(&target) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(KokoroError::from(error)),
+        } {
+            if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
                 return Err(KokoroError::Validation(format!(
                     "installed managed avatar target for {instance_id} is unsafe"
                 )));
@@ -642,9 +793,7 @@ fn promote_staged_resources(
             guard.replaced_targets.push((target, backup));
             continue;
         }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(KokoroError::from)?;
-        }
+        fs::create_dir_all(target_parent).map_err(KokoroError::from)?;
         fs::rename(source, &target).map_err(KokoroError::from)?;
         guard.created_targets.push(target);
     }
@@ -775,6 +924,10 @@ pub(crate) fn stage_character_resources(
                     "invalid character resource path: {name}"
                 )));
             }
+            validate_catalog_segment(components[1], "template id")
+                .map_err(KokoroError::Validation)?;
+            validate_catalog_segment(components[2], "template version")
+                .map_err(KokoroError::Validation)?;
             let relative = components[3..].join("/");
             let relative_path = PathBuf::from(relative.trim_end_matches('/'));
             crate::characters::manifest::validate_package_path(&relative_path)
@@ -921,6 +1074,37 @@ struct PreparedCharacterRow {
     example_dialogue: String,
     runtime_profile_json: String,
     user_modified_at: Option<i64>,
+}
+
+pub(crate) async fn load_template_references(
+    source: &SqlitePool,
+) -> Result<Vec<(String, String)>, KokoroError> {
+    let columns: Vec<String> = sqlx::query("PRAGMA table_info(characters)")
+        .fetch_all(source)
+        .await?
+        .into_iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect();
+    if !columns.iter().any(|column| column == "template_id")
+        || !columns.iter().any(|column| column == "template_version")
+    {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query(
+        "SELECT DISTINCT template_id, template_version FROM characters \
+         WHERE template_id IS NOT NULL AND template_version IS NOT NULL",
+    )
+    .fetch_all(source)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<String, _>("template_id")?,
+                row.try_get::<String, _>("template_version")?,
+            ))
+        })
+        .collect()
 }
 
 async fn prepare_character_rows(
@@ -1204,12 +1388,7 @@ async fn write_character_resources<W: Write + Seek>(
         return Ok(());
     }
     let pool = open_readonly_pool(database).await?;
-    let references = sqlx::query(
-        "SELECT DISTINCT template_id, template_version FROM characters \
-         WHERE template_id IS NOT NULL AND template_version IS NOT NULL",
-    )
-    .fetch_all(&pool)
-    .await?;
+    let references = load_template_references(&pool).await?;
     let instance_avatars = sqlx::query(
         "SELECT id, avatar_path FROM characters \
          WHERE avatar_path LIKE 'character-instance-resource://%/avatar.png'",
@@ -1218,9 +1397,7 @@ async fn write_character_resources<W: Write + Seek>(
     .await?;
     pool.close().await;
     let resolver = LocalCatalogPackageResolver::new(app_data.join("characters"));
-    for row in references {
-        let template_id: String = row.try_get("template_id")?;
-        let template_version: String = row.try_get("template_version")?;
+    for (template_id, template_version) in references {
         let package = resolver
             .resolve_exact(&template_id, &template_version)
             .map_err(KokoroError::Validation)?
@@ -1618,15 +1795,8 @@ pub async fn import_data(
         let catalog_root = app_data.join("characters");
         let local_resolver = LocalCatalogPackageResolver::new(catalog_root.clone());
         let official_resolver = OfficialRegistryPackageResolver::new(catalog_root);
-        let references = sqlx::query(
-            "SELECT DISTINCT template_id, template_version FROM characters \
-             WHERE template_id IS NOT NULL AND template_version IS NOT NULL",
-        )
-        .fetch_all(&source_pool)
-        .await?;
-        for reference in references {
-            let template_id: String = reference.try_get("template_id")?;
-            let template_version: String = reference.try_get("template_version")?;
+        let references = load_template_references(&source_pool).await?;
+        for (template_id, template_version) in references {
             if local_resolver
                 .resolve_exact(&template_id, &template_version)
                 .map_err(KokoroError::Validation)?
@@ -2235,6 +2405,148 @@ mod tests {
         guard.disarm();
 
         assert_eq!(fs::read(&live).unwrap(), b"old");
+    }
+
+    #[test]
+    fn official_registry_restore_selects_the_exact_character_version_only() {
+        let index = RegistryIndex {
+            schema_version: 1,
+            registry_version: 1,
+            generated_at: None,
+            entries: vec![
+                RegistryEntry {
+                    content_type: "character".to_string(),
+                    id: "kokoro".to_string(),
+                    name: "Kokoro".to_string(),
+                    version: "1.0.0".to_string(),
+                    author: "team".to_string(),
+                    description: "old".to_string(),
+                    preview: Vec::new(),
+                    engine_version: ">=0.1.0".to_string(),
+                    download_url: "https://example.test/kokoro-1.0.0.zip".to_string(),
+                    archive_size: 1,
+                    sha256: "a".repeat(64),
+                    trust: "official".to_string(),
+                    trust_source: OFFICIAL_REGISTRY_URL.to_string(),
+                    registry_identity: None,
+                    permissions: Vec::new(),
+                    recommendations: crate::registry::manifest::RegistryRecommendations {
+                        vision: false,
+                        memory: false,
+                        mcp_servers: Vec::new(),
+                        bot_platforms: Vec::new(),
+                    },
+                },
+                RegistryEntry {
+                    content_type: "character".to_string(),
+                    id: "kokoro".to_string(),
+                    name: "Kokoro".to_string(),
+                    version: "2.0.0".to_string(),
+                    author: "team".to_string(),
+                    description: "new".to_string(),
+                    preview: Vec::new(),
+                    engine_version: ">=0.1.0".to_string(),
+                    download_url: "https://example.test/kokoro-2.0.0.zip".to_string(),
+                    archive_size: 1,
+                    sha256: "b".repeat(64),
+                    trust: "official".to_string(),
+                    trust_source: OFFICIAL_REGISTRY_URL.to_string(),
+                    registry_identity: None,
+                    permissions: Vec::new(),
+                    recommendations: crate::registry::manifest::RegistryRecommendations {
+                        vision: false,
+                        memory: false,
+                        mcp_servers: Vec::new(),
+                        bot_platforms: Vec::new(),
+                    },
+                },
+            ],
+        };
+
+        assert_eq!(
+            find_official_character_package(&index, "kokoro", "1.0.0")
+                .map(|entry| entry.description.as_str()),
+            Some("old")
+        );
+        assert!(find_official_character_package(&index, "kokoro", "3.0.0").is_none());
+        assert!(find_official_character_package(&index, "../kokoro", "1.0.0").is_none());
+    }
+
+    #[test]
+    fn resource_promotion_rejects_redirected_catalog_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("staging");
+        let catalog = temp.path().join("app/characters");
+        let redirected = temp.path().join("redirected-catalog");
+        fs::create_dir_all(&catalog).unwrap();
+        fs::create_dir_all(&redirected).unwrap();
+        let redirected_id = catalog.join("kokoro");
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(&redirected, &redirected_id).is_err() {
+            return;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&redirected, &redirected_id).unwrap();
+        let staged_package = staging.join("kokoro/1.0.0");
+        fs::create_dir_all(&staged_package).unwrap();
+        fs::write(staged_package.join("character.json"), b"{}").unwrap();
+        let staged = StagedCharacterResources {
+            packages: vec![("kokoro".to_string(), "1.0.0".to_string())],
+            instance_ids: Vec::new(),
+        };
+
+        let error = match promote_staged_resources(
+            &staging,
+            &catalog,
+            &staged,
+            ConflictStrategy::Overwrite,
+        ) {
+            Ok(_) => panic!("redirected catalog parent must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("restore parent"), "{error}");
+        assert!(!redirected.join("1.0.0").exists());
+        assert!(staged_package.exists());
+    }
+
+    #[test]
+    fn resource_promotion_rejects_redirected_instance_resource_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("staging");
+        let catalog = temp.path().join("app/characters");
+        let app_data = catalog.parent().unwrap();
+        let redirected = temp.path().join("redirected-instances");
+        fs::create_dir_all(app_data).unwrap();
+        fs::create_dir_all(&redirected).unwrap();
+        let resource_root = app_data.join("character-instance-resources");
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(&redirected, &resource_root).is_err() {
+            return;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&redirected, &resource_root).unwrap();
+        let staged_avatar = staging.join(".instances/instance/avatar.png");
+        fs::create_dir_all(staged_avatar.parent().unwrap()).unwrap();
+        fs::write(&staged_avatar, b"new").unwrap();
+        let staged = StagedCharacterResources {
+            packages: Vec::new(),
+            instance_ids: vec!["instance".to_string()],
+        };
+
+        let error = match promote_staged_resources(
+            &staging,
+            &catalog,
+            &staged,
+            ConflictStrategy::Overwrite,
+        ) {
+            Ok(_) => panic!("redirected instance resource parent must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("restore parent"), "{error}");
+        assert!(!redirected.join("instance").exists());
+        assert!(staged_avatar.exists());
     }
 
     #[test]

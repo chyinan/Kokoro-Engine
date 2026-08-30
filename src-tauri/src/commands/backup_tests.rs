@@ -1,7 +1,7 @@
 // pattern: Imperative Shell
 
 use super::backup::{
-    inspect_backup_archive, restore_character_rows, stage_backup_configs,
+    inspect_backup_archive, load_template_references, restore_character_rows, stage_backup_configs,
     stage_character_resources, BackupManifest, CharacterPackageResolver, ConflictStrategy,
     ExportOptions, ImportOptions, LocalCatalogPackageResolver, ResolvedCharacterPackage,
     MAX_BACKUP_RESOURCE_BYTES, MAX_BACKUP_RESOURCE_FILES, MAX_BACKUP_RESOURCE_PACKAGES,
@@ -203,6 +203,35 @@ fn backup_resolver_rejects_any_symlink_encountered_in_package() {
     let error = resolver.resolve_exact("kokoro", "1.0.0").unwrap_err();
 
     assert!(error.contains("symlink"), "{error}");
+}
+
+#[test]
+fn local_catalog_resolver_rejects_template_path_traversal_before_joining() {
+    let tmp = tempfile::tempdir().unwrap();
+    let resolver = LocalCatalogPackageResolver::new(tmp.path().join("characters"));
+
+    assert!(resolver.resolve_exact("../outside", "1.0.0").is_err());
+    assert!(resolver.resolve_exact("kokoro", "../../outside").is_err());
+    assert!(!tmp.path().join("outside").exists());
+}
+
+#[tokio::test]
+async fn legacy_character_database_without_template_columns_has_no_reference_query() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE characters (id TEXT PRIMARY KEY, name TEXT NOT NULL, persona TEXT NOT NULL, user_nickname TEXT NOT NULL, source_format TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, description TEXT NOT NULL, avatar_path TEXT, greeting TEXT NOT NULL, greeting_consumed_at INTEGER, greeting_message_id INTEGER, example_dialogue TEXT NOT NULL, runtime_profile_json TEXT NOT NULL, user_modified_at INTEGER)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let references = load_template_references(&pool).await.unwrap();
+
+    assert!(references.is_empty());
 }
 
 #[test]
