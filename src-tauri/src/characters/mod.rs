@@ -3,7 +3,8 @@
 use crate::characters::manifest::{
     is_supported_package_file, validate_package_path, ManifestError,
 };
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub mod activation;
@@ -38,6 +39,8 @@ pub enum PackageContentError {
     MissingManifest,
     #[error("character package is missing a root license file")]
     MissingRootLicense,
+    #[error("package contains duplicate path `{0}` (case-insensitive)")]
+    DuplicatePath(String),
 }
 
 pub fn validate_package_content(
@@ -49,10 +52,16 @@ pub fn validate_package_content(
     }
 
     let mut total_size = 0_u64;
+    let mut seen_paths = HashSet::new();
     let mut has_manifest = false;
     let mut has_root_license = false;
     for entry in entries {
         validate_package_path(&entry.path)?;
+        if !seen_paths.insert(package_path_key(&entry.path)) {
+            return Err(PackageContentError::DuplicatePath(
+                entry.path.to_string_lossy().into_owned(),
+            ));
+        }
         if entry.is_directory {
             continue;
         }
@@ -82,6 +91,10 @@ pub fn validate_package_content(
         return Err(PackageContentError::MissingRootLicense);
     }
     Ok(())
+}
+
+pub(crate) fn package_path_key(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/").to_lowercase()
 }
 
 fn is_root_license_file(path: &std::path::Path) -> bool {

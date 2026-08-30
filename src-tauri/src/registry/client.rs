@@ -8,12 +8,13 @@
 use crate::characters::manifest::{
     is_supported_package_file, validate_package_path, CharacterTemplateManifest,
 };
-use crate::characters::{MAX_PACKAGE_FILE_COUNT, MAX_PACKAGE_UNCOMPRESSED_BYTES};
+use crate::characters::{package_path_key, MAX_PACKAGE_FILE_COUNT, MAX_PACKAGE_UNCOMPRESSED_BYTES};
 use crate::registry::manifest::{
     RegistryEntry, RegistryIndex, OFFICIAL_REGISTRY_IDENTITY, OFFICIAL_REGISTRY_URL,
 };
 use semver::{Version, VersionReq};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -81,8 +82,12 @@ pub fn normalize_registry_index(
         .map_err(|error| RegistryClientError::InvalidIndex(error.to_string()))?;
     let official = source_url == OFFICIAL_REGISTRY_URL;
     for entry in &mut index.entries {
-        if official && entry.trust == "official" {
-            entry.registry_identity = Some(OFFICIAL_REGISTRY_IDENTITY.to_string());
+        let has_official_metadata = official
+            && entry.trust == "official"
+            && entry.trust_source == OFFICIAL_REGISTRY_URL
+            && entry.registry_identity.as_deref() == Some(OFFICIAL_REGISTRY_IDENTITY);
+        if has_official_metadata {
+            entry.trust_source = OFFICIAL_REGISTRY_URL.to_string();
         } else {
             entry.trust = if entry.trust == "unverified" {
                 "unverified".to_string()
@@ -133,6 +138,7 @@ pub fn verify_character_archive(
     let mut total_uncompressed = 0_u64;
     let mut manifest_json = None;
     let mut file_count = 0_usize;
+    let mut seen_paths = HashSet::new();
 
     for index in 0..archive.len() {
         let mut file = archive
@@ -142,6 +148,11 @@ pub fn verify_character_archive(
         let path = normalized_archive_path(&name, file.is_dir());
         validate_package_path(&path)
             .map_err(|error| RegistryClientError::UnsafeContent(error.to_string()))?;
+        if !seen_paths.insert(package_path_key(&path)) {
+            return Err(RegistryClientError::UnsafeContent(format!(
+                "duplicate package path `{name}` (case-insensitive)"
+            )));
+        }
         if !file.is_dir() {
             file_count += 1;
             if file_count > MAX_PACKAGE_FILE_COUNT {

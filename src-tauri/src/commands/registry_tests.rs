@@ -6,8 +6,8 @@ use crate::commands::registry::{
     revalidate_staged_character_bytes, trust_for_registry_entry,
 };
 use crate::registry::client::{
-    install_trust, verify_character_archive, verify_registry_entry_archive, InstallTrust,
-    RegistryClientError, MAX_ARCHIVE_BYTES,
+    install_trust, normalize_registry_index, verify_character_archive,
+    verify_registry_entry_archive, InstallTrust, RegistryClientError, MAX_ARCHIVE_BYTES,
 };
 use crate::registry::manifest::{
     RegistryEntry, RegistryRecommendations, OFFICIAL_REGISTRY_IDENTITY, OFFICIAL_REGISTRY_URL,
@@ -45,6 +45,26 @@ fn archive(extra: Option<(&str, &[u8])>, engine: &str) -> Vec<u8> {
         writer.start_file("LICENSE.md", options).unwrap();
         writer.write_all(b"MIT").unwrap();
         if let Some((path, data)) = extra {
+            writer.start_file(path, options).unwrap();
+            writer.write_all(data).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+    bytes.into_inner()
+}
+
+fn archive_with_entries(engine: &str, entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut bytes = Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut bytes);
+        let options = SimpleFileOptions::default();
+        writer.start_file("character.json", options).unwrap();
+        writer
+            .write_all(manifest("1.0.0", engine).as_bytes())
+            .unwrap();
+        writer.start_file("LICENSE.md", options).unwrap();
+        writer.write_all(b"MIT").unwrap();
+        for (path, data) in entries {
             writer.start_file(path, options).unwrap();
             writer.write_all(data).unwrap();
         }
@@ -257,6 +277,62 @@ fn official_install_trust_requires_canonical_source_and_entry_identity() {
         InstallTrust::Community,
         "a non-canonical endpoint must never inherit official trust"
     );
+}
+
+#[test]
+fn official_index_normalization_does_not_upgrade_incomplete_trust_metadata() {
+    let bytes = archive(None, ">=0.3.0, <0.4.0");
+    let mut missing_identity = registry_entry(&bytes, ">=0.3.0, <0.4.0");
+    missing_identity.trust = "official".to_string();
+    missing_identity.trust_source = OFFICIAL_REGISTRY_URL.to_string();
+    missing_identity.registry_identity = None;
+    let json = serde_json::to_string(&serde_json::json!({
+        "schema_version": 1,
+        "registry_version": 1,
+        "entries": [missing_identity]
+    }))
+    .unwrap();
+
+    let normalized = normalize_registry_index(&json, OFFICIAL_REGISTRY_URL).unwrap();
+
+    assert_eq!(normalized.entries[0].trust, "community");
+    assert_eq!(normalized.entries[0].registry_identity, None);
+
+    let mut wrong_source = normalized.entries[0].clone();
+    wrong_source.trust = "official".to_string();
+    wrong_source.trust_source = "https://mirror.example.test/index.json".to_string();
+    wrong_source.registry_identity = Some(OFFICIAL_REGISTRY_IDENTITY.to_string());
+    let json = serde_json::to_string(&serde_json::json!({
+        "schema_version": 1,
+        "registry_version": 1,
+        "entries": [wrong_source]
+    }))
+    .unwrap();
+
+    let normalized = normalize_registry_index(&json, OFFICIAL_REGISTRY_URL).unwrap();
+
+    assert_eq!(normalized.entries[0].trust, "community");
+    assert_eq!(normalized.entries[0].registry_identity, None);
+}
+
+#[test]
+fn registry_character_validation_rejects_case_folded_duplicate_paths() {
+    let bytes = archive_with_entries(
+        ">=0.3.0, <0.4.0",
+        &[
+            ("assets/avatar.png", b"first"),
+            ("assets/AVATAR.PNG", b"second"),
+        ],
+    );
+
+    let error = verify_character_archive(
+        &bytes,
+        Some((bytes.len() as u64, checksum(&bytes))),
+        &Version::parse("0.3.1").unwrap(),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("duplicate"), "{error}");
 }
 
 #[test]

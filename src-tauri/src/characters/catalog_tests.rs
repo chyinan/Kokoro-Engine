@@ -275,6 +275,31 @@ fn rejects_case_folded_duplicate_archive_paths_before_extraction() {
 }
 
 #[test]
+fn shared_package_content_validation_rejects_case_folded_duplicate_paths() {
+    let entries = vec![
+        PackageContentEntry {
+            path: "character.json".into(),
+            uncompressed_size: 1,
+            is_directory: false,
+        },
+        PackageContentEntry {
+            path: "CHARACTER.JSON".into(),
+            uncompressed_size: 1,
+            is_directory: false,
+        },
+        PackageContentEntry {
+            path: "LICENSE.md".into(),
+            uncompressed_size: 1,
+            is_directory: false,
+        },
+    ];
+
+    let error = validate_package_content(&entries).unwrap_err();
+
+    assert!(error.to_string().contains("duplicate"), "{error}");
+}
+
+#[test]
 fn accepts_uppercase_semver_prerelease_and_build_segments_for_exact_lookup_and_removal() {
     let temp = TempDir::new().unwrap();
     let catalog = test_catalog(&temp);

@@ -10,6 +10,7 @@ import {
   OFFICIAL_REGISTRY_URL,
   normalizeTrustSource,
   validateContentFileNames,
+  validateContentFileSizes,
   validateRegistryEntry,
   validateRegistryIndex,
 } from './build-content-registry.mjs';
@@ -201,6 +202,60 @@ describe('content registry contract', () => {
     expect(validateContentFileNames(['mod.json', 'payload.bin'], 'mod').valid).toBe(false);
     expect(validateContentFileNames(['mod.json', 'unsafe/../main.js'], 'mod').valid).toBe(false);
     expect(validateContentFileNames(['mod.json', 'main.js', 'MAIN.JS'], 'mod').valid).toBe(false);
+  });
+
+  it('enforces installer-equivalent character and MOD size limits before archiving', () => {
+    const characterAtFileLimit = Array.from({ length: 2048 }, (_, index) => ({
+      name: `assets/${index}.png`,
+      size: 1,
+    }));
+    expect(validateContentFileSizes(characterAtFileLimit, 'character')).toEqual({ valid: true });
+    expect(validateContentFileSizes([...characterAtFileLimit, { name: 'assets/overflow.png', size: 1 }], 'character').valid).toBe(false);
+    expect(validateContentFileSizes([{ name: 'assets/full.png', size: 128 * 1024 * 1024 }], 'character')).toEqual({ valid: true });
+    expect(validateContentFileSizes([{ name: 'assets/overflow.png', size: 128 * 1024 * 1024 + 1 }], 'character').valid).toBe(false);
+
+    expect(validateContentFileSizes([{ name: 'main.js', size: 10 * 1024 * 1024 }], 'mod')).toEqual({ valid: true });
+    expect(validateContentFileSizes([{ name: 'main.js', size: 10 * 1024 * 1024 + 1 }], 'mod').valid).toBe(false);
+    expect(validateContentFileSizes(Array.from({ length: 5 }, (_, index) => ({
+      name: `assets/${index}.txt`,
+      size: 10 * 1024 * 1024,
+    })), 'mod')).toEqual({ valid: true });
+    expect(validateContentFileSizes([
+      ...Array.from({ length: 4 }, (_, index) => ({ name: `assets/${index}.txt`, size: 10 * 1024 * 1024 })),
+      { name: 'assets/overflow.txt', size: 10 * 1024 * 1024 + 1 },
+    ], 'mod').valid).toBe(false);
+  });
+
+  it('requires the full CharacterTemplateManifest required field set', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kokoro-registry-character-schema-'));
+    temporaryRoots.push(root);
+    const packageRoot = join(root, 'characters', 'candidate');
+    await mkdir(packageRoot, { recursive: true });
+    await writeFile(join(packageRoot, 'LICENSE.md'), 'MIT');
+    const manifest = {
+      schema_version: 1,
+      engine_version: '>=0.3.1, <0.4.0',
+      id: 'candidate',
+      version: '1.0.0',
+      name: 'Candidate',
+      description: 'A character',
+      author: 'Kokoro',
+      license: 'MIT',
+      persona: 'Be helpful.',
+      greeting: 'Hello.',
+    };
+
+    for (const field of ['schema_version', 'engine_version', 'id', 'version', 'name', 'description', 'author', 'license', 'persona', 'greeting']) {
+      const candidate = { ...manifest };
+      delete candidate[field];
+      await writeFile(join(packageRoot, 'character.json'), JSON.stringify(candidate));
+      await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+        .rejects.toThrow(new RegExp(field));
+    }
+
+    await writeFile(join(packageRoot, 'character.json'), JSON.stringify({ ...manifest, schema_version: 2 }));
+    await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+      .rejects.toThrow(/schema_version|schema/i);
   });
 
   it('requires relative manifest previews to resolve to an image in the package', async () => {

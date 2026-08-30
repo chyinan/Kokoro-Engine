@@ -13,6 +13,11 @@ export const OFFICIAL_REGISTRY_URL =
 export const OFFICIAL_PACKAGE_BASE_URL =
   'https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages';
 export const OFFICIAL_REGISTRY_IDENTITY = 'github.com/chyinan/Kokoro-Engine/registry-v1';
+export const CHARACTER_SCHEMA_VERSION = 1;
+export const MAX_CHARACTER_FILE_COUNT = 2048;
+export const MAX_CHARACTER_TOTAL_BYTES = 128 * 1024 * 1024;
+export const MAX_MOD_FILE_BYTES = 10 * 1024 * 1024;
+export const MAX_MOD_TOTAL_BYTES = 50 * 1024 * 1024;
 
 const ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
@@ -157,6 +162,30 @@ export function validateContentFileNames(names, contentType) {
     if (contentType === 'character' ? !isSupportedCharacterFile(name) : !isSupportedModFile(name)) {
       return invalid(`unsupported ${contentType} package content: ${name}`);
     }
+  }
+  return { valid: true };
+}
+
+/** Validate source file sizes against the corresponding package installer. */
+export function validateContentFileSizes(files, contentType) {
+  if (!Array.isArray(files)) return invalid('package files must be an array');
+  const isCharacter = contentType === 'character';
+  const fileLimit = isCharacter ? MAX_CHARACTER_FILE_COUNT : Number.POSITIVE_INFINITY;
+  const perFileLimit = isCharacter ? Number.POSITIVE_INFINITY : MAX_MOD_FILE_BYTES;
+  const totalLimit = isCharacter ? MAX_CHARACTER_TOTAL_BYTES : MAX_MOD_TOTAL_BYTES;
+  if (files.length > fileLimit) return invalid(`package exceeds ${contentType} file count limit`);
+
+  let total = 0;
+  for (const file of files) {
+    const size = Number.isSafeInteger(file?.size)
+      ? file.size
+      : Number.isSafeInteger(file?.data?.byteLength)
+        ? file.data.byteLength
+        : NaN;
+    if (!Number.isSafeInteger(size) || size < 0) return invalid(`invalid ${contentType} file size: ${file?.name ?? '<unknown>'}`);
+    if (size > perFileLimit) return invalid(`${contentType} file exceeds the 10 MiB limit: ${file?.name ?? '<unknown>'}`);
+    total += size;
+    if (!Number.isSafeInteger(total) || total > totalLimit) return invalid(`${contentType} package exceeds the ${totalLimit / (1024 * 1024)} MiB total size limit`);
   }
   return { valid: true };
 }
@@ -405,12 +434,25 @@ async function collectFiles(root, contentType) {
   }
   const policy = validateContentFileNames(result.map(file => file.name), contentType);
   if (!policy.valid) throw new Error(policy.error);
+  const sizePolicy = validateContentFileSizes(result, contentType);
+  if (!sizePolicy.valid) throw new Error(sizePolicy.error);
   return result;
 }
 
 async function readManifest(root, contentType) {
   const manifestName = contentType === 'character' ? 'character.json' : 'mod.json';
   const value = JSON.parse(await readFile(join(root, manifestName), 'utf8'));
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`invalid ${manifestName} object`);
+  }
+  if (contentType === 'character') {
+    if (value.schema_version !== CHARACTER_SCHEMA_VERSION) {
+      throw new Error(`invalid ${manifestName} schema_version`);
+    }
+    for (const field of ['engine_version', 'id', 'version', 'name', 'description', 'author', 'license', 'persona', 'greeting']) {
+      if (typeof value[field] !== 'string' || value[field].trim() === '') throw new Error(`invalid ${manifestName} ${field}`);
+    }
+  }
   if (typeof value.id !== 'string' || !ID_PATTERN.test(value.id)) throw new Error(`invalid ${manifestName} id`);
   if (typeof value.version !== 'string' || !isValidSemVer(value.version)) throw new Error(`invalid ${manifestName} version`);
   if (typeof value.engine_version !== 'string' || !isValidEngineRange(value.engine_version)) throw new Error(`invalid ${manifestName} engine_version`);
