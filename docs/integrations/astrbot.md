@@ -137,7 +137,7 @@ components, and one audio component per event/reply chain.
 | --- | --- | --- |
 | `enable_text` | Joins enabled plain text components into `text`. | Returns the `reply` string as `Plain`. |
 | `enable_images` | Converts AstrBot `Image` components to `data:image/...;base64,...` values in `images`. | Converts each reply image's `data_base64` to an AstrBot `Image`. |
-| `enable_audio` | Converts the first AstrBot `Record` to `audio_base64` and an inferred `audio_format`. | Converts reply `audio.data_base64` to an AstrBot `Record`. |
+| `enable_audio` | Converts the first AstrBot `Record` to normalized WAV bytes in `audio_base64` with `audio_format: "wav"`. | Converts reply `audio.data_base64` to an AstrBot `Record`. |
 
 If all components are disabled, the plugin does not make an HTTP request. An
 audio request is transcribed by Kokoro before generation, so Kokoro must have

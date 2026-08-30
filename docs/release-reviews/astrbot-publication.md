@@ -40,7 +40,7 @@ external owner must add evidence before changing a row to `Pass` or `Fail`.
 | --- | --- | --- | --- | --- |
 | Plugin metadata/config review | Pass | Phase 6 Task 3 | 2026-08-30 | `metadata.yaml` targets AstrBot `>=4.5.0`; `_conf_schema.json` exposes endpoint, token, character, conversation, and text/image/audio toggles. |
 | Webhook contract review | Pass | Phase 6 Task 3 | 2026-08-30 | [`docs/API specification.md`](../API%20specification.md#authenticated-generic-webhook) and the plugin docs match the Rust handler's request fields, precedence, conversation keys, replies, and `400`/`401`/`404`/`500` outcomes. |
-| Plugin mocked HTTP tests | Pass | Phase 6 Task 3 | 2026-08-30 | `rtk pytest -q` from `integrations/astrbot-kokoro`: 6 tests passed. |
+| Plugin mocked HTTP tests | Pass | Phase 6 Task 3 | 2026-08-30 | `rtk pytest -q` from `integrations/astrbot-kokoro`: 7 tests passed. |
 | Documentation link check | Pass | Phase 6 Task 3 | 2026-08-30 | Local Markdown target check covered the three Task 3 documents; all relative targets exist. |
 | Real Kokoro endpoint smoke test | Pending | Kokoro Engine maintainer | Pending | Local docs provide curl commands, but no running LLM/STT/TTS service was exercised in this task. |
 

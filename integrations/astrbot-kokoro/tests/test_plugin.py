@@ -170,6 +170,19 @@ async def test_platform_session_uses_platform_origin_instead_of_character_sessio
 
 
 @pytest.mark.asyncio
+async def test_image_without_mime_type_uses_file_extension(plugin_module, monkeypatch):
+    client = FakeAsyncClient(FakeResponse(200, {"reply": "image received"}))
+    monkeypatch.setattr(plugin_module.httpx, "AsyncClient", lambda **_: client)
+    plugin = plugin_module.Main(FakeContext(), config())
+    image = Image(file="/tmp/reference.webp", encoded="cGlj")
+    del image.mime_type
+
+    await collect(plugin.on_message, FakeEvent([image], message_str=""))
+
+    assert client.calls[0]["json"]["images"] == ["data:image/webp;base64,cGlj"]
+
+
+@pytest.mark.asyncio
 async def test_returns_text_image_and_audio_components(plugin_module, monkeypatch):
     client = FakeAsyncClient(
         FakeResponse(

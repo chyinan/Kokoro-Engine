@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+import mimetypes
 from astrbot.api import AstrBotConfig, star
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain, Record
@@ -49,6 +50,31 @@ def _media_format(component: Any) -> str:
     # AstrBot Record.convert_to_base64() provides the normalized WAV payload;
     # the source filename/MIME describes the original upload, not the bytes.
     return "wav"
+
+
+def _image_mime_type(component: Any) -> str:
+    configured = _clean_text(getattr(component, "mime_type", ""))
+    if configured.startswith("image/"):
+        return configured.split(";", 1)[0].strip()
+    for attribute in ("file", "url", "path"):
+        source = _clean_text(getattr(component, attribute, ""))
+        if source.startswith("data:image/"):
+            return source.split(";", 1)[0].removeprefix("data:").strip()
+        suffix = source.split("?", 1)[0].rsplit(".", 1)[-1].lower() if "." in source else ""
+        extension_mimes = {
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+            "webp": "image/webp",
+            "gif": "image/gif",
+            "bmp": "image/bmp",
+        }
+        if suffix in extension_mimes:
+            return extension_mimes[suffix]
+        guessed = mimetypes.guess_type(source)[0]
+        if guessed and guessed.startswith("image/"):
+            return guessed
+    return "image/jpeg"
 
 
 def _event_platform(event: AstrMessageEvent) -> str:
@@ -109,7 +135,7 @@ async def _component_payload(
                 continue
             encoded = _clean_text(await component.convert_to_base64())
             if encoded:
-                mime_type = _clean_text(getattr(component, "mime_type", "")) or "image/jpeg"
+                mime_type = _image_mime_type(component)
                 images.append(f"data:{mime_type};base64,{encoded}")
         elif isinstance(component, Record) and _enabled(config, "enable_audio") and audio is None:
             encoded = _clean_text(await component.convert_to_base64())

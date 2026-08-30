@@ -2111,10 +2111,24 @@ fn webhook_conversation_key(
         .filter(|value| !value.is_empty())
         .unwrap_or("private")
         .to_ascii_lowercase();
+    fn first_non_empty<'a>(values: &[Option<&'a str>]) -> Option<&'a str> {
+        values
+            .iter()
+            .copied()
+            .flatten()
+            .map(str::trim)
+            .find(|value| !value.is_empty())
+    }
     let (prefix, identity) = if matches!(conversation_type.as_str(), "group" | "channel") {
-        ("group", conversation_id.or(source).or(user_id))
+        (
+            "group",
+            first_non_empty(&[conversation_id, source, user_id]),
+        )
     } else {
-        ("private", user_id.or(conversation_id).or(source))
+        (
+            "private",
+            first_non_empty(&[user_id, conversation_id, source]),
+        )
     };
     identity
         .map(str::trim)
@@ -3313,6 +3327,24 @@ mod tests {
         assert_eq!(
             map_webhook_conversation_to_character("char-2", parsed.conversation_key.as_deref()),
             "char-2:group:group-42"
+        );
+    }
+
+    #[test]
+    fn webhook_payload_parser_falls_back_to_conversation_when_user_is_blank() {
+        let parsed = parse_generic_webhook_payload(
+            br#"{
+                "text": "hello",
+                "conversation_type": "private",
+                "conversation_id": "private-session-9",
+                "user_id": "   "
+            }"#,
+        )
+        .expect("valid private webhook payload");
+
+        assert_eq!(
+            parsed.conversation_key.as_deref(),
+            Some("private:private-session-9")
         );
     }
 
