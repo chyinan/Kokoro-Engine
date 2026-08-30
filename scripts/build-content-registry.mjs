@@ -256,16 +256,11 @@ function isValidRangeComparator(part) {
   return parseSemVer(value) !== null;
 }
 
-/** Validate the subset of npm-style ranges accepted by Rust semver::VersionReq. */
+/** Validate the comma-separated comparator grammar accepted by Rust semver::VersionReq. */
 export function isValidEngineRange(value) {
   if (typeof value !== 'string' || value.trim() === '') return false;
-  return value.split('||').every(alternative => {
-    const trimmed = alternative.trim();
-    if (trimmed === '') return false;
-    const hyphen = /^(\S+)\s+-\s+(\S+)$/.exec(trimmed);
-    if (hyphen) return isValidSemVer(hyphen[1]) && isValidSemVer(hyphen[2]);
-    return trimmed.split(',').every(part => isValidRangeComparator(part));
-  });
+  if (value.includes('||') || /\S\s+-\s+\S/.test(value)) return false;
+  return value.split(',').every(part => isValidRangeComparator(part));
 }
 
 function isSafePackageRelativePath(value) {

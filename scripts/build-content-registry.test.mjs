@@ -11,6 +11,7 @@ import {
   OFFICIAL_REGISTRY_IDENTITY,
   OFFICIAL_REGISTRY_URL,
   normalizeTrustSource,
+  isValidEngineRange,
   verifyRegistryArtifact,
   validateContentFileNames,
   validateContentFileSizes,
@@ -100,6 +101,13 @@ function validIndex(entries = [archive]) {
 }
 
 describe('content registry contract', () => {
+  it('accepts only engine ranges understood by Rust semver::VersionReq', () => {
+    expect(isValidEngineRange('>=0.3.1, <0.4.0')).toBe(true);
+    expect(isValidEngineRange('0.3.x')).toBe(true);
+    expect(isValidEngineRange('>=0.3.1 || <0.4.0')).toBe(false);
+    expect(isValidEngineRange('0.3.1 - 0.4.0')).toBe(false);
+  });
+
   it('accepts character and MOD entry content types and compatibility metadata', () => {
     expect(validateRegistryEntry(archive)).toEqual({ valid: true });
     expect(validateRegistryEntry({ ...archive, content_type: 'mod' })).toEqual({ valid: true });
