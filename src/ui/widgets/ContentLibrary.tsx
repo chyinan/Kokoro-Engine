@@ -178,7 +178,9 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
       if (target.contentType === "mod") {
         if (!dependencies.installModFromUrl) throw new Error("MOD URL installation is unavailable");
         const installed = await dependencies.installModFromUrl(target.url, true);
-        dispatch({ type: "operation-succeeded", operation: "install", contentType: target.contentType, entryId: `url:${target.url}`, version: installed && "version" in installed ? installed.version : undefined });
+        const entryId = installed?.id?.trim() || `url:${target.url}`;
+        const version = installed?.version?.trim() || undefined;
+        dispatch({ type: "operation-succeeded", operation: "install", contentType: target.contentType, entryId, version });
       } else {
         if (!dependencies.installCharacterFromUrl) throw new Error("character URL installation is unavailable");
         const installed = await dependencies.installCharacterFromUrl(target.url);

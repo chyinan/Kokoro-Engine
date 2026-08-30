@@ -25,6 +25,11 @@ const ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const TRUST_LABELS = new Set(['official', 'community', 'unverified']);
 const CONTENT_TYPES = new Set(['character', 'mod']);
+const REGISTRY_ENTRY_FIELDS = new Set([
+  'content_type', 'id', 'name', 'version', 'author', 'description', 'preview',
+  'engine_version', 'download_url', 'archive_size', 'sha256', 'trust', 'trust_source',
+  'registry_identity', 'permissions', 'recommendations',
+]);
 const PERMISSIONS = new Set([
   'tts',
   'vision',
@@ -390,6 +395,8 @@ function validateRecommendations(value) {
 /** Validate one registry entry without reading from disk. */
 export function validateRegistryEntry(entry) {
   if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return invalid('entry must be an object');
+  const unknown = Object.keys(entry).find(field => !REGISTRY_ENTRY_FIELDS.has(field));
+  if (unknown) return invalid(`entry contains unknown field: ${unknown}`);
   for (const field of ['content_type', 'id', 'name', 'version', 'author', 'description', 'download_url', 'sha256', 'trust', 'trust_source']) {
     if (typeof entry[field] !== 'string' || entry[field].trim() === '') return invalid(`missing ${field}`);
   }
@@ -409,8 +416,7 @@ export function validateRegistryEntry(entry) {
   if (!SHA256_PATTERN.test(entry.sha256)) return invalid('invalid sha256');
   if (!TRUST_LABELS.has(entry.trust)) return invalid('invalid trust label');
   if (!isValidHttpsUrl(entry.trust_source)) return invalid('invalid trust_source');
-  const preview = entry.preview ?? [];
-  if (!Array.isArray(preview) || preview.some(value => !isSafePreviewReference(value))) return invalid('invalid preview reference');
+  if (!Array.isArray(entry.preview) || entry.preview.some(value => !isSafePreviewReference(value))) return invalid('invalid preview reference');
   const official = normalizeTrustSource(entry.trust_source);
   if (entry.trust === 'official' && (official.trust !== 'official' || entry.registry_identity !== OFFICIAL_REGISTRY_IDENTITY)) return invalid('official trust requires canonical registry identity');
   if (entry.trust === 'official' && !isOfficialPackageUrl(download, archiveName(entry))) return invalid('official trust requires canonical package URL');

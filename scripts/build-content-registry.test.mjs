@@ -85,6 +85,7 @@ const archive = {
   version: '1.0.0',
   author: 'Kokoro Engine',
   description: 'A warm daily companion.',
+  preview: [],
   engine_version: '>=0.3.1, <0.4.0',
   download_url: `${OFFICIAL_PACKAGE_BASE_URL}/kokoro-1.0.0.zip`,
   archive_size: 1234,
@@ -119,6 +120,11 @@ describe('content registry contract', () => {
     expect(validateRegistryEntry({ ...archive, download_url: 'http://example.test/kokoro-1.0.0.zip' }).valid).toBe(false);
     expect(validateRegistryEntry({ ...archive, download_url: `${OFFICIAL_REGISTRY_URL}/../packages/other.zip` }).valid).toBe(false);
     expect(validateRegistryEntry({ ...archive, download_url: `${OFFICIAL_REGISTRY_URL}/../packages/kokoro-1.0.0.tar.gz` }).valid).toBe(false);
+  });
+
+  it('rejects null previews and unknown registry entry fields', () => {
+    expect(validateRegistryEntry({ ...archive, preview: null }).valid).toBe(false);
+    expect(validateRegistryEntry({ ...archive, unexpected: true }).valid).toBe(false);
   });
 
   it('accepts only safe preview references', () => {

@@ -229,6 +229,34 @@ describe("ContentLibrary", () => {
     act(() => root.unmount());
   });
 
+  it("records the returned MOD manifest identity after a URL install", async () => {
+    const installModFromUrl = vi.fn(async () => ({
+      id: "night-theme",
+      name: "Night Theme",
+      version: "2.0.0",
+      description: "A calm dark theme",
+    }));
+    const { container, root } = renderLibrary({ dependencies: deps({ installModFromUrl }) });
+    await act(async () => { await Promise.resolve(); });
+    click(container, '[data-content-tab="mod"]');
+    const input = container.querySelector<HTMLInputElement>("[data-content-url-input]");
+    act(() => {
+      if (input) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        setter?.call(input, "https://community.example/theme-v2.zip");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    click(container, '[data-content-action="install-url"]');
+    click(container, '[data-content-action="confirm-url"]');
+    await act(async () => { await Promise.resolve(); });
+
+    expect(installModFromUrl).toHaveBeenCalledWith("https://community.example/theme-v2.zip", true);
+    expect(container.querySelector('[data-content-status="night-theme"]')?.textContent).toContain("installed");
+    act(() => root.unmount());
+  });
+
   it("hydrates installed packages from authoritative state after restart", async () => {
     const listInstalled = vi.fn(async () => [
       { content_type: "mod" as const, id: "night-theme", version: "1.0.0" },
