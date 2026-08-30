@@ -141,6 +141,19 @@ fn rejects_unsupported_archive_content() {
 }
 
 #[test]
+fn rejects_character_package_without_a_root_license_file() {
+    let entries = vec![PackageContentEntry {
+        path: "character.json".into(),
+        uncompressed_size: 1,
+        is_directory: false,
+    }];
+
+    let error = validate_package_content(&entries).unwrap_err();
+
+    assert!(error.to_string().contains("root license"));
+}
+
+#[test]
 fn failed_update_preserves_the_installed_version() {
     let temp = TempDir::new().unwrap();
     let catalog = test_catalog(&temp);

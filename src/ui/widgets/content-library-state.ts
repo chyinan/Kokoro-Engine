@@ -12,7 +12,9 @@ export type ContentVersionState = "available" | "installed" | "update-available"
 
 export type ContentPendingOperation = {
   readonly operation: ContentOperation;
+  readonly contentType: ContentLibraryTab;
   readonly entryId: string;
+  readonly key: string;
 };
 
 export type ContentActionableError = {
@@ -42,9 +44,9 @@ export type ContentLibraryState = {
 
 export type ContentLibraryEvent =
   | { readonly type: "tab-selected"; readonly tab: ContentLibraryTab }
-  | { readonly type: "operation-started"; readonly operation: ContentOperation; readonly entryId: string }
-  | { readonly type: "operation-succeeded"; readonly operation: ContentOperation; readonly entryId: string; readonly version?: string }
-  | { readonly type: "operation-failed"; readonly operation: ContentOperation; readonly entryId: string; readonly error: unknown }
+  | { readonly type: "operation-started"; readonly operation: ContentOperation; readonly contentType: ContentLibraryTab; readonly entryId: string }
+  | { readonly type: "operation-succeeded"; readonly operation: ContentOperation; readonly contentType: ContentLibraryTab; readonly entryId: string; readonly version?: string }
+  | { readonly type: "operation-failed"; readonly operation: ContentOperation; readonly contentType: ContentLibraryTab; readonly entryId: string; readonly error: unknown }
   | { readonly type: "url-warning-opened"; readonly url: string; readonly contentType: ContentLibraryTab }
   | { readonly type: "installed-refreshed"; readonly packages: ReadonlyArray<InstalledContentPackage> }
   | { readonly type: "url-warning-dismissed" }
@@ -53,10 +55,14 @@ export type ContentLibraryEvent =
 export function createContentLibraryState(
   installedVersions: Readonly<Record<string, string>> = {},
 ): ContentLibraryState {
+  const normalizedInstalledVersions: Record<string, string> = {};
+  for (const [key, version] of Object.entries(installedVersions)) {
+    normalizedInstalledVersions[key.includes(":") ? key : contentKey("character", key)] = version;
+  }
   return {
     activeTab: "character",
     pending: null,
-    installedVersions: { ...installedVersions },
+    installedVersions: normalizedInstalledVersions,
     error: null,
     urlWarning: null,
   };
@@ -72,15 +78,21 @@ export function reduceContentLibraryState(
     case "operation-started":
       return {
         ...state,
-        pending: { operation: event.operation, entryId: event.entryId },
+        pending: {
+          operation: event.operation,
+          contentType: event.contentType,
+          entryId: event.entryId,
+          key: contentKey(event.contentType, event.entryId),
+        },
         error: null,
       };
     case "operation-succeeded": {
       const installedVersions = { ...state.installedVersions };
+      const key = contentKey(event.contentType, event.entryId);
       if (event.operation === "remove") {
-        delete installedVersions[event.entryId];
+        delete installedVersions[key];
       } else if (event.version) {
-        installedVersions[event.entryId] = event.version;
+        installedVersions[key] = event.version;
       }
       return { ...state, pending: null, installedVersions, error: null };
     }
@@ -88,7 +100,7 @@ export function reduceContentLibraryState(
       const installedVersions: Record<string, string> = {};
       for (const packageEntry of event.packages) {
         if (packageEntry.id.trim() && packageEntry.version.trim()) {
-          installedVersions[packageEntry.id] = packageEntry.version;
+          installedVersions[contentKey(packageEntry.contentType, packageEntry.id)] = packageEntry.version;
         }
       }
       return { ...state, installedVersions };
@@ -113,6 +125,10 @@ export function selectRegistryEntries(
   tab: ContentLibraryTab,
 ): Array<RegistryEntry> {
   return entries.filter((entry) => entry.content_type === tab);
+}
+
+export function contentKey(contentType: ContentLibraryTab, id: string): string {
+  return `${contentType}:${id}`;
 }
 
 /** Never trust a self-asserted official label from a custom registry or URL. */

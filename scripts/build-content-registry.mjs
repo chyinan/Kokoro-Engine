@@ -97,6 +97,11 @@ function isSafePreviewReference(value) {
   return value.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..');
 }
 
+function isRootLicenseName(value) {
+  const lower = basename(value).toLowerCase();
+  return !value.includes('/') && (lower === 'license' || lower.startsWith('license.'));
+}
+
 function validateRecommendations(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   if (typeof value.vision !== 'boolean' || typeof value.memory !== 'boolean') return false;
@@ -298,6 +303,9 @@ async function collectFiles(root, contentType) {
     }
   }
   await walk(root);
+  if (contentType === 'character' && !result.some(file => isRootLicenseName(file.name))) {
+    throw new Error('character package must contain a root license-named file');
+  }
   return result;
 }
 

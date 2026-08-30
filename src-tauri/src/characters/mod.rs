@@ -36,6 +36,8 @@ pub enum PackageContentError {
     UncompressedSizeLimit,
     #[error("package is missing `character.json`")]
     MissingManifest,
+    #[error("character package is missing a root license file")]
+    MissingRootLicense,
 }
 
 pub fn validate_package_content(
@@ -48,6 +50,7 @@ pub fn validate_package_content(
 
     let mut total_size = 0_u64;
     let mut has_manifest = false;
+    let mut has_root_license = false;
     for entry in entries {
         validate_package_path(&entry.path)?;
         if entry.is_directory {
@@ -62,6 +65,9 @@ pub fn validate_package_content(
         if entry.path == std::path::Path::new("character.json") {
             has_manifest = true;
         }
+        if is_root_license_file(&entry.path) {
+            has_root_license = true;
+        }
         if !is_supported_package_file(&entry.path) {
             return Err(PackageContentError::UnsupportedContent(
                 entry.path.to_string_lossy().into_owned(),
@@ -72,7 +78,22 @@ pub fn validate_package_content(
     if !has_manifest {
         return Err(PackageContentError::MissingManifest);
     }
+    if !has_root_license {
+        return Err(PackageContentError::MissingRootLicense);
+    }
     Ok(())
+}
+
+fn is_root_license_file(path: &std::path::Path) -> bool {
+    path.parent()
+        .is_some_and(|parent| parent.as_os_str().is_empty())
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                let lower = name.to_ascii_lowercase();
+                lower == "license" || lower.starts_with("license.")
+            })
 }
 
 #[cfg(test)]

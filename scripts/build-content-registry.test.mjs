@@ -134,6 +134,23 @@ describe('content registry contract', () => {
       .rejects.toThrow(/symlink|link|outside/i);
   });
 
+  it('requires a root license-named file for character packages', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kokoro-registry-license-'));
+    temporaryRoots.push(root);
+    const packageRoot = join(root, 'characters', 'unlicensed');
+    await mkdir(packageRoot, { recursive: true });
+    await writeFile(join(packageRoot, 'character.json'), JSON.stringify({
+      schema_version: 1, id: 'unlicensed', version: '1.0.0', name: 'Unlicensed',
+      description: 'A character', author: 'Kokoro', license: 'MIT', engine_version: '>=0.3.1, <0.4.0',
+      persona: 'Be helpful.', greeting: 'Hello.',
+    }));
+    await mkdir(join(packageRoot, 'licenses'));
+    await writeFile(join(packageRoot, 'licenses', 'MIT.txt'), 'MIT');
+
+    await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+      .rejects.toThrow(/root license/i);
+  });
+
   it('does not publish the creator template directory by default', async () => {
     const root = await mkdtemp(join(tmpdir(), 'kokoro-registry-template-'));
     temporaryRoots.push(root);
@@ -145,6 +162,7 @@ describe('content registry contract', () => {
       description: 'Built-in character', author: 'Kokoro', license: 'MIT', engine_version: '>=0.3.1, <0.4.0',
       persona: 'Kokoro', greeting: 'Hello',
     }));
+    await writeFile(join(root, 'characters', 'kokoro', 'LICENSE.md'), 'MIT');
     const index = await buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' });
     expect(index.entries.map((entry) => entry.id)).toEqual(['kokoro']);
   });

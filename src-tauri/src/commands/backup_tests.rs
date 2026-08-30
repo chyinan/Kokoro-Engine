@@ -6,8 +6,11 @@ use super::backup::{
     ExportOptions, ImportOptions, LocalCatalogPackageResolver, ResolvedCharacterPackage,
     MAX_BACKUP_RESOURCE_BYTES, MAX_BACKUP_RESOURCE_FILES, MAX_BACKUP_RESOURCE_PACKAGES,
 };
+use crate::registry::client::sha256_hex;
+use crate::registry::manifest::{RegistryEntry, RegistryRecommendations};
 use sqlx::sqlite::SqlitePoolOptions;
 use std::fs;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
 fn create_character_table_sql() -> &'static str {
@@ -200,6 +203,45 @@ fn backup_resolver_rejects_any_symlink_encountered_in_package() {
     let error = resolver.resolve_exact("kokoro", "1.0.0").unwrap_err();
 
     assert!(error.contains("symlink"), "{error}");
+}
+
+#[test]
+fn official_restore_stages_only_the_verified_exact_package() {
+    let bytes = {
+        let mut cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(&mut cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        writer.start_file("character.json", options).unwrap();
+        writer.write_all(br#"{"schema_version":1,"engine_version":">=0.3.1, <0.4.0","id":"kokoro","version":"1.0.0","name":"Kokoro","description":"desc","author":"team","license":"MIT","persona":"persona","greeting":"hello"}"#).unwrap();
+        writer.start_file("LICENSE.md", options).unwrap();
+        writer.write_all(b"MIT").unwrap();
+        writer.finish().unwrap();
+        cursor.into_inner()
+    };
+    let entry = RegistryEntry {
+        content_type: "character".to_string(),
+        id: "kokoro".to_string(),
+        name: "Kokoro".to_string(),
+        version: "1.0.0".to_string(),
+        author: "team".to_string(),
+        description: "desc".to_string(),
+        preview: Vec::new(),
+        engine_version: ">=0.3.1, <0.4.0".to_string(),
+        download_url: "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/kokoro-1.0.0.zip".to_string(),
+        archive_size: bytes.len() as u64,
+        sha256: sha256_hex(&bytes),
+        trust: "official".to_string(),
+        trust_source: crate::registry::manifest::OFFICIAL_REGISTRY_URL.to_string(),
+        registry_identity: Some(crate::registry::manifest::OFFICIAL_REGISTRY_IDENTITY.to_string()),
+        permissions: Vec::new(),
+        recommendations: RegistryRecommendations { vision: false, memory: false, mcp_servers: Vec::new(), bot_platforms: Vec::new() },
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let resolved = super::backup::stage_verified_official_package(temp.path(), &bytes, &entry)
+        .expect("verified official package should stage");
+    assert_eq!(resolved.package_dir, temp.path().join("kokoro/1.0.0"));
+    assert_eq!(resolved.avatar_path, None);
 }
 
 #[tokio::test]

@@ -43,7 +43,7 @@ pub struct CharacterPackageRemoval {
     pub active_fallback: Option<String>,
 }
 
-fn engine_version() -> Version {
+pub(crate) fn engine_version() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 3, 1))
 }
 
@@ -174,15 +174,60 @@ pub(crate) fn append_limited_chunk(
 }
 
 fn persist_download_temp(bytes: &[u8]) -> Result<PathBuf, KokoroError> {
+    let target = std::env::temp_dir().join(format!("kokoro-registry-{}.zip", Uuid::new_v4()));
+    persist_download_temp_at(bytes, &target)
+}
+
+pub(crate) fn persist_download_temp_at(
+    bytes: &[u8],
+    target: &Path,
+) -> Result<PathBuf, KokoroError> {
     if bytes.len() as u64 > MAX_ARCHIVE_BYTES {
         return Err(KokoroError::Validation(format!(
             "archive exceeds download size limit of {MAX_ARCHIVE_BYTES} bytes"
         )));
     }
-    let target = std::env::temp_dir().join(format!("kokoro-registry-{}.zip", Uuid::new_v4()));
-    fs::write(&target, bytes)
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(|error| {
+            let message = if error.kind() == std::io::ErrorKind::AlreadyExists {
+                format!(
+                    "temporary download path already exists: {}",
+                    target.display()
+                )
+            } else {
+                format!("failed to stage registry download: {error}")
+            };
+            KokoroError::Io(message)
+        })?;
+    use std::io::Write;
+    file.write_all(bytes)
         .map_err(|error| KokoroError::Io(format!("failed to stage registry download: {error}")))?;
-    Ok(target)
+    file.sync_all().map_err(|error| {
+        KokoroError::Io(format!("failed to finalize registry download: {error}"))
+    })?;
+    Ok(target.to_path_buf())
+}
+
+pub(crate) fn revalidate_staged_character_bytes(
+    original: &crate::registry::client::VerifiedCharacterPackage,
+    staged: &[u8],
+    engine: &Version,
+) -> Result<crate::registry::client::VerifiedCharacterPackage, KokoroError> {
+    let expected = (
+        original.bytes.len() as u64,
+        crate::registry::client::sha256_hex(&original.bytes),
+    );
+    let revalidated =
+        verify_character_archive(staged, Some(expected), engine).map_err(client_error)?;
+    if revalidated.manifest != original.manifest {
+        return Err(KokoroError::Validation(
+            "staged registry archive changed before installation".to_string(),
+        ));
+    }
+    Ok(revalidated)
 }
 
 fn client_error(error: RegistryClientError) -> KokoroError {
@@ -259,6 +304,7 @@ fn install_verified_package(
     let result = (|| {
         let bytes = fs::read(&temporary)
             .map_err(|error| KokoroError::Io(format!("failed to read staged archive: {error}")))?;
+        let _revalidated = revalidate_staged_character_bytes(&verified, &bytes, &engine_version())?;
         let catalog = catalog_for_app(app)?;
         let entry = catalog.install_zip(Cursor::new(bytes)).map_err(|error| {
             KokoroError::Validation(format!("failed to install character package: {error}"))

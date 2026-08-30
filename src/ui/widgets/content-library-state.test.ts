@@ -70,13 +70,13 @@ describe("content library state", () => {
   it("transitions through install, update, remove, and recoverable error states", () => {
     let state = createContentLibraryState();
     const events: ContentLibraryEvent[] = [
-      { type: "operation-started", operation: "install", entryId: character.id },
-      { type: "operation-succeeded", operation: "install", entryId: character.id, version: character.version },
-      { type: "operation-started", operation: "update", entryId: character.id },
-      { type: "operation-failed", operation: "update", entryId: character.id, error: "checksum mismatch" },
+      { type: "operation-started", operation: "install", contentType: "character", entryId: character.id },
+      { type: "operation-succeeded", operation: "install", contentType: "character", entryId: character.id, version: character.version },
+      { type: "operation-started", operation: "update", contentType: "character", entryId: character.id },
+      { type: "operation-failed", operation: "update", contentType: "character", entryId: character.id, error: "checksum mismatch" },
       { type: "error-dismissed" },
-      { type: "operation-started", operation: "remove", entryId: character.id },
-      { type: "operation-succeeded", operation: "remove", entryId: character.id },
+      { type: "operation-started", operation: "remove", contentType: "character", entryId: character.id },
+      { type: "operation-succeeded", operation: "remove", contentType: "character", entryId: character.id },
     ];
     for (const event of events) state = reduceContentLibraryState(state, event);
     expect(state.pending).toBeNull();
@@ -118,7 +118,34 @@ describe("content library state", () => {
         { contentType: "mod", id: "night-theme", version: "2.0.0" },
       ],
     });
-    expect(state.installedVersions).toEqual({ kokoro: "1.0.0", "night-theme": "2.0.0" });
+    expect(state.installedVersions).toEqual({ "character:kokoro": "1.0.0", "mod:night-theme": "2.0.0" });
+  });
+
+  it("keeps same IDs isolated between Character and MOD packages", () => {
+    let state = createContentLibraryState();
+    state = reduceContentLibraryState(state, {
+      type: "installed-refreshed",
+      packages: [
+        { contentType: "character", id: "shared", version: "1.0.0" },
+        { contentType: "mod", id: "shared", version: "2.0.0" },
+      ],
+    });
+    expect(state.installedVersions).toEqual({ "character:shared": "1.0.0", "mod:shared": "2.0.0" });
+
+    state = reduceContentLibraryState(state, {
+      type: "operation-started",
+      operation: "remove",
+      contentType: "character",
+      entryId: "shared",
+    });
+    expect(state.pending).toEqual({ operation: "remove", contentType: "character", entryId: "shared", key: "character:shared" });
+    state = reduceContentLibraryState(state, {
+      type: "operation-succeeded",
+      operation: "remove",
+      contentType: "character",
+      entryId: "shared",
+    });
+    expect(state.installedVersions).toEqual({ "mod:shared": "2.0.0" });
   });
 
   it("accepts only safe HTTPS preview URLs", () => {

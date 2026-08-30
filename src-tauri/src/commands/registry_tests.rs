@@ -1,7 +1,9 @@
 // pattern: Imperative Shell
 
 use crate::characters::catalog::CharacterCatalog;
-use crate::commands::registry::append_limited_chunk;
+use crate::commands::registry::{
+    append_limited_chunk, persist_download_temp_at, revalidate_staged_character_bytes,
+};
 use crate::registry::client::{
     install_trust, verify_character_archive, verify_registry_entry_archive, InstallTrust,
     RegistryClientError, MAX_ARCHIVE_BYTES,
@@ -166,6 +168,41 @@ fn cumulative_download_limit_is_checked_before_buffer_growth() {
     assert!(append_limited_chunk(&mut buffer, b"1234", 5).is_ok());
     assert!(append_limited_chunk(&mut buffer, b"56", 5).is_err());
     assert_eq!(buffer, b"1234");
+}
+
+#[test]
+fn registry_download_temp_file_is_exclusive_and_rejects_existing_paths() {
+    let temp = TempDir::new().unwrap();
+    let target = temp.path().join("download.zip");
+    std::fs::write(&target, b"existing").unwrap();
+
+    let error = persist_download_temp_at(b"replacement", &target).unwrap_err();
+
+    assert!(error.to_string().contains("already exists"));
+    assert_eq!(std::fs::read(&target).unwrap(), b"existing");
+}
+
+#[test]
+fn registry_install_revalidates_bytes_after_temp_file_read() {
+    let original = archive(None, ">=0.3.0, <0.4.0");
+    let verified = verify_character_archive(
+        &original,
+        Some((original.len() as u64, checksum(&original))),
+        &Version::parse("0.3.1").unwrap(),
+    )
+    .unwrap();
+    let mut replaced = original.clone();
+    let offset = replaced
+        .iter()
+        .position(|byte| *byte == b'M')
+        .expect("license bytes");
+    replaced[offset] = b'X';
+
+    let error =
+        revalidate_staged_character_bytes(&verified, &replaced, &Version::parse("0.3.1").unwrap())
+            .unwrap_err();
+
+    assert!(error.to_string().contains("checksum mismatch"));
 }
 
 #[test]

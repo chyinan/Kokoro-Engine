@@ -21,6 +21,7 @@ import {
 
 import {
   createContentLibraryState,
+  contentKey,
   getContentTrustLabel,
   getContentVersionState,
   getSafePreviewUrl,
@@ -98,7 +99,7 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
       dispatch({ type: "error-dismissed" });
     } catch (error) {
       setLastAction(() => loadRegistry);
-      dispatch({ type: "operation-failed", operation: "install", entryId: "registry", error });
+      dispatch({ type: "operation-failed", operation: "install", contentType: "character", entryId: "registry", error });
     } finally {
       setLoading(false);
     }
@@ -117,7 +118,7 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
       });
     } catch (error) {
       setLastAction(() => loadInstalled);
-      dispatch({ type: "operation-failed", operation: "install", entryId: "installed", error });
+      dispatch({ type: "operation-failed", operation: "install", contentType: "character", entryId: "installed", error });
     }
   };
 
@@ -134,23 +135,23 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
       return;
     }
     const action = async (): Promise<void> => {
-      dispatch({ type: "operation-started", operation, entryId: entry.id });
+      dispatch({ type: "operation-started", operation, contentType: entry.content_type, entryId: entry.id });
       try {
         if (operation === "install") {
           if (entry.content_type === "character") {
             const installed = await dependencies.installCharacter(entry.id, entry.version, props.registryUrl);
-            dispatch({ type: "operation-succeeded", operation, entryId: entry.id, version: installed.version || entry.version });
+            dispatch({ type: "operation-succeeded", operation, contentType: entry.content_type, entryId: entry.id, version: installed.version || entry.version });
           } else {
             await dependencies.installMod(entry, permissionConfirmed, props.registryUrl);
-            dispatch({ type: "operation-succeeded", operation, entryId: entry.id, version: entry.version });
+            dispatch({ type: "operation-succeeded", operation, contentType: entry.content_type, entryId: entry.id, version: entry.version });
           }
         } else if (operation === "update") {
           if (entry.content_type === "character") {
             const installed = await dependencies.installCharacter(entry.id, entry.version, props.registryUrl);
-            dispatch({ type: "operation-succeeded", operation, entryId: entry.id, version: installed.version || entry.version });
+            dispatch({ type: "operation-succeeded", operation, contentType: entry.content_type, entryId: entry.id, version: installed.version || entry.version });
           } else {
             await dependencies.update(entry, permissionConfirmed, props.registryUrl);
-            dispatch({ type: "operation-succeeded", operation, entryId: entry.id, version: entry.version });
+            dispatch({ type: "operation-succeeded", operation, contentType: entry.content_type, entryId: entry.id, version: entry.version });
           }
         } else {
           if (entry.content_type === "character" && dependencies.removeCharacter) {
@@ -158,10 +159,10 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
           } else {
             await dependencies.remove(entry);
           }
-          dispatch({ type: "operation-succeeded", operation, entryId: entry.id });
+          dispatch({ type: "operation-succeeded", operation, contentType: entry.content_type, entryId: entry.id });
         }
       } catch (error) {
-        dispatch({ type: "operation-failed", operation, entryId: entry.id, error });
+        dispatch({ type: "operation-failed", operation, contentType: entry.content_type, entryId: entry.id, error });
       }
     };
     setLastAction(() => action);
@@ -172,20 +173,20 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
     const target = state.urlWarning;
     dispatch({ type: "url-warning-dismissed" });
     if (!target) return;
-    dispatch({ type: "operation-started", operation: "install", entryId: `url:${target.url}` });
+    dispatch({ type: "operation-started", operation: "install", contentType: target.contentType, entryId: `url:${target.url}` });
     try {
       if (state.urlWarning?.contentType === "mod") {
         if (!dependencies.installModFromUrl) throw new Error("MOD URL installation is unavailable");
         const installed = await dependencies.installModFromUrl(target.url, true);
-        dispatch({ type: "operation-succeeded", operation: "install", entryId: `url:${target.url}`, version: installed && "version" in installed ? installed.version : undefined });
+        dispatch({ type: "operation-succeeded", operation: "install", contentType: target.contentType, entryId: `url:${target.url}`, version: installed && "version" in installed ? installed.version : undefined });
       } else {
         if (!dependencies.installCharacterFromUrl) throw new Error("character URL installation is unavailable");
         const installed = await dependencies.installCharacterFromUrl(target.url);
-        dispatch({ type: "operation-succeeded", operation: "install", entryId: installed.id, version: installed.version });
+        dispatch({ type: "operation-succeeded", operation: "install", contentType: target.contentType, entryId: installed.id, version: installed.version });
       }
       setUrl("");
     } catch (error) {
-      dispatch({ type: "operation-failed", operation: "install", entryId: `url:${target.url}`, error });
+      dispatch({ type: "operation-failed", operation: "install", contentType: target.contentType, entryId: `url:${target.url}`, error });
     }
   };
 
@@ -231,8 +232,9 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
         {!loading && visibleEntries.length === 0 && <p className="py-8 text-center text-xs text-[var(--color-text-muted)]">{emptyText}</p>}
         {visibleEntries.map((entry) => {
           const trust = getContentTrustLabel(entry, props.registryUrl ?? undefined);
-          const versionState = getContentVersionState(entry, state.installedVersions[entry.id]);
-          const pending = state.pending?.entryId === entry.id;
+          const entryKey = contentKey(entry.content_type, entry.id);
+          const versionState = getContentVersionState(entry, state.installedVersions[entryKey]);
+          const pending = state.pending?.key === entryKey;
           const recommendations = recommendationLabels(entry, t);
           const action = versionState === "available" ? "install" : versionState === "update-available" ? "update" : "remove";
           return (

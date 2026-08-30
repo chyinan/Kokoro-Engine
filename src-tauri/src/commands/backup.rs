@@ -1,18 +1,22 @@
 use crate::ai::context::AIOrchestrator;
-use crate::characters::catalog::validate_package_directory as validate_catalog_package_directory;
+use crate::characters::catalog::{
+    validate_package_directory as validate_catalog_package_directory, CharacterCatalog,
+};
 use crate::characters::instance_resource::{
     instance_avatar_reference, parse_instance_avatar_reference, validate_avatar_bytes,
     validate_instance_id, MAX_INSTANCE_AVATAR_BYTES,
 };
 use crate::characters::{validate_package_content, PackageContentEntry};
 use crate::error::KokoroError;
+use crate::registry::client::verify_registry_entry_archive;
+use crate::registry::manifest::{RegistryEntry, OFFICIAL_REGISTRY_URL};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Acquire, Row, SqliteConnection, SqlitePool};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{Read, Seek, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tauri::AppHandle;
@@ -150,6 +154,98 @@ impl CharacterPackageResolver for LocalCatalogPackageResolver {
             Err(error) => Err(error.to_string()),
         }
     }
+}
+
+/// Resolves missing data-only restore packages from the canonical registry.
+/// Network failures and missing versions intentionally return `None`, allowing
+/// the restored instance to retain its built-in presentation fallback. Any
+/// downloaded bytes still pass the exact registry checksum, manifest, and
+/// engine-compatibility checks before they are staged into the local catalog.
+pub(crate) struct OfficialRegistryPackageResolver {
+    root: PathBuf,
+}
+
+impl OfficialRegistryPackageResolver {
+    pub(crate) fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    pub(crate) async fn hydrate_exact(
+        &self,
+        template_id: &str,
+        template_version: &str,
+    ) -> Result<Option<ResolvedCharacterPackage>, String> {
+        let index = match crate::commands::registry::fetch_index(OFFICIAL_REGISTRY_URL).await {
+            Ok(index) => index,
+            Err(error) => {
+                tracing::warn!(
+                    target: "backup",
+                    "official character package registry unavailable: {error}"
+                );
+                return Ok(None);
+            }
+        };
+        let Some(entry) = index.entries.iter().find(|entry| {
+            entry.content_type == "character"
+                && entry.id == template_id
+                && entry.version == template_version
+        }) else {
+            return Ok(None);
+        };
+        let bytes = match crate::commands::registry::fetch_bytes(&entry.download_url).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(
+                    target: "backup",
+                    package = %format!("{template_id}@{template_version}"),
+                    "official character package unavailable: {error}"
+                );
+                return Ok(None);
+            }
+        };
+        stage_verified_official_package(&self.root, &bytes, entry)
+            .map(Some)
+            .map_err(|error| format!("failed to validate official character package: {error}"))
+    }
+}
+
+impl CharacterPackageResolver for OfficialRegistryPackageResolver {
+    fn resolve_exact(
+        &self,
+        template_id: &str,
+        template_version: &str,
+    ) -> Result<Option<ResolvedCharacterPackage>, String> {
+        LocalCatalogPackageResolver::new(self.root.clone())
+            .resolve_exact(template_id, template_version)
+    }
+
+    fn resolve_instance_avatar(&self, instance_id: &str) -> Result<Option<String>, String> {
+        LocalCatalogPackageResolver::new(self.root.clone()).resolve_instance_avatar(instance_id)
+    }
+}
+
+pub(crate) fn stage_verified_official_package(
+    root: &Path,
+    bytes: &[u8],
+    entry: &RegistryEntry,
+) -> Result<ResolvedCharacterPackage, String> {
+    let engine_version = Version::parse(env!("CARGO_PKG_VERSION"))
+        .map_err(|error| format!("invalid engine version: {error}"))?;
+    let verified = verify_registry_entry_archive(bytes, entry, &engine_version)
+        .map_err(|error| format!("{error}"))?;
+    let catalog = CharacterCatalog::new(root.to_path_buf(), engine_version);
+    let installed = catalog
+        .install_zip(Cursor::new(verified.bytes))
+        .map_err(|error| format!("failed to stage official character package: {error}"))?;
+    if installed.manifest.id != entry.id || installed.manifest.version != entry.version {
+        return Err(
+            "staged official package does not match the requested exact version".to_string(),
+        );
+    }
+    Ok(ResolvedCharacterPackage {
+        package_dir: installed.package_dir,
+        avatar_path: installed.manifest.avatar.map(PathBuf::from),
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1519,8 +1615,30 @@ pub async fn import_data(
     };
     let prepared_characters = if has_db {
         let source_pool = open_readonly_pool(&tmp_dir.join("import.db")).await?;
-        let resolver = LocalCatalogPackageResolver::new(app_data.join("characters"));
-        let rows = prepare_character_rows(&source_pool, &resolver).await?;
+        let catalog_root = app_data.join("characters");
+        let local_resolver = LocalCatalogPackageResolver::new(catalog_root.clone());
+        let official_resolver = OfficialRegistryPackageResolver::new(catalog_root);
+        let references = sqlx::query(
+            "SELECT DISTINCT template_id, template_version FROM characters \
+             WHERE template_id IS NOT NULL AND template_version IS NOT NULL",
+        )
+        .fetch_all(&source_pool)
+        .await?;
+        for reference in references {
+            let template_id: String = reference.try_get("template_id")?;
+            let template_version: String = reference.try_get("template_version")?;
+            if local_resolver
+                .resolve_exact(&template_id, &template_version)
+                .map_err(KokoroError::Validation)?
+                .is_none()
+            {
+                let _ = official_resolver
+                    .hydrate_exact(&template_id, &template_version)
+                    .await
+                    .map_err(KokoroError::Validation)?;
+            }
+        }
+        let rows = prepare_character_rows(&source_pool, &official_resolver).await?;
         source_pool.close().await;
         rows
     } else {
