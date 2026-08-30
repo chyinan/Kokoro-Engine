@@ -28,7 +28,7 @@
         "content_type": { "enum": ["character", "mod"] },
         "id": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$" },
         "name": { "type": "string", "minLength": 1 },
-        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$" },
+        "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$" },
         "author": { "type": "string", "minLength": 1 },
         "description": { "type": "string", "minLength": 1 },
         "preview": {
@@ -36,7 +36,7 @@
           "items": {
             "oneOf": [
               { "type": "string", "format": "uri", "pattern": "^https://[^/@?#]+(?:/|$)" },
-              { "type": "string", "pattern": "^(?!/)(?!//)(?!.*(?:^|/)\\.\\.?/)(?!.*(?:^|/)\\.\\.?$)(?!.*\\\\)(?!.*:)[^\\s]+$" }
+              { "type": "string", "pattern": "^(?!/)(?!//)(?!.*(?:^|/)\\.(?:\\.|/|$))(?!.*\\\\)(?!.*:)(?!.*//)[^\\s/]+(?:/[^\\s/]+)*$" }
             ]
           },
           "uniqueItems": true
@@ -48,7 +48,11 @@
         "trust": { "enum": ["official", "community", "unverified"] },
         "trust_source": { "type": "string", "format": "uri", "pattern": "^https://" },
         "registry_identity": { "type": ["string", "null"] },
-        "permissions": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "permissions": {
+          "type": "array",
+          "items": { "enum": ["tts", "vision", "memory", "mcp", "bot", "system.info", "system.notifications", "filesystem.read", "clipboard.read"] },
+          "uniqueItems": true
+        },
         "recommendations": {
           "type": "object",
           "additionalProperties": false,

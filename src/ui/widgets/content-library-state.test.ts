@@ -121,6 +121,30 @@ describe("content library state", () => {
     expect(state.installedVersions).toEqual({ "character:kokoro": "1.0.0", "mod:night-theme": "2.0.0" });
   });
 
+  it("ignores malformed installed package snapshots before they become UI state", () => {
+    let state = createContentLibraryState({
+      kokoro: "1.0.0",
+      "mod:night-theme": "1.0.0-beta.1",
+      "character:../escape": "1.0.0",
+      "mod:unsafe": "1.0.0-01",
+    });
+    expect(state.installedVersions).toEqual({
+      "character:kokoro": "1.0.0",
+      "mod:night-theme": "1.0.0-beta.1",
+    });
+
+    state = reduceContentLibraryState(state, {
+      type: "installed-refreshed",
+      packages: [
+        { contentType: "character", id: "valid", version: "2.1.0" },
+        { contentType: "character", id: "valid", version: "2.0.0" },
+        { contentType: "character", id: "../escape", version: "3.0.0" },
+        { contentType: "mod", id: "unsafe", version: "1.0.0-01" },
+      ],
+    });
+    expect(state.installedVersions).toEqual({ "character:valid": "2.1.0" });
+  });
+
   it("keeps same IDs isolated between Character and MOD packages", () => {
     let state = createContentLibraryState();
     state = reduceContentLibraryState(state, {
@@ -156,6 +180,7 @@ describe("content library state", () => {
     expect(getSafePreviewUrl("data:image/svg+xml,<svg/onload=alert(1)>")).toBeNull();
     expect(getSafePreviewUrl("https://user:secret@cdn.example.test/avatar.webp")).toBeNull();
     expect(getSafePreviewUrl("//evil.example.test/avatar.webp", "https://cdn.example.test/packages/kokoro-1.0.0.zip")).toBeNull();
+    expect(getSafePreviewUrl("%2e%2e/outside.webp", "https://cdn.example.test/packages/kokoro-1.0.0.zip")).toBeNull();
   });
 
   it("orders registry versions according to SemVer prerelease precedence", () => {

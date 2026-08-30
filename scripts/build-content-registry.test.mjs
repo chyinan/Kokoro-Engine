@@ -1,6 +1,6 @@
 // pattern: Functional Core
 
-import { mkdtemp, mkdir, symlink, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, symlink, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -9,6 +9,7 @@ import {
   OFFICIAL_REGISTRY_IDENTITY,
   OFFICIAL_REGISTRY_URL,
   normalizeTrustSource,
+  validateContentFileNames,
   validateRegistryEntry,
   validateRegistryIndex,
 } from './build-content-registry.mjs';
@@ -165,5 +166,55 @@ describe('content registry contract', () => {
     await writeFile(join(root, 'characters', 'kokoro', 'LICENSE.md'), 'MIT');
     const index = await buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' });
     expect(index.entries.map((entry) => entry.id)).toEqual(['kokoro']);
+  });
+
+  it('validates manifest identity and semantic ranges before deriving an archive path', async () => {
+    const cases = [
+      { id: '../escape', version: '1.0.0', engine_version: '>=0.3.1, <0.4.0' },
+      { id: 'leading-zero', version: '01.0.0', engine_version: '>=0.3.1, <0.4.0' },
+      { id: 'bad-prerelease', version: '1.0.0-01', engine_version: '>=0.3.1, <0.4.0' },
+      { id: 'bad-build', version: '1.0.0+build..1', engine_version: '>=0.3.1, <0.4.0' },
+      { id: 'bad-range', version: '1.0.0', engine_version: '>=0.3.1-01, <0.4.0' },
+    ];
+    for (const [index, values] of cases.entries()) {
+      const root = await mkdtemp(join(tmpdir(), `kokoro-registry-manifest-${index}-`));
+      temporaryRoots.push(root);
+      const packageRoot = join(root, 'characters', 'candidate');
+      await mkdir(packageRoot, { recursive: true });
+      await writeFile(join(packageRoot, 'character.json'), JSON.stringify({
+        schema_version: 1, ...values, name: 'Candidate', description: 'A character',
+        author: 'Kokoro', license: 'MIT', persona: 'Be helpful.', greeting: 'Hello.',
+      }));
+      await writeFile(join(packageRoot, 'LICENSE.md'), 'MIT');
+
+      await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+        .rejects.toThrow(/invalid .*?(id|version|engine_version)|semantic|range/i);
+      expect((await readdir(join(root, 'registry'), { withFileTypes: true }).catch(() => [])).some((entry) => entry.name === 'escape-1.0.0.zip')).toBe(false);
+    }
+  });
+
+  it('keeps archive file policy aligned with character and MOD installers', async () => {
+    expect(validateContentFileNames(['character.json', 'cues.json', 'LICENSE.md', 'live2d/model.model3.json'], 'character').valid).toBe(true);
+    expect(validateContentFileNames(['character.json', 'LICENSE.md', 'payload.bin'], 'character').valid).toBe(false);
+    expect(validateContentFileNames(['character.json', 'LICENSE.md', 'extra.json'], 'character').valid).toBe(false);
+    expect(validateContentFileNames(['mod.json', 'main.js', 'assets/theme.css'], 'mod').valid).toBe(true);
+    expect(validateContentFileNames(['mod.json', 'payload.bin'], 'mod').valid).toBe(false);
+    expect(validateContentFileNames(['mod.json', 'unsafe/../main.js'], 'mod').valid).toBe(false);
+    expect(validateContentFileNames(['mod.json', 'main.js', 'MAIN.JS'], 'mod').valid).toBe(false);
+  });
+
+  it('requires relative manifest previews to resolve to an image in the package', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kokoro-registry-preview-'));
+    temporaryRoots.push(root);
+    const packageRoot = join(root, 'characters', 'preview');
+    await mkdir(packageRoot, { recursive: true });
+    await writeFile(join(packageRoot, 'character.json'), JSON.stringify({
+      schema_version: 1, id: 'preview', version: '1.0.0', name: 'Preview', description: 'A character',
+      author: 'Kokoro', license: 'MIT', engine_version: '>=0.3.1, <0.4.0', persona: 'Be helpful.',
+      greeting: 'Hello.', avatar: 'assets/avatar.png',
+    }));
+    await writeFile(join(packageRoot, 'LICENSE.md'), 'MIT');
+    await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+      .rejects.toThrow(/preview|avatar|missing|package/i);
   });
 });

@@ -57,7 +57,12 @@ export function createContentLibraryState(
 ): ContentLibraryState {
   const normalizedInstalledVersions: Record<string, string> = {};
   for (const [key, version] of Object.entries(installedVersions)) {
-    normalizedInstalledVersions[key.includes(":") ? key : contentKey("character", key)] = version;
+    const separator = key.indexOf(":");
+    const contentType = separator === -1 ? "character" : key.slice(0, separator);
+    const id = separator === -1 ? key : key.slice(separator + 1);
+    if (isValidContentType(contentType) && isValidContentId(id) && isValidContentVersion(version)) {
+      normalizedInstalledVersions[contentKey(contentType, id)] = version;
+    }
   }
   return {
     activeTab: "character",
@@ -91,7 +96,7 @@ export function reduceContentLibraryState(
       const key = contentKey(event.contentType, event.entryId);
       if (event.operation === "remove") {
         delete installedVersions[key];
-      } else if (event.version) {
+      } else if (event.version && isValidContentId(event.entryId) && isValidContentVersion(event.version)) {
         installedVersions[key] = event.version;
       }
       return { ...state, pending: null, installedVersions, error: null };
@@ -99,8 +104,14 @@ export function reduceContentLibraryState(
     case "installed-refreshed": {
       const installedVersions: Record<string, string> = {};
       for (const packageEntry of event.packages) {
-        if (packageEntry.id.trim() && packageEntry.version.trim()) {
-          installedVersions[contentKey(packageEntry.contentType, packageEntry.id)] = packageEntry.version;
+        if (isValidContentType(packageEntry.contentType)
+          && isValidContentId(packageEntry.id)
+          && isValidContentVersion(packageEntry.version)) {
+          const key = contentKey(packageEntry.contentType, packageEntry.id);
+          const previous = installedVersions[key];
+          if (!previous || compareContentVersions(packageEntry.version, previous) > 0) {
+            installedVersions[key] = packageEntry.version;
+          }
         }
       }
       return { ...state, installedVersions };
@@ -124,7 +135,7 @@ export function selectRegistryEntries(
   entries: ReadonlyArray<RegistryEntry>,
   tab: ContentLibraryTab,
 ): Array<RegistryEntry> {
-  return entries.filter((entry) => entry.content_type === tab);
+  return entries.filter((entry) => entry.content_type === tab && isValidContentId(entry.id) && isValidContentVersion(entry.version));
 }
 
 export function contentKey(contentType: ContentLibraryTab, id: string): string {
@@ -153,10 +164,19 @@ type ParsedContentVersion = {
   readonly prerelease: ReadonlyArray<bigint | string>;
 };
 
+const CONTENT_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+
+function isValidContentType(value: string): value is ContentLibraryTab {
+  return value === "character" || value === "mod";
+}
+
+function isValidContentId(value: string): boolean {
+  return CONTENT_ID_PATTERN.test(value);
+}
+
 function parseContentVersion(value: string): ParsedContentVersion | null {
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value);
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(value);
   if (!match) return null;
-  if ([match[1], match[2], match[3]].some((identifier) => identifier.length > 1 && identifier.startsWith("0"))) return null;
   const prerelease = (match[4] ?? "").split(".").filter(Boolean).map((identifier) => {
     if (/^\d+$/.test(identifier)) {
       if (identifier.length > 1 && identifier.startsWith("0")) return null;
@@ -171,6 +191,10 @@ function parseContentVersion(value: string): ParsedContentVersion | null {
     core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])],
     prerelease: prerelease as ReadonlyArray<bigint | string>,
   };
+}
+
+function isValidContentVersion(value: string): boolean {
+  return parseContentVersion(value) !== null;
 }
 
 /** Compare validated registry versions using SemVer 2.0 precedence rules. */
@@ -221,7 +245,7 @@ export function getSafePreviewUrl(value: string, downloadUrl?: string): string |
   try {
     const isAbsolute = value.startsWith("https://");
     if (!isAbsolute) {
-      if (!downloadUrl || value.startsWith("/") || value.startsWith("//") || value.includes("\\") || value.includes(":")) return null;
+      if (!downloadUrl || value.startsWith("/") || value.startsWith("//") || value.includes("\\") || value.includes(":") || value.includes("%")) return null;
       if (value.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) return null;
     }
     const base = downloadUrl ? new URL(downloadUrl) : undefined;

@@ -1,7 +1,7 @@
 // pattern: Imperative Shell
 
 import { createHash } from 'node:crypto';
-import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
+import { lstat, readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { basename, extname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -48,6 +48,16 @@ const NATIVE_EXECUTABLE_EXTENSIONS = new Set([
   '.sh',
 ]);
 const CHARACTER_SCRIPT_EXTENSIONS = new Set(['.js', '.mjs', '.cjs']);
+const MOD_ALLOWED_EXTENSIONS = new Set([
+  '.html', '.js', '.css', '.json', '.png', '.jpg', '.jpeg', '.webp', '.svg', '.gif',
+  '.woff', '.woff2', '.ttf', '.otf', '.txt', '.md',
+]);
+const CHARACTER_ALLOWED_SUFFIXES = [
+  '.png', '.jpg', '.jpeg', '.webp', '.wav', '.ogg', '.mp3', '.moc3', '.model3.json',
+  '.motion3.json', '.physics3.json', '.pose3.json', '.exp3.json', '.userdata3.json',
+];
+const MAX_SEMVER_NUMBER = 18446744073709551615n;
+const SEMVER_IDENTIFIER = /^[0-9A-Za-z-]+$/;
 
 function invalid(message) {
   return { valid: false, error: message };
@@ -63,10 +73,92 @@ function entryEngineVersion(entry) {
     : `>=${entry.min_engine_version ?? '0.0.0'}, <=${entry.max_engine_version ?? '999.999.999'}`;
 }
 
-function isEngineRange(value) {
-  return value.split('||').every(alternative => alternative.split(',').every(part =>
-    /^(?:\s*(?:\^|~|>=|<=|>|<|=)?\s*[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\s*)$/.test(part),
-  ));
+function parseSemVer(value) {
+  if (typeof value !== 'string') return null;
+  const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(value);
+  if (!match) return null;
+  const core = match.slice(1, 4).map(identifier => BigInt(identifier));
+  if (core.some(number => number > MAX_SEMVER_NUMBER)) return null;
+  const prerelease = match[4]?.split('.') ?? [];
+  if (prerelease.some(identifier => !SEMVER_IDENTIFIER.test(identifier)
+    || (/^[0-9]+$/.test(identifier) && (identifier.length > 1 && identifier.startsWith('0'))))) return null;
+  const build = match[5]?.split('.') ?? [];
+  if (build.some(identifier => !SEMVER_IDENTIFIER.test(identifier))) return null;
+  return { core, prerelease, build };
+}
+
+export function isValidSemVer(value) {
+  return parseSemVer(value) !== null;
+}
+
+function isValidRangeComparator(part) {
+  const match = /^(?:\^|~|>=|<=|>|<|=)?\s*(.*)$/.exec(part.trim());
+  if (!match || match[1] === '') return false;
+  const value = match[1];
+  if (value === '*' || value.toLowerCase() === 'x') return true;
+  if (/^(?:\d+|[xX])(?:\.(?:\d+|[xX]))?(?:\.(?:\d+|[xX]))?$/.test(value)) {
+    const identifiers = value.split('.');
+    const wildcardIndex = identifiers.findIndex(identifier => identifier.toLowerCase() === 'x');
+    if (wildcardIndex >= 0) {
+      if (identifiers.slice(wildcardIndex).some(identifier => identifier.toLowerCase() !== 'x')) return false;
+      return identifiers.slice(0, wildcardIndex).every(identifier => /^(0|[1-9][0-9]*)$/.test(identifier)
+        && BigInt(identifier) <= MAX_SEMVER_NUMBER);
+    }
+    if (identifiers.length < 3) {
+      return identifiers.every(identifier => /^(0|[1-9][0-9]*)$/.test(identifier)
+        && BigInt(identifier) <= MAX_SEMVER_NUMBER);
+    }
+    return parseSemVer(value) !== null;
+  }
+  return parseSemVer(value) !== null;
+}
+
+/** Validate the subset of npm-style ranges accepted by Rust semver::VersionReq. */
+export function isValidEngineRange(value) {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  return value.split('||').every(alternative => {
+    const trimmed = alternative.trim();
+    if (trimmed === '') return false;
+    const hyphen = /^(\S+)\s+-\s+(\S+)$/.exec(trimmed);
+    if (hyphen) return isValidSemVer(hyphen[1]) && isValidSemVer(hyphen[2]);
+    return trimmed.split(',').every(part => isValidRangeComparator(part));
+  });
+}
+
+function isSafePackageRelativePath(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.includes('\\') || value.includes('\0') || value.includes(':')) return false;
+  if (value.startsWith('/') || value.startsWith('//')) return false;
+  return value.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..');
+}
+
+function isRootLicenseName(value) {
+  const lower = basename(value).toLowerCase();
+  return !value.includes('/') && (lower === 'license' || lower.startsWith('license.'));
+}
+
+function isSupportedCharacterFile(value) {
+  const lower = value.toLowerCase();
+  if (lower === 'character.json' || lower === 'cues.json' || basename(lower) === 'license' || basename(lower).startsWith('license.')) return true;
+  return CHARACTER_ALLOWED_SUFFIXES.some(suffix => lower.endsWith(suffix));
+}
+
+function isSupportedModFile(value) {
+  return MOD_ALLOWED_EXTENSIONS.has(extname(value.toLowerCase()));
+}
+
+/** Validate archive names before writing bytes, including case-insensitive collisions. */
+export function validateContentFileNames(names, contentType) {
+  const seen = new Set();
+  for (const name of names) {
+    if (!isSafePackageRelativePath(name)) return invalid(`unsafe package path: ${name}`);
+    const key = name.toLowerCase();
+    if (seen.has(key)) return invalid(`case-insensitive duplicate package path: ${name}`);
+    seen.add(key);
+    if (contentType === 'character' ? !isSupportedCharacterFile(name) : !isSupportedModFile(name)) {
+      return invalid(`unsupported ${contentType} package content: ${name}`);
+    }
+  }
+  return { valid: true };
 }
 
 function archiveName(entry) {
@@ -93,13 +185,8 @@ function isSafePreviewReference(value) {
       return false;
     }
   }
-  if (value.startsWith('/') || value.startsWith('//') || value.includes('\\') || value.includes(':')) return false;
+  if (value.startsWith('/') || value.startsWith('//') || value.includes('\\') || value.includes(':') || value.includes('%')) return false;
   return value.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..');
-}
-
-function isRootLicenseName(value) {
-  const lower = basename(value).toLowerCase();
-  return !value.includes('/') && (lower === 'license' || lower.startsWith('license.'));
 }
 
 function validateRecommendations(value) {
@@ -123,8 +210,8 @@ export function validateRegistryEntry(entry) {
   }
   if (!CONTENT_TYPES.has(entry.content_type)) return invalid('invalid content_type');
   if (!ID_PATTERN.test(entry.id)) return invalid('invalid id');
-  if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(entry.version)) return invalid('invalid version');
-  if (typeof entryEngineVersion(entry) !== 'string' || entryEngineVersion(entry).trim() === '' || !isEngineRange(entryEngineVersion(entry))) return invalid('invalid engine_version');
+  if (!isValidSemVer(entry.version)) return invalid('invalid version');
+  if (typeof entryEngineVersion(entry) !== 'string' || entryEngineVersion(entry).trim() === '' || !isValidEngineRange(entryEngineVersion(entry))) return invalid('invalid engine_version');
   if (!isValidHttpsUrl(entry.download_url)) return invalid('download_url must use HTTPS');
   let download;
   try {
@@ -276,6 +363,11 @@ export function verifyRegistryArtifact(entry, archive) {
     if (entry.content_type === 'character' && ![...files.keys()].some(isRootLicenseName)) {
       return invalid('character package must contain a root license-named file');
     }
+    for (const preview of entry.preview ?? []) {
+      if (!preview.startsWith('https://') && !files.has(preview)) {
+        return invalid(`preview reference is missing from archive: ${preview}`);
+      }
+    }
     const manifest = JSON.parse(manifestBytes.toString('utf8'));
     if (manifest.id !== entry.id || manifest.version !== entry.version || manifest.engine_version !== entry.engine_version) return invalid('manifest metadata mismatch');
   } catch (error) {
@@ -295,37 +387,61 @@ async function collectFiles(root, contentType) {
       else if (entry.isSymbolicLink() || !entry.isFile()) throw new Error(`registry source contains symlink or non-regular file: ${relative(root, fullPath)}`);
       else {
         const relativePath = relative(root, fullPath).split(sep).join('/');
-        const lowerName = entry.name.toLowerCase();
-        const extension = extname(lowerName);
-        if (BLOCKED_NAMES.has(lowerName)
-          || NATIVE_EXECUTABLE_EXTENSIONS.has(extension)
-          || (contentType === 'character' && CHARACTER_SCRIPT_EXTENSIONS.has(extension))) {
-          throw new Error(`blocked executable or secret resource: ${relativePath}`);
-        }
         result.push({ name: relativePath, data: await readFile(fullPath) });
       }
     }
   }
   await walk(root);
+  for (const file of result) {
+    const lowerName = basename(file.name).toLowerCase();
+    const extension = extname(lowerName);
+    if (BLOCKED_NAMES.has(lowerName) || NATIVE_EXECUTABLE_EXTENSIONS.has(extension)
+      || (contentType === 'character' && CHARACTER_SCRIPT_EXTENSIONS.has(extension))) {
+      throw new Error(`blocked executable or secret resource: ${file.name}`);
+    }
+  }
   if (contentType === 'character' && !result.some(file => isRootLicenseName(file.name))) {
     throw new Error('character package must contain a root license-named file');
   }
+  const policy = validateContentFileNames(result.map(file => file.name), contentType);
+  if (!policy.valid) throw new Error(policy.error);
   return result;
 }
 
 async function readManifest(root, contentType) {
   const manifestName = contentType === 'character' ? 'character.json' : 'mod.json';
   const value = JSON.parse(await readFile(join(root, manifestName), 'utf8'));
-  if (typeof value.id !== 'string' || typeof value.version !== 'string' || typeof value.engine_version !== 'string') throw new Error(`invalid ${manifestName}`);
+  if (typeof value.id !== 'string' || !ID_PATTERN.test(value.id)) throw new Error(`invalid ${manifestName} id`);
+  if (typeof value.version !== 'string' || !isValidSemVer(value.version)) throw new Error(`invalid ${manifestName} version`);
+  if (typeof value.engine_version !== 'string' || !isValidEngineRange(value.engine_version)) throw new Error(`invalid ${manifestName} engine_version`);
+  for (const field of ['name', 'description']) {
+    if (typeof value[field] !== 'string' || value[field].trim() === '') throw new Error(`invalid ${manifestName} ${field}`);
+  }
   return value;
 }
 
-async function buildArchive(root, outputPath, contentType) {
+function validateManifestReferences(manifest, files) {
+  const available = new Set(files);
+  const image = value => typeof value === 'string' && /\.(?:png|jpe?g|webp)$/i.test(value);
+  const references = [
+    ['avatar', manifest.avatar, image],
+    ['assets.live2d_model', manifest.assets?.live2d_model, value => /\.model3\.json$/i.test(value)],
+    ['assets.background', manifest.assets?.background, image],
+    ['assets.cue_profile', manifest.assets?.cue_profile, value => /\.json$/i.test(value)],
+  ];
+  for (const [label, value, extensionCheck] of references) {
+    if (value === undefined || value === null) continue;
+    if (!isSafePackageRelativePath(value) || !extensionCheck(value) || !available.has(value)) {
+      throw new Error(`invalid or missing ${label} package reference: ${value}`);
+    }
+  }
+}
+
+async function buildArchive(root, contentType, manifest) {
   const files = await collectFiles(root, contentType);
+  validateManifestReferences(manifest, files.map(file => file.name));
   files.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
-  const archive = zipStored(files);
-  await writeFile(outputPath, archive);
-  return archive;
+  return zipStored(files);
 }
 
 function registryEntry(manifest, contentType, archive, sourceUrl, packageBaseUrl) {
@@ -373,16 +489,25 @@ export async function buildContentRegistry({ root = resolve(fileURLToPath(new UR
   for (const contentType of ['character', 'mod']) {
     const sourceRoot = join(root, `${contentType === 'character' ? 'characters' : 'mods'}`);
     if (!existsSync(sourceRoot)) continue;
-    const children = (await readdir(sourceRoot, { withFileTypes: true })).filter(entry => entry.isDirectory()).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+    const sourceMetadata = await lstat(sourceRoot);
+    if (sourceMetadata.isSymbolicLink() || !sourceMetadata.isDirectory()) throw new Error(`registry source is not a regular directory: ${sourceRoot}`);
+    const sourceEntries = await readdir(sourceRoot, { withFileTypes: true });
+    for (const sourceEntry of sourceEntries) {
+      if (sourceEntry.isSymbolicLink() || (!sourceEntry.isDirectory() && sourceEntry.name.toLowerCase() !== '.gitkeep')) {
+        throw new Error(`registry source contains symlink or non-directory entry: ${sourceEntry.name}`);
+      }
+    }
+    const children = sourceEntries.filter(entry => entry.isDirectory()).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
     for (const child of children) {
       const source = join(sourceRoot, child.name);
       if (contentType === 'character' && child.name.toLowerCase() === 'template') continue;
       const manifest = await readManifest(source, contentType);
       const archivePath = join(packageRoot, `${manifest.id}-${manifest.version}.zip`);
-      const archive = await buildArchive(source, archivePath, contentType);
+      const archive = await buildArchive(source, contentType, manifest);
       const entry = registryEntry(manifest, contentType, archive, sourceUrl, packageBaseUrl);
       const artifact = verifyRegistryArtifact(entry, archive);
       if (!artifact.valid) throw new Error(`generated archive ${child.name} is invalid: ${artifact.error}`);
+      await writeFile(archivePath, archive);
       entries.push(entry);
     }
   }
