@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "profile": "my-character-default",
+  "default": "neutral",
+  "cues": {
+    "neutral": {
+      "expression": "neutral",
+      "intensity": 0.25
+    },
+    "warm": {
+      "expression": "smile",
+      "intensity": 0.55
+    },
+    "focused": {
+      "expression": "attentive",
+      "intensity": 0.5
+    }
+  }
+}
