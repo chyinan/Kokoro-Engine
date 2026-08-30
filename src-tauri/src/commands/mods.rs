@@ -1,13 +1,12 @@
 // pattern: Imperative Shell
 
-use crate::commands::registry::append_limited_chunk;
 use crate::error::KokoroError;
 use crate::mods::{ModManager, ModManifest, ModThemeJson};
 use crate::registry::manifest::RegistryEntry;
-use futures::StreamExt;
 use semver::{Version, VersionReq};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
@@ -100,6 +99,27 @@ fn permission_review(
 fn read_manifest<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<ModManifest, KokoroError> {
+    let mut manifest_count = 0_u8;
+    let mut paths = HashSet::new();
+    for index in 0..archive.len() {
+        let file = archive
+            .by_index(index)
+            .map_err(|error| KokoroError::Validation(format!("invalid MOD archive: {error}")))?;
+        if !paths.insert(file.name().to_string()) {
+            return Err(KokoroError::Validation(format!(
+                "MOD archive contains duplicate path `{}`",
+                file.name()
+            )));
+        }
+        if file.name() == "mod.json" {
+            manifest_count = manifest_count.saturating_add(1);
+        }
+    }
+    if manifest_count != 1 {
+        return Err(KokoroError::Validation(format!(
+            "MOD archive must contain exactly one root mod.json (found {manifest_count})"
+        )));
+    }
     let mut content = String::new();
     let mut file = archive
         .by_name("mod.json")
@@ -492,33 +512,7 @@ pub async fn install_mod_from_url(
     if !confirm_untrusted_code {
         return Err(KokoroError::Unauthorized(untrusted_mod_url_warning(&url)));
     }
-    let response = reqwest::Client::new()
-        .get(parsed)
-        .send()
-        .await
-        .map_err(|error| KokoroError::ExternalService(error.to_string()))?
-        .error_for_status()
-        .map_err(|error| KokoroError::ExternalService(error.to_string()))?;
-    if response
-        .content_length()
-        .is_some_and(|size| size > MAX_MOD_ARCHIVE_BYTES)
-    {
-        return Err(KokoroError::Validation(format!(
-            "MOD archive exceeds the {}MB download limit",
-            MAX_MOD_ARCHIVE_BYTES / (1024 * 1024)
-        )));
-    }
-    let mut stream = response.bytes_stream();
-    let mut bytes = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| KokoroError::ExternalService(error.to_string()))?;
-        if append_limited_chunk(&mut bytes, &chunk, MAX_MOD_ARCHIVE_BYTES).is_err() {
-            return Err(KokoroError::Validation(format!(
-                "MOD archive exceeds the {}MB download limit",
-                MAX_MOD_ARCHIVE_BYTES / (1024 * 1024)
-            )));
-        }
-    }
+    let bytes = crate::commands::registry::fetch_bytes(&url).await?;
     let mods_dir = {
         let manager = mod_manager.lock().await;
         manager.mods_path.clone()

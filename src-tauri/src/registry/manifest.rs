@@ -314,7 +314,7 @@ fn is_valid_identifier(value: &str) -> bool {
 }
 
 fn is_valid_preview_reference(value: &str) -> bool {
-    if value.is_empty() || value.len() > 512 {
+    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_whitespace) {
         return false;
     }
     if value.starts_with("https://") {

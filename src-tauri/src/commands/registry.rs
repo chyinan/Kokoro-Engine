@@ -72,6 +72,18 @@ pub(crate) fn normalize_registry_url(url: Option<String>) -> Result<String, Koko
     Ok(value)
 }
 
+/// Registry and package downloads never follow redirects.  The registry
+/// identity is derived from the requested endpoint, so silently following a
+/// redirect could otherwise turn an official URL into an untrusted origin.
+fn registry_http_client() -> Result<reqwest::Client, KokoroError> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| {
+            KokoroError::ExternalService(format!("failed to configure registry client: {error}"))
+        })
+}
+
 pub(crate) async fn fetch_bytes(url: &str) -> Result<Vec<u8>, KokoroError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|error| KokoroError::Validation(format!("invalid download URL: {error}")))?;
@@ -80,7 +92,7 @@ pub(crate) async fn fetch_bytes(url: &str) -> Result<Vec<u8>, KokoroError> {
             "registry downloads must use HTTPS without credentials".to_string(),
         ));
     }
-    let response = reqwest::Client::new()
+    let response = registry_http_client()?
         .get(parsed)
         .send()
         .await
@@ -115,7 +127,7 @@ async fn fetch_text(url: &str) -> Result<String, KokoroError> {
             "registry URL must use HTTPS without credentials".to_string(),
         ));
     }
-    let response = reqwest::Client::new()
+    let response = registry_http_client()?
         .get(parsed)
         .send()
         .await
@@ -247,6 +259,21 @@ fn installed_result(entry: CatalogEntry, trust: InstallTrust) -> InstalledCharac
     }
 }
 
+/// Removing a package must not silently switch the user's active instance to
+/// another character.  The activation coordinator re-applies that same
+/// instance while package presentation assets are unavailable, allowing its
+/// built-in presentation fallback to take over.
+pub(crate) fn removal_activation_target(
+    active_id: Option<&str>,
+    uses_removed_package: bool,
+) -> Option<String> {
+    if uses_removed_package {
+        active_id.map(ToOwned::to_owned)
+    } else {
+        None
+    }
+}
+
 #[command]
 pub async fn list_registry_entries(
     registry_url: Option<String>,
@@ -371,35 +398,21 @@ async fn active_character_uses_package(
     let Some(active_id) = active_id else {
         return Ok(false);
     };
-    if active_id == package_id {
-        return Ok(true);
-    }
     let origin = sqlx::query_as::<_, (Option<String>, Option<String>)>(
         "SELECT template_id, template_version FROM characters WHERE id = ?",
     )
     .bind(active_id)
     .fetch_optional(pool)
     .await?;
-    Ok(origin.is_some_and(|(template_id, template_version)| {
-        template_id.as_deref() == Some(package_id)
-            && template_version.as_deref() == Some(package_version)
-    }))
-}
-
-async fn choose_fallback(
-    pool: &SqlitePool,
-    removed_id: &str,
-    removed_version: &str,
-) -> Result<Option<String>, KokoroError> {
-    let characters = crate::commands::characters::list_characters_from_pool(pool).await?;
-    Ok(characters
-        .into_iter()
-        .find(|character| {
-            character.id != removed_id
-                && !(character.template_id.as_deref() == Some(removed_id)
-                    && character.template_version.as_deref() == Some(removed_version))
-        })
-        .map(|character| character.id))
+    Ok(match origin {
+        Some((template_id, template_version)) => {
+            template_id.as_deref() == Some(package_id)
+                && template_version.as_deref() == Some(package_version)
+        }
+        // Legacy installations may have no character row for the active
+        // package id. Preserve that conservative compatibility behavior.
+        None => active_id == package_id,
+    })
 }
 
 #[command]
@@ -424,11 +437,7 @@ pub async fn remove_character_package(
             ))
         })?;
     let is_active = staged.is_some() && is_active;
-    let fallback = if is_active {
-        choose_fallback(&orchestrator.db, &character_id, &version).await?
-    } else {
-        None
-    };
+    let fallback = removal_activation_target(active.as_deref(), is_active);
     let previous_active = active.clone();
     let Some(staged) = staged else {
         return Ok(CharacterPackageRemoval {
@@ -456,25 +465,46 @@ pub async fn remove_character_package(
         )
         .await
         {
-            let _ = staged.rollback();
-            if let Some(previous) = previous_active.as_deref() {
-                let _ = write_active_character_id(&app_data, previous);
+            let rollback_error = staged.rollback().err();
+            let active_restore_error = previous_active
+                .as_deref()
+                .and_then(|previous| write_active_character_id(&app_data, previous).err());
+            if let Some(rollback_error) = rollback_error {
+                return Err(KokoroError::Validation(format!(
+                    "character activation failed: {error}; failed to restore package: {rollback_error}"
+                )));
+            }
+            if let Some(active_restore_error) = active_restore_error {
+                return Err(KokoroError::Validation(format!(
+                    "character activation failed: {error}; failed to restore active character: {active_restore_error}"
+                )));
             }
             return Err(error);
         }
     }
     if let Err(error) = staged.finalize() {
-        if let Some(previous) = previous_active.as_deref() {
-            let _ = write_active_character_id(&app_data, previous);
-            if is_active {
-                let _ = activate_character_for_package_removal(
+        let active_restore_error = if let Some(previous) = previous_active.as_deref() {
+            if let Err(active_error) = write_active_character_id(&app_data, previous) {
+                Some(active_error)
+            } else if is_active {
+                activate_character_for_package_removal(
                     &coordinator,
                     &orchestrator,
                     &app_data,
                     previous,
                 )
-                .await;
+                .await
+                .err()
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        if let Some(active_restore_error) = active_restore_error {
+            return Err(KokoroError::Validation(format!(
+                "failed to remove character package: {error}; failed to restore active character: {active_restore_error}"
+            )));
         }
         return Err(KokoroError::Validation(format!(
             "failed to remove character package: {error}"

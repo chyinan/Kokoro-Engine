@@ -84,7 +84,7 @@ function isValidHttpsUrl(value) {
 }
 
 function isSafePreviewReference(value) {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 512) return false;
+  if (typeof value !== 'string' || value.length === 0 || value.length > 512 || /\s/.test(value)) return false;
   if (value.startsWith('https://')) {
     try {
       const parsed = new URL(value);
@@ -253,6 +253,7 @@ function readStoredZip(archive) {
     const dataEnd = dataStart + compressedSize;
     if (dataEnd > archive.length) throw new Error('truncated ZIP entry');
     const name = archive.subarray(nameStart, nameStart + nameLength).toString('utf8');
+    if (files.has(name)) throw new Error(`registry archive contains duplicate path: ${name}`);
     files.set(name, archive.subarray(dataStart, dataEnd));
     offset = dataEnd;
   }
@@ -272,6 +273,9 @@ export function verifyRegistryArtifact(entry, archive) {
     const manifestName = entry.content_type === 'character' ? 'character.json' : 'mod.json';
     const manifestBytes = files.get(manifestName);
     if (!manifestBytes) return invalid(`archive missing ${manifestName}`);
+    if (entry.content_type === 'character' && ![...files.keys()].some(isRootLicenseName)) {
+      return invalid('character package must contain a root license-named file');
+    }
     const manifest = JSON.parse(manifestBytes.toString('utf8'));
     if (manifest.id !== entry.id || manifest.version !== entry.version || manifest.engine_version !== entry.engine_version) return invalid('manifest metadata mismatch');
   } catch (error) {

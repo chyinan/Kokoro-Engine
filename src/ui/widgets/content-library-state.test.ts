@@ -150,9 +150,19 @@ describe("content library state", () => {
 
   it("accepts only safe HTTPS preview URLs", () => {
     expect(getSafePreviewUrl("https://cdn.example.test/avatar.webp")).toBe("https://cdn.example.test/avatar.webp");
+    expect(getSafePreviewUrl("assets/avatar.webp", "https://cdn.example.test/packages/kokoro-1.0.0.zip")).toBe("https://cdn.example.test/packages/assets/avatar.webp");
     expect(getSafePreviewUrl("http://cdn.example.test/avatar.webp")).toBeNull();
     expect(getSafePreviewUrl("javascript:alert(1)")).toBeNull();
     expect(getSafePreviewUrl("data:image/svg+xml,<svg/onload=alert(1)>")).toBeNull();
+    expect(getSafePreviewUrl("https://user:secret@cdn.example.test/avatar.webp")).toBeNull();
+    expect(getSafePreviewUrl("//evil.example.test/avatar.webp", "https://cdn.example.test/packages/kokoro-1.0.0.zip")).toBeNull();
+  });
+
+  it("orders registry versions according to SemVer prerelease precedence", () => {
+    expect(getContentVersionState({ ...character, version: "1.0.0" }, "1.0.0-beta.1")).toBe("update-available");
+    expect(getContentVersionState({ ...character, version: "1.0.0-beta.10" }, "1.0.0-beta.2")).toBe("update-available");
+    expect(getContentVersionState({ ...character, version: "1.0.0-beta.2" }, "1.0.0-beta.10")).toBe("installed");
+    expect(getContentVersionState({ ...character, version: "1.0.0+build.2" }, "1.0.0+build.1")).toBe("installed");
   });
 
   it("turns transport and compatibility failures into actionable recovery text", () => {

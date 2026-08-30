@@ -2,7 +2,8 @@
 
 use crate::characters::catalog::CharacterCatalog;
 use crate::commands::registry::{
-    append_limited_chunk, persist_download_temp_at, revalidate_staged_character_bytes,
+    append_limited_chunk, persist_download_temp_at, removal_activation_target,
+    revalidate_staged_character_bytes,
 };
 use crate::registry::client::{
     install_trust, verify_character_archive, verify_registry_entry_archive, InstallTrust,
@@ -290,4 +291,14 @@ fn exact_version_lookup_returns_none_without_breaking_fallback() {
     assert!(catalog
         .presentation_directory("remote-character", "9.9.9")
         .is_none());
+}
+
+#[test]
+fn active_package_removal_keeps_the_active_instance_and_uses_presentation_fallback() {
+    assert_eq!(
+        removal_activation_target(Some("instance-1"), true),
+        Some("instance-1".to_string())
+    );
+    assert_eq!(removal_activation_target(Some("instance-1"), false), None);
+    assert_eq!(removal_activation_target(None, true), None);
 }

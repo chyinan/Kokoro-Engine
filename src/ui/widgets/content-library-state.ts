@@ -148,13 +148,58 @@ export function getContentTrustLabel(
   return "community";
 }
 
-function compareVersions(left: string, right: string): number {
-  const parse = (value: string): number[] => value.split(/[.+-]/).map((part) => Number.parseInt(part, 10) || 0);
-  const a = parse(left);
-  const b = parse(right);
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-    const difference = (a[index] ?? 0) - (b[index] ?? 0);
-    if (difference !== 0) return difference;
+type ParsedContentVersion = {
+  readonly core: readonly [bigint, bigint, bigint];
+  readonly prerelease: ReadonlyArray<bigint | string>;
+};
+
+function parseContentVersion(value: string): ParsedContentVersion | null {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value);
+  if (!match) return null;
+  if ([match[1], match[2], match[3]].some((identifier) => identifier.length > 1 && identifier.startsWith("0"))) return null;
+  const prerelease = (match[4] ?? "").split(".").filter(Boolean).map((identifier) => {
+    if (/^\d+$/.test(identifier)) {
+      if (identifier.length > 1 && identifier.startsWith("0")) return null;
+      return BigInt(identifier);
+    }
+    return identifier;
+  });
+  if (prerelease.some((identifier): identifier is null => identifier === null)) {
+    return null;
+  }
+  return {
+    core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])],
+    prerelease: prerelease as ReadonlyArray<bigint | string>,
+  };
+}
+
+/** Compare validated registry versions using SemVer 2.0 precedence rules. */
+export function compareContentVersions(left: string, right: string): number {
+  const a = parseContentVersion(left);
+  const b = parseContentVersion(right);
+  if (!a || !b) return left === right ? 0 : left < right ? -1 : 1;
+  for (let index = 0; index < a.core.length; index += 1) {
+    if (a.core[index] !== b.core[index]) return a.core[index] > b.core[index] ? 1 : -1;
+  }
+  if (a.prerelease.length === 0 || b.prerelease.length === 0) {
+    if (a.prerelease.length === b.prerelease.length) return 0;
+    return a.prerelease.length === 0 ? 1 : -1;
+  }
+  for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index += 1) {
+    const leftIdentifier = a.prerelease[index];
+    const rightIdentifier = b.prerelease[index];
+    if (leftIdentifier === undefined || rightIdentifier === undefined) {
+      return leftIdentifier === undefined ? -1 : 1;
+    }
+    if (typeof leftIdentifier === "bigint" && typeof rightIdentifier === "bigint") {
+      if (leftIdentifier !== rightIdentifier) return leftIdentifier > rightIdentifier ? 1 : -1;
+    } else if (typeof leftIdentifier === "bigint") {
+      return -1;
+    } else if (typeof rightIdentifier === "bigint") {
+      return 1;
+    } else if (leftIdentifier !== rightIdentifier) {
+      return leftIdentifier < rightIdentifier ? -1 : 1;
+    }
   }
   return 0;
 }
@@ -164,16 +209,24 @@ export function getContentVersionState(
   installedVersion: string | null | undefined,
 ): ContentVersionState {
   if (!installedVersion) return "available";
-  return compareVersions(entry.version, installedVersion) > 0 ? "update-available" : "installed";
+  return compareContentVersions(entry.version, installedVersion) > 0 ? "update-available" : "installed";
 }
 
 export function getUrlInstallWarning(url: string): string {
   return `This URL is not part of the official registry. The package is untrusted until validation succeeds (${url}). Continue only if you trust the source.`;
 }
 
-export function getSafePreviewUrl(value: string): string | null {
+export function getSafePreviewUrl(value: string, downloadUrl?: string): string | null {
+  if (!value || value.trim() !== value || /\s/.test(value)) return null;
   try {
-    const parsed = new URL(value);
+    const isAbsolute = value.startsWith("https://");
+    if (!isAbsolute) {
+      if (!downloadUrl || value.startsWith("/") || value.startsWith("//") || value.includes("\\") || value.includes(":")) return null;
+      if (value.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) return null;
+    }
+    const base = downloadUrl ? new URL(downloadUrl) : undefined;
+    if (base && (base.protocol !== "https:" || base.username !== "" || base.password !== "")) return null;
+    const parsed = new URL(value, base);
     if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "") return null;
     return parsed.toString();
   } catch {

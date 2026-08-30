@@ -50,6 +50,20 @@ fn archive(manifest: &str, extra: Option<(&str, &[u8])>) -> Vec<u8> {
     bytes.into_inner()
 }
 
+fn archive_with_duplicate_root_manifests(first: &str, second: &str) -> Vec<u8> {
+    let mut bytes = Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut bytes);
+        let options = SimpleFileOptions::default();
+        writer.start_file("mod.json", options).unwrap();
+        writer.write_all(first.as_bytes()).unwrap();
+        writer.start_file("mod.json", options).unwrap();
+        writer.write_all(second.as_bytes()).unwrap();
+        writer.finish().unwrap();
+    }
+    bytes.into_inner()
+}
+
 fn engine() -> Version {
     Version::parse("0.3.1").unwrap()
 }
@@ -302,4 +316,22 @@ fn mod_archive_rejects_native_executables_and_secret_files_but_allows_js() {
             "unsafe MOD file should be rejected: {path}"
         );
     }
+}
+
+#[test]
+fn duplicate_root_mod_manifests_are_rejected_before_extraction() {
+    let first = manifest_json("duplicate-root", Some(">=0.3.0, <0.4.0"), &[]);
+    let second = manifest_json("duplicate-root", Some(">=0.3.0, <0.4.0"), &[]);
+    let temp = TempDir::new().unwrap();
+
+    let result = install_mod_archive(
+        &archive_with_duplicate_root_manifests(&first, &second),
+        temp.path(),
+        &engine(),
+        true,
+        ModInstallSource::Registry,
+    );
+
+    assert!(result.is_err());
+    assert!(!temp.path().join("duplicate-root").exists());
 }

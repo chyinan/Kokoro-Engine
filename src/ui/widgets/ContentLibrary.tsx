@@ -241,7 +241,7 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
             <article key={`${entry.content_type}:${entry.id}`} data-content-entry={entry.id} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)]/70 p-3">
               <div className="flex gap-3">
                 <div className="h-16 w-16 shrink-0 overflow-hidden rounded-lg border border-[var(--color-border)] bg-black/20">
-                  {getSafePreviewUrl(entry.preview[0] ?? "") ? <img src={getSafePreviewUrl(entry.preview[0] ?? "") ?? undefined} alt="" className="h-full w-full object-cover" /> : <div className="grid h-full w-full place-items-center text-[var(--color-text-muted)]"><Package size={20} aria-hidden="true" /></div>}
+                  {getSafePreviewUrl(entry.preview[0] ?? "", entry.download_url) ? <img src={getSafePreviewUrl(entry.preview[0] ?? "", entry.download_url) ?? undefined} alt="" className="h-full w-full object-cover" /> : <div className="grid h-full w-full place-items-center text-[var(--color-text-muted)]"><Package size={20} aria-hidden="true" /></div>}
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
