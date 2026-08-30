@@ -350,3 +350,22 @@ fn exact_lookup_rejects_a_redirected_catalog_root() {
         .presentation_directory("kokoro", "1.0.0")
         .is_none());
 }
+
+#[test]
+fn install_bundled_rejects_a_redirected_bundled_root() {
+    let temp = TempDir::new().unwrap();
+    let outside = temp.path().join("outside-bundled");
+    let bundled = temp.path().join("bundled");
+    write_package_dir(&outside.join("kokoro"), "1.0.0", "outside");
+    if !create_directory_redirect(&bundled, &outside) {
+        return;
+    }
+
+    let error = test_catalog(&temp).install_bundled(&bundled).unwrap_err();
+
+    assert!(error.to_string().contains("regular directory"), "{error}");
+    assert!(!temp
+        .path()
+        .join("app-data-characters/kokoro/1.0.0")
+        .exists());
+}

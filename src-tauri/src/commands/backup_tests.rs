@@ -1,10 +1,11 @@
 // pattern: Imperative Shell
 
 use super::backup::{
-    inspect_backup_archive, load_template_references, restore_character_rows, stage_backup_configs,
-    stage_character_resources, BackupManifest, CharacterPackageResolver, ConflictStrategy,
-    ExportOptions, ImportOptions, LocalCatalogPackageResolver, ResolvedCharacterPackage,
-    MAX_BACKUP_RESOURCE_BYTES, MAX_BACKUP_RESOURCE_FILES, MAX_BACKUP_RESOURCE_PACKAGES,
+    export_data_to_path, inspect_backup_archive, load_template_references, restore_character_rows,
+    stage_backup_configs, stage_character_resources, BackupManifest, CharacterPackageResolver,
+    ConflictStrategy, ExportOptions, ImportOptions, LocalCatalogPackageResolver,
+    ResolvedCharacterPackage, MAX_BACKUP_RESOURCE_BYTES, MAX_BACKUP_RESOURCE_FILES,
+    MAX_BACKUP_RESOURCE_PACKAGES,
 };
 use crate::registry::client::sha256_hex;
 use crate::registry::manifest::{RegistryEntry, RegistryRecommendations};
@@ -511,6 +512,65 @@ fn import_options_reject_unknown_conflict_strategy() {
     }))
     .unwrap();
     assert_eq!(overwrite.conflict_strategy, ConflictStrategy::Overwrite);
+}
+
+#[tokio::test]
+async fn backup_export_rejects_a_symlinked_config_instead_of_reading_outside_app_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_data = temp.path().join("app-data");
+    let outside = temp.path().join("outside-config.json");
+    fs::create_dir_all(&app_data).unwrap();
+    fs::write(&outside, br#"{"secret":"must-not-export"}"#).unwrap();
+    let config = app_data.join("llm_config.json");
+    if !create_directory_or_file_redirect(&config, &outside) {
+        return;
+    }
+
+    let error = export_data_to_path(&app_data, &temp.path().join("backup.kokoro"), None)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("symlink") || error.to_string().contains("regular"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn backup_export_rejects_a_symlinked_database_instead_of_copying_outside_app_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_data = temp.path().join("app-data");
+    let outside = temp.path().join("outside.db");
+    fs::create_dir_all(&app_data).unwrap();
+    fs::write(&outside, b"not the managed database").unwrap();
+    let database = app_data.join("kokoro.db");
+    if !create_directory_or_file_redirect(&database, &outside) {
+        return;
+    }
+
+    let error = export_data_to_path(&app_data, &temp.path().join("backup.kokoro"), None)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("symlink") || error.to_string().contains("regular"),
+        "{error}"
+    );
+}
+
+fn create_directory_or_file_redirect(link: &Path, destination: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        if link.extension().is_some() {
+            std::os::windows::fs::symlink_file(destination, link).is_ok()
+        } else {
+            std::os::windows::fs::symlink_dir(destination, link).is_ok()
+        }
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(destination, link).is_ok()
+    }
 }
 
 #[allow(dead_code)]

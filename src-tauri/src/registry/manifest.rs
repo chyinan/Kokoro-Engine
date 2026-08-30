@@ -216,6 +216,9 @@ impl RegistryEntry {
         if !matches!(self.trust.as_str(), "official" | "community" | "unverified") {
             return Err(RegistryManifestError::InvalidTrust(self.trust.clone()));
         }
+        if self.trust_source == OFFICIAL_REGISTRY_URL && self.trust != "official" {
+            return Err(RegistryManifestError::InvalidOfficialTrust);
+        }
         if self.trust == "official"
             && (source.trust != "official"
                 || self.registry_identity.as_deref() != Some(OFFICIAL_REGISTRY_IDENTITY))
@@ -471,6 +474,19 @@ mod tests {
         let normalized = normalize_trust_source("https://mirror.example.test/index.json");
         assert_eq!(normalized.trust, "community");
         assert_eq!(normalized.registry_identity, None);
+    }
+
+    #[test]
+    fn non_official_entries_cannot_reuse_the_canonical_trust_source() {
+        let mut entry = valid_entry();
+        entry.trust = "community".to_string();
+        entry.trust_source = OFFICIAL_REGISTRY_URL.to_string();
+        entry.registry_identity = None;
+
+        assert!(matches!(
+            entry.validate(),
+            Err(RegistryManifestError::InvalidOfficialTrust)
+        ));
     }
 
     #[test]

@@ -58,7 +58,7 @@ impl StagedPackageRemoval {
         let Some(staging) = self.staging.take() else {
             return Ok(());
         };
-        if let Err(error) = fs::remove_dir_all(&staging) {
+        if let Err(error) = remove_non_redirected_directory(&staging) {
             let _ = fs::rename(&staging, &self.target);
             return Err(error.into());
         }
@@ -69,6 +69,12 @@ impl StagedPackageRemoval {
         let Some(staging) = self.staging.take() else {
             return Ok(());
         };
+        let metadata = fs::symlink_metadata(&staging)?;
+        if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+            return Err(CatalogError::InvalidDeclaredAsset(
+                staging.display().to_string(),
+            ));
+        }
         fs::rename(staging, &self.target)?;
         Ok(())
     }
@@ -176,19 +182,27 @@ impl CharacterCatalog {
         let mut packages = Vec::new();
         for id_entry in fs::read_dir(&self.root)? {
             let id_entry = id_entry?;
-            if !id_entry.file_type()?.is_dir()
+            let id_path = id_entry.path();
+            let id_metadata = fs::symlink_metadata(&id_path)?;
+            if is_filesystem_redirect(&id_metadata)
+                || !id_metadata.is_dir()
                 || id_entry.file_name().to_string_lossy().starts_with('.')
+                || reject_case_folded_sibling(&id_path, "character id").is_err()
             {
                 continue;
             }
-            for version_entry in fs::read_dir(id_entry.path())? {
+            for version_entry in fs::read_dir(&id_path)? {
                 let version_entry = version_entry?;
-                if !version_entry.file_type()?.is_dir()
+                let version_path = version_entry.path();
+                let version_metadata = fs::symlink_metadata(&version_path)?;
+                if is_filesystem_redirect(&version_metadata)
+                    || !version_metadata.is_dir()
                     || version_entry.file_name().to_string_lossy().starts_with('.')
+                    || reject_case_folded_sibling(&version_path, "character version").is_err()
                 {
                     continue;
                 }
-                match self.validate_installed_directory(&version_entry.path()) {
+                match self.validate_installed_directory(&version_path) {
                     Ok(entry) => packages.push(entry),
                     Err(error) => tracing::warn!(
                         target: "characters",
@@ -210,15 +224,29 @@ impl CharacterCatalog {
 
     pub fn install_bundled(&self, bundled_root: &Path) -> Result<Vec<CatalogEntry>, CatalogError> {
         ensure_catalog_directory(&self.root)?;
-        if !bundled_root.is_dir() {
-            return Ok(Vec::new());
+        ensure_catalog_parent_chain(bundled_root, bundled_root)?;
+        let bundled_metadata = match fs::symlink_metadata(bundled_root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        if is_filesystem_redirect(&bundled_metadata) || !bundled_metadata.is_dir() {
+            return Err(CatalogError::InvalidDeclaredAsset(format!(
+                "bundled character root is not a regular directory: {}",
+                bundled_root.display()
+            )));
         }
 
         let mut installed = Vec::new();
         for package in fs::read_dir(bundled_root)? {
             let package = package?;
-            if package.file_type()?.is_dir() && package.path().join("character.json").is_file() {
-                installed.push(self.install_directory(&package.path())?);
+            let package_path = package.path();
+            let package_metadata = fs::symlink_metadata(&package_path)?;
+            if !is_filesystem_redirect(&package_metadata)
+                && package_metadata.is_dir()
+                && package_path.join("character.json").is_file()
+            {
+                installed.push(self.install_directory(&package_path)?);
             }
         }
         installed.sort_by(|left, right| left.manifest.id.cmp(&right.manifest.id));
@@ -257,7 +285,7 @@ impl CharacterCatalog {
             Ok(())
         })();
         if let Err(error) = extraction {
-            let _ = fs::remove_dir_all(&staging);
+            remove_non_redirected_directory(&staging).ok();
             return Err(error);
         }
 
@@ -272,7 +300,7 @@ impl CharacterCatalog {
         let staging = self.staging_path();
         fs::create_dir_all(&staging)?;
         if let Err(error) = copy_package_directory(source, &staging) {
-            let _ = fs::remove_dir_all(&staging);
+            remove_non_redirected_directory(&staging).ok();
             return Err(error.into());
         }
         self.commit_validated_staging(staging, manifest)
@@ -282,7 +310,7 @@ impl CharacterCatalog {
         let manifest = match self.validate_source_directory(&staging) {
             Ok(manifest) => manifest,
             Err(error) => {
-                let _ = fs::remove_dir_all(&staging);
+                remove_non_redirected_directory(&staging).ok();
                 return Err(error);
             }
         };
@@ -710,7 +738,7 @@ fn atomic_replace_directory(staging: &Path, target: &Path) -> Result<(), io::Err
     fs::rename(target, &backup)?;
     match fs::rename(staging, target) {
         Ok(()) => {
-            fs::remove_dir_all(backup)?;
+            remove_non_redirected_directory(&backup)?;
             Ok(())
         }
         Err(error) => {
@@ -718,4 +746,24 @@ fn atomic_replace_directory(staging: &Path, target: &Path) -> Result<(), io::Err
             Err(error)
         }
     }
+}
+
+fn remove_non_redirected_directory(path: &Path) -> Result<(), io::Error> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        ensure_catalog_parent_chain(parent, parent)?;
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refusing to remove redirected character directory: {}",
+                path.display()
+            ),
+        ));
+    }
+    fs::remove_dir_all(path)
 }

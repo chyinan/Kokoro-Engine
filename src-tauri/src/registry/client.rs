@@ -95,7 +95,11 @@ pub fn normalize_registry_index(
                 "community".to_string()
             };
             entry.registry_identity = None;
-            entry.trust_source = source_url.to_string();
+            entry.trust_source = if official {
+                "registry-entry-metadata-unverified".to_string()
+            } else {
+                source_url.to_string()
+            };
         }
     }
     index

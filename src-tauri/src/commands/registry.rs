@@ -105,11 +105,8 @@ pub(crate) async fn fetch_bytes(url: &str) -> Result<Vec<u8>, KokoroError> {
         .await
         .map_err(|error| {
             KokoroError::ExternalService(format!("failed to download registry content: {error}"))
-        })?
-        .error_for_status()
-        .map_err(|error| {
-            KokoroError::ExternalService(format!("registry download failed: {error}"))
         })?;
+    require_success_status(response.status(), "registry download")?;
     if response
         .content_length()
         .is_some_and(|size| size > MAX_ARCHIVE_BYTES)
@@ -140,15 +137,25 @@ async fn fetch_text(url: &str) -> Result<String, KokoroError> {
         .await
         .map_err(|error| {
             KokoroError::ExternalService(format!("failed to fetch registry index: {error}"))
-        })?
-        .error_for_status()
-        .map_err(|error| {
-            KokoroError::ExternalService(format!("registry index request failed: {error}"))
         })?;
+    require_success_status(response.status(), "registry index request")?;
     let bytes = read_response_bytes(response, MAX_REGISTRY_INDEX_BYTES, "registry index").await?;
     String::from_utf8(bytes).map_err(|error| {
         KokoroError::Validation(format!("registry index is not valid UTF-8: {error}"))
     })
+}
+
+pub(crate) fn require_success_status(
+    status: reqwest::StatusCode,
+    label: &str,
+) -> Result<(), KokoroError> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(KokoroError::ExternalService(format!(
+            "{label} returned unexpected HTTP status {status}"
+        )))
+    }
 }
 
 async fn read_response_bytes(

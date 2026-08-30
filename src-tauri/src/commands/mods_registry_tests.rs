@@ -469,3 +469,29 @@ fn mod_install_rejects_case_folded_existing_id_instead_of_replacing_another_mod(
     assert!(error.to_string().contains("case-insensitive"), "{error}");
     assert_eq!(fs::read(existing.join("sentinel.txt")).unwrap(), b"keep");
 }
+
+#[test]
+fn mod_install_rejects_a_redirected_parent_of_an_existing_managed_root() {
+    let temp = TempDir::new().unwrap();
+    let outside = temp.path().join("outside");
+    let alias = temp.path().join("managed-alias");
+    let managed = alias.join("mods");
+    fs::create_dir_all(&outside).unwrap();
+    if !create_directory_redirect(&alias, &outside) {
+        return;
+    }
+    fs::create_dir_all(&managed).unwrap();
+
+    let raw = manifest_json("parent-redirect", Some(">=0.3.0, <0.4.0"), &[]);
+    let error = install_mod_archive(
+        &archive(&raw, None),
+        &managed,
+        &engine(),
+        true,
+        ModInstallSource::Local,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("regular directory"), "{error}");
+    assert!(!outside.join("mods/parent-redirect").exists());
+}

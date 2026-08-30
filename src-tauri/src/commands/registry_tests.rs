@@ -3,8 +3,8 @@
 use crate::characters::catalog::CharacterCatalog;
 use crate::commands::registry::{
     append_limited_chunk, persist_download_temp_at, removal_activation_target,
-    revalidate_staged_character_bytes, trust_for_registry_entry, REGISTRY_CONNECT_TIMEOUT,
-    REGISTRY_REQUEST_TIMEOUT,
+    require_success_status, revalidate_staged_character_bytes, trust_for_registry_entry,
+    REGISTRY_CONNECT_TIMEOUT, REGISTRY_REQUEST_TIMEOUT,
 };
 use crate::registry::client::{
     install_trust, normalize_registry_index, verify_character_archive,
@@ -344,6 +344,13 @@ fn official_trust_requires_the_canonical_package_origin_and_exact_path() {
 fn registry_client_has_bounded_connect_and_request_timeouts() {
     assert!(REGISTRY_CONNECT_TIMEOUT > std::time::Duration::ZERO);
     assert!(REGISTRY_REQUEST_TIMEOUT >= REGISTRY_CONNECT_TIMEOUT);
+}
+
+#[test]
+fn registry_client_rejects_redirect_statuses_instead_of_treating_them_as_content() {
+    assert!(require_success_status(reqwest::StatusCode::OK, "registry").is_ok());
+    assert!(require_success_status(reqwest::StatusCode::FOUND, "registry").is_err());
+    assert!(require_success_status(reqwest::StatusCode::NO_CONTENT, "registry").is_ok());
 }
 
 #[test]

@@ -248,17 +248,17 @@ pub fn install_mod_archive(
     ensure_mod_directory(mods_dir)?;
     let (manifest, staging_dir) = extract_to_staging(bytes, mods_dir, engine_version)?;
     if let Err(error) = permission_review(&manifest, source, permission_confirmed) {
-        let _ = fs::remove_dir_all(&staging_dir);
+        remove_staging_directory(&staging_dir);
         return Err(error);
     }
     let target = mods_dir.join(&manifest.id);
     if let Err(error) = reject_case_folded_sibling(&target, "MOD id") {
-        let _ = fs::remove_dir_all(&staging_dir);
+        remove_staging_directory(&staging_dir);
         return Err(error);
     }
     if let Ok(metadata) = fs::symlink_metadata(&target) {
         if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
-            let _ = fs::remove_dir_all(&staging_dir);
+            remove_staging_directory(&staging_dir);
             return Err(KokoroError::Validation(format!(
                 "installed MOD target is not a regular directory: {}",
                 target.display()
@@ -266,14 +266,31 @@ pub fn install_mod_archive(
         }
     }
     if let Err(error) = ensure_mod_directory(mods_dir) {
-        let _ = fs::remove_dir_all(&staging_dir);
+        remove_staging_directory(&staging_dir);
         return Err(error);
     }
+    let current_target = match fs::symlink_metadata(&target) {
+        Ok(metadata) => {
+            if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                remove_staging_directory(&staging_dir);
+                return Err(KokoroError::Validation(format!(
+                    "installed MOD target is not a regular directory: {}",
+                    target.display()
+                )));
+            }
+            Some(metadata)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            remove_staging_directory(&staging_dir);
+            return Err(KokoroError::Io(error.to_string()));
+        }
+    };
     let previous = mods_dir.join(format!(".previous-{}", Uuid::new_v4()));
-    let had_previous = fs::symlink_metadata(&target).is_ok();
+    let had_previous = current_target.is_some();
     if had_previous {
         fs::rename(&target, &previous).map_err(|error| {
-            let _ = fs::remove_dir_all(&staging_dir);
+            remove_staging_directory(&staging_dir);
             KokoroError::Io(format!("failed to stage previous MOD: {error}"))
         })?;
     }
@@ -281,13 +298,13 @@ pub fn install_mod_archive(
         if had_previous {
             let _ = fs::rename(&previous, &target);
         }
-        let _ = fs::remove_dir_all(&staging_dir);
+        remove_staging_directory(&staging_dir);
         return Err(KokoroError::Io(format!(
             "failed to install staged MOD: {error}"
         )));
     }
     if had_previous {
-        let _ = fs::remove_dir_all(previous);
+        remove_staging_directory(&previous);
     }
     Ok(ModInstallResult { manifest, source })
 }
@@ -378,7 +395,7 @@ pub fn remove_installed_mod(mods_dir: &Path, mod_id: &str) -> Result<(), KokoroE
         )));
     }
     ensure_mod_directory(mods_dir)?;
-    fs::remove_dir_all(target).map_err(|error| KokoroError::Io(error.to_string()))
+    remove_non_redirected_directory(&target)
 }
 
 fn is_filesystem_redirect(metadata: &fs::Metadata) -> bool {
@@ -420,6 +437,7 @@ fn ensure_mod_directory(path: &Path) -> Result<(), KokoroError> {
             Err(error) => return Err(KokoroError::Io(error.to_string())),
         }
     }
+    validate_existing_directory_ancestors(&current)?;
     for directory in missing.into_iter().rev() {
         match fs::create_dir(&directory) {
             Ok(()) => {}
@@ -436,6 +454,54 @@ fn ensure_mod_directory(path: &Path) -> Result<(), KokoroError> {
         }
     }
     Ok(())
+}
+
+fn validate_existing_directory_ancestors(path: &Path) -> Result<(), KokoroError> {
+    let mut current = path.to_path_buf();
+    loop {
+        let metadata =
+            fs::symlink_metadata(&current).map_err(|error| KokoroError::Io(error.to_string()))?;
+        if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+            return Err(KokoroError::Validation(format!(
+                "MOD managed root is not a regular directory: {}",
+                current.display()
+            )));
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    Ok(())
+}
+
+fn remove_staging_directory(path: &Path) {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if !is_filesystem_redirect(&metadata) && metadata.is_dir() {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
+fn remove_non_redirected_directory(path: &Path) -> Result<(), KokoroError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        validate_existing_directory_ancestors(parent)?;
+    }
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| KokoroError::Io(error.to_string()))?;
+    if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+        return Err(KokoroError::Validation(format!(
+            "refusing to remove redirected MOD directory: {}",
+            path.display()
+        )));
+    }
+    fs::remove_dir_all(path).map_err(|error| KokoroError::Io(error.to_string()))
 }
 
 fn reject_case_folded_sibling(path: &Path, label: &str) -> Result<(), KokoroError> {

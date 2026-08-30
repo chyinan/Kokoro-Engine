@@ -16,6 +16,7 @@ use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Acquire, Row, SqliteConnection, SqlitePool};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -24,8 +25,10 @@ use tauri::Manager;
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 
 // pattern: Imperative Shell
 
@@ -363,6 +366,110 @@ pub fn db_path_pub(app_data: &Path) -> PathBuf {
     db_path(app_data)
 }
 
+fn open_regular_non_redirected_file(path: &Path, label: &str) -> Result<Option<File>, KokoroError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(KokoroError::from(error)),
+    };
+    if is_filesystem_redirect(&metadata) || !metadata.is_file() {
+        return Err(KokoroError::Validation(format!(
+            "{label} is not a regular non-symlink file: {}",
+            path.display()
+        )));
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_no_follow(&mut options);
+    let file = options.open(path).map_err(|error| {
+        KokoroError::Io(format!(
+            "failed to open {label} {}: {error}",
+            path.display()
+        ))
+    })?;
+    let opened_metadata = file.metadata().map_err(KokoroError::from)?;
+    if is_filesystem_redirect(&opened_metadata) || !opened_metadata.is_file() {
+        return Err(KokoroError::Validation(format!(
+            "{label} changed to a redirected or non-file path: {}",
+            path.display()
+        )));
+    }
+    Ok(Some(file))
+}
+
+fn create_regular_export_file(path: &Path) -> Result<File, KokoroError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        ensure_non_redirected_parent_chain(parent, parent)?;
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    configure_no_follow(&mut options);
+    let file = options.open(path).map_err(|error| {
+        KokoroError::Io(format!(
+            "failed to create backup export {}: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = file.metadata().map_err(KokoroError::from)?;
+    if is_filesystem_redirect(&metadata) || !metadata.is_file() {
+        return Err(KokoroError::Validation(format!(
+            "backup export target is not a regular file: {}",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
+fn copy_regular_file_to_new_path(
+    source: &Path,
+    target: &Path,
+    label: &str,
+) -> Result<bool, KokoroError> {
+    if let Some(parent) = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        ensure_non_redirected_parent_chain(parent, parent)?;
+    }
+    let Some(mut input) = open_regular_non_redirected_file(source, label)? else {
+        return Ok(false);
+    };
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    configure_no_follow(&mut options);
+    let mut output = options.open(target).map_err(|error| {
+        KokoroError::Io(format!(
+            "failed to stage {label} {}: {error}",
+            target.display()
+        ))
+    })?;
+    std::io::copy(&mut input, &mut output).map_err(KokoroError::from)?;
+    output.sync_all().map_err(KokoroError::from)?;
+    Ok(true)
+}
+
+fn configure_no_follow(options: &mut OpenOptions) {
+    #[cfg(unix)]
+    {
+        #[cfg(target_os = "linux")]
+        const NO_FOLLOW: i32 = 0x20000;
+        #[cfg(target_os = "macos")]
+        const NO_FOLLOW: i32 = 0x100;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        const NO_FOLLOW: i32 = 0;
+        options.custom_flags(NO_FOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x00200000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+}
+
 fn is_filesystem_redirect(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
@@ -543,6 +650,13 @@ fn create_non_redirected_directory_chain(path: &Path) -> Result<(), KokoroError>
 }
 
 fn remove_non_redirected_directory(path: &Path) -> Result<(), std::io::Error> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        ensure_non_redirected_parent_chain(parent, parent)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
     let metadata = fs::symlink_metadata(path)?;
     if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
         return Err(std::io::Error::new(
@@ -621,7 +735,7 @@ impl TempDirGuard {
 
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = remove_non_redirected_directory(&self.0);
     }
 }
 
@@ -1070,6 +1184,7 @@ pub(crate) fn stage_character_resources(
     backup_path: &Path,
     staging_root: &Path,
 ) -> Result<StagedCharacterResources, KokoroError> {
+    ensure_non_redirected_parent_chain(staging_root, staging_root)?;
     match fs::symlink_metadata(staging_root) {
         Ok(metadata) => {
             if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
@@ -1268,7 +1383,7 @@ pub(crate) fn stage_character_resources(
     })();
 
     if result.is_err() {
-        let _ = fs::remove_dir_all(staging_root);
+        let _ = remove_non_redirected_directory(staging_root);
     }
     result
 }
@@ -1517,6 +1632,12 @@ async fn detach_import_database_best_effort(connection: &mut SqliteConnection) -
 
 /// Open a read-only sqlx pool to a given DB file.
 async fn open_readonly_pool(path: &Path) -> Result<SqlitePool, KokoroError> {
+    if open_regular_non_redirected_file(path, "database")?.is_none() {
+        return Err(KokoroError::NotFound(format!(
+            "database does not exist: {}",
+            path.display()
+        )));
+    }
     let url = format!("sqlite://{}", path.to_string_lossy().replace('\\', "/"));
     let options = SqliteConnectOptions::from_str(&url)
         .map_err(|e| KokoroError::Internal(format!("Invalid DB path: {}", e)))?
@@ -1574,6 +1695,17 @@ async fn count_rows(pool: &SqlitePool, table: CountTable) -> i64 {
 }
 
 async fn gather_stats(path: &Path) -> BackupStats {
+    if !matches!(
+        open_regular_non_redirected_file(path, "database"),
+        Ok(Some(_))
+    ) {
+        return BackupStats {
+            memories: 0,
+            conversations: 0,
+            messages: 0,
+            configs: 0,
+        };
+    }
     let pool = match open_readonly_pool(path).await {
         Ok(p) => p,
         Err(_) => {
@@ -1603,7 +1735,7 @@ async fn write_character_resources<W: Write + Seek>(
     app_data: &Path,
     database: &Path,
 ) -> Result<(), KokoroError> {
-    if !database.is_file() {
+    if open_regular_non_redirected_file(database, "database")?.is_none() {
         return Ok(());
     }
     let pool = open_readonly_pool(database).await?;
@@ -1638,7 +1770,17 @@ async fn write_character_resources<W: Write + Seek>(
             );
             zip.start_file(&archive_path, options)
                 .map_err(|error| KokoroError::Internal(format!("ZIP error: {error}")))?;
-            let mut input = fs::File::open(source).map_err(KokoroError::from)?;
+            ensure_non_redirected_parent_chain(
+                &package.package_dir,
+                source.parent().unwrap_or(&package.package_dir),
+            )?;
+            let mut input = open_regular_non_redirected_file(&source, "character resource")?
+                .ok_or_else(|| {
+                    KokoroError::Validation(format!(
+                        "character resource disappeared during export: {}",
+                        source.display()
+                    ))
+                })?;
             std::io::copy(&mut input, zip).map_err(KokoroError::from)?;
         }
     }
@@ -1667,7 +1809,19 @@ async fn write_character_resources<W: Write + Seek>(
             options,
         )
         .map_err(|error| KokoroError::Internal(format!("ZIP error: {error}")))?;
-        let mut input = fs::File::open(source).map_err(KokoroError::from)?;
+        ensure_non_redirected_parent_chain(
+            app_data,
+            source.parent().ok_or_else(|| {
+                KokoroError::Validation("managed avatar source has no parent".to_string())
+            })?,
+        )?;
+        let mut input = open_regular_non_redirected_file(&source, "managed avatar resource")?
+            .ok_or_else(|| {
+                KokoroError::Validation(format!(
+                    "managed avatar resource disappeared during export: {}",
+                    source.display()
+                ))
+            })?;
         std::io::copy(&mut input, zip).map_err(KokoroError::from)?;
     }
     Ok(())
@@ -1683,10 +1837,11 @@ pub async fn export_data(
     options: Option<ExportOptions>,
 ) -> Result<ExportResult, KokoroError> {
     let app_data = app_data_dir(&app)?;
+    ensure_non_redirected_parent_chain(&app_data, &app_data)?;
     let db = db_path(&app_data);
 
     let out_path = PathBuf::from(&export_path);
-    let file = fs::File::create(&out_path).map_err(KokoroError::from)?;
+    let file = create_regular_export_file(&out_path)?;
     let mut zip = zip::ZipWriter::new(file);
     let zip_options =
         SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -1711,18 +1866,18 @@ pub async fn export_data(
         .map_err(KokoroError::from)?;
 
     // 3. kokoro.db — fs::copy to temp to avoid WAL lock issues
-    if db.exists() {
-        let tmp_db = app_data.join("kokoro_backup_tmp.db");
-        fs::copy(&db, &tmp_db).map_err(KokoroError::from)?;
+    if open_regular_non_redirected_file(&db, "database")?.is_some() {
+        let tmp_db = app_data.join(format!(".kokoro_backup_tmp-{}.db", Uuid::new_v4()));
+        copy_regular_file_to_new_path(&db, &tmp_db, "database")?;
         // Also copy WAL/SHM if present so the copy is consistent
         let wal = db.with_extension("db-wal");
+        copy_regular_file_to_new_path(&wal, &tmp_db.with_extension("db-wal"), "database WAL")?;
         let shm = db.with_extension("db-shm");
-        if wal.exists() {
-            let _ = fs::copy(&wal, tmp_db.with_extension("db-wal"));
-        }
-        if shm.exists() {
-            let _ = fs::copy(&shm, tmp_db.with_extension("db-shm"));
-        }
+        copy_regular_file_to_new_path(
+            &shm,
+            &tmp_db.with_extension("db-shm"),
+            "database shared memory",
+        )?;
 
         // Checkpoint the temp copy to merge WAL into main DB file
         {
@@ -1761,15 +1916,17 @@ pub async fn export_data(
     // 5. configs/
     for name in CONFIG_FILES {
         let cfg_path = app_data.join(name);
-        if cfg_path.exists() {
-            if let Ok(content) = fs::read_to_string(&cfg_path) {
-                let entry = format!("configs/{}", name);
-                zip.start_file(&entry, zip_options)
-                    .map_err(|e| KokoroError::Internal(format!("ZIP error: {}", e)))?;
-                zip.write_all(content.as_bytes())
-                    .map_err(KokoroError::from)?;
-                config_count += 1;
-            }
+        if let Some(mut input) = open_regular_non_redirected_file(&cfg_path, "config")? {
+            let mut content = String::new();
+            input
+                .read_to_string(&mut content)
+                .map_err(KokoroError::from)?;
+            let entry = format!("configs/{}", name);
+            zip.start_file(&entry, zip_options)
+                .map_err(|e| KokoroError::Internal(format!("ZIP error: {}", e)))?;
+            zip.write_all(content.as_bytes())
+                .map_err(KokoroError::from)?;
+            config_count += 1;
         }
     }
 
@@ -1798,9 +1955,10 @@ pub async fn export_data_to_path(
     out_path: &Path,
     _characters_json: Option<String>,
 ) -> Result<ExportResult, KokoroError> {
+    ensure_non_redirected_parent_chain(app_data, app_data)?;
     let db = db_path(app_data);
 
-    let file = fs::File::create(out_path).map_err(KokoroError::from)?;
+    let file = create_regular_export_file(out_path)?;
     let mut zip = zip::ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
@@ -1820,17 +1978,17 @@ pub async fn export_data_to_path(
     zip.write_all(manifest_json.as_bytes())
         .map_err(KokoroError::from)?;
 
-    if db.exists() {
-        let tmp_db = app_data.join("kokoro_autobackup_tmp.db");
-        fs::copy(&db, &tmp_db).map_err(KokoroError::from)?;
+    if open_regular_non_redirected_file(&db, "database")?.is_some() {
+        let tmp_db = app_data.join(format!(".kokoro_autobackup_tmp-{}.db", Uuid::new_v4()));
+        copy_regular_file_to_new_path(&db, &tmp_db, "database")?;
         let wal = db.with_extension("db-wal");
         let shm = db.with_extension("db-shm");
-        if wal.exists() {
-            let _ = fs::copy(&wal, tmp_db.with_extension("db-wal"));
-        }
-        if shm.exists() {
-            let _ = fs::copy(&shm, tmp_db.with_extension("db-shm"));
-        }
+        copy_regular_file_to_new_path(&wal, &tmp_db.with_extension("db-wal"), "database WAL")?;
+        copy_regular_file_to_new_path(
+            &shm,
+            &tmp_db.with_extension("db-shm"),
+            "database shared memory",
+        )?;
         {
             let url = format!("sqlite://{}", tmp_db.to_string_lossy().replace('\\', "/"));
             if let Ok(opts) = SqliteConnectOptions::from_str(&url) {
@@ -1857,15 +2015,17 @@ pub async fn export_data_to_path(
 
     for name in CONFIG_FILES {
         let cfg_path = app_data.join(name);
-        if cfg_path.exists() {
-            if let Ok(content) = fs::read_to_string(&cfg_path) {
-                let entry = format!("configs/{}", name);
-                zip.start_file(&entry, options)
-                    .map_err(|e| KokoroError::Internal(format!("ZIP error: {}", e)))?;
-                zip.write_all(content.as_bytes())
-                    .map_err(KokoroError::from)?;
-                config_count += 1;
-            }
+        if let Some(mut input) = open_regular_non_redirected_file(&cfg_path, "config")? {
+            let mut content = String::new();
+            input
+                .read_to_string(&mut content)
+                .map_err(KokoroError::from)?;
+            let entry = format!("configs/{}", name);
+            zip.start_file(&entry, options)
+                .map_err(|e| KokoroError::Internal(format!("ZIP error: {}", e)))?;
+            zip.write_all(content.as_bytes())
+                .map_err(KokoroError::from)?;
+            config_count += 1;
         }
     }
 
