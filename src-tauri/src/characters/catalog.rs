@@ -10,6 +10,9 @@ use thiserror::Error;
 use uuid::Uuid;
 use zip::result::ZipError;
 
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CatalogEntry {
     pub manifest: CharacterTemplateManifest,
@@ -32,6 +35,8 @@ pub enum CatalogError {
     MissingDeclaredAsset(String),
     #[error("declared asset must be a regular non-symlink file: {0}")]
     InvalidDeclaredAsset(String),
+    #[error("character archive contains duplicate path `{0}`")]
+    DuplicateArchivePath(String),
 }
 
 pub struct CharacterCatalog {
@@ -98,7 +103,7 @@ impl CharacterCatalog {
     /// Resolve an exact immutable template version from the local catalog.
     /// Invalid path segments simply behave as unavailable versions.
     pub fn find_exact(&self, id: &str, version: &str) -> Option<CatalogEntry> {
-        if !is_safe_catalog_segment(id) || !is_safe_catalog_segment(version) {
+        if !is_safe_catalog_id(id) || !is_safe_catalog_version(version) {
             return None;
         }
         let target = self.root.join(id).join(version);
@@ -128,19 +133,23 @@ impl CharacterCatalog {
         id: &str,
         version: &str,
     ) -> Result<Option<StagedPackageRemoval>, CatalogError> {
-        if !is_safe_catalog_segment(id) || !is_safe_catalog_segment(version) {
+        if !is_safe_catalog_id(id) || !is_safe_catalog_version(version) {
             return Err(CatalogError::Layout {
                 id: id.to_string(),
                 version: version.to_string(),
             });
         }
         let target = self.root.join(id).join(version);
+        ensure_catalog_parent_chain(
+            &self.root,
+            target.parent().expect("catalog target has parent"),
+        )?;
         let metadata = match fs::symlink_metadata(&target) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
             return Err(CatalogError::InvalidDeclaredAsset(
                 target.display().to_string(),
             ));
@@ -279,6 +288,17 @@ impl CharacterCatalog {
         manifest: CharacterTemplateManifest,
     ) -> Result<CatalogEntry, CatalogError> {
         let target = self.root.join(&manifest.id).join(&manifest.version);
+        ensure_catalog_parent_chain(
+            &self.root,
+            target.parent().expect("catalog target has parent"),
+        )?;
+        if let Ok(metadata) = fs::symlink_metadata(&target) {
+            if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                return Err(CatalogError::InvalidDeclaredAsset(
+                    target.display().to_string(),
+                ));
+            }
+        }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -325,14 +345,114 @@ impl CharacterCatalog {
     }
 }
 
-fn is_safe_catalog_segment(value: &str) -> bool {
+fn is_safe_catalog_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value != "."
         && value != ".."
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'.'
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn is_safe_catalog_version(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value != "."
+        && value != ".."
+        && Version::parse(value).is_ok()
+}
+
+fn is_filesystem_redirect(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+fn ensure_catalog_parent_chain(root: &Path, target_parent: &Path) -> Result<(), io::Error> {
+    let relative = target_parent.strip_prefix(root).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "catalog target escapes managed root: {}",
+                target_parent.display()
+            ),
+        )
+    })?;
+    if relative
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "catalog target contains unsafe parent path: {}",
+                target_parent.display()
+            ),
+        ));
+    }
+
+    let mut existing = target_parent.to_path_buf();
+    loop {
+        match fs::symlink_metadata(&existing) {
+            Ok(metadata) => {
+                if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "catalog parent is not a regular directory: {}",
+                            existing.display()
+                        ),
+                    ));
+                }
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "catalog target has no existing parent",
+                        )
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    // Check the existing chain too: an app-data root redirected through a
+    // junction must not become an implicit write target.
+    let mut ancestor = existing;
+    loop {
+        let metadata = fs::symlink_metadata(&ancestor)?;
+        if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "catalog parent is not a regular directory: {}",
+                    ancestor.display()
+                ),
+            ));
+        }
+        let Some(parent) = ancestor.parent() else {
+            break;
+        };
+        if parent == ancestor {
+            break;
+        }
+        ancestor = parent.to_path_buf();
+    }
+
+    Ok(())
 }
 
 pub(crate) fn validate_package_directory(
@@ -383,10 +503,15 @@ fn archive_entries<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<Vec<PackageContentEntry>, CatalogError> {
     let mut entries = Vec::with_capacity(archive.len());
+    let mut seen = std::collections::HashSet::new();
     for index in 0..archive.len() {
         let file = archive.by_index(index)?;
+        let path = normalized_archive_path(file.name(), file.is_dir());
+        if !seen.insert(archive_path_key(&path)) {
+            return Err(CatalogError::DuplicateArchivePath(file.name().to_string()));
+        }
         entries.push(PackageContentEntry {
-            path: normalized_archive_path(file.name(), file.is_dir()),
+            path,
             uncompressed_size: file.size(),
             is_directory: file.is_dir(),
         });
@@ -402,9 +527,13 @@ fn normalized_archive_path(name: &str, is_directory: bool) -> PathBuf {
     }
 }
 
+fn archive_path_key(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/").to_lowercase()
+}
+
 fn directory_entries(root: &Path) -> Result<Vec<PackageContentEntry>, io::Error> {
-    let root_type = fs::symlink_metadata(root)?.file_type();
-    if root_type.is_symlink() || !root_type.is_dir() {
+    let root_metadata = fs::symlink_metadata(root)?;
+    if is_filesystem_redirect(&root_metadata) || !root_metadata.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -418,9 +547,10 @@ fn directory_entries(root: &Path) -> Result<Vec<PackageContentEntry>, io::Error>
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
-            let file_type = entry.file_type()?;
             let path = entry.path();
-            if file_type.is_symlink() {
+            let metadata = fs::symlink_metadata(&path)?;
+            let file_type = metadata.file_type();
+            if is_filesystem_redirect(&metadata) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("character package contains symlink: {}", path.display()),

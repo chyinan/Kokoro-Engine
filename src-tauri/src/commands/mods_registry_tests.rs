@@ -50,6 +50,22 @@ fn archive(manifest: &str, extra: Option<(&str, &[u8])>) -> Vec<u8> {
     bytes.into_inner()
 }
 
+fn archive_with_entries(manifest: &str, entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut bytes = Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut bytes);
+        let options = SimpleFileOptions::default();
+        writer.start_file("mod.json", options).unwrap();
+        writer.write_all(manifest.as_bytes()).unwrap();
+        for (path, contents) in entries {
+            writer.start_file(path, options).unwrap();
+            writer.write_all(contents).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+    bytes.into_inner()
+}
+
 fn archive_with_duplicate_root_manifests(first: &str, second: &str) -> Vec<u8> {
     let mut bytes = Cursor::new(Vec::new());
     {
@@ -334,4 +350,49 @@ fn duplicate_root_mod_manifests_are_rejected_before_extraction() {
 
     assert!(result.is_err());
     assert!(!temp.path().join("duplicate-root").exists());
+}
+
+#[test]
+fn case_folded_duplicate_mod_paths_are_rejected_before_extraction() {
+    let raw = manifest_json("case-folded", Some(">=0.3.0, <0.4.0"), &[]);
+    let bytes = archive_with_entries(
+        &raw,
+        &[
+            ("assets/panel.js", b"first"),
+            ("assets/PANEL.JS", b"second"),
+        ],
+    );
+    let temp = TempDir::new().unwrap();
+
+    let error = install_mod_archive(
+        &bytes,
+        temp.path(),
+        &engine(),
+        true,
+        ModInstallSource::Local,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("duplicate"), "{error}");
+    assert!(!temp.path().join("case-folded").exists());
+}
+
+#[test]
+fn case_folded_duplicate_mod_manifests_are_rejected_before_manifest_lookup() {
+    let first = manifest_json("case-manifest", Some(">=0.3.0, <0.4.0"), &[]);
+    let second = manifest_json("case-manifest", Some(">=0.3.0, <0.4.0"), &[]);
+    let bytes = archive_with_entries(&first, &[("MOD.JSON", second.as_bytes())]);
+    let temp = TempDir::new().unwrap();
+
+    let error = install_mod_archive(
+        &bytes,
+        temp.path(),
+        &engine(),
+        true,
+        ModInstallSource::Local,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("duplicate"), "{error}");
+    assert!(!temp.path().join("case-manifest").exists());
 }

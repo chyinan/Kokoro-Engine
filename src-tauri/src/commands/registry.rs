@@ -11,10 +11,12 @@ use crate::characters::manifest::CharacterTemplateManifest;
 use crate::commands::characters::activate_character_for_package_removal;
 use crate::error::KokoroError;
 use crate::registry::client::{
-    install_trust, normalize_registry_index, verify_character_archive,
-    verify_registry_entry_archive, InstallTrust, RegistryClientError, MAX_ARCHIVE_BYTES,
+    normalize_registry_index, verify_character_archive, verify_registry_entry_archive,
+    InstallTrust, RegistryClientError, MAX_ARCHIVE_BYTES,
 };
-use crate::registry::manifest::{RegistryIndex, OFFICIAL_REGISTRY_URL};
+use crate::registry::manifest::{
+    RegistryEntry, RegistryIndex, OFFICIAL_REGISTRY_IDENTITY, OFFICIAL_REGISTRY_URL,
+};
 use futures::StreamExt;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -246,6 +248,18 @@ fn client_error(error: RegistryClientError) -> KokoroError {
     KokoroError::Validation(error.to_string())
 }
 
+pub(crate) fn trust_for_registry_entry(source_url: &str, entry: &RegistryEntry) -> InstallTrust {
+    if source_url == OFFICIAL_REGISTRY_URL
+        && entry.trust == "official"
+        && entry.trust_source == OFFICIAL_REGISTRY_URL
+        && entry.registry_identity.as_deref() == Some(OFFICIAL_REGISTRY_IDENTITY)
+    {
+        InstallTrust::Official
+    } else {
+        InstallTrust::Community
+    }
+}
+
 fn installed_result(entry: CatalogEntry, trust: InstallTrust) -> InstalledCharacterPackage {
     InstalledCharacterPackage {
         id: entry.manifest.id,
@@ -308,7 +322,11 @@ pub async fn install_character_from_registry(
     let bytes = fetch_bytes(&entry.download_url).await?;
     let verified =
         verify_registry_entry_archive(&bytes, &entry, &engine_version()).map_err(client_error)?;
-    install_verified_package(&app, verified, install_trust(&source_url, true))
+    install_verified_package(
+        &app,
+        verified,
+        trust_for_registry_entry(&source_url, &entry),
+    )
 }
 
 #[command]

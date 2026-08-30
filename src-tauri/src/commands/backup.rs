@@ -453,18 +453,53 @@ fn ensure_non_redirected_parent_chain(
 }
 
 fn validate_catalog_segment(value: &str, field: &str) -> Result<(), String> {
-    let valid = !value.is_empty()
-        && value.len() <= 128
-        && value != "."
-        && value != ".."
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'.'
-        });
+    let valid = if field == "template version" {
+        !value.is_empty()
+            && value.len() <= 128
+            && value != "."
+            && value != ".."
+            && Version::parse(value).is_ok()
+    } else {
+        !value.is_empty()
+            && value.len() <= 128
+            && value != "."
+            && value != ".."
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    };
     if valid {
         Ok(())
     } else {
         Err(format!("invalid {field} path segment"))
     }
+}
+
+fn archive_path_key(name: &str, is_directory: bool) -> String {
+    let normalized = if is_directory {
+        name.trim_end_matches('/')
+    } else {
+        name
+    };
+    normalized.replace('\\', "/").to_lowercase()
+}
+
+fn validate_archive_path_uniqueness<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<(), KokoroError> {
+    let mut seen = HashSet::new();
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| KokoroError::Validation(format!("invalid backup entry: {error}")))?;
+        if !seen.insert(archive_path_key(entry.name(), entry.is_dir())) {
+            return Err(KokoroError::Validation(format!(
+                "duplicate backup archive path: {}",
+                entry.name()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Validate that a filename from a ZIP entry is safe (no path traversal).
@@ -495,6 +530,7 @@ pub(crate) fn stage_backup_configs(
     let file = fs::File::open(backup_path).map_err(KokoroError::from)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|error| KokoroError::Validation(format!("invalid backup archive: {error}")))?;
+    validate_archive_path_uniqueness(&mut archive)?;
     let allowed: HashSet<&str> = CONFIG_FILES.iter().copied().collect();
     let mut seen = HashSet::new();
     let mut staged = Vec::new();
@@ -801,13 +837,27 @@ fn promote_staged_resources(
 }
 
 fn package_directory_entries(root: &Path) -> Result<Vec<PackageContentEntry>, String> {
+    let root_metadata = fs::symlink_metadata(root).map_err(|error| error.to_string())?;
+    if is_filesystem_redirect(&root_metadata) || !root_metadata.is_dir() {
+        return Err(format!(
+            "character package root is not a regular directory: {}",
+            root.display()
+        ));
+    }
     let mut pending = vec![root.to_path_buf()];
     let mut entries = Vec::new();
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
             let entry = entry.map_err(|error| error.to_string())?;
-            let file_type = entry.file_type().map_err(|error| error.to_string())?;
             let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+            let file_type = metadata.file_type();
+            if is_filesystem_redirect(&metadata) {
+                return Err(format!(
+                    "character package contains redirected entry: {}",
+                    path.display()
+                ));
+            }
             let relative = path
                 .strip_prefix(root)
                 .map_err(|error| error.to_string())?
@@ -833,6 +883,7 @@ pub(crate) fn inspect_backup_archive(path: &Path) -> Result<BackupArchiveInspect
     let file = fs::File::open(path).map_err(KokoroError::from)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|error| KokoroError::Validation(format!("invalid backup archive: {error}")))?;
+    validate_archive_path_uniqueness(&mut archive)?;
     let mut has_character_resources = false;
     for index in 0..archive.len() {
         let entry = archive
@@ -870,6 +921,7 @@ pub(crate) fn stage_character_resources(
         let file = fs::File::open(backup_path).map_err(KokoroError::from)?;
         let mut archive = zip::ZipArchive::new(file)
             .map_err(|error| KokoroError::Validation(format!("invalid backup archive: {error}")))?;
+        validate_archive_path_uniqueness(&mut archive)?;
         let mut packages: HashMap<(String, String), Vec<PackageContentEntry>> = HashMap::new();
         let mut instance_ids = HashSet::new();
         let mut resource_file_count = 0_usize;
@@ -1669,6 +1721,7 @@ pub async fn preview_import(file_path: String) -> Result<ImportPreview, KokoroEr
     let file = fs::File::open(&path).map_err(KokoroError::from)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| KokoroError::Internal(format!("Invalid ZIP archive: {}", e)))?;
+    validate_archive_path_uniqueness(&mut archive)?;
 
     // Read manifest
     let manifest: BackupManifest = {
@@ -2470,6 +2523,60 @@ mod tests {
         );
         assert!(find_official_character_package(&index, "kokoro", "3.0.0").is_none());
         assert!(find_official_character_package(&index, "../kokoro", "1.0.0").is_none());
+    }
+
+    #[test]
+    fn accepts_legal_uppercase_semver_prerelease_and_build_path_segments() {
+        assert!(validate_catalog_segment("1.0.0-ALPHA+Build.7", "template version").is_ok());
+        assert!(validate_catalog_segment("../escape", "template version").is_err());
+    }
+
+    #[test]
+    fn rejects_case_folded_duplicate_character_resource_paths_before_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("backup.zip");
+        let mut bytes = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut bytes);
+            let options = SimpleFileOptions::default();
+            let manifest = serde_json::json!({
+                "schema_version": 1,
+                "engine_version": ">=0.3.0, <0.4.0",
+                "id": "kokoro",
+                "version": "1.0.0",
+                "name": "Kokoro",
+                "description": "A character",
+                "author": "Kokoro",
+                "license": "MIT",
+                "persona": "Be helpful.",
+                "greeting": "Hello."
+            })
+            .to_string();
+            for (path, content) in [
+                (
+                    "character-resources/kokoro/1.0.0/character.json",
+                    manifest.as_bytes(),
+                ),
+                (
+                    "character-resources/kokoro/1.0.0/LICENSE.md",
+                    b"MIT".as_slice(),
+                ),
+                (
+                    "character-resources/kokoro/1.0.0/CHARACTER.JSON",
+                    b"shadow".as_slice(),
+                ),
+            ] {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(content).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        fs::write(&archive_path, bytes.into_inner()).unwrap();
+
+        let error =
+            stage_character_resources(&archive_path, &temp.path().join("staging")).unwrap_err();
+
+        assert!(error.to_string().contains("duplicate"), "{error}");
     }
 
     #[test]

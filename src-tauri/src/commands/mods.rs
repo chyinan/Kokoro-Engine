@@ -105,7 +105,8 @@ fn read_manifest<R: Read + Seek>(
         let file = archive
             .by_index(index)
             .map_err(|error| KokoroError::Validation(format!("invalid MOD archive: {error}")))?;
-        if !paths.insert(file.name().to_string()) {
+        let path_key = archive_path_key(file.name(), file.is_dir());
+        if !paths.insert(path_key) {
             return Err(KokoroError::Validation(format!(
                 "MOD archive contains duplicate path `{}`",
                 file.name()
@@ -129,6 +130,15 @@ fn read_manifest<R: Read + Seek>(
     let manifest: ModManifest = serde_json::from_str(&content)
         .map_err(|error| KokoroError::Validation(format!("Invalid mod.json: {error}")))?;
     Ok(manifest)
+}
+
+fn archive_path_key(name: &str, is_directory: bool) -> String {
+    let normalized = if is_directory {
+        name.trim_end_matches('/')
+    } else {
+        name
+    };
+    normalized.replace('\\', "/").to_lowercase()
 }
 
 fn extract_to_staging(

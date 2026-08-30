@@ -3,13 +3,15 @@
 use crate::characters::catalog::CharacterCatalog;
 use crate::commands::registry::{
     append_limited_chunk, persist_download_temp_at, removal_activation_target,
-    revalidate_staged_character_bytes,
+    revalidate_staged_character_bytes, trust_for_registry_entry,
 };
 use crate::registry::client::{
     install_trust, verify_character_archive, verify_registry_entry_archive, InstallTrust,
     RegistryClientError, MAX_ARCHIVE_BYTES,
 };
-use crate::registry::manifest::{RegistryEntry, RegistryRecommendations};
+use crate::registry::manifest::{
+    RegistryEntry, RegistryRecommendations, OFFICIAL_REGISTRY_IDENTITY, OFFICIAL_REGISTRY_URL,
+};
 use semver::Version;
 use std::io::{Cursor, Write};
 use tempfile::TempDir;
@@ -225,6 +227,35 @@ fn custom_registry_and_url_installs_cannot_claim_official() {
             true
         ),
         InstallTrust::Official
+    );
+}
+
+#[test]
+fn official_install_trust_requires_canonical_source_and_entry_identity() {
+    let bytes = archive(None, ">=0.3.0, <0.4.0");
+    let mut entry = registry_entry(&bytes, ">=0.3.0, <0.4.0");
+    entry.trust = "official".to_string();
+    entry.trust_source = OFFICIAL_REGISTRY_URL.to_string();
+
+    assert_eq!(
+        trust_for_registry_entry(OFFICIAL_REGISTRY_URL, &entry),
+        InstallTrust::Community,
+        "official label without the signed registry identity must stay untrusted"
+    );
+
+    entry.registry_identity = Some(OFFICIAL_REGISTRY_IDENTITY.to_string());
+    assert_eq!(
+        trust_for_registry_entry(OFFICIAL_REGISTRY_URL, &entry),
+        InstallTrust::Official
+    );
+
+    assert_eq!(
+        trust_for_registry_entry(
+            "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/v1/index.json?redirect=evil",
+            &entry,
+        ),
+        InstallTrust::Community,
+        "a non-canonical endpoint must never inherit official trust"
     );
 }
 

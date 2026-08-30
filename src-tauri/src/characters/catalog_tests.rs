@@ -63,6 +63,38 @@ fn zip_package(version: &str, greeting: &str, extra: Option<(&str, &[u8])>) -> C
     bytes
 }
 
+fn zip_package_with_entries(version: &str, entries: &[(&str, &[u8])]) -> Cursor<Vec<u8>> {
+    let mut bytes = Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut bytes);
+        let options = SimpleFileOptions::default();
+        writer.start_file("character.json", options).unwrap();
+        writer
+            .write_all(manifest_json(version, "Hello").as_bytes())
+            .unwrap();
+        writer.start_file("LICENSE.md", options).unwrap();
+        writer.write_all(b"Test license").unwrap();
+        for (path, content) in entries {
+            writer.start_file(path, options).unwrap();
+            writer.write_all(content).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+    bytes.set_position(0);
+    bytes
+}
+
+fn create_directory_redirect(target: &Path, destination: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(destination, target).is_ok()
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(destination, target).is_ok()
+    }
+}
+
 fn test_catalog(temp: &TempDir) -> CharacterCatalog {
     CharacterCatalog::new(
         temp.path().join("app-data-characters"),
@@ -220,4 +252,59 @@ fn rejects_manifest_when_a_declared_asset_is_a_directory() {
     let error = test_catalog(&temp).install_zip(bytes).unwrap_err();
 
     assert!(error.to_string().contains("regular non-symlink file"));
+}
+
+#[test]
+fn rejects_case_folded_duplicate_archive_paths_before_extraction() {
+    let temp = TempDir::new().unwrap();
+    let archive = zip_package_with_entries(
+        "1.0.0",
+        &[
+            ("assets/avatar.png", b"first"),
+            ("assets/AVATAR.PNG", b"second"),
+        ],
+    );
+
+    let error = test_catalog(&temp).install_zip(archive).unwrap_err();
+
+    assert!(error.to_string().contains("duplicate"), "{error}");
+    assert!(!temp
+        .path()
+        .join("app-data-characters/kokoro/1.0.0")
+        .exists());
+}
+
+#[test]
+fn accepts_uppercase_semver_prerelease_and_build_segments_for_exact_lookup_and_removal() {
+    let temp = TempDir::new().unwrap();
+    let catalog = test_catalog(&temp);
+    let version = "1.0.0-ALPHA+Build.7";
+
+    catalog
+        .install_zip(zip_package(version, "Hello", None))
+        .unwrap();
+    assert!(catalog.find_exact("kokoro", version).is_some());
+    assert!(catalog.stage_package_removal("kokoro", version).is_ok());
+}
+
+#[test]
+fn rejects_redirected_character_parent_before_commit_and_removal() {
+    let temp = TempDir::new().unwrap();
+    let catalog = test_catalog(&temp);
+    let root = temp.path().join("app-data-characters");
+    let redirected = temp.path().join("outside");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&redirected).unwrap();
+    let redirected_id = root.join("kokoro");
+    if !create_directory_redirect(&redirected_id, &redirected) {
+        return;
+    }
+
+    let error = catalog
+        .install_zip(zip_package("1.0.0", "Hello", None))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("regular directory"), "{error}");
+    assert!(!redirected.join("1.0.0").exists());
+    assert!(catalog.stage_package_removal("kokoro", "1.0.0").is_err());
 }
