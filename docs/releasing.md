@@ -121,7 +121,9 @@ external operation happened.
 
 Record the release URL, exact installer asset names, and any failed platform
 job in the release review. Keep the five evidence rows immutable for that
-release. Before starting the next product phase, complete
-`docs/release-reviews/TEMPLATE.md` (the Phase 7 Task 2 template) and record
-unavailable metrics as `Unknown` or `Pending`; Kokoro does not add automatic
-remote analytics to fill those gaps.
+release. Before starting the next product phase, copy
+`docs/release-reviews/TEMPLATE.md` to
+`docs/release-reviews/vX.Y.Z-feedback.md` (the Phase 7 Task 2 template), then
+record unavailable metrics as `Not collected`, `Unavailable`, or `Pending
+external` according to the evidence state. Do not overwrite the template;
+Kokoro does not add automatic remote analytics to fill those gaps.
