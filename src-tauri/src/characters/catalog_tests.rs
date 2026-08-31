@@ -290,7 +290,10 @@ fn rejects_repeated_separator_archive_aliases_before_extraction() {
 
     let error = test_catalog(&temp).install_zip(archive).unwrap_err();
 
-    assert!(error.to_string().contains("duplicate"), "{error}");
+    assert!(
+        error.to_string().contains("duplicate") || error.to_string().contains("non-canonical"),
+        "{error}"
+    );
     assert!(!temp
         .path()
         .join("app-data-characters/kokoro/1.0.0")

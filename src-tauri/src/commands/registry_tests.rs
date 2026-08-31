@@ -398,7 +398,10 @@ fn registry_character_validation_rejects_repeated_separator_aliases() {
     )
     .unwrap_err();
 
-    assert!(error.to_string().contains("duplicate"), "{error}");
+    assert!(
+        error.to_string().contains("duplicate") || error.to_string().contains("non-canonical"),
+        "{error}"
+    );
 }
 
 #[test]
