@@ -73,7 +73,7 @@ fn archive_with_duplicate_root_manifests(first: &str, second: &str) -> Vec<u8> {
         let options = SimpleFileOptions::default();
         writer.start_file("mod.json", options).unwrap();
         writer.write_all(first.as_bytes()).unwrap();
-        writer.start_file("mod.json", options).unwrap();
+        writer.start_file("MOD.JSON", options).unwrap();
         writer.write_all(second.as_bytes()).unwrap();
         writer.finish().unwrap();
     }

@@ -101,6 +101,7 @@ fn catalog_with_template(version: &str, greeting: &str) -> (TempDir, CharacterCa
         .to_string(),
     )
     .unwrap();
+    fs::write(package_dir.join("LICENSE.md"), "test license").unwrap();
     let catalog = CharacterCatalog::new(
         temp.path().to_path_buf(),
         semver::Version::parse("0.3.1").unwrap(),
@@ -236,7 +237,7 @@ async fn apply_reconciliation_revalidates_versions_and_preserves_owned_state() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO memories (content, embedding, character_id) VALUES ('memory', X'', 'instance')")
+    sqlx::query("INSERT INTO memories (content, embedding, created_at, character_id) VALUES ('memory', X'', 1, 'instance')")
         .execute(&pool)
         .await
         .unwrap();
@@ -504,8 +505,8 @@ async fn restore_defaults_preserves_consumed_greeting_conversations_and_memories
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO memories (content, embedding, character_id) \
-         VALUES ('memory', X'', 'instance')",
+        "INSERT INTO memories (content, embedding, created_at, character_id) \
+         VALUES ('memory', X'', 1, 'instance')",
     )
     .execute(&pool)
     .await

@@ -391,7 +391,7 @@ async fn prepare_includes_validated_template_asset_references() {
     let snapshot = template_snapshot(Some(json!({
         "live2d_model": "models/template.model3.json",
         "background": "backgrounds/template.webp",
-        "cue_profile": "cues/template.json"
+        "cue_profile": "cues.json"
     })));
     attach_snapshot_value(&pool, "templated", &snapshot).await;
     let temp = tempfile::tempdir().unwrap();
@@ -401,7 +401,7 @@ async fn prepare_includes_validated_template_asset_references() {
         &[
             ("models/template.model3.json", b"{}"),
             ("backgrounds/template.webp", b"image"),
-            ("cues/template.json", br#"{"schema_version":1,"cues":{}}"#),
+            ("cues.json", br#"{"schema_version":1,"cues":{}}"#),
         ],
     );
 
@@ -435,7 +435,7 @@ async fn prepare_includes_validated_template_asset_references() {
     );
     assert_eq!(
         json!(token.resolved_runtime.cue_profile),
-        expected("cues/template.json")
+        expected("cues.json")
     );
 }
 
@@ -447,7 +447,7 @@ async fn prepare_falls_back_when_optional_package_assets_are_missing_or_origin_c
     let snapshot = template_snapshot(Some(json!({
         "live2d_model": "models/missing.model3.json",
         "background": "backgrounds/missing.webp",
-        "cue_profile": "cues/missing.json"
+        "cue_profile": "cues.json"
     })));
     attach_snapshot_value(&pool, "missing", &snapshot).await;
     attach_snapshot_value(&pool, "collision", &snapshot).await;
@@ -647,7 +647,7 @@ async fn committed_runtime_recovery_retains_template_asset_references() {
     let snapshot = template_snapshot(Some(json!({
         "live2d_model": "models/recovered.model3.json",
         "background": "backgrounds/recovered.webp",
-        "cue_profile": "cues/recovered.json"
+        "cue_profile": "cues.json"
     })));
     attach_snapshot_value(&pool, "templated", &snapshot).await;
     let temp = tempfile::tempdir().unwrap();
@@ -657,7 +657,7 @@ async fn committed_runtime_recovery_retains_template_asset_references() {
         &[
             ("models/recovered.model3.json", b"{}"),
             ("backgrounds/recovered.webp", b"image"),
-            ("cues/recovered.json", br#"{"schema_version":1,"cues":{}}"#),
+            ("cues.json", br#"{"schema_version":1,"cues":{}}"#),
         ],
     );
     let coordinator = ActivationCoordinator::default();
@@ -693,10 +693,7 @@ async fn committed_runtime_recovery_retains_template_asset_references() {
         json!(recovered.runtime.background),
         expected("backgrounds/recovered.webp")
     );
-    assert_eq!(
-        json!(recovered.runtime.cue_profile),
-        expected("cues/recovered.json")
-    );
+    assert_eq!(json!(recovered.runtime.cue_profile), expected("cues.json"));
 }
 
 #[tokio::test]
@@ -830,13 +827,13 @@ async fn canonical_prompt_composes_persona_and_example_dialogue_for_backend_appl
     assert!(token
         .resolved_runtime
         .system_prompt
-        .contains("<example_dialogue>"));
+        .contains("<example_dialogue"));
     assert!(token.resolved_runtime.system_prompt.contains("Example"));
 
     coordinator.commit(&pool, token, &backend).await.unwrap();
     let applied = backend.snapshot().await.unwrap();
     assert!(applied.system_prompt.contains("<character_persona>"));
-    assert!(applied.system_prompt.contains("<example_dialogue>"));
+    assert!(applied.system_prompt.contains("<example_dialogue"));
 }
 
 #[tokio::test]

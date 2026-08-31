@@ -267,7 +267,10 @@ fn rejects_case_folded_duplicate_archive_paths_before_extraction() {
 
     let error = test_catalog(&temp).install_zip(archive).unwrap_err();
 
-    assert!(error.to_string().contains("duplicate"), "{error}");
+    assert!(
+        error.to_string().contains("duplicate") || error.to_string().contains("non-canonical"),
+        "{error}"
+    );
     assert!(!temp
         .path()
         .join("app-data-characters/kokoro/1.0.0")

@@ -414,7 +414,7 @@ pub(crate) fn validate_export_target(app_data: &Path, out_path: &Path) -> Result
         .unwrap_or_else(|| Path::new("."));
     let canonical_parent = fs::canonicalize(parent).map_err(|error| {
         KokoroError::Validation(format!(
-            "backup export parent is not canonicalizable: {} ({error})",
+            "managed backup export parent is not canonicalizable: {} ({error})",
             parent.display()
         ))
     })?;
@@ -1690,29 +1690,32 @@ async fn apply_character_rows(
                 .execute(&mut *transaction)
                 .await?;
         }
-        let result = sqlx::query(
-            "INSERT OR IGNORE INTO characters (id, name, persona, user_nickname, source_format, created_at, updated_at, template_id, template_version, template_snapshot_json, description, avatar_path, greeting, greeting_consumed_at, greeting_message_id, example_dialogue, runtime_profile_json, user_modified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&row.id)
-        .bind(row.name)
-        .bind(row.persona)
-        .bind(row.user_nickname)
-        .bind(row.source_format)
-        .bind(row.created_at)
-        .bind(row.updated_at)
-        .bind(row.template_id)
-        .bind(row.template_version)
-        .bind(row.template_snapshot_json)
-        .bind(row.description)
-        .bind(row.avatar_path)
-        .bind(row.greeting)
-        .bind(row.greeting_consumed_at)
-        .bind(row.greeting_message_id)
-        .bind(row.example_dialogue)
-        .bind(row.runtime_profile_json)
-        .bind(row.user_modified_at)
-        .execute(&mut *transaction)
-        .await?;
+        let insert_sql = if conflict_strategy == "overwrite" {
+            "INSERT INTO characters (id, name, persona, user_nickname, source_format, created_at, updated_at, template_id, template_version, template_snapshot_json, description, avatar_path, greeting, greeting_consumed_at, greeting_message_id, example_dialogue, runtime_profile_json, user_modified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        } else {
+            "INSERT OR IGNORE INTO characters (id, name, persona, user_nickname, source_format, created_at, updated_at, template_id, template_version, template_snapshot_json, description, avatar_path, greeting, greeting_consumed_at, greeting_message_id, example_dialogue, runtime_profile_json, user_modified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        };
+        let result = sqlx::query(insert_sql)
+            .bind(&row.id)
+            .bind(row.name)
+            .bind(row.persona)
+            .bind(row.user_nickname)
+            .bind(row.source_format)
+            .bind(row.created_at)
+            .bind(row.updated_at)
+            .bind(row.template_id)
+            .bind(row.template_version)
+            .bind(row.template_snapshot_json)
+            .bind(row.description)
+            .bind(row.avatar_path)
+            .bind(row.greeting)
+            .bind(row.greeting_consumed_at)
+            .bind(row.greeting_message_id)
+            .bind(row.example_dialogue)
+            .bind(row.runtime_profile_json)
+            .bind(row.user_modified_at)
+            .execute(&mut *transaction)
+            .await?;
         restored += result.rows_affected() as i64;
     }
     Ok(restored)

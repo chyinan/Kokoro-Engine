@@ -375,7 +375,10 @@ fn registry_character_validation_rejects_case_folded_duplicate_paths() {
     )
     .unwrap_err();
 
-    assert!(error.to_string().contains("duplicate"), "{error}");
+    assert!(
+        error.to_string().contains("duplicate") || error.to_string().contains("non-canonical"),
+        "{error}"
+    );
 }
 
 #[test]

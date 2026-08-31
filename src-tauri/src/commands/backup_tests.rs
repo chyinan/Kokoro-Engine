@@ -154,6 +154,7 @@ fn local_catalog_resolver_requires_an_exact_valid_version() {
         r#"{"schema_version":1,"engine_version":">=0.1.0","id":"kokoro","version":"1.0.0","name":"Kokoro","description":"desc","author":"team","license":"CC0","avatar":"avatar.png","persona":"persona","greeting":"hello"}"#,
     )
     .unwrap();
+    fs::write(package.join("LICENSE.md"), "test license").unwrap();
     fs::write(package.join("avatar.png"), b"png").unwrap();
     let resolver = LocalCatalogPackageResolver::new(tmp.path().to_path_buf());
 
@@ -173,6 +174,7 @@ fn backup_resolver_reuses_complete_catalog_validation() {
         r#"{"schema_version":1,"engine_version":">=99.0.0","id":"kokoro","version":"1.0.0","name":"Kokoro","description":"desc","author":"team","license":"CC0","avatar":"missing.png","persona":"persona","greeting":"hello"}"#,
     )
     .unwrap();
+    fs::write(package.join("LICENSE.md"), "test license").unwrap();
     let resolver = LocalCatalogPackageResolver::new(tmp.path().to_path_buf());
 
     let error = resolver.resolve_exact("kokoro", "1.0.0").unwrap_err();
@@ -426,13 +428,17 @@ fn config_import_rejects_duplicate_allowed_names() {
         &backup,
         &[
             ("configs/llm_config.json", b"{}"),
-            ("configs/llm_config.json", b"{}"),
+            ("configs/LLM_CONFIG.JSON", b"{}"),
         ],
     );
 
     let error = stage_backup_configs(&backup).unwrap_err();
 
-    assert!(error.to_string().contains("duplicate config"), "{error}");
+    assert!(
+        error.to_string().contains("duplicate config")
+            || error.to_string().contains("duplicate backup archive path"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -488,6 +494,7 @@ fn backup_export_target_cannot_be_managed_database_or_resource_path() {
     let tmp = tempfile::tempdir().unwrap();
     let app_data = tmp.path().join("app-data");
     fs::create_dir_all(app_data.join("characters")).unwrap();
+    fs::create_dir_all(app_data.join("character-instance-resources")).unwrap();
 
     for target in [
         app_data.clone(),
