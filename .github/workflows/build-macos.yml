@@ -46,6 +46,10 @@ jobs:
           workspaces: src-tauri
           key: macos-${{ matrix.arch }}
 
+      - name: Validate Sherpa-ONNX cache
+        shell: bash
+        run: bash .github/scripts/validate-sherpa-onnx-cache.sh
+
       - name: Install dependencies
         run: npm install
 
