@@ -314,8 +314,10 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
 
     const update = (patch: Partial<VisionConfig>) => {
         if (!config) return;
-        setConfig({ ...config, ...patch });
+        const next = { ...config, ...patch };
+        setConfig(next);
         setDirty(true);
+        onConfigChange?.(next);
     };
 
     const persistVisionConfig = async (cfg: VisionConfig) => {

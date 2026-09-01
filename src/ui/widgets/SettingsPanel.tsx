@@ -8,7 +8,7 @@ import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Spa
 import { ModList } from "../mods/ModList";
 import ContentLibrary from "./ContentLibrary";
 import { Select } from "@/components/ui/select";
-import CharacterManager from "./CharacterManager";
+import CharacterManager, { type CharacterManagerRef } from "./CharacterManager";
 import type { CharacterRuntimeOverrides } from "../../features/characters/character-runtime-overrides";
 import ImageGenSettings from "./ImageGenSettings";
 import MemoryPanel from "./MemoryPanel";
@@ -25,7 +25,19 @@ import { BackupTab } from "./settings/BackupTab";
 import PetTab from "./settings/PetTab";
 import AboutTab from "./settings/AboutTab";
 import { useTranslation } from "react-i18next";
-import { setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, getBotConfig, saveBotConfig, saveLlmConfig } from "../../lib/kokoro-bridge";
+import { setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, getBotConfig, saveBotConfig, saveLlmConfig, saveVisionConfig } from "../../lib/kokoro-bridge";
+import {
+    isBackgroundConfigDirty,
+    isBotConfigDirty,
+    isImageGenConfigDirty,
+    isLlmConfigDirty,
+    isRuntimeDirty,
+    isSttConfigDirty,
+    isTtsConfigDirty,
+    isTtsParamsDirty,
+    isVisionConfigDirty,
+    type TtsParamSnapshot,
+} from "./settings-dirty-check";
 import type {
     ProviderStatus,
     VoiceProfile,
@@ -302,6 +314,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     const overlayRef = useRef<HTMLDivElement>(null);
     const latestLlmConfigRef = useRef<LlmConfig | null>(llmConfigProp ?? null);
     const bgConfigDirtyRef = useRef(false);
+    const characterManagerRef = useRef<CharacterManagerRef | null>(null);
 
     // ── Local Buffer State ───────────────────────────────
     // We hold changes locally until "Save" is clicked.
@@ -316,6 +329,32 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         ...normalizeBackgroundConfigForImageCount(bg.config, bg.imageCount),
     }));
 
+    // Vision Config
+    const [localVisionConfig, setLocalVisionConfig] = useState<VisionConfig | null>(visionConfigProp ?? null);
+
+    // Baseline snapshots (recorded when opening Settings to support dirty checking and cancel reset)
+    const baselineDisplayModeRef = useRef(displayMode);
+    const baselineCustomModelPathRef = useRef(customModelPath);
+    const baselineGazeTrackingRef = useRef(gazeTrackingProp ?? true);
+    const baselineBgConfigRef = useRef(localBgConfig);
+    const baselineTtsParamsRef = useRef<TtsParamSnapshot>({
+        enabled: false,
+        providerId: "browser",
+        voice: "",
+        speed: "1.0",
+        pitch: "1.0",
+    });
+    const baselineTtsConfigRef = useRef<TtsSystemConfig | null>(null);
+    const baselineSttConfigRef = useRef<SttConfig | null>(null);
+    const baselineVoiceInterruptRef = useRef(false);
+    const baselineImageGenConfigRef = useRef<ImageGenSystemConfig | null>(null);
+    const baselineBotConfigRef = useRef<BotConfig | null>(null);
+    const baselineLlmConfigRef = useRef<LlmConfig | null>(null);
+    const baselineVisionConfigRef = useRef<VisionConfig | null>(null);
+    const baselineVisionEnabledRef = useRef(false);
+    const baselineUserLangRef = useRef("");
+    const baselineResponseLangRef = useRef("");
+
     // Sync local state only when the panel opens; while editing, keep local form state authoritative.
     useEffect(() => {
         if (isOpen) {
@@ -324,17 +363,51 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             latestLlmConfigRef.current = llmConfigProp ?? null;
             setLocalGazeTracking(gazeTrackingProp ?? true);
             bgConfigDirtyRef.current = false;
-            setLocalBgConfig({ ...normalizeBackgroundConfigForImageCount(bg.config, bg.imageCount) });
-            setTtsVoice(readStringSetting(APP_SETTING_KEYS.ttsVoice, ""));
-            setTtsSpeed(readStringSetting(APP_SETTING_KEYS.ttsSpeed, "1.0"));
-            setTtsPitch(readStringSetting(APP_SETTING_KEYS.ttsPitch, "1.0"));
-            setTtsProviderId(readStringSetting(APP_SETTING_KEYS.ttsProvider, "browser"));
-            setTtsEnabled(readBooleanSetting(APP_SETTING_KEYS.ttsEnabled, false));
-            setVisionEnabled(readBooleanSetting(APP_SETTING_KEYS.visionEnabled, false));
-            setVoiceInterrupt(readBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, false));
-            setResponseLang(readStringSetting(APP_SETTING_KEYS.responseLanguage, ""));
-            setUserLang(readStringSetting(APP_SETTING_KEYS.userLanguage, ""));
+            const currentBg = { ...normalizeBackgroundConfigForImageCount(bg.config, bg.imageCount) };
+            setLocalBgConfig(currentBg);
+
+            const voice = readStringSetting(APP_SETTING_KEYS.ttsVoice, "");
+            const speed = readStringSetting(APP_SETTING_KEYS.ttsSpeed, "1.0");
+            const pitch = readStringSetting(APP_SETTING_KEYS.ttsPitch, "1.0");
+            const provider = readStringSetting(APP_SETTING_KEYS.ttsProvider, "browser");
+            const enabled = readBooleanSetting(APP_SETTING_KEYS.ttsEnabled, false);
+            const vision = readBooleanSetting(APP_SETTING_KEYS.visionEnabled, false);
+            const voiceInt = readBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, false);
+            const respLang = readStringSetting(APP_SETTING_KEYS.responseLanguage, "");
+            const uLang = readStringSetting(APP_SETTING_KEYS.userLanguage, "");
+
+            setTtsVoice(voice);
+            setTtsSpeed(speed);
+            setTtsPitch(pitch);
+            setTtsProviderId(provider);
+            setTtsEnabled(enabled);
+            setVisionEnabled(vision);
+            setVoiceInterrupt(voiceInt);
+            setResponseLang(respLang);
+            setUserLang(uLang);
             setLocalBotConfig(null);
+            setLocalVisionConfig(visionConfigProp ?? null);
+
+            // Record baseline snapshots
+            baselineDisplayModeRef.current = displayMode;
+            baselineCustomModelPathRef.current = customModelPath;
+            baselineGazeTrackingRef.current = gazeTrackingProp ?? true;
+            baselineBgConfigRef.current = currentBg;
+            baselineTtsParamsRef.current = {
+                enabled,
+                providerId: provider,
+                voice,
+                speed,
+                pitch,
+            };
+            baselineVisionEnabledRef.current = vision;
+            baselineVoiceInterruptRef.current = voiceInt;
+            baselineResponseLangRef.current = respLang;
+            baselineUserLangRef.current = uLang;
+            baselineImageGenConfigRef.current = imageGenConfigProp ?? null;
+            baselineLlmConfigRef.current = llmConfigProp ?? null;
+            baselineVisionConfigRef.current = visionConfigProp ?? null;
+
             fetchData();
             fetchBotConfig();
         }
@@ -482,25 +555,25 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     useEffect(() => {
         const handleClick = (e: MouseEvent) => {
             if (overlayRef.current && e.target === overlayRef.current) {
-                onClose();
+                handleCancel();
             }
         };
         if (isOpen) {
             document.addEventListener("mousedown", handleClick);
         }
         return () => document.removeEventListener("mousedown", handleClick);
-    }, [isOpen, onClose]);
+    }, [isOpen]);
 
     // Escape to close
     useEffect(() => {
         const handleKey = (e: KeyboardEvent) => {
-            if (e.key === "Escape") onClose();
+            if (e.key === "Escape") handleCancel();
         };
         if (isOpen) {
             document.addEventListener("keydown", handleKey);
         }
         return () => document.removeEventListener("keydown", handleKey);
-    }, [isOpen, onClose]);
+    }, [isOpen]);
 
     const fetchData = async () => {
         setIsTtsLoading(true);
@@ -513,8 +586,10 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             setTtsProviders(providers);
             setTtsVoices(voices);
             setLocalTtsConfig(ttsConfig);
+            baselineTtsConfigRef.current = ttsConfig;
             const sttConfig = await getSttConfig();
             setLocalSttConfig(sttConfig);
+            baselineSttConfigRef.current = sttConfig;
         } catch (e) {
             console.error("[SettingsPanel] Failed to fetch data:", e);
         } finally {
@@ -526,6 +601,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         try {
             const botConfig = await getBotConfig();
             setLocalBotConfig(botConfig);
+            baselineBotConfigRef.current = botConfig;
         } catch (e) {
             console.error("[SettingsPanel] Failed to fetch bot config:", e);
         }
@@ -556,41 +632,99 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     };
 
     const handleSave = async () => {
-        // Persist to localStorage (non-LLM settings)
-        writeBooleanSetting(APP_SETTING_KEYS.visionEnabled, visionEnabled);
-        dispatchRuntimeSettingsChanged("vision");
-        if (localSttConfig) {
-            const activeSttProvider = localSttConfig.providers?.find(p => p.id === localSttConfig.active_provider);
-            writeBooleanSetting(APP_SETTING_KEYS.sttEnabled, activeSttProvider?.enabled === true);
-            writeBooleanSetting(APP_SETTING_KEYS.sttAutoSend, localSttConfig.auto_send);
-            writeStringSetting(APP_SETTING_KEYS.sttLanguage, localSttConfig.language || "");
-            writeBooleanSetting(APP_SETTING_KEYS.sttContinuousListening, localSttConfig.continuous_listening);
-            writeBooleanSetting(APP_SETTING_KEYS.wakeWordEnabled, localSttConfig.wake_word_enabled);
-            writeStringSetting(APP_SETTING_KEYS.wakeWord, localSttConfig.wake_word || "");
+        // 1. Commit Persona Draft
+        const personaSaveResult = await characterManagerRef.current?.saveDraft();
+        const personaDirty = personaSaveResult?.hasChanges ?? false;
+
+        // 2. Commit Vision Settings & Config
+        const visionEnabledDirty = visionEnabled !== baselineVisionEnabledRef.current;
+        if (visionEnabledDirty) {
+            writeBooleanSetting(APP_SETTING_KEYS.visionEnabled, visionEnabled);
+            dispatchRuntimeSettingsChanged("vision");
+            baselineVisionEnabledRef.current = visionEnabled;
         }
-        dispatchRuntimeSettingsChanged("stt");
-        writeBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, voiceInterrupt);
-        writeStringSetting(APP_SETTING_KEYS.userLanguage, userLang);
-
-        // Commit core settings
-        onDisplayModeChange(localDisplayMode);
-        onGazeTrackingChange?.(localGazeTracking);
-
-        // Commit background config
-        bg.setConfig(localBgConfig);
-        bgConfigDirtyRef.current = false;
-
-        showSaveFeedback();
-
-        // Send user language to backend
-        try {
-            await setUserLanguage(userLang);
-        } catch (e) {
-            console.error("[SettingsPanel] Failed to set user language:", e);
+        const visionConfigDirty = isVisionConfigDirty(baselineVisionConfigRef.current, localVisionConfig);
+        if (visionConfigDirty && localVisionConfig) {
+            try {
+                await saveVisionConfig(localVisionConfig);
+                baselineVisionConfigRef.current = { ...localVisionConfig };
+                dispatchRuntimeSettingsChanged("vision");
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to save Vision config:", e);
+            }
         }
 
-        // Persist TTS Config
-        if (localTtsConfig) {
+        // 3. Commit STT Settings & Config
+        const sttDirty = isSttConfigDirty(
+            baselineSttConfigRef.current,
+            localSttConfig,
+            baselineVoiceInterruptRef.current,
+            voiceInterrupt,
+        );
+        if (sttDirty) {
+            if (localSttConfig) {
+                const activeSttProvider = localSttConfig.providers?.find(p => p.id === localSttConfig.active_provider);
+                writeBooleanSetting(APP_SETTING_KEYS.sttEnabled, activeSttProvider?.enabled === true);
+                writeBooleanSetting(APP_SETTING_KEYS.sttAutoSend, localSttConfig.auto_send);
+                writeStringSetting(APP_SETTING_KEYS.sttLanguage, localSttConfig.language || "");
+                writeBooleanSetting(APP_SETTING_KEYS.sttContinuousListening, localSttConfig.continuous_listening);
+                writeBooleanSetting(APP_SETTING_KEYS.wakeWordEnabled, localSttConfig.wake_word_enabled);
+                writeStringSetting(APP_SETTING_KEYS.wakeWord, localSttConfig.wake_word || "");
+                try {
+                    await saveSttConfig(localSttConfig);
+                    baselineSttConfigRef.current = { ...localSttConfig };
+                } catch (e) {
+                    console.error("[SettingsPanel] Failed to save STT config:", e);
+                }
+            }
+            writeBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, voiceInterrupt);
+            baselineVoiceInterruptRef.current = voiceInterrupt;
+            dispatchRuntimeSettingsChanged("stt");
+        }
+
+        // 4. Commit Core Display & Gaze Tracking
+        const displayModeDirty = localDisplayMode !== baselineDisplayModeRef.current;
+        if (displayModeDirty) {
+            onDisplayModeChange(localDisplayMode);
+            baselineDisplayModeRef.current = localDisplayMode;
+        }
+        const gazeTrackingDirty = localGazeTracking !== baselineGazeTrackingRef.current;
+        if (gazeTrackingDirty) {
+            onGazeTrackingChange?.(localGazeTracking);
+            baselineGazeTrackingRef.current = localGazeTracking;
+        }
+
+        // 5. Commit Background Config
+        const bgDirty = bgConfigDirtyRef.current || isBackgroundConfigDirty(baselineBgConfigRef.current, localBgConfig);
+        if (bgDirty) {
+            bg.setConfig(localBgConfig);
+            baselineBgConfigRef.current = { ...localBgConfig };
+            bgConfigDirtyRef.current = false;
+        }
+
+        // 6. Commit User Language (Translation)
+        const userLangDirty = userLang !== baselineUserLangRef.current;
+        if (userLangDirty) {
+            writeStringSetting(APP_SETTING_KEYS.userLanguage, userLang);
+            baselineUserLangRef.current = userLang;
+            try {
+                await setUserLanguage(userLang);
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to set user language:", e);
+            }
+        }
+
+        // 7. Commit TTS System Config
+        const currentTtsParams: TtsParamSnapshot = {
+            enabled: ttsEnabled,
+            providerId: ttsProviderId,
+            voice: ttsVoice,
+            speed: ttsSpeed,
+            pitch: ttsPitch,
+        };
+        const ttsParamsDirty = isTtsParamsDirty(baselineTtsParamsRef.current, currentTtsParams);
+        const ttsConfigDirty = isTtsConfigDirty(baselineTtsConfigRef.current, localTtsConfig);
+        if (ttsConfigDirty && localTtsConfig) {
             const ttsConfigToSave: TtsSystemConfig = {
                 ...localTtsConfig,
                 providers: localTtsConfig.providers.map((provider) => {
@@ -610,6 +744,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             try {
                 await saveTtsConfig(ttsConfigToSave);
                 setLocalTtsConfig(ttsConfigToSave);
+                baselineTtsConfigRef.current = ttsConfigToSave;
                 // Refresh provider status after saving config
                 const [providers, voices] = await Promise.all([
                     listTtsProviders(),
@@ -621,66 +756,115 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 console.error("[SettingsPanel] Failed to save TTS config:", e);
             }
         }
-
-        const selectedTtsProvider = localTtsConfig?.providers.find(
-            (provider) => provider.id === ttsProviderId,
-        ) ?? null;
-        try {
-            await onCharacterRuntimeChange({
-                responseLanguage: responseLang,
-                live2dModel: localCustomModelPath,
-                tts: {
-                    enabled: ttsEnabled,
-                    providerId: ttsProviderId || null,
-                    providerType: selectedTtsProvider?.provider_type ?? null,
-                    voice: ttsVoice || null,
-                    speed: Number.parseFloat(ttsSpeed) || 1,
-                    pitch: Number.parseFloat(ttsPitch) || 1,
-                },
-            });
-        } catch (e) {
-            console.error("[SettingsPanel] Failed to apply character runtime:", e);
+        if (ttsParamsDirty) {
+            baselineTtsParamsRef.current = currentTtsParams;
         }
 
-        // Commit Image Gen Config
-        if (localImageGenConfig) {
+        // 8. Track Live2D Model & Response Language changes
+        const modelDirty = localCustomModelPath !== baselineCustomModelPathRef.current;
+        if (modelDirty) {
+            baselineCustomModelPathRef.current = localCustomModelPath;
+        }
+        const responseLangDirty = responseLang !== baselineResponseLangRef.current;
+        if (responseLangDirty) {
+            baselineResponseLangRef.current = responseLang;
+        }
+
+        // 9. CONDITIONAL RUNTIME RELOAD:
+        // Only trigger onCharacterRuntimeChange if one of the runtime-sensitive fields changed!
+        const runtimeDirty = isRuntimeDirty({
+            personaDirty,
+            ttsDirty: ttsParamsDirty,
+            modelDirty,
+            responseLangDirty,
+        });
+
+        if (runtimeDirty) {
+            const selectedTtsProvider = localTtsConfig?.providers.find(
+                (provider) => provider.id === ttsProviderId,
+            ) ?? null;
+            try {
+                await onCharacterRuntimeChange({
+                    ...(responseLangDirty ? { responseLanguage: responseLang } : {}),
+                    ...(modelDirty ? { live2dModel: localCustomModelPath } : {}),
+                    ...(personaSaveResult?.changedCharacter ? { persona: personaSaveResult.changedCharacter.persona } : {}),
+                    ...(ttsParamsDirty ? {
+                        tts: {
+                            enabled: ttsEnabled,
+                            providerId: ttsProviderId || null,
+                            providerType: selectedTtsProvider?.provider_type ?? null,
+                            voice: ttsVoice || null,
+                            speed: Number.parseFloat(ttsSpeed) || 1,
+                            pitch: Number.parseFloat(ttsPitch) || 1,
+                        },
+                    } : {}),
+                });
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to apply character runtime:", e);
+            }
+        }
+
+        // 10. Commit Image Gen Config
+        const imageGenDirty = isImageGenConfigDirty(baselineImageGenConfigRef.current, localImageGenConfig);
+        if (imageGenDirty && localImageGenConfig) {
             try {
                 await saveImageGenConfig(localImageGenConfig);
+                baselineImageGenConfigRef.current = { ...localImageGenConfig };
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Image Gen config:", e);
             }
         }
 
-        // Commit STT Config
-        if (localSttConfig) {
+        // 11. Commit Bot Config
+        const botDirty = isBotConfigDirty(baselineBotConfigRef.current, localBotConfig);
+        if (botDirty && localBotConfig) {
             try {
-                await saveSttConfig(localSttConfig);
-            } catch (e) {
-                console.error("[SettingsPanel] Failed to save STT config:", e);
-            }
-        }
-
-        // Commit Bot Config
-        if (localBotConfig) {
-            try {
-                setLocalBotConfig(await saveBotConfig(localBotConfig));
+                const savedBot = await saveBotConfig(localBotConfig);
+                setLocalBotConfig(savedBot);
+                baselineBotConfigRef.current = savedBot;
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Bot config:", e);
             }
         }
 
-        // Commit LLM Config (if ApiTab has unsaved changes)
-        if (latestLlmConfigRef.current) {
+        // 12. Commit LLM Config (if ApiTab has unsaved changes)
+        const llmDirty = isLlmConfigDirty(baselineLlmConfigRef.current, latestLlmConfigRef.current);
+        if (llmDirty && latestLlmConfigRef.current) {
             try {
                 await saveLlmConfig(latestLlmConfigRef.current);
+                baselineLlmConfigRef.current = latestLlmConfigRef.current;
                 onLlmConfigSaved?.(latestLlmConfigRef.current);
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save LLM config:", e);
             }
         }
+
+        showSaveFeedback();
     };
 
     const handleCancel = () => {
+        characterManagerRef.current?.resetDraft();
+        setLocalDisplayMode(baselineDisplayModeRef.current);
+        setLocalCustomModelPath(baselineCustomModelPathRef.current);
+        setLocalGazeTracking(baselineGazeTrackingRef.current);
+        setLocalBgConfig(baselineBgConfigRef.current);
+        bg.setConfig(baselineBgConfigRef.current);
+        bgConfigDirtyRef.current = false;
+        setUserLang(baselineUserLangRef.current);
+        setResponseLang(baselineResponseLangRef.current);
+        setTtsVoice(baselineTtsParamsRef.current.voice);
+        setTtsSpeed(baselineTtsParamsRef.current.speed);
+        setTtsPitch(baselineTtsParamsRef.current.pitch);
+        setTtsProviderId(baselineTtsParamsRef.current.providerId);
+        setTtsEnabled(baselineTtsParamsRef.current.enabled);
+        setLocalTtsConfig(baselineTtsConfigRef.current);
+        setLocalSttConfig(baselineSttConfigRef.current);
+        setVoiceInterrupt(baselineVoiceInterruptRef.current);
+        setLocalImageGenConfig(baselineImageGenConfigRef.current);
+        setLocalBotConfig(baselineBotConfigRef.current);
+        latestLlmConfigRef.current = baselineLlmConfigRef.current;
+        setVisionEnabled(baselineVisionEnabledRef.current);
+        setLocalVisionConfig(baselineVisionConfigRef.current);
         onClose();
     };
 
@@ -795,6 +979,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                             {mountedTabs.has("persona") && (
                                 <div className={activeTab === "persona" ? "block" : "hidden"}>
                                     <CharacterManager
+                                        ref={characterManagerRef}
                                         onActivateCharacter={onActivateCharacter}
                                         onCharacterRuntimeChange={onCharacterRuntimeChange}
                                         onCharactersChanged={onCharactersChanged}
@@ -902,8 +1087,11 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                             {mountedTabs.has("vision") && (
                                 <div className={activeTab === "vision" ? "block" : "hidden"}>
                                     <VisionTab
-                                        initialConfig={visionConfigProp ?? null}
-                                        onConfigChange={onVisionConfigChange}
+                                        initialConfig={localVisionConfig}
+                                        onConfigChange={(cfg) => {
+                                            setLocalVisionConfig(cfg);
+                                            onVisionConfigChange?.(cfg);
+                                        }}
                                     />
                                 </div>
                             )}

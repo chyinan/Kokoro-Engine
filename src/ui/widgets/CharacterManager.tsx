@@ -5,7 +5,7 @@
  * Full character management UI: list, create, edit, delete,
  * and import SillyTavern character cards (JSON / PNG).
  */
-import { useState, useEffect, useCallback, useRef, type ChangeEvent } from "react";
+import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle, type ChangeEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Plus, Upload, Trash2, UserCircle, Check, X, User } from "lucide-react";
@@ -13,6 +13,8 @@ import { characterDb } from "../../lib/db";
 import { parseCharacterCard } from "../../lib/character-card-parser";
 import { getKokoroErrorMessage, setUserName, setUserPersona, getProactiveEnabled, listCharacters, createCharacter, createCharacterWithAvatar, updateCharacter, updateCharacterWithAvatar, deleteCharacter } from "../../lib/kokoro-bridge";
 import type { CharacterRecord } from "../../lib/kokoro-bridge";
+import { isCharacterEditDirty, isUserProfileDirty } from "./settings-dirty-check";
+export { isCharacterEditDirty, isUserProfileDirty };
 import {
     readCharacterRuntimeProfile,
     type CharacterRuntimeOverrides,
@@ -135,7 +137,16 @@ type ImportFeedback = {
 
 const ACTIVE_CHAR_KEY = "kokoro_active_character_id";
 
-// ── Props ──────────────────────────────────────────
+// ── Props & Ref ────────────────────────────────────
+
+export interface CharacterManagerRef {
+    saveDraft: () => Promise<{
+        hasChanges: boolean;
+        changedCharacter?: CharacterRecord;
+        userProfile?: UserProfile;
+    }>;
+    resetDraft: () => void;
+}
 
 interface CharacterManagerProps {
     /** Routes every user-initiated selection through the activation transaction owner. */
@@ -158,18 +169,36 @@ interface CharacterManagerProps {
 
 // ── Component ──────────────────────────────────────
 
-export default function CharacterManager({ onActivateCharacter, onCharacterRuntimeChange, onCharactersChanged, characters: charactersProp, resolveAvatarUrl, characterToEditId, activeCharacterId: activeCharacterIdProp, responseLanguage, onResponseLanguageChange, userLanguage, onUserLanguageChange }: CharacterManagerProps) {
-    const { t } = useTranslation();
-    const [characters, setCharacters] = useState<CharacterRecord[]>([]);
-    const [activeId, setActiveId] = useState<string | null>(null);
-    const [editChar, setEditChar] = useState<CharacterRecord | null>(null);
-    const [isLoading, setIsLoading] = useState(true);
-    const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-    const [importFeedback, setImportFeedback] = useState<ImportFeedback | null>(null);
-    const avatarInputRef = useRef<HTMLInputElement | null>(null);
-    const [isAvatarUpdating, setIsAvatarUpdating] = useState(false);
-    const [userProfile, setUserProfile] = useState<UserProfile>(loadUserProfile);
-    const [proactiveEnabled, setProactiveEnabledState] = useState(true);
+const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
+    function CharacterManager(
+        {
+            onActivateCharacter,
+            onCharacterRuntimeChange,
+            onCharactersChanged,
+            characters: charactersProp,
+            resolveAvatarUrl,
+            characterToEditId,
+            activeCharacterId: activeCharacterIdProp,
+            responseLanguage,
+            onResponseLanguageChange,
+            userLanguage,
+            onUserLanguageChange,
+        }: CharacterManagerProps,
+        ref,
+    ) {
+        const { t } = useTranslation();
+        const [characters, setCharacters] = useState<CharacterRecord[]>([]);
+        const [activeId, setActiveId] = useState<string | null>(null);
+        const [editChar, setEditChar] = useState<CharacterRecord | null>(null);
+        const [isLoading, setIsLoading] = useState(true);
+        const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+        const [importFeedback, setImportFeedback] = useState<ImportFeedback | null>(null);
+        const avatarInputRef = useRef<HTMLInputElement | null>(null);
+        const [isAvatarUpdating, setIsAvatarUpdating] = useState(false);
+        const [userProfile, setUserProfile] = useState<UserProfile>(loadUserProfile);
+        const baselineUserProfileRef = useRef<UserProfile>(userProfile);
+        const baselineCharRef = useRef<CharacterRecord | null>(null);
+        const [proactiveEnabled, setProactiveEnabledState] = useState(true);
 
     const onActivateCharacterRef = useRef(onActivateCharacter);
     onActivateCharacterRef.current = onActivateCharacter;
@@ -239,6 +268,7 @@ export default function CharacterManager({ onActivateCharacter, onCharacterRunti
             const active = (savedId && all.find(c => c.id === savedId)) ? all.find(c => c.id === savedId)! : all[0];
             setActiveId(active.id);
             setEditChar(active);
+            baselineCharRef.current = { ...active };
             if (normalizedCharacterIds.has(active.id)) {
                 await onActivateCharacterRef.current(active.id).catch((error) => {
                     console.error("[CharacterManager] Failed to refresh normalized character runtime:", error);
@@ -258,7 +288,10 @@ export default function CharacterManager({ onActivateCharacter, onCharacterRunti
     useEffect(() => {
         if (characterToEditId === null || characterToEditId === undefined) return;
         const selected = characters.find((character) => character.id === characterToEditId);
-        if (selected) setEditChar({ ...selected });
+        if (selected) {
+            setEditChar({ ...selected });
+            baselineCharRef.current = { ...selected };
+        }
     }, [characterToEditId, characters]);
 
     useEffect(() => {
@@ -267,13 +300,67 @@ export default function CharacterManager({ onActivateCharacter, onCharacterRunti
         if (!active) return;
         setActiveId(active.id);
         setEditChar({ ...active });
+        baselineCharRef.current = { ...active };
     }, [activeCharacterIdProp, characterToEditId, characters, userProfile]);
 
+    useImperativeHandle(ref, () => ({
+        saveDraft: async () => {
+            let hasChanges = false;
+            let updatedChar: CharacterRecord | undefined;
+            const userProfileDirty = isUserProfileDirty(baselineUserProfileRef.current, userProfile);
+            if (userProfileDirty) {
+                hasChanges = true;
+                baselineUserProfileRef.current = { ...userProfile };
+                saveUserProfile(userProfile);
+                await setUserName(userProfile.name).catch(e => console.error("[CharacterManager] Failed to set user name:", e));
+                await setUserPersona(userProfile.persona).catch(e => console.error("[CharacterManager] Failed to persist user profile:", e));
+            }
+
+            const currentInList = characters.find(c => c.id === editChar?.id) ?? baselineCharRef.current;
+            const charDirty = editChar && isCharacterEditDirty(currentInList, editChar);
+            if (charDirty && editChar) {
+                hasChanges = true;
+                const normalized = normalizeCharacterRecord(editChar, userProfile);
+                updatedChar = {
+                    ...normalized,
+                    updated_at: Date.now(),
+                };
+                await updateCharacter(updatedChar);
+                publishCharacters(characters.map(c => c.id === updatedChar!.id ? updatedChar! : c));
+                setEditChar(updatedChar);
+                baselineCharRef.current = { ...updatedChar };
+            }
+
+            return {
+                hasChanges,
+                changedCharacter: updatedChar,
+                userProfile,
+            };
+        },
+        resetDraft: () => {
+            setUserProfile({ ...baselineUserProfileRef.current });
+            setEditChar(baselineCharRef.current ? { ...baselineCharRef.current } : null);
+        },
+    }), [characters, editChar, userProfile]);
+
     const selectCharacter = async (char: CharacterRecord) => {
+        if (editChar && isCharacterEditDirty(baselineCharRef.current, editChar)) {
+            try {
+                const updated = {
+                    ...normalizeCharacterRecord(editChar, userProfile),
+                    updated_at: Date.now(),
+                };
+                await updateCharacter(updated);
+                publishCharacters(characters.map(c => c.id === updated.id ? updated : c));
+            } catch (err) {
+                console.error("[CharacterManager] Failed to commit character before switch:", err);
+            }
+        }
         try {
             await onActivateCharacter(char.id);
             setActiveId(char.id);
             setEditChar({ ...char });
+            baselineCharRef.current = { ...char };
             setProactiveEnabledState(
                 readCharacterRuntimeProfile(char.runtime_profile_json).proactive_enabled ?? true,
             );
@@ -360,24 +447,6 @@ export default function CharacterManager({ onActivateCharacter, onCharacterRunti
             });
         } finally {
             setIsAvatarUpdating(false);
-        }
-    };
-
-    const handleSaveEdit = async () => {
-        if (!editChar) return;
-        try {
-            const updated = {
-                ...normalizeCharacterRecord(editChar, userProfile),
-                updated_at: Date.now(),
-            };
-            await updateCharacter(updated);
-            publishCharacters(characters.map(c => c.id === updated.id ? updated : c));
-            setEditChar(updated);
-            if (activeId === updated.id) {
-                await onActivateCharacter(updated.id);
-            }
-        } catch (err) {
-            console.error("[CharacterManager] Failed to update character:", err);
         }
     };
 
@@ -470,17 +539,6 @@ export default function CharacterManager({ onActivateCharacter, onCharacterRunti
         setUserProfile(prev => ({ ...prev, [field]: value }));
     };
 
-    const handleUserProfileSave = () => {
-        saveUserProfile(userProfile);
-        setUserName(userProfile.name).catch(e => console.error("[CharacterManager] Failed to set user name:", e));
-        setUserPersona(userProfile.persona).catch(e => console.error("[CharacterManager] Failed to persist user profile:", e));
-        // Keep the persisted character persona raw; activation composes the runtime prompt.
-        if (editChar) {
-            const nextPersona = normalizeCharacterRecord(editChar, userProfile).persona;
-            void onCharacterRuntimeChange({ persona: nextPersona }).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
-        }
-    };
-
     return (
         <div className="space-y-4">
             {/* ── User Profile ── */}
@@ -497,14 +555,12 @@ export default function CharacterManager({ onActivateCharacter, onCharacterRunti
                         type="text"
                         value={userProfile.name}
                         onChange={e => handleUserProfileChange("name", e.target.value)}
-                        onBlur={handleUserProfileSave}
                         placeholder={t("settings.persona.user_profile.name_placeholder")}
                         className={inputClasses}
                     />
                     <textarea
                         value={userProfile.persona}
                         onChange={e => handleUserProfileChange("persona", e.target.value)}
-                        onBlur={handleUserProfileSave}
                         placeholder={t("settings.persona.user_profile.persona_placeholder")}
                         rows={3}
                         className={clsx(inputClasses, "resize-y min-h-[60px]")}
@@ -608,7 +664,7 @@ export default function CharacterManager({ onActivateCharacter, onCharacterRunti
                             const next = !proactiveEnabled;
                             void onCharacterRuntimeChange({ proactiveEnabled: next })
                                 .then(() => setProactiveEnabledState(next))
-                                .catch(e => console.error("[CharacterManager] Failed to set proactive:", e));
+                                .catch((e: unknown) => console.error("[CharacterManager] Failed to set proactive:", e));
                         }}
                         className={clsx(
                             "relative inline-flex h-6 w-11 items-center rounded-full transition-colors shrink-0",
@@ -816,7 +872,6 @@ export default function CharacterManager({ onActivateCharacter, onCharacterRunti
                             type="text"
                             value={editChar.name}
                             onChange={e => handleFieldChange("name", e.target.value)}
-                            onBlur={handleSaveEdit}
                             placeholder={t("settings.persona.edit.name_placeholder")}
                             className={inputClasses}
                         />
@@ -831,7 +886,6 @@ export default function CharacterManager({ onActivateCharacter, onCharacterRunti
                             type="text"
                             value={editChar.user_nickname}
                             onChange={e => handleFieldChange("user_nickname", e.target.value)}
-                            onBlur={handleSaveEdit}
                             placeholder={t("settings.persona.edit.nickname_placeholder")}
                             className={inputClasses}
                         />
@@ -848,7 +902,6 @@ export default function CharacterManager({ onActivateCharacter, onCharacterRunti
                         <textarea
                             value={editChar.persona}
                             onChange={e => handleFieldChange("persona", e.target.value)}
-                            onBlur={handleSaveEdit}
                             placeholder={t("settings.persona.edit.persona_placeholder")}
                             rows={6}
                             className={clsx(inputClasses, "resize-y min-h-[100px]")}
@@ -860,7 +913,9 @@ export default function CharacterManager({ onActivateCharacter, onCharacterRunti
             )}
         </div>
     );
-}
+});
+
+export default CharacterManager;
 
 type AvatarPreviewProps = {
     readonly path: string | null;
