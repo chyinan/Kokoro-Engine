@@ -230,26 +230,24 @@ pub async fn set_jailbreak_prompt(
     prompt: String,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
-    state.set_jailbreak_prompt(prompt.clone()).await;
-
-    // Persist to disk
+    // Persist to disk first to avoid split-brain if disk write fails
     let app_data = dirs_next::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let path = app_data.join("jailbreak_prompt.json");
     crate::config::save_json_config(&path, &serde_json::json!({ "prompt": prompt }), "JAILBREAK")?;
 
+    state.set_jailbreak_prompt(prompt).await;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn get_jailbreak_prompt(state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
-    let memory_prompt = state.get_jailbreak_prompt().await;
-    if !memory_prompt.is_empty() {
+    if let Some(memory_prompt) = state.get_jailbreak_prompt().await {
         return Ok(memory_prompt);
     }
 
-    // Fallback read from disk
+    // Fallback read from disk only when not loaded yet
     let app_data = dirs_next::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
@@ -263,6 +261,7 @@ pub async fn get_jailbreak_prompt(state: State<'_, AIOrchestrator>) -> Result<St
         }
     }
 
+    state.set_jailbreak_prompt(String::new()).await;
     Ok(String::new())
 }
 

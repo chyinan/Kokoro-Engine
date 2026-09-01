@@ -10,18 +10,21 @@ import { inputClasses, labelClasses } from '../../styles/settings-primitives';
 
 export interface JailbreakTabProps {
     value?: string;
+    loading?: boolean;
     onChange?: (prompt: string) => void;
     onSaveSuccess?: (prompt: string) => void;
 }
 
 export const JailbreakTab: React.FC<JailbreakTabProps> = ({
     value,
+    loading: loadingProp,
     onChange,
     onSaveSuccess,
 }) => {
     const { t } = useTranslation();
     const [internalPrompt, setInternalPrompt] = useState('');
-    const [loading, setLoading] = useState(value === undefined);
+    const [internalLoading, setInternalLoading] = useState(value === undefined);
+    const loading = loadingProp !== undefined ? loadingProp : internalLoading;
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
 
@@ -41,7 +44,7 @@ export const JailbreakTab: React.FC<JailbreakTabProps> = ({
         } catch (error) {
             console.error('Failed to load jailbreak prompt:', error);
         } finally {
-            setLoading(false);
+            setInternalLoading(false);
         }
     };
 

@@ -142,6 +142,8 @@ const ACTIVE_CHAR_KEY = "kokoro_active_character_id";
 export interface CharacterManagerRef {
     saveDraft: () => Promise<{
         hasChanges: boolean;
+        characterDirty?: boolean;
+        userProfileDirty?: boolean;
         changedCharacter?: CharacterRecord;
         userProfile?: UserProfile;
     }>;
@@ -204,15 +206,27 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
     onActivateCharacterRef.current = onActivateCharacter;
     const onCharactersChangedRef = useRef(onCharactersChanged);
     onCharactersChangedRef.current = onCharactersChanged;
+    const charactersRef = useRef<CharacterRecord[]>(characters);
+    charactersRef.current = characters;
+    const initialCharactersRef = useRef<Map<string, CharacterRecord>>(new Map());
+    const characterDraftsRef = useRef<Map<string, CharacterRecord>>(new Map());
 
     function publishCharacters(nextCharacters: Array<CharacterRecord>): void {
+        charactersRef.current = nextCharacters;
         setCharacters(nextCharacters);
         onCharactersChangedRef.current?.(nextCharacters);
     }
 
     useEffect(() => {
         if (charactersProp === undefined) return;
-        setCharacters(Array.from(charactersProp));
+        const next = Array.from(charactersProp);
+        charactersRef.current = next;
+        setCharacters(next);
+        next.forEach((c) => {
+            if (!initialCharactersRef.current.has(c.id)) {
+                initialCharactersRef.current.set(c.id, { ...c });
+            }
+        });
     }, [charactersProp]);
 
     useEffect(() => {
@@ -263,6 +277,11 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
             }
 
             publishCharacters(all);
+            all.forEach((c) => {
+                if (!initialCharactersRef.current.has(c.id)) {
+                    initialCharactersRef.current.set(c.id, { ...c });
+                }
+            });
 
             const savedId = localStorage.getItem(ACTIVE_CHAR_KEY);
             const active = (savedId && all.find(c => c.id === savedId)) ? all.find(c => c.id === savedId)! : all[0];
@@ -305,62 +324,80 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
 
     useImperativeHandle(ref, () => ({
         saveDraft: async () => {
-            let hasChanges = false;
+            let characterDirty = false;
             let updatedChar: CharacterRecord | undefined;
             const userProfileDirty = isUserProfileDirty(baselineUserProfileRef.current, userProfile);
             if (userProfileDirty) {
-                hasChanges = true;
                 baselineUserProfileRef.current = { ...userProfile };
                 saveUserProfile(userProfile);
                 await setUserName(userProfile.name).catch(e => console.error("[CharacterManager] Failed to set user name:", e));
                 await setUserPersona(userProfile.persona).catch(e => console.error("[CharacterManager] Failed to persist user profile:", e));
             }
 
-            const currentInList = characters.find(c => c.id === editChar?.id) ?? baselineCharRef.current;
-            const charDirty = editChar && isCharacterEditDirty(currentInList, editChar);
-            if (charDirty && editChar) {
-                hasChanges = true;
+            if (editChar && isCharacterEditDirty(baselineCharRef.current, editChar)) {
                 const normalized = normalizeCharacterRecord(editChar, userProfile);
-                updatedChar = {
+                const currentUpdated = {
                     ...normalized,
                     updated_at: Date.now(),
                 };
-                await updateCharacter(updatedChar);
-                publishCharacters(characters.map(c => c.id === updatedChar!.id ? updatedChar! : c));
-                setEditChar(updatedChar);
-                baselineCharRef.current = { ...updatedChar };
+                characterDraftsRef.current.set(currentUpdated.id, currentUpdated);
+            }
+
+            if (characterDraftsRef.current.size > 0) {
+                characterDirty = true;
+                const committedMap = new Map<string, CharacterRecord>();
+                for (const [id, draft] of characterDraftsRef.current.entries()) {
+                    await updateCharacter(draft);
+                    committedMap.set(id, draft);
+                    initialCharactersRef.current.set(id, { ...draft });
+                }
+                const nextList = charactersRef.current.map(c => committedMap.get(c.id) ?? c);
+                publishCharacters(nextList);
+                if (editChar && committedMap.has(editChar.id)) {
+                    updatedChar = committedMap.get(editChar.id)!;
+                    setEditChar(updatedChar);
+                    baselineCharRef.current = { ...updatedChar };
+                } else if (editChar) {
+                    updatedChar = editChar;
+                }
+                characterDraftsRef.current.clear();
             }
 
             return {
-                hasChanges,
+                hasChanges: userProfileDirty || characterDirty,
+                characterDirty,
+                userProfileDirty,
                 changedCharacter: updatedChar,
                 userProfile,
             };
         },
         resetDraft: () => {
             setUserProfile({ ...baselineUserProfileRef.current });
-            setEditChar(baselineCharRef.current ? { ...baselineCharRef.current } : null);
+            characterDraftsRef.current.clear();
+            const restoredList = charactersRef.current.map(c => initialCharactersRef.current.get(c.id) ?? c);
+            publishCharacters(restoredList);
+            const initialForCurrent = editChar ? initialCharactersRef.current.get(editChar.id) : null;
+            setEditChar(initialForCurrent ? { ...initialForCurrent } : (baselineCharRef.current ? { ...baselineCharRef.current } : null));
         },
     }), [characters, editChar, userProfile]);
 
-    const selectCharacter = async (char: CharacterRecord) => {
+    const selectCharacter = async (char: CharacterRecord, explicitList?: CharacterRecord[]) => {
+        const list = explicitList ?? charactersRef.current;
         if (editChar && isCharacterEditDirty(baselineCharRef.current, editChar)) {
-            try {
-                const updated = {
-                    ...normalizeCharacterRecord(editChar, userProfile),
-                    updated_at: Date.now(),
-                };
-                await updateCharacter(updated);
-                publishCharacters(characters.map(c => c.id === updated.id ? updated : c));
-            } catch (err) {
-                console.error("[CharacterManager] Failed to commit character before switch:", err);
-            }
+            const updated = {
+                ...normalizeCharacterRecord(editChar, userProfile),
+                updated_at: Date.now(),
+            };
+            characterDraftsRef.current.set(updated.id, updated);
+            const nextList = list.map(c => c.id === updated.id ? updated : c);
+            publishCharacters(nextList);
         }
         try {
             await onActivateCharacter(char.id);
             setActiveId(char.id);
-            setEditChar({ ...char });
-            baselineCharRef.current = { ...char };
+            const nextChar = characterDraftsRef.current.get(char.id) ?? { ...char };
+            setEditChar(nextChar);
+            baselineCharRef.current = initialCharactersRef.current.get(char.id) ?? { ...char };
             setProactiveEnabledState(
                 readCharacterRuntimeProfile(char.runtime_profile_json).proactive_enabled ?? true,
             );
@@ -381,10 +418,20 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
             created_at: now,
             updated_at: now,
         };
+        if (editChar && isCharacterEditDirty(baselineCharRef.current, editChar)) {
+            const updated = {
+                ...normalizeCharacterRecord(editChar, userProfile),
+                updated_at: Date.now(),
+            };
+            characterDraftsRef.current.set(updated.id, updated);
+        }
         try {
             await createCharacter(newChar);
-            publishCharacters([...characters, newChar]);
-            await selectCharacter(newChar);
+            initialCharactersRef.current.set(newChar.id, { ...newChar });
+            const currentList = charactersRef.current.map(c => characterDraftsRef.current.get(c.id) ?? c);
+            const nextList = [...currentList, newChar];
+            publishCharacters(nextList);
+            await selectCharacter(newChar, nextList);
         } catch (err) {
             console.error("[CharacterManager] Failed to create character:", err);
         }
@@ -473,6 +520,13 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
     };
 
     const handleImport = async () => {
+        if (editChar && isCharacterEditDirty(baselineCharRef.current, editChar)) {
+            const updated = {
+                ...normalizeCharacterRecord(editChar, userProfile),
+                updated_at: Date.now(),
+            };
+            characterDraftsRef.current.set(updated.id, updated);
+        }
         const input = document.createElement("input");
         input.type = "file";
         input.accept = ".json,.png";
@@ -504,8 +558,11 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                 } else {
                     await createCharacter(newChar);
                 }
-                publishCharacters([...characters, newChar]);
-                await selectCharacter(newChar);
+                initialCharactersRef.current.set(newChar.id, { ...newChar });
+                const currentList = charactersRef.current.map(c => characterDraftsRef.current.get(c.id) ?? c);
+                const nextList = [...currentList, newChar];
+                publishCharacters(nextList);
+                await selectCharacter(newChar, nextList);
                 setImportFeedback({
                     kind: "success",
                     message: t("settings.persona.status.imported", { name: profile.name }),

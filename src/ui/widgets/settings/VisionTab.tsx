@@ -301,6 +301,22 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
         };
     }, [config?.vlm_provider, config?.vlm_base_url, config?.vlm_api_key]);
 
+    useEffect(() => {
+        if (initialConfig !== undefined && initialConfig !== null) {
+            setConfig(initialConfig);
+            setLoading(false);
+            setDirty(false);
+        }
+    }, [initialConfig]);
+
+    useEffect(() => {
+        const handleSaved = () => {
+            setDirty(false);
+        };
+        window.addEventListener("kokoro-vision-settings-changed", handleSaved);
+        return () => window.removeEventListener("kokoro-vision-settings-changed", handleSaved);
+    }, []);
+
     const loadConfig = async () => {
         try {
             const cfg = await getVisionConfig();

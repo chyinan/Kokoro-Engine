@@ -160,8 +160,8 @@ pub struct AIOrchestrator {
     pub response_language: Arc<Mutex<String>>,
     /// User's display language for inline translation (e.g. "中文"). Empty = disabled.
     pub user_language: Arc<Mutex<String>>,
-    /// Jailbreak prompt prefix (prepended to all system prompts). Empty = disabled.
-    pub jailbreak_prompt: Arc<Mutex<String>>,
+    /// Jailbreak prompt prefix (prepended to all system prompts). None = not loaded from disk yet, Some("") = explicitly empty.
+    pub jailbreak_prompt: Arc<Mutex<Option<String>>>,
     /// Character name for {{char}} placeholder replacement.
     character_name: Arc<Mutex<String>>,
     /// User name for {{user}} placeholder replacement.
@@ -221,7 +221,7 @@ impl AIOrchestrator {
             conversation_count: Arc::new(Mutex::new(0)),
             response_language: Arc::new(Mutex::new(String::new())),
             user_language: Arc::new(Mutex::new(String::new())),
-            jailbreak_prompt: Arc::new(Mutex::new(String::new())),
+            jailbreak_prompt: Arc::new(Mutex::new(None)),
             character_name: Arc::new(Mutex::new("Kokoro".to_string())),
             user_name: Arc::new(Mutex::new("User".to_string())),
             curiosity: Arc::new(Mutex::new(CuriosityModule::new())),
@@ -302,10 +302,10 @@ impl AIOrchestrator {
 
     pub async fn set_jailbreak_prompt(&self, prompt: String) {
         let mut jp = self.jailbreak_prompt.lock().await;
-        *jp = prompt;
+        *jp = Some(prompt);
     }
 
-    pub async fn get_jailbreak_prompt(&self) -> String {
+    pub async fn get_jailbreak_prompt(&self) -> Option<String> {
         let jp = self.jailbreak_prompt.lock().await;
         jp.clone()
     }
@@ -895,7 +895,12 @@ impl AIOrchestrator {
         ));
 
         // Section 2: Character persona (jailbreak + system prompt)
-        let jailbreak = self.jailbreak_prompt.lock().await.clone();
+        let jailbreak = self
+            .jailbreak_prompt
+            .lock()
+            .await
+            .clone()
+            .unwrap_or_default();
         let character_block = if !jailbreak.is_empty() {
             let char_name = self.character_name.lock().await.clone();
             let user_name = self.user_name.lock().await.clone();
