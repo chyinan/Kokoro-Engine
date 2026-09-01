@@ -1,9 +1,9 @@
 // pattern: Imperative Shell
 
-import { useState, useRef, useEffect, useCallback, useDeferredValue, memo, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useDeferredValue, memo, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
+import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
 import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
 import type { CommittedCharacterRuntime, FailureEvent, ToolTraceItem } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
@@ -35,6 +35,11 @@ import {
     type ChatPanelMessage,
     type PendingTurnState,
 } from "./chat/turn-state";
+import {
+    computeTargetScrollTop,
+    isScrollAtBottom,
+    type ChatScrollSnapshot,
+} from "./chat/chat-scroll-state";
 import { requestMemoryModelDialog } from "../../lib/memory-model-gate";
 import { getChatPanelInteractionProps } from "../layout/layout-interaction";
 import { audioPlayer } from "../../core/services";
@@ -244,9 +249,41 @@ export default function ChatPanel({
     const deferredMessages = useDeferredValue(messages);
     const [visibleCount, setVisibleCount] = useState(20);
     const [input, setInput] = useState("");
-    const [expandedInput, setExpandedInput] = useState(false);
-    const compactInputRef = useRef<HTMLInputElement>(null);
-    const expandedTextareaRef = useRef<HTMLTextAreaElement>(null);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const [inputHeight, setInputHeight] = useState<number>(88);
+    const isDraggingInputResizeRef = useRef(false);
+    const inputResizeStartYRef = useRef(0);
+    const inputResizeStartHeightRef = useRef(0);
+
+    const handleInputResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+        e.preventDefault();
+        isDraggingInputResizeRef.current = true;
+        inputResizeStartYRef.current = e.clientY;
+        inputResizeStartHeightRef.current = inputHeight;
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    }, [inputHeight]);
+
+    const handleInputResizeMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+        if (!isDraggingInputResizeRef.current) return;
+        const deltaY = inputResizeStartYRef.current - e.clientY;
+        const nextHeight = Math.max(82, Math.min(300, inputResizeStartHeightRef.current + deltaY));
+        setInputHeight(nextHeight);
+    }, []);
+
+    const handleInputResizeEnd = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+        if (!isDraggingInputResizeRef.current) return;
+        isDraggingInputResizeRef.current = false;
+        try {
+            (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+        } catch {
+            // pointer capture already released
+        }
+    }, []);
+
+    const handleInputResizeReset = useCallback(() => {
+        setInputHeight(prev => (prev > 88 ? 88 : 180));
+    }, []);
+
     const [isStreaming, setIsStreaming] = useState(false);
     const isStreamingRef = useRef(false);
     const [isBusy, setIsBusy] = useState(false);
@@ -308,6 +345,7 @@ export default function ChatPanel({
     const messagesContainerRef = useRef<HTMLDivElement>(null);
     const userScrolledRef = useRef(false);
     const isProgrammaticScrollRef = useRef(false);
+    const savedScrollSnapshotRef = useRef<ChatScrollSnapshot | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const resizeCleanupRef = useRef<(() => void) | null>(null);
     const latestResizeWidthRef = useRef(width);
@@ -550,7 +588,7 @@ export default function ChatPanel({
     useEffect(() => {
         const syncTextInputFocus = () => {
             const active = document.activeElement;
-            const focused = active === compactInputRef.current || active === expandedTextareaRef.current;
+            const focused = active === textareaRef.current;
             setVisionTextInputFocused(focused).catch(error => {
                 console.error("[ChatPanel] Failed to sync text input focus:", error);
             });
@@ -650,13 +688,59 @@ export default function ChatPanel({
     // Firing on `messages` scrolls to the old DOM height (before new bubble renders).
     useEffect(scrollToBottom, [deferredMessages, scrollToBottom]);
 
+    // ── Restore scroll display position on expand ───────────
+    useLayoutEffect(() => {
+        if (collapsed) return;
+        const container = messagesContainerRef.current;
+        if (!container) return;
+
+        isProgrammaticScrollRef.current = true;
+        const restoreScroll = () => {
+            const el = messagesContainerRef.current;
+            if (!el) return;
+            const target = computeTargetScrollTop(
+                savedScrollSnapshotRef.current,
+                el.scrollHeight,
+                el.clientHeight
+            );
+            el.scrollTop = target.scrollTop;
+            userScrolledRef.current = target.userScrolled;
+        };
+
+        restoreScroll();
+
+        const rafId = requestAnimationFrame(() => {
+            restoreScroll();
+            requestAnimationFrame(restoreScroll);
+        });
+
+        const timer = setTimeout(() => {
+            isProgrammaticScrollRef.current = false;
+        }, 120);
+
+        return () => {
+            cancelAnimationFrame(rafId);
+            clearTimeout(timer);
+        };
+    }, [collapsed]);
+
     const handleScroll = useCallback(() => {
-        // Ignore scroll events triggered by our own scrollToBottom
+        // Ignore scroll events triggered by our own scrollToBottom or restore
         if (isProgrammaticScrollRef.current) return;
         const container = messagesContainerRef.current;
         if (!container) return;
-        const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 40;
+        const atBottom = isScrollAtBottom(
+            container.scrollTop,
+            container.scrollHeight,
+            container.clientHeight
+        );
         userScrolledRef.current = !atBottom;
+        savedScrollSnapshotRef.current = {
+            scrollTop: container.scrollTop,
+            scrollHeight: container.scrollHeight,
+            clientHeight: container.clientHeight,
+            isAtBottom: atBottom,
+        };
         // Load more messages when scrolled near top
         if (container.scrollTop < 100) {
             setVisibleCount(prev => prev + 20);
@@ -1054,6 +1138,7 @@ export default function ChatPanel({
         startStreaming();
         setIsThinking(true);
         userScrolledRef.current = false;
+        savedScrollSnapshotRef.current = null;
         // Lock out handleScroll until deferredMessages DOM update settles (~200ms)
         isProgrammaticScrollRef.current = true;
         setTimeout(() => { isProgrammaticScrollRef.current = false; }, 200);
@@ -1179,6 +1264,8 @@ export default function ChatPanel({
             // Backend might not be ready
         }
         setMessages([]);
+        savedScrollSnapshotRef.current = null;
+        userScrolledRef.current = false;
     };
 
     // ── Stable message action callbacks ───────────────────
@@ -1373,11 +1460,30 @@ export default function ChatPanel({
         };
     }, []);
 
-    // ── Expand handler ─────────────────────────────────────
-    const handleExpand = () => {
+    // ── Collapse / Expand handlers ─────────────────────────
+    const handleCollapse = useCallback(() => {
+        const container = messagesContainerRef.current;
+        if (container) {
+            const atBottom = isScrollAtBottom(
+                container.scrollTop,
+                container.scrollHeight,
+                container.clientHeight
+            );
+            userScrolledRef.current = !atBottom;
+            savedScrollSnapshotRef.current = {
+                scrollTop: container.scrollTop,
+                scrollHeight: container.scrollHeight,
+                clientHeight: container.clientHeight,
+                isAtBottom: atBottom,
+            };
+        }
+        setCollapsed(true);
+    }, []);
+
+    const handleExpand = useCallback(() => {
         setCollapsed(false);
         setUnreadCount(0);
-    };
+    }, []);
 
     // ════════════════════════════════════════════════════════�?
     // Collapsed state �?small floating chat bubble
@@ -1530,7 +1636,7 @@ export default function ChatPanel({
                     <motion.button
                         whileHover={{ scale: 1.1 }}
                         whileTap={{ scale: 0.95 }}
-                        onClick={() => setCollapsed(true)}
+                        onClick={handleCollapse}
                         className="p-2 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
                         aria-label={t("chat.actions.collapse")}
                         title={t("chat.actions.collapse")}
@@ -1544,6 +1650,11 @@ export default function ChatPanel({
             <div
                 ref={messagesContainerRef}
                 onScroll={handleScroll}
+                onPointerDown={(e) => {
+                    if (e.target === e.currentTarget) {
+                        textareaRef.current?.blur();
+                    }
+                }}
                 className="flex-1 overflow-y-auto p-4 space-y-3 scrollable"
             >
                 <AnimatePresence initial={false}>
@@ -1572,7 +1683,20 @@ export default function ChatPanel({
             </div>
 
             {/* Input */}
-            <form onSubmit={handleSend} className="border-t border-[var(--color-border)] bg-black/20">
+            <form onSubmit={handleSend} className="relative border-t border-[var(--color-border)] bg-black/20 pt-1">
+                {/* Drag handle on top edge */}
+                <div
+                    onPointerDown={handleInputResizeStart}
+                    onPointerMove={handleInputResizeMove}
+                    onPointerUp={handleInputResizeEnd}
+                    onPointerCancel={handleInputResizeEnd}
+                    onDoubleClick={handleInputResizeReset}
+                    className="w-full h-3 cursor-ns-resize flex items-center justify-center group select-none -mt-1 touch-none"
+                    title={t("chat.input.resize_hint", "拖拽调整高度 · 双击切换/复位")}
+                >
+                    <div className="w-10 h-1 rounded-full bg-white/10 group-hover:bg-[var(--color-accent)]/60 transition-colors" />
+                </div>
+
                 {/* Pending images preview */}
                 <AnimatePresence>
                     {hasSendableImages && (
@@ -1580,14 +1704,14 @@ export default function ChatPanel({
                             initial={{ height: 0, opacity: 0 }}
                             animate={{ height: "auto", opacity: 1 }}
                             exit={{ height: 0, opacity: 0 }}
-                            className="flex gap-2 px-3 pt-2 overflow-x-auto"
+                            className="flex gap-2 px-3 pb-2 overflow-x-auto"
                         >
                             {pendingImages.map((url, idx) => (
                                 <div key={idx} className="relative group flex-shrink-0">
                                     <img
                                         src={url}
                                         alt="pending"
-                                        className="w-16 h-16 rounded-md object-cover border border-[var(--color-border)]"
+                                        className="w-14 h-14 rounded-md object-cover border border-[var(--color-border)]"
                                     />
                                     <button
                                         type="button"
@@ -1602,268 +1726,181 @@ export default function ChatPanel({
                     )}
                 </AnimatePresence>
 
-                <div className="relative flex items-center gap-2 p-3">
-                    {/* Hidden file input */}
-                    <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept="image/*"
-                        className="hidden"
-                        onChange={handleImageSelect}
+                <div
+                    style={{ height: `${inputHeight}px` }}
+                    className={clsx(
+                        "relative mx-3 mb-3 p-2.5 bg-black/40 border border-[var(--color-border)] rounded-2xl flex flex-col",
+                        "hover:border-white/20",
+                        "focus-within:!border-[var(--color-accent)] focus-within:shadow-[0_0_10px_rgba(0,240,255,0.25)]",
+                        "transition-colors",
+                        isBusy && "opacity-50 cursor-not-allowed"
+                    )}
+                >
+                    <textarea
+                        ref={textareaRef}
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onPaste={handlePaste}
+                        onKeyDown={(e) => {
+                            if ((e.key === "Enter" && !e.shiftKey) || (e.key === "Enter" && (e.ctrlKey || e.metaKey))) {
+                                if (e.nativeEvent.isComposing) return;
+                                e.preventDefault();
+                                handleSend();
+                            }
+                        }}
+                        data-onboarding-id="chat-input"
+                        placeholder={t("chat.input.placeholder")}
+                        disabled={isBusy}
+                        style={{ outline: "none", boxShadow: "none" }}
+                        className={clsx(
+                            "w-full flex-1 bg-transparent border-none text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)]",
+                            "text-sm font-body resize-none p-0 pr-1 leading-normal",
+                            "!outline-none focus:!outline-none focus-visible:!outline-none focus:ring-0 focus-visible:ring-0",
+                            "scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent",
+                            "[&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-button]:hidden"
+                        )}
                     />
 
-                    {/* Image upload button �?only visible when Vision Mode is ON */}
-                    {visionEnabled && (
+                    <div className="flex items-center justify-between pt-1.5 mt-auto">
+                        <div className="flex items-center gap-1.5">
+                            {/* Hidden file input */}
+                            <input
+                                ref={fileInputRef}
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={handleImageSelect}
+                            />
+
+                            {/* Image upload button — only visible when Vision Mode is ON */}
+                            {visionEnabled && (
+                                <motion.button
+                                    type="button"
+                                    whileHover={{ scale: 1.1 }}
+                                    whileTap={{ scale: 0.9 }}
+                                    onClick={() => fileInputRef.current?.click()}
+                                    disabled={isBusy || isUploading}
+                                    className={clsx(
+                                        "p-1.5 rounded-lg transition-colors text-[var(--color-text-muted)] hover:text-[var(--color-accent)]",
+                                        (isBusy || isUploading) && "opacity-50 cursor-not-allowed"
+                                    )}
+                                    aria-label={t("chat.input.attach_image")}
+                                    title={t("chat.input.attach_image")}
+                                >
+                                    {isUploading ? (
+                                        <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                                    ) : (
+                                        <ImagePlus size={16} strokeWidth={1.5} />
+                                    )}
+                                </motion.button>
+                            )}
+
+                            {/* Camera frame indicator */}
+                            {visionEnabled && cameraEnabled && (
+                                <div
+                                    className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] text-[var(--color-accent)] opacity-70 select-none"
+                                    title={t("chat.input.camera_frame_attached")}
+                                >
+                                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
+                                    CAM
+                                </div>
+                            )}
+
+                            {/* Microphone button — Advanced VAD Mode */}
+                            {sttEnabled && (
+                                <div className="relative flex items-center justify-center">
+                                    {/* Volume ring */}
+                                    {voiceState !== VoiceState.Idle && voiceState !== VoiceState.Processing && (
+                                        <motion.div
+                                            className="absolute inset-0 rounded-lg border-2 border-[var(--color-accent)]"
+                                            animate={{
+                                                opacity: voiceState === VoiceState.Speaking ? [0.3, 0.8, 0.3] : 0.2,
+                                                scale: voiceState === VoiceState.Speaking
+                                                    ? [1, 1 + Math.min(micVolume / 100, 0.5), 1]
+                                                    : 1,
+                                            }}
+                                            transition={{ duration: 0.3, repeat: voiceState === VoiceState.Speaking ? Infinity : 0 }}
+                                            style={{ pointerEvents: "none" }}
+                                        />
+                                    )}
+                                    <motion.button
+                                        type="button"
+                                        whileHover={{ scale: 1.1 }}
+                                        whileTap={{ scale: 0.9 }}
+                                        onClick={handleMicToggle}
+                                        disabled={isBusy}
+                                        className={clsx(
+                                            "relative p-1.5 rounded-lg transition-all z-10",
+                                            voiceState === VoiceState.Idle
+                                                ? "text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
+                                                : voiceState === VoiceState.Listening
+                                                    ? "text-[var(--color-accent)] bg-[var(--color-accent)]/15 border border-[var(--color-accent)]/30"
+                                                    : voiceState === VoiceState.Speaking
+                                                        ? "text-red-400 bg-red-500/20 border border-red-500/40 shadow-[0_0_12px_rgba(239,68,68,0.3)]"
+                                                        : "text-amber-400 bg-amber-500/15 border border-amber-500/30",
+                                            isBusy && voiceState === VoiceState.Idle && "opacity-50 cursor-not-allowed"
+                                        )}
+                                        aria-label={
+                                            voiceState === VoiceState.Idle ? t("chat.input.mic.title.idle") :
+                                                voiceState === VoiceState.Listening ? t("chat.input.mic.title.listening") :
+                                                    voiceState === VoiceState.Speaking ? t("chat.input.mic.title.speaking") :
+                                                        t("chat.input.mic.title.transcribing")
+                                        }
+                                        title={
+                                            voiceState === VoiceState.Idle ? t("chat.input.mic.title.idle") :
+                                                voiceState === VoiceState.Listening ? t("chat.input.mic.title.listening") :
+                                                    voiceState === VoiceState.Speaking ? t("chat.input.mic.title.speaking") :
+                                                        t("chat.input.mic.title.transcribing")
+                                        }
+                                    >
+                                        {voiceState === VoiceState.Processing ? (
+                                            <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                                        ) : voiceState === VoiceState.Speaking ? (
+                                            <motion.div
+                                                animate={{ scale: [1, 1.15, 1] }}
+                                                transition={{ duration: 0.6, repeat: Infinity }}
+                                            >
+                                                <Mic size={16} strokeWidth={1.5} />
+                                            </motion.div>
+                                        ) : voiceState !== VoiceState.Idle ? (
+                                            <MicOff size={16} strokeWidth={1.5} />
+                                        ) : (
+                                            <Mic size={16} strokeWidth={1.5} />
+                                        )}
+                                    </motion.button>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Send / Stop button */}
                         <motion.button
-                            type="button"
                             whileHover={{ scale: 1.1 }}
                             whileTap={{ scale: 0.9 }}
-                            onClick={() => fileInputRef.current?.click()}
-                            disabled={isBusy || isUploading}
+                            type="submit"
+                            onClick={isStreaming ? (e) => {
+                                e.preventDefault();
+                                handleStopGeneration();
+                            } : undefined}
+                            disabled={isStreaming ? isStopping : (isBusy || (!input.trim() && !hasSendableImages))}
                             className={clsx(
-                                "p-2.5 rounded-lg transition-colors",
-                                "text-[var(--color-text-muted)] hover:text-[var(--color-accent)]",
-                                (isBusy || isUploading) && "opacity-50 cursor-not-allowed"
+                                "p-2 rounded-xl transition-colors",
+                                isStreaming
+                                    ? "bg-red-500 text-white hover:bg-red-400"
+                                    : "bg-[var(--color-accent)] text-black hover:bg-white",
+                                (isStreaming ? isStopping : (isBusy || (!input.trim() && !hasSendableImages))) && "opacity-50 cursor-not-allowed"
                             )}
-                            aria-label={t("chat.input.attach_image")}
-                            title={t("chat.input.attach_image")}
+                            aria-label={isStreaming ? t("chat.actions.stop") : "Send message"}
+                            title={isStreaming ? (isStopping ? t("chat.actions.stopping") : t("chat.actions.stop")) : undefined}
                         >
-                            {isUploading ? (
-                                <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                            {isStreaming ? (
+                                <X size={15} strokeWidth={1.8} />
                             ) : (
-                                <ImagePlus size={16} strokeWidth={1.5} />
+                                <Send size={15} strokeWidth={1.5} />
                             )}
                         </motion.button>
-                    )}
-
-                    {/* Camera frame indicator — visible when vision + camera both enabled */}
-                    {visionEnabled && cameraEnabled && (
-                        <div
-                            className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[10px] text-[var(--color-accent)] opacity-70 select-none"
-                            title={t("chat.input.camera_frame_attached")}
-                        >
-                            <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                            CAM
-                        </div>
-                    )}
-
-                    {/* Microphone button�?Advanced VAD Mode */}
-                    {sttEnabled && (
-                        <div className="relative flex items-center justify-center">
-                            {/* Volume ring �?visible when listening/speaking */}
-                            {voiceState !== VoiceState.Idle && voiceState !== VoiceState.Processing && (
-                                <motion.div
-                                    className="absolute inset-0 rounded-lg border-2 border-[var(--color-accent)]"
-                                    animate={{
-                                        opacity: voiceState === VoiceState.Speaking ? [0.3, 0.8, 0.3] : 0.2,
-                                        scale: voiceState === VoiceState.Speaking
-                                            ? [1, 1 + Math.min(micVolume / 100, 0.5), 1]
-                                            : 1,
-                                    }}
-                                    transition={{ duration: 0.3, repeat: voiceState === VoiceState.Speaking ? Infinity : 0 }}
-                                    style={{ pointerEvents: "none" }}
-                                />
-                            )}
-                            <motion.button
-                                type="button"
-                                whileHover={{ scale: 1.1 }}
-                                whileTap={{ scale: 0.9 }}
-                                onClick={handleMicToggle}
-                                disabled={isBusy}
-                                className={clsx(
-                                    "relative p-2.5 rounded-lg transition-all z-10",
-                                    voiceState === VoiceState.Idle
-                                        ? "text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
-                                        : voiceState === VoiceState.Listening
-                                            ? "text-[var(--color-accent)] bg-[var(--color-accent)]/15 border border-[var(--color-accent)]/30"
-                                            : voiceState === VoiceState.Speaking
-                                            ? "text-red-400 bg-red-500/20 border border-red-500/40 shadow-[0_0_12px_rgba(239,68,68,0.3)]"
-                                            : "text-amber-400 bg-amber-500/15 border border-amber-500/30",
-                                    isBusy && voiceState === VoiceState.Idle && "opacity-50 cursor-not-allowed"
-                                )}
-                                aria-label={
-                                    voiceState === VoiceState.Idle ? t("chat.input.mic.title.idle") :
-                                        voiceState === VoiceState.Listening ? t("chat.input.mic.title.listening") :
-                                            voiceState === VoiceState.Speaking ? t("chat.input.mic.title.speaking") :
-                                                t("chat.input.mic.title.transcribing")
-                                }
-                                title={
-                                    voiceState === VoiceState.Idle ? t("chat.input.mic.title.idle") :
-                                        voiceState === VoiceState.Listening ? t("chat.input.mic.title.listening") :
-                                            voiceState === VoiceState.Speaking ? t("chat.input.mic.title.speaking") :
-                                                t("chat.input.mic.title.transcribing")
-                                }
-                            >
-                                {voiceState === VoiceState.Processing ? (
-                                    <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                                ) : voiceState === VoiceState.Speaking ? (
-                                    <motion.div
-                                        animate={{ scale: [1, 1.15, 1] }}
-                                        transition={{ duration: 0.6, repeat: Infinity }}
-                                    >
-                                        <Mic size={16} strokeWidth={1.5} />
-                                    </motion.div>
-                                ) : voiceState !== VoiceState.Idle ? (
-                                    <MicOff size={16} strokeWidth={1.5} />
-                                ) : (
-                                    <Mic size={16} strokeWidth={1.5} />
-                                )}
-                            </motion.button>
-                        </div>
-                    )}
-
-                    <div className="relative flex-1">
-                        <input
-                            ref={compactInputRef}
-                            type="text"
-                            value={input}
-                            onChange={(e) => setInput(e.target.value)}
-                            onPaste={handlePaste}
-                            data-onboarding-id="chat-input"
-                            placeholder={t("chat.input.placeholder")}
-                            disabled={isBusy}
-                            className={clsx(
-                                "w-full bg-black/40 border border-[var(--color-border)]",
-                                "text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)]",
-                                "text-sm rounded-lg pl-4 pr-8 py-2.5 font-body",
-                                "focus:outline-none focus:border-[var(--color-accent)] focus:shadow-[var(--glow-accent)]",
-                                "transition-all",
-                                isBusy && "opacity-50 cursor-not-allowed"
-                            )}
-                        />
-                        <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() => {
-                                setExpandedInput(true);
-                                setTimeout(() => {
-                                    const ta = expandedTextareaRef.current;
-                                    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
-                                }, 50);
-                            }}
-                            className={clsx(
-                                "absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors",
-                                isBusy && "opacity-50 cursor-not-allowed"
-                            )}
-                            aria-label={t("chat.input.expand")}
-                            title={t("chat.input.expand")}
-                        >
-                            <Maximize2 size={13} strokeWidth={1.5} />
-                        </button>
                     </div>
-                    <motion.button
-                        whileHover={{ scale: 1.1 }}
-                        whileTap={{ scale: 0.9 }}
-                        type="submit"
-                        onClick={isStreaming ? (e) => {
-                            e.preventDefault();
-                            handleStopGeneration();
-                        } : undefined}
-                        disabled={isStreaming ? isStopping : (isBusy || (!input.trim() && !hasSendableImages))}
-                        className={clsx(
-                            "p-2.5 rounded-lg transition-colors",
-                            isStreaming
-                                ? "bg-red-500 text-white hover:bg-red-400"
-                                : "bg-[var(--color-accent)] text-black hover:bg-white",
-                            (isStreaming ? isStopping : (isBusy || (!input.trim() && !hasSendableImages))) && "opacity-50 cursor-not-allowed"
-                        )}
-                        aria-label={isStreaming ? t("chat.actions.stop") : "Send message"}
-                        title={isStreaming ? (isStopping ? t("chat.actions.stopping") : t("chat.actions.stop")) : undefined}
-                    >
-                        {isStreaming ? (
-                            <X size={16} strokeWidth={1.8} />
-                        ) : (
-                            <Send size={16} strokeWidth={1.5} />
-                        )}
-                    </motion.button>
                 </div>
             </form>
-
-            {/* Expanded input overlay */}
-            <AnimatePresence>
-                {expandedInput && (
-                    <motion.div
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: 10 }}
-                        className="absolute inset-x-0 bottom-0 z-20 p-3 bg-[var(--color-bg-surface)] border-t border-[var(--color-border)] backdrop-blur-[var(--glass-blur)]"
-                    >
-                        <textarea
-                            ref={expandedTextareaRef}
-                            value={input}
-                            onChange={(e) => setInput(e.target.value)}
-                            onPaste={handlePaste}
-                            onKeyDown={(e) => {
-                                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                                    e.preventDefault();
-                                    setExpandedInput(false);
-                                    handleSend();
-                                }
-                                if (e.key === "Escape") setExpandedInput(false);
-                            }}
-                            placeholder={t("chat.input.placeholder")}
-                            disabled={isBusy}
-                            rows={6}
-                            className={clsx(
-                                "w-full bg-black/40 border border-[var(--color-border)] rounded-lg",
-                                "text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)]",
-                                "text-sm px-4 py-3 font-body resize-none",
-                                "focus:outline-none focus:border-[var(--color-accent)] focus:shadow-[var(--glow-accent)]",
-                                "transition-all",
-                                isBusy && "opacity-50 cursor-not-allowed"
-                            )}
-                        />
-                        <div className="flex items-center justify-between mt-2">
-                            <span className="text-xs text-[var(--color-text-muted)]">Ctrl+Enter 发送 · Esc 收起</span>
-                            <div className="flex gap-2">
-                                <motion.button
-                                    type="button"
-                                    whileHover={{ scale: 1.05 }}
-                                    whileTap={{ scale: 0.95 }}
-                                    onClick={() => setExpandedInput(false)}
-                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)] transition-colors"
-                                >
-                                    <Minimize2 size={12} strokeWidth={1.5} />
-                                    收起
-                                </motion.button>
-                                <motion.button
-                                    type="button"
-                                    whileHover={{ scale: 1.05 }}
-                                    whileTap={{ scale: 0.95 }}
-                                    onClick={() => {
-                                        if (isStreaming) {
-                                            handleStopGeneration();
-                                            return;
-                                        }
-                                        setExpandedInput(false);
-                                        handleSend();
-                                    }}
-                                    disabled={isStreaming ? isStopping : (isBusy || !input.trim())}
-                                    className={clsx(
-                                        "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
-                                        isStreaming
-                                            ? "bg-red-500 text-white hover:bg-red-400"
-                                            : "bg-[var(--color-accent)] text-black hover:bg-white",
-                                        (isStreaming ? isStopping : (isBusy || !input.trim())) && "opacity-50 cursor-not-allowed"
-                                    )}
-                                >
-                                    {isStreaming ? (
-                                        <>
-                                            <X size={12} strokeWidth={1.8} />
-                                            {isStopping ? t("chat.actions.stopping") : t("chat.actions.stop")}
-                                        </>
-                                    ) : (
-                                        <>
-                                            <Send size={12} strokeWidth={1.5} />
-                                            发送
-                                        </>
-                                    )}
-                                </motion.button>
-                            </div>
-                        </div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
         </motion.div >
     );
 }

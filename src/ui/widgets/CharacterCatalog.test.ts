@@ -307,6 +307,76 @@ describe("main character catalog actions", () => {
     root.unmount();
   });
 
+  it("closes the catalog dropdown when clicking outside", async () => {
+    const { container, root } = renderOpenCatalog({
+      id: "char-outside",
+      name: "Outside Test Character",
+      persona: "A companion",
+      description: "A companion",
+      user_nickname: "User",
+      source_format: "manual",
+      created_at: 1,
+      updated_at: 1,
+      avatar_path: null,
+    });
+
+    expect(container.querySelector('[role="listbox"]')).not.toBeNull();
+
+    await act(async () => {
+      document.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+
+    expect(container.querySelector('[role="listbox"]')).toBeNull();
+    root.unmount();
+  });
+
+  it("does not close the catalog dropdown when clicking inside the dropdown container", async () => {
+    const { container, root } = renderOpenCatalog({
+      id: "char-inside",
+      name: "Inside Test Character",
+      persona: "A companion",
+      description: "A companion",
+      user_nickname: "User",
+      source_format: "manual",
+      created_at: 1,
+      updated_at: 1,
+      avatar_path: null,
+    });
+
+    const listbox = container.querySelector('[role="listbox"]');
+    expect(listbox).not.toBeNull();
+
+    await act(async () => {
+      listbox?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+
+    expect(container.querySelector('[role="listbox"]')).not.toBeNull();
+    root.unmount();
+  });
+
+  it("does not close the catalog dropdown on Escape key", async () => {
+    const { container, root } = renderOpenCatalog({
+      id: "char-esc",
+      name: "Escape Test Character",
+      persona: "A companion",
+      description: "A companion",
+      user_nickname: "User",
+      source_format: "manual",
+      created_at: 1,
+      updated_at: 1,
+      avatar_path: null,
+    });
+
+    expect(container.querySelector('[role="listbox"]')).not.toBeNull();
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+
+    expect(container.querySelector('[role="listbox"]')).not.toBeNull();
+    root.unmount();
+  });
+
   it("renders a non-null avatar through the supplied resolver", () => {
     const character: CharacterRecord = {
       id: "custom",
