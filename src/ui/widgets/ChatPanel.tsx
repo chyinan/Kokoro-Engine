@@ -434,10 +434,16 @@ export default function ChatPanel({
         const handleRuntimeChanged = (event: Event): void => {
             const detail = (event as CustomEvent<CommittedCharacterRuntime>).detail;
             const eventCharacterId = detail?.runtime?.character_id;
-            if (!shouldSynchronizeOnRuntimeChanged(activeCharacterIdRef.current, eventCharacterId)) {
+            const targetConversationId = detail?.target_conversation_id ?? null;
+            if (!shouldSynchronizeOnRuntimeChanged(
+                activeCharacterIdRef.current,
+                eventCharacterId,
+                activeConversationIdRef.current,
+                targetConversationId,
+            )) {
                 return;
             }
-            synchronize(eventCharacterId, detail.target_conversation_id);
+            synchronize(eventCharacterId, targetConversationId);
         };
         window.addEventListener("kokoro-character-runtime-changed", handleRuntimeChanged);
         return () => {

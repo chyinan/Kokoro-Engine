@@ -55,8 +55,15 @@ export function shouldIgnoreLegacyChatError(_activeTurnId: string | null): boole
 export function shouldSynchronizeOnRuntimeChanged(
   activeCharacterId: string,
   eventCharacterId: string | null | undefined,
+  currentConversationId?: string | null,
+  targetConversationId?: string | null,
 ): boolean {
   if (!eventCharacterId) return false;
-  return eventCharacterId !== activeCharacterId;
+  if (eventCharacterId !== activeCharacterId) return true;
+  if (targetConversationId !== undefined && currentConversationId !== undefined) {
+    return (targetConversationId ?? null) !== (currentConversationId ?? null);
+  }
+  return false;
 }
+
 

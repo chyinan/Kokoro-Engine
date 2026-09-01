@@ -42,6 +42,7 @@ import {
     setJailbreakPrompt,
     getAutoBackupConfig,
     saveAutoBackupConfig,
+    getKokoroErrorMessage,
 } from "../../lib/kokoro-bridge";
 import {
     isAutoBackupConfigDirty,
@@ -353,6 +354,10 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
     // Jailbreak Prompt
     const [localJailbreakPrompt, setLocalJailbreakPrompt] = useState("");
+    const [isJailbreakLoading, setIsJailbreakLoading] = useState(true);
+
+    // Save error feedback
+    const [saveError, setSaveError] = useState<string | null>(null);
 
     // Render FPS
     const [localRenderFps, setLocalRenderFps] = useState(renderFps);
@@ -441,12 +446,17 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             baselineLlmConfigRef.current = llmConfigProp ?? null;
             baselineVisionConfigRef.current = visionConfigProp ?? null;
 
+            setIsJailbreakLoading(true);
+            setSaveError(null);
             getJailbreakPrompt()
                 .then((loaded) => {
                     setLocalJailbreakPrompt(loaded);
                     baselineJailbreakPromptRef.current = loaded;
                 })
-                .catch((e) => console.error("[SettingsPanel] Failed to fetch jailbreak prompt:", e));
+                .catch((e) => console.error("[SettingsPanel] Failed to fetch jailbreak prompt:", e))
+                .finally(() => {
+                    setIsJailbreakLoading(false);
+                });
 
             getAutoBackupConfig()
                 .then((cfg) => {
@@ -679,9 +689,11 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     };
 
     const handleSave = async () => {
+        setSaveError(null);
         // 1. Commit Persona Draft
         const personaSaveResult = await characterManagerRef.current?.saveDraft();
-        const personaDirty = personaSaveResult?.hasChanges ?? false;
+        const isCurrentActiveCharacter = personaSaveResult?.changedCharacter?.id === activeCharacterId;
+        const personaDirty = Boolean(personaSaveResult?.characterDirty && isCurrentActiveCharacter);
 
         // 2. Commit Vision Settings & Config
         const visionEnabledDirty = visionEnabled !== baselineVisionEnabledRef.current;
@@ -694,7 +706,10 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         if (visionConfigDirty && localVisionConfig) {
             try {
                 await saveVisionConfig(localVisionConfig);
+                localStorage.setItem("kokoro_vision_config", JSON.stringify(localVisionConfig));
                 baselineVisionConfigRef.current = { ...localVisionConfig };
+                onVisionConfigChange?.(localVisionConfig);
+                window.dispatchEvent(new Event("kokoro-vision-settings-changed"));
                 dispatchRuntimeSettingsChanged("vision");
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Vision config:", e);
@@ -803,19 +818,9 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 console.error("[SettingsPanel] Failed to save TTS config:", e);
             }
         }
-        if (ttsParamsDirty) {
-            baselineTtsParamsRef.current = currentTtsParams;
-        }
-
         // 8. Track Live2D Model & Response Language changes
         const modelDirty = localCustomModelPath !== baselineCustomModelPathRef.current;
-        if (modelDirty) {
-            baselineCustomModelPathRef.current = localCustomModelPath;
-        }
         const responseLangDirty = responseLang !== baselineResponseLangRef.current;
-        if (responseLangDirty) {
-            baselineResponseLangRef.current = responseLang;
-        }
 
         // 9. CONDITIONAL RUNTIME RELOAD:
         // Only trigger onCharacterRuntimeChange if one of the runtime-sensitive fields changed!
@@ -834,7 +839,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 await onCharacterRuntimeChange({
                     ...(responseLangDirty ? { responseLanguage: responseLang } : {}),
                     ...(modelDirty ? { live2dModel: localCustomModelPath } : {}),
-                    ...(personaSaveResult?.changedCharacter ? { persona: personaSaveResult.changedCharacter.persona } : {}),
+                    ...(personaDirty && personaSaveResult?.changedCharacter ? { persona: personaSaveResult.changedCharacter.persona } : {}),
                     ...(ttsParamsDirty ? {
                         tts: {
                             enabled: ttsEnabled,
@@ -846,8 +851,29 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                         },
                     } : {}),
                 });
+                if (responseLangDirty) {
+                    baselineResponseLangRef.current = responseLang;
+                }
+                if (modelDirty) {
+                    baselineCustomModelPathRef.current = localCustomModelPath;
+                }
+                if (ttsParamsDirty) {
+                    baselineTtsParamsRef.current = currentTtsParams;
+                }
             } catch (e) {
                 console.error("[SettingsPanel] Failed to apply character runtime:", e);
+                setSaveError(getKokoroErrorMessage(e));
+                return;
+            }
+        } else {
+            if (responseLangDirty) {
+                baselineResponseLangRef.current = responseLang;
+            }
+            if (modelDirty) {
+                baselineCustomModelPathRef.current = localCustomModelPath;
+            }
+            if (ttsParamsDirty) {
+                baselineTtsParamsRef.current = currentTtsParams;
             }
         }
 
@@ -919,6 +945,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     };
 
     const handleCancel = () => {
+        setSaveError(null);
         characterManagerRef.current?.resetDraft();
         setLocalDisplayMode(baselineDisplayModeRef.current);
         setLocalCustomModelPath(baselineCustomModelPathRef.current);
@@ -942,6 +969,9 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         latestLlmConfigRef.current = baselineLlmConfigRef.current;
         setVisionEnabled(baselineVisionEnabledRef.current);
         setLocalVisionConfig(baselineVisionConfigRef.current);
+        if (baselineVisionConfigRef.current) {
+            onVisionConfigChange?.(baselineVisionConfigRef.current);
+        }
         setLocalJailbreakPrompt(baselineJailbreakPromptRef.current);
         setLocalAutoBackupConfig(baselineAutoBackupConfigRef.current);
         onClose();
@@ -1169,7 +1199,6 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                         initialConfig={localVisionConfig}
                                         onConfigChange={(cfg) => {
                                             setLocalVisionConfig(cfg);
-                                            onVisionConfigChange?.(cfg);
                                         }}
                                     />
                                 </div>
@@ -1197,6 +1226,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                 <div className={activeTab === "jailbreak" ? "block" : "hidden"}>
                                     <JailbreakTab
                                         value={localJailbreakPrompt}
+                                        loading={isJailbreakLoading}
                                         onChange={setLocalJailbreakPrompt}
                                         onSaveSuccess={(prompt) => {
                                             baselineJailbreakPromptRef.current = prompt;
@@ -1245,6 +1275,11 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                             </div>
 
                             <div className="flex items-center gap-3">
+                                {saveError && (
+                                    <span className="text-xs text-red-400 font-medium mr-2 max-w-xs truncate" title={saveError}>
+                                        {saveError}
+                                    </span>
+                                )}
                                 <motion.button
                                     whileHover={{ scale: 1.02 }}
                                     whileTap={{ scale: 0.98 }}
