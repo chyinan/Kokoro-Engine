@@ -300,7 +300,7 @@ fn official_restore_stages_only_the_verified_exact_package() {
         let mut writer = zip::ZipWriter::new(&mut cursor);
         let options = zip::write::SimpleFileOptions::default();
         writer.start_file("character.json", options).unwrap();
-        writer.write_all(br#"{"schema_version":1,"engine_version":">=0.3.1, <0.4.0","id":"kokoro","version":"1.0.0","name":"Kokoro","description":"desc","author":"team","license":"MIT","persona":"persona","greeting":"hello"}"#).unwrap();
+        writer.write_all(br#"{"schema_version":1,"engine_version":">=0.3.1, <0.5.0","id":"kokoro","version":"1.0.0","name":"Kokoro","description":"desc","author":"team","license":"MIT","persona":"persona","greeting":"hello"}"#).unwrap();
         writer.start_file("LICENSE.md", options).unwrap();
         writer.write_all(b"MIT").unwrap();
         writer.finish().unwrap();
@@ -314,7 +314,7 @@ fn official_restore_stages_only_the_verified_exact_package() {
         author: "team".to_string(),
         description: "desc".to_string(),
         preview: Vec::new(),
-        engine_version: ">=0.3.1, <0.4.0".to_string(),
+        engine_version: ">=0.3.1, <0.5.0".to_string(),
         download_url: "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/packages/kokoro-1.0.0.zip".to_string(),
         archive_size: bytes.len() as u64,
         sha256: sha256_hex(&bytes),

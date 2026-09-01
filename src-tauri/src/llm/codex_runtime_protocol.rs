@@ -210,14 +210,15 @@ pub(crate) fn prepare_inference_inputs(
         .iter()
         .rposition(|message| message_role(&message.message).as_deref() == Some("tool"))
         .filter(|index| *index == messages.len().saturating_sub(1));
-    let history_end = tool_continuation_index.unwrap_or(latest_user_index);
-    let history = build_responses_request(
-        "",
-        messages[..history_end].to_vec(),
-        None,
-        Vec::new(),
-        false,
-    )?;
+    let history_messages = if let Some(tool_index) = tool_continuation_index {
+        // Keep the assistant function_call in history. The matching tool result
+        // is sent through app-server's toolOutput field below, so only that
+        // output item must be removed from the injected Responses history.
+        messages[..=tool_index].to_vec()
+    } else {
+        messages[..latest_user_index].to_vec()
+    };
+    let history = build_responses_request("", history_messages, None, Vec::new(), false)?;
     let (turn_input, tool_output) = if let Some(tool_index) = tool_continuation_index {
         (
             Vec::new(),
@@ -238,11 +239,24 @@ pub(crate) fn prepare_inference_inputs(
         (responses_items_to_user_input(latest)?, None)
     };
 
-    let history = history
+    let mut history = history
         .get("input")
         .and_then(Value::as_array)
         .cloned()
         .ok_or_else(|| "Codex runtime history was not an input array".to_string())?;
+    if let Some(tool_index) = tool_continuation_index {
+        let tool_message = serde_json::to_value(&messages[tool_index].message)
+            .map_err(|error| format!("failed to serialize Codex runtime tool output: {error}"))?;
+        let call_id = tool_message
+            .get("tool_call_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "Codex runtime tool message is missing tool_call_id".to_string())?;
+        history.retain(|item| {
+            !(item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                && item.get("call_id").and_then(Value::as_str) == Some(call_id))
+        });
+    }
     let history = history
         .into_iter()
         .map(|item| normalize_history_item(item, tools))
