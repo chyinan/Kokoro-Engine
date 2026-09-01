@@ -1,4 +1,5 @@
 import type {
+  AutoBackupConfig,
   BotConfig,
   CharacterRecord,
   ImageGenSystemConfig,
@@ -152,6 +153,28 @@ export function isLlmConfigDirty(
 export function isBackgroundConfigDirty(
   baseline: Readonly<BackgroundConfig> | null | undefined,
   current: Readonly<BackgroundConfig> | null | undefined,
+): boolean {
+  if (!current && !baseline) return false;
+  if (!current || !baseline) return true;
+  return JSON.stringify(baseline) !== JSON.stringify(current);
+}
+
+/**
+ * Checks if Jailbreak prompt has changed.
+ */
+export function isJailbreakPromptDirty(
+  baseline: string | null | undefined,
+  current: string | null | undefined,
+): boolean {
+  return (baseline ?? "") !== (current ?? "");
+}
+
+/**
+ * Checks if AutoBackup configuration has changed.
+ */
+export function isAutoBackupConfigDirty(
+  baseline: Readonly<AutoBackupConfig> | null | undefined,
+  current: Readonly<AutoBackupConfig> | null | undefined,
 ): boolean {
   if (!current && !baseline) return false;
   if (!current || !baseline) return true;

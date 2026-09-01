@@ -25,11 +25,30 @@ import { BackupTab } from "./settings/BackupTab";
 import PetTab from "./settings/PetTab";
 import AboutTab from "./settings/AboutTab";
 import { useTranslation } from "react-i18next";
-import { setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, getBotConfig, saveBotConfig, saveLlmConfig, saveVisionConfig } from "../../lib/kokoro-bridge";
 import {
+    setUserLanguage,
+    listTtsProviders,
+    listTtsVoices,
+    getTtsConfig,
+    saveTtsConfig,
+    saveImageGenConfig,
+    getSttConfig,
+    saveSttConfig,
+    getBotConfig,
+    saveBotConfig,
+    saveLlmConfig,
+    saveVisionConfig,
+    getJailbreakPrompt,
+    setJailbreakPrompt,
+    getAutoBackupConfig,
+    saveAutoBackupConfig,
+} from "../../lib/kokoro-bridge";
+import {
+    isAutoBackupConfigDirty,
     isBackgroundConfigDirty,
     isBotConfigDirty,
     isImageGenConfigDirty,
+    isJailbreakPromptDirty,
     isLlmConfigDirty,
     isRuntimeDirty,
     isSttConfigDirty,
@@ -332,10 +351,20 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     // Vision Config
     const [localVisionConfig, setLocalVisionConfig] = useState<VisionConfig | null>(visionConfigProp ?? null);
 
+    // Jailbreak Prompt
+    const [localJailbreakPrompt, setLocalJailbreakPrompt] = useState("");
+
+    // Render FPS
+    const [localRenderFps, setLocalRenderFps] = useState(renderFps);
+
+    // Auto Backup Config
+    const [localAutoBackupConfig, setLocalAutoBackupConfig] = useState<AutoBackupConfig | null>(null);
+
     // Baseline snapshots (recorded when opening Settings to support dirty checking and cancel reset)
     const baselineDisplayModeRef = useRef(displayMode);
     const baselineCustomModelPathRef = useRef(customModelPath);
     const baselineGazeTrackingRef = useRef(gazeTrackingProp ?? true);
+    const baselineRenderFpsRef = useRef(renderFps);
     const baselineBgConfigRef = useRef(localBgConfig);
     const baselineTtsParamsRef = useRef<TtsParamSnapshot>({
         enabled: false,
@@ -354,6 +383,8 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     const baselineVisionEnabledRef = useRef(false);
     const baselineUserLangRef = useRef("");
     const baselineResponseLangRef = useRef("");
+    const baselineJailbreakPromptRef = useRef("");
+    const baselineAutoBackupConfigRef = useRef<AutoBackupConfig | null>(null);
 
     // Sync local state only when the panel opens; while editing, keep local form state authoritative.
     useEffect(() => {
@@ -362,6 +393,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             setLocalCustomModelPath(customModelPath);
             latestLlmConfigRef.current = llmConfigProp ?? null;
             setLocalGazeTracking(gazeTrackingProp ?? true);
+            setLocalRenderFps(renderFps);
             bgConfigDirtyRef.current = false;
             const currentBg = { ...normalizeBackgroundConfigForImageCount(bg.config, bg.imageCount) };
             setLocalBgConfig(currentBg);
@@ -392,6 +424,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             baselineDisplayModeRef.current = displayMode;
             baselineCustomModelPathRef.current = customModelPath;
             baselineGazeTrackingRef.current = gazeTrackingProp ?? true;
+            baselineRenderFpsRef.current = renderFps;
             baselineBgConfigRef.current = currentBg;
             baselineTtsParamsRef.current = {
                 enabled,
@@ -407,6 +440,20 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             baselineImageGenConfigRef.current = imageGenConfigProp ?? null;
             baselineLlmConfigRef.current = llmConfigProp ?? null;
             baselineVisionConfigRef.current = visionConfigProp ?? null;
+
+            getJailbreakPrompt()
+                .then((loaded) => {
+                    setLocalJailbreakPrompt(loaded);
+                    baselineJailbreakPromptRef.current = loaded;
+                })
+                .catch((e) => console.error("[SettingsPanel] Failed to fetch jailbreak prompt:", e));
+
+            getAutoBackupConfig()
+                .then((cfg) => {
+                    setLocalAutoBackupConfig(cfg);
+                    baselineAutoBackupConfigRef.current = cfg;
+                })
+                .catch((e) => console.error("[SettingsPanel] Failed to fetch auto backup config:", e));
 
             fetchData();
             fetchBotConfig();
@@ -839,6 +886,35 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             }
         }
 
+        // 13. Commit Jailbreak Prompt
+        const jailbreakDirty = isJailbreakPromptDirty(baselineJailbreakPromptRef.current, localJailbreakPrompt);
+        if (jailbreakDirty) {
+            try {
+                await setJailbreakPrompt(localJailbreakPrompt);
+                baselineJailbreakPromptRef.current = localJailbreakPrompt;
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to save Jailbreak prompt:", e);
+            }
+        }
+
+        // 14. Commit Render FPS
+        const renderFpsDirty = localRenderFps !== baselineRenderFpsRef.current;
+        if (renderFpsDirty) {
+            onRenderFpsChange(localRenderFps);
+            baselineRenderFpsRef.current = localRenderFps;
+        }
+
+        // 15. Commit Auto Backup Config
+        const autoBackupDirty = isAutoBackupConfigDirty(baselineAutoBackupConfigRef.current, localAutoBackupConfig);
+        if (autoBackupDirty && localAutoBackupConfig) {
+            try {
+                await saveAutoBackupConfig(localAutoBackupConfig);
+                baselineAutoBackupConfigRef.current = { ...localAutoBackupConfig };
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to save Auto Backup config:", e);
+            }
+        }
+
         showSaveFeedback();
     };
 
@@ -847,6 +923,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         setLocalDisplayMode(baselineDisplayModeRef.current);
         setLocalCustomModelPath(baselineCustomModelPathRef.current);
         setLocalGazeTracking(baselineGazeTrackingRef.current);
+        setLocalRenderFps(baselineRenderFpsRef.current);
         setLocalBgConfig(baselineBgConfigRef.current);
         bg.setConfig(baselineBgConfigRef.current);
         bgConfigDirtyRef.current = false;
@@ -865,6 +942,8 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         latestLlmConfigRef.current = baselineLlmConfigRef.current;
         setVisionEnabled(baselineVisionEnabledRef.current);
         setLocalVisionConfig(baselineVisionConfigRef.current);
+        setLocalJailbreakPrompt(baselineJailbreakPromptRef.current);
+        setLocalAutoBackupConfig(baselineAutoBackupConfigRef.current);
         onClose();
     };
 
@@ -1046,8 +1125,8 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                         onCustomModelPathChange={setLocalCustomModelPath}
                                         gazeTracking={localGazeTracking}
                                         onGazeTrackingChange={setLocalGazeTracking}
-                                        renderFps={renderFps}
-                                        onRenderFpsChange={onRenderFpsChange}
+                                        renderFps={localRenderFps}
+                                        onRenderFpsChange={setLocalRenderFps}
                                     />
                                 </div>
                             )}
@@ -1116,12 +1195,24 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                             )}
                             {mountedTabs.has("jailbreak") && (
                                 <div className={activeTab === "jailbreak" ? "block" : "hidden"}>
-                                    <JailbreakTab />
+                                    <JailbreakTab
+                                        value={localJailbreakPrompt}
+                                        onChange={setLocalJailbreakPrompt}
+                                        onSaveSuccess={(prompt) => {
+                                            baselineJailbreakPromptRef.current = prompt;
+                                        }}
+                                    />
                                 </div>
                             )}
                             {mountedTabs.has("backup") && (
                                 <div className={activeTab === "backup" ? "block" : "hidden"}>
-                                    <BackupTab />
+                                    <BackupTab
+                                        autoBackupConfig={localAutoBackupConfig}
+                                        onAutoBackupConfigChange={setLocalAutoBackupConfig}
+                                        onAutoBackupSaved={(cfg) => {
+                                            baselineAutoBackupConfigRef.current = cfg;
+                                        }}
+                                    />
                                 </div>
                             )}
                             {mountedTabs.has("pet") && (

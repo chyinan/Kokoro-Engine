@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  isAutoBackupConfigDirty,
   isBackgroundConfigDirty,
   isBotConfigDirty,
   isCharacterEditDirty,
   isImageGenConfigDirty,
+  isJailbreakPromptDirty,
   isLlmConfigDirty,
   isRuntimeDirty,
   isSttConfigDirty,
@@ -15,6 +17,7 @@ import {
   type UserProfile,
 } from "./settings-dirty-check";
 import type {
+  AutoBackupConfig,
   BotConfig,
   CharacterRecord,
   ImageGenSystemConfig,
@@ -333,6 +336,46 @@ describe("Settings Dirty Checking", () => {
           responseLangDirty: true,
         }),
       ).toBe(true);
+    });
+  });
+
+  describe("isJailbreakPromptDirty", () => {
+    it("returns false when both prompts match", () => {
+      expect(isJailbreakPromptDirty("You are an assistant", "You are an assistant")).toBe(false);
+      expect(isJailbreakPromptDirty("", "")).toBe(false);
+      expect(isJailbreakPromptDirty(null, "")).toBe(false);
+      expect(isJailbreakPromptDirty(undefined, "")).toBe(false);
+    });
+
+    it("returns true when prompt has changed", () => {
+      expect(isJailbreakPromptDirty("prompt a", "prompt b")).toBe(true);
+      expect(isJailbreakPromptDirty("", "new jailbreak")).toBe(true);
+      expect(isJailbreakPromptDirty("old jailbreak", "")).toBe(true);
+    });
+  });
+
+  describe("isAutoBackupConfigDirty", () => {
+    const base: AutoBackupConfig = {
+      enabled: true,
+      backup_dir: "/path/to/backups",
+      interval_days: 7,
+      auto_cleanup: true,
+      keep_days: 14,
+    };
+
+    it("returns false when config is unchanged", () => {
+      expect(isAutoBackupConfigDirty(base, { ...base })).toBe(false);
+      expect(isAutoBackupConfigDirty(null, null)).toBe(false);
+    });
+
+    it("returns true when any field changed", () => {
+      expect(isAutoBackupConfigDirty(base, { ...base, enabled: false })).toBe(true);
+      expect(isAutoBackupConfigDirty(base, { ...base, backup_dir: "/other" })).toBe(true);
+      expect(isAutoBackupConfigDirty(base, { ...base, interval_days: 3 })).toBe(true);
+      expect(isAutoBackupConfigDirty(base, { ...base, auto_cleanup: false })).toBe(true);
+      expect(isAutoBackupConfigDirty(base, { ...base, keep_days: 30 })).toBe(true);
+      expect(isAutoBackupConfigDirty(base, null)).toBe(true);
+      expect(isAutoBackupConfigDirty(null, base)).toBe(true);
     });
   });
 });

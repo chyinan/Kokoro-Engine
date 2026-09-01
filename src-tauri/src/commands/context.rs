@@ -237,14 +237,33 @@ pub async fn set_jailbreak_prompt(
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let path = app_data.join("jailbreak_prompt.json");
-    let _ = std::fs::write(&path, serde_json::json!({ "prompt": prompt }).to_string());
+    crate::config::save_json_config(&path, &serde_json::json!({ "prompt": prompt }), "JAILBREAK")?;
 
     Ok(())
 }
 
 #[tauri::command]
 pub async fn get_jailbreak_prompt(state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
-    Ok(state.get_jailbreak_prompt().await)
+    let memory_prompt = state.get_jailbreak_prompt().await;
+    if !memory_prompt.is_empty() {
+        return Ok(memory_prompt);
+    }
+
+    // Fallback read from disk
+    let app_data = dirs_next::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("com.chyin.kokoro");
+    let path = app_data.join("jailbreak_prompt.json");
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(prompt) = val.get("prompt").and_then(|v| v.as_str()) {
+                state.set_jailbreak_prompt(prompt.to_string()).await;
+                return Ok(prompt.to_string());
+            }
+        }
+    }
+
+    Ok(String::new())
 }
 
 #[tauri::command]

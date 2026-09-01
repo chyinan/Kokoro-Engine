@@ -19,7 +19,17 @@ function formatBytes(bytes: number): string {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function BackupTab() {
+export interface BackupTabProps {
+    autoBackupConfig?: AutoBackupConfig | null;
+    onAutoBackupConfigChange?: (cfg: AutoBackupConfig) => void;
+    onAutoBackupSaved?: (cfg: AutoBackupConfig) => void;
+}
+
+export function BackupTab({
+    autoBackupConfig,
+    onAutoBackupConfigChange,
+    onAutoBackupSaved,
+}: BackupTabProps = {}) {
     const { t } = useTranslation();
 
     // Export state
@@ -41,21 +51,32 @@ export function BackupTab() {
     const [conflictStrategy, setConflictStrategy] = useState<"skip" | "overwrite">("overwrite");
 
     // Auto backup state
-    const [autoBackup, setAutoBackup] = useState<AutoBackupConfig>({
+    const [internalAutoBackup, setInternalAutoBackup] = useState<AutoBackupConfig>({
         enabled: false,
         backup_dir: '',
         interval_days: 1,
         auto_cleanup: false,
         keep_days: 30,
     });
+    const isControlledAutoBackup = autoBackupConfig !== undefined && autoBackupConfig !== null;
+    const autoBackup = isControlledAutoBackup ? autoBackupConfig : internalAutoBackup;
+
+    const setAutoBackup = (update: AutoBackupConfig | ((prev: AutoBackupConfig) => AutoBackupConfig)) => {
+        const next = typeof update === 'function' ? update(autoBackup) : update;
+        setInternalAutoBackup(next);
+        onAutoBackupConfigChange?.(next);
+    };
+
     const [autoBackupSaved, setAutoBackupSaved] = useState(false);
     const [autoBackupError, setAutoBackupError] = useState<string | null>(null);
     const [runningNow, setRunningNow] = useState(false);
     const [runNowResult, setRunNowResult] = useState<string | null>(null);
 
     useEffect(() => {
-        getAutoBackupConfig().then(setAutoBackup).catch(() => {});
-    }, []);
+        if (!isControlledAutoBackup) {
+            getAutoBackupConfig().then(setInternalAutoBackup).catch(() => {});
+        }
+    }, [isControlledAutoBackup]);
 
     const handleSaveAutoBackup = async () => {
         setAutoBackupError(null);
@@ -63,6 +84,7 @@ export function BackupTab() {
         try {
             await saveAutoBackupConfig(autoBackup);
             setAutoBackupSaved(true);
+            onAutoBackupSaved?.(autoBackup);
             setTimeout(() => setAutoBackupSaved(false), 2000);
         } catch (e: any) {
             setAutoBackupError(typeof e === 'string' ? e : (e?.message ?? JSON.stringify(e)));
