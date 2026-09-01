@@ -46,6 +46,8 @@ pub struct CharacterCatalog {
     engine_version: Version,
 }
 
+pub const DOCUMENTATION_TEMPLATE_ID: &str = "my-character";
+
 pub struct StagedPackageRemoval {
     target: PathBuf,
     staging: Option<PathBuf>,
@@ -243,6 +245,12 @@ impl CharacterCatalog {
         for package in fs::read_dir(bundled_root)? {
             let package = package?;
             let package_path = package.path();
+            if package_path
+                .file_name()
+                .is_some_and(|name| name == "template")
+            {
+                continue;
+            }
             let package_metadata = fs::symlink_metadata(&package_path)?;
             if !is_filesystem_redirect(&package_metadata)
                 && package_metadata.is_dir()

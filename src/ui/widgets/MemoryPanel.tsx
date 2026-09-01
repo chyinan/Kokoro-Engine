@@ -39,6 +39,7 @@ import {
     splitStructuredMemoryContent,
     stripStructuredMemoryPrefix,
 } from "./memory/memory-display-content";
+import { getMemoryCharacterOptions } from "./memory/character-memory-selection";
 
 interface MemoryPanelProps {
     characterId: string;
@@ -142,9 +143,7 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
     useEffect(() => {
         listCharacters().then((all) => {
             setCharacters(all);
-            if (!all.find((c) => c.id === characterId) && all.length > 0) {
-                setSelectedCharId(all[0].id);
-            }
+            setSelectedCharId(all.find((character) => character.id === characterId)?.id ?? all[0]?.id ?? "");
         }).catch((e) => console.error("[MemoryPanel] Failed to load characters:", e));
     }, [characterId]);
 
@@ -476,12 +475,11 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                         <Select
                             value={selectedCharId}
                             onChange={setSelectedCharId}
-                            options={characters
-                                .filter(char => char.id === characterId || !characters.some(c => c.name === char.name && c.id === characterId))
-                                .map(char => ({
-                                    value: char.id,
-                                    label: `${char.name}${char.id === characterId ? ` ${t("settings.memory.active_char")}` : ""}`,
-                                }))}
+                            options={getMemoryCharacterOptions(
+                                characters,
+                                characterId,
+                                t("settings.memory.active_char"),
+                            )}
                             className="[&>button]:pl-9"
                         />
                     </div>

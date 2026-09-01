@@ -22,7 +22,12 @@ import OnboardingOverlay, {
 } from "./ui/widgets/OnboardingOverlay";
 import MemoryModelDownloadDialog from "./ui/widgets/MemoryModelDownloadDialog";
 import { QQAuthorizationDialog } from "./ui/widgets/QQAuthorizationDialog";
-import { CharacterCatalog, type CharacterCatalogActionDependencies } from "./ui/widgets/CharacterCatalog";
+import {
+  CharacterCatalog,
+  compareCharacterTemplateVersions,
+  getLatestCharacterTemplates,
+  type CharacterCatalogActionDependencies,
+} from "./ui/widgets/CharacterCatalog";
 import {
   CharacterRecommendationDialog,
   type CharacterCapabilityRecommendations,
@@ -38,6 +43,7 @@ import {
   type AppSettingKey,
   dispatchRuntimeSettingsChanged,
   readBooleanSetting,
+  readJsonSetting,
   readNumberSetting,
   readStringSetting,
   removeSetting,
@@ -521,11 +527,18 @@ function App() {
   // Character list for mod settings
   const [characters, setCharacters] = useState<CharacterRecord[]>([]);
   const [characterTemplates, setCharacterTemplates] = useState<Array<CharacterTemplateManifest>>([]);
+  const [characterCatalogError, setCharacterCatalogError] = useState<string | null>(null);
+  const [characterImportError, setCharacterImportError] = useState<string | null>(null);
+  const [isCharacterCatalogRetrying, setIsCharacterCatalogRetrying] = useState(false);
   const [recommendedCapabilities, setRecommendedCapabilities] = useState<{
     readonly characterName: string;
     readonly recommendations: CharacterCapabilityRecommendations;
   } | null>(null);
   const [characterToEditId, setCharacterToEditId] = useState<string | null>(null);
+  const closeSettings = () => {
+    setSettingsOpen(false);
+    setCharacterToEditId(null);
+  };
 
   // Mod-specific state exposed via props
   const [voiceInterrupt, setVoiceInterrupt] = useState(false);
@@ -744,6 +757,67 @@ function App() {
     activateCharacter: (characterId) => characterActivation.activateCharacter(characterId),
     now: Date.now,
   });
+
+  async function provisionMissingCharacterTemplates(
+    existingCharacters: ReadonlyArray<CharacterRecord>,
+    templates: ReadonlyArray<CharacterTemplateManifest>,
+  ): Promise<Array<CharacterRecord>> {
+    const provisionedIds = new Set(
+      readJsonSetting<Array<string>>(APP_SETTING_KEYS.provisionedCharacterTemplateIds, []),
+    );
+    let allCharacters = Array.from(existingCharacters);
+    let changed = false;
+    for (const template of getLatestCharacterTemplates(templates)) {
+      if (provisionedIds.has(template.id)) continue;
+      if (!allCharacters.some((character) => character.template_id === template.id)) {
+        const instanceId = allCharacters.some((character) => character.id === template.id)
+          ? `${template.id}-${crypto.randomUUID()}`
+          : template.id;
+        const now = Date.now();
+        await instantiateCharacterTemplate({
+          template_id: template.id,
+          template_version: template.version,
+          instance_id: instanceId,
+          user_nickname: readStringSetting(APP_SETTING_KEYS.userName, "") || "User",
+          created_at: now,
+          updated_at: now,
+        });
+        allCharacters = await listCharacters();
+      }
+      provisionedIds.add(template.id);
+      changed = true;
+    }
+    if (changed) {
+      writeJsonSetting(APP_SETTING_KEYS.provisionedCharacterTemplateIds, Array.from(provisionedIds));
+    }
+    return allCharacters;
+  }
+
+  async function loadCharacterCatalog(): Promise<{ all: Array<CharacterRecord>; templates: Array<CharacterTemplateManifest> }> {
+    try {
+      const [loadedCharacters, templates] = await Promise.all([listCharacters(), listCharacterTemplates()]);
+      const all = await provisionMissingCharacterTemplates(loadedCharacters, templates);
+      setCharacters(all);
+      setCharacterTemplates(templates);
+      setCharacterCatalogError(null);
+      return { all, templates };
+    } catch (error) {
+      const message = getKokoroErrorMessage(error);
+      setCharacterCatalogError(message);
+      throw error;
+    }
+  }
+
+  async function retryCharacterCatalog(): Promise<void> {
+    setIsCharacterCatalogRetrying(true);
+    try {
+      await loadCharacterCatalog();
+    } catch (error) {
+      console.error("[App] Failed to reload character catalog:", error);
+    } finally {
+      setIsCharacterCatalogRetrying(false);
+    }
+  }
 
   async function updateActiveCharacterRuntime(
     overrides: Readonly<CharacterRuntimeOverrides>,
@@ -1253,9 +1327,7 @@ function App() {
     // Backend committed runtime is authoritative for startup and window recreation.
     userProfileHydration.finally(async () => {
       try {
-        const [all, templates] = await Promise.all([listCharacters(), listCharacterTemplates()]);
-        setCharacters(all);
-        setCharacterTemplates(templates);
+        const { all } = await loadCharacterCatalog();
         const recovered = await characterActivation.recoverCommittedRuntime();
         if (recovered === null) {
           const savedId = readStringSetting(APP_SETTING_KEYS.activeCharacterId, "");
@@ -1579,7 +1651,7 @@ function App() {
   // ── MOD System: Action listener for UI components ──
   const dispatchSimpleModAction = createModActionDispatcher({
     close_settings: () => {
-      setSettingsOpen(false);
+      closeSettings();
     },
     set_display_mode: ({ data }) => {
       if (data && typeof data === "object") {
@@ -1616,6 +1688,68 @@ function App() {
       dispatchRuntimeSettingsChanged("vision");
     },
   });
+
+  async function importCharacterFromFile(): Promise<void> {
+    setCharacterImportError(null);
+    await new Promise<void>((resolve, reject) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".json,.png";
+      let settled = false;
+      const settle = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        callback();
+      };
+      input.addEventListener("cancel", () => settle(resolve), { once: true });
+      input.onchange = (event) => {
+        const file = (event.target as HTMLInputElement).files?.[0];
+        if (!file) {
+          settle(resolve);
+          return;
+        }
+        void (async () => {
+          try {
+            const { parseCharacterCard } = await import("./lib/character-card-parser");
+            const profile = await parseCharacterCard(file);
+            const id = crypto.randomUUID();
+            const now = Date.now();
+            const avatarPath = profile.avatar_bytes
+              ? `character-instance-resource://${id}/avatar.png`
+              : profile.avatar_path;
+            const record = {
+              id,
+              name: profile.name,
+              description: profile.description,
+              persona: profile.persona,
+              avatar_path: avatarPath,
+              greeting: profile.greeting,
+              example_dialogue: profile.example_dialogue,
+              user_nickname: profile.user_nickname,
+              source_format: profile.source_format,
+              created_at: now,
+              updated_at: now,
+            };
+            if (profile.avatar_bytes) {
+              await createCharacterWithAvatar(record, profile.avatar_bytes);
+            } else {
+              await createCharacter(record);
+            }
+            const all = await listCharacters();
+            setCharacters(all);
+            setCharacterImportError(null);
+            if (all.some((character) => character.id === id)) {
+              await characterActivation.activateCharacter(id);
+            }
+            settle(resolve);
+          } catch (error) {
+            settle(() => reject(error));
+          }
+        })();
+      };
+      input.click();
+    });
+  }
 
   const handleModAction = (e: Event) => {
     const action = getModActionFromEvent(e);
@@ -2216,49 +2350,10 @@ function App() {
       })().catch(console.error);
     }
     if (detail.action === 'import_character') {
-      // Trigger file input from host context
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = '.json,.png';
-      input.onchange = async (e) => {
-        const file = (e.target as HTMLInputElement).files?.[0];
-        if (!file) return;
-        try {
-          const { parseCharacterCard } = await import('./lib/character-card-parser');
-          const profile = await parseCharacterCard(file);
-          const id = crypto.randomUUID();
-          const now = Date.now();
-          const avatarPath = profile.avatar_bytes
-            ? `character-instance-resource://${id}/avatar.png`
-            : profile.avatar_path;
-          const record = {
-            id,
-            name: profile.name,
-            description: profile.description,
-            persona: profile.persona,
-            avatar_path: avatarPath,
-            greeting: profile.greeting,
-            example_dialogue: profile.example_dialogue,
-            user_nickname: profile.user_nickname,
-            source_format: profile.source_format,
-            created_at: now,
-            updated_at: now,
-          };
-          if (profile.avatar_bytes) {
-            await createCharacterWithAvatar(record, profile.avatar_bytes);
-          } else {
-            await createCharacter(record);
-          }
-          const all = await listCharacters();
-          setCharacters(all);
-          if (all.some((character) => character.id === id)) {
-            await characterActivation.activateCharacter(id);
-          }
-        } catch (err) {
-          console.error('[App] import character failed:', err);
-        }
-      };
-      input.click();
+      void importCharacterFromFile().catch((error) => {
+        setCharacterImportError(getKokoroErrorMessage(error));
+        console.error("[App] import character failed:", error);
+      });
     }
   };
 
@@ -2319,9 +2414,7 @@ function App() {
         : null;
     },
     importCharacter: async () => {
-      document.dispatchEvent(new CustomEvent("kokoro:mod-action", {
-        detail: { action: "import_character" },
-      }));
+      await importCharacterFromFile();
     },
     editCharacter: async (characterId) => {
       selectCharacterForEditing(characters, characterId);
@@ -2354,7 +2447,7 @@ function App() {
       if (!character?.template_id) throw new Error("character has no template origin");
       const availableTemplates = characterTemplates
         .filter((candidate) => candidate.id === character.template_id)
-        .sort((left, right) => left.version.localeCompare(right.version));
+        .sort((left, right) => compareCharacterTemplateVersions(left.version, right.version));
       const available = availableTemplates[availableTemplates.length - 1];
       if (!available) throw new Error(`template '${character.template_id}' is unavailable`);
       const preview = await reconcileCharacterTemplate({
@@ -2461,6 +2554,10 @@ function App() {
               activeCharacterId={activeCharacterId}
               actions={characterCatalogActions}
               resolveAvatarUrl={(path) => mapCharacterAvatarUrl(path, convertFileSrc)}
+              catalogError={characterCatalogError}
+              actionError={characterImportError}
+              isRetrying={isCharacterCatalogRetrying}
+              onRetry={() => void retryCharacterCatalog()}
               onRecommendations={(characterName, recommendations) => {
                 setRecommendedCapabilities({ characterName, recommendations });
               }}
@@ -2504,9 +2601,9 @@ function App() {
         const SettingsComponent = registry.get("SettingsPanel") || SettingsPanel;
         const isMod = registry.isModComponent("SettingsPanel");
         const component = (
-          <SettingsComponent
+            <SettingsComponent
             isOpen={settingsOpen}
-            onClose={() => setSettingsOpen(false)}
+            onClose={closeSettings}
             activeTab={activeSettingsTab}
             onActiveTabChange={setActiveSettingsTab}
             backgroundControls={{
@@ -2563,7 +2660,9 @@ function App() {
               await characterActivation.activateCharacter(characterId);
             }}
             onCharacterRuntimeChange={updateActiveCharacterRuntime}
+            onCharactersChanged={(nextCharacters) => setCharacters(Array.from(nextCharacters))}
             characters={characters}
+            resolveAvatarUrl={(path) => mapCharacterAvatarUrl(path, convertFileSrc)}
             // User Profile (from localStorage)
             userName={readStringSetting(APP_SETTING_KEYS.userName, "")}
             userPersona={readStringSetting(APP_SETTING_KEYS.userPersona, "")}

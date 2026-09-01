@@ -132,7 +132,9 @@ interface SettingsPanelProps {
     characterToEditId?: string | null;
     onActivateCharacter: (characterId: string) => Promise<void>;
     onCharacterRuntimeChange: (overrides: Readonly<CharacterRuntimeOverrides>) => Promise<void>;
+    onCharactersChanged?: (characters: ReadonlyArray<CharacterRecord>) => void;
     characters?: CharacterRecord[];
+    resolveAvatarUrl?: (path: string) => string;
     // User Profile
     userName?: string;
     userPersona?: string;
@@ -287,7 +289,7 @@ function normalizeTtsVoice(
 const DEFAULT_PERSONA =
     "You are a friendly, warm companion character. Respond with personality and emotion.";
 
-export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange: _onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, initialTelegramStatus, onVisionConfigChange, onActivateCharacter, onCharacterRuntimeChange, characterToEditId, activeCharacterId }: SettingsPanelProps) {
+export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange: _onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, resolveAvatarUrl, initialTelegramStatus, onVisionConfigChange, onActivateCharacter, onCharacterRuntimeChange, onCharactersChanged, characterToEditId, activeCharacterId }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [internalActiveTab, setInternalActiveTab] = useState<SettingsTabId>(() => {
         const saved = readStringSetting(APP_SETTING_KEYS.settingsActiveTab, "");
@@ -749,9 +751,6 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                             <div className="space-y-2 p-2">
                                 {Object.values(SETTINGS_GROUPS).map((group) => (
                                     <div key={group.id} data-settings-group={group.id}>
-                                        <div className="px-2 pb-1 text-[9px] font-heading font-semibold uppercase tracking-[0.18em] text-[var(--color-text-muted)]">
-                                            {t(group.label)}
-                                        </div>
                                         <div className="flex flex-wrap gap-1">
                                             {group.tabs.map((id) => {
                                                 const tab = tabs.find((candidate) => candidate.id === id);
@@ -810,6 +809,9 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                         onPersonaChange={(prompt) => setPersonaText(prompt)}
                                         onActivateCharacter={onActivateCharacter}
                                         onCharacterRuntimeChange={onCharacterRuntimeChange}
+                                        onCharactersChanged={onCharactersChanged}
+                                        characters={charactersProp}
+                                        resolveAvatarUrl={resolveAvatarUrl}
                                         characterToEditId={characterToEditId}
                                         activeCharacterId={activeCharacterId}
                                         responseLanguage={responseLang}

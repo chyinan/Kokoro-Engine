@@ -10,6 +10,13 @@
     "restoreDefault": "還原範本預設值",
     "resolveConflict": "保留我的修改並套用範本更新",
     "copySuffix": "副本",
+    "preview": "預覽",
+    "description": "描述",
+    "persona": "角色設定",
+    "greeting": "開場白",
+    "exampleDialogue": "範例對話",
+    "retry": "重試",
+    "retrying": "重試中…",
     "ttsProbe": {
       "available": "本機 TTS 已在 {{endpoint}} 回應。",
       "unavailable": "本機 TTS 未在 {{endpoint}} 回應，將使用瀏覽器語音或純文字備援。",
@@ -247,10 +254,17 @@
                 "delete": "刪除"
             },
             "status": {
+                "avatar_updated": "頭像已更新。",
+                "avatar_removed": "頭像已移除。",
+                "avatar_update_failed": "頭像更新失敗：{{error}}",
                 "imported": "成功匯入 \"{{name}}\"！",
                 "import_failed": "匯入失敗: {{error}}"
             },
             "edit": {
+                "avatar": "頭像",
+                "avatar_choose": "選擇 PNG",
+                "avatar_remove": "移除頭像",
+                "avatar_desc": "可選 PNG 頭像；未設定時使用預設頭像。",
                 "title": "編輯角色",
                 "name": "名稱",
                 "name_placeholder": "角色名稱",

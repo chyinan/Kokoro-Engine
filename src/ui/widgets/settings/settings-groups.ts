@@ -24,19 +24,16 @@ export type SettingsGroupId = "basic" | "advanced";
 
 export interface SettingsGroup {
     id: SettingsGroupId;
-    label: string;
     tabs: readonly SettingsTabId[];
 }
 
 export const SETTINGS_GROUPS: Readonly<Record<SettingsGroupId, SettingsGroup>> = {
     basic: {
         id: "basic",
-        label: "settings.groups.basic",
         tabs: ["persona", "model", "tts", "stt", "bg", "imagegen"],
     },
     advanced: {
         id: "advanced",
-        label: "settings.groups.advanced",
         tabs: ["vision", "memory", "mcp", "mods", "bot", "api", "jailbreak", "pet", "backup", "about"],
     },
 };

@@ -138,6 +138,22 @@ fn installs_bundled_packages_into_app_data_catalog() {
 }
 
 #[test]
+fn skips_the_documentation_template_when_installing_bundled_packages() {
+    let temp = TempDir::new().unwrap();
+    let bundled = temp.path().join("bundled");
+    write_package_dir(&bundled.join("kokoro"), "1.0.0", "Kokoro");
+    write_package_dir(&bundled.join("template"), "0.1.0", "Template scaffold");
+
+    let installed = test_catalog(&temp).install_bundled(&bundled).unwrap();
+
+    assert_eq!(installed.len(), 1);
+    assert!(!temp
+        .path()
+        .join("app-data-characters/kokoro/0.1.0")
+        .exists());
+}
+
+#[test]
 fn rejects_zip_traversal_without_writing_outside_catalog() {
     let temp = TempDir::new().unwrap();
     let catalog = test_catalog(&temp);

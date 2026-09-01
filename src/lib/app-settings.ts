@@ -12,6 +12,7 @@ export const APP_SETTING_KEYS = {
   characterLive2dSource: "kokoro_character_live2d_source",
   characterBackgroundSource: "kokoro_character_background_source",
   characterCueProfileSource: "kokoro_character_cue_profile_source",
+  provisionedCharacterTemplateIds: "kokoro_provisioned_character_template_ids_v2",
   displayMode: "kokoro_display_mode",
   gazeTracking: "kokoro_gaze_tracking",
   persona: "kokoro_persona",

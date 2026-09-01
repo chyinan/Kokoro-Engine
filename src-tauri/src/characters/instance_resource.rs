@@ -53,21 +53,24 @@ pub fn parse_instance_avatar_reference(value: &str) -> Option<&str> {
 
 /// Parses both native custom-scheme and Windows WebView2 avatar requests.
 ///
-/// Native WebKit keeps the instance id in the URI host, while WebView2 maps
-/// `character-instance-resource://id/avatar.png` to
-/// `http://character-instance-resource.localhost/id/avatar.png`.
+/// Native WebKit keeps the instance id in the URI host. Wry's Windows
+/// workaround maps `character-instance-resource://localhost/id/avatar.png`
+/// to `http://character-instance-resource.localhost/id/avatar.png` and then
+/// restores the `localhost` form before invoking this handler.
 pub fn parse_instance_avatar_request(host: Option<&str>, path: &str) -> Option<(String, String)> {
     let host = host?;
     let clean_path = path.trim_start_matches('/');
-    let (instance_id, relative) =
-        if host.eq_ignore_ascii_case("character-instance-resource.localhost") {
-            clean_path.split_once('/')?
-        } else {
-            if host.ends_with(".localhost") {
-                return None;
-            }
-            (host, clean_path)
-        };
+    let (instance_id, relative) = if host
+        .eq_ignore_ascii_case("character-instance-resource.localhost")
+        || host.eq_ignore_ascii_case("localhost")
+    {
+        clean_path.split_once('/')?
+    } else {
+        if host.ends_with(".localhost") {
+            return None;
+        }
+        (host, clean_path)
+    };
 
     validate_instance_id(instance_id).ok()?;
     if relative != "avatar.png" || relative.contains("..") || relative.contains('\\') {

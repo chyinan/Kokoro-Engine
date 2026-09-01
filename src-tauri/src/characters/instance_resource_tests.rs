@@ -22,6 +22,14 @@ fn parses_windows_webview2_avatar_request() {
 }
 
 #[test]
+fn parses_wry_reverted_windows_avatar_request() {
+    assert_eq!(
+        parse_instance_avatar_request(Some("localhost"), "/instance-1/avatar.png"),
+        Some(("instance-1".to_string(), "avatar.png".to_string()))
+    );
+}
+
+#[test]
 fn rejects_traversal_and_unknown_hosts() {
     assert_eq!(
         parse_instance_avatar_request(

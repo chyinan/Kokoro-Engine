@@ -153,6 +153,29 @@ pub fn handle_character_instance_resource_request() -> impl Fn(
         };
 
         let root = app_data.join("character-instance-resources");
+        match fs::symlink_metadata(&root) {
+            Ok(metadata) if is_filesystem_redirect(&metadata) || !metadata.is_dir() => {
+                tracing::error!(target: "characters", "[avatar protocol] unsafe resource root: {}", root.display());
+                return tauri::http::Response::builder()
+                    .status(403)
+                    .body(b"Forbidden".to_vec())
+                    .unwrap();
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return tauri::http::Response::builder()
+                    .status(404)
+                    .body(b"Not Found".to_vec())
+                    .unwrap();
+            }
+            Err(error) => {
+                tracing::error!(target: "characters", "[avatar protocol] resource root metadata error: {}", error);
+                return tauri::http::Response::builder()
+                    .status(500)
+                    .body(b"Internal Server Error".to_vec())
+                    .unwrap();
+            }
+        }
         let candidate = root.join(instance_id).join(relative);
         if !candidate.exists() || !candidate.is_file() {
             return tauri::http::Response::builder()
@@ -172,6 +195,7 @@ pub fn handle_character_instance_resource_request() -> impl Fn(
             Ok(content) => tauri::http::Response::builder()
                 .header("Content-Type", "image/png")
                 .header("Access-Control-Allow-Origin", "*")
+                .header("Cache-Control", "no-store")
                 .body(content)
                 .unwrap(),
             Err(error) => {
@@ -265,6 +289,19 @@ fn ensure_within_root(root: &Path, candidate: &Path) -> Result<(), String> {
             canonical_root.display()
         ))
     }
+}
+
+#[cfg(windows)]
+fn is_filesystem_redirect(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_filesystem_redirect(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 /// Decode percent-encoded characters in a URL path.

@@ -9,6 +9,11 @@ import {
 } from "./settings-groups";
 
 describe("settings groups", () => {
+  it("does not expose redundant group labels", () => {
+    expect(SETTINGS_GROUPS.basic).not.toHaveProperty("label");
+    expect(SETTINGS_GROUPS.advanced).not.toHaveProperty("label");
+  });
+
   it("keeps primary controls in the basic group", () => {
     expect(getSettingsGroupForTab("persona")).toBe("basic");
     expect(getSettingsGroupForTab("model")).toBe("basic");

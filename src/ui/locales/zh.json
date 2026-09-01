@@ -10,6 +10,13 @@
     "restoreDefault": "恢复模板默认值",
     "resolveConflict": "保留我的修改并应用模板更新",
     "copySuffix": "副本",
+    "preview": "预览",
+    "description": "描述",
+    "persona": "角色设定",
+    "greeting": "开场白",
+    "exampleDialogue": "示例对话",
+    "retry": "重试",
+    "retrying": "重试中…",
     "ttsProbe": {
       "available": "本地 TTS 已在 {{endpoint}} 响应。",
       "unavailable": "本地 TTS 未在 {{endpoint}} 响应，将使用浏览器语音或纯文本回退。",
@@ -247,10 +254,17 @@
                 "delete": "删除"
             },
             "status": {
+                "avatar_updated": "头像已更新。",
+                "avatar_removed": "头像已移除。",
+                "avatar_update_failed": "头像更新失败：{{error}}",
                 "imported": "成功导入 \"{{name}}\"！",
                 "import_failed": "导入失败: {{error}}"
             },
             "edit": {
+                "avatar": "头像",
+                "avatar_choose": "选择 PNG",
+                "avatar_remove": "移除头像",
+                "avatar_desc": "可选 PNG 头像；未设置时使用默认头像。",
                 "title": "编辑角色",
                 "name": "名称",
                 "name_placeholder": "角色名称",

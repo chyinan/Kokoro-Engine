@@ -33,7 +33,9 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "../characters": "characters",
+      "../characters/kokoro": "characters/kokoro",
+      "../characters/pico": "characters/pico",
+      "../characters/seren": "characters/seren",
       "../mods": "mods",
       "../public/live2d": "live2d"
     },

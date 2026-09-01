@@ -7,6 +7,16 @@ import {
 } from "./CharacterManager";
 
 describe("character language presets", () => {
+    it("maps persisted language codes to their preset display values", () => {
+        expect(getLanguageSelectValue("en", RESPONSE_LANGUAGE_PRESETS)).toBe("English");
+        expect(getLanguageSelectValue("ja", RESPONSE_LANGUAGE_PRESETS)).toBe("日本語");
+        expect(getLanguageSelectValue("zh-TW", USER_LANGUAGE_PRESETS)).toBe("繁體中文");
+        expect(getLanguageSelectValue("ja-jp", RESPONSE_LANGUAGE_PRESETS)).toBe("日本語");
+        expect(getLanguageSelectValue("zh-tw", USER_LANGUAGE_PRESETS)).toBe("繁體中文");
+        expect(shouldShowCustomLanguageInput("en", RESPONSE_LANGUAGE_PRESETS)).toBe(false);
+        expect(shouldShowCustomLanguageInput("ja", RESPONSE_LANGUAGE_PRESETS)).toBe(false);
+    });
+
     it("includes Russian and Traditional Chinese in response and user language presets", () => {
         expect(RESPONSE_LANGUAGE_PRESETS).toContain("Русский");
         expect(USER_LANGUAGE_PRESETS).toContain("Русский");

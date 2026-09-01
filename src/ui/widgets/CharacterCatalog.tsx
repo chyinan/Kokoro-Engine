@@ -4,6 +4,7 @@ import {
   Check,
   ChevronDown,
   Copy,
+  Eye,
   FilePenLine,
   Import,
   RefreshCcw,
@@ -12,10 +13,14 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { CharacterRecord, CharacterTemplateManifest } from "@/lib/kokoro-bridge";
+import {
+  getKokoroErrorMessage,
+  type CharacterRecord,
+  type CharacterTemplateManifest,
+} from "@/lib/kokoro-bridge";
 
 import {
   getRecommendationItems,
@@ -45,9 +50,15 @@ type CharacterCatalogEntry = {
   readonly actionId: string;
   readonly name: string;
   readonly description: string;
+  readonly persona: string;
+  readonly greeting: string;
+  readonly exampleDialogue: string;
   readonly avatarPath: string | null;
   readonly source: "template" | "instance";
   readonly hasTemplate: boolean;
+  readonly templateVersion: string | null;
+  readonly availableTemplateVersion: string | null;
+  readonly author: string | null;
 };
 
 export type CharacterCatalogProps = {
@@ -57,6 +68,10 @@ export type CharacterCatalogProps = {
   readonly actions: Readonly<CharacterCatalogActionDependencies>;
   /** Converts persisted filesystem/protocol references at the Tauri boundary. */
   readonly resolveAvatarUrl: (path: string) => string;
+  readonly catalogError?: string | null;
+  readonly actionError?: string | null;
+  readonly isRetrying?: boolean;
+  readonly onRetry?: () => void;
   readonly onRecommendations: (
     characterName: string,
     recommendations: Readonly<CharacterCapabilityRecommendations>,
@@ -94,30 +109,112 @@ function buildCatalogEntries(
   templates: ReadonlyArray<CharacterTemplateManifest>,
 ): Array<CharacterCatalogEntry> {
   const matchedInstanceIds = new Set<string>();
-  const entries = templates.map((template) => {
-    const instance = characters.find((candidate) => candidate.template_id === template.id);
-    if (instance) matchedInstanceIds.add(instance.id);
-    return {
-      actionId: instance?.id ?? `template:${template.id}`,
-      name: instance?.name ?? template.name,
-      description: instance?.description?.trim() || template.description,
-      avatarPath: instance?.avatar_path ?? template.avatar,
-      source: instance ? "instance" as const : "template" as const,
-      hasTemplate: true,
-    };
-  });
+  const latestTemplates = getLatestCharacterTemplates(templates);
+  const entries: Array<CharacterCatalogEntry> = [];
+
+  for (const template of latestTemplates) {
+    for (const character of characters.filter((candidate) => candidate.template_id === template.id)) {
+      matchedInstanceIds.add(character.id);
+      entries.push({
+        actionId: character.id,
+        name: character.name,
+        description: character.description?.trim() || template.description,
+        persona: character.persona,
+        greeting: character.greeting ?? template.greeting,
+        exampleDialogue: character.example_dialogue ?? template.example_dialogue ?? "",
+        avatarPath: character.avatar_path ?? template.avatar,
+        source: "instance",
+        hasTemplate: true,
+        templateVersion: character.template_version ?? null,
+        availableTemplateVersion: template.version,
+        author: template.author,
+      });
+    }
+  }
   for (const character of characters) {
     if (matchedInstanceIds.has(character.id)) continue;
+    const template = character.template_id === null || character.template_id === undefined
+      ? undefined
+      : latestTemplates.find((candidate) => candidate.id === character.template_id);
     entries.push({
       actionId: character.id,
       name: character.name,
       description: character.description?.trim() || character.persona.trim(),
+      persona: character.persona,
+      greeting: character.greeting ?? "",
+      exampleDialogue: character.example_dialogue ?? "",
       avatarPath: character.avatar_path ?? null,
       source: "instance",
-      hasTemplate: character.template_id != null,
+      hasTemplate: template !== undefined,
+      templateVersion: character.template_version ?? null,
+      availableTemplateVersion: template?.version ?? null,
+      author: template?.author ?? null,
     });
   }
   return entries;
+}
+
+/** Keeps only the newest installed version for each template ID. */
+export function getLatestCharacterTemplates(
+  templates: ReadonlyArray<CharacterTemplateManifest>,
+): Array<CharacterTemplateManifest> {
+  const latestTemplates = new Map<string, CharacterTemplateManifest>();
+  for (const template of templates) {
+    const current = latestTemplates.get(template.id);
+    if (current === undefined || compareCharacterTemplateVersions(template.version, current.version) > 0) {
+      latestTemplates.set(template.id, template);
+    }
+  }
+  return Array.from(latestTemplates.values());
+}
+
+type CharacterTemplateVersionParts = {
+  readonly numbers: readonly [number, number, number];
+  readonly prerelease: ReadonlyArray<string>;
+};
+
+function parseCharacterTemplateVersion(value: string): CharacterTemplateVersionParts | null {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value);
+  if (match === null) return null;
+  return {
+    numbers: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: match[4]?.split(".") ?? [],
+  };
+}
+
+/** Compares valid SemVer strings so template updates choose the real newest version. */
+export function compareCharacterTemplateVersions(left: string, right: string): number {
+  const leftParts = parseCharacterTemplateVersion(left);
+  const rightParts = parseCharacterTemplateVersion(right);
+  if (leftParts === null || rightParts === null) return left.localeCompare(right);
+
+  for (const index of [0, 1, 2] as const) {
+    if (leftParts.numbers[index] !== rightParts.numbers[index]) {
+      return leftParts.numbers[index] - rightParts.numbers[index];
+    }
+  }
+
+  if (leftParts.prerelease.length === 0 || rightParts.prerelease.length === 0) {
+    return leftParts.prerelease.length === rightParts.prerelease.length
+      ? 0
+      : leftParts.prerelease.length === 0 ? 1 : -1;
+  }
+  for (let index = 0; index < Math.max(leftParts.prerelease.length, rightParts.prerelease.length); index += 1) {
+    const leftIdentifier = leftParts.prerelease[index];
+    const rightIdentifier = rightParts.prerelease[index];
+    if (leftIdentifier === undefined || rightIdentifier === undefined) {
+      return leftIdentifier === rightIdentifier ? 0 : leftIdentifier === undefined ? -1 : 1;
+    }
+    if (leftIdentifier === rightIdentifier) continue;
+    const leftNumber = Number(leftIdentifier);
+    const rightNumber = Number(rightIdentifier);
+    const leftIsNumber = Number.isInteger(leftNumber) && /^\d+$/.test(leftIdentifier);
+    const rightIsNumber = Number.isInteger(rightNumber) && /^\d+$/.test(rightIdentifier);
+    if (leftIsNumber && rightIsNumber) return leftNumber - rightNumber;
+    if (leftIsNumber !== rightIsNumber) return leftIsNumber ? -1 : 1;
+    return leftIdentifier.localeCompare(rightIdentifier);
+  }
+  return 0;
 }
 
 function initials(name: string): string {
@@ -128,6 +225,10 @@ function initials(name: string): string {
 export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
   const { t } = useTranslation();
   const [isOpen, setIsOpen] = useState(false);
+  const [previewEntry, setPreviewEntry] = useState<CharacterCatalogEntry | null>(null);
+  const previewDialogRef = useRef<HTMLElement | null>(null);
+  const previewCloseButtonRef = useRef<HTMLButtonElement | null>(null);
+  const previewTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const entries = useMemo(
@@ -135,6 +236,46 @@ export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
     [props.characters, props.templates],
   );
   const active = entries.find((entry) => entry.actionId === props.activeCharacterId) ?? entries[0] ?? null;
+  const displayedActionError = error ?? props.actionError ?? null;
+
+  function closePreview(): void {
+    setPreviewEntry(null);
+    previewTriggerRef.current?.focus();
+  }
+
+  useEffect(() => {
+    if (previewEntry === null) return;
+
+    const handlePreviewKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePreview();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const focusable = previewDialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      if (!focusable || focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handlePreviewKeyDown);
+    previewCloseButtonRef.current?.focus();
+    return () => document.removeEventListener("keydown", handlePreviewKeyDown);
+  }, [previewEntry]);
 
   const runAction = async (
     action: Readonly<CharacterCatalogAction>,
@@ -150,22 +291,43 @@ export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
       }
       if (action.type === "select") setIsOpen(false);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(getKokoroErrorMessage(reason));
     } finally {
       setPendingAction(null);
     }
   };
 
   if (entries.length === 0) {
+    if (props.catalogError) {
+      return (
+        <div className="pointer-events-auto w-[min(360px,calc(100vw-32px))] rounded-2xl border border-red-400/30 bg-[var(--color-bg-surface)]/95 p-4 text-sm shadow-lg backdrop-blur-xl" role="alert">
+          <p className="text-xs text-red-200">{props.catalogError}</p>
+          {props.onRetry && (
+            <button
+              type="button"
+              onClick={props.onRetry}
+              disabled={props.isRetrying}
+              className="mt-3 rounded-lg border border-[var(--color-accent)]/50 px-3 py-2 text-xs text-[var(--color-accent)] disabled:opacity-50"
+            >
+              {props.isRetrying ? t("characterCatalog.retrying", { defaultValue: "Retrying..." }) : t("characterCatalog.retry", { defaultValue: "Retry" })}
+            </button>
+          )}
+        </div>
+      );
+    }
     return (
-      <button
-        type="button"
-        onClick={() => void runAction({ type: "import" }, "")}
-        className="pointer-events-auto flex items-center gap-2 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-surface)]/90 px-3 py-2 text-xs text-[var(--color-text-secondary)] shadow-lg backdrop-blur-xl"
-      >
-        <Upload size={14} aria-hidden="true" />
-        {t("characterCatalog.import")}
-      </button>
+      <div className="pointer-events-auto flex flex-col items-start gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)]/90 p-3 shadow-lg backdrop-blur-xl">
+        {displayedActionError !== null && <p role="alert" className="max-w-[260px] text-[10px] text-red-200">{displayedActionError}</p>}
+        <button
+          type="button"
+          onClick={() => void runAction({ type: "import" }, "")}
+          disabled={pendingAction !== null}
+          className="flex items-center gap-2 rounded-full border border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-text-secondary)] disabled:opacity-50"
+        >
+          <Upload size={14} aria-hidden="true" />
+          {t("characterCatalog.import")}
+        </button>
+      </div>
     );
   }
 
@@ -192,6 +354,9 @@ export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
         <ChevronDown size={14} className={`shrink-0 text-[var(--color-text-muted)] transition ${isOpen ? "rotate-180" : ""}`} aria-hidden="true" />
       </button>
 
+      {!isOpen && props.catalogError && <CatalogErrorNotice message={props.catalogError} isRetrying={props.isRetrying ?? false} onRetry={props.onRetry} t={t} />}
+      {!isOpen && props.actionError && <CatalogErrorNotice message={props.actionError} isRetrying={false} t={t} />}
+
       {isOpen && (
         <section className="absolute right-0 top-12 max-h-[min(480px,calc(100vh-120px))] w-full overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)]/95 shadow-[0_22px_70px_rgba(0,0,0,0.5)] backdrop-blur-2xl">
           <header className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
@@ -215,7 +380,7 @@ export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
             </div>
           </header>
 
-          <div role="listbox" aria-label={t("characterCatalog.title")} className="max-h-[390px] space-y-1 overflow-y-auto p-2">
+          <div role="listbox" aria-label={t("characterCatalog.title")} className="max-h-[390px] space-y-1 overflow-y-auto p-2 scrollable">
             {entries.map((entry) => {
               const isActive = entry.actionId === props.activeCharacterId;
               const isBusy = pendingAction?.endsWith(`:${entry.actionId}`) ?? false;
@@ -239,31 +404,94 @@ export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
                         <span className="truncate text-sm font-semibold text-[var(--color-text-primary)]">{entry.name}</span>
                         {isActive && <Check size={13} className="shrink-0 text-[var(--color-accent)]" aria-hidden="true" />}
                       </span>
-                      <span className="mt-0.5 line-clamp-2 block text-[10px] leading-4 text-[var(--color-text-muted)]">{entry.description}</span>
+                      <span className="mt-0.5 line-clamp-2 text-[10px] leading-4 text-[var(--color-text-primary)]">{entry.description}</span>
                     </span>
                     {isBusy && <RefreshCcw size={13} className="animate-spin text-[var(--color-accent)]" aria-hidden="true" />}
                   </button>
 
-                  {entry.source === "instance" && (
-                    <div className="mt-1 flex justify-end gap-0.5 border-t border-[var(--color-border)]/60 pt-1 opacity-80 transition group-hover:opacity-100">
-                      <CatalogActionButton label={t("characterCatalog.edit")} icon={<FilePenLine size={13} />} onClick={() => void runAction({ type: "edit", characterId: entry.actionId }, entry.name)} disabled={pendingAction !== null} />
-                      <CatalogActionButton label={t("characterCatalog.duplicate")} icon={<Copy size={13} />} onClick={() => void runAction({ type: "duplicate", characterId: entry.actionId }, entry.name)} disabled={pendingAction !== null} />
-                      {entry.hasTemplate && (
-                        <>
+                  <div className="mt-1 flex justify-end gap-0.5 border-t border-[var(--color-border)]/60 pt-1 opacity-80 transition group-hover:opacity-100">
+                    <CatalogActionButton label={t("characterCatalog.preview")} icon={<Eye size={13} />} onClick={(event) => { previewTriggerRef.current = event.currentTarget; setPreviewEntry(entry); }} disabled={pendingAction !== null} />
+                    {entry.source === "instance" && (
+                      <>
+                        <CatalogActionButton label={t("characterCatalog.edit")} icon={<FilePenLine size={13} />} onClick={() => void runAction({ type: "edit", characterId: entry.actionId }, entry.name)} disabled={pendingAction !== null} />
+                        <CatalogActionButton label={t("characterCatalog.duplicate")} icon={<Copy size={13} />} onClick={() => void runAction({ type: "duplicate", characterId: entry.actionId }, entry.name)} disabled={pendingAction !== null} />
+                        {entry.hasTemplate && (
                           <CatalogActionButton label={t("characterCatalog.restoreDefault")} icon={<RefreshCcw size={13} />} onClick={() => void runAction({ type: "restore-default", characterId: entry.actionId }, entry.name)} disabled={pendingAction !== null} />
+                        )}
+                        {entry.hasTemplate && entry.templateVersion !== null && entry.availableTemplateVersion !== null && compareCharacterTemplateVersions(entry.availableTemplateVersion, entry.templateVersion) > 0 && (
                           <CatalogActionButton label={t("characterCatalog.resolveConflict")} icon={<Sparkles size={13} />} onClick={() => void runAction({ type: "resolve-conflict", characterId: entry.actionId }, entry.name)} disabled={pendingAction !== null} />
-                        </>
-                      )}
-                    </div>
-                  )}
+                        )}
+                      </>
+                    )}
+                  </div>
                 </article>
               );
             })}
           </div>
 
+          {props.catalogError && <CatalogErrorNotice message={props.catalogError} isRetrying={props.isRetrying ?? false} onRetry={props.onRetry} t={t} />}
+          {props.actionError && <CatalogErrorNotice message={props.actionError} isRetrying={false} t={t} />}
           {error !== null && <p role="alert" className="border-t border-red-400/20 bg-red-500/10 px-4 py-2 text-[10px] text-red-200">{error}</p>}
         </section>
       )}
+
+      {previewEntry !== null && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) closePreview();
+          }}
+        >
+          <section ref={previewDialogRef} role="dialog" aria-modal="true" aria-labelledby="character-preview-title" className="pointer-events-auto w-full max-w-md overflow-hidden rounded-2xl border border-[var(--color-border-accent)]/60 bg-[var(--color-bg-surface)]/95 shadow-[0_24px_80px_rgba(0,0,0,0.58)]">
+            <header className="flex items-start justify-between border-b border-[var(--color-border)] px-5 py-4">
+              <div className="min-w-0">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-[var(--color-accent)]">{t("characterCatalog.preview")}</p>
+                <h2 id="character-preview-title" className="mt-1 truncate text-base font-semibold text-[var(--color-text-primary)]">{previewEntry.name}</h2>
+              </div>
+              <button ref={previewCloseButtonRef} type="button" onClick={closePreview} aria-label={t("characterCatalog.close")} className="rounded-lg p-1.5 text-[var(--color-text-muted)] hover:bg-white/5 hover:text-[var(--color-text-primary)]">
+                <X size={16} aria-hidden="true" />
+              </button>
+            </header>
+            <div className="max-h-[min(560px,calc(100vh-180px))] space-y-4 overflow-y-auto p-5 scrollable">
+              <PreviewField label={t("characterCatalog.description")} value={previewEntry.description} />
+              <PreviewField label={t("characterCatalog.persona")} value={previewEntry.persona} />
+              <PreviewField label={t("characterCatalog.greeting")} value={previewEntry.greeting} />
+              <PreviewField label={t("characterCatalog.exampleDialogue")} value={previewEntry.exampleDialogue} />
+              {(previewEntry.author !== null || previewEntry.availableTemplateVersion !== null) && (
+                <p className="border-t border-[var(--color-border)] pt-3 text-[10px] text-[var(--color-text-muted)]">
+                  {[previewEntry.author, previewEntry.availableTemplateVersion ? `v${previewEntry.availableTemplateVersion}` : null].filter(Boolean).join(" · ")}
+                </p>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
+
+type Translate = (key: string, options?: Record<string, unknown>) => string;
+
+function CatalogErrorNotice(props: Readonly<{ message: string; isRetrying: boolean; onRetry?: () => void; t: Translate }>) {
+  return (
+    <div role="alert" className="mt-2 rounded-lg border border-red-400/20 bg-red-500/10 px-4 py-2 text-[10px] text-red-200">
+      <p>{props.message}</p>
+      {props.onRetry && (
+        <button type="button" onClick={props.onRetry} disabled={props.isRetrying} className="mt-2 rounded border border-red-300/30 px-2 py-1 text-red-100 disabled:opacity-50">
+          {props.isRetrying ? props.t("characterCatalog.retrying", { defaultValue: "Retrying..." }) : props.t("characterCatalog.retry", { defaultValue: "Retry" })}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function PreviewField(props: Readonly<{ label: string; value: string }>) {
+  if (!props.value.trim()) return null;
+  return (
+    <div>
+      <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--color-text-muted)]">{props.label}</p>
+      <p className="whitespace-pre-wrap break-words text-xs leading-5 text-[var(--color-text-secondary)]">{props.value}</p>
     </div>
   );
 }
@@ -271,7 +499,7 @@ export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
 type CatalogActionButtonProps = {
   readonly label: string;
   readonly icon: React.ReactNode;
-  readonly onClick: () => void;
+  readonly onClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
   readonly disabled: boolean;
 };
 

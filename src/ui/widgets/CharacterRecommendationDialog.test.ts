@@ -1,6 +1,8 @@
+// @vitest-environment jsdom
 // pattern: Imperative Shell
 
-import { createElement } from "react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
@@ -14,6 +16,8 @@ import {
   type CharacterCapabilityRecommendations,
 } from "./CharacterRecommendationDialog";
 
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
 function recommendations(): CharacterCapabilityRecommendations {
   return {
     vision: true,
@@ -24,6 +28,30 @@ function recommendations(): CharacterCapabilityRecommendations {
 }
 
 describe("character capability recommendation consent", () => {
+  it("renders structured confirmation failures as readable messages", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(CharacterRecommendationDialog, {
+        open: true,
+        characterName: "Kokoro",
+        recommendations: recommendations(),
+        onConfirm: async () => {
+          throw { code: "CAPABILITY_UPDATE_FAILED", message: "capability update failed" };
+        },
+        onDismiss: () => undefined,
+      }));
+    });
+
+    const buttons = container.querySelectorAll<HTMLButtonElement>("button");
+    await act(async () => {
+      buttons[buttons.length - 1]?.click();
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("capability update failed");
+    root.unmount();
+  });
+
   it("changes session identity when the dialog reopens for a character", () => {
     const suggested = recommendations();
 

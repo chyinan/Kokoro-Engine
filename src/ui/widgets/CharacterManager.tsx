@@ -5,13 +5,13 @@
  * Full character management UI: list, create, edit, delete,
  * and import SillyTavern character cards (JSON / PNG).
  */
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, type ChangeEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Plus, Upload, Trash2, UserCircle, Check, X, User } from "lucide-react";
 import { characterDb } from "../../lib/db";
 import { parseCharacterCard } from "../../lib/character-card-parser";
-import { setUserName, setUserPersona, getProactiveEnabled, listCharacters, createCharacter, createCharacterWithAvatar, updateCharacter, deleteCharacter } from "../../lib/kokoro-bridge";
+import { getKokoroErrorMessage, setUserName, setUserPersona, getProactiveEnabled, listCharacters, createCharacter, createCharacterWithAvatar, updateCharacter, updateCharacterWithAvatar, deleteCharacter } from "../../lib/kokoro-bridge";
 import type { CharacterRecord } from "../../lib/kokoro-bridge";
 import {
     readCharacterRuntimeProfile,
@@ -24,16 +24,37 @@ import { useTranslation, Trans } from "react-i18next";
 export const RESPONSE_LANGUAGE_PRESETS = ["日本語", "English", "中文", "繁體中文", "한국어", "Русский"] as const;
 export const USER_LANGUAGE_PRESETS = ["中文", "繁體中文", "English", "日本語", "한국어", "Русский"] as const;
 
+const LANGUAGE_CODE_TO_DISPLAY: Readonly<Record<string, string>> = {
+    en: "English",
+    "en-us": "English",
+    ja: "日本語",
+    "ja-jp": "日本語",
+    zh: "中文",
+    "zh-cn": "中文",
+    "zh-tw": "繁體中文",
+    "zh-hant": "繁體中文",
+    ko: "한국어",
+    "ko-kr": "한국어",
+    ru: "Русский",
+    "ru-ru": "Русский",
+};
+
+function normalizeLanguageValue(value: string): string {
+    return LANGUAGE_CODE_TO_DISPLAY[value.trim().toLowerCase()] ?? value;
+}
+
 export function getLanguageSelectValue(value: string, presets: readonly string[]) {
-    if (value === "" || value === "auto") {
+    const normalizedValue = normalizeLanguageValue(value);
+    if (normalizedValue === "" || normalizedValue === "auto") {
         return "auto";
     }
 
-    return value === "__custom__" || presets.includes(value) ? value : "__custom__";
+    return normalizedValue === "__custom__" || presets.includes(normalizedValue) ? normalizedValue : "__custom__";
 }
 
 export function shouldShowCustomLanguageInput(value: string, presets: readonly string[]) {
-    return value === "__custom__" || (value !== "" && value !== "auto" && !presets.includes(value));
+    const normalizedValue = normalizeLanguageValue(value);
+    return normalizedValue === "__custom__" || (normalizedValue !== "" && normalizedValue !== "auto" && !presets.includes(normalizedValue));
 }
 
 function getCustomLanguageInputValue(value: string) {
@@ -94,6 +115,11 @@ function saveUserProfile(profile: UserProfile) {
     localStorage.setItem(USER_PERSONA_KEY, profile.persona);
 }
 
+type ImportFeedback = {
+    readonly kind: "success" | "error";
+    readonly message: string;
+};
+
 // ── Compose system prompt from a character ─────────
 
 export function composeSystemPrompt(
@@ -130,6 +156,9 @@ interface CharacterManagerProps {
     /** Routes every user-initiated selection through the activation transaction owner. */
     onActivateCharacter: (characterId: string) => Promise<void>;
     onCharacterRuntimeChange: (overrides: Readonly<CharacterRuntimeOverrides>) => Promise<void>;
+    onCharactersChanged?: (characters: ReadonlyArray<CharacterRecord>) => void;
+    characters?: ReadonlyArray<CharacterRecord>;
+    resolveAvatarUrl?: (path: string) => string;
     characterToEditId?: string | null;
     activeCharacterId?: string;
     /** Current response language setting */
@@ -144,19 +173,33 @@ interface CharacterManagerProps {
 
 // ── Component ──────────────────────────────────────
 
-export default function CharacterManager({ onPersonaChange, onActivateCharacter, onCharacterRuntimeChange, characterToEditId, activeCharacterId: activeCharacterIdProp, responseLanguage, onResponseLanguageChange, userLanguage, onUserLanguageChange }: CharacterManagerProps) {
+export default function CharacterManager({ onPersonaChange, onActivateCharacter, onCharacterRuntimeChange, onCharactersChanged, characters: charactersProp, resolveAvatarUrl, characterToEditId, activeCharacterId: activeCharacterIdProp, responseLanguage, onResponseLanguageChange, userLanguage, onUserLanguageChange }: CharacterManagerProps) {
     const { t } = useTranslation();
     const [characters, setCharacters] = useState<CharacterRecord[]>([]);
     const [activeId, setActiveId] = useState<string | null>(null);
     const [editChar, setEditChar] = useState<CharacterRecord | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-    const [importFeedback, setImportFeedback] = useState<string | null>(null);
+    const [importFeedback, setImportFeedback] = useState<ImportFeedback | null>(null);
+    const avatarInputRef = useRef<HTMLInputElement | null>(null);
+    const [isAvatarUpdating, setIsAvatarUpdating] = useState(false);
     const [userProfile, setUserProfile] = useState<UserProfile>(loadUserProfile);
     const [proactiveEnabled, setProactiveEnabledState] = useState(true);
 
     const onPersonaChangeRef = useRef(onPersonaChange);
     onPersonaChangeRef.current = onPersonaChange;
+    const onCharactersChangedRef = useRef(onCharactersChanged);
+    onCharactersChangedRef.current = onCharactersChanged;
+
+    function publishCharacters(nextCharacters: Array<CharacterRecord>): void {
+        setCharacters(nextCharacters);
+        onCharactersChangedRef.current?.(nextCharacters);
+    }
+
+    useEffect(() => {
+        if (charactersProp === undefined) return;
+        setCharacters(Array.from(charactersProp));
+    }, [charactersProp]);
 
     useEffect(() => {
         getProactiveEnabled().then(setProactiveEnabledState).catch(() => {});
@@ -197,7 +240,7 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
                 all = [defaultChar];
             }
 
-            setCharacters(all);
+            publishCharacters(all);
 
             const savedId = localStorage.getItem(ACTIVE_CHAR_KEY);
             const active = (savedId && all.find(c => c.id === savedId)) ? all.find(c => c.id === savedId)! : all[0];
@@ -260,7 +303,7 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
         };
         try {
             await createCharacter(newChar);
-            setCharacters(prev => [...prev, newChar]);
+            publishCharacters([...characters, newChar]);
             await selectCharacter(newChar);
         } catch (err) {
             console.error("[CharacterManager] Failed to create character:", err);
@@ -272,12 +315,67 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
         setEditChar(prev => prev ? { ...prev, [field]: value } : null);
     };
 
+    const handleAvatarFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+        if (isAvatarUpdating) return;
+        const file = event.currentTarget.files?.[0];
+        event.currentTarget.value = "";
+        if (!file || !editChar) return;
+        setIsAvatarUpdating(true);
+        try {
+            const updated: CharacterRecord = {
+                ...editChar,
+                avatar_path: `character-instance-resource://${editChar.id}/avatar.png`,
+                updated_at: Date.now(),
+            };
+            await updateCharacterWithAvatar(updated, new Uint8Array(await file.arrayBuffer()));
+            publishCharacters(characters.map(character => character.id === updated.id ? updated : character));
+            setEditChar(updated);
+            setImportFeedback({
+                kind: "success",
+                message: t("settings.persona.status.avatar_updated"),
+            });
+        } catch (error) {
+            setImportFeedback({
+                kind: "error",
+                message: t("settings.persona.status.avatar_update_failed", { error: getKokoroErrorMessage(error) }),
+            });
+        } finally {
+            setIsAvatarUpdating(false);
+        }
+    };
+
+    const handleRemoveAvatar = async () => {
+        if (!editChar?.avatar_path || isAvatarUpdating) return;
+        setIsAvatarUpdating(true);
+        try {
+            const updated: CharacterRecord = {
+                ...editChar,
+                avatar_path: null,
+                updated_at: Date.now(),
+            };
+            await updateCharacter(updated);
+            publishCharacters(characters.map(character => character.id === updated.id ? updated : character));
+            setEditChar(updated);
+            setImportFeedback({
+                kind: "success",
+                message: t("settings.persona.status.avatar_removed"),
+            });
+        } catch (error) {
+            setImportFeedback({
+                kind: "error",
+                message: t("settings.persona.status.avatar_update_failed", { error: getKokoroErrorMessage(error) }),
+            });
+        } finally {
+            setIsAvatarUpdating(false);
+        }
+    };
+
     const handleSaveEdit = async () => {
         if (!editChar) return;
         try {
             const updated = { ...editChar, updated_at: Date.now() };
             await updateCharacter(updated);
-            setCharacters(prev => prev.map(c => c.id === updated.id ? updated : c));
+            publishCharacters(characters.map(c => c.id === updated.id ? updated : c));
             if (activeId === updated.id) {
                 await onActivateCharacter(updated.id);
                 onPersonaChangeRef.current(composeSystemPrompt(updated));
@@ -291,7 +389,7 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
         try {
             await deleteCharacter(charId);
             const remaining = characters.filter(c => c.id !== charId);
-            setCharacters(remaining);
+            publishCharacters(remaining);
             setConfirmDeleteId(null);
 
             if (activeId === charId || editChar?.id === charId) {
@@ -300,7 +398,7 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
                 } else {
                     const defaultChar = makeDefaultCharacter();
                     await createCharacter(defaultChar);
-                    setCharacters([defaultChar]);
+                    publishCharacters([defaultChar]);
                     await selectCharacter(defaultChar);
                 }
             }
@@ -341,13 +439,19 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
                 } else {
                     await createCharacter(newChar);
                 }
-                setCharacters(prev => [...prev, newChar]);
+                publishCharacters([...characters, newChar]);
                 await selectCharacter(newChar);
-                setImportFeedback(t("settings.persona.status.imported", { name: profile.name }));
+                setImportFeedback({
+                    kind: "success",
+                    message: t("settings.persona.status.imported", { name: profile.name }),
+                });
                 setTimeout(() => setImportFeedback(null), 3000);
             } catch (err) {
                 console.error("[CharacterManager] Import failed:", err);
-                setImportFeedback(t("settings.persona.status.import_failed", { error: err instanceof Error ? err.message : "Unknown error" }));
+                setImportFeedback({
+                    kind: "error",
+                    message: t("settings.persona.status.import_failed", { error: getKokoroErrorMessage(err) }),
+                });
                 setTimeout(() => setImportFeedback(null), 5000);
             }
         };
@@ -564,12 +668,12 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
                         exit={{ opacity: 0, y: -8 }}
                         className={clsx(
                             "text-xs px-3 py-2 rounded-md",
-                            importFeedback.startsWith("Import failed")
+                            importFeedback.kind === "error"
                                 ? "bg-[var(--color-error)]/10 text-[var(--color-error)]"
                                 : "bg-[var(--color-accent-subtle)] text-[var(--color-accent)]"
                         )}
                     >
-                        {importFeedback}
+                        {importFeedback.message}
                     </motion.div>
                 )}
             </AnimatePresence>
@@ -617,7 +721,13 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
                             onClick={() => selectCharacter(char)}
                             className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-[var(--color-text-secondary)] hover:bg-white/5 transition-colors"
                         >
-                            <UserCircle size={16} strokeWidth={1.5} className="shrink-0 opacity-60" />
+                            <AvatarPreview
+                                path={char.avatar_path ?? null}
+                                resolveAvatarUrl={resolveAvatarUrl}
+                                version={char.updated_at}
+                                alt={char.name}
+                                className="h-9 w-9 shrink-0 rounded-full"
+                            />
                             <div className="flex-1 min-w-0">
                                 <span className="text-sm font-heading font-semibold tracking-wide truncate block">
                                     {char.name}
@@ -652,6 +762,55 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
                 <div className="space-y-3">
                     <div className="border-t border-[var(--color-border)] pt-4">
                         <label className={labelClasses}>{t("settings.persona.edit.title")}</label>
+                    </div>
+
+                    {/* Avatar */}
+                    <div>
+                        <label className="block text-[10px] font-heading font-semibold tracking-wider uppercase text-[var(--color-text-muted)] mb-1">
+                            {t("settings.persona.edit.avatar")}
+                        </label>
+                        <div className="flex items-center gap-3 rounded-md border border-[var(--color-border)] bg-black/20 p-3">
+                            <AvatarPreview
+                                path={editChar.avatar_path ?? null}
+                                resolveAvatarUrl={resolveAvatarUrl}
+                                version={editChar.updated_at}
+                                alt={editChar.name}
+                                className="h-16 w-16 shrink-0 rounded-xl"
+                            />
+                            <div className="min-w-0 flex-1">
+                                <input
+                                    ref={avatarInputRef}
+                                    type="file"
+                                    accept=".png,image/png"
+                                    onChange={handleAvatarFileChange}
+                                    disabled={isAvatarUpdating}
+                                    className="hidden"
+                                />
+                                <div className="flex flex-wrap gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => avatarInputRef.current?.click()}
+                                        disabled={isAvatarUpdating}
+                                        className="rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-[10px] font-semibold text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                                    >
+                                        {t("settings.persona.edit.avatar_choose")}
+                                    </button>
+                                    {editChar.avatar_path && (
+                                        <button
+                                            type="button"
+                                            onClick={() => void handleRemoveAvatar()}
+                                            disabled={isAvatarUpdating}
+                                            className="rounded-md border border-[var(--color-error)]/40 px-2.5 py-1.5 text-[10px] font-semibold text-[var(--color-error)] transition-colors hover:bg-[var(--color-error)]/10"
+                                        >
+                                            {t("settings.persona.edit.avatar_remove")}
+                                        </button>
+                                    )}
+                                </div>
+                                <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
+                                    {t("settings.persona.edit.avatar_desc")}
+                                </p>
+                            </div>
+                        </div>
                     </div>
 
                     {/* Name */}
@@ -706,5 +865,41 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
                 </div>
             )}
         </div>
+    );
+}
+
+type AvatarPreviewProps = {
+    readonly path: string | null;
+    readonly resolveAvatarUrl?: (path: string) => string;
+    readonly version?: number;
+    readonly alt: string;
+    readonly className: string;
+};
+
+function AvatarPreview(props: Readonly<AvatarPreviewProps>) {
+    const [hasError, setHasError] = useState(false);
+
+    useEffect(() => {
+        setHasError(false);
+    }, [props.path, props.version]);
+
+    const canRenderImage = props.path !== null && props.resolveAvatarUrl !== undefined && !hasError;
+    const resolvedUrl = canRenderImage ? props.resolveAvatarUrl?.(props.path ?? "") ?? null : null;
+    const imageUrl = resolvedUrl === null || props.version === undefined
+        ? resolvedUrl
+        : `${resolvedUrl}${resolvedUrl.includes("?") ? "&" : "?"}v=${props.version}`;
+    return (
+        <span className={clsx("grid place-items-center overflow-hidden border border-[var(--color-border)] bg-black/20 text-[var(--color-text-secondary)]", props.className)}>
+            {imageUrl !== null ? (
+                <img
+                    src={imageUrl}
+                    alt={props.alt}
+                    onError={() => setHasError(true)}
+                    className="h-full w-full object-cover"
+                />
+            ) : (
+                <UserCircle size={18} strokeWidth={1.5} aria-hidden="true" />
+            )}
+        </span>
     );
 }

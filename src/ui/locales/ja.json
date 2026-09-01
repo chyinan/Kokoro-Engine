@@ -10,6 +10,13 @@
     "restoreDefault": "テンプレートの初期値に戻す",
     "resolveConflict": "編集を保持してテンプレート更新を適用",
     "copySuffix": "コピー",
+    "preview": "プレビュー",
+    "description": "説明",
+    "persona": "ペルソナ",
+    "greeting": "挨拶",
+    "exampleDialogue": "会話例",
+    "retry": "再試行",
+    "retrying": "再試行中…",
     "ttsProbe": {
       "available": "ローカル TTS が {{endpoint}} で応答しました。",
       "unavailable": "ローカル TTS は {{endpoint}} で応答しませんでした。ブラウザー音声またはテキスト表示に切り替えます。",
@@ -247,10 +254,17 @@
                 "delete": "削除"
             },
             "status": {
+                "avatar_updated": "アバターを更新しました。",
+                "avatar_removed": "アバターを削除しました。",
+                "avatar_update_failed": "アバターの更新に失敗しました: {{error}}",
                 "imported": "\"{{name}}\" をインポートしました！",
                 "import_failed": "インポート失敗: {{error}}"
             },
             "edit": {
+                "avatar": "アバター",
+                "avatar_choose": "PNGを選択",
+                "avatar_remove": "アバターを削除",
+                "avatar_desc": "任意のPNGアバター。未設定の場合はデフォルトを使用します。",
                 "title": "キャラクター編集",
                 "name": "名前",
                 "name_placeholder": "キャラクター名",

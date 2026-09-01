@@ -10,6 +10,13 @@
     "restoreDefault": "Восстановить шаблон",
     "resolveConflict": "Сохранить мои правки и применить обновление",
     "copySuffix": "Копия",
+    "preview": "Предпросмотр",
+    "description": "Описание",
+    "persona": "Персона",
+    "greeting": "Приветствие",
+    "exampleDialogue": "Пример диалога",
+    "retry": "Повторить",
+    "retrying": "Повтор...",
     "ttsProbe": {
       "available": "Локальный TTS ответил по адресу {{endpoint}}.",
       "unavailable": "Локальный TTS не ответил по адресу {{endpoint}}. Будет использован браузерный голос или текстовый режим.",
@@ -247,10 +254,17 @@
         "delete": "Удалить"
       },
       "status": {
+        "avatar_updated": "Аватар обновлён.",
+        "avatar_removed": "Аватар удалён.",
+        "avatar_update_failed": "Не удалось обновить аватар: {{error}}",
         "imported": "Импорт \"{{name}}\" выполнен успешно!",
         "import_failed": "Импорт не удался: {{error}}"
       },
       "edit": {
+        "avatar": "Аватар",
+        "avatar_choose": "Выбрать PNG",
+        "avatar_remove": "Удалить аватар",
+        "avatar_desc": "Необязательный PNG-аватар. Если он не задан, используется аватар по умолчанию.",
         "title": "Редактирование персонажа",
         "name": "Имя",
         "name_placeholder": "Имя персонажа",

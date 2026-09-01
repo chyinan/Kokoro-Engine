@@ -5,7 +5,7 @@ use crate::characters::activation::{
     ActivationCoordinator, ActivationRuntimeBackend, BackendRuntimeSnapshot,
     CharacterActivationToken, CommittedCharacterRuntime, LocalTtsPreset,
 };
-use crate::characters::catalog::{CatalogEntry, CharacterCatalog};
+use crate::characters::catalog::{CatalogEntry, CharacterCatalog, DOCUMENTATION_TEMPLATE_ID};
 use crate::characters::instance_resource::{
     instance_avatar_reference, parse_instance_avatar_reference, validate_avatar_bytes,
     validate_instance_id,
@@ -308,6 +308,17 @@ pub async fn create_character_with_avatar(
 }
 
 #[tauri::command]
+pub async fn update_character_with_avatar(
+    request: UpdateCharacterRequest,
+    avatar_bytes: Vec<u8>,
+    orchestrator: State<'_, AIOrchestrator>,
+    app: AppHandle,
+) -> Result<(), KokoroError> {
+    let app_data = resolve_app_data(&app)?;
+    update_character_with_avatar_in_pool(&orchestrator.db, &app_data, request, &avatar_bytes).await
+}
+
+#[tauri::command]
 pub async fn update_character(
     request: UpdateCharacterRequest,
     orchestrator: State<'_, AIOrchestrator>,
@@ -394,6 +405,7 @@ pub(crate) fn list_character_templates_from_catalog(
 ) -> Result<Vec<CharacterTemplateManifest>, KokoroError> {
     Ok(discover_catalog(catalog)?
         .into_iter()
+        .filter(|entry| entry.manifest.id != DOCUMENTATION_TEMPLATE_ID)
         .map(|entry| entry.manifest)
         .collect())
 }
@@ -522,8 +534,12 @@ pub(crate) async fn apply_character_template_reconciliation_with_resources_in_po
         })?;
     let mut removal =
         stage_owned_avatar_if_replaced(app_data, &current, request.selected.avatar.as_deref())?;
-    apply_character_template_reconciliation_in_pool(pool, catalog, request).await?;
-    removal.finalize();
+    if let Err(error) =
+        apply_character_template_reconciliation_in_pool(pool, catalog, request).await
+    {
+        return Err(recover_managed_avatar_failure(&mut removal, error, Ok(())));
+    }
+    removal.finalize()?;
     Ok(())
 }
 
@@ -583,31 +599,41 @@ pub(crate) async fn create_character_with_avatar_in_pool(
     validate_avatar_bytes(avatar_bytes)
         .map_err(|error| KokoroError::Validation(error.to_string()))?;
 
-    let resource_directory = managed_avatar_directory(app_data, &request.id);
-    if resource_directory.exists() {
-        return Err(KokoroError::Validation(format!(
-            "managed avatar resource already exists for character '{}'",
-            request.id
-        )));
+    let character_id = request.id.clone();
+    let resources_root = ensure_managed_avatar_root(app_data)?;
+    let resource_directory = resources_root.join(&character_id);
+    match fs::symlink_metadata(&resource_directory) {
+        Ok(metadata) => {
+            if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                return Err(KokoroError::Validation(
+                    "character avatar resource directory is unsafe".to_string(),
+                ));
+            }
+            return Err(KokoroError::Validation(format!(
+                "managed avatar resource already exists for character '{}'",
+                character_id
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
-    let resources_root = resource_directory.parent().ok_or_else(|| {
-        KokoroError::Internal("managed avatar resource has no parent directory".to_string())
-    })?;
-    fs::create_dir_all(resources_root)?;
     fs::create_dir(&resource_directory)?;
 
     let persisted = persist_character_avatar(app_data, &request.id, avatar_bytes);
     let avatar_reference = match persisted {
         Ok(reference) => reference,
         Err(error) => {
-            let _ = fs::remove_dir_all(&resource_directory);
-            return Err(KokoroError::Validation(error));
+            let cleanup = remove_managed_avatar_directory(app_data, &character_id);
+            return Err(recover_cleanup_failure(
+                KokoroError::Validation(error),
+                cleanup,
+            ));
         }
     };
     request.avatar_path = Some(avatar_reference);
     if let Err(error) = create_character_in_pool(pool, request).await {
-        let _ = fs::remove_dir_all(resource_directory);
-        return Err(error);
+        let cleanup = remove_managed_avatar_directory(app_data, &character_id);
+        return Err(recover_cleanup_failure(error, cleanup));
     }
     Ok(())
 }
@@ -649,6 +675,52 @@ pub(crate) async fn update_character_in_pool(
     require_affected_character(result.rows_affected(), &request.id)
 }
 
+pub(crate) async fn update_character_with_avatar_in_pool(
+    pool: &SqlitePool,
+    app_data: &Path,
+    mut request: UpdateCharacterRequest,
+    avatar_bytes: &[u8],
+) -> Result<(), KokoroError> {
+    validate_update_request(&request).map_err(KokoroError::Validation)?;
+    validate_instance_id(&request.id)
+        .map_err(|error| KokoroError::Validation(error.to_string()))?;
+    validate_avatar_bytes(avatar_bytes)
+        .map_err(|error| KokoroError::Validation(error.to_string()))?;
+
+    let current = find_character_from_pool(pool, &request.id)
+        .await?
+        .ok_or_else(|| KokoroError::NotFound(format!("character '{}' not found", request.id)))?;
+    let owns_current_avatar = current
+        .avatar_path
+        .as_deref()
+        .and_then(parse_instance_avatar_reference)
+        == Some(current.id.as_str());
+    let mut removal = if owns_current_avatar {
+        ManagedAvatarRemoval::stage(app_data, &current.id)?
+    } else {
+        ManagedAvatarRemoval::empty()
+    };
+
+    let avatar_reference = match persist_character_avatar(app_data, &request.id, avatar_bytes) {
+        Ok(reference) => reference,
+        Err(error) => {
+            let cleanup = remove_managed_avatar_directory(app_data, &request.id);
+            return Err(recover_managed_avatar_failure(
+                &mut removal,
+                KokoroError::Validation(error),
+                cleanup,
+            ));
+        }
+    };
+    request.avatar_path = Some(Some(avatar_reference));
+    if let Err(error) = update_character_in_pool(pool, request).await {
+        let cleanup = remove_managed_avatar_directory(app_data, &current.id);
+        return Err(recover_managed_avatar_failure(&mut removal, error, cleanup));
+    }
+    removal.finalize()?;
+    Ok(())
+}
+
 pub(crate) async fn update_character_with_resources_in_pool(
     pool: &SqlitePool,
     app_data: &Path,
@@ -663,8 +735,10 @@ pub(crate) async fn update_character_with_resources_in_pool(
         }
         None => ManagedAvatarRemoval::empty(),
     };
-    update_character_in_pool(pool, request).await?;
-    removal.finalize();
+    if let Err(error) = update_character_in_pool(pool, request).await {
+        return Err(recover_managed_avatar_failure(&mut removal, error, Ok(())));
+    }
+    removal.finalize()?;
     Ok(())
 }
 
@@ -714,12 +788,20 @@ pub(crate) async fn delete_character_with_resources_in_pool(
         .await;
     if let Err(error) = delete_result {
         drop(transaction);
-        return Err(error.into());
+        return Err(recover_managed_avatar_failure(
+            &mut removal,
+            error.into(),
+            Ok(()),
+        ));
     }
     if let Err(error) = transaction.commit().await {
-        return Err(error.into());
+        return Err(recover_managed_avatar_failure(
+            &mut removal,
+            error.into(),
+            Ok(()),
+        ));
     }
-    removal.finalize();
+    removal.finalize()?;
     Ok(())
 }
 
@@ -808,8 +890,10 @@ pub(crate) async fn restore_character_defaults_with_resources_in_pool(
         .map_err(KokoroError::Validation)?;
     let mut removal =
         stage_owned_avatar_if_replaced(app_data, &current, defaults.avatar_path.as_deref())?;
-    restore_character_defaults_in_pool(pool, request).await?;
-    removal.finalize();
+    if let Err(error) = restore_character_defaults_in_pool(pool, request).await {
+        return Err(recover_managed_avatar_failure(&mut removal, error, Ok(())));
+    }
+    removal.finalize()?;
     Ok(())
 }
 
@@ -840,10 +924,99 @@ fn duplicate_create_request(
     }
 }
 
-fn managed_avatar_directory(app_data: &Path, instance_id: &str) -> std::path::PathBuf {
-    app_data
-        .join("character-instance-resources")
-        .join(instance_id)
+#[cfg(windows)]
+fn is_filesystem_redirect(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_filesystem_redirect(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+fn inspect_managed_avatar_root(app_data: &Path) -> Result<Option<PathBuf>, KokoroError> {
+    let root = app_data.join("character-instance-resources");
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) => {
+            if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                return Err(KokoroError::Validation(
+                    "managed character avatar resource root is unsafe".to_string(),
+                ));
+            }
+            Ok(Some(root))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn ensure_managed_avatar_root(app_data: &Path) -> Result<PathBuf, KokoroError> {
+    let root = app_data.join("character-instance-resources");
+    if inspect_managed_avatar_root(app_data)?.is_none() {
+        fs::create_dir_all(&root)?;
+    }
+    inspect_managed_avatar_root(app_data)?.ok_or_else(|| {
+        KokoroError::Internal("managed character avatar resource root disappeared".to_string())
+    })
+}
+
+fn recover_cleanup_failure(
+    operation_error: KokoroError,
+    cleanup_result: Result<(), KokoroError>,
+) -> KokoroError {
+    match cleanup_result {
+        Ok(()) => operation_error,
+        Err(cleanup_error) => KokoroError::Internal(format!(
+            "avatar operation failed: {operation_error}; cleanup also failed: {cleanup_error}"
+        )),
+    }
+}
+
+fn recover_managed_avatar_failure(
+    removal: &mut ManagedAvatarRemoval,
+    operation_error: KokoroError,
+    cleanup_result: Result<(), KokoroError>,
+) -> KokoroError {
+    let cleanup_error = cleanup_result.err();
+    let restore_error = removal.rollback().err();
+    if cleanup_error.is_none() && restore_error.is_none() {
+        return operation_error;
+    }
+
+    KokoroError::Internal(format!(
+        "avatar operation failed: {operation_error}; cleanup: {}; restoration: {}",
+        cleanup_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "ok".to_string()),
+        restore_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "ok".to_string()),
+    ))
+}
+
+fn remove_managed_avatar_directory(app_data: &Path, instance_id: &str) -> Result<(), KokoroError> {
+    validate_instance_id(instance_id)
+        .map_err(|error| KokoroError::Validation(error.to_string()))?;
+    let Some(resources_root) = inspect_managed_avatar_root(app_data)? else {
+        return Ok(());
+    };
+    let directory = resources_root.join(instance_id);
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) => {
+            if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                return Err(KokoroError::Validation(
+                    "character avatar resource directory is unsafe".to_string(),
+                ));
+            }
+            fs::remove_dir_all(&directory)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 fn stage_owned_avatar_if_replaced(
@@ -866,16 +1039,19 @@ fn stage_owned_avatar_if_replaced(
 fn read_managed_avatar(app_data: &Path, instance_id: &str) -> Result<Vec<u8>, KokoroError> {
     validate_instance_id(instance_id)
         .map_err(|error| KokoroError::Validation(error.to_string()))?;
-    let directory = managed_avatar_directory(app_data, instance_id);
+    let resources_root = inspect_managed_avatar_root(app_data)?.ok_or_else(|| {
+        KokoroError::NotFound("managed avatar resource directory not found".to_string())
+    })?;
+    let directory = resources_root.join(instance_id);
     let directory_metadata = fs::symlink_metadata(&directory)?;
-    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+    if is_filesystem_redirect(&directory_metadata) || !directory_metadata.is_dir() {
         return Err(KokoroError::Validation(
             "character avatar resource directory is unsafe".to_string(),
         ));
     }
     let avatar = directory.join("avatar.png");
     let avatar_metadata = fs::symlink_metadata(&avatar)?;
-    if avatar_metadata.file_type().is_symlink() || !avatar_metadata.is_file() {
+    if is_filesystem_redirect(&avatar_metadata) || !avatar_metadata.is_file() {
         return Err(KokoroError::Validation(
             "character avatar resource file is unsafe".to_string(),
         ));
@@ -901,15 +1077,24 @@ impl ManagedAvatarRemoval {
     }
 
     fn stage(app_data: &Path, instance_id: &str) -> Result<Self, KokoroError> {
-        let original = managed_avatar_directory(app_data, instance_id);
-        if !original.exists() {
+        validate_instance_id(instance_id)
+            .map_err(|error| KokoroError::Validation(error.to_string()))?;
+        let Some(resources_root) = inspect_managed_avatar_root(app_data)? else {
             return Ok(Self::empty());
-        }
-        let metadata = fs::symlink_metadata(&original)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(KokoroError::Validation(
-                "character avatar resource directory is unsafe".to_string(),
-            ));
+        };
+        let original = resources_root.join(instance_id);
+        match fs::symlink_metadata(&original) {
+            Ok(metadata) => {
+                if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                    return Err(KokoroError::Validation(
+                        "character avatar resource directory is unsafe".to_string(),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::empty());
+            }
+            Err(error) => return Err(error.into()),
         }
         let backup =
             original.with_file_name(format!(".{instance_id}.delete-backup-{}", Uuid::new_v4()));
@@ -921,17 +1106,38 @@ impl ManagedAvatarRemoval {
         })
     }
 
-    fn finalize(&mut self) {
+    fn finalize(&mut self) -> Result<(), KokoroError> {
         self.is_armed = false;
         if let Some(backup) = self.backup.take() {
-            if let Err(error) = fs::remove_dir_all(&backup) {
-                tracing::warn!(
-                    target: "characters",
-                    path = %backup.display(),
-                    "failed to remove deleted character resource backup: {error}"
-                );
-            }
+            fs::remove_dir_all(&backup).map_err(|error| {
+                KokoroError::Io(format!(
+                    "failed to remove deleted character resource backup '{}': {error}",
+                    backup.display()
+                ))
+            })?;
         }
+        Ok(())
+    }
+
+    fn rollback(&mut self) -> Result<(), KokoroError> {
+        if !self.is_armed {
+            return Ok(());
+        }
+        let original = self.original.as_ref().ok_or_else(|| {
+            KokoroError::Internal("managed avatar rollback has no original path".to_string())
+        })?;
+        let backup = self.backup.as_ref().ok_or_else(|| {
+            KokoroError::Internal("managed avatar rollback has no backup path".to_string())
+        })?;
+        fs::rename(backup, original).map_err(|error| {
+            KokoroError::Io(format!(
+                "failed to restore managed avatar resource '{}': {error}",
+                original.display()
+            ))
+        })?;
+        self.is_armed = false;
+        self.backup = None;
+        Ok(())
     }
 }
 
@@ -940,8 +1146,11 @@ impl Drop for ManagedAvatarRemoval {
         if !self.is_armed {
             return;
         }
-        if let (Some(original), Some(backup)) = (&self.original, &self.backup) {
-            let _ = fs::rename(backup, original);
+        if let Err(error) = self.rollback() {
+            tracing::error!(
+                target: "characters",
+                "failed to rollback managed avatar resource removal: {error}"
+            );
         }
     }
 }
@@ -1018,24 +1227,51 @@ pub(crate) fn persist_character_avatar(
 ) -> Result<String, String> {
     validate_instance_id(instance_id).map_err(|error| error.to_string())?;
     validate_avatar_bytes(bytes).map_err(|error| error.to_string())?;
-    let directory = managed_avatar_directory(app_data, instance_id);
-    if directory.exists() {
-        let metadata = fs::symlink_metadata(&directory).map_err(|error| error.to_string())?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err("character avatar resource directory is unsafe".to_string());
+    let root = ensure_managed_avatar_root(app_data).map_err(|error| error.to_string())?;
+    let directory = root.join(instance_id);
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) => {
+            if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                return Err("character avatar resource directory is unsafe".to_string());
+            }
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+            let metadata = fs::symlink_metadata(&directory).map_err(|error| error.to_string())?;
+            if is_filesystem_redirect(&metadata) || !metadata.is_dir() {
+                return Err("character avatar resource directory is unsafe".to_string());
+            }
+        }
+        Err(error) => return Err(error.to_string()),
     }
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let target = directory.join("avatar.png");
     let temporary = directory.join(format!(".avatar-{}.tmp", Uuid::new_v4()));
     fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
-    if target.exists() {
+    let target_exists = match fs::symlink_metadata(&target) {
+        Ok(metadata) => {
+            if is_filesystem_redirect(&metadata) || !metadata.is_file() {
+                return Err("character avatar resource file is unsafe".to_string());
+            }
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.to_string()),
+    };
+    if target_exists {
         let backup = directory.join(format!(".avatar-{}.backup", Uuid::new_v4()));
         fs::rename(&target, &backup).map_err(|error| error.to_string())?;
         if let Err(error) = fs::rename(&temporary, &target) {
-            let _ = fs::rename(&backup, &target);
-            let _ = fs::remove_file(&temporary);
-            return Err(error.to_string());
+            let restore_error = fs::rename(&backup, &target).err();
+            let cleanup_error = fs::remove_file(&temporary).err();
+            return Err(format!(
+                "failed to replace character avatar: {error}; restoration: {}; cleanup: {}",
+                restore_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "ok".to_string()),
+                cleanup_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "ok".to_string()),
+            ));
         }
         fs::remove_file(backup).map_err(|error| error.to_string())?;
     } else {

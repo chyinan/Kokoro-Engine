@@ -183,6 +183,7 @@ pub fn run() {
             commands::characters::list_characters,
             commands::characters::create_character,
             commands::characters::create_character_with_avatar,
+            commands::characters::update_character_with_avatar,
             commands::characters::update_character,
             commands::characters::delete_character,
             commands::characters::duplicate_character,

@@ -3,6 +3,7 @@
 import { Bot, Brain, Eye, PlugZap, ShieldCheck, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { getKokoroErrorMessage } from "@/lib/kokoro-bridge";
 
 export type CharacterCapabilityRecommendations = {
   readonly vision: boolean;
@@ -118,7 +119,7 @@ export function CharacterRecommendationDialog(
       if (sessionKeyRef.current === confirmationSession) props.onDismiss();
     } catch (reason) {
       if (sessionKeyRef.current === confirmationSession) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(getKokoroErrorMessage(reason));
         setErrorSessionKey(confirmationSession);
       }
     } finally {

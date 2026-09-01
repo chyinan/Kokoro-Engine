@@ -1884,6 +1884,16 @@ export async function createCharacterWithAvatar(
     });
 }
 
+export async function updateCharacterWithAvatar(
+    record: Omit<CharacterRecord, "created_at">,
+    bytes: Uint8Array,
+): Promise<void> {
+    return invoke("update_character_with_avatar", {
+        request: record,
+        avatarBytes: Array.from(bytes),
+    });
+}
+
 export async function updateCharacter(record: Omit<CharacterRecord, "created_at">): Promise<void> {
     return invoke("update_character", { request: record });
 }

@@ -10,6 +10,13 @@
     "restoreDefault": "Restore template defaults",
     "resolveConflict": "Keep my edits and apply template update",
     "copySuffix": "Copy",
+    "preview": "Preview",
+    "description": "Description",
+    "persona": "Persona",
+    "greeting": "Greeting",
+    "exampleDialogue": "Example dialogue",
+    "retry": "Retry",
+    "retrying": "Retrying...",
     "ttsProbe": {
       "available": "Local TTS responded at {{endpoint}}.",
       "unavailable": "Local TTS did not respond at {{endpoint}}. Browser or text fallback will be used.",
@@ -247,10 +254,17 @@
                 "delete": "DELETE"
             },
             "status": {
+                "avatar_updated": "Avatar updated.",
+                "avatar_removed": "Avatar removed.",
+                "avatar_update_failed": "Avatar update failed: {{error}}",
                 "imported": "Imported \"{{name}}\" successfully!",
                 "import_failed": "Import failed: {{error}}"
             },
             "edit": {
+                "avatar": "Avatar",
+                "avatar_choose": "Choose PNG",
+                "avatar_remove": "Remove avatar",
+                "avatar_desc": "Optional PNG avatar. Without one, the default avatar is used.",
                 "title": "Edit Character",
                 "name": "Name",
                 "name_placeholder": "Character name",

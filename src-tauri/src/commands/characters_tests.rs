@@ -120,6 +120,36 @@ fn template_catalog_returns_validated_manifests() {
     assert_eq!(templates[0].version, "1.1.0");
 }
 
+#[test]
+fn template_catalog_omits_the_documentation_scaffold() {
+    let (temp, catalog) = catalog_with_template("1.1.0", "Hello from catalog");
+    let package_dir = temp.path().join("my-character").join("0.1.0");
+    fs::create_dir_all(&package_dir).unwrap();
+    fs::write(
+        package_dir.join("character.json"),
+        json!({
+            "schema_version": 1,
+            "engine_version": ">=0.3.0, <0.4.0",
+            "id": "my-character",
+            "version": "0.1.0",
+            "name": "My Character",
+            "description": "Documentation scaffold",
+            "author": "Kokoro Project",
+            "license": "CC-BY-4.0",
+            "persona": "Scaffold persona",
+            "greeting": "Hello",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(package_dir.join("LICENSE.md"), "test license").unwrap();
+
+    let templates = list_character_templates_from_catalog(&catalog).unwrap();
+
+    assert_eq!(templates.len(), 1);
+    assert_eq!(templates[0].id, "kokoro");
+}
+
 #[tokio::test]
 async fn instantiate_creates_user_owned_instance_with_unconsumed_greeting() {
     let pool = migrated_pool().await;
@@ -671,6 +701,63 @@ fn imported_png_avatar_is_persisted_as_a_typed_instance_resource() {
     );
     assert!(persist_character_avatar(temp.path(), "../escape", &png).is_err());
     assert!(persist_character_avatar(temp.path(), "instance-2", b"not-png").is_err());
+}
+
+#[tokio::test]
+async fn updating_png_avatar_replaces_the_managed_resource_and_reference() {
+    let pool = migrated_pool().await;
+    let temp = TempDir::new().unwrap();
+    let old_png = [137, 80, 78, 71, 13, 10, 26, 10, 1];
+    let new_png = [137, 80, 78, 71, 13, 10, 26, 10, 2];
+    create_character_with_avatar_in_pool(
+        &pool,
+        temp.path(),
+        complete_create_request("avatar-update"),
+        &old_png,
+    )
+    .await
+    .unwrap();
+
+    update_character_with_avatar_in_pool(
+        &pool,
+        temp.path(),
+        UpdateCharacterRequest {
+            id: "avatar-update".to_string(),
+            name: "Kokoro".to_string(),
+            persona: "Warm and attentive".to_string(),
+            user_nickname: "Friend".to_string(),
+            source_format: "template".to_string(),
+            updated_at: 200,
+            description: None,
+            avatar_path: None,
+            greeting: None,
+            example_dialogue: None,
+            runtime_profile_json: None,
+            user_modified_at: None,
+        },
+        &new_png,
+    )
+    .await
+    .unwrap();
+
+    let updated = list_characters_from_pool(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|character| character.id == "avatar-update")
+        .unwrap();
+    assert_eq!(
+        updated.avatar_path.as_deref(),
+        Some("character-instance-resource://avatar-update/avatar.png")
+    );
+    assert_eq!(
+        fs::read(
+            temp.path()
+                .join("character-instance-resources/avatar-update/avatar.png")
+        )
+        .unwrap(),
+        new_png
+    );
 }
 
 #[tokio::test]
