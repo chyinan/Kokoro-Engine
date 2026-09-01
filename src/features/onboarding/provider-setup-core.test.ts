@@ -2,7 +2,7 @@
 
 import { describe, expect, test } from "vitest";
 import type { LlmConfig, LlmProviderConfig } from "../../lib/kokoro-bridge";
-import { applyProviderSetupToConfig, type ProviderSetup } from "./provider-setup-core";
+import { applyProviderSetupToConfig, createProvider, type ProviderSetup } from "./provider-setup-core";
 
 function provider(): LlmProviderConfig {
   return {
@@ -32,5 +32,19 @@ describe("provider setup functional core", () => {
       active_provider: "openai",
       providers: [{ base_url: "https://api.deepseek.com/v1", model: "deepseek-chat", api_key: "sk-new", extra: { temperature: 0.2 } }],
     });
+  });
+
+  test("creates a Codex runtime provider without API-key fields", () => {
+    const runtime = createProvider("codex_runtime", []);
+
+    expect(runtime).toMatchObject({
+      id: "codex-runtime",
+      provider_type: "codex_runtime",
+      enabled: true,
+      supports_native_tools: true,
+    });
+    expect(runtime.model).toBeUndefined();
+    expect(runtime).not.toHaveProperty("api_key");
+    expect(runtime).not.toHaveProperty("base_url");
   });
 });

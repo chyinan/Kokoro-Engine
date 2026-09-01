@@ -19,6 +19,8 @@ import {
     testLlmConnection,
     listAnthropicModels,
     getLlamaCppStatus,
+    getCodexRuntimeStatus,
+    listCodexRuntimeModels,
     getContextSettings,
     setContextSettings as saveContextSettings,
     type LlmConfig,
@@ -26,6 +28,7 @@ import {
     type LlmProviderConfig,
     type LlmPreset,
     type ContextSettings,
+    type CodexRuntimeInfo,
 } from "../../../lib/kokoro-bridge";
 import {
     createProvider,
@@ -75,12 +78,13 @@ function normalizeSelectedProviders(config: LlmConfig): LlmConfig {
 const LLAMA_CPP_CURRENT_MODEL_KEY = "llama_cpp_current_model";
 const LLAMA_CPP_CONTEXT_LENGTH_KEY = "llama_cpp_context_length";
 
-function getProviderLocationLabel(providerType: string): string {
+function getProviderLocationLabel(providerType: string): "cloud" | "local" | "runtime" {
+    if (providerType === "codex_runtime") return "runtime";
     return providerType === "openai"
         || providerType === "openai_responses"
         || providerType === "anthropic"
-        ? "Cloud"
-        : "Local";
+        ? "cloud"
+        : "local";
 }
 
 function getProviderExtraString(provider: LlmProviderConfig, key: string): string | undefined {
@@ -120,6 +124,8 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
     const [error, setError] = useState<string | null>(null);
     const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [isLoadingModels, setIsLoadingModels] = useState(false);
+    const [codexRuntimeInfo, setCodexRuntimeInfo] = useState<CodexRuntimeInfo | null>(null);
+    const [isLoadingCodexRuntime, setIsLoadingCodexRuntime] = useState(false);
     const [selectedPresetId, setSelectedPresetId] = useState<string>("");
     const [contextSettings, setContextSettings] = useState<ContextSettings>({
         strategy: "window",
@@ -157,6 +163,38 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
     const activeProvider = config
         ? config.providers.find((p) => p.id === config.active_provider) ?? config.providers[0]
         : null;
+
+    const activeProviderType = activeProvider?.provider_type;
+
+    useEffect(() => {
+        if (activeProviderType !== "codex_runtime") {
+            setCodexRuntimeInfo(null);
+            return;
+        }
+
+        let cancelled = false;
+        setIsLoadingCodexRuntime(true);
+        getCodexRuntimeStatus()
+            .then((info) => {
+                if (!cancelled) setCodexRuntimeInfo(info);
+            })
+            .catch(() => {
+                if (!cancelled) {
+                    setCodexRuntimeInfo({ status: "error", binary: "codex" });
+                }
+            })
+            .finally(() => {
+                if (!cancelled) setIsLoadingCodexRuntime(false);
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [activeProviderType]);
+
+    useEffect(() => {
+        setAvailableModels([]);
+    }, [activeProvider?.id]);
 
     // Collect all unique providers from current config and all presets
     const allAvailableProviders = useMemo(() => {
@@ -402,8 +440,12 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
     const handleFetchModels = async () => {
         if (!activeProvider) return;
         setIsLoadingModels(true);
+        setError(null);
         try {
-            if (activeProvider.provider_type === "ollama") {
+            if (activeProvider.provider_type === "codex_runtime") {
+                const models = await listCodexRuntimeModels();
+                setAvailableModels(models);
+            } else if (activeProvider.provider_type === "ollama") {
                 const models = await discoverProviderModels(providerToSetup(activeProvider));
                 setAvailableModels(models);
             } else if (activeProvider.provider_type === "anthropic") {
@@ -488,9 +530,17 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
     const isAnthropic = activeProvider.provider_type === "anthropic";
     const isLlamaCpp = activeProvider.provider_type === "llama_cpp";
     const isOpenAIResponses = activeProvider.provider_type === "openai_responses";
+    const isCodexRuntime = activeProvider.provider_type === "codex_runtime";
     const showApiKey = activeProvider.provider_type === "openai" || isOpenAIResponses || isAnthropic;
     const configuredContextLength = getProviderExtraNumber(activeProvider, LLAMA_CPP_CONTEXT_LENGTH_KEY);
     const detectedCurrentModel = getProviderExtraString(activeProvider, LLAMA_CPP_CURRENT_MODEL_KEY);
+    const codexRuntimeStatusLabel = isLoadingCodexRuntime
+        ? t("settings.api.codex_runtime.checking", { defaultValue: "Checking" })
+        : codexRuntimeInfo
+            ? t(`settings.api.codex_runtime.${codexRuntimeInfo.status}`, {
+                defaultValue: codexRuntimeInfo.status,
+            })
+            : t("settings.api.codex_runtime.unknown", { defaultValue: "Unknown" });
     const modelFetchDisabled =
         isLoadingModels
         || ((activeProvider.provider_type === "openai" || isOpenAIResponses || isAnthropic)
@@ -546,9 +596,13 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                             >
                                 <div className="font-medium capitalize">{p.id}</div>
                                 <div className="text-[8px] leading-tight whitespace-nowrap opacity-70 mt-0.5 overflow-hidden">
-                                    {getProviderLocationLabel(p.provider_type)} · {p.provider_type === "openai_responses"
+                                    {t(`settings.api.provider_locations.${getProviderLocationLabel(p.provider_type)}`, {
+                                        defaultValue: getProviderLocationLabel(p.provider_type),
+                                    })} · {p.provider_type === "openai_responses"
                                         ? t("settings.api.provider_types.openai_responses")
-                                        : getProviderTypeLabel(p.provider_type)}
+                                        : p.provider_type === "codex_runtime"
+                                            ? t("settings.api.provider_types.codex_runtime", { defaultValue: "Codex Runtime" })
+                                            : getProviderTypeLabel(p.provider_type)}
                                 </div>
                             </button>
                             {config.providers.length > 1 && (
@@ -582,7 +636,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                     ))}
                 </div>
                 <div className="flex flex-wrap gap-2 mt-2">
-                    {(["openai", "openai_responses", "anthropic", "ollama", "llama_cpp"] as const).map((providerType) => (
+                    {(["openai", "openai_responses", "anthropic", "ollama", "llama_cpp", "codex_runtime"] as const).map((providerType) => (
                         <button
                             key={providerType}
                             onClick={() => {
@@ -598,11 +652,52 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                             <Plus size={10} />
                             {providerType === "openai_responses"
                                 ? t("settings.api.provider_types.openai_responses")
+                                : providerType === "codex_runtime"
+                                    ? t("settings.api.provider_types.codex_runtime", { defaultValue: "Codex Runtime" })
                                 : getProviderTypeLabel(providerType)}
                         </button>
                     ))}
                 </div>
             </div>
+
+            {isCodexRuntime && (
+                <div className="rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/5 px-3 py-3 space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <div className="text-xs font-medium text-[var(--color-text-main)]">
+                                {t("settings.api.codex_runtime.title", { defaultValue: "Codex Runtime" })}{" "}
+                                <span className="text-[10px] text-[var(--color-accent)]">
+                                    — {t("settings.api.codex_runtime.experimental", { defaultValue: "Experimental" })}
+                                </span>
+                            </div>
+                            <div className="text-[10px] text-[var(--color-text-muted)] mt-1">
+                                {t("settings.api.codex_runtime.managed_description", {
+                                    defaultValue: "Authentication and provider configuration are managed by Codex.",
+                                })}
+                            </div>
+                        </div>
+                        <span className={clsx(
+                            "text-[10px] uppercase tracking-wider",
+                            codexRuntimeInfo?.status === "available" ? "text-emerald-300" : "text-[var(--color-text-muted)]",
+                        )}>
+                            {codexRuntimeStatusLabel}
+                        </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px] text-[var(--color-text-muted)]">
+                        <span>{t("settings.api.codex_runtime.binary", { defaultValue: "Binary" })}</span>
+                        <code className="text-[var(--color-text-main)] truncate">{codexRuntimeInfo?.binary ?? "codex"}</code>
+                        <span>{t("settings.api.codex_runtime.authentication", { defaultValue: "Authentication" })}</span>
+                        <span className="text-[var(--color-text-main)]">{t("settings.api.codex_runtime.managed_by_codex", { defaultValue: "Managed by Codex" })}</span>
+                        <span>{t("settings.api.codex_runtime.provider", { defaultValue: "Provider" })}</span>
+                        <span className="text-[var(--color-text-main)]">{t("settings.api.codex_runtime.managed_by_codex", { defaultValue: "Managed by Codex" })}</span>
+                    </div>
+                    <p className="text-[9px] text-[var(--color-text-muted)]">
+                        {t("settings.api.codex_runtime.privacy", {
+                            defaultValue: "Kokoro does not read or store Codex credentials. Requests use a read-only, ephemeral Codex app-server thread.",
+                        })}
+                    </p>
+                </div>
+            )}
 
             {/* Provider ID */}
             <div>
@@ -655,8 +750,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
             )}
 
             {/* Base URL */}
-            {/* Base URL */}
-            <div>
+            {!isCodexRuntime && <div>
                 <label className={labelClasses}>
                     {isOllama
                         ? t("settings.api.ollama_url")
@@ -679,12 +773,16 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                     }
                     className={clsx(inputClasses, "font-mono")}
                 />
-            </div>
+            </div>}
 
             {/* Model */}
             <div>
                 <div className="flex justify-between items-center mb-2">
-                    <label className={labelClasses.replace("mb-2", "mb-0")}>{t("settings.api.model_label")}</label>
+                    <label className={labelClasses.replace("mb-2", "mb-0")}>
+                        {isCodexRuntime
+                            ? t("settings.api.codex_runtime.model_override", { defaultValue: "Model override (optional)" })
+                            : t("settings.api.model_label")}
+                    </label>
                     <button
                         onClick={handleFetchModels}
                         disabled={modelFetchDisabled}
@@ -708,6 +806,8 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                                         ? "claude-sonnet-4-20250514"
                                         : isOpenAIResponses
                                             ? "gpt-4o"
+                                            : isCodexRuntime
+                                                ? t("settings.api.codex_runtime.model_placeholder", { defaultValue: "Use Codex configuration" })
                                             : "gpt-4"
                         }
                         list="model-list"
@@ -719,6 +819,32 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
                         ))}
                     </datalist>
                 </div>
+                {isCodexRuntime && availableModels.length > 0 && (
+                    <div className="mt-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/40 px-2.5 py-2">
+                        <div className="mb-1.5 text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                            {t("settings.api.codex_runtime.available_models", { defaultValue: "Available models" })}
+                            <span className="ml-1 opacity-70">({availableModels.length})</span>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                            {availableModels.map((model) => (
+                                <button
+                                    key={model}
+                                    type="button"
+                                    onClick={() => updateActiveProvider({ model })}
+                                    className={clsx(
+                                        "rounded-md border px-2 py-1 text-[10px] font-mono transition-colors",
+                                        activeProvider.model === model
+                                            ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+                                            : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text-main)]",
+                                    )}
+                                >
+                                    {model}
+                                    {activeProvider.model === model && <Check size={10} className="ml-1 inline" />}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
                 {isOpenAIResponses && !activeProvider.api_key && activeProvider.api_key_env && (
                     <p className="text-[9px] text-[var(--color-text-muted)] mt-1">
                         {t("settings.api.responses_env_model_hint")}

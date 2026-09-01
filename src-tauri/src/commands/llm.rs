@@ -1,7 +1,9 @@
 //! Tauri commands for LLM config management.
+// pattern: Imperative Shell
 
 use crate::error::KokoroError;
 use crate::llm::anthropic::{AnthropicModelInfo, AnthropicProvider};
+use crate::llm::codex_runtime::{detect_codex_runtime, CodexRuntimeInfo, CodexRuntimeProvider};
 use crate::llm::llama_cpp::{LlamaCppProvider, LlamaCppStatus};
 use crate::llm::llm_config::LlmConfig;
 use crate::llm::ollama::{OllamaModelInfo, OllamaProvider};
@@ -48,6 +50,19 @@ pub async fn list_anthropic_models(
 #[tauri::command]
 pub async fn get_llama_cpp_status(base_url: String) -> Result<LlamaCppStatus, KokoroError> {
     LlamaCppProvider::inspect_server(&base_url)
+        .await
+        .map_err(KokoroError::Llm)
+}
+
+#[tauri::command]
+pub async fn get_codex_runtime_status() -> Result<CodexRuntimeInfo, KokoroError> {
+    Ok(detect_codex_runtime())
+}
+
+#[tauri::command]
+pub async fn list_codex_runtime_models() -> Result<Vec<String>, KokoroError> {
+    CodexRuntimeProvider::new("codex-runtime-model-list".to_string(), None)
+        .list_models()
         .await
         .map_err(KokoroError::Llm)
 }

@@ -212,6 +212,8 @@ pub fn run() {
             commands::llm::list_ollama_models,
             commands::llm::list_anthropic_models,
             commands::llm::get_llama_cpp_status,
+            commands::llm::get_codex_runtime_status,
+            commands::llm::list_codex_runtime_models,
             commands::stt::transcribe_audio,
             commands::stt::get_stt_config,
             commands::stt::save_stt_config,

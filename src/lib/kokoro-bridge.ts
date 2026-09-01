@@ -226,6 +226,12 @@ export interface LlamaCppStatus {
     available_models: string[];
 }
 
+export interface CodexRuntimeInfo {
+    status: "available" | "not_installed" | "error" | string;
+    binary: string;
+    version?: string;
+}
+
 export async function getLlmConfig(): Promise<LlmConfig> {
     return invoke<LlmConfig>("get_llm_config");
 }
@@ -249,6 +255,14 @@ export async function listAnthropicModels(baseUrl: string, apiKey: string): Prom
 
 export async function getLlamaCppStatus(baseUrl: string): Promise<LlamaCppStatus> {
     return invoke<LlamaCppStatus>("get_llama_cpp_status", { baseUrl });
+}
+
+export async function getCodexRuntimeStatus(): Promise<CodexRuntimeInfo> {
+    return invoke<CodexRuntimeInfo>("get_codex_runtime_status");
+}
+
+export async function listCodexRuntimeModels(): Promise<string[]> {
+    return invoke<string[]>("list_codex_runtime_models");
 }
 
 // ── LLM Streaming ──────────────────────────────────

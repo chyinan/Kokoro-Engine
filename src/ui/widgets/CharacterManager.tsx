@@ -17,6 +17,7 @@ import {
     readCharacterRuntimeProfile,
     type CharacterRuntimeOverrides,
 } from "../../features/characters/character-runtime-overrides";
+import { normalizeCharacterPersona } from "./character-persona";
 import { Languages, MessageCircle } from "lucide-react";
 import { Select } from "@/components/ui/select";
 import { useTranslation, Trans } from "react-i18next";
@@ -110,6 +111,16 @@ function loadUserProfile(): UserProfile {
     };
 }
 
+function normalizeCharacterRecord(character: CharacterRecord, userProfile: UserProfile): CharacterRecord {
+    const persona = normalizeCharacterPersona(
+        character.persona,
+        { name: character.name, userNickname: character.user_nickname },
+        userProfile.name,
+        userProfile.persona,
+    );
+    return persona === character.persona ? character : { ...character, persona };
+}
+
 function saveUserProfile(profile: UserProfile) {
     localStorage.setItem(USER_NAME_KEY, profile.name);
     localStorage.setItem(USER_PERSONA_KEY, profile.persona);
@@ -120,30 +131,6 @@ type ImportFeedback = {
     readonly message: string;
 };
 
-// ── Compose system prompt from a character ─────────
-
-export function composeSystemPrompt(
-    char: CharacterRecord,
-    userProfile: UserProfile = loadUserProfile()
-): string {
-    const parts: string[] = [];
-    parts.push(`Your name is ${char.name}.`);
-
-    if (char.persona) {
-        parts.push(char.persona.split("{{user}}").join(userProfile.name));
-    }
-    if (char.user_nickname && char.user_nickname !== "{{user}}") {
-        parts.push(`Address the user as "${char.user_nickname}".`);
-    }
-
-    parts.push(`The user's name is ${userProfile.name}.`);
-    if (userProfile.persona) {
-        parts.push(`About the user: ${userProfile.persona}`);
-    }
-
-    return parts.join(" ");
-}
-
 // ── Storage key for active character ───────────────
 
 const ACTIVE_CHAR_KEY = "kokoro_active_character_id";
@@ -151,8 +138,6 @@ const ACTIVE_CHAR_KEY = "kokoro_active_character_id";
 // ── Props ──────────────────────────────────────────
 
 interface CharacterManagerProps {
-    /** Called whenever the active character changes so SettingsPanel can update its persona buffer */
-    onPersonaChange: (prompt: string) => void;
     /** Routes every user-initiated selection through the activation transaction owner. */
     onActivateCharacter: (characterId: string) => Promise<void>;
     onCharacterRuntimeChange: (overrides: Readonly<CharacterRuntimeOverrides>) => Promise<void>;
@@ -173,7 +158,7 @@ interface CharacterManagerProps {
 
 // ── Component ──────────────────────────────────────
 
-export default function CharacterManager({ onPersonaChange, onActivateCharacter, onCharacterRuntimeChange, onCharactersChanged, characters: charactersProp, resolveAvatarUrl, characterToEditId, activeCharacterId: activeCharacterIdProp, responseLanguage, onResponseLanguageChange, userLanguage, onUserLanguageChange }: CharacterManagerProps) {
+export default function CharacterManager({ onActivateCharacter, onCharacterRuntimeChange, onCharactersChanged, characters: charactersProp, resolveAvatarUrl, characterToEditId, activeCharacterId: activeCharacterIdProp, responseLanguage, onResponseLanguageChange, userLanguage, onUserLanguageChange }: CharacterManagerProps) {
     const { t } = useTranslation();
     const [characters, setCharacters] = useState<CharacterRecord[]>([]);
     const [activeId, setActiveId] = useState<string | null>(null);
@@ -186,8 +171,8 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
     const [userProfile, setUserProfile] = useState<UserProfile>(loadUserProfile);
     const [proactiveEnabled, setProactiveEnabledState] = useState(true);
 
-    const onPersonaChangeRef = useRef(onPersonaChange);
-    onPersonaChangeRef.current = onPersonaChange;
+    const onActivateCharacterRef = useRef(onActivateCharacter);
+    onActivateCharacterRef.current = onActivateCharacter;
     const onCharactersChangedRef = useRef(onCharactersChanged);
     onCharactersChangedRef.current = onCharactersChanged;
 
@@ -229,9 +214,17 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
                 }
             }
 
-            let all = await listCharacters();
-
             const currentUserProfile = loadUserProfile();
+            let all = await listCharacters();
+            const normalizedCharacters = all.map((character) => normalizeCharacterRecord(character, currentUserProfile));
+            const normalizedCharacterIds = new Set<string>();
+            for (const character of normalizedCharacters) {
+                const previous = all.find((candidate) => candidate.id === character.id);
+                if (previous?.persona === character.persona) continue;
+                normalizedCharacterIds.add(character.id);
+                await updateCharacter(character).catch(() => {});
+            }
+            all = normalizedCharacters;
             setUserName(currentUserProfile.name).catch(() => {});
 
             if (all.length === 0) {
@@ -246,8 +239,11 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
             const active = (savedId && all.find(c => c.id === savedId)) ? all.find(c => c.id === savedId)! : all[0];
             setActiveId(active.id);
             setEditChar(active);
-            const prompt = composeSystemPrompt(active);
-            onPersonaChangeRef.current(prompt);
+            if (normalizedCharacterIds.has(active.id)) {
+                await onActivateCharacterRef.current(active.id).catch((error) => {
+                    console.error("[CharacterManager] Failed to refresh normalized character runtime:", error);
+                });
+            }
         } catch (err) {
             console.error("[CharacterManager] Failed to load characters:", err);
         } finally {
@@ -271,7 +267,6 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
         if (!active) return;
         setActiveId(active.id);
         setEditChar({ ...active });
-        onPersonaChangeRef.current(composeSystemPrompt(active, userProfile));
     }, [activeCharacterIdProp, characterToEditId, characters, userProfile]);
 
     const selectCharacter = async (char: CharacterRecord) => {
@@ -283,8 +278,6 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
                 readCharacterRuntimeProfile(char.runtime_profile_json).proactive_enabled ?? true,
             );
             setConfirmDeleteId(null);
-            const prompt = composeSystemPrompt(char);
-            onPersonaChangeRef.current(prompt);
         } catch (error) {
             console.error("[CharacterManager] Failed to activate character:", error);
         }
@@ -373,12 +366,15 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
     const handleSaveEdit = async () => {
         if (!editChar) return;
         try {
-            const updated = { ...editChar, updated_at: Date.now() };
+            const updated = {
+                ...normalizeCharacterRecord(editChar, userProfile),
+                updated_at: Date.now(),
+            };
             await updateCharacter(updated);
             publishCharacters(characters.map(c => c.id === updated.id ? updated : c));
+            setEditChar(updated);
             if (activeId === updated.id) {
                 await onActivateCharacter(updated.id);
-                onPersonaChangeRef.current(composeSystemPrompt(updated));
             }
         } catch (err) {
             console.error("[CharacterManager] Failed to update character:", err);
@@ -478,11 +474,9 @@ export default function CharacterManager({ onPersonaChange, onActivateCharacter,
         saveUserProfile(userProfile);
         setUserName(userProfile.name).catch(e => console.error("[CharacterManager] Failed to set user name:", e));
         setUserPersona(userProfile.persona).catch(e => console.error("[CharacterManager] Failed to persist user profile:", e));
-        // Re-compose the active character's prompt with updated user info
+        // Keep the persisted character persona raw; activation composes the runtime prompt.
         if (editChar) {
-            const nextPersona = composeSystemPrompt(editChar, userProfile);
-            onPersonaChangeRef.current(nextPersona);
-            // Persist the per-character prompt and re-enter the activation owner.
+            const nextPersona = normalizeCharacterRecord(editChar, userProfile).persona;
             void onCharacterRuntimeChange({ persona: nextPersona }).catch(e => console.error("[CharacterManager] Failed to set persona:", e));
         }
     };

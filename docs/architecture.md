@@ -188,8 +188,10 @@ src-tauri/src/
 │
 ├── llm/                           # LLM adapters
 │   ├── service.rs                 # LlmService (main interface)
-│   ├── provider.rs                # LlmProvider trait
-│   ├── openai.rs                  # OpenAI-compatible API adapter
+│   ├── provider.rs                # Provider-neutral LLM contract + OpenAI-compatible adapter
+│   ├── responses.rs               # OpenAI Responses API adapter
+│   ├── codex_runtime.rs           # Experimental Codex app-server runtime bridge
+│   ├── codex_runtime_protocol.rs  # Pure app-server JSONL/request/event conversion
 │   ├── ollama.rs                  # Ollama local inference
 │   ├── context.rs                 # LLM context management
 │   ├── llm_config.rs              # Config persistence
@@ -409,7 +411,7 @@ graph TD
 
 | Pattern | Implementation |
 |---|---|
-| **Pluggable LLM** | OpenAI-compatible + Ollama adapters; Fast/Smart/Cheap model routing |
+| **Pluggable LLM** | OpenAI-compatible + Ollama + experimental Codex Runtime adapters; model routing remains provider-specific |
 | **Pluggable TTS** | `TtsProvider` trait + capability router + fallback chain (preferred/default/browser) |
 | **Pluggable ImageGen** | `ImageGenProvider` trait — Stable Diffusion, DALL-E, Gemini |
 | **Tool calling** | `ActionHandler` trait with `needs_feedback()` for feedback loop control |
@@ -437,7 +439,7 @@ The command set is defined by `tauri::generate_handler![]` in `src-tauri/src/lib
 | TTS | `synthesize`, `list_tts_providers`, `list_tts_voices`, `get_tts_provider_status`, `clear_tts_cache`, `get_tts_config`, `save_tts_config`, `list_gpt_sovits_models` | `tts.rs` |
 | STT | `transcribe_audio`, `get_stt_config`, `save_stt_config`, `transcribe_wake_word_audio`, `start_native_mic`, `stop_native_mic`, `start_native_wake_word`, `stop_native_wake_word`, `get_sensevoice_local_status`, `download_sensevoice_local_model` | `stt.rs` |
 | STT streaming buffer | `process_audio_chunk`, `complete_audio_stream`, `discard_audio_stream`, `snapshot_audio_stream`, `prune_audio_buffer` | `stt/stream.rs` |
-| LLM | `get_llm_config`, `save_llm_config`, `list_ollama_models` | `llm.rs` |
+| LLM | `get_llm_config`, `save_llm_config`, `get_codex_runtime_status`, `list_codex_runtime_models`, `list_ollama_models` | `llm.rs` |
 | Vision | `upload_vision_image`, `get_vision_config`, `save_vision_config`, `start_vision_watcher`, `stop_vision_watcher`, `capture_screen_now` | `vision.rs` |
 | Image generation | `generate_image`, `get_imagegen_config`, `save_imagegen_config`, `test_sd_connection` | `imagegen.rs` |
 | Memory | `list_memories`, `update_memory`, `delete_memory`, `update_memory_tier` | `memory.rs` |

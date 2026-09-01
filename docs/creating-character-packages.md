@@ -56,7 +56,7 @@ identity. Required fields are:
 | Field | Guidance |
 | --- | --- |
 | `schema_version` | Set to `1`. |
-| `engine_version` | Semver requirement supported by the package, for example `>=0.3.1, <0.4.0`. |
+| `engine_version` | Semver requirement supported by the package, for example `>=0.3.1, <0.5.0`. |
 | `id` | Lowercase letters, numbers, and hyphens; 1–64 characters; no leading or trailing hyphen. |
 | `version` | Semantic version for this immutable package, for example `1.0.0`. |
 | `name`, `description`, `author`, `license` | User-facing identity and the license identifier matching `LICENSE.md`. |

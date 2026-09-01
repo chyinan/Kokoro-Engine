@@ -154,7 +154,13 @@
         "api": {
             "provider_label": "LLM Provider",
             "provider_types": {
-                "openai_responses": "OpenAI Responses"
+                "openai_responses": "OpenAI Responses",
+                "codex_runtime": "Codex Runtime"
+            },
+            "provider_locations": {
+                "cloud": "Cloud",
+                "local": "Local",
+                "runtime": "Runtime"
             },
             "provider_id_label": "Provider ID",
             "provider_id_hint": "Unique identifier for this provider (used in system LLM selection)",
@@ -174,6 +180,24 @@
             "fetch_models": "Fetch Available",
             "fetching": "Fetching...",
             "responses_env_model_hint": "Chat can use the configured environment variable, but model listing requires entering the API key here.",
+            "codex_runtime": {
+                "title": "Codex Runtime",
+                "experimental": "Experimental",
+                "managed_description": "Authentication and provider configuration are managed by Codex.",
+                "checking": "Checking",
+                "unknown": "Unknown",
+                "available": "Available",
+                "not_installed": "Not installed",
+                "error": "Error",
+                "binary": "Binary",
+                "authentication": "Authentication",
+                "provider": "Provider",
+                "managed_by_codex": "Managed by Codex",
+                "privacy": "Kokoro does not read or store Codex credentials. Requests use a read-only, ephemeral Codex app-server thread.",
+                "model_override": "Model override (optional)",
+                "model_placeholder": "Use Codex configuration",
+                "available_models": "Available models"
+            },
             "native_tools": {
                 "label": "Tool Calling",
                 "toggle": "Enable native tool calling",

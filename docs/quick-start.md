@@ -26,7 +26,8 @@ Pick one of the built-in characters from the main-surface catalog, or import a S
 1. In the onboarding provider step, review the preselected provider or choose an OpenAI-compatible preset/custom endpoint.
 2. Enter the endpoint, model, and API key required by that provider.
 3. For Ollama, start Ollama first and use its local endpoint.
-4. Use **Settings > API** later for advanced provider options.
+4. To reuse a locally installed Codex setup, add **Codex Runtime — Experimental** in **Settings > API**. Codex keeps control of its own authentication and provider configuration; Kokoro does not request a Codex token.
+5. Use **Settings > API** later for advanced provider options.
 
 Provider credentials stay in your local Kokoro configuration. Character cards and MODs don't receive or replace them.
 
@@ -39,6 +40,8 @@ Run the connection test in onboarding after entering the endpoint, model, and ke
 Send a short message in the chat step. On a later launch, a dismissed setup stays dismissed; use the **Resume setup** chip on the main surface to continue where you left off. The memory embedding model downloads in the background and never blocks a basic text reply; semantic retrieval becomes available when it is ready.
 
 Voice, vision, MCP, MOD, and bot integrations are optional. Configure them only after basic text chat works.
+
+See [Codex Runtime Provider](codex-runtime.md) for its read-only, ephemeral-thread behavior and compatibility limitations.
 
 ## Next steps
 

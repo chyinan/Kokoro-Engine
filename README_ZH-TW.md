@@ -112,6 +112,7 @@ npm run tauri dev
 ### 多維架構
 
 - 支援 Ollama、llama.cpp 與 OpenAI、Anthropic 相容協定 API 介面
+- `Codex Runtime — Experimental`：可選的本機執行時橋接，透過 `codex app-server --listen stdio://` 重用使用者現有的 Codex 驗證、模型與 provider 設定；Kokoro 不讀取或儲存 Codex 憑據，也不修改 Codex 設定。詳見 [Codex Runtime 文件](docs/codex-runtime.md)。
 - 支援多模態輸入、上下文回溯、長期記憶與情感狀態
 
 ### 音訊互動
@@ -130,6 +131,7 @@ npm run tauri dev
 ### 遠端連線
 
 - 內建 QQ、Telegram、Discord、LINE、Webhook 五種 Bot 服務
+- AstrBot 整合：透過具備驗證的通用 Webhook 將 AstrBot 訊息接入 Kokoro，支援依角色與會話處理文字、圖片與音訊，並回傳文字或媒體回覆。詳見 [AstrBot 整合文件](integrations/astrbot-kokoro/README.md)。
 - 將各平台支援的訊息類型橋接至 AI 管線
 
 ## 🏗️ 技術架構

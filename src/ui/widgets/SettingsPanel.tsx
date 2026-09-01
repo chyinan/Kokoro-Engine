@@ -99,7 +99,6 @@ interface SettingsPanelProps {
     onRenderFpsChange: (fps: number) => void;
     // Optional props for external state management (Mod support)
     availableModels?: Live2dModelInfo[];
-    persona?: string;
     responseLanguage?: string;
     ttsConfig?: TtsSystemConfig;
     llmConfig?: LlmConfig;
@@ -286,9 +285,6 @@ function normalizeTtsVoice(
     return getDefaultTtsVoice(providerId, voices);
 }
 
-const DEFAULT_PERSONA =
-    "You are a friendly, warm companion character. Respond with personality and emotion.";
-
 export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange: _onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, resolveAvatarUrl, initialTelegramStatus, onVisionConfigChange, onActivateCharacter, onCharacterRuntimeChange, onCharactersChanged, characterToEditId, activeCharacterId }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [internalActiveTab, setInternalActiveTab] = useState<SettingsTabId>(() => {
@@ -329,7 +325,6 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             setLocalGazeTracking(gazeTrackingProp ?? true);
             bgConfigDirtyRef.current = false;
             setLocalBgConfig({ ...normalizeBackgroundConfigForImageCount(bg.config, bg.imageCount) });
-            setPersonaText(readStringSetting(APP_SETTING_KEYS.persona, DEFAULT_PERSONA));
             setTtsVoice(readStringSetting(APP_SETTING_KEYS.ttsVoice, ""));
             setTtsSpeed(readStringSetting(APP_SETTING_KEYS.ttsSpeed, "1.0"));
             setTtsPitch(readStringSetting(APP_SETTING_KEYS.ttsPitch, "1.0"));
@@ -373,11 +368,6 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         setLocalBgConfig(prev => ({ ...prev, ...update }));
     };
 
-
-    // Persona state
-    const [persona, setPersonaText] = useState(() =>
-        readStringSetting(APP_SETTING_KEYS.persona, DEFAULT_PERSONA)
-    );
 
     // TTS state
     const [ttsVoice, setTtsVoice] = useState(() => readStringSetting(APP_SETTING_KEYS.ttsVoice, ""));
@@ -637,7 +627,6 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         ) ?? null;
         try {
             await onCharacterRuntimeChange({
-                persona,
                 responseLanguage: responseLang,
                 live2dModel: localCustomModelPath,
                 tts: {
@@ -806,7 +795,6 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                             {mountedTabs.has("persona") && (
                                 <div className={activeTab === "persona" ? "block" : "hidden"}>
                                     <CharacterManager
-                                        onPersonaChange={(prompt) => setPersonaText(prompt)}
                                         onActivateCharacter={onActivateCharacter}
                                         onCharacterRuntimeChange={onCharacterRuntimeChange}
                                         onCharactersChanged={onCharactersChanged}

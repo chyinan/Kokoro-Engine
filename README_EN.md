@@ -113,6 +113,7 @@ For more Nix usage, see [docs/nix.md](docs/nix.md).
 ### AI brain
 
 - Supports Ollama, llama.cpp, and protocol API interfaces compatible with OpenAI and Anthropic.
+- `Codex Runtime — Experimental`: an optional local runtime bridge using `codex app-server --listen stdio://` to reuse the user's existing Codex authentication, model, and provider configuration. Kokoro does not read or store Codex credentials or modify Codex configuration. See the [Codex Runtime documentation](docs/codex-runtime.md).
 - Supports multimodal input, context recall, long-term memory, and emotional state continuity.
 
 ### Voice stack
@@ -131,6 +132,7 @@ For more Nix usage, see [docs/nix.md](docs/nix.md).
 ### Remote interaction
 
 - Built-in QQ, Telegram, Discord, LINE, and Webhook services.
+- AstrBot integration: connects AstrBot messages to Kokoro through an authenticated generic webhook, with character- and conversation-scoped text, image, and audio handling plus text/media replies. See the [AstrBot integration guide](integrations/astrbot-kokoro/README.md).
 - Bridges the message types supported by each platform to the AI pipeline.
 
 ## 🏗️ Technical architecture

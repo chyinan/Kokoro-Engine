@@ -154,7 +154,13 @@
         "api": {
             "provider_label": "LLM 服務供應商",
             "provider_types": {
-                "openai_responses": "OpenAI Responses 介面"
+                "openai_responses": "OpenAI Responses 介面",
+                "codex_runtime": "Codex Runtime"
+            },
+            "provider_locations": {
+                "cloud": "雲端",
+                "local": "本機",
+                "runtime": "執行環境"
             },
             "provider_id_label": "服務供應商 ID",
             "provider_id_hint": "該服務供應商的唯一識別碼（用於系統 LLM 選擇）。",
@@ -174,6 +180,24 @@
             "fetch_models": "取得可用模型",
             "fetching": "取得中...",
             "responses_env_model_hint": "聊天可使用已設定的環境變數，但取得模型清單需要在此輸入 API 金鑰。",
+            "codex_runtime": {
+                "title": "Codex Runtime",
+                "experimental": "實驗性",
+                "managed_description": "驗證與 provider 設定由 Codex 管理。",
+                "checking": "檢查中",
+                "unknown": "未知",
+                "available": "已偵測",
+                "not_installed": "未安裝",
+                "error": "錯誤",
+                "binary": "可執行檔",
+                "authentication": "驗證",
+                "provider": "Provider",
+                "managed_by_codex": "由 Codex 管理",
+                "privacy": "Kokoro 不會讀取或儲存 Codex 憑證。請求使用唯讀、暫時的 Codex app-server thread。",
+                "model_override": "模型覆寫（可選）",
+                "model_placeholder": "使用 Codex 設定",
+                "available_models": "可用模型"
+            },
             "native_tools": {
                 "label": "工具呼叫",
                 "toggle": "啟用原生工具呼叫",

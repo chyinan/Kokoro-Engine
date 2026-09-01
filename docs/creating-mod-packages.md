@@ -38,7 +38,7 @@ following is a complete minimal manifest with explicit optional fields:
   "name": "My MOD",
   "version": "0.1.0",
   "description": "A small interface enhancement.",
-  "engine_version": ">=0.3.1, <0.4.0",
+  "engine_version": ">=0.3.1, <0.5.0",
   "layout": "layout.json",
   "theme": "theme.json",
   "components": {

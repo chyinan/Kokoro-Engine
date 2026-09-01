@@ -1771,7 +1771,9 @@ pub async fn stream_chat(
                     .push(assistant_tool_call_metadata_value(&outcome, tool_call_id));
                 continuation_tool_call_messages.push((
                     tool_call_id.clone(),
-                    outcome.tool_name().to_string(),
+                    // Provider-facing history must use the canonical registry id. Keep the
+                    // human-readable action name in metadata for UI/audit purposes.
+                    outcome.tool_id().to_string(),
                     serde_json::to_string(&outcome.invocation.args)
                         .unwrap_or_else(|_| "{}".to_string()),
                 ));

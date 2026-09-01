@@ -154,7 +154,13 @@
         "api": {
             "provider_label": "LLM プロバイダー",
             "provider_types": {
-                "openai_responses": "OpenAI Responses API"
+                "openai_responses": "OpenAI Responses API",
+                "codex_runtime": "Codex Runtime"
+            },
+            "provider_locations": {
+                "cloud": "クラウド",
+                "local": "ローカル",
+                "runtime": "ランタイム"
             },
             "provider_id_label": "プロバイダー ID",
             "provider_id_hint": "このプロバイダーの一意な識別子です（システム LLM の選択で使用）。",
@@ -174,6 +180,24 @@
             "fetch_models": "モデル一覧を取得",
             "fetching": "取得中...",
             "responses_env_model_hint": "チャットは設定済みの環境変数を使用できますが、モデル一覧の取得にはここで API キーを入力する必要があります。",
+            "codex_runtime": {
+                "title": "Codex Runtime",
+                "experimental": "実験的",
+                "managed_description": "認証とプロバイダー設定は Codex が管理します。",
+                "checking": "確認中",
+                "unknown": "不明",
+                "available": "検出済み",
+                "not_installed": "未インストール",
+                "error": "エラー",
+                "binary": "実行ファイル",
+                "authentication": "認証",
+                "provider": "プロバイダー",
+                "managed_by_codex": "Codex が管理",
+                "privacy": "Kokoro は Codex の認証情報を読み取ったり保存したりしません。リクエストには読み取り専用の一時的な Codex app-server スレッドを使用します。",
+                "model_override": "モデルの上書き（任意）",
+                "model_placeholder": "Codex の設定を使用",
+                "available_models": "利用可能なモデル"
+            },
             "native_tools": {
                 "label": "ツール呼び出し",
                 "toggle": "ネイティブ tool calling を有効化",

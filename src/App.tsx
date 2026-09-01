@@ -494,7 +494,6 @@ function App() {
 
   // ── Global Settings State ──
   const [availableModels, setAvailableModels] = useState<Live2dModelInfo[]>([]);
-  const [persona, setPersonaState] = useState(() => readStringSetting(APP_SETTING_KEYS.persona, ""));
   const [responseLanguage, setResponseLanguageState] = useState(() =>
     readStringSetting(APP_SETTING_KEYS.responseLanguage, "zh")
   );
@@ -669,10 +668,8 @@ function App() {
         writeJsonSetting(APP_SETTING_KEYS.characterRuntimeCache, runtime);
       },
       dispatchRuntimeChanged: (runtime) => {
-        writeStringSetting(APP_SETTING_KEYS.persona, runtime.runtime.system_prompt);
         writeStringSetting(APP_SETTING_KEYS.responseLanguage, runtime.runtime.response_language);
         writeBooleanSetting(APP_SETTING_KEYS.proactiveEnabled, runtime.runtime.proactive_enabled);
-        setPersonaState(runtime.runtime.system_prompt);
         setResponseLanguageState(runtime.runtime.response_language);
         setProactiveEnabledState(runtime.runtime.proactive_enabled);
         window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
@@ -2625,7 +2622,6 @@ function App() {
             onRenderFpsChange={handleRenderFpsChange}
             // External state for Mod
             availableModels={availableModels}
-            persona={persona}
             responseLanguage={responseLanguage}
             ttsConfig={ttsConfig}
             llmConfig={llmConfig}

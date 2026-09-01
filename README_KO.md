@@ -113,6 +113,7 @@ Nix 상세 내용은 [docs/nix.md](docs/nix.md)를 참고하세요.
 ### AI 브레인
 
 - Ollama, llama.cpp 및 OpenAI / Anthropic 호환 프로토콜 API 인터페이스 지원.
+- `Codex Runtime — Experimental`: 선택 가능한 로컬 런타임 브리지입니다. `codex app-server --listen stdio://`를 통해 사용자가 이미 설정한 Codex 인증, 모델 및 provider 구성을 재사용합니다. Kokoro는 Codex 자격 증명을 읽거나 저장하지 않으며 Codex 구성을 변경하지 않습니다. [Codex Runtime 문서](docs/codex-runtime.md)를 참고하세요.
 - 멀티모달 입력, 컨텍스트 회수, 장기 기억, 감정 상태 연속성.
 
 ### 음성 스택
@@ -131,6 +132,7 @@ Nix 상세 내용은 [docs/nix.md](docs/nix.md)를 참고하세요.
 ### 원격 상호작용
 
 - QQ, Telegram, Discord, LINE, Webhook 등 다섯 가지 Bot 서비스를 내장합니다.
+- AstrBot 통합: 인증된 범용 Webhook으로 AstrBot 메시지를 Kokoro에 연결하고, 캐릭터 및 대화 단위의 텍스트·이미지·오디오를 처리하여 텍스트 또는 미디어로 응답합니다. [AstrBot 통합 가이드](integrations/astrbot-kokoro/README.md)를 참고하세요.
 - 각 플랫폼에서 지원하는 메시지 형식을 AI 파이프라인에 연결합니다.
 
 ## 🏗️ 기술 아키텍처

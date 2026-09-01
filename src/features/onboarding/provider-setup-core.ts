@@ -3,7 +3,7 @@
 import type { LlmConfig, LlmProviderConfig } from "../../lib/kokoro-bridge";
 
 /** Provider types available from the focused first-run setup. */
-export type SupportedProviderType = "openai" | "openai_responses" | "anthropic" | "ollama" | "llama_cpp";
+export type SupportedProviderType = "openai" | "openai_responses" | "anthropic" | "ollama" | "llama_cpp" | "codex_runtime";
 
 /** A small, curated set of OpenAI-compatible endpoints suitable for onboarding. */
 export type ProviderPreset = Readonly<{
@@ -76,6 +76,8 @@ function getDefaultBaseUrl(providerType: SupportedProviderType): string {
             return "http://127.0.0.1:8080";
         case "anthropic":
             return "https://api.anthropic.com/v1";
+        case "codex_runtime":
+            return "";
         default:
             return "https://api.openai.com/v1";
     }
@@ -92,6 +94,8 @@ export function getDefaultModel(providerType: SupportedProviderType): string {
             return "llama3";
         case "llama_cpp":
             return "";
+        case "codex_runtime":
+            return "";
         default:
             return "gpt-4";
     }
@@ -104,7 +108,9 @@ export function normalizeProviderSetup(setup: Readonly<ProviderSetup>): Provider
         : null;
     const endpoint = trimTrailingSlashes(setup.endpoint) || preset?.baseUrl || getDefaultBaseUrl(setup.providerType);
     const model = setup.model.trim() || preset?.model || getDefaultModel(setup.providerType);
-    const apiKey = setup.providerType === "ollama" || setup.providerType === "llama_cpp"
+    const apiKey = setup.providerType === "ollama"
+        || setup.providerType === "llama_cpp"
+        || setup.providerType === "codex_runtime"
         ? null
         : setup.apiKey?.trim() || null;
 
@@ -139,15 +145,18 @@ function isSupportedProviderType(value: string): value is SupportedProviderType 
         || value === "openai_responses"
         || value === "anthropic"
         || value === "ollama"
-        || value === "llama_cpp";
+        || value === "llama_cpp"
+        || value === "codex_runtime";
 }
 
 function buildProviderId(providerType: SupportedProviderType, providers: ReadonlyArray<LlmProviderConfig>): string {
     const baseId = providerType === "llama_cpp"
-        ? "llama-cpp"
+            ? "llama-cpp"
         : providerType === "openai_responses"
             ? "openai-responses"
-            : providerType;
+            : providerType === "codex_runtime"
+                ? "codex-runtime"
+                : providerType;
     if (!providers.some((provider) => provider.id === baseId)) return baseId;
 
     let suffix = 2;
@@ -167,18 +176,21 @@ export function createProvider(
         apiKey: null,
         model: "",
     });
+    const apiKey = setup.apiKey ?? undefined;
+    const baseUrl = setup.endpoint || undefined;
+    const model = setup.model || undefined;
     return {
         id: buildProviderId(providerType, providers),
         provider_type: providerType,
         enabled: true,
         supports_native_tools: true,
-        api_key: setup.apiKey ?? undefined,
         api_key_env: providerType === "openai" || providerType === "openai_responses"
             ? "OPENAI_API_KEY"
             : providerType === "anthropic" ? "ANTHROPIC_API_KEY" : undefined,
-        base_url: setup.endpoint,
-        model: setup.model,
         extra: {},
+        ...(apiKey ? { api_key: apiKey } : {}),
+        ...(baseUrl ? { base_url: baseUrl } : {}),
+        ...(model ? { model } : {}),
     };
 }
 
@@ -193,6 +205,8 @@ export function getProviderTypeLabel(providerType: string): string {
             return "Ollama";
         case "llama_cpp":
             return "llama.cpp";
+        case "codex_runtime":
+            return "Codex Runtime";
         default:
             return "OpenAI-Compatible";
     }
@@ -211,9 +225,12 @@ export function applyProviderSetupToConfig(
     const provider: LlmProviderConfig = {
         ...fallback,
         provider_type: normalized.providerType,
-        base_url: normalized.endpoint,
-        model: normalized.model,
+        base_url: normalized.endpoint || undefined,
+        model: normalized.model || undefined,
         api_key: normalized.apiKey ?? undefined,
+        supports_native_tools: normalized.providerType === "codex_runtime"
+            ? true
+            : fallback.supports_native_tools,
         api_key_env: normalized.providerType === "openai" || normalized.providerType === "openai_responses"
             ? (fallback.api_key_env || "OPENAI_API_KEY")
             : normalized.providerType === "anthropic" ? (fallback.api_key_env || "ANTHROPIC_API_KEY") : undefined,

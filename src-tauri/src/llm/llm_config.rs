@@ -1,4 +1,6 @@
 //! LLM configuration — persisted to `llm_config.json`.
+// pattern: Mixed (unavoidable)
+// Reason: 该文件同时承载兼容性配置模型与既有 JSON 持久化入口；Codex Runtime 不在此存储凭据。
 
 use crate::config;
 use crate::error::KokoroError;
@@ -10,7 +12,7 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmProviderConfig {
     pub id: String,
-    /// "openai" | "openai_responses" | "anthropic" | "ollama" | "llama_cpp"
+    /// "openai" | "openai_responses" | "anthropic" | "ollama" | "llama_cpp" | "codex_runtime"
     pub provider_type: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -93,6 +95,17 @@ fn default_providers() -> Vec<LlmProviderConfig> {
             api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
             base_url: Some("https://api.anthropic.com/v1".to_string()),
             model: Some("claude-sonnet-4-20250514".to_string()),
+            extra: HashMap::new(),
+        },
+        LlmProviderConfig {
+            id: "codex-runtime".to_string(),
+            provider_type: "codex_runtime".to_string(),
+            enabled: false,
+            supports_native_tools: true,
+            api_key: None,
+            api_key_env: None,
+            base_url: None,
+            model: None,
             extra: HashMap::new(),
         },
         LlmProviderConfig {

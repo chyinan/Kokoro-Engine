@@ -148,6 +148,18 @@ interface ContextSettings {
 ### `LlmConfig`
 
 ```ts
+interface LlmProviderConfig {
+  id: string;
+  provider_type: string;
+  enabled: boolean;
+  supports_native_tools: boolean;
+  api_key?: string;
+  api_key_env?: string;
+  base_url?: string;
+  model?: string;
+  extra?: Record<string, unknown>;
+}
+
 interface LlmConfig {
   active_provider: string;
   system_provider?: string;
@@ -668,6 +680,8 @@ The tables below list the current IPC commands. The `Bridge` column shows whethe
 |---|---|---|---|---|
 | `get_llm_config` | `getLlmConfig` | none | `LlmConfig` | Returns the active LLM config. |
 | `save_llm_config` | `saveLlmConfig` | `config: LlmConfig` | `void` | Saves the active LLM config. |
+| `get_codex_runtime_status` | `getCodexRuntimeStatus` | none | `CodexRuntimeInfo` | Detects a local Codex CLI; does not read Codex credentials. |
+| `list_codex_runtime_models` | `listCodexRuntimeModels` | none | `string[]` | Queries the Codex app-server `model/list` RPC. |
 | `list_ollama_models` | `listOllamaModels` | `baseUrl: string` | `OllamaModelInfo[]` | Lists models from an Ollama server. |
 
 ### Chat
@@ -1082,7 +1096,7 @@ If you want structured handling, use `parseKokoroError` from `kokoro-bridge.ts`.
 - character: `getCharacterState`, `playCue`
 - database: `initDb`, `testVectorStore`, `sendMessage`
 - context: `setPersona`, `setCharacterName`, `setActiveCharacterId`, `setUserName`, `setResponseLanguage`, `setUserLanguage`, `setJailbreakPrompt`, `getJailbreakPrompt`, `setProactiveEnabled`, `getProactiveEnabled`, `clearHistory`, `setMemoryEnabled`, `getMemoryEnabled`, `getContextSettings`, `setContextSettings`, `deleteLastMessages`
-- llm/chat: `getLlmConfig`, `saveLlmConfig`, `listOllamaModels`, `streamChat`, `cancelChatTurn`, `approveToolApproval`, `rejectToolApproval`
+- llm/chat: `getLlmConfig`, `saveLlmConfig`, `getCodexRuntimeStatus`, `listCodexRuntimeModels`, `listOllamaModels`, `streamChat`, `cancelChatTurn`, `approveToolApproval`, `rejectToolApproval`
 - mod/live2d/imagegen/vision/memory/stt/actions/mcp/telegram/backup/characters: see the command tables above
 
 ### Exported event wrappers

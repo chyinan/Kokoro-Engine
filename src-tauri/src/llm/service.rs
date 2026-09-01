@@ -1,7 +1,9 @@
 //! LLM Service — managed Tauri state holding the active LLM provider.
+// pattern: Imperative Shell
 
 use crate::error::KokoroError;
 use crate::llm::anthropic::AnthropicProvider;
+use crate::llm::codex_runtime::CodexRuntimeProvider;
 use crate::llm::llama_cpp::LlamaCppProvider;
 use crate::llm::llm_config::{LlmConfig, LlmPreset, LlmProviderConfig};
 use crate::llm::messages::user_text_message;
@@ -502,6 +504,13 @@ fn try_build_from_provider_config(
                 cfg.base_url.clone(),
                 model,
                 cfg.id.clone(),
+            )))
+        }
+        "codex_runtime" => {
+            tracing::info!(target: "llm", "Initializing experimental Codex runtime provider");
+            Ok(Box::new(CodexRuntimeProvider::new(
+                cfg.id.clone(),
+                cfg.model.clone(),
             )))
         }
         "openai" => {
@@ -1076,6 +1085,27 @@ mod tests {
         let provider = try_build_from_provider_config(&cfg).expect("anthropic should be supported");
 
         assert_eq!(provider.id(), "claude");
+        assert!(provider.supports_native_tools());
+    }
+
+    #[test]
+    fn try_build_from_provider_config_supports_codex_runtime_with_native_tools() {
+        let cfg = LlmProviderConfig {
+            id: "codex-runtime".to_string(),
+            provider_type: "codex_runtime".to_string(),
+            enabled: true,
+            supports_native_tools: true,
+            api_key: None,
+            api_key_env: None,
+            base_url: None,
+            model: None,
+            extra: std::collections::HashMap::new(),
+        };
+
+        let provider = try_build_from_provider_config(&cfg)
+            .expect("Codex runtime provider should be supported");
+
+        assert_eq!(provider.id(), "codex-runtime");
         assert!(provider.supports_native_tools());
     }
 

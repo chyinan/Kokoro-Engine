@@ -3,7 +3,7 @@
     "name": "Genshin Impact Theme",
     "version": "1.0.0",
     "description": "原神风格的对话与设置 UI 主题 — Kokoro Engine 官方示范 MOD",
-    "engine_version": ">=0.3.1, <0.4.0",
+    "engine_version": ">=0.3.1, <0.5.0",
     "theme": "theme.json",
     "components": {
         "ChatPanel": "components/chat.html",
