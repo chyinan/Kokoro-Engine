@@ -1091,7 +1091,10 @@ fn codex_binary_candidates() -> Vec<String> {
         return vec![configured_codex_binary()];
     }
 
+    #[cfg(windows)]
     let mut candidates = vec![DEFAULT_CODEX_BINARY.to_string()];
+    #[cfg(not(windows))]
+    let candidates = vec![DEFAULT_CODEX_BINARY.to_string()];
 
     #[cfg(windows)]
     {
