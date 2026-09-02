@@ -366,6 +366,8 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     const [localAutoBackupConfig, setLocalAutoBackupConfig] = useState<AutoBackupConfig | null>(null);
     const [isAutoBackupLoading, setIsAutoBackupLoading] = useState(true);
     const openRevisionRef = useRef(0);
+    const ttsRefreshRevisionRef = useRef(0);
+    const botRefreshRevisionRef = useRef(0);
     const pendingRuntimePersonaRef = useRef<{ characterId: string; persona: string } | null>(null);
 
     // Baseline snapshots (recorded when opening Settings to support dirty checking and cancel reset)
@@ -669,7 +671,8 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     }, [isOpen]);
 
     const fetchData = async (explicitRevision?: number | unknown) => {
-        const currentRevision = typeof explicitRevision === "number" ? explicitRevision : ++openRevisionRef.current;
+        const sessionRevision = typeof explicitRevision === "number" ? explicitRevision : openRevisionRef.current;
+        const refreshRevision = ++ttsRefreshRevisionRef.current;
         setIsTtsLoading(true);
         try {
             const [providers, voices, ttsConfig, sttConfig] = await Promise.all([
@@ -678,7 +681,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 getTtsConfig(),
                 getSttConfig(),
             ]);
-            if (openRevisionRef.current !== currentRevision) return;
+            if (openRevisionRef.current !== sessionRevision || ttsRefreshRevisionRef.current !== refreshRevision) return;
             setTtsProviders(providers);
             setTtsVoices(voices);
             setLocalTtsConfig(ttsConfig);
@@ -688,17 +691,18 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         } catch (e) {
             console.error("[SettingsPanel] Failed to fetch data:", e);
         } finally {
-            if (openRevisionRef.current === currentRevision) {
+            if (openRevisionRef.current === sessionRevision && ttsRefreshRevisionRef.current === refreshRevision) {
                 setIsTtsLoading(false);
             }
         }
     };
 
     const fetchBotConfig = async (explicitRevision?: number | unknown) => {
-        const currentRevision = typeof explicitRevision === "number" ? explicitRevision : ++openRevisionRef.current;
+        const sessionRevision = typeof explicitRevision === "number" ? explicitRevision : openRevisionRef.current;
+        const refreshRevision = ++botRefreshRevisionRef.current;
         try {
             const botConfig = await getBotConfig();
-            if (openRevisionRef.current !== currentRevision) return;
+            if (openRevisionRef.current !== sessionRevision || botRefreshRevisionRef.current !== refreshRevision) return;
             setLocalBotConfig(botConfig);
             baselineBotConfigRef.current = botConfig;
         } catch (e) {

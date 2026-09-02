@@ -1138,6 +1138,13 @@ pub async fn stream_chat(
         std::sync::Arc<tokio::sync::Mutex<crate::vision::server::VisionServer>>,
     >,
 ) -> Result<(), KokoroError> {
+    // Gate chat if runtime is degraded (e.g. startup recovery failure)
+    if let Some(reason) = state.get_runtime_degraded().await {
+        return Err(KokoroError::Chat(format!(
+            "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings before sending messages."
+        )));
+    }
+
     // 0. Resolve character ID for this request (not stored in shared state)
     let char_id = request
         .character_id

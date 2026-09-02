@@ -101,6 +101,7 @@ async fn apply_orchestrator_runtime(
         .await;
     orchestrator.set_proactive_enabled(snapshot.proactive_enabled);
     *orchestrator.current_conversation_id.lock().await = snapshot.current_conversation_id.clone();
+    orchestrator.clear_runtime_degraded().await;
     Ok(())
 }
 
@@ -109,13 +110,21 @@ async fn sync_orchestrator_history(
     conversation_id: Option<&str>,
 ) -> Result<(), KokoroError> {
     let new_messages = if let Some(conv_id) = conversation_id {
-        let rows = sqlx::query_as::<_, (String, String, Option<String>, String)>(
+        let rows = match sqlx::query_as::<_, (String, String, Option<String>, String)>(
             "SELECT role, content, metadata, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
         )
         .bind(conv_id)
         .fetch_all(&orchestrator.db)
         .await
-        .map_err(|e| KokoroError::Database(format!("failed to load conversation messages: {e}")))?;
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                orchestrator.reset_history_and_boundary().await;
+                return Err(KokoroError::Database(format!(
+                    "failed to load conversation messages: {e}"
+                )));
+            }
+        };
 
         let mut msgs = Vec::with_capacity(rows.len());
         for (role, content, metadata, _) in rows {

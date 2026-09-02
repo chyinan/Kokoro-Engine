@@ -25,6 +25,7 @@ struct TestBackend {
     conversations: Arc<Mutex<HashMap<String, Vec<String>>>>,
     fail_next_apply: Arc<Mutex<bool>>,
     fail_next_sync_history: Arc<Mutex<bool>>,
+    fail_next_restore: Arc<Mutex<bool>>,
 }
 
 impl TestBackend {
@@ -53,6 +54,11 @@ impl ActivationRuntimeBackend for TestBackend {
     }
 
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
+        if std::mem::take(&mut *self.fail_next_restore.lock().await) {
+            return Err(KokoroError::Internal(
+                "injected backend restore failure".into(),
+            ));
+        }
         *self.state.lock().await = snapshot.clone();
         self.sync_history(snapshot.current_conversation_id.as_deref())
             .await
@@ -1258,4 +1264,245 @@ async fn sync_history_failure_returns_error_and_restores_previous_character_and_
         committed.as_ref().map(|c| c.runtime.character_id.as_str()),
         Some("old")
     );
+}
+
+#[tokio::test]
+async fn sync_history_failure_with_rollback_db_failure_realigns_backend_to_committed_state_preventing_split(
+) {
+    let pool = pool().await;
+    insert_character(&pool, "old", "Old Char", json!({})).await;
+    insert_character(&pool, "next", "Next Char", json!({})).await;
+    let coordinator = ActivationCoordinator::default();
+    let backend = TestBackend::default();
+    let original = BackendRuntimeSnapshot {
+        character_id: "old".into(),
+        current_conversation_id: Some("conv-old".into()),
+        ..Default::default()
+    };
+    *backend.state.lock().await = original.clone();
+    backend.sync_history(Some("conv-old")).await.unwrap();
+
+    let token = coordinator
+        .prepare(&pool, "next", &config(vec![], None), &[], &backend)
+        .await
+        .unwrap();
+    *backend.fail_next_sync_history.lock().await = true;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS character_activation_runtime (\
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),\
+            revision INTEGER NOT NULL,\
+            runtime_json TEXT NOT NULL\
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Inject DB failure during rollback via trigger on character_activation_runtime when restoring "old"
+    sqlx::query(
+        "CREATE TRIGGER prevent_runtime_rollback BEFORE UPDATE ON character_activation_runtime \
+         WHEN NEW.runtime_json LIKE '%\"character_id\":\"old\"%' \
+         BEGIN SELECT RAISE(ABORT, 'injected runtime rollback failure'); END;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let err = coordinator
+        .commit(&pool, token, &backend)
+        .await
+        .expect_err("activation commit must fail");
+
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("failed to sync history"),
+        "err was {err_msg}"
+    );
+    assert!(
+        err_msg.contains("failed to rollback committed state"),
+        "err was {err_msg}"
+    );
+
+    // CRITICAL: Backend and SQLite MUST be aligned on "next", NOT split!
+    let committed = coordinator.get_committed(&pool).await.unwrap();
+    assert_eq!(
+        committed.as_ref().map(|c| c.runtime.character_id.as_str()),
+        Some("next")
+    );
+    assert_eq!(backend.state.lock().await.character_id, "next");
+}
+
+#[tokio::test]
+async fn sync_history_failure_with_greeting_revert_failure_aborts_db_rollback_and_reports_error() {
+    let pool = pool().await;
+    insert_character(&pool, "old", "Old Char", json!({})).await;
+    insert_character(&pool, "next", "Next Char", json!({})).await;
+    let coordinator = ActivationCoordinator::default();
+    let backend = TestBackend::default();
+    let original = BackendRuntimeSnapshot {
+        character_id: "old".into(),
+        current_conversation_id: Some("conv-old".into()),
+        ..Default::default()
+    };
+    *backend.state.lock().await = original.clone();
+    backend.sync_history(Some("conv-old")).await.unwrap();
+
+    let token = coordinator
+        .prepare(&pool, "next", &config(vec![], None), &[], &backend)
+        .await
+        .unwrap();
+    *backend.fail_next_sync_history.lock().await = true;
+
+    // Inject greeting revert failure via trigger on conversation_messages DELETE
+    sqlx::query(
+        "CREATE TRIGGER prevent_greeting_deletion BEFORE DELETE ON conversation_messages \
+         BEGIN SELECT RAISE(ABORT, 'injected greeting message delete failure'); END;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let err = coordinator
+        .commit(&pool, token, &backend)
+        .await
+        .expect_err("activation commit must fail");
+
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("failed to sync history"),
+        "err was {err_msg}"
+    );
+    assert!(
+        err_msg.contains("failed to rollback committed state"),
+        "err was {err_msg}"
+    );
+    assert!(
+        err_msg.contains("injected greeting message delete failure"),
+        "err was {err_msg}"
+    );
+
+    // Atomic transaction aborts partial rollback; backend and SQLite remain aligned on "next"
+    let committed = coordinator.get_committed(&pool).await.unwrap();
+    assert_eq!(
+        committed.as_ref().map(|c| c.runtime.character_id.as_str()),
+        Some("next")
+    );
+    assert_eq!(backend.state.lock().await.character_id, "next");
+}
+
+#[tokio::test]
+async fn sync_history_failure_with_backend_restore_failure_realigns_backend_from_database() {
+    let pool = pool().await;
+    insert_character(&pool, "old", "Old Char", json!({})).await;
+    insert_character(&pool, "next", "Next Char", json!({})).await;
+    let coordinator = ActivationCoordinator::default();
+    let backend = TestBackend::default();
+    let original = BackendRuntimeSnapshot {
+        character_id: "old".into(),
+        current_conversation_id: Some("conv-old".into()),
+        ..Default::default()
+    };
+    *backend.state.lock().await = original.clone();
+    backend.sync_history(Some("conv-old")).await.unwrap();
+
+    let token = coordinator
+        .prepare(&pool, "next", &config(vec![], None), &[], &backend)
+        .await
+        .unwrap();
+    *backend.fail_next_sync_history.lock().await = true;
+    *backend.fail_next_restore.lock().await = true;
+
+    let err = coordinator
+        .commit(&pool, token, &backend)
+        .await
+        .expect_err("activation commit must fail");
+
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("failed to sync history"),
+        "err was {err_msg}"
+    );
+    assert!(
+        err_msg.contains("failed to restore backend"),
+        "err was {err_msg}"
+    );
+
+    // DB rollback succeeded, backend was realigned from DB to "old"
+    let committed = coordinator.get_committed(&pool).await.unwrap();
+    assert_eq!(
+        committed.as_ref().map(|c| c.runtime.character_id.as_str()),
+        Some("old")
+    );
+    assert_eq!(backend.state.lock().await.character_id, "old");
+}
+
+#[tokio::test]
+async fn recover_committed_history_sync_failure_clears_dirty_history_and_restores_initial_snapshot()
+{
+    let pool = pool().await;
+    insert_character(&pool, "char-committed", "Committed Char", json!({})).await;
+    let coordinator = ActivationCoordinator::default();
+    let initial_backend = TestBackend::default();
+
+    let token = coordinator
+        .prepare(
+            &pool,
+            "char-committed",
+            &config(vec![], None),
+            &[],
+            &initial_backend,
+        )
+        .await
+        .unwrap();
+    coordinator
+        .commit(&pool, token, &initial_backend)
+        .await
+        .unwrap();
+
+    let recovered_backend = TestBackend::default();
+    let initial_snapshot = BackendRuntimeSnapshot {
+        character_id: "initial-char".into(),
+        character_name: "Initial Char".into(),
+        current_conversation_id: Some("conv-initial".into()),
+        ..Default::default()
+    };
+    *recovered_backend.state.lock().await = initial_snapshot.clone();
+    recovered_backend
+        .set_conversation_history("conv-initial", vec!["initial message".into()])
+        .await;
+    recovered_backend
+        .sync_history(Some("conv-initial"))
+        .await
+        .unwrap();
+    assert_eq!(recovered_backend.history.lock().await.len(), 1);
+
+    *recovered_backend.fail_next_sync_history.lock().await = true;
+
+    let restarted = ActivationCoordinator::default();
+    let err = restarted
+        .recover_committed(&pool, &recovered_backend)
+        .await
+        .expect_err("recover_committed must fail when history sync fails");
+
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("failed to recover conversation history"),
+        "err was {err_msg}"
+    );
+    assert!(
+        err_msg.contains("cleared dirty history and rolled back runtime"),
+        "err was {err_msg}"
+    );
+
+    // CRITICAL: initial snapshot must be restored, and dirty history must be cleared!
+    assert_eq!(
+        recovered_backend.state.lock().await.character_id,
+        "initial-char"
+    );
+    assert!(
+        recovered_backend.history.lock().await.is_empty(),
+        "history must be cleared on failure"
+    );
+    assert_eq!(*recovered_backend.history_boundary.lock().await, 0);
 }

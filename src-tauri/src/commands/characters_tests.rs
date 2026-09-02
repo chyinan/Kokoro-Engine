@@ -1128,3 +1128,39 @@ async fn orchestrator_activation_backend_restore_restores_history_and_memory_bou
     assert_eq!(history[1].content, "Hello!");
     assert_eq!(orchestrator.memory_history_boundary().await, 2);
 }
+
+#[tokio::test]
+async fn orchestrator_runtime_degraded_blocks_prompt_and_clears_on_successful_apply() {
+    let orchestrator = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+    let temp = TempDir::new().unwrap();
+
+    orchestrator
+        .set_runtime_degraded(Some("Startup recovery failed".to_string()))
+        .await;
+    assert!(orchestrator.get_runtime_degraded().await.is_some());
+
+    let err = orchestrator
+        .compose_prompt("Hello", false, None, false, "char-1")
+        .await
+        .expect_err("compose_prompt must fail when degraded");
+    assert!(err.to_string().contains("Character runtime is degraded"));
+
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let snapshot = BackendRuntimeSnapshot {
+        character_id: "char-1".into(),
+        character_name: "Char One".into(),
+        ..Default::default()
+    };
+    backend.apply(&snapshot).await.unwrap();
+
+    // Degradation is cleared upon successful apply
+    assert!(orchestrator.get_runtime_degraded().await.is_none());
+    let (messages, _) = orchestrator
+        .compose_prompt("Hello", false, None, false, "char-1")
+        .await
+        .expect("compose_prompt should succeed once runtime is applied");
+    assert!(!messages.is_empty());
+}

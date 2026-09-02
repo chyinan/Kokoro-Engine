@@ -353,4 +353,137 @@ describe("CharacterManager lifecycle and draft management", () => {
     expect(saveResult.failedDraftIds?.length ?? 0).toBe(0);
     expect(saveResult.errors?.length ?? 0).toBe(0);
   });
+
+  it("editing fields then clicking current character retains draft and allows global save and cancel", async () => {
+    const managerRef = createRef<CharacterManagerRef>();
+    const onActivateCharacter = vi.fn(async () => undefined);
+
+    await act(async () => {
+      root.render(
+        createElement(CharacterManager as any, {
+          ref: managerRef,
+          characters: [char1, char2],
+          activeCharacterId: "char-1",
+          characterToEditId: "char-1",
+          onActivateCharacter,
+        }),
+      );
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 60));
+    });
+
+    // 1. Edit char-1's name and persona
+    const nameInput = container.querySelector<HTMLInputElement>(
+      'input[placeholder="settings.persona.edit.name_placeholder"]',
+    );
+    expect(nameInput).not.toBeNull();
+    await act(async () => {
+      if (nameInput) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          "value",
+        )?.set;
+        nativeSetter?.call(nameInput, "Char 1 Reclick Draft");
+        nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+        nameInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    const personaInput = container.querySelector<HTMLTextAreaElement>(
+      'textarea[placeholder="settings.persona.edit.persona_placeholder"]',
+    );
+    expect(personaInput).not.toBeNull();
+    await act(async () => {
+      if (personaInput) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLTextAreaElement.prototype,
+          "value",
+        )?.set;
+        nativeSetter?.call(personaInput, "Char 1 Reclick Persona");
+        personaInput.dispatchEvent(new Event("input", { bubbles: true }));
+        personaInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    expect(nameInput?.value).toBe("Char 1 Reclick Draft");
+    expect(personaInput?.value).toBe("Char 1 Reclick Persona");
+
+    // 2. Click on the same character (char-1) again in the list
+    const rows = container.querySelectorAll(".group.relative");
+    const char1Button = rows[0]?.querySelector("button");
+    expect(char1Button).not.toBeNull();
+
+    await act(async () => {
+      char1Button?.click();
+    });
+
+    // Verify onActivateCharacter was invoked for char-1
+    expect(onActivateCharacter).toHaveBeenCalledWith("char-1");
+
+    // 3. Verify inputs still retain edited values (NOT discarded or overwritten by baseline)
+    const recheckedNameInput = container.querySelector<HTMLInputElement>(
+      'input[placeholder="settings.persona.edit.name_placeholder"]',
+    );
+    const recheckedPersonaInput = container.querySelector<HTMLTextAreaElement>(
+      'textarea[placeholder="settings.persona.edit.persona_placeholder"]',
+    );
+    expect(recheckedNameInput?.value).toBe("Char 1 Reclick Draft");
+    expect(recheckedPersonaInput?.value).toBe("Char 1 Reclick Persona");
+
+    // Verify the character list item was updated with the draft name
+    expect(rows[0]?.textContent).toContain("Char 1 Reclick Draft");
+
+    // 4. Verify Global Save successfully persists the draft
+    mockUpdateCharacter.mockReset();
+    mockUpdateCharacter.mockImplementation(async (c: CharacterRecord) => c);
+
+    let saveResult: any;
+    await act(async () => {
+      saveResult = await managerRef.current?.saveDraft();
+    });
+
+    expect(saveResult.hasChanges).toBe(true);
+    expect(saveResult.characterDirty).toBe(true);
+    expect(mockUpdateCharacter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "char-1",
+        name: "Char 1 Reclick Draft",
+        persona: "Char 1 Reclick Persona",
+      }),
+    );
+
+    // 5. Test Cancel (resetDraft) after another edit on the same character
+    await act(async () => {
+      if (recheckedNameInput) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          "value",
+        )?.set;
+        nativeSetter?.call(recheckedNameInput, "Char 1 Transient Edit");
+        recheckedNameInput.dispatchEvent(new Event("input", { bubbles: true }));
+        recheckedNameInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    // Re-click same character again
+    await act(async () => {
+      char1Button?.click();
+    });
+
+    expect(recheckedNameInput?.value).toBe("Char 1 Transient Edit");
+
+    // Cancel / reset draft
+    await act(async () => {
+      managerRef.current?.resetDraft();
+    });
+
+    // Verify it cleanly restores back to the last committed state ("Char 1 Reclick Draft")
+    const restoredNameInput = container.querySelector<HTMLInputElement>(
+      'input[placeholder="settings.persona.edit.name_placeholder"]',
+    );
+    expect(restoredNameInput?.value).toBe("Char 1 Reclick Draft");
+  });
 });

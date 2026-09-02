@@ -448,23 +448,32 @@ pub fn run() {
                         )
                         .await
                         {
-                            Ok(Some(committed)) => tracing::info!(
-                                target: "ai",
-                                "Restored committed character runtime: character_id={} revision={}",
-                                committed.runtime.character_id,
-                                committed.revision
-                            ),
+                            Ok(Some(committed)) => {
+                                orch.clear_runtime_degraded().await;
+                                tracing::info!(
+                                    target: "ai",
+                                    "Restored committed character runtime: character_id={} revision={}",
+                                    committed.runtime.character_id,
+                                    committed.revision
+                                );
+                            }
                             Ok(None) => {
+                                orch.clear_runtime_degraded().await;
                                 if let Some(char_id) = crate::ai::context::AIOrchestrator::load_active_character_id() {
                                     orch.set_character_id(char_id.clone()).await;
                                     tracing::info!(target: "ai", "Restored legacy active_character_id: {}", char_id);
                                 }
                             }
-                            Err(error) => tracing::error!(
-                                target: "ai",
-                                "Failed to restore committed character runtime: {}",
-                                error
-                            ),
+                            Err(error) => {
+                                let error_message = format!("Failed to restore committed character runtime: {error}");
+                                tracing::error!(
+                                    target: "ai",
+                                    "{}",
+                                    error_message
+                                );
+                                orch.set_runtime_degraded(Some(error_message)).await;
+                                orch.reset_history_and_boundary().await;
+                            }
                         }
 
                     }
