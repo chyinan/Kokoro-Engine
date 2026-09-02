@@ -1161,6 +1161,10 @@ impl AIOrchestrator {
         *self.memory_history_boundary.lock().await = boundary;
     }
 
+    pub async fn memory_history_boundary(&self) -> usize {
+        *self.memory_history_boundary.lock().await
+    }
+
     pub async fn should_trigger_memory_event(
         &self,
         cooldown_key: &str,

@@ -54,6 +54,7 @@ describe("character conversation synchronization", () => {
     expect(shouldSynchronizeOnRuntimeChanged("kokoro", null)).toBe(false);
     expect(shouldSynchronizeOnRuntimeChanged("kokoro", undefined)).toBe(false);
     expect(shouldSynchronizeOnRuntimeChanged("kokoro", "pico")).toBe(true);
+    expect(shouldSynchronizeOnRuntimeChanged("kokoro", "kokoro", "conv-1", "conv-1", { force: true })).toBe(true);
   });
 
   it("re-synchronizes when the same character has switched target conversation id", () => {

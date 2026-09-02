@@ -1087,3 +1087,44 @@ async fn production_activation_backend_applies_and_persists_complete_selection()
     assert_eq!(active["character_id"], "persistent-character");
     assert_eq!(conversation["conversation_id"], "persistent-conversation");
 }
+
+#[tokio::test]
+async fn orchestrator_activation_backend_restore_restores_history_and_memory_boundary() {
+    let orchestrator = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+    let temp = TempDir::new().unwrap();
+
+    sqlx::query(
+        "INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-1', 'restored-char', 'Test', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+    )
+    .execute(&orchestrator.db)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES ('conv-1', 'user', 'Hi there', '2026-01-01T00:00:01Z'), ('conv-1', 'assistant', 'Hello!', '2026-01-01T00:00:02Z')",
+    )
+    .execute(&orchestrator.db)
+    .await
+    .unwrap();
+
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+
+    let snapshot = BackendRuntimeSnapshot {
+        character_id: "restored-char".into(),
+        character_name: "Restored Name".into(),
+        current_conversation_id: Some("conv-1".into()),
+        ..Default::default()
+    };
+
+    backend.restore(&snapshot).await.unwrap();
+
+    assert_eq!(orchestrator.get_character_id().await, "restored-char");
+    let history = orchestrator.history.lock().await;
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].content, "Hi there");
+    assert_eq!(history[1].content, "Hello!");
+    assert_eq!(orchestrator.memory_history_boundary().await, 2);
+}

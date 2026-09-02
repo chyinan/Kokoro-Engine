@@ -20,7 +20,20 @@ use tokio::sync::Mutex;
 #[derive(Clone, Default)]
 struct TestBackend {
     state: Arc<Mutex<BackendRuntimeSnapshot>>,
+    history: Arc<Mutex<Vec<String>>>,
+    history_boundary: Arc<Mutex<usize>>,
+    conversations: Arc<Mutex<HashMap<String, Vec<String>>>>,
     fail_next_apply: Arc<Mutex<bool>>,
+    fail_next_sync_history: Arc<Mutex<bool>>,
+}
+
+impl TestBackend {
+    async fn set_conversation_history(&self, conversation_id: &str, messages: Vec<String>) {
+        self.conversations
+            .lock()
+            .await
+            .insert(conversation_id.to_string(), messages);
+    }
 }
 
 #[async_trait]
@@ -41,6 +54,26 @@ impl ActivationRuntimeBackend for TestBackend {
 
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
         *self.state.lock().await = snapshot.clone();
+        self.sync_history(snapshot.current_conversation_id.as_deref())
+            .await
+    }
+
+    async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
+        if std::mem::take(&mut *self.fail_next_sync_history.lock().await) {
+            return Err(KokoroError::Internal(
+                "injected backend sync_history failure".into(),
+            ));
+        }
+        let mut history = self.history.lock().await;
+        let mut boundary = self.history_boundary.lock().await;
+        history.clear();
+        *boundary = 0;
+        if let Some(conv_id) = conversation_id {
+            if let Some(msgs) = self.conversations.lock().await.get(conv_id) {
+                *history = msgs.clone();
+                *boundary = msgs.len();
+            }
+        }
         Ok(())
     }
 }
@@ -1068,4 +1101,161 @@ async fn backend_failure_rolls_back_runtime_and_leaves_greeting_unconsumed() {
             .unwrap();
     assert_eq!(consumed, None);
     assert!(coordinator.get_committed(&pool).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn backend_failure_on_apply_restores_conversation_history_and_memory_boundary() {
+    let pool = pool().await;
+    insert_character(&pool, "old", "Old Char", json!({})).await;
+    insert_character(&pool, "next", "Next Char", json!({})).await;
+    let coordinator = ActivationCoordinator::default();
+    let backend = TestBackend::default();
+    let original = BackendRuntimeSnapshot {
+        character_id: "old".into(),
+        current_conversation_id: Some("conv-old".into()),
+        ..Default::default()
+    };
+    *backend.state.lock().await = original.clone();
+    backend
+        .set_conversation_history(
+            "conv-old",
+            vec!["user message".into(), "old response".into()],
+        )
+        .await;
+    backend.sync_history(Some("conv-old")).await.unwrap();
+    assert_eq!(
+        *backend.history.lock().await,
+        vec!["user message".to_string(), "old response".to_string()]
+    );
+    assert_eq!(*backend.history_boundary.lock().await, 2);
+
+    let token = coordinator
+        .prepare(&pool, "next", &config(vec![], None), &[], &backend)
+        .await
+        .unwrap();
+    *backend.fail_next_apply.lock().await = true;
+
+    coordinator
+        .commit(&pool, token, &backend)
+        .await
+        .unwrap_err();
+
+    assert_eq!(*backend.state.lock().await, original);
+    assert_eq!(
+        *backend.history.lock().await,
+        vec!["user message".to_string(), "old response".to_string()]
+    );
+    assert_eq!(*backend.history_boundary.lock().await, 2);
+}
+
+#[tokio::test]
+async fn transaction_commit_failure_restores_previous_conversation_history_and_memory_boundary() {
+    let pool = pool().await;
+    insert_character(&pool, "old", "Old Char", json!({})).await;
+    insert_character(&pool, "next", "Next Char", json!({})).await;
+    let coordinator = ActivationCoordinator::default();
+    let backend = TestBackend::default();
+    let original = BackendRuntimeSnapshot {
+        character_id: "old".into(),
+        current_conversation_id: Some("conv-old".into()),
+        ..Default::default()
+    };
+    *backend.state.lock().await = original.clone();
+    backend
+        .set_conversation_history("conv-old", vec!["remember me".into()])
+        .await;
+    backend.sync_history(Some("conv-old")).await.unwrap();
+
+    // Trigger deferred foreign key violation on commit
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS character_activation_runtime (\
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),\
+            revision INTEGER NOT NULL,\
+            runtime_json TEXT NOT NULL\
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("CREATE TABLE test_fk_p (id TEXT PRIMARY KEY)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE test_fk_c (id TEXT REFERENCES test_fk_p(id) DEFERRABLE INITIALLY DEFERRED)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER test_trigger_fail_commit AFTER INSERT ON character_activation_runtime \
+         BEGIN INSERT INTO test_fk_c VALUES ('missing'); END;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let token = coordinator
+        .prepare(&pool, "next", &config(vec![], None), &[], &backend)
+        .await
+        .unwrap();
+
+    coordinator
+        .commit(&pool, token, &backend)
+        .await
+        .unwrap_err();
+
+    assert_eq!(*backend.state.lock().await, original);
+    assert_eq!(
+        *backend.history.lock().await,
+        vec!["remember me".to_string()]
+    );
+    assert_eq!(*backend.history_boundary.lock().await, 1);
+}
+
+#[tokio::test]
+async fn sync_history_failure_returns_error_and_restores_previous_character_and_history() {
+    let pool = pool().await;
+    insert_character(&pool, "old", "Old Char", json!({})).await;
+    insert_character(&pool, "next", "Next Char", json!({})).await;
+    let coordinator = ActivationCoordinator::default();
+    let backend = TestBackend::default();
+    let original = BackendRuntimeSnapshot {
+        character_id: "old".into(),
+        current_conversation_id: Some("conv-old".into()),
+        ..Default::default()
+    };
+    *backend.state.lock().await = original.clone();
+    backend
+        .set_conversation_history("conv-old", vec!["persisted context".into()])
+        .await;
+    backend.sync_history(Some("conv-old")).await.unwrap();
+
+    let token = coordinator
+        .prepare(&pool, "next", &config(vec![], None), &[], &backend)
+        .await
+        .unwrap();
+    *backend.fail_next_sync_history.lock().await = true;
+
+    let err = coordinator
+        .commit(&pool, token, &backend)
+        .await
+        .expect_err("activation commit must fail when history sync fails");
+
+    assert!(err.to_string().contains("sync"));
+    assert_eq!(*backend.state.lock().await, original);
+    assert_eq!(
+        *backend.history.lock().await,
+        vec!["persisted context".to_string()]
+    );
+    assert_eq!(*backend.history_boundary.lock().await, 1);
+    let committed = coordinator.get_committed(&pool).await.unwrap();
+    assert_eq!(
+        committed.as_ref().map(|c| c.runtime.character_id.as_str()),
+        Some("old")
+    );
 }

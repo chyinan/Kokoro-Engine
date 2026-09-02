@@ -196,7 +196,24 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
         const { t } = useTranslation();
         const [characters, setCharacters] = useState<CharacterRecord[]>([]);
         const [activeId, setActiveId] = useState<string | null>(null);
-        const [editChar, setEditChar] = useState<CharacterRecord | null>(null);
+        const [editChar, setEditCharState] = useState<CharacterRecord | null>(null);
+        const editCharRef = useRef<CharacterRecord | null>(null);
+        editCharRef.current = editChar;
+        const setEditChar = useCallback(
+            (val: CharacterRecord | null | ((prev: CharacterRecord | null) => CharacterRecord | null)) => {
+                if (typeof val === "function") {
+                    setEditCharState((prev) => {
+                        const computed = val(prev);
+                        editCharRef.current = computed;
+                        return computed;
+                    });
+                } else {
+                    editCharRef.current = val;
+                    setEditCharState(val);
+                }
+            },
+            [],
+        );
         const [isLoading, setIsLoading] = useState(true);
         const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
         const [importFeedback, setImportFeedback] = useState<ImportFeedback | null>(null);
@@ -333,7 +350,7 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                         return current;
                     }
                 }
-                if (current && current.id !== selected.id) {
+                if (current && current.id !== selected.id && characters.some(c => c.id === current.id)) {
                     const initialForCurrent = initialCharactersRef.current.get(current.id) ?? baselineCharRef.current;
                     if (isCharacterEditDirty(initialForCurrent, current)) {
                         const updated = {
@@ -362,7 +379,7 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                     return current;
                 }
             }
-            if (current && current.id !== active.id) {
+            if (current && current.id !== active.id && characters.some(c => c.id === current.id)) {
                 const initialForCurrent = initialCharactersRef.current.get(current.id) ?? baselineCharRef.current;
                 if (isCharacterEditDirty(initialForCurrent, current)) {
                     const updated = {
@@ -398,22 +415,29 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                 }
             }
 
-            if (editChar) {
-                const initialForEdit = initialCharactersRef.current.get(editChar.id) ?? baselineCharRef.current;
-                if (isCharacterEditDirty(initialForEdit, editChar)) {
-                    const normalized = normalizeCharacterRecord(editChar, userProfile);
+            const currentEdit = editCharRef.current ?? editChar;
+            if (currentEdit && charactersRef.current.some(c => c.id === currentEdit.id)) {
+                const initialForEdit = initialCharactersRef.current.get(currentEdit.id) ?? baselineCharRef.current;
+                if (isCharacterEditDirty(initialForEdit, currentEdit)) {
+                    const normalized = normalizeCharacterRecord(currentEdit, userProfile);
                     const currentUpdated = {
                         ...normalized,
                         updated_at: Date.now(),
                     };
                     characterDraftsRef.current.set(currentUpdated.id, currentUpdated);
                 } else {
-                    characterDraftsRef.current.delete(editChar.id);
+                    characterDraftsRef.current.delete(currentEdit.id);
                 }
+            } else if (currentEdit) {
+                characterDraftsRef.current.delete(currentEdit.id);
             }
 
-            // Purge any drafts in characterDraftsRef that are no longer dirty against initial snapshot
+            // Purge any drafts in characterDraftsRef that are no longer dirty against initial snapshot or no longer in charactersRef
             for (const [id, draft] of characterDraftsRef.current.entries()) {
+                if (!charactersRef.current.some(c => c.id === id)) {
+                    characterDraftsRef.current.delete(id);
+                    continue;
+                }
                 const initial = initialCharactersRef.current.get(id);
                 if (initial && !isCharacterEditDirty(initial, draft)) {
                     characterDraftsRef.current.delete(id);
@@ -437,8 +461,9 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                 }
                 const nextList = charactersRef.current.map(c => committedMap.get(c.id) ?? c);
                 publishCharacters(nextList);
-                if (editChar && committedMap.has(editChar.id)) {
-                    const updated = committedMap.get(editChar.id)!;
+                const currentEdit = editCharRef.current ?? editChar;
+                if (currentEdit && committedMap.has(currentEdit.id)) {
+                    const updated = committedMap.get(currentEdit.id)!;
                     setEditChar(updated);
                     baselineCharRef.current = { ...updated };
                 }
@@ -461,7 +486,10 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
         resetDraft: () => {
             setUserProfile({ ...baselineUserProfileRef.current });
             const draftedIds = new Set(characterDraftsRef.current.keys());
-            if (editChar) draftedIds.add(editChar.id);
+            const currentEdit = editCharRef.current ?? editChar;
+            if (currentEdit && charactersRef.current.some(c => c.id === currentEdit.id)) {
+                draftedIds.add(currentEdit.id);
+            }
 
             const restoredList = charactersRef.current.map(c => {
                 if (draftedIds.has(c.id) && initialCharactersRef.current.has(c.id)) {
@@ -471,25 +499,35 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
             });
             characterDraftsRef.current.clear();
             publishCharacters(restoredList);
-            const initialForCurrent = editChar ? initialCharactersRef.current.get(editChar.id) : null;
+            const initialForCurrent = currentEdit ? initialCharactersRef.current.get(currentEdit.id) : null;
             setEditChar(initialForCurrent ? { ...initialForCurrent } : (baselineCharRef.current ? { ...baselineCharRef.current } : null));
         },
     }), [activeId, characters, editChar, userProfile]);
 
-    const selectCharacter = async (char: CharacterRecord, explicitList?: CharacterRecord[]) => {
+    const selectCharacter = async (
+        char: CharacterRecord,
+        explicitList?: CharacterRecord[],
+        options?: { skipSaveCurrentDraft?: boolean },
+    ) => {
         const list = explicitList ?? charactersRef.current;
-        if (editChar) {
-            const initialForEdit = initialCharactersRef.current.get(editChar.id) ?? baselineCharRef.current;
-            if (isCharacterEditDirty(initialForEdit, editChar)) {
-                const updated = {
-                    ...normalizeCharacterRecord(editChar, userProfile),
-                    updated_at: Date.now(),
-                };
-                characterDraftsRef.current.set(updated.id, updated);
-                const nextList = list.map(c => c.id === updated.id ? updated : c);
-                publishCharacters(nextList);
-            } else {
-                characterDraftsRef.current.delete(editChar.id);
+        const currentEdit = editCharRef.current ?? editChar;
+        if (currentEdit && !options?.skipSaveCurrentDraft) {
+            const isExistingInList = list.some(c => c.id === currentEdit.id);
+            if (isExistingInList && currentEdit.id !== char.id) {
+                const initialForEdit = initialCharactersRef.current.get(currentEdit.id) ?? baselineCharRef.current;
+                if (isCharacterEditDirty(initialForEdit, currentEdit)) {
+                    const updated = {
+                        ...normalizeCharacterRecord(currentEdit, userProfile),
+                        updated_at: Date.now(),
+                    };
+                    characterDraftsRef.current.set(updated.id, updated);
+                    const nextList = list.map(c => c.id === updated.id ? updated : c);
+                    publishCharacters(nextList);
+                } else {
+                    characterDraftsRef.current.delete(currentEdit.id);
+                }
+            } else if (!isExistingInList) {
+                characterDraftsRef.current.delete(currentEdit.id);
             }
         }
         try {
@@ -518,9 +556,14 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
             created_at: now,
             updated_at: now,
         };
-        if (editChar && isCharacterEditDirty(baselineCharRef.current, editChar)) {
+        const currentEdit = editCharRef.current ?? editChar;
+        if (
+            currentEdit &&
+            charactersRef.current.some(c => c.id === currentEdit.id) &&
+            isCharacterEditDirty(baselineCharRef.current, currentEdit)
+        ) {
             const updated = {
-                ...normalizeCharacterRecord(editChar, userProfile),
+                ...normalizeCharacterRecord(currentEdit, userProfile),
                 updated_at: Date.now(),
             };
             characterDraftsRef.current.set(updated.id, updated);
@@ -645,15 +688,20 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
             publishCharacters(remaining);
             setConfirmDeleteId(null);
 
-            if (activeId === charId || editChar?.id === charId) {
+            const isDeletedCurrent = activeId === charId || editCharRef.current?.id === charId || editChar?.id === charId;
+            if (isDeletedCurrent) {
+                editCharRef.current = null;
+                baselineCharRef.current = null;
+                setEditChar(null);
+
                 if (remaining.length > 0) {
-                    await selectCharacter(remaining[0], remaining);
+                    await selectCharacter(remaining[0], remaining, { skipSaveCurrentDraft: true });
                 } else {
                     const defaultChar = makeDefaultCharacter();
                     await createCharacter(defaultChar);
                     initialCharactersRef.current.set(defaultChar.id, { ...defaultChar });
                     publishCharacters([defaultChar]);
-                    await selectCharacter(defaultChar, [defaultChar]);
+                    await selectCharacter(defaultChar, [defaultChar], { skipSaveCurrentDraft: true });
                 }
             }
         } catch (err) {
@@ -662,9 +710,14 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
     };
 
     const handleImport = async () => {
-        if (editChar && isCharacterEditDirty(baselineCharRef.current, editChar)) {
+        const currentEdit = editCharRef.current ?? editChar;
+        if (
+            currentEdit &&
+            charactersRef.current.some(c => c.id === currentEdit.id) &&
+            isCharacterEditDirty(baselineCharRef.current, currentEdit)
+        ) {
             const updated = {
-                ...normalizeCharacterRecord(editChar, userProfile),
+                ...normalizeCharacterRecord(currentEdit, userProfile),
                 updated_at: Date.now(),
             };
             characterDraftsRef.current.set(updated.id, updated);

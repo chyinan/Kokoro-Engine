@@ -57,7 +57,9 @@ export function shouldSynchronizeOnRuntimeChanged(
   eventCharacterId: string | null | undefined,
   currentConversationId?: string | null,
   targetConversationId?: string | null,
+  options?: { readonly force?: boolean },
 ): boolean {
+  if (options?.force) return true;
   if (!eventCharacterId) return false;
   if (eventCharacterId !== activeCharacterId) return true;
   if (targetConversationId !== undefined && currentConversationId !== undefined) {

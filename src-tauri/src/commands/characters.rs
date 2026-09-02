@@ -67,7 +67,12 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
     }
 
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
-        apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await
+        apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await?;
+        sync_orchestrator_history(
+            self.orchestrator,
+            snapshot.current_conversation_id.as_deref(),
+        )
+        .await
     }
 
     async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
@@ -96,7 +101,6 @@ async fn apply_orchestrator_runtime(
         .await;
     orchestrator.set_proactive_enabled(snapshot.proactive_enabled);
     *orchestrator.current_conversation_id.lock().await = snapshot.current_conversation_id.clone();
-    orchestrator.reset_history_and_boundary().await;
     Ok(())
 }
 

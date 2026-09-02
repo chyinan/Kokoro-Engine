@@ -480,14 +480,23 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                     }
                 });
 
-            fetchData();
-            fetchBotConfig();
+            fetchData(currentRevision);
+            fetchBotConfig(currentRevision);
+        } else {
+            openRevisionRef.current++;
         }
+        return () => {
+            openRevisionRef.current++;
+        };
     }, [isOpen]);
 
     useEffect(() => {
-        if (!isOpen || bgConfigDirtyRef.current) return;
-        setLocalBgConfig({ ...normalizeBackgroundConfigForImageCount(bg.config, bg.imageCount) });
+        if (!isOpen) return;
+        if (!bgConfigDirtyRef.current) {
+            setLocalBgConfig({ ...normalizeBackgroundConfigForImageCount(bg.config, bg.imageCount) });
+        } else if (bg.imageCount === 0) {
+            setLocalBgConfig(prev => normalizeBackgroundConfigForImageCount(prev, 0));
+        }
     }, [isOpen, bg.config, bg.imageCount]);
 
     const [mountedTabs, setMountedTabs] = useState<Set<SettingsTabId>>(() => new Set([activeTab]));
@@ -510,7 +519,10 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     // Update local BG config helper
     const updateBgConfig = (update: Partial<BackgroundConfig>) => {
         bgConfigDirtyRef.current = true;
-        setLocalBgConfig(prev => ({ ...prev, ...update }));
+        setLocalBgConfig(prev => {
+            const merged = { ...prev, ...update };
+            return normalizeBackgroundConfigForImageCount(merged, bg.imageCount);
+        });
     };
 
     useEffect(() => {
@@ -656,31 +668,37 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         return () => document.removeEventListener("keydown", handleKey);
     }, [isOpen]);
 
-    const fetchData = async () => {
+    const fetchData = async (explicitRevision?: number | unknown) => {
+        const currentRevision = typeof explicitRevision === "number" ? explicitRevision : ++openRevisionRef.current;
         setIsTtsLoading(true);
         try {
-            const [providers, voices, ttsConfig] = await Promise.all([
+            const [providers, voices, ttsConfig, sttConfig] = await Promise.all([
                 listTtsProviders(),
                 listTtsVoices(),
                 getTtsConfig(),
+                getSttConfig(),
             ]);
+            if (openRevisionRef.current !== currentRevision) return;
             setTtsProviders(providers);
             setTtsVoices(voices);
             setLocalTtsConfig(ttsConfig);
             baselineTtsConfigRef.current = ttsConfig;
-            const sttConfig = await getSttConfig();
             setLocalSttConfig(sttConfig);
             baselineSttConfigRef.current = sttConfig;
         } catch (e) {
             console.error("[SettingsPanel] Failed to fetch data:", e);
         } finally {
-            setIsTtsLoading(false);
+            if (openRevisionRef.current === currentRevision) {
+                setIsTtsLoading(false);
+            }
         }
     };
 
-    const fetchBotConfig = async () => {
+    const fetchBotConfig = async (explicitRevision?: number | unknown) => {
+        const currentRevision = typeof explicitRevision === "number" ? explicitRevision : ++openRevisionRef.current;
         try {
             const botConfig = await getBotConfig();
+            if (openRevisionRef.current !== currentRevision) return;
             setLocalBotConfig(botConfig);
             baselineBotConfigRef.current = botConfig;
         } catch (e) {
@@ -742,35 +760,53 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
         // 2. Commit Vision Settings & Config
         const visionEnabledDirty = visionEnabled !== baselineVisionEnabledRef.current;
-        if (visionEnabledDirty) {
-            writeBooleanSetting(APP_SETTING_KEYS.visionEnabled, visionEnabled);
-            dispatchRuntimeSettingsChanged("vision");
-            baselineVisionEnabledRef.current = visionEnabled;
-        }
         const visionConfigDirty = isVisionConfigDirty(baselineVisionConfigRef.current, localVisionConfig);
+        let visionSaveFailed = false;
         if (visionConfigDirty && localVisionConfig) {
             try {
                 await saveVisionConfig(localVisionConfig);
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to save Vision config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
+                visionSaveFailed = true;
+            }
+        }
+        if (!visionSaveFailed) {
+            if (visionConfigDirty && localVisionConfig) {
                 localStorage.setItem("kokoro_vision_config", JSON.stringify(localVisionConfig));
                 baselineVisionConfigRef.current = { ...localVisionConfig };
                 onVisionConfigChange?.(localVisionConfig);
                 window.dispatchEvent(new Event("kokoro-vision-settings-changed"));
+            }
+            if (visionEnabledDirty) {
+                writeBooleanSetting(APP_SETTING_KEYS.visionEnabled, visionEnabled);
+                baselineVisionEnabledRef.current = visionEnabled;
+            }
+            if (visionEnabledDirty || visionConfigDirty) {
                 dispatchRuntimeSettingsChanged("vision");
-            } catch (e) {
-                console.error("[SettingsPanel] Failed to save Vision config:", e);
-                saveErrors.push(getKokoroErrorMessage(e));
             }
         }
 
         // 3. Commit STT Settings & Config
-        const sttDirty = isSttConfigDirty(
+        const voiceInterruptDirty = voiceInterrupt !== baselineVoiceInterruptRef.current;
+        const sttConfigDirty = isSttConfigDirty(
             baselineSttConfigRef.current,
             localSttConfig,
             baselineVoiceInterruptRef.current,
-            voiceInterrupt,
+            baselineVoiceInterruptRef.current,
         );
-        if (sttDirty) {
-            if (localSttConfig) {
+        let sttSaveFailed = false;
+        if (sttConfigDirty && localSttConfig) {
+            try {
+                await saveSttConfig(localSttConfig);
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to save STT config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
+                sttSaveFailed = true;
+            }
+        }
+        if (!sttSaveFailed) {
+            if (sttConfigDirty && localSttConfig) {
                 const activeSttProvider = localSttConfig.providers?.find(p => p.id === localSttConfig.active_provider);
                 writeBooleanSetting(APP_SETTING_KEYS.sttEnabled, activeSttProvider?.enabled === true);
                 writeBooleanSetting(APP_SETTING_KEYS.sttAutoSend, localSttConfig.auto_send);
@@ -778,17 +814,15 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 writeBooleanSetting(APP_SETTING_KEYS.sttContinuousListening, localSttConfig.continuous_listening);
                 writeBooleanSetting(APP_SETTING_KEYS.wakeWordEnabled, localSttConfig.wake_word_enabled);
                 writeStringSetting(APP_SETTING_KEYS.wakeWord, localSttConfig.wake_word || "");
-                try {
-                    await saveSttConfig(localSttConfig);
-                    baselineSttConfigRef.current = { ...localSttConfig };
-                } catch (e) {
-                    console.error("[SettingsPanel] Failed to save STT config:", e);
-                    saveErrors.push(getKokoroErrorMessage(e));
-                }
+                baselineSttConfigRef.current = { ...localSttConfig };
             }
-            writeBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, voiceInterrupt);
-            baselineVoiceInterruptRef.current = voiceInterrupt;
-            dispatchRuntimeSettingsChanged("stt");
+            if (voiceInterruptDirty) {
+                writeBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, voiceInterrupt);
+                baselineVoiceInterruptRef.current = voiceInterrupt;
+            }
+            if (sttConfigDirty || voiceInterruptDirty) {
+                dispatchRuntimeSettingsChanged("stt");
+            }
         }
 
         // 4. Commit Core Display & Gaze Tracking
@@ -804,19 +838,20 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         }
 
         // 5. Commit Background Config
-        const bgDirty = bgConfigDirtyRef.current || isBackgroundConfigDirty(baselineBgConfigRef.current, localBgConfig);
+        const finalBgConfig = normalizeBackgroundConfigForImageCount(localBgConfig, bg.imageCount);
+        const bgDirty = bgConfigDirtyRef.current || isBackgroundConfigDirty(baselineBgConfigRef.current, finalBgConfig);
         if (bgDirty) {
-            bg.setConfig(localBgConfig);
-            baselineBgConfigRef.current = { ...localBgConfig };
+            bg.setConfig(finalBgConfig);
+            baselineBgConfigRef.current = { ...finalBgConfig };
             bgConfigDirtyRef.current = false;
         }
 
         // 6. Commit User Language (Translation)
         const userLangDirty = userLang !== baselineUserLangRef.current;
         if (userLangDirty) {
-            writeStringSetting(APP_SETTING_KEYS.userLanguage, userLang);
             try {
                 await setUserLanguage(userLang);
+                writeStringSetting(APP_SETTING_KEYS.userLanguage, userLang);
                 baselineUserLangRef.current = userLang;
             } catch (e) {
                 console.error("[SettingsPanel] Failed to set user language:", e);
@@ -877,8 +912,9 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         const pendingForActive = (pendingRuntime && pendingRuntime.characterId === activeCharacterId)
             ? pendingRuntime.persona
             : null;
-        const personaToApply = (personaDirty && personaSaveResult?.changedCharacter?.persona)
-            ?? pendingForActive;
+        const personaToApply = personaDirty
+            ? (personaSaveResult?.changedCharacter?.persona ?? null)
+            : pendingForActive;
         const runtimeDirty = isRuntimeDirty({
             personaDirty: Boolean(personaToApply),
             ttsDirty: ttsParamsDirty,
@@ -1011,6 +1047,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     };
 
     const handleCancel = () => {
+        openRevisionRef.current++;
         setSaveError(null);
         pendingRuntimePersonaRef.current = null;
         characterManagerRef.current?.resetDraft();
@@ -1018,8 +1055,9 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         setLocalCustomModelPath(baselineCustomModelPathRef.current);
         setLocalGazeTracking(baselineGazeTrackingRef.current);
         setLocalRenderFps(baselineRenderFpsRef.current);
-        setLocalBgConfig(baselineBgConfigRef.current);
-        bg.setConfig(baselineBgConfigRef.current);
+        const restoredBg = normalizeBackgroundConfigForImageCount(baselineBgConfigRef.current, bg.imageCount);
+        setLocalBgConfig(restoredBg);
+        bg.setConfig(restoredBg);
         bgConfigDirtyRef.current = false;
         setUserLang(baselineUserLangRef.current);
         setResponseLang(baselineResponseLangRef.current);
