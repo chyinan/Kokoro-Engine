@@ -14,6 +14,7 @@ use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -29,6 +30,7 @@ struct TestBackend {
     fail_next_restore: Arc<Mutex<bool>>,
     fail_next_clear_history: Arc<Mutex<bool>>,
     degraded: Arc<Mutex<Option<String>>>,
+    activation_locked: Arc<AtomicBool>,
 }
 
 impl TestBackend {
@@ -106,6 +108,18 @@ impl ActivationRuntimeBackend for TestBackend {
 
     async fn clear_degraded(&self) {
         *self.degraded.lock().await = None;
+    }
+
+    async fn lock_activation(&self) -> Result<Box<dyn std::any::Any + Send>, KokoroError> {
+        self.activation_locked.store(true, Ordering::SeqCst);
+        let flag = self.activation_locked.clone();
+        struct Guard(Arc<AtomicBool>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        Ok(Box::new(Guard(flag)))
     }
 }
 

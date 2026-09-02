@@ -133,6 +133,91 @@ fn build_conversation_summary_prompt(transcript: &str, target_language: &str) ->
     )
 }
 
+#[derive(Debug)]
+pub struct ActivationGate {
+    lock: Arc<tokio::sync::RwLock<()>>,
+    activating: Arc<AtomicBool>,
+}
+
+impl Default for ActivationGate {
+    fn default() -> Self {
+        Self {
+            lock: Arc::new(tokio::sync::RwLock::new(())),
+            activating: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+pub struct ActivationLockGuard {
+    _write_guard: tokio::sync::OwnedRwLockWriteGuard<()>,
+    activating: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for ActivationLockGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActivationLockGuard")
+            .field("activating", &self.activating.load(Ordering::SeqCst))
+            .finish()
+    }
+}
+
+impl Drop for ActivationLockGuard {
+    fn drop(&mut self) {
+        self.activating.store(false, Ordering::SeqCst);
+    }
+}
+
+pub struct ChatTurnGuard {
+    _read_guard: tokio::sync::OwnedRwLockReadGuard<()>,
+}
+
+impl std::fmt::Debug for ChatTurnGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatTurnGuard").finish()
+    }
+}
+
+impl ActivationGate {
+    pub async fn acquire_activation_lock(&self) -> ActivationLockGuard {
+        self.activating.store(true, Ordering::SeqCst);
+        let write_guard = self.lock.clone().write_owned().await;
+        ActivationLockGuard {
+            _write_guard: write_guard,
+            activating: self.activating.clone(),
+        }
+    }
+
+    pub fn enter_chat_turn(&self) -> Result<ChatTurnGuard, String> {
+        if self.activating.load(Ordering::SeqCst) {
+            return Err(
+                "Character activation is in progress. Please retry after activation completes."
+                    .to_string(),
+            );
+        }
+        match self.lock.clone().try_read_owned() {
+            Ok(read_guard) => {
+                if self.activating.load(Ordering::SeqCst) {
+                    return Err(
+                        "Character activation is in progress. Please retry after activation completes."
+                            .to_string(),
+                    );
+                }
+                Ok(ChatTurnGuard {
+                    _read_guard: read_guard,
+                })
+            }
+            Err(_) => Err(
+                "Character activation is in progress. Please retry after activation completes."
+                    .to_string(),
+            ),
+        }
+    }
+
+    pub fn is_activating(&self) -> bool {
+        self.activating.load(Ordering::SeqCst)
+    }
+}
+
 pub struct AIOrchestrator {
     pub db: SqlitePool,
     pub system_prompt: Arc<Mutex<String>>,
@@ -186,6 +271,8 @@ pub struct AIOrchestrator {
     /// If startup or activation recovery failed, stores the degradation reason.
     /// While set, LLM chat requests are blocked to prevent cross-character context leakage.
     pub runtime_degraded: Arc<Mutex<Option<String>>>,
+    /// Concurrency gate to block chat turns during character activation and recovery.
+    pub activation_gate: Arc<ActivationGate>,
 }
 
 impl AIOrchestrator {
@@ -237,6 +324,7 @@ impl AIOrchestrator {
             max_message_chars: Arc::new(Mutex::new(2000)),
             vision_context_history_mode: Arc::new(Mutex::new("latest".to_string())),
             runtime_degraded: Arc::new(Mutex::new(None)),
+            activation_gate: Arc::new(ActivationGate::default()),
         })
     }
 
@@ -271,7 +359,20 @@ impl AIOrchestrator {
             max_message_chars: self.max_message_chars.clone(),
             vision_context_history_mode: self.vision_context_history_mode.clone(),
             runtime_degraded: self.runtime_degraded.clone(),
+            activation_gate: self.activation_gate.clone(),
         }
+    }
+
+    pub async fn acquire_activation_lock(&self) -> ActivationLockGuard {
+        self.activation_gate.acquire_activation_lock().await
+    }
+
+    pub fn enter_chat_turn(&self) -> Result<ChatTurnGuard, String> {
+        self.activation_gate.enter_chat_turn()
+    }
+
+    pub fn is_activating(&self) -> bool {
+        self.activation_gate.is_activating()
     }
 
     pub async fn set_runtime_degraded(&self, reason: Option<String>) {
@@ -814,6 +915,10 @@ impl AIOrchestrator {
                 "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings."
             );
         }
+
+        let _turn_guard = self
+            .enter_chat_turn()
+            .map_err(|reason| anyhow::anyhow!("{reason}"))?;
 
         // 1. Determine Model logic
         let model_type = self.router.route(query);
