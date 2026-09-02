@@ -252,17 +252,36 @@ pub async fn get_jailbreak_prompt(state: State<'_, AIOrchestrator>) -> Result<St
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let path = app_data.join("jailbreak_prompt.json");
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(prompt) = val.get("prompt").and_then(|v| v.as_str()) {
-                state.set_jailbreak_prompt(prompt.to_string()).await;
-                return Ok(prompt.to_string());
+
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(val) => {
+                let prompt = val
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                state.set_jailbreak_prompt(prompt.clone()).await;
+                Ok(prompt)
             }
+            Err(e) => {
+                tracing::warn!(target: "ai", "[Context] Failed to parse jailbreak_prompt.json: {e}");
+                Err(KokoroError::Internal(format!(
+                    "corrupted jailbreak_prompt.json: {e}"
+                )))
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File not created yet; do not permanently cache so imported files can be discovered
+            Ok(String::new())
+        }
+        Err(e) => {
+            tracing::warn!(target: "ai", "[Context] Failed to read jailbreak_prompt.json: {e}");
+            Err(KokoroError::Internal(format!(
+                "failed to read jailbreak_prompt.json: {e}"
+            )))
         }
     }
-
-    state.set_jailbreak_prompt(String::new()).await;
-    Ok(String::new())
 }
 
 #[tauri::command]

@@ -8,7 +8,7 @@ import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Spa
 import { ModList } from "../mods/ModList";
 import ContentLibrary from "./ContentLibrary";
 import { Select } from "@/components/ui/select";
-import CharacterManager, { type CharacterManagerRef } from "./CharacterManager";
+import CharacterManager, { type CharacterManagerRef, type CharacterSaveResult } from "./CharacterManager";
 import type { CharacterRuntimeOverrides } from "../../features/characters/character-runtime-overrides";
 import ImageGenSettings from "./ImageGenSettings";
 import MemoryPanel from "./MemoryPanel";
@@ -364,6 +364,9 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
     // Auto Backup Config
     const [localAutoBackupConfig, setLocalAutoBackupConfig] = useState<AutoBackupConfig | null>(null);
+    const [isAutoBackupLoading, setIsAutoBackupLoading] = useState(true);
+    const openRevisionRef = useRef(0);
+    const pendingRuntimePersonaRef = useRef<string | null>(null);
 
     // Baseline snapshots (recorded when opening Settings to support dirty checking and cancel reset)
     const baselineDisplayModeRef = useRef(displayMode);
@@ -446,24 +449,35 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             baselineLlmConfigRef.current = llmConfigProp ?? null;
             baselineVisionConfigRef.current = visionConfigProp ?? null;
 
+            const currentRevision = ++openRevisionRef.current;
             setIsJailbreakLoading(true);
+            setIsAutoBackupLoading(true);
             setSaveError(null);
             getJailbreakPrompt()
                 .then((loaded) => {
+                    if (openRevisionRef.current !== currentRevision) return;
                     setLocalJailbreakPrompt(loaded);
                     baselineJailbreakPromptRef.current = loaded;
                 })
                 .catch((e) => console.error("[SettingsPanel] Failed to fetch jailbreak prompt:", e))
                 .finally(() => {
-                    setIsJailbreakLoading(false);
+                    if (openRevisionRef.current === currentRevision) {
+                        setIsJailbreakLoading(false);
+                    }
                 });
 
             getAutoBackupConfig()
                 .then((cfg) => {
+                    if (openRevisionRef.current !== currentRevision) return;
                     setLocalAutoBackupConfig(cfg);
                     baselineAutoBackupConfigRef.current = cfg;
                 })
-                .catch((e) => console.error("[SettingsPanel] Failed to fetch auto backup config:", e));
+                .catch((e) => console.error("[SettingsPanel] Failed to fetch auto backup config:", e))
+                .finally(() => {
+                    if (openRevisionRef.current === currentRevision) {
+                        setIsAutoBackupLoading(false);
+                    }
+                });
 
             fetchData();
             fetchBotConfig();
@@ -690,10 +704,21 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
     const handleSave = async () => {
         setSaveError(null);
+        const saveErrors: string[] = [];
+
         // 1. Commit Persona Draft
-        const personaSaveResult = await characterManagerRef.current?.saveDraft();
+        let personaSaveResult: CharacterSaveResult | undefined;
+        try {
+            personaSaveResult = await characterManagerRef.current?.saveDraft();
+        } catch (e) {
+            console.error("[SettingsPanel] Failed to save character draft:", e);
+            saveErrors.push(getKokoroErrorMessage(e));
+        }
         const isCurrentActiveCharacter = personaSaveResult?.changedCharacter?.id === activeCharacterId;
         const personaDirty = Boolean(personaSaveResult?.characterDirty && isCurrentActiveCharacter);
+        if (personaDirty && personaSaveResult?.changedCharacter?.persona) {
+            pendingRuntimePersonaRef.current = personaSaveResult.changedCharacter.persona;
+        }
 
         // 2. Commit Vision Settings & Config
         const visionEnabledDirty = visionEnabled !== baselineVisionEnabledRef.current;
@@ -713,6 +738,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 dispatchRuntimeSettingsChanged("vision");
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Vision config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
             }
         }
 
@@ -737,6 +763,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                     baselineSttConfigRef.current = { ...localSttConfig };
                 } catch (e) {
                     console.error("[SettingsPanel] Failed to save STT config:", e);
+                    saveErrors.push(getKokoroErrorMessage(e));
                 }
             }
             writeBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, voiceInterrupt);
@@ -768,11 +795,12 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         const userLangDirty = userLang !== baselineUserLangRef.current;
         if (userLangDirty) {
             writeStringSetting(APP_SETTING_KEYS.userLanguage, userLang);
-            baselineUserLangRef.current = userLang;
             try {
                 await setUserLanguage(userLang);
+                baselineUserLangRef.current = userLang;
             } catch (e) {
                 console.error("[SettingsPanel] Failed to set user language:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
             }
         }
 
@@ -816,6 +844,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 setTtsVoices(voices);
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save TTS config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
             }
         }
         // 8. Track Live2D Model & Response Language changes
@@ -824,8 +853,10 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
         // 9. CONDITIONAL RUNTIME RELOAD:
         // Only trigger onCharacterRuntimeChange if one of the runtime-sensitive fields changed!
+        const personaToApply = (personaDirty && personaSaveResult?.changedCharacter?.persona)
+            ?? pendingRuntimePersonaRef.current;
         const runtimeDirty = isRuntimeDirty({
-            personaDirty,
+            personaDirty: Boolean(personaToApply),
             ttsDirty: ttsParamsDirty,
             modelDirty,
             responseLangDirty,
@@ -839,7 +870,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 await onCharacterRuntimeChange({
                     ...(responseLangDirty ? { responseLanguage: responseLang } : {}),
                     ...(modelDirty ? { live2dModel: localCustomModelPath } : {}),
-                    ...(personaDirty && personaSaveResult?.changedCharacter ? { persona: personaSaveResult.changedCharacter.persona } : {}),
+                    ...(personaToApply ? { persona: personaToApply } : {}),
                     ...(ttsParamsDirty ? {
                         tts: {
                             enabled: ttsEnabled,
@@ -851,6 +882,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                         },
                     } : {}),
                 });
+                pendingRuntimePersonaRef.current = null;
                 if (responseLangDirty) {
                     baselineResponseLangRef.current = responseLang;
                 }
@@ -862,8 +894,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 }
             } catch (e) {
                 console.error("[SettingsPanel] Failed to apply character runtime:", e);
-                setSaveError(getKokoroErrorMessage(e));
-                return;
+                saveErrors.push(getKokoroErrorMessage(e));
             }
         } else {
             if (responseLangDirty) {
@@ -885,6 +916,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 baselineImageGenConfigRef.current = { ...localImageGenConfig };
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Image Gen config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
             }
         }
 
@@ -897,6 +929,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 baselineBotConfigRef.current = savedBot;
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Bot config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
             }
         }
 
@@ -909,6 +942,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 onLlmConfigSaved?.(latestLlmConfigRef.current);
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save LLM config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
             }
         }
 
@@ -920,6 +954,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 baselineJailbreakPromptRef.current = localJailbreakPrompt;
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Jailbreak prompt:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
             }
         }
 
@@ -938,14 +973,22 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 baselineAutoBackupConfigRef.current = { ...localAutoBackupConfig };
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Auto Backup config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
             }
         }
 
+        if (saveErrors.length > 0) {
+            setSaveError(saveErrors.join("; "));
+            return;
+        }
+
+        setSaveError(null);
         showSaveFeedback();
     };
 
     const handleCancel = () => {
         setSaveError(null);
+        pendingRuntimePersonaRef.current = null;
         characterManagerRef.current?.resetDraft();
         setLocalDisplayMode(baselineDisplayModeRef.current);
         setLocalCustomModelPath(baselineCustomModelPathRef.current);
@@ -1197,6 +1240,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                 <div className={activeTab === "vision" ? "block" : "hidden"}>
                                     <VisionTab
                                         initialConfig={localVisionConfig}
+                                        committedConfig={baselineVisionConfigRef.current}
                                         onConfigChange={(cfg) => {
                                             setLocalVisionConfig(cfg);
                                         }}
@@ -1238,6 +1282,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                 <div className={activeTab === "backup" ? "block" : "hidden"}>
                                     <BackupTab
                                         autoBackupConfig={localAutoBackupConfig}
+                                        loading={isAutoBackupLoading}
                                         onAutoBackupConfigChange={setLocalAutoBackupConfig}
                                         onAutoBackupSaved={(cfg) => {
                                             baselineAutoBackupConfigRef.current = cfg;

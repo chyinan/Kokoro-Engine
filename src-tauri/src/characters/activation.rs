@@ -125,6 +125,10 @@ pub trait ActivationRuntimeBackend: Send + Sync {
     async fn snapshot(&self) -> Result<BackendRuntimeSnapshot, KokoroError>;
     async fn apply(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError>;
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError>;
+    async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
+        let _ = conversation_id;
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -389,6 +393,13 @@ impl ActivationCoordinator {
             return Err(error.into());
         }
 
+        if let Err(error) = backend
+            .sync_history(applied_runtime.current_conversation_id.as_deref())
+            .await
+        {
+            return Err(error);
+        }
+
         state.committed_revision = token.revision;
         Ok(committed)
     }
@@ -403,6 +414,9 @@ impl ActivationCoordinator {
             return Ok(None);
         };
         backend.apply(&committed.runtime).await?;
+        backend
+            .sync_history(committed.runtime.current_conversation_id.as_deref())
+            .await?;
         state.next_revision = state.next_revision.max(committed.revision);
         state.committed_revision = state.committed_revision.max(committed.revision);
         Ok(Some(committed))

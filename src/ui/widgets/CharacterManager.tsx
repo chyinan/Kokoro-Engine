@@ -139,14 +139,16 @@ const ACTIVE_CHAR_KEY = "kokoro_active_character_id";
 
 // ── Props & Ref ────────────────────────────────────
 
+export interface CharacterSaveResult {
+    hasChanges: boolean;
+    characterDirty?: boolean;
+    userProfileDirty?: boolean;
+    changedCharacter?: CharacterRecord;
+    userProfile?: UserProfile;
+}
+
 export interface CharacterManagerRef {
-    saveDraft: () => Promise<{
-        hasChanges: boolean;
-        characterDirty?: boolean;
-        userProfileDirty?: boolean;
-        changedCharacter?: CharacterRecord;
-        userProfile?: UserProfile;
-    }>;
+    saveDraft: () => Promise<CharacterSaveResult>;
     resetDraft: () => void;
 }
 
@@ -223,8 +225,12 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
         charactersRef.current = next;
         setCharacters(next);
         next.forEach((c) => {
-            if (!initialCharactersRef.current.has(c.id)) {
+            // Update initial snapshot for characters without active drafts in this panel
+            if (!characterDraftsRef.current.has(c.id) && editChar?.id !== c.id) {
                 initialCharactersRef.current.set(c.id, { ...c });
+            } else if (editChar?.id === c.id && !isCharacterEditDirty(initialCharactersRef.current.get(c.id), editChar)) {
+                initialCharactersRef.current.set(c.id, { ...c });
+                baselineCharRef.current = { ...c };
             }
         });
     }, [charactersProp]);
@@ -278,7 +284,7 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
 
             publishCharacters(all);
             all.forEach((c) => {
-                if (!initialCharactersRef.current.has(c.id)) {
+                if (!characterDraftsRef.current.has(c.id) && editChar?.id !== c.id) {
                     initialCharactersRef.current.set(c.id, { ...c });
                 }
             });
@@ -325,7 +331,7 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
     useImperativeHandle(ref, () => ({
         saveDraft: async () => {
             let characterDirty = false;
-            let updatedChar: CharacterRecord | undefined;
+            let activeCommittedChar: CharacterRecord | undefined;
             const userProfileDirty = isUserProfileDirty(baselineUserProfileRef.current, userProfile);
             if (userProfileDirty) {
                 baselineUserProfileRef.current = { ...userProfile };
@@ -334,31 +340,50 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                 await setUserPersona(userProfile.persona).catch(e => console.error("[CharacterManager] Failed to persist user profile:", e));
             }
 
-            if (editChar && isCharacterEditDirty(baselineCharRef.current, editChar)) {
-                const normalized = normalizeCharacterRecord(editChar, userProfile);
-                const currentUpdated = {
-                    ...normalized,
-                    updated_at: Date.now(),
-                };
-                characterDraftsRef.current.set(currentUpdated.id, currentUpdated);
+            if (editChar) {
+                const initialForEdit = initialCharactersRef.current.get(editChar.id) ?? baselineCharRef.current;
+                if (isCharacterEditDirty(initialForEdit, editChar)) {
+                    const normalized = normalizeCharacterRecord(editChar, userProfile);
+                    const currentUpdated = {
+                        ...normalized,
+                        updated_at: Date.now(),
+                    };
+                    characterDraftsRef.current.set(currentUpdated.id, currentUpdated);
+                } else {
+                    characterDraftsRef.current.delete(editChar.id);
+                }
+            }
+
+            // Purge any drafts in characterDraftsRef that are no longer dirty against initial snapshot
+            for (const [id, draft] of characterDraftsRef.current.entries()) {
+                const initial = initialCharactersRef.current.get(id);
+                if (initial && !isCharacterEditDirty(initial, draft)) {
+                    characterDraftsRef.current.delete(id);
+                }
             }
 
             if (characterDraftsRef.current.size > 0) {
                 characterDirty = true;
                 const committedMap = new Map<string, CharacterRecord>();
                 for (const [id, draft] of characterDraftsRef.current.entries()) {
-                    await updateCharacter(draft);
-                    committedMap.set(id, draft);
-                    initialCharactersRef.current.set(id, { ...draft });
+                    try {
+                        await updateCharacter(draft);
+                        committedMap.set(id, draft);
+                        initialCharactersRef.current.set(id, { ...draft });
+                    } catch (err) {
+                        console.error(`[CharacterManager] Failed to commit draft for ${id}:`, err);
+                    }
                 }
                 const nextList = charactersRef.current.map(c => committedMap.get(c.id) ?? c);
                 publishCharacters(nextList);
                 if (editChar && committedMap.has(editChar.id)) {
-                    updatedChar = committedMap.get(editChar.id)!;
-                    setEditChar(updatedChar);
-                    baselineCharRef.current = { ...updatedChar };
-                } else if (editChar) {
-                    updatedChar = editChar;
+                    const updated = committedMap.get(editChar.id)!;
+                    setEditChar(updated);
+                    baselineCharRef.current = { ...updated };
+                }
+                // Only return changedCharacter if the active character was actually modified and committed
+                if (activeId && committedMap.has(activeId)) {
+                    activeCommittedChar = committedMap.get(activeId);
                 }
                 characterDraftsRef.current.clear();
             }
@@ -367,30 +392,43 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                 hasChanges: userProfileDirty || characterDirty,
                 characterDirty,
                 userProfileDirty,
-                changedCharacter: updatedChar,
+                changedCharacter: activeCommittedChar,
                 userProfile,
             };
         },
         resetDraft: () => {
             setUserProfile({ ...baselineUserProfileRef.current });
+            const draftedIds = new Set(characterDraftsRef.current.keys());
+            if (editChar) draftedIds.add(editChar.id);
+
+            const restoredList = charactersRef.current.map(c => {
+                if (draftedIds.has(c.id) && initialCharactersRef.current.has(c.id)) {
+                    return initialCharactersRef.current.get(c.id)!;
+                }
+                return c;
+            });
             characterDraftsRef.current.clear();
-            const restoredList = charactersRef.current.map(c => initialCharactersRef.current.get(c.id) ?? c);
             publishCharacters(restoredList);
             const initialForCurrent = editChar ? initialCharactersRef.current.get(editChar.id) : null;
             setEditChar(initialForCurrent ? { ...initialForCurrent } : (baselineCharRef.current ? { ...baselineCharRef.current } : null));
         },
-    }), [characters, editChar, userProfile]);
+    }), [activeId, characters, editChar, userProfile]);
 
     const selectCharacter = async (char: CharacterRecord, explicitList?: CharacterRecord[]) => {
         const list = explicitList ?? charactersRef.current;
-        if (editChar && isCharacterEditDirty(baselineCharRef.current, editChar)) {
-            const updated = {
-                ...normalizeCharacterRecord(editChar, userProfile),
-                updated_at: Date.now(),
-            };
-            characterDraftsRef.current.set(updated.id, updated);
-            const nextList = list.map(c => c.id === updated.id ? updated : c);
-            publishCharacters(nextList);
+        if (editChar) {
+            const initialForEdit = initialCharactersRef.current.get(editChar.id) ?? baselineCharRef.current;
+            if (isCharacterEditDirty(initialForEdit, editChar)) {
+                const updated = {
+                    ...normalizeCharacterRecord(editChar, userProfile),
+                    updated_at: Date.now(),
+                };
+                characterDraftsRef.current.set(updated.id, updated);
+                const nextList = list.map(c => c.id === updated.id ? updated : c);
+                publishCharacters(nextList);
+            } else {
+                characterDraftsRef.current.delete(editChar.id);
+            }
         }
         try {
             await onActivateCharacter(char.id);
@@ -449,14 +487,35 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
         if (!file || !editChar) return;
         setIsAvatarUpdating(true);
         try {
-            const updated: CharacterRecord = {
-                ...editChar,
-                avatar_path: `character-instance-resource://${editChar.id}/avatar.png`,
+            const avatarPath = `character-instance-resource://${editChar.id}/avatar.png`;
+            // Only commit the avatar change to SQLite based on committed initial record, NOT unsaved persona edits
+            const committedInitial = initialCharactersRef.current.get(editChar.id) ?? baselineCharRef.current ?? editChar;
+            const dbRecord: CharacterRecord = {
+                ...committedInitial,
+                avatar_path: avatarPath,
                 updated_at: Date.now(),
             };
-            await updateCharacterWithAvatar(updated, new Uint8Array(await file.arrayBuffer()));
-            publishCharacters(characters.map(character => character.id === updated.id ? updated : character));
-            setEditChar(updated);
+            await updateCharacterWithAvatar(dbRecord, new Uint8Array(await file.arrayBuffer()));
+            initialCharactersRef.current.set(editChar.id, dbRecord);
+            if (baselineCharRef.current?.id === editChar.id) {
+                baselineCharRef.current = { ...baselineCharRef.current, avatar_path: avatarPath };
+            }
+
+            // In local editChar, retain ongoing persona/name edits and update only avatar_path
+            const nextEditChar: CharacterRecord = {
+                ...editChar,
+                avatar_path: avatarPath,
+            };
+            setEditChar(nextEditChar);
+
+            const existingDraft = characterDraftsRef.current.get(editChar.id);
+            if (existingDraft) {
+                characterDraftsRef.current.set(editChar.id, { ...existingDraft, avatar_path: avatarPath });
+            }
+
+            const nextList = charactersRef.current.map(c => c.id === editChar.id ? nextEditChar : c);
+            publishCharacters(nextList);
+
             setImportFeedback({
                 kind: "success",
                 message: t("settings.persona.status.avatar_updated"),
@@ -475,14 +534,32 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
         if (!editChar?.avatar_path || isAvatarUpdating) return;
         setIsAvatarUpdating(true);
         try {
-            const updated: CharacterRecord = {
-                ...editChar,
+            const committedInitial = initialCharactersRef.current.get(editChar.id) ?? baselineCharRef.current ?? editChar;
+            const dbRecord: CharacterRecord = {
+                ...committedInitial,
                 avatar_path: null,
                 updated_at: Date.now(),
             };
-            await updateCharacter(updated);
-            publishCharacters(characters.map(character => character.id === updated.id ? updated : character));
-            setEditChar(updated);
+            await updateCharacter(dbRecord);
+            initialCharactersRef.current.set(editChar.id, dbRecord);
+            if (baselineCharRef.current?.id === editChar.id) {
+                baselineCharRef.current = { ...baselineCharRef.current, avatar_path: null };
+            }
+
+            const nextEditChar: CharacterRecord = {
+                ...editChar,
+                avatar_path: null,
+            };
+            setEditChar(nextEditChar);
+
+            const existingDraft = characterDraftsRef.current.get(editChar.id);
+            if (existingDraft) {
+                characterDraftsRef.current.set(editChar.id, { ...existingDraft, avatar_path: null });
+            }
+
+            const nextList = charactersRef.current.map(c => c.id === editChar.id ? nextEditChar : c);
+            publishCharacters(nextList);
+
             setImportFeedback({
                 kind: "success",
                 message: t("settings.persona.status.avatar_removed"),
@@ -500,18 +577,21 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
     const handleDelete = async (charId: string) => {
         try {
             await deleteCharacter(charId);
-            const remaining = characters.filter(c => c.id !== charId);
+            characterDraftsRef.current.delete(charId);
+            initialCharactersRef.current.delete(charId);
+            const remaining = charactersRef.current.filter(c => c.id !== charId);
             publishCharacters(remaining);
             setConfirmDeleteId(null);
 
             if (activeId === charId || editChar?.id === charId) {
                 if (remaining.length > 0) {
-                    await selectCharacter(remaining[0]);
+                    await selectCharacter(remaining[0], remaining);
                 } else {
                     const defaultChar = makeDefaultCharacter();
                     await createCharacter(defaultChar);
+                    initialCharactersRef.current.set(defaultChar.id, { ...defaultChar });
                     publishCharacters([defaultChar]);
-                    await selectCharacter(defaultChar);
+                    await selectCharacter(defaultChar, [defaultChar]);
                 }
             }
         } catch (err) {

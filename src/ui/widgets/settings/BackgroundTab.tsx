@@ -86,6 +86,9 @@ export default function BackgroundTab({
                 <p className="text-xs text-[var(--color-text-muted)] mt-2">
                     {t("settings.background.import.count", { count: bg.imageCount })}
                 </p>
+                <p className="text-[11px] text-[var(--color-text-muted)] mt-1 opacity-80">
+                    {t("settings.background.import.notice")}
+                </p>
             </div>}
 
             {/* Enable toggle */}

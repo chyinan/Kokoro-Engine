@@ -42,21 +42,58 @@ pub fn load_json_config<T: DeserializeOwned + Default>(path: &Path, label: &str)
     }
 }
 
-/// Generic save for any Serde config type.
+use uuid::Uuid;
+
+/// Generic save for any Serde config type with atomic replace semantics.
 pub fn save_json_config<T: Serialize>(
     path: &Path,
     config: &T,
     label: &str,
 ) -> Result<(), KokoroError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            KokoroError::Config(format!("Failed to create config directory: {}", e))
-        })?;
-    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|e| KokoroError::Config(format!("Failed to create config directory: {}", e)))?;
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| KokoroError::Config(format!("Failed to serialize config: {}", e)))?;
-    std::fs::write(path, json)
-        .map_err(|e| KokoroError::Config(format!("Failed to write config file: {}", e)))?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config.json");
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
+    let backup = parent.join(format!(".{file_name}.{}.backup", Uuid::new_v4()));
+
+    std::fs::write(&temporary, json.as_bytes()).map_err(|e| {
+        KokoroError::Config(format!("Failed to write temporary config file: {}", e))
+    })?;
+
+    if !path.exists() {
+        if let Err(e) = std::fs::rename(&temporary, path) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(KokoroError::Config(format!(
+                "Failed to persist config file: {}",
+                e
+            )));
+        }
+    } else {
+        if let Err(e) = std::fs::rename(path, &backup) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(KokoroError::Config(format!(
+                "Failed to stage existing config file: {}",
+                e
+            )));
+        }
+        if let Err(e) = std::fs::rename(&temporary, path) {
+            let _ = std::fs::rename(&backup, path);
+            let _ = std::fs::remove_file(&temporary);
+            return Err(KokoroError::Config(format!(
+                "Failed to persist config file: {}",
+                e
+            )));
+        }
+        let _ = std::fs::remove_file(&backup);
+    }
+
     tracing::info!(target: "config", "[{}] Saved config to {}", label, path.display());
     Ok(())
 }
@@ -266,5 +303,37 @@ mod tests {
 
         let config = load_memory_upgrade_config(&path);
         assert_eq!(config, MemoryUpgradeConfig::default());
+    }
+
+    #[test]
+    fn save_json_config_writes_and_replaces_atomically() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("test_config.json");
+
+        #[derive(Debug, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
+        struct TestData {
+            message: String,
+        }
+
+        let initial = TestData {
+            message: "hello".into(),
+        };
+        save_json_config(&path, &initial, "TEST").expect("save initial");
+        let loaded: TestData = load_json_config(&path, "TEST");
+        assert_eq!(loaded, initial);
+
+        let updated = TestData {
+            message: "world".into(),
+        };
+        save_json_config(&path, &updated, "TEST").expect("atomic replace");
+        let loaded_updated: TestData = load_json_config(&path, "TEST");
+        assert_eq!(loaded_updated, updated);
+
+        // Ensure no temporary or backup files left behind
+        let files: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(files, vec!["test_config.json"]);
     }
 }
