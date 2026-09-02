@@ -183,6 +183,9 @@ pub struct AIOrchestrator {
     pub max_message_chars: Arc<Mutex<usize>>,
     /// Screen context history injected into the LLM prompt: "latest" | "full".
     pub vision_context_history_mode: Arc<Mutex<String>>,
+    /// If startup or activation recovery failed, stores the degradation reason.
+    /// While set, LLM chat requests are blocked to prevent cross-character context leakage.
+    pub runtime_degraded: Arc<Mutex<Option<String>>>,
 }
 
 impl AIOrchestrator {
@@ -233,6 +236,7 @@ impl AIOrchestrator {
             context_strategy: Arc::new(Mutex::new("window".to_string())),
             max_message_chars: Arc::new(Mutex::new(2000)),
             vision_context_history_mode: Arc::new(Mutex::new("latest".to_string())),
+            runtime_degraded: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -266,7 +270,20 @@ impl AIOrchestrator {
             context_strategy: self.context_strategy.clone(),
             max_message_chars: self.max_message_chars.clone(),
             vision_context_history_mode: self.vision_context_history_mode.clone(),
+            runtime_degraded: self.runtime_degraded.clone(),
         }
+    }
+
+    pub async fn set_runtime_degraded(&self, reason: Option<String>) {
+        *self.runtime_degraded.lock().await = reason;
+    }
+
+    pub async fn get_runtime_degraded(&self) -> Option<String> {
+        self.runtime_degraded.lock().await.clone()
+    }
+
+    pub async fn clear_runtime_degraded(&self) {
+        *self.runtime_degraded.lock().await = None;
     }
 
     pub async fn apply_character_profile(&self, character_id: &str) -> Result<bool> {
@@ -792,6 +809,12 @@ impl AIOrchestrator {
         native_tools_enabled: bool,
         character_id: &str,
     ) -> Result<(Vec<Message>, Vec<String>)> {
+        if let Some(reason) = self.get_runtime_degraded().await {
+            anyhow::bail!(
+                "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings."
+            );
+        }
+
         // 1. Determine Model logic
         let model_type = self.router.route(query);
         let _max_context = match model_type {
@@ -1847,5 +1870,27 @@ mod tests {
             count, 0,
             "Message count should remain 0 for non-user messages"
         );
+    }
+
+    #[tokio::test]
+    async fn test_degraded_runtime_blocks_compose_prompt_and_clearing_allows_it() {
+        let orchestrator = setup_test_orchestrator().await;
+        orchestrator
+            .set_runtime_degraded(Some("Startup history sync failed".to_string()))
+            .await;
+
+        let err = orchestrator
+            .compose_prompt("Hello", false, None, false, "default")
+            .await
+            .expect_err("compose_prompt must fail when runtime is degraded");
+        assert!(err.to_string().contains("Character runtime is degraded"));
+        assert!(err.to_string().contains("Startup history sync failed"));
+
+        orchestrator.clear_runtime_degraded().await;
+        let (messages, _) = orchestrator
+            .compose_prompt("Hello", false, None, false, "default")
+            .await
+            .expect("compose_prompt must succeed when degraded state is cleared");
+        assert!(!messages.is_empty());
     }
 }

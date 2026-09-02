@@ -513,7 +513,7 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
         const currentEdit = editCharRef.current ?? editChar;
         if (currentEdit && !options?.skipSaveCurrentDraft) {
             const isExistingInList = list.some(c => c.id === currentEdit.id);
-            if (isExistingInList && currentEdit.id !== char.id) {
+            if (isExistingInList) {
                 const initialForEdit = initialCharactersRef.current.get(currentEdit.id) ?? baselineCharRef.current;
                 if (isCharacterEditDirty(initialForEdit, currentEdit)) {
                     const updated = {
@@ -526,14 +526,14 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                 } else {
                     characterDraftsRef.current.delete(currentEdit.id);
                 }
-            } else if (!isExistingInList) {
+            } else {
                 characterDraftsRef.current.delete(currentEdit.id);
             }
         }
         try {
             await onActivateCharacter(char.id);
             setActiveId(char.id);
-            const nextChar = characterDraftsRef.current.get(char.id) ?? { ...char };
+            const nextChar = characterDraftsRef.current.get(char.id) ?? (currentEdit?.id === char.id ? currentEdit : { ...char });
             setEditChar(nextChar);
             baselineCharRef.current = initialCharactersRef.current.get(char.id) ?? { ...char };
             setProactiveEnabledState(

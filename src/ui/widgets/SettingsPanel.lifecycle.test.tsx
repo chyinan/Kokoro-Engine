@@ -6,7 +6,15 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CharacterRecord, VisionConfig, SttConfig, TtsSystemConfig, BotConfig } from "@/lib/kokoro-bridge";
-import { saveVisionConfig, saveSttConfig, getSttConfig, getTtsConfig, getBotConfig } from "@/lib/kokoro-bridge";
+import {
+  saveVisionConfig,
+  saveSttConfig,
+  getSttConfig,
+  getTtsConfig,
+  getBotConfig,
+  getJailbreakPrompt,
+  getAutoBackupConfig,
+} from "@/lib/kokoro-bridge";
 import SettingsPanel from "./SettingsPanel";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -1134,6 +1142,206 @@ describe("SettingsPanel persona lifecycle and isolation", () => {
     expect(bgControls.setConfig).toHaveBeenCalledWith(
       expect.objectContaining({ interval: 30 })
     );
+
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("opening settings with pending jailbreak and auto backup, triggering TTS refresh, does not invalidate jailbreak or backup tokens and allows tabs to load", async () => {
+    let resolveJailbreak!: (val: string) => void;
+    const jailbreakPromise = new Promise<string>((resolve) => {
+      resolveJailbreak = resolve;
+    });
+    vi.mocked(getJailbreakPrompt).mockReturnValue(jailbreakPromise);
+
+    let resolveAutoBackup!: (val: any) => void;
+    const autoBackupPromise = new Promise<any>((resolve) => {
+      resolveAutoBackup = resolve;
+    });
+    vi.mocked(getAutoBackupConfig).mockReturnValue(autoBackupPromise);
+
+    let currentActiveTab: any = "tts";
+    const onActiveTabChange = vi.fn((nextTab: any) => {
+      currentActiveTab = nextTab;
+    });
+
+    const renderPanel = async (tab = currentActiveTab) => {
+      await act(async () => {
+        root.render(
+          createElement(SettingsPanel, {
+            isOpen: true,
+            onClose: vi.fn(),
+            activeTab: tab,
+            onActiveTabChange,
+            activeCharacterId: "char-1",
+            characters: [char1, char2],
+            backgroundControls: dummyBackgroundControls() as any,
+            displayMode: "full",
+            onDisplayModeChange: vi.fn(),
+            customModelPath: null,
+            onCustomModelChange: vi.fn(),
+            renderFps: 60,
+            onRenderFpsChange: vi.fn(),
+            onActivateCharacter: vi.fn(),
+            onCharacterRuntimeChange: vi.fn(),
+            responseLanguage: "en",
+          }),
+        );
+      });
+    };
+
+    // 1. Mount SettingsPanel on "tts" tab with pending jailbreak and backup requests
+    await renderPanel("tts");
+
+    // 2. Find and click the TTS refresh button
+    const refreshBtn = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => b.textContent?.includes("settings.tts.manage_providers.refresh") || b.textContent?.includes("Refresh")
+    );
+    expect(refreshBtn).toBeDefined();
+
+    await act(async () => {
+      refreshBtn?.click();
+    });
+
+    // 3. Now resolve the in-flight jailbreak and auto backup requests
+    await act(async () => {
+      resolveJailbreak("custom-jailbreak-prompt-content");
+      resolveAutoBackup({
+        enabled: true,
+        interval_hours: 12,
+        max_backups: 5,
+        target_directory: "/backup/dir",
+      });
+      await Promise.resolve();
+    });
+
+    // 4. Switch to Jailbreak tab and verify it loaded the resolved content instead of permanent loading
+    const jailbreakTabBtn = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => b.textContent?.includes("settings.tabs.jailbreak") || b.textContent?.includes("Jailbreak")
+    );
+    expect(jailbreakTabBtn).toBeDefined();
+
+    await act(async () => {
+      jailbreakTabBtn?.click();
+    });
+    expect(onActiveTabChange).toHaveBeenCalledWith("jailbreak");
+    await renderPanel("jailbreak");
+
+    // The jailbreak textarea should be rendered with our custom prompt (not loading)
+    const textareas = container.querySelectorAll("textarea");
+    const jailbreakTextarea = Array.from(textareas).find(
+      (t) => t.value === "custom-jailbreak-prompt-content"
+    );
+    expect(jailbreakTextarea).toBeDefined();
+
+    // 5. Switch to Backup tab and verify it loaded the auto backup config instead of permanent loading
+    const backupTabBtn = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => b.textContent?.includes("settings.tabs.backup") || b.textContent?.includes("Backup")
+    );
+    expect(backupTabBtn).toBeDefined();
+
+    await act(async () => {
+      backupTabBtn?.click();
+    });
+    expect(onActiveTabChange).toHaveBeenCalledWith("backup");
+    await renderPanel("backup");
+
+    // The backup tab should not display loading spinner text
+    expect(container.textContent).not.toContain("settings.backup.auto_loading");
+
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("shows error feedback and avoids false success when background removeImage or clearImages fails", async () => {
+    const bgControls = {
+      ...dummyBackgroundControls(),
+      images: ["blob:http://localhost/bg1.png", "blob:http://localhost/bg2.png"],
+      imageCount: 2,
+      config: {
+        enabled: true,
+        blur: false,
+        blurAmount: 8,
+        interval: 30,
+        rotation: "sequential" as const,
+        mode: "slideshow" as const,
+      },
+      setConfig: vi.fn(),
+      importFiles: vi.fn(async () => 1),
+      removeImage: vi.fn(async () => {
+        throw new Error("IndexedDB quota exceeded on delete");
+      }),
+      clearImages: vi.fn(async () => {
+        throw new Error("IndexedDB transaction aborted on clear");
+      }),
+    };
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        createElement(SettingsPanel, {
+          isOpen: true,
+          onClose: vi.fn(),
+          activeTab: "bg",
+          activeCharacterId: "char-1",
+          characters: [char1, char2],
+          backgroundControls: bgControls as any,
+          displayMode: "full",
+          onDisplayModeChange: vi.fn(),
+          customModelPath: null,
+          onCustomModelChange: vi.fn(),
+          renderFps: 60,
+          onRenderFpsChange: vi.fn(),
+          onActivateCharacter: vi.fn(),
+          onCharacterRuntimeChange: vi.fn(),
+          responseLanguage: "en",
+        }),
+      );
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 60));
+    });
+
+    // 1. Trigger remove image failure
+    const removeBtn = container.querySelector<HTMLButtonElement>('button[aria-label="Remove image"]');
+    expect(removeBtn).not.toBeNull();
+    await act(async () => {
+      removeBtn?.click();
+    });
+
+    expect(bgControls.removeImage).toHaveBeenCalledWith(0);
+    // UI must display error and NOT success
+    expect(container.textContent).toContain("IndexedDB quota exceeded on delete");
+    expect(container.textContent).not.toContain("settings.background.library.deleted");
+
+    // 2. Trigger clear images failure
+    const clearBtn = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => b.textContent?.includes("CLEAR ALL") || b.textContent?.includes("settings.background.import.clear")
+    );
+    expect(clearBtn).toBeDefined();
+
+    // First click enters confirmation mode
+    await act(async () => {
+      clearBtn?.click();
+    });
+    // Second click executes clear
+    await act(async () => {
+      clearBtn?.click();
+    });
+
+    expect(bgControls.clearImages).toHaveBeenCalled();
+    // UI must display error and NOT success
+    expect(container.textContent).toContain("IndexedDB transaction aborted on clear");
+    expect(container.textContent).not.toContain("settings.background.library.cleared");
 
     act(() => {
       root.unmount();
