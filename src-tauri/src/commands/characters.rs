@@ -90,6 +90,11 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
     async fn clear_degraded(&self) {
         self.orchestrator.clear_runtime_degraded().await;
     }
+
+    async fn lock_activation(&self) -> Result<Box<dyn std::any::Any + Send>, KokoroError> {
+        let guard = self.orchestrator.acquire_activation_lock().await;
+        Ok(Box::new(guard))
+    }
 }
 
 async fn apply_orchestrator_runtime(

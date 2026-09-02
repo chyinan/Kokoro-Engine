@@ -5,6 +5,7 @@ use crate::characters::catalog::CharacterCatalog;
 use serde_json::json;
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use std::fs;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 async fn migrated_pool() -> SqlitePool {
@@ -1290,4 +1291,217 @@ async fn non_startup_activation_recovery_failure_sets_degraded_and_blocks_chat()
             .contains("Character runtime is degraded"),
         "prompt error was: {prompt_err}"
     );
+}
+
+struct DelayedActivationBackend {
+    orchestrator: Arc<AIOrchestrator>,
+    app_data: PathBuf,
+    delay_ms: u64,
+}
+
+#[async_trait::async_trait]
+impl ActivationRuntimeBackend for DelayedActivationBackend {
+    async fn snapshot(&self) -> Result<BackendRuntimeSnapshot, KokoroError> {
+        let backend = OrchestratorActivationBackend {
+            orchestrator: &self.orchestrator,
+            app_data: self.app_data.clone(),
+        };
+        backend.snapshot().await
+    }
+    async fn apply(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
+        let backend = OrchestratorActivationBackend {
+            orchestrator: &self.orchestrator,
+            app_data: self.app_data.clone(),
+        };
+        backend.apply(snapshot).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+        Ok(())
+    }
+    async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
+        let backend = OrchestratorActivationBackend {
+            orchestrator: &self.orchestrator,
+            app_data: self.app_data.clone(),
+        };
+        backend.restore(snapshot).await
+    }
+    async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
+        let backend = OrchestratorActivationBackend {
+            orchestrator: &self.orchestrator,
+            app_data: self.app_data.clone(),
+        };
+        backend.sync_history(conversation_id).await
+    }
+    async fn set_degraded(&self, reason: Option<String>) {
+        self.orchestrator.set_runtime_degraded(reason).await;
+    }
+    async fn clear_degraded(&self) {
+        self.orchestrator.clear_runtime_degraded().await;
+    }
+    async fn lock_activation(&self) -> Result<Box<dyn std::any::Any + Send>, KokoroError> {
+        let guard = self.orchestrator.acquire_activation_lock().await;
+        Ok(Box::new(guard))
+    }
+}
+
+#[tokio::test]
+async fn concurrent_chat_during_activation_is_blocked_and_prevents_context_leak_and_message_loss() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+
+    // 1. Create Char 1 and Char 2 in SQLite
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-1".into(),
+            name: "Char One".into(),
+            persona: "You are Character One.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-2".into(),
+            name: "Char Two".into(),
+            persona: "You are Character Two.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+
+    // 2. Activate char-1
+    let backend1 = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let token1 = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+    coordinator
+        .commit(&orchestrator.db, token1, &backend1)
+        .await
+        .unwrap();
+
+    // Append a message to char-1's in-memory history
+    orchestrator
+        .push_history_message(crate::ai::context::Message {
+            role: "user".into(),
+            content: "Hello from char-1 conversation".into(),
+            metadata: None,
+        })
+        .await;
+
+    assert_eq!(orchestrator.get_character_id().await, "char-1");
+    assert!(!orchestrator.history.lock().await.is_empty());
+    assert!(!orchestrator.is_activating());
+
+    // 3. Prepare activation for char-2
+    let token2 = coordinator
+        .prepare(&orchestrator.db, "char-2", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+
+    // 4. Commit char-2 activation with an artificial delay in apply
+    let delayed_backend = DelayedActivationBackend {
+        orchestrator: orchestrator.clone(),
+        app_data: temp.path().to_path_buf(),
+        delay_ms: 100,
+    };
+
+    let coord_clone = coordinator.clone();
+    let db_clone = orchestrator.db.clone();
+    let orch_clone = orchestrator.clone();
+
+    // Spawn the activation in a background task
+    let activation_task = tokio::spawn(async move {
+        coord_clone
+            .commit(&db_clone, token2, &delayed_backend)
+            .await
+    });
+
+    // Wait briefly so the background task enters the activation lock and is sleeping in apply
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    // 5. Verify that during activation, chat turns and compose_prompt are BLOCKED by the gate
+    assert!(
+        orch_clone.is_activating(),
+        "orchestrator must report is_activating() = true during activation"
+    );
+
+    // Attempting to enter chat turn must fail
+    let turn_err = orch_clone
+        .enter_chat_turn()
+        .expect_err("enter_chat_turn must be blocked during activation");
+    assert!(
+        turn_err.contains("Character activation is in progress"),
+        "error was: {turn_err}"
+    );
+
+    // Attempting to compose prompt must fail
+    let prompt_err = orch_clone
+        .compose_prompt("Hello during activation", false, None, false, "char-1")
+        .await
+        .expect_err("compose_prompt must be blocked during activation");
+    assert!(
+        prompt_err
+            .to_string()
+            .contains("Character activation is in progress"),
+        "error was: {prompt_err}"
+    );
+
+    // 6. Await activation completion
+    let commit_res = activation_task.await.unwrap();
+    assert!(commit_res.is_ok(), "activation must complete successfully");
+
+    // 7. Verify gate is released and normal chat succeeds with new character
+    assert!(
+        !orchestrator.is_activating(),
+        "activation gate must be released after commit"
+    );
+    assert_eq!(orchestrator.get_character_id().await, "char-2");
+
+    let chat_guard = orchestrator.enter_chat_turn();
+    assert!(
+        chat_guard.is_ok(),
+        "chat turn must be allowed after activation completes"
+    );
+    drop(chat_guard);
+
+    let (messages, _) = orchestrator
+        .compose_prompt("Hello after activation", false, None, false, "char-2")
+        .await
+        .expect("compose_prompt must succeed after activation completes");
+    assert!(!messages.is_empty());
 }

@@ -1145,6 +1145,8 @@ pub async fn stream_chat(
         )));
     }
 
+    let _chat_turn_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+
     // 0. Resolve character ID for this request (not stored in shared state)
     let char_id = request
         .character_id

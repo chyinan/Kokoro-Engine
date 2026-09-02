@@ -2331,6 +2331,12 @@ async fn handle_generic_webhook(
         Some(orchestrator) => orchestrator,
         None => return server_error("AIOrchestrator not available"),
     };
+    if base_orchestrator.is_activating() {
+        return json_response(
+            json!({ "error": "Character activation is in progress" }),
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+    }
     let webhook_orchestrator = base_orchestrator.fork_with_isolated_history().await;
     let explicit_character_id = parsed
         .character_id

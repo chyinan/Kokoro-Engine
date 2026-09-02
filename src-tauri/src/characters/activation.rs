@@ -133,6 +133,9 @@ pub trait ActivationRuntimeBackend: Send + Sync {
         let _ = reason;
     }
     async fn clear_degraded(&self) {}
+    async fn lock_activation(&self) -> Result<Box<dyn std::any::Any + Send>, KokoroError> {
+        Ok(Box::new(()))
+    }
 }
 
 #[derive(Clone)]
@@ -379,6 +382,8 @@ impl ActivationCoordinator {
         .execute(&mut *transaction)
         .await?;
 
+        let _activation_lock = backend.lock_activation().await?;
+
         if let Err(error) = backend.apply(&applied_runtime).await {
             if let Err(restore_error) = backend.restore(&token.previous_committed).await {
                 let recover_res = self.recover_committed_backend(pool, backend).await;
@@ -549,6 +554,7 @@ impl ActivationCoordinator {
             return Ok(None);
         };
         let initial_snapshot = backend.snapshot().await?;
+        let _activation_lock = backend.lock_activation().await?;
         if let Err(apply_err) = backend.apply(&committed.runtime).await {
             return Err(compensate_recovery_failure(
                 backend,
