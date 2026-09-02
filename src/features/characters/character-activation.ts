@@ -143,7 +143,21 @@ export function createCharacterActivationService(
       return successful;
     } catch (error) {
       if (token.revision === currentRevision) {
-        await dependencies.restoreFrontendRuntime(snapshot);
+        try {
+          const authoritative = await dependencies.getCommittedCharacterRuntime();
+          if (authoritative) {
+            const current = snapshotFrontendRuntime(dependencies.readFrontendRuntime());
+            const recovered = resolveFrontendRuntimeProfile(authoritative.runtime, current);
+            await dependencies.applyFrontendRuntime(recovered);
+            currentRevision = Math.max(currentRevision, authoritative.revision);
+            writeCacheBestEffort(dependencies, authoritative);
+            dependencies.dispatchRuntimeChanged(authoritative);
+          } else {
+            await dependencies.restoreFrontendRuntime(snapshot);
+          }
+        } catch {
+          await dependencies.restoreFrontendRuntime(snapshot);
+        }
       }
       throw error;
     }

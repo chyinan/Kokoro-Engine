@@ -104,9 +104,7 @@ async fn sync_orchestrator_history(
     orchestrator: &AIOrchestrator,
     conversation_id: Option<&str>,
 ) -> Result<(), KokoroError> {
-    orchestrator.reset_history_and_boundary().await;
-
-    if let Some(conv_id) = conversation_id {
+    let new_messages = if let Some(conv_id) = conversation_id {
         let rows = sqlx::query_as::<_, (String, String, Option<String>, String)>(
             "SELECT role, content, metadata, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
         )
@@ -115,9 +113,9 @@ async fn sync_orchestrator_history(
         .await
         .map_err(|e| KokoroError::Database(format!("failed to load conversation messages: {e}")))?;
 
-        let mut history = orchestrator.history.lock().await;
+        let mut msgs = Vec::with_capacity(rows.len());
         for (role, content, metadata, _) in rows {
-            history.push_back(crate::ai::context::Message {
+            msgs.push(crate::ai::context::Message {
                 role,
                 content,
                 metadata: metadata
@@ -125,10 +123,20 @@ async fn sync_orchestrator_history(
                     .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
             });
         }
-        let count = history.len();
-        drop(history);
-        orchestrator.set_memory_history_boundary(count).await;
+        msgs
+    } else {
+        Vec::new()
+    };
+
+    orchestrator.reset_history_and_boundary().await;
+    let count = new_messages.len();
+    {
+        let mut history = orchestrator.history.lock().await;
+        for msg in new_messages {
+            history.push_back(msg);
+        }
     }
+    orchestrator.set_memory_history_boundary(count).await;
     Ok(())
 }
 

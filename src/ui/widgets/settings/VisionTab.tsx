@@ -168,7 +168,26 @@ export default function VisionTab({
         if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
     }
 
-    // Load config on mount
+    // Cleanup preview on component unmount only
+    useEffect(() => {
+        return () => {
+            stopPreview();
+        };
+    }, []);
+
+    // Ensure preview stream remains attached to video element if stream is active
+    useEffect(() => {
+        if (
+            previewVideoRef.current &&
+            previewStreamRef.current &&
+            previewVideoRef.current.srcObject !== previewStreamRef.current
+        ) {
+            previewVideoRef.current.srcObject = previewStreamRef.current;
+            previewVideoRef.current.play().catch(() => {});
+        }
+    });
+
+    // Load config on mount and synchronize external baseline changes
     useEffect(() => {
         if (initialConfig) {
             setConfig(initialConfig);
@@ -176,9 +195,6 @@ export default function VisionTab({
         } else {
             loadConfig();
         }
-        return () => {
-            stopPreview();
-        };
     }, [initialConfig]);
 
     useEffect(() => {
