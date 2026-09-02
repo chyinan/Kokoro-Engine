@@ -592,6 +592,21 @@
             }
         },
         "background": {
+            "library": {
+                "title": "Image Asset Library",
+                "badge": "Direct Storage • Immediate",
+                "notice": "Importing or deleting images directly updates the local asset database and takes effect immediately. The Cancel button only rolls back display preferences below.",
+                "imported": "Successfully imported {{count}} image(s)",
+                "no_valid_images": "No valid image files found",
+                "deleted": "Image removed from library",
+                "cleared": "All background images cleared",
+                "clear_confirm": "CONFIRM CLEAR ALL?",
+                "clear_cancel": "Cancel",
+                "empty": "No images in library. Import images to enable slideshow."
+            },
+            "preferences": {
+                "title": "Display & Slideshow Preferences"
+            },
             "import": {
                 "label": "Import Images",
                 "files": "FILES",

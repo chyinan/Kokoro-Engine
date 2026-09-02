@@ -256,7 +256,7 @@ pub fn is_supported_package_file(path: &Path) -> bool {
         .to_ascii_lowercase();
 
     if normalized == "character.json"
-        || normalized == "cues.json"
+        || file_name == "cues.json"
         || file_name == "license"
         || file_name.starts_with("license.")
     {
@@ -336,7 +336,7 @@ mod tests {
     use proptest::prelude::*;
     use semver::Version;
     use serde_json::{json, Value};
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     fn valid_manifest_json() -> Value {
         json!({
@@ -482,15 +482,13 @@ mod tests {
             segments in prop::collection::vec("[a-zA-Z0-9_-]{1,16}", 1..6),
             extension in prop_oneof![Just("png"), Just("webp"), Just("json"), Just("moc3")],
         ) {
-            let mut relative = PathBuf::new();
-            for segment in &segments {
-                relative.push(segment);
-            }
-            relative.set_extension(extension);
+            let joined = segments.join("/");
+            let relative_str = format!("{joined}.{extension}");
+            let relative = Path::new(&relative_str);
 
-            prop_assert!(validate_package_path(&relative).is_ok());
+            prop_assert!(validate_package_path(relative).is_ok());
             let root = Path::new("package-root");
-            prop_assert!(root.join(&relative).starts_with(root));
+            prop_assert!(root.join(relative).starts_with(root));
         }
     }
 }

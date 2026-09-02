@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { VisionConfig } from "@/lib/kokoro-bridge";
+import { saveVisionConfig } from "@/lib/kokoro-bridge";
 import VisionTab from "./VisionTab";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -171,5 +172,364 @@ describe("VisionTab lifecycle", () => {
     });
 
     expect(previewTrackStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("toggling switches and selects updates draft via onConfigChange without calling saveVisionConfig or localStorage", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root: Root = createRoot(container);
+
+    const onConfigChange = vi.fn();
+    const setItemSpy = vi.spyOn(Storage.prototype, "setItem");
+
+    await act(async () => {
+      root.render(
+        createElement(VisionTab as any, {
+          initialConfig: { ...defaultConfig, vlm_enabled: true, auto_vision_enabled: false },
+          committedConfig: defaultConfig,
+          onConfigChange,
+        }),
+      );
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 60));
+    });
+
+    const vlmToggle = container.querySelector<HTMLButtonElement>('[aria-label="vlm-enable-toggle"]');
+    expect(vlmToggle).not.toBeNull();
+
+    await act(async () => {
+      vlmToggle?.click();
+    });
+
+    expect(saveVisionConfig).not.toHaveBeenCalled();
+    expect(setItemSpy).not.toHaveBeenCalledWith("kokoro_vision_config", expect.anything());
+    expect(onConfigChange).toHaveBeenCalledWith(
+      expect.objectContaining({ vlm_enabled: false }),
+    );
+
+    const autoToggle = container.querySelector<HTMLButtonElement>('[aria-label="auto-vision-enable-toggle"]');
+    expect(autoToggle).not.toBeNull();
+
+    await act(async () => {
+      autoToggle?.click();
+    });
+
+    expect(saveVisionConfig).not.toHaveBeenCalled();
+    expect(setItemSpy).not.toHaveBeenCalledWith("kokoro_vision_config", expect.anything());
+    expect(onConfigChange).toHaveBeenCalledWith(
+      expect.objectContaining({ auto_vision_enabled: true }),
+    );
+
+    act(() => {
+      root.unmount();
+    });
+    setItemSpy.mockRestore();
+  });
+
+  it("stops tracks when getUserMedia resolves after component has unmounted", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root: Root = createRoot(container);
+
+    let resolveGetUserMedia: ((stream: MediaStream) => void) | null = null;
+    const pendingTrackStop = vi.fn();
+
+    (navigator.mediaDevices.getUserMedia as any).mockImplementation(() => {
+      return new Promise<MediaStream>((resolve) => {
+        resolveGetUserMedia = resolve;
+      });
+    });
+
+    await act(async () => {
+      root.render(
+        createElement(VisionTab as any, {
+          initialConfig: { ...defaultConfig, camera_enabled: true },
+          committedConfig: defaultConfig,
+        }),
+      );
+    });
+
+    // Unmount while getUserMedia is pending
+    act(() => {
+      root.unmount();
+    });
+
+    // Resolve getUserMedia late
+    const lateTrack = {
+      stop: pendingTrackStop,
+      kind: "video",
+      enabled: true,
+      readyState: "live",
+    } as unknown as MediaStreamTrack;
+
+    const lateStream = {
+      getTracks: () => [lateTrack],
+      getVideoTracks: () => [lateTrack],
+    } as unknown as MediaStream;
+
+    await act(async () => {
+      resolveGetUserMedia?.(lateStream);
+      await Promise.resolve();
+    });
+
+    expect(pendingTrackStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops stale stream when switching camera device while previous request is pending", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root: Root = createRoot(container);
+
+    let resolveFirstStream: ((stream: MediaStream) => void) | null = null;
+    const firstTrackStop = vi.fn();
+    const secondTrackStop = vi.fn();
+
+    let callCount = 0;
+    (navigator.mediaDevices.getUserMedia as any).mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        // Enumerate permission check
+        const track = { stop: vi.fn(), kind: "video" } as any;
+        return { getTracks: () => [track], getVideoTracks: () => [track] } as any;
+      }
+      if (callCount === 2) {
+        // First preview request - pending
+        return new Promise<MediaStream>((resolve) => {
+          resolveFirstStream = resolve;
+        });
+      }
+      // Second preview request - resolves immediately
+      const secondTrack = {
+        stop: secondTrackStop,
+        kind: "video",
+        enabled: true,
+        readyState: "live",
+      } as unknown as MediaStreamTrack;
+      return {
+        getTracks: () => [secondTrack],
+        getVideoTracks: () => [secondTrack],
+      } as unknown as MediaStream;
+    });
+
+    (navigator.mediaDevices.enumerateDevices as any).mockImplementation(async () => [
+      { deviceId: "cam-1", kind: "videoinput", label: "Cam 1" },
+      { deviceId: "cam-2", kind: "videoinput", label: "Cam 2" },
+    ]);
+
+    await act(async () => {
+      root.render(
+        createElement(VisionTab as any, {
+          initialConfig: { ...defaultConfig, camera_enabled: true, camera_device_id: "cam-1" },
+          committedConfig: defaultConfig,
+        }),
+      );
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 60));
+    });
+
+    // Switch device to cam-2
+    await act(async () => {
+      root.render(
+        createElement(VisionTab as any, {
+          initialConfig: { ...defaultConfig, camera_enabled: true, camera_device_id: "cam-2" },
+          committedConfig: defaultConfig,
+        }),
+      );
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 60));
+    });
+
+    // Now resolve the first (stale) request
+    const firstTrack = {
+      stop: firstTrackStop,
+      kind: "video",
+      enabled: true,
+      readyState: "live",
+    } as unknown as MediaStreamTrack;
+    const firstStream = {
+      getTracks: () => [firstTrack],
+      getVideoTracks: () => [firstTrack],
+    } as unknown as MediaStream;
+
+    await act(async () => {
+      resolveFirstStream?.(firstStream);
+      await Promise.resolve();
+    });
+
+    // Stale stream MUST be stopped
+    expect(firstTrackStop).toHaveBeenCalled();
+    // Active stream MUST NOT be stopped
+    expect(secondTrackStop).not.toHaveBeenCalled();
+
+    act(() => {
+      root.unmount();
+    });
+    expect(secondTrackStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("stale getUserMedia failure does not stop active preview stream or clear ready state", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root: Root = createRoot(container);
+
+    let rejectFirstStream: ((err: unknown) => void) | null = null;
+    const secondTrackStop = vi.fn();
+
+    let callCount = 0;
+    (navigator.mediaDevices.getUserMedia as any).mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        const track = { stop: vi.fn(), kind: "video" } as any;
+        return { getTracks: () => [track], getVideoTracks: () => [track] } as any;
+      }
+      if (callCount === 2) {
+        // Request 1: will fail after request 2 succeeds
+        return new Promise<MediaStream>((_resolve, reject) => {
+          rejectFirstStream = reject;
+        });
+      }
+      // Request 2: succeeds immediately
+      const secondTrack = {
+        stop: secondTrackStop,
+        kind: "video",
+        enabled: true,
+        readyState: "live",
+      } as unknown as MediaStreamTrack;
+      return {
+        getTracks: () => [secondTrack],
+        getVideoTracks: () => [secondTrack],
+      } as unknown as MediaStream;
+    });
+
+    (navigator.mediaDevices.enumerateDevices as any).mockImplementation(async () => [
+      { deviceId: "cam-1", kind: "videoinput", label: "Cam 1" },
+      { deviceId: "cam-2", kind: "videoinput", label: "Cam 2" },
+    ]);
+
+    await act(async () => {
+      root.render(
+        createElement(VisionTab as any, {
+          initialConfig: { ...defaultConfig, camera_enabled: true, camera_device_id: "cam-1" },
+          committedConfig: defaultConfig,
+        }),
+      );
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 60));
+    });
+
+    // Switch device to cam-2 (callCount = 3 succeeds)
+    await act(async () => {
+      root.render(
+        createElement(VisionTab as any, {
+          initialConfig: { ...defaultConfig, camera_enabled: true, camera_device_id: "cam-2" },
+          committedConfig: defaultConfig,
+        }),
+      );
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 60));
+    });
+
+    // Now reject the first (stale) request with an error
+    await act(async () => {
+      rejectFirstStream?.(new Error("Camera 1 disconnected"));
+      await Promise.resolve();
+    });
+
+    // CRITICAL: Request 1's failure MUST NOT stop the active stream!
+    expect(secondTrackStop).not.toHaveBeenCalled();
+
+    act(() => {
+      root.unmount();
+    });
+    expect(secondTrackStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("disabling camera while getUserMedia is pending stops tracks upon resolution", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root: Root = createRoot(container);
+
+    let resolveGetUserMedia: ((stream: MediaStream) => void) | null = null;
+    const pendingTrackStop = vi.fn();
+
+    let callCount = 0;
+    (navigator.mediaDevices.getUserMedia as any).mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        const track = { stop: vi.fn(), kind: "video" } as any;
+        return { getTracks: () => [track], getVideoTracks: () => [track] } as any;
+      }
+      return new Promise<MediaStream>((resolve) => {
+        resolveGetUserMedia = resolve;
+      });
+    });
+
+    (navigator.mediaDevices.enumerateDevices as any).mockImplementation(async () => [
+      { deviceId: "cam-1", kind: "videoinput", label: "Cam 1" },
+    ]);
+
+    await act(async () => {
+      root.render(
+        createElement(VisionTab as any, {
+          initialConfig: { ...defaultConfig, camera_enabled: true, camera_device_id: "cam-1" },
+          committedConfig: defaultConfig,
+        }),
+      );
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 60));
+    });
+
+    // Disable camera while startPreview is pending
+    await act(async () => {
+      root.render(
+        createElement(VisionTab as any, {
+          initialConfig: { ...defaultConfig, camera_enabled: false },
+          committedConfig: defaultConfig,
+        }),
+      );
+    });
+
+    // Now resolve the pending getUserMedia
+    const lateTrack = {
+      stop: pendingTrackStop,
+      kind: "video",
+      enabled: true,
+      readyState: "live",
+    } as unknown as MediaStreamTrack;
+
+    const lateStream = {
+      getTracks: () => [lateTrack],
+      getVideoTracks: () => [lateTrack],
+    } as unknown as MediaStream;
+
+    await act(async () => {
+      resolveGetUserMedia?.(lateStream);
+      await Promise.resolve();
+    });
+
+    // CRITICAL: Tracks must be stopped when camera was disabled before resolution!
+    expect(pendingTrackStop).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      root.unmount();
+    });
   });
 });

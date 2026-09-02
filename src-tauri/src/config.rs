@@ -55,7 +55,7 @@ fn find_backup_candidates(path: &Path) -> Vec<std::path::PathBuf> {
 }
 
 /// Attempt to recover a missing or corrupted config from backup files.
-fn try_recover_from_backup<T: DeserializeOwned>(path: &Path, label: &str) -> Option<T> {
+pub fn try_recover_from_backup<T: DeserializeOwned>(path: &Path, label: &str) -> Option<T> {
     let candidates = find_backup_candidates(path);
     for candidate in candidates {
         if let Ok(content) = std::fs::read_to_string(&candidate) {
@@ -111,7 +111,178 @@ pub fn load_json_config<T: DeserializeOwned + Default>(path: &Path, label: &str)
     }
 }
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+pub struct JailbreakConfig {
+    #[serde(default)]
+    pub prompt: String,
+}
+
+/// Load jailbreak prompt from disk with automatic backup recovery if missing or corrupted.
+pub fn load_jailbreak_prompt(path: &Path) -> Option<String> {
+    if !path.exists() {
+        if let Some(recovered) = try_recover_from_backup::<JailbreakConfig>(path, "JAILBREAK") {
+            return Some(recovered.prompt);
+        }
+        return None;
+    }
+
+    match std::fs::read_to_string(path) {
+        Ok(content) => match serde_json::from_str::<JailbreakConfig>(&content) {
+            Ok(val) => Some(val.prompt),
+            Err(e) => {
+                tracing::warn!(
+                    target: "config",
+                    "[JAILBREAK] Failed to parse {}: {} — searching for backup",
+                    path.display(),
+                    e
+                );
+                try_recover_from_backup::<JailbreakConfig>(path, "JAILBREAK").map(|c| c.prompt)
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                target: "config",
+                "[JAILBREAK] Failed to read {}: {} — searching for backup",
+                path.display(),
+                e
+            );
+            try_recover_from_backup::<JailbreakConfig>(path, "JAILBREAK").map(|c| c.prompt)
+        }
+    }
+}
+
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
+
+static CONFIG_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+fn normalize_path_for_lock(path: &Path) -> PathBuf {
+    if let Ok(canon) = path.canonicalize() {
+        return canon;
+    }
+    if let Some(parent) = path.parent() {
+        if let Ok(canon_parent) = parent.canonicalize() {
+            if let Some(name) = path.file_name() {
+                return canon_parent.join(name);
+            }
+        }
+    }
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else if let Ok(cwd) = std::env::current_dir() {
+        cwd.join(path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn get_config_path_lock(path: &Path) -> Arc<Mutex<()>> {
+    let key = normalize_path_for_lock(path);
+    let locks = CONFIG_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = locks.lock().unwrap();
+    guard
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+#[cfg(windows)]
+fn atomic_replace_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let to_u16_vec = |p: &Path| -> Vec<u16> {
+        p.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+
+    let target_w = to_u16_vec(target);
+    let temp_w = to_u16_vec(temporary);
+
+    extern "system" {
+        fn ReplaceFileW(
+            lpReplacedFileName: *const u16,
+            lpReplacementFileName: *const u16,
+            lpBackupFileName: *const u16,
+            dwReplaceFlags: u32,
+            lpExclude: *mut std::ffi::c_void,
+            lpReserved: *mut std::ffi::c_void,
+        ) -> i32;
+
+        fn MoveFileExW(
+            lpExistingFileName: *const u16,
+            lpNewFileName: *const u16,
+            dwFlags: u32,
+        ) -> i32;
+    }
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x00000001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x00000008;
+    const REPLACEFILE_WRITE_THROUGH: u32 = 0x00000001;
+    const REPLACEFILE_IGNORE_MERGE_ERRORS: u32 = 0x00000002;
+
+    if !target.exists() {
+        let ret = unsafe {
+            MoveFileExW(
+                temp_w.as_ptr(),
+                target_w.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ret != 0 {
+            return Ok(());
+        }
+        return std::fs::rename(temporary, target);
+    }
+
+    // Target exists: attempt atomic ReplaceFileW with retry for transient file locks (e.g. indexers/scanners)
+    let mut last_err = None;
+    for attempt in 0..5 {
+        let ret = unsafe {
+            ReplaceFileW(
+                target_w.as_ptr(),
+                temp_w.as_ptr(),
+                std::ptr::null(),
+                REPLACEFILE_WRITE_THROUGH | REPLACEFILE_IGNORE_MERGE_ERRORS,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ret != 0 {
+            return Ok(());
+        }
+        last_err = Some(std::io::Error::last_os_error());
+        std::thread::sleep(std::time::Duration::from_millis(5 * (1 << attempt)));
+    }
+
+    // Fallback: try MoveFileExW with REPLACE_EXISTING
+    let ret = unsafe {
+        MoveFileExW(
+            temp_w.as_ptr(),
+            target_w.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ret != 0 {
+        return Ok(());
+    }
+
+    // Fallback: try standard std::fs::rename
+    if let Ok(()) = std::fs::rename(temporary, target) {
+        return Ok(());
+    }
+
+    Err(last_err.unwrap_or_else(std::io::Error::last_os_error))
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::rename(temporary, target)
+}
 
 /// Generic save for any Serde config type with atomic replace semantics.
 pub fn save_json_config<T: Serialize>(
@@ -119,6 +290,9 @@ pub fn save_json_config<T: Serialize>(
     config: &T,
     label: &str,
 ) -> Result<(), KokoroError> {
+    let file_lock = get_config_path_lock(path);
+    let _guard = file_lock.lock().unwrap();
+
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)
         .map_err(|e| KokoroError::Config(format!("Failed to create config directory: {}", e)))?;
@@ -132,23 +306,30 @@ pub fn save_json_config<T: Serialize>(
     let temporary = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
     let backup = parent.join(format!(".{file_name}.backup"));
 
-    std::fs::write(&temporary, json.as_bytes()).map_err(|e| {
-        KokoroError::Config(format!("Failed to write temporary config file: {}", e))
-    })?;
+    // Write and fsync temporary file to ensure data is durable before replacement
+    {
+        let mut file = std::fs::File::create(&temporary).map_err(|e| {
+            KokoroError::Config(format!("Failed to create temporary config file: {}", e))
+        })?;
+        file.write_all(json.as_bytes()).map_err(|e| {
+            let _ = std::fs::remove_file(&temporary);
+            KokoroError::Config(format!("Failed to write temporary config file: {}", e))
+        })?;
+        file.sync_all().map_err(|e| {
+            let _ = std::fs::remove_file(&temporary);
+            KokoroError::Config(format!("Failed to sync temporary config file: {}", e))
+        })?;
+    }
 
     if path.exists() {
         let _ = std::fs::copy(path, &backup);
     }
 
-    if let Err(e) = std::fs::rename(&temporary, path) {
-        // Fallback for filesystem differences: try copy + remove
-        if let Err(copy_err) = std::fs::copy(&temporary, path) {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(KokoroError::Config(format!(
-                "Failed to persist config file (rename: {e}, copy: {copy_err})"
-            )));
-        }
+    if let Err(replace_err) = atomic_replace_file(&temporary, path) {
         let _ = std::fs::remove_file(&temporary);
+        return Err(KokoroError::Config(format!(
+            "Failed to atomically persist config file: {replace_err}"
+        )));
     }
 
     let _ = std::fs::remove_file(&backup);
@@ -438,5 +619,75 @@ mod tests {
         // Target file should now contain recovered valid content
         let reloaded: TestData = load_json_config(&path, "RELOAD_TEST");
         assert_eq!(reloaded, saved);
+    }
+
+    #[test]
+    fn save_json_config_concurrent_writes_produce_valid_json() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("concurrent_config.json");
+
+        #[derive(Debug, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
+        struct ConcurrentData {
+            thread_id: usize,
+            iteration: usize,
+            payload: String,
+        }
+
+        let mut handles = Vec::new();
+        for tid in 0..10 {
+            let path_clone = path.clone();
+            handles.push(std::thread::spawn(move || {
+                for iter in 0..15 {
+                    let data = ConcurrentData {
+                        thread_id: tid,
+                        iteration: iter,
+                        payload: format!("data-from-thread-{}-iter-{}", tid, iter),
+                    };
+                    save_json_config(&path_clone, &data, "CONCURRENT")
+                        .expect("concurrent save must succeed");
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread join");
+        }
+
+        // Verify that target file exists, is valid JSON, and matches one of the saved structures
+        let final_data: ConcurrentData = load_json_config(&path, "CONCURRENT_FINAL");
+        assert!(!final_data.payload.is_empty());
+
+        // Ensure no stray temporary or backup files were left behind
+        let mut leftovers = Vec::new();
+        for entry in std::fs::read_dir(temp_dir.path()).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name != "concurrent_config.json" {
+                leftovers.push(name);
+            }
+        }
+        assert!(
+            leftovers.is_empty(),
+            "Found leftover files from concurrent save: {:?}",
+            leftovers
+        );
+    }
+
+    #[test]
+    fn save_json_config_preserves_target_when_replace_blocked() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("preserved_config.json");
+
+        #[derive(Debug, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
+        struct TestData {
+            val: String,
+        }
+
+        let initial = TestData {
+            val: "ORIGINAL_INTACT".into(),
+        };
+        save_json_config(&path, &initial, "PRESERVE").expect("initial save");
+
+        let loaded: TestData = load_json_config(&path, "PRESERVE");
+        assert_eq!(loaded, initial);
     }
 }

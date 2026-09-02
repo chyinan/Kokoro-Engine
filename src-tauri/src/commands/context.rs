@@ -136,6 +136,75 @@ mod tests {
                 || path.ends_with("com.chyin.kokoro\\memory_upgrade_config.json")
         );
     }
+
+    #[tokio::test]
+    async fn jailbreak_prompt_recovers_from_backup_when_target_corrupted() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let jailbreak_path = temp_dir.path().join("jailbreak_prompt.json");
+        let backup_path = temp_dir.path().join(".jailbreak_prompt.json.backup");
+
+        // 1. Write corrupted content to target
+        std::fs::write(&jailbreak_path, "INVALID_CORRUPTED_JSON{{{{").expect("write corrupted");
+
+        // 2. Write valid prompt to backup
+        let valid_json = serde_json::to_string(&crate::config::JailbreakConfig {
+            prompt: "system prompt to be recovered".to_string(),
+        })
+        .unwrap();
+        std::fs::write(&backup_path, valid_json).expect("write backup");
+
+        // 3. Create orchestrator
+        let orchestrator = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+
+        // 4. Perform load / startup recovery
+        let prompt_opt = crate::config::load_jailbreak_prompt(&jailbreak_path);
+        assert_eq!(
+            prompt_opt,
+            Some("system prompt to be recovered".to_string())
+        );
+
+        if let Some(ref prompt) = prompt_opt {
+            orchestrator.set_jailbreak_prompt(prompt.clone()).await;
+        }
+
+        // Verify MEMORY is recovered
+        assert_eq!(
+            orchestrator.get_jailbreak_prompt().await,
+            Some("system prompt to be recovered".to_string())
+        );
+
+        // Verify DISK target is recovered and parseable
+        let disk_content = std::fs::read_to_string(&jailbreak_path).expect("read restored target");
+        let disk_val: crate::config::JailbreakConfig =
+            serde_json::from_str(&disk_content).expect("parse restored target");
+        assert_eq!(disk_val.prompt, "system prompt to be recovered");
+
+        // Verify NEXT STARTUP recovers cleanly from the now-restored target (even if backup is removed)
+        std::fs::remove_file(&backup_path).expect("remove backup");
+        let next_startup_prompt = crate::config::load_jailbreak_prompt(&jailbreak_path);
+        assert_eq!(
+            next_startup_prompt,
+            Some("system prompt to be recovered".to_string())
+        );
+    }
+
+    #[test]
+    fn jailbreak_prompt_recovers_from_backup_when_target_missing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let jailbreak_path = temp_dir.path().join("jailbreak_prompt.json");
+        let backup_path = temp_dir.path().join(".jailbreak_prompt.json.backup");
+
+        let valid_json = serde_json::to_string(&crate::config::JailbreakConfig {
+            prompt: "backup only prompt".to_string(),
+        })
+        .unwrap();
+        std::fs::write(&backup_path, valid_json).expect("write backup");
+
+        assert!(!jailbreak_path.exists());
+        let prompt_opt = crate::config::load_jailbreak_prompt(&jailbreak_path);
+        assert_eq!(prompt_opt, Some("backup only prompt".to_string()));
+        assert!(jailbreak_path.exists());
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -225,17 +294,27 @@ pub async fn set_user_language(
     Ok(())
 }
 
+pub(crate) fn jailbreak_prompt_path() -> std::path::PathBuf {
+    dirs_next::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("com.chyin.kokoro")
+        .join("jailbreak_prompt.json")
+}
+
 #[tauri::command]
 pub async fn set_jailbreak_prompt(
     prompt: String,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
     // Persist to disk first to avoid split-brain if disk write fails
-    let app_data = dirs_next::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("com.chyin.kokoro");
-    let path = app_data.join("jailbreak_prompt.json");
-    crate::config::save_json_config(&path, &serde_json::json!({ "prompt": prompt }), "JAILBREAK")?;
+    let path = jailbreak_prompt_path();
+    crate::config::save_json_config(
+        &path,
+        &crate::config::JailbreakConfig {
+            prompt: prompt.clone(),
+        },
+        "JAILBREAK",
+    )?;
 
     state.set_jailbreak_prompt(prompt).await;
     Ok(())
@@ -247,41 +326,13 @@ pub async fn get_jailbreak_prompt(state: State<'_, AIOrchestrator>) -> Result<St
         return Ok(memory_prompt);
     }
 
-    // Fallback read from disk only when not loaded yet
-    let app_data = dirs_next::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("com.chyin.kokoro");
-    let path = app_data.join("jailbreak_prompt.json");
-
-    match std::fs::read_to_string(&path) {
-        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-            Ok(val) => {
-                let prompt = val
-                    .get("prompt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                state.set_jailbreak_prompt(prompt.clone()).await;
-                Ok(prompt)
-            }
-            Err(e) => {
-                tracing::warn!(target: "ai", "[Context] Failed to parse jailbreak_prompt.json: {e}");
-                Err(KokoroError::Internal(format!(
-                    "corrupted jailbreak_prompt.json: {e}"
-                )))
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // File not created yet; do not permanently cache so imported files can be discovered
-            Ok(String::new())
-        }
-        Err(e) => {
-            tracing::warn!(target: "ai", "[Context] Failed to read jailbreak_prompt.json: {e}");
-            Err(KokoroError::Internal(format!(
-                "failed to read jailbreak_prompt.json: {e}"
-            )))
-        }
+    // Fallback read from disk with backup recovery
+    let path = jailbreak_prompt_path();
+    let prompt = crate::config::load_jailbreak_prompt(&path).unwrap_or_default();
+    if !prompt.is_empty() {
+        state.set_jailbreak_prompt(prompt.clone()).await;
     }
+    Ok(prompt)
 }
 
 #[tauri::command]

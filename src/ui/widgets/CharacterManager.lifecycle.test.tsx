@@ -31,6 +31,7 @@ vi.mock("@/lib/db", () => ({
 
 const mockUpdateCharacter = vi.fn();
 const mockCreateCharacter = vi.fn();
+const mockDeleteCharacter = vi.fn(async (_id?: string) => undefined);
 
 vi.mock("@/lib/kokoro-bridge", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -39,6 +40,7 @@ vi.mock("@/lib/kokoro-bridge", async (importOriginal) => {
     listCharacters: vi.fn(async () => [char1, char2, char3]),
     updateCharacter: (c: CharacterRecord) => mockUpdateCharacter(c),
     createCharacter: (c: CharacterRecord) => mockCreateCharacter(c),
+    deleteCharacter: (id: string) => mockDeleteCharacter(id),
     getProactiveEnabled: vi.fn(async () => true),
     setUserName: vi.fn(async () => undefined),
     setUserPersona: vi.fn(async () => undefined),
@@ -87,6 +89,7 @@ describe("CharacterManager lifecycle and draft management", () => {
     root = createRoot(container);
     localStorage.clear();
     mockUpdateCharacter.mockReset();
+    mockDeleteCharacter.mockReset();
   });
 
   afterEach(() => {
@@ -267,5 +270,87 @@ describe("CharacterManager lifecycle and draft management", () => {
       'input[placeholder="settings.persona.edit.name_placeholder"]',
     );
     expect(updatedInput?.value).toBe("Char 1 Local In-Progress Typing");
+  });
+
+  it("editing current character, deleting it, then global save does NOT re-add deleted draft or call updateCharacter", async () => {
+    const managerRef = createRef<CharacterManagerRef>();
+    const onActivateCharacter = vi.fn(async () => undefined);
+
+    // 1. Render CharacterManager with char1, char2
+    await act(async () => {
+      root.render(
+        createElement(CharacterManager as any, {
+          ref: managerRef,
+          characters: [char1, char2],
+          activeCharacterId: "char-1",
+          characterToEditId: "char-1",
+          onActivateCharacter,
+        }),
+      );
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 60));
+    });
+
+    // 2. Edit char-1's name (dirty draft for currently edited character)
+    const nameInput = container.querySelector<HTMLInputElement>(
+      'input[placeholder="settings.persona.edit.name_placeholder"]',
+    );
+    expect(nameInput).not.toBeNull();
+    await act(async () => {
+      if (nameInput) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          "value",
+        )?.set;
+        nativeSetter?.call(nameInput, "Char 1 Dirty Draft");
+        nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+        nameInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    expect(nameInput?.value).toBe("Char 1 Dirty Draft");
+
+    // 3. Delete currently edited character (char-1)
+    const rows = container.querySelectorAll(".group.relative");
+    expect(rows.length).toBeGreaterThanOrEqual(2);
+    // Find delete icon trigger in char-1's row
+    const deleteIcon = rows[0]?.querySelector(".cursor-pointer");
+    expect(deleteIcon).not.toBeNull();
+
+    await act(async () => {
+      deleteIcon?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    // Find confirm delete button in overlay
+    const confirmDeleteBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.includes("settings.persona.list.delete"),
+    );
+    expect(confirmDeleteBtn).not.toBeNull();
+
+    await act(async () => {
+      confirmDeleteBtn?.click();
+    });
+
+    // Verify deleteCharacter was called for char-1
+    expect(mockDeleteCharacter).toHaveBeenCalledWith("char-1");
+    // Verify onActivateCharacter switched to remaining char-2
+    expect(onActivateCharacter).toHaveBeenCalledWith("char-2");
+
+    // 4. Perform Global Save (saveDraft)
+    mockUpdateCharacter.mockReset();
+    let saveResult: any;
+    await act(async () => {
+      saveResult = await managerRef.current?.saveDraft();
+    });
+
+    // CRITICAL: char-1 was deleted, so updateCharacter must NEVER be called for char-1
+    expect(mockUpdateCharacter).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: "char-1" }),
+    );
+    expect(saveResult.characterDirty).toBe(false);
+    expect(saveResult.failedDraftIds?.length ?? 0).toBe(0);
+    expect(saveResult.errors?.length ?? 0).toBe(0);
   });
 });

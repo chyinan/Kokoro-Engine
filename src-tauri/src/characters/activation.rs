@@ -399,13 +399,74 @@ impl ActivationCoordinator {
             .sync_history(applied_runtime.current_conversation_id.as_deref())
             .await
         {
-            tracing::warn!(
+            tracing::error!(
                 "Failed to sync conversation history after character activation: {history_err}"
             );
+            let restore_result = backend.restore(&token.previous_committed).await;
+            let rollback_db_result = self
+                .rollback_committed_runtime_table(
+                    pool,
+                    &token.previous_committed,
+                    state.committed_revision,
+                )
+                .await;
+            let _ = revert_staged_greeting(pool, &token).await;
+            if let Err(restore_error) = restore_result {
+                let _ = self.recover_committed_backend(pool, backend).await;
+                return Err(KokoroError::Internal(format!(
+                    "failed to sync history: {history_err}; failed to restore backend: {restore_error}"
+                )));
+            }
+            if let Err(rollback_error) = rollback_db_result {
+                return Err(KokoroError::Internal(format!(
+                    "failed to sync history: {history_err}; failed to rollback committed table: {rollback_error}"
+                )));
+            }
+            return Err(KokoroError::Internal(format!(
+                "failed to sync conversation history: {history_err}"
+            )));
         }
 
         state.committed_revision = token.revision;
         Ok(committed)
+    }
+
+    async fn rollback_committed_runtime_table(
+        &self,
+        pool: &SqlitePool,
+        previous_committed: &BackendRuntimeSnapshot,
+        previous_revision: u64,
+    ) -> Result<(), KokoroError> {
+        if previous_committed.character_id.is_empty() {
+            sqlx::query("DELETE FROM character_activation_runtime WHERE singleton = 1")
+                .execute(pool)
+                .await?;
+        } else {
+            let previous_record = CommittedCharacterRuntime {
+                revision: previous_revision,
+                runtime: previous_committed.clone(),
+                target_conversation_id: previous_committed
+                    .current_conversation_id
+                    .clone()
+                    .unwrap_or_default(),
+            };
+            let previous_json = serde_json::to_string(&previous_record).map_err(|error| {
+                KokoroError::Internal(format!(
+                    "failed to serialize previous committed character runtime: {error}"
+                ))
+            })?;
+            sqlx::query(
+                "INSERT INTO character_activation_runtime (singleton, revision, runtime_json) \
+                 VALUES (1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET revision = excluded.revision, runtime_json = excluded.runtime_json",
+            )
+            .bind(i64::try_from(previous_revision).map_err(|_| {
+                KokoroError::Internal("character activation revision exceeds SQLite range".into())
+            })?)
+            .bind(previous_json)
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
     }
 
     async fn recover_committed_backend<B: ActivationRuntimeBackend>(
@@ -432,9 +493,9 @@ impl ActivationCoordinator {
             return Ok(None);
         };
         backend.apply(&committed.runtime).await?;
-        let _ = backend
+        backend
             .sync_history(committed.runtime.current_conversation_id.as_deref())
-            .await;
+            .await?;
         state.next_revision = state.next_revision.max(committed.revision);
         state.committed_revision = state.committed_revision.max(committed.revision);
         Ok(Some(committed))
@@ -936,6 +997,49 @@ async fn stage_greeting(
         return Err(stale_token_error());
     }
     Ok(())
+}
+
+async fn revert_staged_greeting(
+    pool: &SqlitePool,
+    token: &CharacterActivationToken,
+) -> Result<(), KokoroError> {
+    match &token.greeting_action {
+        GreetingAction::None => Ok(()),
+        GreetingAction::ConsumeWithoutEmit => {
+            sqlx::query(
+                "UPDATE characters SET greeting_consumed_at = NULL, greeting_message_id = NULL \
+                 WHERE id = ?",
+            )
+            .bind(&token.resolved_runtime.character_id)
+            .execute(pool)
+            .await?;
+            Ok(())
+        }
+        GreetingAction::Emit { .. } => {
+            let message_id = sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT greeting_message_id FROM characters WHERE id = ?",
+            )
+            .bind(&token.resolved_runtime.character_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+
+            if let Some(msg_id) = message_id {
+                let _ = sqlx::query("DELETE FROM conversation_messages WHERE id = ?")
+                    .bind(msg_id)
+                    .execute(pool)
+                    .await;
+            }
+            sqlx::query(
+                "UPDATE characters SET greeting_consumed_at = NULL, greeting_message_id = NULL \
+                 WHERE id = ?",
+            )
+            .bind(&token.resolved_runtime.character_id)
+            .execute(pool)
+            .await?;
+            Ok(())
+        }
+    }
 }
 
 async fn ensure_committed_runtime_table(
