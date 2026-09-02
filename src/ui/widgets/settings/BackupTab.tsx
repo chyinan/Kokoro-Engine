@@ -21,12 +21,14 @@ function formatBytes(bytes: number): string {
 
 export interface BackupTabProps {
     autoBackupConfig?: AutoBackupConfig | null;
+    loading?: boolean;
     onAutoBackupConfigChange?: (cfg: AutoBackupConfig) => void;
     onAutoBackupSaved?: (cfg: AutoBackupConfig) => void;
 }
 
 export function BackupTab({
     autoBackupConfig,
+    loading = false,
     onAutoBackupConfigChange,
     onAutoBackupSaved,
 }: BackupTabProps = {}) {
@@ -297,16 +299,22 @@ export function BackupTab({
                 <div className={clsx(sectionHeadingClasses, "mb-3")}>{t('settings.backup.auto_title')}</div>
                 <p className="text-xs text-[var(--color-text-muted)] mb-4">{t('settings.backup.auto_desc')}</p>
 
-                <div className="space-y-3">
-                    {/* Enable toggle */}
-                    <label className="flex items-center gap-2 text-xs text-[var(--color-text-primary)] cursor-pointer">
-                        <input type="checkbox" checked={autoBackup.enabled}
-                            onChange={e => setAutoBackup(prev => ({ ...prev, enabled: e.target.checked }))}
-                            className={clsx(toggleClasses, autoBackup.enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]")}
-                            style={{ appearance: 'none' }}
-                        />
-                        {t('settings.backup.auto_enable')}
-                    </label>
+                {loading ? (
+                    <div className="flex items-center gap-2 py-4 text-xs text-[var(--color-text-muted)]">
+                        <Loader2 size={14} className="animate-spin" />
+                        <span>{t('settings.backup.auto_loading', 'Loading auto backup configuration...')}</span>
+                    </div>
+                ) : (
+                    <div className="space-y-3">
+                        {/* Enable toggle */}
+                        <label className="flex items-center gap-2 text-xs text-[var(--color-text-primary)] cursor-pointer">
+                            <input type="checkbox" checked={autoBackup.enabled}
+                                onChange={e => setAutoBackup(prev => ({ ...prev, enabled: e.target.checked }))}
+                                className={clsx(toggleClasses, autoBackup.enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]")}
+                                style={{ appearance: 'none' }}
+                            />
+                            {t('settings.backup.auto_enable')}
+                        </label>
 
                     {autoBackup.enabled && (
                         <div className="space-y-3 pl-1">
@@ -415,6 +423,7 @@ export function BackupTab({
                         </div>
                     )}
                 </div>
+                )}
             </div>
 
             <div className="border-t border-[var(--color-border)]" />

@@ -69,6 +69,10 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
         apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await
     }
+
+    async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
+        sync_orchestrator_history(self.orchestrator, conversation_id).await
+    }
 }
 
 async fn apply_orchestrator_runtime(
@@ -92,28 +96,38 @@ async fn apply_orchestrator_runtime(
         .await;
     orchestrator.set_proactive_enabled(snapshot.proactive_enabled);
     *orchestrator.current_conversation_id.lock().await = snapshot.current_conversation_id.clone();
-    {
+    orchestrator.reset_history_and_boundary().await;
+    Ok(())
+}
+
+async fn sync_orchestrator_history(
+    orchestrator: &AIOrchestrator,
+    conversation_id: Option<&str>,
+) -> Result<(), KokoroError> {
+    orchestrator.reset_history_and_boundary().await;
+
+    if let Some(conv_id) = conversation_id {
+        let rows = sqlx::query_as::<_, (String, String, Option<String>, String)>(
+            "SELECT role, content, metadata, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
+        )
+        .bind(conv_id)
+        .fetch_all(&orchestrator.db)
+        .await
+        .map_err(|e| KokoroError::Database(format!("failed to load conversation messages: {e}")))?;
+
         let mut history = orchestrator.history.lock().await;
-        history.clear();
-        if let Some(ref conv_id) = snapshot.current_conversation_id {
-            if let Ok(rows) = sqlx::query_as::<_, (String, String, Option<String>, String)>(
-                "SELECT role, content, metadata, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
-            )
-            .bind(conv_id)
-            .fetch_all(&orchestrator.db)
-            .await
-            {
-                for (role, content, metadata, _) in rows {
-                    history.push_back(crate::ai::context::Message {
-                        role,
-                        content,
-                        metadata: metadata
-                            .as_deref()
-                            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
-                    });
-                }
-            }
+        for (role, content, metadata, _) in rows {
+            history.push_back(crate::ai::context::Message {
+                role,
+                content,
+                metadata: metadata
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
+            });
         }
+        let count = history.len();
+        drop(history);
+        orchestrator.set_memory_history_boundary(count).await;
     }
     Ok(())
 }

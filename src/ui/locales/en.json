@@ -597,7 +597,8 @@
                 "files": "FILES",
                 "folder": "FOLDER",
                 "clear": "CLEAR ALL",
-                "count": "{{count}} image(s) loaded"
+                "count": "{{count}} image(s) loaded",
+                "notice": "Image asset import and deletion apply immediately to local storage and are not rolled back on cancel."
             },
             "enable": "Enable Background",
             "mode": {

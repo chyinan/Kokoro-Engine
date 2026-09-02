@@ -16,6 +16,7 @@ import {
 } from "../../../lib/kokoro-bridge";
 import type { VisionConfig, OllamaModelInfo, VisionScreenInfo } from "../../../lib/kokoro-bridge";
 import { Select } from "@/components/ui/select";
+import { isVisionConfigDirty } from "../settings-dirty-check";
 
 type CameraPreviewIssue = "no_devices" | "permission_denied" | "unsupported" | "unavailable";
 type VisionContextHistoryMode = VisionConfig["vision_context_history_mode"];
@@ -29,10 +30,21 @@ function getCameraPreviewIssue(error: unknown): CameraPreviewIssue {
     return "unavailable";
 }
 
-export default function VisionTab({ initialConfig = null, onConfigChange }: { initialConfig?: VisionConfig | null; onConfigChange?: (cfg: VisionConfig) => void } = {}) {
+export interface VisionTabProps {
+    initialConfig?: VisionConfig | null;
+    committedConfig?: VisionConfig | null;
+    onConfigChange?: (cfg: VisionConfig) => void;
+}
+
+export default function VisionTab({
+    initialConfig = null,
+    committedConfig = null,
+    onConfigChange,
+}: VisionTabProps = {}) {
     const { t } = useTranslation();
-    const [config, setConfig] = useState<VisionConfig | null>(initialConfig);
-    const [loading, setLoading] = useState(initialConfig === null);
+    const [config, setConfig] = useState<VisionConfig | null>(initialConfig ?? committedConfig);
+    const committedConfigRef = useRef<VisionConfig | null>(committedConfig ?? initialConfig);
+    const [loading, setLoading] = useState(initialConfig === null && committedConfig === null);
     const [capturing, setCapturing] = useState(false);
     const [captureResult, setCaptureResult] = useState<string | null>(null);
     const [ollamaModels, setOllamaModels] = useState<OllamaModelInfo[]>([]);
@@ -302,15 +314,38 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
     }, [config?.vlm_provider, config?.vlm_base_url, config?.vlm_api_key]);
 
     useEffect(() => {
-        if (initialConfig !== undefined && initialConfig !== null) {
-            setConfig(initialConfig);
-            setLoading(false);
-            setDirty(false);
+        if (committedConfig !== undefined && committedConfig !== null) {
+            committedConfigRef.current = committedConfig;
+            setConfig((prev) => {
+                if (!prev) return committedConfig;
+                setDirty(isVisionConfigDirty(committedConfig, prev));
+                return prev;
+            });
         }
-    }, [initialConfig]);
+    }, [committedConfig]);
+
+    useEffect(() => {
+        if (config === null) {
+            const base = committedConfig ?? initialConfig;
+            if (base) {
+                setConfig(base);
+                committedConfigRef.current = base;
+                setLoading(false);
+                setDirty(false);
+            }
+        }
+    }, [initialConfig, committedConfig, config]);
 
     useEffect(() => {
         const handleSaved = () => {
+            try {
+                const raw = localStorage.getItem("kokoro_vision_config");
+                if (raw) {
+                    const saved = JSON.parse(raw) as VisionConfig;
+                    committedConfigRef.current = saved;
+                    setConfig(saved);
+                }
+            } catch {}
             setDirty(false);
         };
         window.addEventListener("kokoro-vision-settings-changed", handleSaved);
@@ -321,7 +356,9 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
         try {
             const cfg = await getVisionConfig();
             setConfig(cfg);
+            committedConfigRef.current = cfg;
             setLoading(false);
+            setDirty(false);
         } catch (e) {
             console.error("[VisionTab] Failed to load config:", e);
             setLoading(false);
@@ -332,7 +369,8 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
         if (!config) return;
         const next = { ...config, ...patch };
         setConfig(next);
-        setDirty(true);
+        const isDirty = isVisionConfigDirty(committedConfigRef.current, next);
+        setDirty(isDirty);
         onConfigChange?.(next);
     };
 
@@ -347,6 +385,7 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
         if (!config) return;
         try {
             await persistVisionConfig(config);
+            committedConfigRef.current = { ...config };
             setDirty(false);
         } catch (e) {
             console.error("[VisionTab] Failed to save config:", e);

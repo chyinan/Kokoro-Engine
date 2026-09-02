@@ -201,9 +201,13 @@ describe('content registry contract', () => {
       id: 'linked-mod', name: 'Linked Mod', version: '1.0.0', description: 'A MOD',
       engine_version: '>=0.3.1, <0.4.0', permissions: [],
     }));
-    await symlink(join(root, 'outside.txt'), join(packageRoot, 'linked.txt'), 'file');
-    await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
-      .rejects.toThrow(/symlink|link|outside/i);
+    try {
+      await symlink(join(root, 'outside.txt'), join(packageRoot, 'linked.txt'), 'file');
+      await expect(buildContentRegistry({ root, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+        .rejects.toThrow(/symlink|link|outside/i);
+    } catch (error) {
+      if (error?.code !== 'EPERM' && error?.code !== 'EACCES') throw error;
+    }
   });
 
   it('requires a root license-named file for character packages', async () => {
@@ -535,9 +539,13 @@ describe('content registry contract', () => {
     await makeMod(registryLinkRoot);
     const registryOutside = await mkdtemp(join(tmpdir(), 'kokoro-registry-output-outside-'));
     temporaryRoots.push(registryOutside);
-    await symlink(registryOutside, join(registryLinkRoot, 'registry'), 'dir');
-    await expect(buildContentRegistry({ root: registryLinkRoot, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
-      .rejects.toThrow(/symlink|regular directory|output/i);
+    try {
+      await symlink(registryOutside, join(registryLinkRoot, 'registry'), 'dir');
+      await expect(buildContentRegistry({ root: registryLinkRoot, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+        .rejects.toThrow(/symlink|regular directory|output/i);
+    } catch (error) {
+      if (error?.code !== 'EPERM' && error?.code !== 'EACCES') throw error;
+    }
 
     const packageLinkRoot = await mkdtemp(join(tmpdir(), 'kokoro-package-output-link-'));
     temporaryRoots.push(packageLinkRoot);
@@ -546,9 +554,13 @@ describe('content registry contract', () => {
     const packageOutside = await mkdtemp(join(tmpdir(), 'kokoro-package-output-outside-'));
     temporaryRoots.push(packageOutside);
     await writeFile(join(packageOutside, 'archive.zip'), 'must not be overwritten');
-    await symlink(join(packageOutside, 'archive.zip'), join(packageLinkRoot, 'registry', 'packages', 'safe-mod-1.0.0.zip'), 'file');
-    await expect(buildContentRegistry({ root: packageLinkRoot, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
-      .rejects.toThrow(/symlink|regular file|output/i);
+    try {
+      await symlink(join(packageOutside, 'archive.zip'), join(packageLinkRoot, 'registry', 'packages', 'safe-mod-1.0.0.zip'), 'file');
+      await expect(buildContentRegistry({ root: packageLinkRoot, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+        .rejects.toThrow(/symlink|regular file|output/i);
+    } catch (error) {
+      if (error?.code !== 'EPERM' && error?.code !== 'EACCES') throw error;
+    }
 
     const v1LinkRoot = await mkdtemp(join(tmpdir(), 'kokoro-v1-output-link-'));
     temporaryRoots.push(v1LinkRoot);
@@ -556,8 +568,12 @@ describe('content registry contract', () => {
     await mkdir(join(v1LinkRoot, 'registry', 'packages'), { recursive: true });
     const v1Outside = await mkdtemp(join(tmpdir(), 'kokoro-v1-output-outside-'));
     temporaryRoots.push(v1Outside);
-    await symlink(v1Outside, join(v1LinkRoot, 'registry', 'v1'), 'dir');
-    await expect(buildContentRegistry({ root: v1LinkRoot, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
-      .rejects.toThrow(/symlink|regular directory|output/i);
+    try {
+      await symlink(v1Outside, join(v1LinkRoot, 'registry', 'v1'), 'dir');
+      await expect(buildContentRegistry({ root: v1LinkRoot, sourceUrl: 'https://mirror.example.test/registry/v1/index.json' }))
+        .rejects.toThrow(/symlink|regular directory|output/i);
+    } catch (error) {
+      if (error?.code !== 'EPERM' && error?.code !== 'EACCES') throw error;
+    }
   });
 });

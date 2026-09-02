@@ -65,5 +65,3 @@ export function shouldSynchronizeOnRuntimeChanged(
   }
   return false;
 }
-
-
