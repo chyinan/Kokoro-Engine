@@ -1156,11 +1156,138 @@ async fn orchestrator_runtime_degraded_blocks_prompt_and_clears_on_successful_ap
     };
     backend.apply(&snapshot).await.unwrap();
 
-    // Degradation is cleared upon successful apply
+    // Degradation is NOT cleared by apply alone (history sync has not completed yet)
+    assert!(orchestrator.get_runtime_degraded().await.is_some());
+
+    // Successful restore (or completed coordinator activation with history sync) clears degradation
+    backend.restore(&snapshot).await.unwrap();
     assert!(orchestrator.get_runtime_degraded().await.is_none());
     let (messages, _) = orchestrator
         .compose_prompt("Hello", false, None, false, "char-1")
         .await
         .expect("compose_prompt should succeed once runtime is applied");
     assert!(!messages.is_empty());
+}
+
+#[tokio::test]
+async fn non_startup_activation_recovery_failure_sets_degraded_and_blocks_chat() {
+    let orchestrator = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+    let temp = TempDir::new().unwrap();
+    let coordinator = ActivationCoordinator::default();
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+
+    // 1. Set up two characters in database with empty greetings so staging doesn't touch messages table
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-1".into(),
+            name: "Char One".into(),
+            persona: "You are Char One.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-2".into(),
+            name: "Char Two".into(),
+            persona: "You are Char Two.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // 2. Activate char-1 successfully first (non-degraded)
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let token1 = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend)
+        .await
+        .unwrap();
+    coordinator
+        .commit(&orchestrator.db, token1, &backend)
+        .await
+        .unwrap();
+
+    assert_eq!(orchestrator.get_character_id().await, "char-1");
+    assert!(orchestrator.get_runtime_degraded().await.is_none());
+
+    // 3. Prepare activation for char-2
+    let token2 = coordinator
+        .prepare(&orchestrator.db, "char-2", &tts_config, &[], &backend)
+        .await
+        .unwrap();
+
+    // 4. Rename conversation_messages table so history sync fails on SELECT,
+    // causing both the new activation sync and the rollback restore sync to fail!
+    sqlx::query("ALTER TABLE conversation_messages RENAME TO conversation_messages_backup")
+        .execute(&orchestrator.db)
+        .await
+        .unwrap();
+
+    // 5. Attempt commit in non-startup context
+    let err = coordinator
+        .commit(&orchestrator.db, token2, &backend)
+        .await
+        .expect_err("activation commit must fail when history sync fails");
+
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("failed to sync history")
+            || err_str.contains("failed to sync conversation history"),
+        "error was: {err_str}"
+    );
+
+    // 6. Verify that the runtime is now degraded and in-memory history is cleared
+    let degraded_reason = orchestrator.get_runtime_degraded().await;
+    assert!(
+        degraded_reason.is_some(),
+        "orchestrator runtime_degraded MUST be set when recovery fails"
+    );
+    assert!(
+        orchestrator.history.lock().await.is_empty(),
+        "history must be cleared when sync fails during recovery"
+    );
+
+    // 7. Verify compose_prompt is rejected with degraded error
+    let prompt_err = orchestrator
+        .compose_prompt("Hello", false, None, false, "char-1")
+        .await
+        .expect_err("compose_prompt must be blocked when runtime is degraded");
+    assert!(
+        prompt_err
+            .to_string()
+            .contains("Character runtime is degraded"),
+        "prompt error was: {prompt_err}"
+    );
 }

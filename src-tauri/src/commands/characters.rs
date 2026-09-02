@@ -72,11 +72,23 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
             self.orchestrator,
             snapshot.current_conversation_id.as_deref(),
         )
-        .await
+        .await?;
+        if !snapshot.character_id.is_empty() {
+            self.orchestrator.clear_runtime_degraded().await;
+        }
+        Ok(())
     }
 
     async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
         sync_orchestrator_history(self.orchestrator, conversation_id).await
+    }
+
+    async fn set_degraded(&self, reason: Option<String>) {
+        self.orchestrator.set_runtime_degraded(reason).await;
+    }
+
+    async fn clear_degraded(&self) {
+        self.orchestrator.clear_runtime_degraded().await;
     }
 }
 
@@ -101,7 +113,6 @@ async fn apply_orchestrator_runtime(
         .await;
     orchestrator.set_proactive_enabled(snapshot.proactive_enabled);
     *orchestrator.current_conversation_id.lock().await = snapshot.current_conversation_id.clone();
-    orchestrator.clear_runtime_degraded().await;
     Ok(())
 }
 
