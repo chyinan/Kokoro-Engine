@@ -366,7 +366,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     const [localAutoBackupConfig, setLocalAutoBackupConfig] = useState<AutoBackupConfig | null>(null);
     const [isAutoBackupLoading, setIsAutoBackupLoading] = useState(true);
     const openRevisionRef = useRef(0);
-    const pendingRuntimePersonaRef = useRef<string | null>(null);
+    const pendingRuntimePersonaRef = useRef<{ characterId: string; persona: string } | null>(null);
 
     // Baseline snapshots (recorded when opening Settings to support dirty checking and cancel reset)
     const baselineDisplayModeRef = useRef(displayMode);
@@ -453,6 +453,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             setIsJailbreakLoading(true);
             setIsAutoBackupLoading(true);
             setSaveError(null);
+            pendingRuntimePersonaRef.current = null;
             getJailbreakPrompt()
                 .then((loaded) => {
                     if (openRevisionRef.current !== currentRevision) return;
@@ -511,6 +512,15 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         bgConfigDirtyRef.current = true;
         setLocalBgConfig(prev => ({ ...prev, ...update }));
     };
+
+    useEffect(() => {
+        if (
+            pendingRuntimePersonaRef.current &&
+            pendingRuntimePersonaRef.current.characterId !== activeCharacterId
+        ) {
+            pendingRuntimePersonaRef.current = null;
+        }
+    }, [activeCharacterId]);
 
 
     // TTS state
@@ -710,14 +720,24 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         let personaSaveResult: CharacterSaveResult | undefined;
         try {
             personaSaveResult = await characterManagerRef.current?.saveDraft();
+            if (personaSaveResult?.errors && personaSaveResult.errors.length > 0) {
+                saveErrors.push(...personaSaveResult.errors);
+            }
         } catch (e) {
             console.error("[SettingsPanel] Failed to save character draft:", e);
             saveErrors.push(getKokoroErrorMessage(e));
         }
         const isCurrentActiveCharacter = personaSaveResult?.changedCharacter?.id === activeCharacterId;
         const personaDirty = Boolean(personaSaveResult?.characterDirty && isCurrentActiveCharacter);
-        if (personaDirty && personaSaveResult?.changedCharacter?.persona) {
-            pendingRuntimePersonaRef.current = personaSaveResult.changedCharacter.persona;
+        if (
+            personaDirty &&
+            personaSaveResult?.changedCharacter?.persona &&
+            personaSaveResult?.changedCharacter?.id
+        ) {
+            pendingRuntimePersonaRef.current = {
+                characterId: personaSaveResult.changedCharacter.id,
+                persona: personaSaveResult.changedCharacter.persona,
+            };
         }
 
         // 2. Commit Vision Settings & Config
@@ -853,8 +873,12 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
         // 9. CONDITIONAL RUNTIME RELOAD:
         // Only trigger onCharacterRuntimeChange if one of the runtime-sensitive fields changed!
+        const pendingRuntime = pendingRuntimePersonaRef.current;
+        const pendingForActive = (pendingRuntime && pendingRuntime.characterId === activeCharacterId)
+            ? pendingRuntime.persona
+            : null;
         const personaToApply = (personaDirty && personaSaveResult?.changedCharacter?.persona)
-            ?? pendingRuntimePersonaRef.current;
+            ?? pendingForActive;
         const runtimeDirty = isRuntimeDirty({
             personaDirty: Boolean(personaToApply),
             ttsDirty: ttsParamsDirty,
@@ -863,7 +887,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         });
 
         if (runtimeDirty) {
-            const selectedTtsProvider = localTtsConfig?.providers.find(
+            const selectedTtsProvider = localTtsConfig?.providers?.find(
                 (provider) => provider.id === ttsProviderId,
             ) ?? null;
             try {
@@ -1055,7 +1079,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                     whileHover="hover"
                                     whileTap={{ scale: 0.97 }}
                                     transition={{ type: "spring", stiffness: 380, damping: 26 }}
-                                    onClick={onClose}
+                                    onClick={handleCancel}
                                     data-onboarding-id="settings-close-button"
                                     className="inline-flex h-9 w-9 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-[color,border-color,box-shadow,background-color] duration-200 ease-out hover:bg-[var(--color-accent)]/8 hover:text-[var(--color-accent)]"
                                     aria-label="Close settings"
@@ -1344,6 +1368,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                     whileHover={{ scale: 1.05 }}
                                     whileTap={{ scale: 0.95 }}
                                     onClick={handleSave}
+                                    data-onboarding-id="settings-save-button"
                                     className={clsx(
                                         "inline-flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-heading font-semibold tracking-wider uppercase",
                                         "bg-[var(--color-accent)] text-black",

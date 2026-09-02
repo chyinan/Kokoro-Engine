@@ -42,11 +42,12 @@ const LANGUAGE_CODE_TO_DISPLAY: Readonly<Record<string, string>> = {
     "ru-ru": "Русский",
 };
 
-function normalizeLanguageValue(value: string): string {
+function normalizeLanguageValue(value?: string | null): string {
+    if (!value) return "";
     return LANGUAGE_CODE_TO_DISPLAY[value.trim().toLowerCase()] ?? value;
 }
 
-export function getLanguageSelectValue(value: string, presets: readonly string[]) {
+export function getLanguageSelectValue(value?: string | null, presets: readonly string[] = []) {
     const normalizedValue = normalizeLanguageValue(value);
     if (normalizedValue === "" || normalizedValue === "auto") {
         return "auto";
@@ -55,7 +56,7 @@ export function getLanguageSelectValue(value: string, presets: readonly string[]
     return normalizedValue === "__custom__" || presets.includes(normalizedValue) ? normalizedValue : "__custom__";
 }
 
-export function shouldShowCustomLanguageInput(value: string, presets: readonly string[]) {
+export function shouldShowCustomLanguageInput(value?: string | null, presets: readonly string[] = []) {
     const normalizedValue = normalizeLanguageValue(value);
     return normalizedValue === "__custom__" || (normalizedValue !== "" && normalizedValue !== "auto" && !presets.includes(normalizedValue));
 }
@@ -145,6 +146,8 @@ export interface CharacterSaveResult {
     userProfileDirty?: boolean;
     changedCharacter?: CharacterRecord;
     userProfile?: UserProfile;
+    failedDraftIds?: string[];
+    errors?: string[];
 }
 
 export interface CharacterManagerRef {
@@ -221,10 +224,19 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
 
     useEffect(() => {
         if (charactersProp === undefined) return;
-        const next = Array.from(charactersProp);
+        const next = charactersProp.map((c) => {
+            if (editChar && editChar.id === c.id) {
+                const initial = initialCharactersRef.current.get(c.id) ?? baselineCharRef.current;
+                if (isCharacterEditDirty(initial, editChar)) {
+                    return { ...editChar };
+                }
+            }
+            const draft = characterDraftsRef.current.get(c.id);
+            return draft ? { ...draft } : { ...c };
+        });
         charactersRef.current = next;
         setCharacters(next);
-        next.forEach((c) => {
+        charactersProp.forEach((c) => {
             // Update initial snapshot for characters without active drafts in this panel
             if (!characterDraftsRef.current.has(c.id) && editChar?.id !== c.id) {
                 initialCharactersRef.current.set(c.id, { ...c });
@@ -314,17 +326,55 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
         if (characterToEditId === null || characterToEditId === undefined) return;
         const selected = characters.find((character) => character.id === characterToEditId);
         if (selected) {
-            setEditChar({ ...selected });
+            setEditChar((current) => {
+                if (current && current.id === selected.id) {
+                    const initial = initialCharactersRef.current.get(selected.id) ?? baselineCharRef.current;
+                    if (isCharacterEditDirty(initial, current)) {
+                        return current;
+                    }
+                }
+                if (current && current.id !== selected.id) {
+                    const initialForCurrent = initialCharactersRef.current.get(current.id) ?? baselineCharRef.current;
+                    if (isCharacterEditDirty(initialForCurrent, current)) {
+                        const updated = {
+                            ...normalizeCharacterRecord(current, userProfile),
+                            updated_at: Date.now(),
+                        };
+                        characterDraftsRef.current.set(updated.id, updated);
+                    }
+                }
+                const draft = characterDraftsRef.current.get(selected.id);
+                return draft ? { ...draft } : { ...selected };
+            });
             baselineCharRef.current = { ...selected };
         }
-    }, [characterToEditId, characters]);
+    }, [characterToEditId, characters, userProfile]);
 
     useEffect(() => {
         if (!activeCharacterIdProp || characterToEditId) return;
         const active = characters.find((character) => character.id === activeCharacterIdProp);
         if (!active) return;
         setActiveId(active.id);
-        setEditChar({ ...active });
+        setEditChar((current) => {
+            if (current && current.id === active.id) {
+                const initial = initialCharactersRef.current.get(active.id) ?? baselineCharRef.current;
+                if (isCharacterEditDirty(initial, current)) {
+                    return current;
+                }
+            }
+            if (current && current.id !== active.id) {
+                const initialForCurrent = initialCharactersRef.current.get(current.id) ?? baselineCharRef.current;
+                if (isCharacterEditDirty(initialForCurrent, current)) {
+                    const updated = {
+                        ...normalizeCharacterRecord(current, userProfile),
+                        updated_at: Date.now(),
+                    };
+                    characterDraftsRef.current.set(updated.id, updated);
+                }
+            }
+            const draft = characterDraftsRef.current.get(active.id);
+            return draft ? { ...draft } : { ...active };
+        });
         baselineCharRef.current = { ...active };
     }, [activeCharacterIdProp, characterToEditId, characters, userProfile]);
 
@@ -332,12 +382,20 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
         saveDraft: async () => {
             let characterDirty = false;
             let activeCommittedChar: CharacterRecord | undefined;
+            const failedDraftIds: string[] = [];
+            const errors: string[] = [];
+
             const userProfileDirty = isUserProfileDirty(baselineUserProfileRef.current, userProfile);
             if (userProfileDirty) {
-                baselineUserProfileRef.current = { ...userProfile };
-                saveUserProfile(userProfile);
-                await setUserName(userProfile.name).catch(e => console.error("[CharacterManager] Failed to set user name:", e));
-                await setUserPersona(userProfile.persona).catch(e => console.error("[CharacterManager] Failed to persist user profile:", e));
+                try {
+                    await setUserName(userProfile.name);
+                    await setUserPersona(userProfile.persona);
+                    saveUserProfile(userProfile);
+                    baselineUserProfileRef.current = { ...userProfile };
+                } catch (e) {
+                    console.error("[CharacterManager] Failed to persist user profile:", e);
+                    errors.push(getKokoroErrorMessage(e));
+                }
             }
 
             if (editChar) {
@@ -370,8 +428,11 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                         await updateCharacter(draft);
                         committedMap.set(id, draft);
                         initialCharactersRef.current.set(id, { ...draft });
+                        characterDraftsRef.current.delete(id);
                     } catch (err) {
                         console.error(`[CharacterManager] Failed to commit draft for ${id}:`, err);
+                        failedDraftIds.push(id);
+                        errors.push(getKokoroErrorMessage(err));
                     }
                 }
                 const nextList = charactersRef.current.map(c => committedMap.get(c.id) ?? c);
@@ -385,7 +446,6 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                 if (activeId && committedMap.has(activeId)) {
                     activeCommittedChar = committedMap.get(activeId);
                 }
-                characterDraftsRef.current.clear();
             }
 
             return {
@@ -394,6 +454,8 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                 userProfileDirty,
                 changedCharacter: activeCommittedChar,
                 userProfile,
+                failedDraftIds: failedDraftIds.length > 0 ? failedDraftIds : undefined,
+                errors: errors.length > 0 ? errors : undefined,
             };
         },
         resetDraft: () => {

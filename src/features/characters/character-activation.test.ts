@@ -502,4 +502,29 @@ describe("character activation shell", () => {
     expect(deps.probeLocalTtsPreset).not.toHaveBeenCalled();
     expect(deps.saveConfirmedLocalTtsPreset).not.toHaveBeenCalled();
   });
+
+  it("synchronizes frontend with authoritative committed runtime if backend error occurs after SQLite commit", async () => {
+    const snapshot = oldFrontendState();
+    const authoritativeCommitted = committed("committed-char", 2);
+    const deps = dependencies({
+      readFrontendRuntime: vi.fn(() => snapshot),
+      commitCharacterActivation: vi.fn(async () => {
+        throw new Error("backend restore failed post-commit");
+      }),
+      getCommittedCharacterRuntime: vi.fn(async () => authoritativeCommitted),
+    });
+
+    await expect(
+      createCharacterActivationService(deps).activateCharacter("committed-char"),
+    ).rejects.toThrow("backend restore failed post-commit");
+
+    // Must NOT restore the stale snapshot because SQLite was already committed to authoritativeCommitted!
+    expect(deps.restoreFrontendRuntime).not.toHaveBeenCalledWith(snapshot);
+    // Must align frontend with authoritative SQLite runtime
+    expect(deps.applyFrontendRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ activeCharacterId: "committed-char" }),
+    );
+    expect(deps.writeRuntimeCache).toHaveBeenCalledWith(authoritativeCommitted);
+    expect(deps.dispatchRuntimeChanged).toHaveBeenCalledWith(authoritativeCommitted);
+  });
 });

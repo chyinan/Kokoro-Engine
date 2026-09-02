@@ -377,6 +377,7 @@ impl ActivationCoordinator {
 
         if let Err(error) = backend.apply(&applied_runtime).await {
             if let Err(restore_error) = backend.restore(&token.previous_committed).await {
+                let _ = self.recover_committed_backend(pool, backend).await;
                 return Err(KokoroError::Internal(format!(
                     "failed to apply activation: {error}; failed to restore backend: {restore_error}"
                 )));
@@ -386,6 +387,7 @@ impl ActivationCoordinator {
         if let Err(error) = transaction.commit().await {
             let restore_result = backend.restore(&token.previous_committed).await;
             if let Err(restore_error) = restore_result {
+                let _ = self.recover_committed_backend(pool, backend).await;
                 return Err(KokoroError::Internal(format!(
                     "failed to commit activation: {error}; failed to restore backend: {restore_error}"
                 )));
@@ -393,15 +395,31 @@ impl ActivationCoordinator {
             return Err(error.into());
         }
 
-        if let Err(error) = backend
+        if let Err(history_err) = backend
             .sync_history(applied_runtime.current_conversation_id.as_deref())
             .await
         {
-            return Err(error);
+            tracing::warn!(
+                "Failed to sync conversation history after character activation: {history_err}"
+            );
         }
 
         state.committed_revision = token.revision;
         Ok(committed)
+    }
+
+    async fn recover_committed_backend<B: ActivationRuntimeBackend>(
+        &self,
+        pool: &SqlitePool,
+        backend: &B,
+    ) -> Result<(), KokoroError> {
+        if let Ok(Some(committed)) = self.get_committed(pool).await {
+            let _ = backend.apply(&committed.runtime).await;
+            let _ = backend
+                .sync_history(committed.runtime.current_conversation_id.as_deref())
+                .await;
+        }
+        Ok(())
     }
 
     pub async fn recover_committed<B: ActivationRuntimeBackend>(
@@ -414,9 +432,9 @@ impl ActivationCoordinator {
             return Ok(None);
         };
         backend.apply(&committed.runtime).await?;
-        backend
+        let _ = backend
             .sync_history(committed.runtime.current_conversation_id.as_deref())
-            .await?;
+            .await;
         state.next_revision = state.next_revision.max(committed.revision);
         state.committed_revision = state.committed_revision.max(committed.revision);
         Ok(Some(committed))

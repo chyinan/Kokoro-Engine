@@ -8,6 +8,73 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::Path;
 
+/// Helper to find candidate backup files for a config path in order of preference
+fn find_backup_candidates(path: &Path) -> Vec<std::path::PathBuf> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config.json");
+    let mut candidates = Vec::new();
+
+    let dot_backup = parent.join(format!(".{file_name}.backup"));
+    if dot_backup.is_file() {
+        candidates.push(dot_backup);
+    }
+    let direct_backup = parent.join(format!("{file_name}.backup"));
+    if direct_backup.is_file() {
+        candidates.push(direct_backup);
+    }
+
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        let prefix = format!(".{file_name}.");
+        let suffix = ".backup";
+        let mut uuid_backups = Vec::new();
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with(&prefix) && name.ends_with(suffix) && p.is_file() {
+                    if let Ok(metadata) = p.metadata() {
+                        let mtime = metadata
+                            .modified()
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        uuid_backups.push((p, mtime));
+                    }
+                }
+            }
+        }
+        uuid_backups.sort_by(|a, b| b.1.cmp(&a.1));
+        for (p, _) in uuid_backups {
+            if !candidates.contains(&p) {
+                candidates.push(p);
+            }
+        }
+    }
+
+    candidates
+}
+
+/// Attempt to recover a missing or corrupted config from backup files.
+fn try_recover_from_backup<T: DeserializeOwned>(path: &Path, label: &str) -> Option<T> {
+    let candidates = find_backup_candidates(path);
+    for candidate in candidates {
+        if let Ok(content) = std::fs::read_to_string(&candidate) {
+            if let Ok(config) = serde_json::from_str::<T>(&content) {
+                tracing::warn!(
+                    target: "config",
+                    "[{}] Recovered valid config from backup file {} to {}",
+                    label,
+                    candidate.display(),
+                    path.display()
+                );
+                let _ = std::fs::copy(&candidate, path);
+                return Some(config);
+            }
+        }
+    }
+    None
+}
+
 /// Generic load for any Serde config type with a `Default` implementation.
 /// Falls back to `T::default()` if the file is missing or unparsable.
 pub fn load_json_config<T: DeserializeOwned + Default>(path: &Path, label: &str) -> T {
@@ -20,24 +87,26 @@ pub fn load_json_config<T: DeserializeOwned + Default>(path: &Path, label: &str)
             Err(e) => {
                 tracing::warn!(
                     target: "config",
-                    "[{}] Failed to parse config {}: {} — using defaults",
+                    "[{}] Failed to parse config {}: {} — searching for backup",
                     label,
                     path.display(),
                     e
                 );
-                T::default()
+                try_recover_from_backup::<T>(path, label).unwrap_or_default()
             }
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => T::default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            try_recover_from_backup::<T>(path, label).unwrap_or_default()
+        }
         Err(e) => {
             tracing::warn!(
                 target: "config",
-                "[{}] Failed to read config {}: {} — using defaults",
+                "[{}] Failed to read config {}: {} — searching for backup",
                 label,
                 path.display(),
                 e
             );
-            T::default()
+            try_recover_from_backup::<T>(path, label).unwrap_or_default()
         }
     }
 }
@@ -61,39 +130,28 @@ pub fn save_json_config<T: Serialize>(
         .and_then(|n| n.to_str())
         .unwrap_or("config.json");
     let temporary = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
-    let backup = parent.join(format!(".{file_name}.{}.backup", Uuid::new_v4()));
+    let backup = parent.join(format!(".{file_name}.backup"));
 
     std::fs::write(&temporary, json.as_bytes()).map_err(|e| {
         KokoroError::Config(format!("Failed to write temporary config file: {}", e))
     })?;
 
-    if !path.exists() {
-        if let Err(e) = std::fs::rename(&temporary, path) {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(KokoroError::Config(format!(
-                "Failed to persist config file: {}",
-                e
-            )));
-        }
-    } else {
-        if let Err(e) = std::fs::rename(path, &backup) {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(KokoroError::Config(format!(
-                "Failed to stage existing config file: {}",
-                e
-            )));
-        }
-        if let Err(e) = std::fs::rename(&temporary, path) {
-            let _ = std::fs::rename(&backup, path);
-            let _ = std::fs::remove_file(&temporary);
-            return Err(KokoroError::Config(format!(
-                "Failed to persist config file: {}",
-                e
-            )));
-        }
-        let _ = std::fs::remove_file(&backup);
+    if path.exists() {
+        let _ = std::fs::copy(path, &backup);
     }
 
+    if let Err(e) = std::fs::rename(&temporary, path) {
+        // Fallback for filesystem differences: try copy + remove
+        if let Err(copy_err) = std::fs::copy(&temporary, path) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(KokoroError::Config(format!(
+                "Failed to persist config file (rename: {e}, copy: {copy_err})"
+            )));
+        }
+        let _ = std::fs::remove_file(&temporary);
+    }
+
+    let _ = std::fs::remove_file(&backup);
     tracing::info!(target: "config", "[{}] Saved config to {}", label, path.display());
     Ok(())
 }
@@ -335,5 +393,50 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(files, vec!["test_config.json"]);
+    }
+
+    #[test]
+    fn load_json_config_recovers_from_backup_when_target_missing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("app_config.json");
+        let backup_path = temp_dir.path().join(".app_config.json.backup");
+
+        #[derive(Debug, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
+        struct TestData {
+            counter: u32,
+        }
+
+        let saved = TestData { counter: 42 };
+        let json = serde_json::to_string(&saved).unwrap();
+        std::fs::write(&backup_path, json).expect("write backup");
+
+        assert!(!path.exists());
+        let loaded: TestData = load_json_config(&path, "RECOVERY_TEST");
+        assert_eq!(loaded, saved);
+        // Target file should have been restored from backup
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn load_json_config_recovers_from_backup_when_target_corrupted() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("app_config.json");
+        let backup_path = temp_dir.path().join(".app_config.json.backup");
+
+        #[derive(Debug, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
+        struct TestData {
+            counter: u32,
+        }
+
+        let saved = TestData { counter: 99 };
+        let json = serde_json::to_string(&saved).unwrap();
+        std::fs::write(&backup_path, json).expect("write backup");
+        std::fs::write(&path, "CORRUPTED_JSON_DATA{{{").expect("write corrupt target");
+
+        let loaded: TestData = load_json_config(&path, "RECOVERY_TEST");
+        assert_eq!(loaded, saved);
+        // Target file should now contain recovered valid content
+        let reloaded: TestData = load_json_config(&path, "RELOAD_TEST");
+        assert_eq!(reloaded, saved);
     }
 }
