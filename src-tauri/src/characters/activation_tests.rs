@@ -25,7 +25,10 @@ struct TestBackend {
     conversations: Arc<Mutex<HashMap<String, Vec<String>>>>,
     fail_next_apply: Arc<Mutex<bool>>,
     fail_next_sync_history: Arc<Mutex<bool>>,
+    fail_sync_history_count: Arc<Mutex<usize>>,
     fail_next_restore: Arc<Mutex<bool>>,
+    fail_next_clear_history: Arc<Mutex<bool>>,
+    degraded: Arc<Mutex<Option<String>>>,
 }
 
 impl TestBackend {
@@ -65,6 +68,20 @@ impl ActivationRuntimeBackend for TestBackend {
     }
 
     async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
+        if conversation_id.is_none()
+            && std::mem::take(&mut *self.fail_next_clear_history.lock().await)
+        {
+            return Err(KokoroError::Internal(
+                "injected backend clear_history failure".into(),
+            ));
+        }
+        let mut count = self.fail_sync_history_count.lock().await;
+        if *count > 0 {
+            *count -= 1;
+            return Err(KokoroError::Internal(
+                "injected backend sync_history failure count".into(),
+            ));
+        }
         if std::mem::take(&mut *self.fail_next_sync_history.lock().await) {
             return Err(KokoroError::Internal(
                 "injected backend sync_history failure".into(),
@@ -81,6 +98,14 @@ impl ActivationRuntimeBackend for TestBackend {
             }
         }
         Ok(())
+    }
+
+    async fn set_degraded(&self, reason: Option<String>) {
+        *self.degraded.lock().await = reason;
+    }
+
+    async fn clear_degraded(&self) {
+        *self.degraded.lock().await = None;
     }
 }
 
@@ -1505,4 +1530,153 @@ async fn recover_committed_history_sync_failure_clears_dirty_history_and_restore
         "history must be cleared on failure"
     );
     assert_eq!(*recovered_backend.history_boundary.lock().await, 0);
+    assert!(
+        recovered_backend.degraded.lock().await.is_some(),
+        "backend must be marked degraded on history sync recovery failure"
+    );
+}
+
+#[tokio::test]
+async fn recover_committed_when_restore_and_clear_fail_reports_accurate_errors_and_sets_degraded() {
+    let pool = pool().await;
+    insert_character(&pool, "char-committed-2", "Committed Char 2", json!({})).await;
+    let coordinator = ActivationCoordinator::default();
+    let initial_backend = TestBackend::default();
+
+    let token = coordinator
+        .prepare(
+            &pool,
+            "char-committed-2",
+            &config(vec![], None),
+            &[],
+            &initial_backend,
+        )
+        .await
+        .unwrap();
+    coordinator
+        .commit(&pool, token, &initial_backend)
+        .await
+        .unwrap();
+
+    let recovered_backend = TestBackend::default();
+    let initial_snapshot = BackendRuntimeSnapshot {
+        character_id: "initial-char".into(),
+        character_name: "Initial Char".into(),
+        current_conversation_id: Some("conv-initial".into()),
+        ..Default::default()
+    };
+    *recovered_backend.state.lock().await = initial_snapshot.clone();
+
+    // Inject history sync failure, restore failure, and clear failure
+    *recovered_backend.fail_next_sync_history.lock().await = true;
+    *recovered_backend.fail_next_restore.lock().await = true;
+    *recovered_backend.fail_next_clear_history.lock().await = true;
+
+    let restarted = ActivationCoordinator::default();
+    let err = restarted
+        .recover_committed(&pool, &recovered_backend)
+        .await
+        .expect_err("recover_committed must fail when history sync fails");
+
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("failed to recover conversation history"),
+        "err was {err_msg}"
+    );
+    assert!(
+        err_msg.contains("failed to restore backend"),
+        "err was {err_msg}"
+    );
+    assert!(
+        err_msg.contains("failed to clear dirty history"),
+        "err was {err_msg}"
+    );
+    assert!(
+        recovered_backend.degraded.lock().await.is_some(),
+        "backend must be degraded when compensation fails"
+    );
+}
+
+#[tokio::test]
+async fn activation_sync_history_failure_with_restore_and_recovery_failure_sets_degraded() {
+    let pool = pool().await;
+    insert_character(&pool, "old", "Old Char", json!({})).await;
+    insert_character(&pool, "next", "Next Char", json!({})).await;
+    let coordinator = ActivationCoordinator::default();
+    let backend = TestBackend::default();
+    let original = BackendRuntimeSnapshot {
+        character_id: "old".into(),
+        current_conversation_id: Some("conv-old".into()),
+        ..Default::default()
+    };
+    *backend.state.lock().await = original.clone();
+    backend.sync_history(Some("conv-old")).await.unwrap();
+
+    let token = coordinator
+        .prepare(&pool, "next", &config(vec![], None), &[], &backend)
+        .await
+        .unwrap();
+
+    // Fail 2 consecutive sync_history calls: 1 for "next" activation, and 1 during recover_committed_backend for "old"
+    *backend.fail_sync_history_count.lock().await = 2;
+    // Also fail restore
+    *backend.fail_next_restore.lock().await = true;
+
+    let err = coordinator
+        .commit(&pool, token, &backend)
+        .await
+        .expect_err("activation commit must fail when sync_history and recovery fail");
+
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("failed to sync history"),
+        "err was {err_msg}"
+    );
+    // Backend MUST be degraded and in-memory history cleared!
+    assert!(
+        backend.degraded.lock().await.is_some(),
+        "backend must be degraded when recovery sync_history fails"
+    );
+    assert!(
+        backend.history.lock().await.is_empty(),
+        "dirty history must be cleared"
+    );
+}
+
+#[tokio::test]
+async fn recover_committed_when_apply_fails_triggers_compensation_and_sets_degraded() {
+    let pool = pool().await;
+    insert_character(&pool, "char-1", "Character 1", json!({})).await;
+    let coordinator = ActivationCoordinator::default();
+    let backend = TestBackend::default();
+
+    // Commit an active runtime
+    let token = coordinator
+        .prepare(&pool, "char-1", &config(vec![], None), &[], &backend)
+        .await
+        .unwrap();
+    coordinator.commit(&pool, token, &backend).await.unwrap();
+
+    let recovered_backend = TestBackend::default();
+    *recovered_backend.fail_next_apply.lock().await = true;
+
+    let restarted = ActivationCoordinator::default();
+    let err = restarted
+        .recover_committed(&pool, &recovered_backend)
+        .await
+        .expect_err("recover_committed must fail when apply fails");
+
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("failed to apply committed runtime"),
+        "err was {err_msg}"
+    );
+    assert!(
+        err_msg.contains("cleared dirty history and rolled back runtime"),
+        "err was {err_msg}"
+    );
+    assert!(
+        recovered_backend.degraded.lock().await.is_some(),
+        "backend must be degraded when apply fails during recovery"
+    );
 }
