@@ -3,8 +3,8 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useDeferredValue, memo, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
-import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, listCharacters, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
+import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
+import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, editConversationMessage, listCharacters, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
 import type { CommittedCharacterRuntime, FailureEvent, ToolTraceItem } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen } from "@tauri-apps/api/event";
@@ -39,6 +39,7 @@ import {
 import {
     computeTargetScrollTop,
     isScrollAtBottom,
+    computeAnchoredScrollTop,
     type ChatScrollSnapshot,
 } from "./chat/chat-scroll-state";
 import {
@@ -47,6 +48,7 @@ import {
     saveChatInputHeight,
     toggleChatInputResetHeight,
 } from "./chat/chat-input-layout";
+import { combineDraftWithTranscription } from "./chat/chat-draft-layout";
 import { useCharacterChatDraft } from "./chat/use-character-draft";
 import { requestMemoryModelDialog } from "../../lib/memory-model-gate";
 import { getChatPanelInteractionProps } from "../layout/layout-interaction";
@@ -278,7 +280,16 @@ export default function ChatPanel({
     activeConversationIdRef.current = activeConversationId;
     const deferredMessages = useDeferredValue(messages);
     const [visibleCount, setVisibleCount] = useState(20);
+    const [showScrollBottom, setShowScrollBottom] = useState(false);
+    const [hasNewMessagesBelow, setHasNewMessagesBelow] = useState(false);
+    const isPrependingRef = useRef(false);
+    const prevScrollHeightRef = useRef(0);
+    const prevScrollTopRef = useRef(0);
     const { input, setInput, clearDraft } = useCharacterChatDraft(activeCharacterId);
+    const inputRef = useRef(input);
+    inputRef.current = input;
+    const sttBaseDraftRef = useRef<string | null>(null);
+    const prevVoiceStateRef = useRef<VoiceState>(VoiceState.Idle);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [inputHeight, setInputHeight] = useState<number>(loadSavedChatInputHeight);
     const inputHeightRef = useRef(inputHeight);
@@ -333,8 +344,21 @@ export default function ChatPanel({
     const ttsSpeakingRef = useRef(false);
     const [isStopping, setIsStopping] = useState(false);
     const cancelRequestedRef = useRef(false);
+    const cancellationWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const messagesRef = useRef<ChatMessage[]>([]);
     const [isThinking, setIsThinking] = useState(false);
+    const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+    useEffect(() => {
+        if (!showClearConfirm) return;
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === "Escape") {
+                setShowClearConfirm(false);
+            }
+        };
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [showClearConfirm]);
 
     // Per-message translation expand state (set of message indices)
     const [expandedTranslations, setExpandedTranslations] = useState<Set<number>>(new Set());
@@ -353,6 +377,10 @@ export default function ChatPanel({
         setIsStreaming(false);
     }, []);
     const endTurnActivity = useCallback(() => {
+        if (cancellationWatchdogTimerRef.current !== null) {
+            clearTimeout(cancellationWatchdogTimerRef.current);
+            cancellationWatchdogTimerRef.current = null;
+        }
         cancelRequestedRef.current = false;
         setIsStopping(false);
         isStreamingRef.current = false;
@@ -487,11 +515,22 @@ export default function ChatPanel({
         setIsStopping(true);
         setIsThinking(false);
 
+        // 启动安全看门狗：如果 5 秒内后端由于异常未能正常结束 turn，强制复位 UI 状态
+        if (cancellationWatchdogTimerRef.current !== null) {
+            clearTimeout(cancellationWatchdogTimerRef.current);
+        }
+        cancellationWatchdogTimerRef.current = setTimeout(() => {
+            console.warn("[ChatPanel] Cancellation watchdog triggered - forcing UI reset");
+            endTurnActivity();
+            currentTurnRef.current = null;
+            setIsThinking(false);
+        }, 5000);
+
         const activeTurnId = currentTurnRef.current?.turnId;
         if (activeTurnId) {
             void requestTurnCancellation(activeTurnId);
         }
-    }, [isStopping, requestTurnCancellation]);
+    }, [isStopping, requestTurnCancellation, endTurnActivity]);
 
     // 自动恢复最近对话
     useEffect(() => {
@@ -580,18 +619,29 @@ export default function ChatPanel({
 
     const handleTranscription = useCallback((text: string) => {
         const trimmed = text.trim();
-        if (!trimmed) return;
+        if (!trimmed) {
+            // 空文本或未识别：恢复原草稿并重置快照
+            if (sttBaseDraftRef.current !== null) {
+                setInput(sttBaseDraftRef.current);
+                sttBaseDraftRef.current = null;
+            }
+            return;
+        }
+
+        const base = sttBaseDraftRef.current ?? "";
+        sttBaseDraftRef.current = null; // 正常结算，解除锁定
+        const fullMessage = combineDraftWithTranscription(base, trimmed);
 
         if (sttAutoSend) {
             void (async () => {
                 if (!await ensureMemoryModelReady()) {
-                    setInput(trimmed);
+                    setInput(fullMessage);
                     return;
                 }
 
                 // Auto-send: inject directly into chat
                 clearDraft();
-                setMessages(prev => [...prev, { role: "user", text: trimmed }]);
+                setMessages(prev => [...prev, { role: "user", text: fullMessage }]);
                 startStreaming();
                 setIsThinking(true);
                 userScrolledRef.current = false;
@@ -599,7 +649,7 @@ export default function ChatPanel({
                 const allowImageGen = isGeneratedBackgroundMode();
 
                 streamChat({
-                    message: trimmed,
+                    message: fullMessage,
                     allow_image_gen: allowImageGen,
                     character_id: getActiveCharacterIdForRequest(),
                 }).catch(err => {
@@ -616,10 +666,10 @@ export default function ChatPanel({
                 });
             })();
         } else {
-            // Fill input box for user review
-            setInput(trimmed);
+            // Fill input box with merged text for user review
+            setInput(fullMessage);
         }
-    }, [endTurnActivity, ensureMemoryModelReady, sttAutoSend, startStreaming]);
+    }, [endTurnActivity, ensureMemoryModelReady, sttAutoSend, startStreaming, clearDraft, setInput]);
 
     const { state: voiceState, volume: micVolume, partialText: sttPartialText, start: startVoice, stop: stopVoice } = useVoiceInput(handleTranscription);
 
@@ -673,6 +723,7 @@ export default function ChatPanel({
                 }
                 return;
             }
+            sttBaseDraftRef.current = inputRef.current;
             startVoice({ autoStopOnSilence: true });
         }, [continuousListening, handleTranscription, startVoice]),
     });
@@ -680,21 +731,22 @@ export default function ChatPanel({
     // Effect: Sync partial STT text to input box for real-time feedback
     useEffect(() => {
         if (voiceState === VoiceState.Listening && sttPartialText) {
-            // If auto-send is OFF, we just show the text in the box so user can edit later
-            if (!sttAutoSend) {
-                setInput(sttPartialText);
-            }
-            // If auto-send is ON, we usually wait for finalization to send.
-            // But we could show a preview? For now, let's keep it simple:
-            // Only fill input if NOT auto-sending. 
-            // (If auto-sending, the text appears in chat history immediately upon finish).
-            // Actually, showing it in input box is good feedback even for auto-send (it enters chat on stop).
-            // But valid auto-send logic often clears input.
-            // Let's stick to: Always show in input box while speaking.
-            // When "Final" fires, if AutoSend -> Clear Input & Send. If Not -> Leave in Input.
-            setInput(sttPartialText);
+            const base = sttBaseDraftRef.current ?? "";
+            const combined = combineDraftWithTranscription(base, sttPartialText);
+            setInput(combined);
         }
-    }, [sttPartialText, voiceState, sttAutoSend]);
+    }, [sttPartialText, voiceState, setInput]);
+
+    // 听音生命周期退出兜底：若未完成识别退出且存在基准草稿，自动无损回滚
+    useEffect(() => {
+        if (prevVoiceStateRef.current === VoiceState.Listening && voiceState === VoiceState.Idle) {
+            if (sttBaseDraftRef.current !== null) {
+                setInput(sttBaseDraftRef.current);
+                sttBaseDraftRef.current = null;
+            }
+        }
+        prevVoiceStateRef.current = voiceState;
+    }, [voiceState, setInput]);
 
     // Sync vision state when localStorage changes (from Settings panel)
     useEffect(() => {
@@ -778,19 +830,75 @@ export default function ChatPanel({
         const atBottom = isScrollAtBottom(
             container.scrollTop,
             container.scrollHeight,
-            container.clientHeight
+            container.clientHeight,
+            120
         );
         userScrolledRef.current = !atBottom;
+        setShowScrollBottom(!atBottom);
+        if (atBottom) {
+            setHasNewMessagesBelow(false);
+        }
+
         savedScrollSnapshotRef.current = {
             scrollTop: container.scrollTop,
             scrollHeight: container.scrollHeight,
             clientHeight: container.clientHeight,
             isAtBottom: atBottom,
         };
-        // Load more messages when scrolled near top
-        if (container.scrollTop < 100) {
+
+        // 向上滚动加载分页：增加边界与防抖检查，记录基准高度
+        const hasMore = visibleCount < deferredMessages.length;
+        if (container.scrollTop < 100 && hasMore && !isPrependingRef.current) {
+            isPrependingRef.current = true;
+            prevScrollHeightRef.current = container.scrollHeight;
+            prevScrollTopRef.current = container.scrollTop;
             setVisibleCount(prev => prev + 20);
         }
+    }, [deferredMessages.length, visibleCount]);
+
+    // 滚动锚定：在前置插入旧消息后，在浏览器绘制前补偿 scrollTop，杜绝视口抖动
+    useLayoutEffect(() => {
+        if (!isPrependingRef.current) return;
+        isPrependingRef.current = false;
+        const container = messagesContainerRef.current;
+        if (!container) return;
+
+        const targetScrollTop = computeAnchoredScrollTop(
+            prevScrollTopRef.current,
+            prevScrollHeightRef.current,
+            container.scrollHeight
+        );
+
+        if (targetScrollTop !== container.scrollTop) {
+            isProgrammaticScrollRef.current = true;
+            container.scrollTop = targetScrollTop;
+            requestAnimationFrame(() => {
+                isProgrammaticScrollRef.current = false;
+            });
+        }
+    }, [visibleCount]);
+
+    // 离开底部时侦测新到达消息以点亮悬浮指示灯
+    useEffect(() => {
+        if (userScrolledRef.current && messages.length > 0) {
+            setHasNewMessagesBelow(true);
+        }
+    }, [messages.length]);
+
+    const scrollToBottomSmooth = useCallback(() => {
+        const container = messagesContainerRef.current;
+        if (!container) return;
+        userScrolledRef.current = false;
+        setShowScrollBottom(false);
+        setHasNewMessagesBelow(false);
+        isProgrammaticScrollRef.current = true;
+        container.scrollTo({
+            top: container.scrollHeight,
+            behavior: "smooth",
+        });
+        setTimeout(() => {
+            isProgrammaticScrollRef.current = false;
+        }, 300);
     }, []);
 
     // Track unread messages while collapsed
@@ -833,10 +941,6 @@ export default function ChatPanel({
 
             const unTurnStart = await onChatTurnStart(({ turn_id }) => {
                 if (aborted) return;
-                if (cancelRequestedRef.current) {
-                    void requestTurnCancellation(turn_id);
-                    return;
-                }
                 currentTurnRef.current = {
                     turnId: turn_id,
                     messageIndex: null,
@@ -849,6 +953,11 @@ export default function ChatPanel({
                 };
                 pendingVisionContextRef.current = null;
                 rawResponseRef.current = "";
+
+                if (cancelRequestedRef.current) {
+                    void requestTurnCancellation(turn_id);
+                    return;
+                }
             });
             if (aborted) { unTurnStart(); return; }
             cleanups.push(unTurnStart);
@@ -878,6 +987,9 @@ export default function ChatPanel({
                 }
 
                 pushDelta(revealText);
+                if (userScrolledRef.current) {
+                    setHasNewMessagesBelow(true);
+                }
             });
             if (aborted) { unDelta(); return; }
             cleanups.push(unDelta);
@@ -938,7 +1050,14 @@ export default function ChatPanel({
             const unDone = await onChatTurnFinish(({ turn_id, status }) => {
                 if (aborted) return;
                 const turn = currentTurnRef.current;
-                if (!turn || turn.turnId !== turn_id) return;
+                if (!turn || turn.turnId !== turn_id) {
+                    if (cancelRequestedRef.current) {
+                        endTurnActivity();
+                        currentTurnRef.current = null;
+                        setIsThinking(false);
+                    }
+                    return;
+                }
 
                 flushReveal();
                 endTurnActivity();
@@ -1162,6 +1281,10 @@ export default function ChatPanel({
         setup();
         return () => {
             aborted = true;
+            if (cancellationWatchdogTimerRef.current !== null) {
+                clearTimeout(cancellationWatchdogTimerRef.current);
+                cancellationWatchdogTimerRef.current = null;
+            }
             cleanups.forEach(fn => fn());
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1296,6 +1419,7 @@ export default function ChatPanel({
     // ── STT: Advanced VAD Microphone toggle ─────────────────
     const handleMicToggle = useCallback(() => {
         if (voiceState === VoiceState.Idle) {
+            sttBaseDraftRef.current = inputRef.current;
             startVoice({ autoStopOnSilence: true });
         } else {
             stopVoice();
@@ -1303,13 +1427,21 @@ export default function ChatPanel({
     }, [voiceState, startVoice, stopVoice]);
 
     // ── Clear history ──────────────────────────────────────
-    const handleClear = async () => {
+    const handleClearClick = () => {
+        if (messages.length === 0 || isBusy || isStreaming) return;
+        setShowClearConfirm(true);
+    };
+
+    const executeClear = async () => {
+        setShowClearConfirm(false);
         try {
             await clearHistory();
         } catch {
             // Backend might not be ready
         }
         setMessages([]);
+        setShowScrollBottom(false);
+        setHasNewMessagesBelow(false);
         savedScrollSnapshotRef.current = null;
         userScrolledRef.current = false;
     };
@@ -1324,13 +1456,45 @@ export default function ChatPanel({
         });
     }, []);
 
-    const onEdit = useCallback((globalIndex: number, newText: string) => {
+    const onEdit = useCallback(async (globalIndex: number, newText: string) => {
+        const trimmed = newText.trim();
+        if (!trimmed) return;
+
+        const targetMsg = messagesRef.current[globalIndex];
+        if (!targetMsg) return;
+
+        // 1. 本地乐观更新 UI
         setMessages(prev => {
             const updated = [...prev];
-            updated[globalIndex] = { ...updated[globalIndex], text: newText };
+            if (updated[globalIndex]) {
+                updated[globalIndex] = { ...updated[globalIndex], text: trimmed };
+            }
             return updated;
         });
-    }, []);
+
+        // 2. 异步持久化到 SQLite 并同步后端 LLM 上下文
+        try {
+            const res = await editConversationMessage({
+                conversation_id: activeConversationIdRef.current ?? undefined,
+                message_id: targetMsg.id,
+                visible_index: globalIndex,
+                new_content: trimmed,
+            });
+            // 3. 回填生成的新 message_id（适用于刚发出的新消息）
+            if (res?.message_id && !targetMsg.id) {
+                setMessages(prev => {
+                    const updated = [...prev];
+                    if (updated[globalIndex]) {
+                        updated[globalIndex] = { ...updated[globalIndex], id: res.message_id };
+                    }
+                    return updated;
+                });
+            }
+        } catch (e) {
+            console.error("[ChatPanel] Failed to persist message edit:", e);
+            setError(t("chat.errors.edit_failed") ?? "Failed to save edited message");
+        }
+    }, [t]);
 
     const onRegenerate = useCallback(async (globalIndex: number) => {
         const msgs = messagesRef.current;
@@ -1364,6 +1528,7 @@ export default function ChatPanel({
             images: userMsg.images,
             allow_image_gen: allowImageGen,
             character_id: getActiveCharacterIdForRequest(),
+            regenerate: true,
         }).catch(err => {
             if (isTurnCancelledError(err) || cancelRequestedRef.current) {
                 endTurnActivity();
@@ -1640,6 +1805,51 @@ export default function ChatPanel({
                 }}
             />
 
+            {/* 清空会话二次确认模态窗 */}
+            <AnimatePresence>
+                {showClearConfirm && (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="absolute inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+                        onClick={() => setShowClearConfirm(false)}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.9, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={{ scale: 0.9, opacity: 0 }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="w-full max-w-[280px] bg-[var(--color-bg-secondary,#1e293b)] border border-[var(--color-border)] rounded-xl p-4 shadow-2xl space-y-3"
+                        >
+                            <div className="flex items-center gap-2 text-[var(--color-error,#ef4444)]">
+                                <Trash2 size={18} />
+                                <span className="font-semibold text-sm">
+                                    {t("chat.actions.confirm_clear_title")}
+                                </span>
+                            </div>
+                            <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+                                {t("chat.actions.confirm_clear")}
+                            </p>
+                            <div className="flex items-center justify-end gap-2 pt-1">
+                                <button
+                                    onClick={() => setShowClearConfirm(false)}
+                                    className="px-3 py-1.5 rounded-lg text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-slate-700/50 transition-colors"
+                                >
+                                    {t("chat.actions.cancel")}
+                                </button>
+                                <button
+                                    onClick={executeClear}
+                                    className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 transition-colors"
+                                >
+                                    {t("chat.actions.confirm_clear_button")}
+                                </button>
+                            </div>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
             {/* Header �?clean and minimal */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
                 <div className="flex items-center gap-2 min-w-0">
@@ -1681,10 +1891,16 @@ export default function ChatPanel({
                         <History size={14} strokeWidth={1.5} />
                     </motion.button>
                     <motion.button
-                        whileHover={{ scale: 1.1 }}
-                        whileTap={{ scale: 0.95 }}
-                        onClick={handleClear}
-                        className="p-2 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-error)] transition-colors"
+                        whileHover={messages.length > 0 && !isBusy && !isStreaming ? { scale: 1.1 } : undefined}
+                        whileTap={messages.length > 0 && !isBusy && !isStreaming ? { scale: 0.95 } : undefined}
+                        onClick={handleClearClick}
+                        disabled={messages.length === 0 || isBusy || isStreaming}
+                        className={clsx(
+                            "p-2 rounded-md transition-colors",
+                            messages.length === 0 || isBusy || isStreaming
+                                ? "text-[var(--color-text-muted)]/30 cursor-not-allowed"
+                                : "text-[var(--color-text-muted)] hover:text-[var(--color-error)]"
+                        )}
                         aria-label={t("chat.actions.clear")}
                         title={t("chat.actions.clear")}
                     >
@@ -1741,6 +1957,35 @@ export default function ChatPanel({
 
             {/* Input */}
             <form onSubmit={handleSend} className="relative border-t border-[var(--color-border)] bg-black/20 pt-1">
+                {/* Messages 区域上方悬浮的回到底部 / 新消息胶囊 */}
+                <AnimatePresence>
+                    {showScrollBottom && (
+                        <div className="relative w-full">
+                            <motion.button
+                                type="button"
+                                initial={{ opacity: 0, y: 10, scale: 0.9 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: 10, scale: 0.9 }}
+                                whileHover={{ scale: 1.05 }}
+                                whileTap={{ scale: 0.95 }}
+                                onClick={scrollToBottomSmooth}
+                                className={clsx(
+                                    "absolute right-5 -top-12 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-full shadow-xl backdrop-blur-md transition-colors",
+                                    hasNewMessagesBelow
+                                        ? "bg-[var(--color-accent,#6366f1)] text-white font-medium border border-white/20 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
+                                        : "bg-slate-900/80 border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent)]"
+                                )}
+                                title={hasNewMessagesBelow ? t("chat.actions.new_messages") : t("chat.actions.to_bottom")}
+                            >
+                                <ChevronDown size={14} className={hasNewMessagesBelow ? "animate-bounce" : ""} />
+                                <span className="text-xs">
+                                    {hasNewMessagesBelow ? t("chat.actions.new_messages") : t("chat.actions.to_bottom")}
+                                </span>
+                            </motion.button>
+                        </div>
+                    )}
+                </AnimatePresence>
+
                 {/* Drag handle on top edge */}
                 <div
                     onPointerDown={handleInputResizeStart}

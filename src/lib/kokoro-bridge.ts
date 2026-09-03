@@ -279,6 +279,8 @@ export interface ChatRequest {
     hidden?: boolean;
     /** Optional caller correlation echoed on turn lifecycle events. */
     client_request_id?: string;
+    /** If true, this turn is regenerating an assistant reply for the last user message. */
+    regenerate?: boolean;
 }
 
 export async function streamChat(request: ChatRequest): Promise<void> {
@@ -1344,6 +1346,7 @@ export interface Conversation {
 }
 
 export interface ConversationMessage {
+    id?: number;
     role: string;
     content: string;
     metadata?: string;
@@ -1354,6 +1357,24 @@ export interface LoadedConversation {
     topic: string;
     pinned_state: string;
     messages: ConversationMessage[];
+}
+
+export interface EditConversationMessageRequest {
+    conversation_id?: string;
+    message_id?: number;
+    visible_index?: number;
+    new_content: string;
+}
+
+export interface EditConversationMessageResponse {
+    message_id: number;
+    updated_content: string;
+}
+
+export async function editConversationMessage(
+    request: EditConversationMessageRequest,
+): Promise<EditConversationMessageResponse> {
+    return invoke<EditConversationMessageResponse>("edit_conversation_message", { request });
 }
 
 export async function listConversations(characterId: string): Promise<Conversation[]> {
@@ -1379,7 +1400,19 @@ export async function updateConversationState(
 
 export function hasPinnedConversationState(pinnedState: string): boolean {
     const normalized = pinnedState.trim();
-    return normalized !== "" && normalized !== "{}";
+    if (!normalized || normalized === "{}") return false;
+    try {
+        const parsed = JSON.parse(normalized);
+        if (typeof parsed === "object" && parsed !== null) {
+            if ("pinned" in parsed) {
+                return Boolean(parsed.pinned);
+            }
+            return false;
+        }
+        return false;
+    } catch {
+        return false;
+    }
 }
 
 export function getConversationDisplayTitle(conversation: Conversation): string {

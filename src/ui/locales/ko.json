@@ -1127,12 +1127,17 @@
             "save": "저장 (Ctrl+Enter)",
             "cancel": "취소 (Esc)",
             "clear": "대화 지우기",
+            "confirm_clear_title": "대화 지우기",
+            "confirm_clear": "이 대화의 모든 메시지를 지우시겠습니까? 이 작업은 취소할 수 없습니다.",
+            "confirm_clear_button": "모두 지우기",
             "collapse": "채팅 접기",
             "open": "채팅 열기",
             "resize": "채팅 너비 조절",
             "retry": "재시도",
             "stop": "생성 중지",
-            "stopping": "중지하는 중..."
+            "stopping": "중지하는 중...",
+            "to_bottom": "맨 아래로",
+            "new_messages": "새 메시지 ↓"
         },
         "errors": {
             "image_too_large": "이미지가 너무 큽니다 (최대 5MB)",
@@ -1140,7 +1145,8 @@
             "upload_failed": "이미지 업로드 실패",
             "connection_error": "연결에 문제가 발생했습니다. API 설정을 확인해주세요. 💭",
             "memory_model_required": "로컬 메모리 모델이 아직 준비되지 않았습니다. 채팅은 계속할 수 있지만 의미 메모리는 잠시 건너뜁니다.",
-            "memory_model_check_failed": "로컬 메모리 모델 상태를 확인하지 못했습니다. 채팅은 계속할 수 있으니 편할 때 다운로드 대화상자를 확인하세요."
+            "memory_model_check_failed": "로컬 메모리 모델 상태를 확인하지 못했습니다. 채팅은 계속할 수 있으니 편할 때 다운로드 대화상자를 확인하세요.",
+            "edit_failed": "편집된 메시지를 저장하지 못했습니다"
         },
         "input": {
             "placeholder": "대화를 시작하세요...",
@@ -1166,7 +1172,10 @@
             "delete": "대화 삭제",
             "rename": "이름 변경",
             "empty": "대화 기록이 없습니다",
-            "confirmDelete": "이 대화를 삭제하시겠습니까?"
+            "confirmDelete": "이 대화를 삭제하시겠습니까?",
+            "pinned": "고정됨",
+            "pin": "대화 고정",
+            "unpin": "고정 해제"
         },
         "tools": {
             "header": "도구 ({{count}})",

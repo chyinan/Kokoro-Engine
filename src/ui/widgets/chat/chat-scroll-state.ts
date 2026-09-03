@@ -45,3 +45,15 @@ export function computeTargetScrollTop(
         userScrolled: true,
     };
 }
+
+/**
+ * Calculates the adjusted scrollTop after prepending items to preserve visual scroll anchoring.
+ */
+export function computeAnchoredScrollTop(
+    prevScrollTop: number,
+    prevScrollHeight: number,
+    newScrollHeight: number
+): number {
+    const heightDiff = newScrollHeight - prevScrollHeight;
+    return heightDiff > 0 ? prevScrollTop + heightDiff : prevScrollTop;
+}

@@ -1,6 +1,7 @@
 import type { ConversationMessage, ToolTraceItem } from "../../lib/kokoro-bridge";
 
 export interface ChatHistoryMessage {
+    id?: number;
     role: "user" | "kokoro" | "context";
     text: string;
     images?: string[];
@@ -57,6 +58,7 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
 
         if (m.role === "context") {
             chatMsgs.push({
+                id: m.id,
                 role: "context",
                 text: m.content,
                 capturedAt: getStringMetadataValue(meta, "captured_at") ?? m.created_at,
@@ -137,6 +139,7 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
             const pendingTools = turnId ? pendingToolsByTurn.get(turnId) : undefined;
 
             chatMsgs.push({
+                id: m.id,
                 role: "kokoro",
                 text,
                 translation,
@@ -150,7 +153,7 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
             continue;
         }
 
-        chatMsgs.push({ role: "user", text: m.content });
+        chatMsgs.push({ id: m.id, role: "user", text: m.content });
     }
 
     for (const turnId of pendingTurnOrder) {

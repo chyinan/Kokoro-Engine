@@ -1127,12 +1127,17 @@
             "save": "儲存 (Ctrl+Enter)",
             "cancel": "取消 (Esc)",
             "clear": "清空對話",
+            "confirm_clear_title": "清空當前對話",
+            "confirm_clear": "確定要清空當前對話的所有記錄嗎？此操作無法撤銷。",
+            "confirm_clear_button": "確認清空",
             "collapse": "折疊對話",
             "open": "展開對話",
             "resize": "調整對話寬度",
             "retry": "重試",
             "stop": "停止生成",
-            "stopping": "正在停止..."
+            "stopping": "正在停止...",
+            "to_bottom": "回到最底",
+            "new_messages": "有新訊息 ↓"
         },
         "errors": {
             "image_too_large": "圖片過大 (最大 5MB)",
@@ -1140,7 +1145,8 @@
             "upload_failed": "圖片上傳失敗",
             "connection_error": "連線出現問題，請檢查 API 設定。 💭",
             "memory_model_required": "本機記憶模型還沒準備好。聊天仍可繼續，但暫時不會使用語意記憶。",
-            "memory_model_check_failed": "暫時無法確認本機記憶模型狀態。聊天仍可繼續，方便時再檢查下載視窗。"
+            "memory_model_check_failed": "暫時無法確認本機記憶模型狀態。聊天仍可繼續，方便時再檢查下載視窗。",
+            "edit_failed": "儲存編輯訊息失敗"
         },
         "input": {
             "placeholder": "與你的同伴對話...",
@@ -1166,7 +1172,10 @@
             "delete": "刪除對話",
             "rename": "重命名",
             "empty": "暫無對話記錄",
-            "confirmDelete": "確定刪除這條對話記錄嗎？"
+            "confirmDelete": "確定刪除這條對話記錄嗎？",
+            "pinned": "已釘選",
+            "pin": "釘選對話",
+            "unpin": "取消釘選"
         },
         "tools": {
             "header": "工具 ({{count}})",

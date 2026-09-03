@@ -60,3 +60,51 @@ export function clearCharacterDraft(characterId: string, storage?: Storage): voi
         // ignore storage errors
     }
 }
+
+/**
+ * Safely combines an existing user draft with real-time or final STT speech transcription.
+ * Preserves the user's manual typed content while appending recognized speech with natural spacing/punctuation.
+ */
+export function combineDraftWithTranscription(baseDraft: string, transcription: string): string {
+    const trimmedTranscription = transcription.trim();
+    if (!trimmedTranscription) return baseDraft;
+    if (!baseDraft) return trimmedTranscription;
+
+    const trimmedBase = baseDraft.trimEnd();
+    if (!trimmedBase) return trimmedTranscription;
+
+    // 1. If base ends with a newline, preserve trailing newline
+    if (/\n/.test(baseDraft.slice(-1))) {
+        return baseDraft + trimmedTranscription;
+    }
+
+    const lastChar = trimmedBase.slice(-1);
+
+    // 2. If base ends with Chinese/Japanese full-width punctuation
+    const cjkPunctuation = /[，。！？；：、“”‘’（）《》【】…—]/;
+    if (cjkPunctuation.test(lastChar)) {
+        return trimmedBase + trimmedTranscription;
+    }
+
+    // 3. If base ends with Western punctuation (. , ! ? ; :)
+    const westernPunctuation = /[.,!?;:]/;
+    if (westernPunctuation.test(lastChar)) {
+        return trimmedBase + " " + trimmedTranscription;
+    }
+
+    // 4. If both boundary characters are CJK ideographs
+    const isCjkChar = /[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af]/.test(lastChar);
+    const firstTransChar = trimmedTranscription.charAt(0);
+    const isFirstCjk = /[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af]/.test(firstTransChar);
+
+    if (isCjkChar && isFirstCjk) {
+        // If user already typed a trailing space, preserve it
+        if (/\s/.test(baseDraft.slice(-1))) {
+            return baseDraft + trimmedTranscription;
+        }
+        return trimmedBase + trimmedTranscription;
+    }
+
+    // 5. Default: separate with a single space
+    return trimmedBase + " " + trimmedTranscription;
+}

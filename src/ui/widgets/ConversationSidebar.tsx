@@ -1,10 +1,17 @@
 // pattern: Imperative Shell
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Plus, Trash2, History, X, Check, Pencil, Pin } from "lucide-react";
-import { listConversations, deleteConversation, createConversation, renameConversation, getConversationDisplayTitle, hasPinnedConversationState } from "../../lib/kokoro-bridge";
+import { 
+    listConversations, 
+    deleteConversation, 
+    renameConversation, 
+    updateConversationState,
+    getConversationDisplayTitle, 
+    hasPinnedConversationState 
+} from "../../lib/kokoro-bridge";
 import type { Conversation } from "../../lib/kokoro-bridge";
 import { useTranslation } from "react-i18next";
 
@@ -40,6 +47,39 @@ export default function ConversationSidebar({
         }
     }, [characterId]);
 
+    // 置顶优先排序：已固定的会话始终排在最前面，同级别按更新时间倒序
+    const sortedConversations = useMemo(() => {
+        return [...conversations].sort((a, b) => {
+            const aPinned = hasPinnedConversationState(a.pinned_state) ? 1 : 0;
+            const bPinned = hasPinnedConversationState(b.pinned_state) ? 1 : 0;
+            if (aPinned !== bPinned) {
+                return bPinned - aPinned;
+            }
+            return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+        });
+    }, [conversations]);
+
+    const handleTogglePin = async (e: React.MouseEvent, conv: Conversation) => {
+        e.stopPropagation();
+        const isCurrentlyPinned = hasPinnedConversationState(conv.pinned_state);
+        const nextPinnedState = isCurrentlyPinned
+            ? "{}"
+            : JSON.stringify({ pinned: true, pinned_at: new Date().toISOString() });
+
+        // 乐观更新
+        setConversations(prev =>
+            prev.map(c => (c.id === conv.id ? { ...c, pinned_state: nextPinnedState } : c))
+        );
+
+        try {
+            await updateConversationState(conv.id, { pinned_state: nextPinnedState });
+            await refresh();
+        } catch (err) {
+            console.error("[ConversationSidebar] Failed to toggle pin:", err);
+            await refresh();
+        }
+    };
+
     useEffect(() => {
         setConversations([]);
         if (open) void refresh();
@@ -52,13 +92,9 @@ export default function ConversationSidebar({
         }
     }, [editingId]);
 
-    const handleLoad = async (id: string) => {
-        if (id === activeConversationId) return;
-        try {
-            await onSelectConversation(id);
-        } catch (err) {
-            console.error("[ConversationSidebar] Failed to load conversation:", err);
-        }
+    const handleCreate = async () => {
+        onClose();
+        onStartEmptyConversation();
     };
 
     const handleDelete = async (e: React.MouseEvent, id: string) => {
@@ -71,17 +107,7 @@ export default function ConversationSidebar({
             }
             await refresh();
         } catch (err) {
-            console.error("[ConversationSidebar] Failed to delete:", err);
-        }
-    };
-
-    const handleNew = async () => {
-        try {
-            await createConversation();
-            onStartEmptyConversation();
-            await refresh();
-        } catch (err) {
-            console.error("[ConversationSidebar] Failed to create:", err);
+            console.error("[ConversationSidebar] Failed to delete conversation:", err);
         }
     };
 
@@ -92,37 +118,47 @@ export default function ConversationSidebar({
     };
 
     const handleRenameConfirm = async (id: string) => {
+        if (!editingId) return;
         const trimmed = editTitle.trim();
-        if (trimmed) {
-            try {
-                await renameConversation(id, trimmed);
-                refresh();
-            } catch (err) {
-                console.error("[ConversationSidebar] Failed to rename:", err);
-            }
-        }
         setEditingId(null);
+        if (!trimmed) return;
+        try {
+            await renameConversation(id, trimmed);
+            await refresh();
+        } catch (err) {
+            console.error("[ConversationSidebar] Failed to rename conversation:", err);
+        }
     };
 
     const handleRenameKeyDown = (e: React.KeyboardEvent, id: string) => {
-        if (e.key === "Enter") handleRenameConfirm(id);
-        if (e.key === "Escape") setEditingId(null);
+        if (e.key === "Enter") {
+            void handleRenameConfirm(id);
+        } else if (e.key === "Escape") {
+            setEditingId(null);
+        }
+    };
+
+    const handleLoad = async (id: string) => {
+        if (editingId) return;
+        if (id === activeConversationId) {
+            onClose();
+            return;
+        }
+        await onSelectConversation(id);
+        onClose();
     };
 
     const formatTime = (iso: string) => {
         try {
             const d = new Date(iso);
             const now = new Date();
-            const diff = now.getTime() - d.getTime();
-            const mins = Math.floor(diff / 60000);
-            if (mins < 1) return t("settings.memory.time.just_now");
-            if (mins < 60) return t("settings.memory.time.minutes_ago", { count: mins });
-            const hours = Math.floor(mins / 60);
-            if (hours < 24) return t("settings.memory.time.hours_ago", { count: hours });
-            const days = Math.floor(hours / 24);
-            return t("settings.memory.time.days_ago", { count: days });
+            const isToday = d.toDateString() === now.toDateString();
+            if (isToday) {
+                return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+            }
+            return d.toLocaleDateString([], { month: "numeric", day: "numeric" });
         } catch {
-            return iso;
+            return "";
         }
     };
 
@@ -130,43 +166,31 @@ export default function ConversationSidebar({
         <AnimatePresence>
             {open && (
                 <motion.div
-                    initial={{ x: -280, opacity: 0 }}
-                    animate={{ x: 0, opacity: 1 }}
-                    exit={{ x: -280, opacity: 0 }}
-                    transition={{ type: "spring", stiffness: 300, damping: 30 }}
-                    className={clsx(
-                        "absolute inset-y-0 left-0 z-[100] w-[260px]",
-                        "bg-[var(--color-bg-surface)] backdrop-blur-[var(--glass-blur)]",
-                        "border-r border-[var(--color-border)]",
-                        "flex flex-col shadow-xl"
-                    )}
+                    initial={{ x: "100%" }}
+                    animate={{ x: 0 }}
+                    exit={{ x: "100%" }}
+                    transition={{ type: "spring", damping: 28, stiffness: 300 }}
+                    className="absolute inset-y-0 right-0 w-72 bg-[var(--color-bg-secondary)] border-l border-[var(--color-border)] shadow-2xl z-30 flex flex-col backdrop-blur-md"
                 >
                     {/* Header */}
-                    <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--color-border)]">
-                        <div className="flex items-center gap-2">
-                            <History size={14} strokeWidth={1.5} className="text-[var(--color-text-muted)]" />
-                            <span className="text-xs font-semibold tracking-wider uppercase text-[var(--color-text-secondary)]">
-                                {t("chat.history.title")}
-                            </span>
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
+                        <div className="flex items-center gap-2 text-sm font-medium text-[var(--color-text-primary)]">
+                            <History size={16} strokeWidth={1.5} />
+                            <span>{t("chat.history.title")}</span>
                         </div>
                         <button
                             onClick={onClose}
-                            className="p-1.5 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
+                            className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/5 transition-colors"
                         >
-                            <X size={14} strokeWidth={1.5} />
+                            <X size={16} strokeWidth={1.5} />
                         </button>
                     </div>
 
                     {/* New chat button */}
-                    <div className="px-3 py-2">
+                    <div className="p-2">
                         <button
-                            onClick={handleNew}
-                            className={clsx(
-                                "w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs",
-                                "border border-dashed border-[var(--color-border)]",
-                                "text-[var(--color-text-muted)] hover:text-[var(--color-accent)] hover:border-[var(--color-accent)]/50",
-                                "transition-colors"
-                            )}
+                            onClick={handleCreate}
+                            className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 text-[var(--color-accent)] text-xs font-medium transition-colors border border-[var(--color-accent)]/20"
                         >
                             <Plus size={14} strokeWidth={1.5} />
                             {t("chat.history.newChat")}
@@ -175,12 +199,12 @@ export default function ConversationSidebar({
 
                     {/* Conversation list */}
                     <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1 scrollable">
-                        {conversations.length === 0 ? (
+                        {sortedConversations.length === 0 ? (
                             <div className="text-center text-xs text-[var(--color-text-muted)] py-8">
                                 {t("chat.history.empty")}
                             </div>
                         ) : (
-                            conversations.map(conv => (
+                            sortedConversations.map(conv => (
                                 <div
                                     key={conv.id}
                                     onClick={() => handleLoad(conv.id)}
@@ -204,8 +228,11 @@ export default function ConversationSidebar({
                                                     onClick={e => e.stopPropagation()}
                                                 />
                                                 <button
-                                                    onClick={(e) => { e.stopPropagation(); handleRenameConfirm(conv.id); }}
-                                                    className="p-0.5 text-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        void handleRenameConfirm(conv.id);
+                                                    }}
+                                                    className="p-1 text-[var(--color-accent)] hover:opacity-80"
                                                 >
                                                     <Check size={12} strokeWidth={2} />
                                                 </button>
@@ -221,9 +248,9 @@ export default function ConversationSidebar({
                                                         <span className="truncate max-w-[110px]">· {conv.topic}</span>
                                                     )}
                                                     {hasPinnedConversationState(conv.pinned_state) && (
-                                                        <span className="inline-flex items-center gap-0.5 text-[var(--color-accent)]">
-                                                            <Pin size={9} strokeWidth={1.5} />
-                                                            已固定
+                                                        <span className="inline-flex items-center gap-0.5 text-[var(--color-accent)] font-medium">
+                                                            <Pin size={9} strokeWidth={1.5} className="fill-current" />
+                                                            {t("chat.history.pinned")}
                                                         </span>
                                                     )}
                                                 </div>
@@ -232,6 +259,18 @@ export default function ConversationSidebar({
                                     </div>
                                     {editingId !== conv.id && (
                                         <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                            <button
+                                                onClick={(e) => handleTogglePin(e, conv)}
+                                                className={clsx(
+                                                    "p-1 rounded transition-colors",
+                                                    hasPinnedConversationState(conv.pinned_state)
+                                                        ? "text-[var(--color-accent)] hover:text-[var(--color-text-muted)]"
+                                                        : "text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
+                                                )}
+                                                title={hasPinnedConversationState(conv.pinned_state) ? t("chat.history.unpin") : t("chat.history.pin")}
+                                            >
+                                                <Pin size={12} strokeWidth={1.5} className={hasPinnedConversationState(conv.pinned_state) ? "fill-current" : ""} />
+                                            </button>
                                             <button
                                                 onClick={(e) => handleRenameStart(e, conv)}
                                                 className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"

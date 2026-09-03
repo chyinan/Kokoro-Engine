@@ -205,6 +205,7 @@ pub fn run() {
             commands::conversation::create_conversation,
             commands::conversation::rename_conversation,
             commands::conversation::update_conversation_state,
+            commands::conversation::edit_conversation_message,
             commands::conversation::list_character_ids,
             commands::llm::get_llm_config,
             commands::llm::save_llm_config,

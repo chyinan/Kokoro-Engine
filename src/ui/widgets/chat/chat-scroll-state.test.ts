@@ -4,10 +4,22 @@ import { describe, expect, it } from "vitest";
 import {
     computeTargetScrollTop,
     isScrollAtBottom,
+    computeAnchoredScrollTop,
     type ChatScrollSnapshot,
 } from "./chat-scroll-state";
 
 describe("chat-scroll-state", () => {
+    describe("computeAnchoredScrollTop", () => {
+        it("compensates scrollTop when scrollHeight expands after prepending", () => {
+            expect(computeAnchoredScrollTop(80, 2000, 3500)).toBe(1580);
+        });
+
+        it("preserves scrollTop when scrollHeight has not increased", () => {
+            expect(computeAnchoredScrollTop(80, 2000, 2000)).toBe(80);
+            expect(computeAnchoredScrollTop(80, 2000, 1800)).toBe(80);
+        });
+    });
+
     describe("isScrollAtBottom", () => {
         it("returns true when exact bottom", () => {
             // scrollHeight: 1000, clientHeight: 400, scrollTop: 600

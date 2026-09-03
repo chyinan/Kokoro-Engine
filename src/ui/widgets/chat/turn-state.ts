@@ -6,6 +6,7 @@ import {
 } from "../chat-streaming-state";
 
 export interface ChatPanelMessage {
+    id?: number;
     role: "user" | "kokoro" | "tool" | "context";
     text: string;
     images?: string[];

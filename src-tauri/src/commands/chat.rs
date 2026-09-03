@@ -510,6 +510,9 @@ pub struct ChatRequest {
     /// Optional caller correlation echoed on turn lifecycle events.
     #[serde(default)]
     pub client_request_id: Option<String>,
+    /// If true, this turn is regenerating an assistant reply for the last user message.
+    #[serde(default)]
+    pub regenerate: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -1116,6 +1119,22 @@ fn tool_trace_success_message() -> Option<String> {
     .map(ToString::to_string)
 }
 
+#[inline]
+pub(crate) fn should_insert_user_message_for_request(
+    hidden: bool,
+    regenerate: bool,
+    has_trailing_user_message: bool,
+) -> bool {
+    if hidden {
+        return false;
+    }
+    if regenerate {
+        !has_trailing_user_message
+    } else {
+        true
+    }
+}
+
 // ── Stream Chat Command ────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -1196,9 +1215,19 @@ pub async fn stream_chat(
         .latest_completed_observation(chrono::Utc::now())
         .await;
 
-    // 2. Update History with User Message (skip for hidden/touch interactions)
+    // 2. Update History with User Message (skip for hidden/touch interactions, or regenerate when user msg already trailing)
     let system_provider = llm_state.system_provider().await;
-    if !request.hidden {
+    let should_insert = if request.hidden {
+        false
+    } else if request.regenerate {
+        let history = state.history.lock().await;
+        let trailing_user = history.back().is_some_and(|m| m.role == "user");
+        should_insert_user_message_for_request(request.hidden, request.regenerate, trailing_user)
+    } else {
+        true
+    };
+
+    if should_insert {
         if let Some(observation) = selected_vision_observation.as_ref() {
             persist_vision_context_message(&state, observation, &char_id, None).await;
         }
@@ -3492,5 +3521,40 @@ mod tests {
             cancel_chat_turn_inner("not-exists".to_string(), Some("user".into()), state).await;
         assert!(result.is_err());
         assert!(result.err().unwrap().contains("unknown turn_id"));
+    }
+
+    #[test]
+    fn chat_request_deserializes_regenerate_default_and_explicit() {
+        let default_req: ChatRequest = serde_json::from_str(r#"{"message":"hi"}"#).unwrap();
+        assert!(!default_req.regenerate);
+
+        let regen_req: ChatRequest =
+            serde_json::from_str(r#"{"message":"hi","regenerate":true}"#).unwrap();
+        assert!(regen_req.regenerate);
+    }
+
+    #[test]
+    fn should_insert_user_message_skips_when_hidden() {
+        assert!(!should_insert_user_message_for_request(true, false, false));
+        assert!(!should_insert_user_message_for_request(true, true, false));
+        assert!(!should_insert_user_message_for_request(true, true, true));
+    }
+
+    #[test]
+    fn should_insert_user_message_always_inserts_for_normal_non_hidden_turn() {
+        assert!(should_insert_user_message_for_request(false, false, false));
+        assert!(should_insert_user_message_for_request(false, false, true));
+    }
+
+    #[test]
+    fn should_insert_user_message_skips_when_regenerating_and_history_has_trailing_user() {
+        // Normal regeneration: trailing user message already in history -> skip duplicate insertion
+        assert!(!should_insert_user_message_for_request(false, true, true));
+    }
+
+    #[test]
+    fn should_insert_user_message_heals_when_regenerating_but_history_lacks_trailing_user() {
+        // Defensive self-healing: if history was truncated/empty, fallback to inserting
+        assert!(should_insert_user_message_for_request(false, true, false));
     }
 }

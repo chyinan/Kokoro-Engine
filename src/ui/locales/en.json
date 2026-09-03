@@ -1128,12 +1128,17 @@
             "save": "Save (Ctrl+Enter)",
             "cancel": "Cancel (Esc)",
             "clear": "Clear conversation",
+            "confirm_clear_title": "Clear Conversation",
+            "confirm_clear": "Are you sure you want to clear all messages in this conversation? This action cannot be undone.",
+            "confirm_clear_button": "Clear All",
             "collapse": "Collapse chat",
             "open": "Open chat",
             "resize": "Resize chat",
             "retry": "Retry",
             "stop": "Stop generation",
-            "stopping": "Stopping..."
+            "stopping": "Stopping...",
+            "to_bottom": "To Bottom",
+            "new_messages": "New Messages ↓"
         },
         "errors": {
             "image_too_large": "Image too large (max 5MB)",
@@ -1141,7 +1146,8 @@
             "upload_failed": "Failed to upload image",
             "connection_error": "I'm having trouble connecting right now. Please check your API settings. 💭",
             "memory_model_required": "The local memory model is not ready yet. Chat can continue without semantic memory.",
-            "memory_model_check_failed": "Could not confirm the local memory model status. Chat remains available; check the download dialog when convenient."
+            "memory_model_check_failed": "Could not confirm the local memory model status. Chat remains available; check the download dialog when convenient.",
+            "edit_failed": "Failed to save edited message"
         },
         "input": {
             "placeholder": "Speak to your companion...",
@@ -1167,7 +1173,10 @@
             "delete": "Delete conversation",
             "rename": "Rename",
             "empty": "No conversations yet",
-            "confirmDelete": "Delete this conversation?"
+            "confirmDelete": "Delete this conversation?",
+            "pinned": "Pinned",
+            "pin": "Pin conversation",
+            "unpin": "Unpin conversation"
         },
         "tools": {
             "header": "Tools ({{count}})",

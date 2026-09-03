@@ -186,6 +186,7 @@ export const ChatMessage = memo(function ChatMessage({
     };
 
     const handleSaveEdit = () => {
+        if (!editingText.trim()) return;
         onEdit(editingText);
         setIsEditing(false);
     };

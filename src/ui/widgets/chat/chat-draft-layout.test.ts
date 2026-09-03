@@ -4,12 +4,45 @@ import { describe, expect, it } from "vitest";
 import {
     CHAT_DRAFT_KEY_PREFIX,
     clearCharacterDraft,
+    combineDraftWithTranscription,
     getCharacterDraftStorageKey,
     loadSavedCharacterDraft,
     saveCharacterDraft,
 } from "./chat-draft-layout";
 
 describe("chat-draft-layout", () => {
+    describe("combineDraftWithTranscription", () => {
+        it("returns transcription when base draft is empty or whitespace", () => {
+            expect(combineDraftWithTranscription("", "Hello")).toBe("Hello");
+            expect(combineDraftWithTranscription("   ", "Hello")).toBe("Hello");
+        });
+
+        it("returns base draft when transcription is empty or whitespace", () => {
+            expect(combineDraftWithTranscription("Draft", "")).toBe("Draft");
+            expect(combineDraftWithTranscription("Draft", "   ")).toBe("Draft");
+        });
+
+        it("combines Latin words with space", () => {
+            expect(combineDraftWithTranscription("Hello", "world")).toBe("Hello world");
+            expect(combineDraftWithTranscription("Hello ", "world")).toBe("Hello world");
+        });
+
+        it("combines CJK characters directly without space unless user typed space", () => {
+            expect(combineDraftWithTranscription("今天下午", "开会")).toBe("今天下午开会");
+            expect(combineDraftWithTranscription("今天下午 ", "开会")).toBe("今天下午 开会");
+        });
+
+        it("handles CJK and Western punctuation naturally", () => {
+            expect(combineDraftWithTranscription("你好，", "世界")).toBe("你好，世界");
+            expect(combineDraftWithTranscription("Hello,", "world")).toBe("Hello, world");
+            expect(combineDraftWithTranscription("任务列表：\n", "第一项")).toBe("任务列表：\n第一项");
+        });
+
+        it("handles alphanumeric with CJK transition gracefully", () => {
+            expect(combineDraftWithTranscription("版本 2.0", "已发布")).toBe("版本 2.0 已发布");
+        });
+    });
+
     describe("getCharacterDraftStorageKey", () => {
         it("returns key with prefix and character id", () => {
             expect(getCharacterDraftStorageKey("kiana")).toBe(`${CHAT_DRAFT_KEY_PREFIX}kiana`);
