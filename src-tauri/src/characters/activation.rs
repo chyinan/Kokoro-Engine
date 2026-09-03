@@ -136,6 +136,9 @@ pub trait ActivationRuntimeBackend: Send + Sync {
     async fn lock_activation(&self) -> Result<Box<dyn std::any::Any + Send>, KokoroError> {
         Ok(Box::new(()))
     }
+    fn arm_activation_mutation(&self, lock: &mut (dyn std::any::Any + Send)) {
+        let _ = lock;
+    }
     fn mark_activation_completed(&self, lock: &mut (dyn std::any::Any + Send)) {
         let _ = lock;
     }
@@ -387,6 +390,10 @@ impl ActivationCoordinator {
         .execute(&mut *transaction)
         .await?;
 
+        // Arm the mutation barrier: from this point onward, backend runtime mutation begins.
+        // If an in-flight abort occurs after this barrier, the gate fails closed to prevent torn state.
+        backend.arm_activation_mutation(&mut *_activation_lock);
+
         if let Err(error) = backend.apply(&applied_runtime).await {
             if let Err(restore_error) = backend.restore(&token.previous_committed).await {
                 let recover_res = self.recover_committed_backend(pool, backend).await;
@@ -570,6 +577,7 @@ impl ActivationCoordinator {
         };
         let initial_snapshot = backend.snapshot().await?;
         let mut _activation_lock = backend.lock_activation().await?;
+        backend.arm_activation_mutation(&mut *_activation_lock);
         if let Err(apply_err) = backend.apply(&committed.runtime).await {
             let err = compensate_recovery_failure(
                 backend,

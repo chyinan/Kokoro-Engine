@@ -1341,6 +1341,11 @@ impl ActivationRuntimeBackend for DelayedActivationBackend {
         let guard = self.orchestrator.acquire_activation_lock().await;
         Ok(Box::new(guard))
     }
+    fn arm_activation_mutation(&self, lock: &mut (dyn std::any::Any + Send)) {
+        if let Some(guard) = lock.downcast_mut::<crate::ai::context::ActivationLockGuard>() {
+            guard.arm_mutation();
+        }
+    }
     fn mark_activation_completed(&self, lock: &mut (dyn std::any::Any + Send)) {
         if let Some(guard) = lock.downcast_mut::<crate::ai::context::ActivationLockGuard>() {
             guard.mark_completed();
@@ -1948,6 +1953,12 @@ impl ActivationRuntimeBackend for InterceptedActivationBackend {
         Ok(Box::new(guard))
     }
 
+    fn arm_activation_mutation(&self, lock: &mut (dyn std::any::Any + Send)) {
+        if let Some(guard) = lock.downcast_mut::<crate::ai::context::ActivationLockGuard>() {
+            guard.arm_mutation();
+        }
+    }
+
     fn mark_activation_completed(&self, lock: &mut (dyn std::any::Any + Send)) {
         if let Some(guard) = lock.downcast_mut::<crate::ai::context::ActivationLockGuard>() {
             guard.mark_completed();
@@ -2380,5 +2391,153 @@ async fn test_cancellation_during_rollback_blocks_chat_until_recovered_consisten
     let guard = orchestrator
         .enter_chat_turn()
         .expect("chat turn must succeed after recovery");
+    drop(guard);
+}
+
+#[tokio::test]
+async fn test_activation_early_return_when_character_deleted_releases_gate_and_allows_chat() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+    create_two_characters_for_cancellation_test(&orchestrator).await;
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+
+    // 1. Prepare activation for char-1
+    let token = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend)
+        .await
+        .unwrap();
+
+    // 2. Delete char-1 from SQLite before commit runs
+    sqlx::query("DELETE FROM characters WHERE id = ?")
+        .bind("char-1")
+        .execute(&orchestrator.db)
+        .await
+        .unwrap();
+
+    // 3. Commit should fail with NotFound
+    let err = coordinator
+        .commit(&orchestrator.db, token, &backend)
+        .await
+        .expect_err("commit must fail when character was deleted");
+    assert!(matches!(err, KokoroError::NotFound(_)));
+
+    // 4. Assert gate is cleanly released and runtime is NOT degraded
+    assert!(
+        !orchestrator.is_activating(),
+        "activating flag MUST be false after early return"
+    );
+    assert!(
+        orchestrator.get_runtime_degraded().await.is_none(),
+        "runtime_degraded MUST NOT be set for clean pre-mutation early exit"
+    );
+
+    // 5. Assert chat can enter cleanly
+    let guard = orchestrator
+        .enter_chat_turn()
+        .expect("chat turn must succeed after clean early exit");
+    drop(guard);
+}
+
+#[tokio::test]
+async fn test_activation_early_return_when_stale_token_releases_gate_and_allows_chat() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+    create_two_characters_for_cancellation_test(&orchestrator).await;
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+
+    // 1. Prepare activation for char-1
+    let token = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend)
+        .await
+        .unwrap();
+
+    // 2. Update character updated_at in SQLite before commit runs
+    sqlx::query("UPDATE characters SET updated_at = updated_at + 10 WHERE id = ?")
+        .bind("char-1")
+        .execute(&orchestrator.db)
+        .await
+        .unwrap();
+
+    // 3. Commit should fail with stale token error
+    let err = coordinator
+        .commit(&orchestrator.db, token, &backend)
+        .await
+        .expect_err("commit must fail when token is stale");
+    assert!(matches!(err, KokoroError::Validation(_)));
+
+    // 4. Assert gate is cleanly released and runtime is NOT degraded
+    assert!(
+        !orchestrator.is_activating(),
+        "activating flag MUST be false after stale token early exit"
+    );
+    assert!(
+        orchestrator.get_runtime_degraded().await.is_none(),
+        "runtime_degraded MUST NOT be set for clean pre-mutation early exit"
+    );
+
+    // 5. Assert chat can enter cleanly
+    let guard = orchestrator
+        .enter_chat_turn()
+        .expect("chat turn must succeed after clean early exit");
+    drop(guard);
+}
+
+#[tokio::test]
+async fn test_activation_early_return_when_stage_greeting_or_db_fails_releases_gate_and_allows_chat(
+) {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+    create_two_characters_for_cancellation_test(&orchestrator).await;
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+
+    // 1. Prepare activation for char-1
+    let token = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend)
+        .await
+        .unwrap();
+
+    // 2. Close the SQLite pool so pool.begin() in commit fails immediately
+    orchestrator.db.close().await;
+
+    // 3. Commit should fail with DB error
+    let err = coordinator
+        .commit(&orchestrator.db, token, &backend)
+        .await
+        .expect_err("commit must fail when pool is closed");
+    assert!(matches!(err, KokoroError::Database(_)));
+
+    // 4. Assert gate is cleanly released and runtime is NOT degraded
+    assert!(
+        !orchestrator.is_activating(),
+        "activating flag MUST be false after db failure early exit"
+    );
+    assert!(
+        orchestrator.get_runtime_degraded().await.is_none(),
+        "runtime_degraded MUST NOT be set for clean pre-mutation early exit"
+    );
+
+    // 5. Assert chat gate can enter cleanly
+    let guard = orchestrator
+        .activation_gate
+        .enter_chat_turn()
+        .expect("chat turn guard must be available after early exit");
     drop(guard);
 }

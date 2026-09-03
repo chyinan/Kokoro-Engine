@@ -96,6 +96,12 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
         Ok(Box::new(guard))
     }
 
+    fn arm_activation_mutation(&self, lock: &mut (dyn std::any::Any + Send)) {
+        if let Some(guard) = lock.downcast_mut::<crate::ai::context::ActivationLockGuard>() {
+            guard.arm_mutation();
+        }
+    }
+
     fn mark_activation_completed(&self, lock: &mut (dyn std::any::Any + Send)) {
         if let Some(guard) = lock.downcast_mut::<crate::ai::context::ActivationLockGuard>() {
             guard.mark_completed();

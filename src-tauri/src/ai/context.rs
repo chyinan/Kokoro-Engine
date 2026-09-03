@@ -152,10 +152,15 @@ pub struct ActivationLockGuard {
     _write_guard: tokio::sync::OwnedRwLockWriteGuard<()>,
     activating: Arc<AtomicBool>,
     degraded: Option<Arc<Mutex<Option<String>>>>,
+    fail_closed: bool,
     completed: bool,
 }
 
 impl ActivationLockGuard {
+    pub fn arm_mutation(&mut self) {
+        self.fail_closed = true;
+    }
+
     pub fn mark_completed(&mut self) {
         self.completed = true;
     }
@@ -169,6 +174,7 @@ impl std::fmt::Debug for ActivationLockGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ActivationLockGuard")
             .field("activating", &self.activating.load(Ordering::SeqCst))
+            .field("fail_closed", &self.fail_closed)
             .field("completed", &self.completed)
             .finish()
     }
@@ -176,10 +182,12 @@ impl std::fmt::Debug for ActivationLockGuard {
 
 impl Drop for ActivationLockGuard {
     fn drop(&mut self) {
-        if self.completed {
+        if self.completed || !self.fail_closed {
+            // Clean exit: either activation completed cleanly, or it exited early (e.g. character not found,
+            // stale token, db begin failure) before entering irreversible runtime mutation.
             self.activating.store(false, Ordering::SeqCst);
         } else {
-            // Guard dropped without being explicitly marked completed (e.g. cancelled in-flight / aborted / panic).
+            // Guard dropped after entering irreversible mutation without being marked completed (e.g. cancelled in-flight / aborted / panic).
             // 1. Keep activating = true to prevent new chat turns from entering an unverified/torn state.
             // 2. Mark runtime degraded if degraded hook is available so prompt composition is also blocked.
             if let Some(degraded) = &self.degraded {
@@ -193,7 +201,7 @@ impl Drop for ActivationLockGuard {
                 }
             }
             tracing::warn!(
-                "ActivationLockGuard dropped without completion (in-flight cancellation); keeping activation gate closed and runtime degraded."
+                "ActivationLockGuard dropped without completion after mutation armed (in-flight cancellation); keeping activation gate closed and runtime degraded."
             );
         }
     }
@@ -247,6 +255,7 @@ impl ActivationGate {
             _write_guard: write_guard,
             activating: self.activating.clone(),
             degraded: None,
+            fail_closed: false,
             completed: false,
         }
     }
