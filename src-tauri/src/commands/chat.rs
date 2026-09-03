@@ -1291,12 +1291,13 @@ pub async fn stream_chat(
 
     // Compose Persona Prompt
     let (prompt_messages, compose_warnings) = state
-        .compose_prompt(
+        .compose_prompt_with_guard(
             &request.message,
             request.allow_image_gen.unwrap_or(false),
             tool_prompt,
             native_tools_enabled,
             &char_id,
+            &_chat_turn_guard,
         )
         .await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;

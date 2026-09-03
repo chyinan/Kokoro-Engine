@@ -901,8 +901,51 @@ impl AIOrchestrator {
         }
     }
 
-    /// Composes a prompt based on the user query, budgeting tokens for context
+    /// Composes a prompt based on the user query, budgeting tokens for context.
+    /// Acquires a temporary [`ChatTurnGuard`] for standalone callers.
     pub async fn compose_prompt(
+        &self,
+        query: &str,
+        allow_image_gen: bool,
+        tool_prompt: Option<String>,
+        native_tools_enabled: bool,
+        character_id: &str,
+    ) -> Result<(Vec<Message>, Vec<String>)> {
+        let _turn_guard = self
+            .enter_chat_turn()
+            .map_err(|reason| anyhow::anyhow!("{reason}"))?;
+        self.compose_prompt_inner(
+            query,
+            allow_image_gen,
+            tool_prompt,
+            native_tools_enabled,
+            character_id,
+        )
+        .await
+    }
+
+    /// Composes a prompt within an existing chat turn that already holds a [`ChatTurnGuard`].
+    /// Does not re-enter the activation gate, ensuring an active turn can complete without re-entrancy issues.
+    pub async fn compose_prompt_with_guard(
+        &self,
+        query: &str,
+        allow_image_gen: bool,
+        tool_prompt: Option<String>,
+        native_tools_enabled: bool,
+        character_id: &str,
+        _guard: &ChatTurnGuard,
+    ) -> Result<(Vec<Message>, Vec<String>)> {
+        self.compose_prompt_inner(
+            query,
+            allow_image_gen,
+            tool_prompt,
+            native_tools_enabled,
+            character_id,
+        )
+        .await
+    }
+
+    async fn compose_prompt_inner(
         &self,
         query: &str,
         _allow_image_gen: bool,
@@ -915,10 +958,6 @@ impl AIOrchestrator {
                 "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings."
             );
         }
-
-        let _turn_guard = self
-            .enter_chat_turn()
-            .map_err(|reason| anyhow::anyhow!("{reason}"))?;
 
         // 1. Determine Model logic
         let model_type = self.router.route(query);

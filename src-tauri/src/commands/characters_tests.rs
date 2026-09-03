@@ -1505,3 +1505,300 @@ async fn concurrent_chat_during_activation_is_blocked_and_prevents_context_leak_
         .expect("compose_prompt must succeed after activation completes");
     assert!(!messages.is_empty());
 }
+
+#[tokio::test]
+async fn test_active_stream_chat_turn_completes_when_activation_starts_concurrently() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-1".into(),
+            name: "Char One".into(),
+            persona: "You are Character One.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-2".into(),
+            name: "Char Two".into(),
+            persona: "You are Character Two.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend1 = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let token1 = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+    coordinator
+        .commit(&orchestrator.db, token1, &backend1)
+        .await
+        .unwrap();
+
+    assert_eq!(orchestrator.get_character_id().await, "char-1");
+
+    // 1. stream_chat begins: acquires turn guard at entry
+    let chat_turn_guard = orchestrator
+        .enter_chat_turn()
+        .expect("must enter chat turn before activation");
+
+    // 2. stream_chat records user message
+    orchestrator
+        .add_message(
+            "user".into(),
+            "User message during active turn".into(),
+            "char-1",
+        )
+        .await;
+
+    // 3. Concurrently, activation for char-2 begins in background
+    let token2 = coordinator
+        .prepare(&orchestrator.db, "char-2", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+
+    let delayed_backend = DelayedActivationBackend {
+        orchestrator: orchestrator.clone(),
+        app_data: temp.path().to_path_buf(),
+        delay_ms: 100,
+    };
+
+    let coord_clone = coordinator.clone();
+    let db_clone = orchestrator.db.clone();
+    let activation_task = tokio::spawn(async move {
+        coord_clone
+            .commit(&db_clone, token2, &delayed_backend)
+            .await
+    });
+
+    // Wait briefly so activation sets `activating = true` and waits on write lock
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert!(
+        orchestrator.is_activating(),
+        "orchestrator must be in activating state"
+    );
+
+    // 4. stream_chat calls compose_prompt_with_guard:
+    // With compose_prompt_with_guard, this MUST SUCCEED even though is_activating() == true!
+    let (messages, _) = orchestrator
+        .compose_prompt_with_guard(
+            "User message during active turn",
+            false,
+            None,
+            false,
+            "char-1",
+            &chat_turn_guard,
+        )
+        .await
+        .expect("active turn holding guard must be able to compose prompt despite activating=true");
+    assert!(!messages.is_empty());
+
+    // 5. stream_chat finishes: persists assistant message and then drops guard
+    orchestrator
+        .add_message(
+            "assistant".into(),
+            "Assistant reply completing the turn".into(),
+            "char-1",
+        )
+        .await;
+    drop(chat_turn_guard);
+
+    // 6. Activation completes
+    let commit_res = activation_task.await.unwrap();
+    assert!(
+        commit_res.is_ok(),
+        "activation must succeed after turn completes"
+    );
+
+    assert_eq!(orchestrator.get_character_id().await, "char-2");
+    assert!(!orchestrator.is_activating());
+
+    // 7. Verify char-1 history has the complete turn
+    let rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT role, content FROM conversation_messages ORDER BY id ASC",
+    )
+    .fetch_all(&orchestrator.db)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, "user");
+    assert_eq!(rows[1].0, "assistant");
+}
+
+#[tokio::test]
+async fn test_non_webhook_bot_turn_during_activation_is_blocked_at_entry_without_message_pollution()
+{
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-1".into(),
+            name: "Char One".into(),
+            persona: "You are Character One.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-2".into(),
+            name: "Char Two".into(),
+            persona: "You are Character Two.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend1 = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let token1 = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+    coordinator
+        .commit(&orchestrator.db, token1, &backend1)
+        .await
+        .unwrap();
+
+    // 1. Begin activation for char-2 with a delay
+    let token2 = coordinator
+        .prepare(&orchestrator.db, "char-2", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+
+    let delayed_backend = DelayedActivationBackend {
+        orchestrator: orchestrator.clone(),
+        app_data: temp.path().to_path_buf(),
+        delay_ms: 100,
+    };
+
+    let coord_clone = coordinator.clone();
+    let db_clone = orchestrator.db.clone();
+    let activation_task = tokio::spawn(async move {
+        coord_clone
+            .commit(&db_clone, token2, &delayed_backend)
+            .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert!(orchestrator.is_activating());
+
+    // 2. Simulate Non-Webhook Bot (e.g. LINE, Discord, QQ, Telegram) receiving a message during activation:
+    // With the fix, the bot entry checks enter_chat_turn() BEFORE add_message!
+    let bot_turn_res = orchestrator.enter_chat_turn();
+    assert!(
+        bot_turn_res.is_err(),
+        "bot turn entry must be rejected during activation"
+    );
+    let err_msg = bot_turn_res.err().unwrap();
+    assert!(
+        err_msg.contains("Character activation is in progress"),
+        "error was: {err_msg}"
+    );
+
+    // 3. Verify NO user message was added to the database or history (no partial turn pollution)
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+        .fetch_one(&orchestrator.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "no messages should be written when bot turn is blocked at entry"
+    );
+    assert!(orchestrator.history.lock().await.is_empty());
+
+    // 4. Await activation completion
+    let commit_res = activation_task.await.unwrap();
+    assert!(commit_res.is_ok());
+    assert_eq!(orchestrator.get_character_id().await, "char-2");
+
+    // 5. Bot retry after activation completes succeeds cleanly under char-2
+    let bot_turn_retry = orchestrator.enter_chat_turn();
+    assert!(
+        bot_turn_retry.is_ok(),
+        "bot turn must succeed after activation completes"
+    );
+    let guard = bot_turn_retry.unwrap();
+    orchestrator
+        .add_message("user".into(), "Hello to char 2".into(), "char-2")
+        .await;
+    let (messages, _) = orchestrator
+        .compose_prompt_with_guard("Hello to char 2", false, None, false, "char-2", &guard)
+        .await
+        .expect("compose prompt must succeed for new character");
+    assert!(!messages.is_empty());
+    drop(guard);
+}

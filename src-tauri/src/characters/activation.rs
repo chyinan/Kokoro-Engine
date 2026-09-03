@@ -340,6 +340,8 @@ impl ActivationCoordinator {
         // prompt, greeting, conversation, and rollback fields come from this server-owned copy.
         let token = prepared.token;
 
+        let _activation_lock = backend.lock_activation().await?;
+
         let mut transaction = pool.begin().await?;
         let live_updated_at =
             sqlx::query_scalar::<_, i64>("SELECT updated_at FROM characters WHERE id = ?")
@@ -381,8 +383,6 @@ impl ActivationCoordinator {
         .bind(committed_json)
         .execute(&mut *transaction)
         .await?;
-
-        let _activation_lock = backend.lock_activation().await?;
 
         if let Err(error) = backend.apply(&applied_runtime).await {
             if let Err(restore_error) = backend.restore(&token.previous_committed).await {
