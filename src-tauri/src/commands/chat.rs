@@ -173,16 +173,26 @@ struct PendingToolApproval {
     decision_rx: Option<oneshot::Receiver<ToolApprovalDecision>>,
 }
 
-#[derive(Default)]
 pub struct TurnCancellationState {
     cancelled: RwLock<HashMap<String, Option<String>>>,
+    finished_tx: tokio::sync::broadcast::Sender<String>,
 }
 
 const TURN_CANCELLED_BY_USER_MESSAGE: &str = "turn cancelled by user";
 
+impl Default for TurnCancellationState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TurnCancellationState {
     pub fn new() -> Self {
-        Self::default()
+        let (finished_tx, _) = tokio::sync::broadcast::channel(64);
+        Self {
+            cancelled: RwLock::new(HashMap::new()),
+            finished_tx,
+        }
     }
 
     async fn register_turn(&self, turn_id: &str) {
@@ -229,8 +239,43 @@ impl TurnCancellationState {
             .unwrap_or(false)
     }
 
+    async fn has_turn(&self, turn_id: &str) -> bool {
+        self.cancelled.read().await.contains_key(turn_id)
+    }
+
     async fn clear_turn(&self, turn_id: &str) {
         self.cancelled.write().await.remove(turn_id);
+        let _ = self.finished_tx.send(turn_id.to_string());
+    }
+
+    async fn cancel_turn_and_wait(
+        &self,
+        turn_id: &str,
+        reason: Option<String>,
+        timeout: std::time::Duration,
+    ) -> Result<(), String> {
+        let mut rx = self.finished_tx.subscribe();
+        self.cancel_turn(turn_id, reason).await?;
+
+        if !self.has_turn(turn_id).await {
+            return Ok(());
+        }
+
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            let remaining = timeout.saturating_sub(start.elapsed());
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(finished_id)) if finished_id == turn_id => return Ok(()),
+                Ok(Ok(_)) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                    if !self.has_turn(turn_id).await {
+                        return Ok(());
+                    }
+                }
+                _ => break,
+            }
+        }
+        Ok(())
     }
 }
 
@@ -412,7 +457,9 @@ async fn cancel_chat_turn_inner(
     reason: Option<String>,
     cancel_state: Arc<TurnCancellationState>,
 ) -> Result<(), String> {
-    cancel_state.cancel_turn(&turn_id, reason).await
+    cancel_state
+        .cancel_turn_and_wait(&turn_id, reason, std::time::Duration::from_millis(1000))
+        .await
 }
 
 #[command]
@@ -519,6 +566,8 @@ pub struct ChatRequest {
 pub struct StreamChatResponse {
     pub conversation_id: String,
     pub user_message_id: Option<i64>,
+    #[serde(default)]
+    pub assistant_message_id: Option<i64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1326,6 +1375,10 @@ pub async fn stream_chat(
                     content: request.message.clone(),
                     metadata: None,
                 });
+                // Enforce rolling window limit even on defensive path
+                while history.len() > crate::ai::context::MAX_IN_MEMORY_HISTORY_MESSAGES {
+                    history.pop_front();
+                }
             }
         }
 
@@ -1414,7 +1467,10 @@ pub async fn stream_chat(
     let _turn_guard =
         TurnCancellationGuard::new(cancel_state.inner().clone(), assistant_turn_id.clone());
 
-    let stream_result: Result<(), KokoroError> = async {
+    let draft_row_id_holder = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    let draft_row_id_for_stream = std::sync::Arc::clone(&draft_row_id_holder);
+
+    let stream_result: Result<Option<i64>, KokoroError> = async {
     let mut before_llm_request_payload = build_before_llm_request_payload(
         Some(conversation_id.clone()),
         &char_id,
@@ -1726,18 +1782,19 @@ pub async fn stream_chat(
         // Persist visible assistant drafts incrementally. Hidden proactive/touch
         // turns are persisted only after final no-op filtering, so PASS/empty
         // proactive vision responses leave no DB rows.
-        if !request.hidden && !all_cleaned_text.is_empty() {
+        if !request.hidden && !all_cleaned_text.is_empty() && !cancel_state.is_cancelled(&assistant_turn_id).await {
             let draft_content = strip_leaked_tags(&all_cleaned_text);
             if !draft_content.is_empty() {
                 match draft_row_id {
                     None => {
                         // First round: insert draft row
                         match state
-                            .persist_streaming_draft(&draft_content, &char_id)
+                            .persist_streaming_draft(&conversation_id, &draft_content)
                             .await
                         {
                             Ok(id) => {
                                 draft_row_id = Some(id);
+                                *draft_row_id_for_stream.lock().await = Some(id);
                             }
                             Err(e) => {
                                 tracing::error!(target: "chat", "[Chat] Failed to persist streaming draft: {}", e);
@@ -1919,22 +1976,24 @@ pub async fn stream_chat(
             }
             let assistant_tool_call_metadata = assistant_tool_call_metadata_value.to_string();
             let _ = state
-                .add_message_with_metadata(
+                .add_message_with_metadata_for_conversation(
                     "assistant".to_string(),
                     cleaned_text.clone(),
                     Some(assistant_tool_call_metadata),
                     &char_id,
+                    Some(&conversation_id),
                     None,
                 )
                 .await;
             for (tool_metadata, tool_message) in &persisted_native_tool_results {
                 let tool_content = extract_message_text(tool_message);
                 let _ = state
-                    .add_message_with_metadata(
+                    .add_message_with_metadata_for_conversation(
                         "tool".to_string(),
                         tool_content,
                         Some(tool_metadata.to_string()),
                         &char_id,
+                        Some(&conversation_id),
                         None,
                     )
                     .await;
@@ -1991,6 +2050,7 @@ pub async fn stream_chat(
 
     if request.hidden && is_proactive_noop_response(&full_response) {
         if let Some(row_id) = draft_row_id {
+            *draft_row_id_for_stream.lock().await = None;
             if let Err(error) = state.delete_message_by_id(row_id).await {
                 tracing::error!(
                     target: "chat",
@@ -1998,6 +2058,7 @@ pub async fn stream_chat(
                     error
                 );
             }
+            draft_row_id = None;
         }
         app.emit(
             "chat-turn-text-complete",
@@ -2020,7 +2081,7 @@ pub async fn stream_chat(
             }),
         )
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
-        return Ok(());
+        return Ok(None);
     }
 
     if let Some(hooks) = hook_runtime.as_ref() {
@@ -2195,15 +2256,29 @@ pub async fn stream_chat(
                 )
                 .await;
             }
-            let _ = state
-                .add_message_with_metadata(
+            let persisted_assistant_id = match state
+                .add_message_with_metadata_for_conversation(
                     "assistant".to_string(),
                     full_response.clone(),
                     metadata,
                     &char_id,
+                    Some(&conversation_id),
                     None,
                 )
-                .await;
+                .await
+            {
+                Ok((_, msg_id)) => Some(msg_id),
+                Err(error) => {
+                    tracing::error!(
+                        target: "chat",
+                        "[Chat] Failed to persist hidden assistant message: {}",
+                        error
+                    );
+                    None
+                }
+            };
+            draft_row_id = persisted_assistant_id;
+            *draft_row_id_for_stream.lock().await = persisted_assistant_id;
         } else {
             // Update the draft row with final content + metadata (DB already has the row)
             if let Some(row_id) = draft_row_id {
@@ -2215,15 +2290,17 @@ pub async fn stream_chat(
                 }
             }
 
-            // Add to in-memory history only (DB already persisted).
+            // Add to in-memory history only if this conversation is still the active one (DB already persisted).
             // push_history_message applies the context message length limit.
-            state
-                .push_history_message(Message {
-                    role: "assistant".to_string(),
-                    content: full_response.clone(),
-                    metadata: Some(metadata_value),
-                })
-                .await;
+            if state.current_conversation_id.lock().await.as_deref() == Some(conversation_id.as_str()) {
+                state
+                    .push_history_message(Message {
+                        role: "assistant".to_string(),
+                        content: full_response.clone(),
+                        metadata: Some(metadata_value),
+                    })
+                    .await;
+            }
         }
     }
 
@@ -2469,14 +2546,15 @@ pub async fn stream_chat(
     )
     .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
-    Ok(())
+    Ok(draft_row_id)
     }
     .await;
 
     match stream_result {
-        Ok(()) => Ok(StreamChatResponse {
+        Ok(assistant_message_id) => Ok(StreamChatResponse {
             conversation_id,
             user_message_id,
+            assistant_message_id,
         }),
         Err(KokoroError::Chat(message)) if is_turn_cancelled_error_message(&message) => {
             tracing::info!(
@@ -2484,6 +2562,11 @@ pub async fn stream_chat(
                 "[Chat] Turn {} cancelled by user",
                 assistant_turn_id
             );
+            if let Some(row_id) = *draft_row_id_holder.lock().await {
+                if let Err(e) = state.delete_message_by_id(row_id).await {
+                    tracing::error!(target: "chat", "[Chat] Failed to clean up cancelled streaming draft: {}", e);
+                }
+            }
             app.emit(
                 "chat-turn-finish",
                 serde_json::json!({
@@ -2498,6 +2581,7 @@ pub async fn stream_chat(
             Ok(StreamChatResponse {
                 conversation_id,
                 user_message_id,
+                assistant_message_id: None,
             })
         }
         Err(error) => Err(error),
@@ -2519,6 +2603,29 @@ mod tests {
         MemoryEventType,
     };
     use crate::hooks::HookPayload;
+
+    /// 验证 StreamChatResponse 序列化及向前兼容性（当缺少 assistant_message_id 时默认解析为 None）。
+    #[test]
+    fn test_stream_chat_response_serialization_and_backward_compatibility() {
+        // 包含 assistant_message_id 时的正向序列化与反序列化
+        let res = StreamChatResponse {
+            conversation_id: "conv-123".to_string(),
+            user_message_id: Some(10),
+            assistant_message_id: Some(11),
+        };
+        let json_str = serde_json::to_string(&res).expect("serialization succeeds");
+        let deserialized: StreamChatResponse =
+            serde_json::from_str(&json_str).expect("deserialization succeeds");
+        assert_eq!(deserialized, res);
+
+        // 向前兼容验证：如果接收到没有 assistant_message_id 的旧版 JSON
+        let legacy_json = r#"{"conversation_id":"conv-legacy","user_message_id":42}"#;
+        let legacy_res: StreamChatResponse =
+            serde_json::from_str(legacy_json).expect("legacy deserialization succeeds");
+        assert_eq!(legacy_res.conversation_id, "conv-legacy");
+        assert_eq!(legacy_res.user_message_id, Some(42));
+        assert_eq!(legacy_res.assistant_message_id, None);
+    }
 
     #[test]
     fn chat_memory_ingress_triggers_immediate_extraction_for_profile_event() {
@@ -3719,11 +3826,22 @@ mod tests {
         let trailing_before = resolve_trailing_visible_user_message(&pool, "conv-tools").await.unwrap();
         assert!(trailing_before.is_none(), "When assistant message is at the end, trailing visible user message must be None");
 
-        // Simulate deleting the visible assistant turn (which removes id 4, 3, 2)
-        sqlx::query("DELETE FROM conversation_messages WHERE id IN (2, 3, 4)")
-            .execute(&pool)
+        // Delete the trailing visible assistant turn using the real delete_last_messages command logic.
+        // It must automatically remove id 4 (assistant) and its preceding technical messages (ids 3, 2).
+        let history = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
+        let current_conv = std::sync::Arc::new(tokio::sync::Mutex::new(Some("conv-tools".to_string())));
+        crate::commands::context::delete_last_messages_inner(1, &pool, &history, &current_conv, 2000, None)
             .await
             .unwrap();
+
+        // Verify that id 2, 3, 4 are truly deleted from database
+        let remaining_ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM conversation_messages WHERE conversation_id = 'conv-tools' ORDER BY id ASC"
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining_ids, vec![1]);
 
         // Now, the trailing visible message should be the user message (id 1)
         let trailing_after = resolve_trailing_visible_user_message(&pool, "conv-tools").await.unwrap();

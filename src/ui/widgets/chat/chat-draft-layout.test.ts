@@ -4,11 +4,15 @@ import { describe, expect, it } from "vitest";
 import {
     CHAT_DRAFT_KEY_PREFIX,
     CHAT_DRAFT_IMAGES_KEY_PREFIX,
+    checkImageAccessible,
+    cleanupLegacyCharacterDraftImages,
     clearCharacterDraft,
     clearCharacterDraftImages,
     combineDraftWithTranscription,
     getCharacterDraftImagesStorageKey,
     getCharacterDraftStorageKey,
+    getDefaultImageDraftStorage,
+    isLikelyValidImageUrl,
     loadSavedCharacterDraft,
     loadSavedCharacterDraftImages,
     saveCharacterDraft,
@@ -234,6 +238,73 @@ describe("chat-draft-layout", () => {
             expect(() => saveCharacterDraftImages("kiana", ["http://test.png"], throwingStorage)).not.toThrow();
             expect(loadSavedCharacterDraftImages("kiana", throwingStorage)).toEqual([]);
             expect(() => clearCharacterDraftImages("kiana", throwingStorage)).not.toThrow();
+        });
+    });
+
+    describe("isLikelyValidImageUrl", () => {
+        it("accepts valid URL protocols and data URLs", () => {
+            expect(isLikelyValidImageUrl("http://127.0.0.1:54321/vision/img.png")).toBe(true);
+            expect(isLikelyValidImageUrl("https://example.com/photo.jpg")).toBe(true);
+            expect(isLikelyValidImageUrl("data:image/png;base64,iVBORw0KGgo=")).toBe(true);
+            expect(isLikelyValidImageUrl("asset://localhost/preview.png")).toBe(true);
+        });
+
+        it("rejects invalid, empty, or malicious schemes", () => {
+            expect(isLikelyValidImageUrl("")).toBe(false);
+            expect(isLikelyValidImageUrl("   ")).toBe(false);
+            expect(isLikelyValidImageUrl(null)).toBe(false);
+            expect(isLikelyValidImageUrl(123)).toBe(false);
+            expect(isLikelyValidImageUrl("javascript:alert(1)")).toBe(false);
+            expect(isLikelyValidImageUrl("file:///etc/passwd")).toBe(false);
+        });
+    });
+
+    describe("checkImageAccessible", () => {
+        it("resolves true immediately for data URLs", async () => {
+            await expect(checkImageAccessible("data:image/png;base64,abc")).resolves.toBe(true);
+        });
+
+        it("resolves false for invalid URLs", async () => {
+            await expect(checkImageAccessible("")).resolves.toBe(false);
+            await expect(checkImageAccessible("javascript:void(0)")).resolves.toBe(false);
+        });
+    });
+
+    describe("cleanupLegacyCharacterDraftImages", () => {
+        it("removes specified character key or all legacy keys", () => {
+            const store: Record<string, string> = {
+                [`${CHAT_DRAFT_IMAGES_KEY_PREFIX}kiana`]: '["http://kiana.png"]',
+                [`${CHAT_DRAFT_IMAGES_KEY_PREFIX}bronya`]: '["http://bronya.png"]',
+                [`${CHAT_DRAFT_KEY_PREFIX}kiana`]: "kiana text",
+            };
+            const mockStorage = {
+                getItem: (k: string) => store[k] ?? null,
+                setItem: (k: string, v: string) => { store[k] = v; },
+                removeItem: (k: string) => { delete store[k]; },
+                key: (idx: number) => Object.keys(store)[idx] ?? null,
+                get length() { return Object.keys(store).length; },
+            } as unknown as Storage;
+
+            // Clean specific character
+            cleanupLegacyCharacterDraftImages("kiana", mockStorage);
+            expect(store[`${CHAT_DRAFT_IMAGES_KEY_PREFIX}kiana`]).toBeUndefined();
+            expect(store[`${CHAT_DRAFT_IMAGES_KEY_PREFIX}bronya`]).toBeDefined();
+
+            // Clean all legacy image keys
+            cleanupLegacyCharacterDraftImages(undefined, mockStorage);
+            expect(store[`${CHAT_DRAFT_IMAGES_KEY_PREFIX}bronya`]).toBeUndefined();
+            expect(store[`${CHAT_DRAFT_KEY_PREFIX}kiana`]).toBe("kiana text");
+        });
+    });
+
+    describe("getDefaultImageDraftStorage", () => {
+        it("returns sessionStorage in browser environment or undefined if window is absent", () => {
+            const storage = getDefaultImageDraftStorage();
+            if (typeof window !== "undefined") {
+                expect(storage).toBe(window.sessionStorage);
+            } else {
+                expect(storage).toBeUndefined();
+            }
         });
     });
 });

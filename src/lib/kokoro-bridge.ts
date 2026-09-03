@@ -286,6 +286,7 @@ export interface ChatRequest {
 export interface StreamChatResponse {
     conversation_id: string;
     user_message_id?: number | null;
+    assistant_message_id?: number | null;
 }
 
 export async function streamChat(request: ChatRequest): Promise<StreamChatResponse> {

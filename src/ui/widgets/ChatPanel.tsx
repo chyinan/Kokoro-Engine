@@ -38,6 +38,12 @@ import {
     type PendingTurnState,
 } from "./chat/turn-state";
 import {
+    validateTurnStart,
+    validateTurnFinish,
+    validateStreamChatResponse,
+    reconcileTurnMessageIds,
+} from "./chat/chat-turn-lifecycle";
+import {
     computeTargetScrollTop,
     isScrollAtBottom,
     computeAnchoredScrollTop,
@@ -282,6 +288,13 @@ export default function ChatPanel({
     const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
     const activeConversationIdRef = useRef(activeConversationId);
     activeConversationIdRef.current = activeConversationId;
+    const conversationGenerationRef = useRef(1);
+    const pendingTurnRequestRef = useRef<{
+        clientRequestId?: string | null;
+        generation: number;
+        conversationId: string | null;
+        characterId: string;
+    } | null>(null);
     const deferredMessages = useDeferredValue(messages);
     const [visibleCount, setVisibleCount] = useState(20);
     const [showScrollBottom, setShowScrollBottom] = useState(false);
@@ -428,6 +441,8 @@ export default function ChatPanel({
     const latestResizeWidthRef = useRef(width);
     // Store last failed request for retry
     const lastFailedRequestRef = useRef<{ message: string; images?: string[]; allowImageGen?: boolean } | null>(null);
+    // Guard against sending before asynchronous event listeners are fully registered
+    const listenersReadyPromiseRef = useRef<Promise<void> | null>(null);
 
     const ensureMemoryModelReady = useCallback((options?: { silent?: boolean }): boolean => {
         // Semantic memory is an optional enhancement. Never hold a base LLM turn
@@ -483,6 +498,8 @@ export default function ChatPanel({
             listConversations,
             loadConversation,
             clearVisibleConversation: (characterId) => {
+                conversationGenerationRef.current += 1;
+                pendingTurnRequestRef.current = null;
                 const turnId = currentTurnRef.current?.turnId;
                 endTurnActivity();
                 cancelRequestedRef.current = true;
@@ -503,6 +520,17 @@ export default function ChatPanel({
                 setExpandedTranslations(new Set());
             },
             applyVisibleConversation: (conversation) => {
+                conversationGenerationRef.current += 1;
+                pendingTurnRequestRef.current = null;
+                const turnId = currentTurnRef.current?.turnId;
+                endTurnActivity();
+                cancelRequestedRef.current = true;
+                if (turnId) {
+                    void cancelChatTurn(turnId, "conversation_switched")
+                        .catch(error => console.error("[ChatPanel] Failed to cancel prior turn on conversation switch:", error));
+                }
+                currentTurnRef.current = null;
+                cancelRequestedRef.current = false;
                 setActiveCharacterId(conversation.characterId);
                 activeCharacterIdRef.current = conversation.characterId;
                 setActiveConversationId(conversation.conversationId);
@@ -585,17 +613,39 @@ export default function ChatPanel({
     const handleConversationSelection = useCallback(async (
         preferredConversationId: string | null,
     ): Promise<void> => {
+        const activeTurnId = currentTurnRef.current?.turnId;
+        if (activeTurnId) {
+            cancelRequestedRef.current = true;
+            setIsStopping(true);
+            try {
+                await cancelChatTurn(activeTurnId, "conversation_switched");
+            } catch (err) {
+                console.error("[ChatPanel] Failed to cancel prior turn before switching conversation:", err);
+            }
+        }
         await conversationSyncRef.current?.synchronize({
             characterId: activeCharacterId,
             preferredConversationId,
         });
     }, [activeCharacterId]);
 
-    const handleStartEmptyConversation = useCallback((): void => {
+    const handleStartEmptyConversation = useCallback(async (): Promise<void> => {
+        const activeTurnId = currentTurnRef.current?.turnId;
+        if (activeTurnId) {
+            cancelRequestedRef.current = true;
+            setIsStopping(true);
+            try {
+                await cancelChatTurn(activeTurnId, "new_conversation_started");
+            } catch (err) {
+                console.error("[ChatPanel] Failed to cancel prior turn before new conversation:", err);
+            }
+        }
         conversationSyncRef.current?.startEmptyConversation(activeCharacterId);
-        void clearHistory().catch((err) => {
+        try {
+            await clearHistory();
+        } catch (err) {
             console.error("[ChatPanel] Failed to clear backend history for empty conversation:", err);
-        });
+        }
     }, [activeCharacterId]);
 
     // STT (Speech-to-Text) — Advanced VAD Mode
@@ -951,384 +1001,434 @@ export default function ChatPanel({
         let aborted = false;
         const cleanups: (() => void)[] = [];
 
+        let resolveReady: () => void = () => {};
+        listenersReadyPromiseRef.current = new Promise<void>((resolve) => {
+            resolveReady = resolve;
+        });
+
         const setup = async () => {
-            // Listen for pet window sending a message — start streaming in main window too
-            const unPetChat = await listen<{ message: string }>("pet-chat-start", (event) => {
-                if (aborted) return;
-                const text = event.payload.message;
-                rawResponseRef.current = "";
-                currentTurnRef.current = null;
-                resetReveal();
-                setMessages(prev => [...prev, { role: "user", text }]);
-                startStreaming();
-                setIsThinking(true);
-                userScrolledRef.current = false;
-            });
-            if (aborted) { unPetChat(); return; }
-            cleanups.push(unPetChat);
-
-            const unTurnStart = await onChatTurnStart(({ turn_id, client_request_id, conversation_id, user_message_id }) => {
-                if (aborted) return;
-                if (conversation_id) {
-                    setActiveConversationId(conversation_id);
-                    activeConversationIdRef.current = conversation_id;
-                }
-                if (user_message_id) {
-                    setMessages(prev => {
-                        let idx = client_request_id ? prev.findIndex(m => m.clientRequestId === client_request_id) : -1;
-                        if (idx === -1) {
-                            idx = prev.map(m => m.role).lastIndexOf("user");
-                        }
-                        if (idx !== -1 && !prev[idx].id) {
-                            const updated = [...prev];
-                            updated[idx] = { ...updated[idx], id: user_message_id };
-                            return updated;
-                        }
-                        return prev;
-                    });
-                }
-                currentTurnRef.current = {
-                    turnId: turn_id,
-                    messageIndex: null,
-                    rawText: "",
-                    visibleTextStarted: false,
-                    translation: undefined,
-                    translationPending: false,
-                    tools: [],
-                    pendingContext: pendingVisionContextRef.current ?? undefined,
-                };
-                pendingVisionContextRef.current = null;
-                rawResponseRef.current = "";
-
-                if (cancelRequestedRef.current) {
-                    void requestTurnCancellation(turn_id);
-                    return;
-                }
-            });
-            if (aborted) { unTurnStart(); return; }
-            cleanups.push(unTurnStart);
-
-            const unDelta = await onChatTurnDelta(({ turn_id, delta: rawDelta }) => {
-                if (aborted || !isStreamingRef.current || cancelRequestedRef.current) return;
-                const turn = currentTurnRef.current;
-                if (!turn || turn.turnId !== turn_id) return;
-
-                const delta = stripStreamingMarkup(rawDelta);
-                if (!delta) return;
-
-                turn.rawText += delta;
-                rawResponseRef.current = turn.rawText;
-
-                const revealText = getStreamingRevealText({
-                    accumulatedText: turn.rawText,
-                    delta,
-                    hasVisibleTextStarted: turn.visibleTextStarted,
-                });
-                if (!revealText) return;
-
-                setIsThinking(false);
-                if (!turn.visibleTextStarted) {
-                    turn.visibleTextStarted = true;
-                    setMessages(prev => ensureTurnMessage(prev, turn));
-                }
-
-                pushDelta(revealText);
-                if (userScrolledRef.current) {
-                    setHasNewMessagesBelow(true);
-                }
-            });
-            if (aborted) { unDelta(); return; }
-            cleanups.push(unDelta);
-
-            const unTextComplete = await onChatTurnTextComplete(({ turn_id, text, translation_pending, translation }) => {
-                if (aborted || cancelRequestedRef.current) return;
-                const turn = currentTurnRef.current;
-                if (!turn || turn.turnId !== turn_id) return;
-
-                turn.rawText = text;
-                if (translation) {
-                    turn.translation = translation;
-                }
-                turn.translationPending = translation_pending;
-                rawResponseRef.current = text;
-
-                flushReveal();
-                stopStreaming();
-                setIsThinking(false);
-
-                const cleanText = stripStoredMarkup(text);
-                const hasContent = hasRenderableTurnContent(turn, cleanText);
-                if (!hasContent) {
-                    setMessages(prev => removeTurnMessages(prev, turn));
-                    return;
-                }
-
-                setMessages(prev => {
-                    const ensured = ensureTurnMessage(prev, turn);
-                    return updateTurnMessage(ensured, turn, (current) => ({
-                        ...current,
-                        text: cleanText,
-                        translation: turn.translation,
-                        translationPending: translation_pending,
-                        tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
-                    }));
-                });
-            });
-            if (aborted) { unTextComplete(); return; }
-            cleanups.push(unTextComplete);
-
-            const unTranslation = await onChatTurnTranslation(({ turn_id, translation }) => {
-                if (aborted || cancelRequestedRef.current) return;
-                const turn = currentTurnRef.current;
-                if (!turn || turn.turnId !== turn_id) return;
-                turn.translation = translation;
-                turn.translationPending = false;
-                setMessages(prev => updateTurnMessage(prev, turn, (current) => ({
-                    ...current,
-                    translation,
-                    translationPending: false,
-                })));
-            });
-            if (aborted) { unTranslation(); return; }
-            cleanups.push(unTranslation);
-
-            const unDone = await onChatTurnFinish(({ turn_id, status, conversation_id, assistant_message_id }) => {
-                if (aborted) return;
-                if (conversation_id) {
-                    setActiveConversationId(conversation_id);
-                    activeConversationIdRef.current = conversation_id;
-                }
-                const turn = currentTurnRef.current;
-                if (!turn || turn.turnId !== turn_id) {
-                    if (cancelRequestedRef.current) {
-                        endTurnActivity();
+            try {
+                const unlistens = await Promise.all([
+                    // Listen for pet window sending a message — start streaming in main window too
+                    listen<{ message: string }>("pet-chat-start", (event) => {
+                        if (aborted) return;
+                        const text = event.payload.message;
+                        pendingTurnRequestRef.current = {
+                            clientRequestId: null,
+                            generation: conversationGenerationRef.current,
+                            conversationId: activeConversationIdRef.current,
+                            characterId: activeCharacterIdRef.current,
+                        };
+                        rawResponseRef.current = "";
                         currentTurnRef.current = null;
-                        setIsThinking(false);
-                    }
-                    return;
-                }
+                        resetReveal();
+                        setMessages(prev => [...prev, { role: "user", text }]);
+                        startStreaming();
+                        setIsThinking(true);
+                        userScrolledRef.current = false;
+                    }),
 
-                flushReveal();
-                endTurnActivity();
-                setIsThinking(false);
-
-                const fullText = turn.rawText;
-                rawResponseRef.current = fullText;
-                const cleanText = stripStoredMarkup(fullText);
-
-                setMessages(prev => {
-                    const hasContent = hasRenderableTurnContent(turn, cleanText);
-
-                    if (hasActiveKokoroBubble(prev, turn.messageIndex)) {
-                        if (!hasContent) {
-                            return removeTurnMessages(prev, turn);
-                        }
-
-                        return updateTurnMessage(prev, turn, (current) => ({
-                            ...current,
-                            id: assistant_message_id ?? current.id,
-                            text: cleanText,
-                            translation: turn.translation,
-                            translationPending: false,
-                            tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
-                        }));
-                    }
-
-                    if (hasContent) {
-                        const next = [...prev];
-                        if (turn.pendingContext && !next.some(message => message.role === "context" && message.turnId === turn.turnId)) {
-                            next.push({
-                                ...turn.pendingContext,
-                                turnId: turn.turnId,
-                            });
-                        }
-                        next.push({
-                            id: assistant_message_id ?? undefined,
-                            role: "kokoro",
-                            text: cleanText,
-                            translation: turn.translation,
-                            translationPending: false,
-                            tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
+                    onChatTurnStart(({ turn_id, client_request_id, conversation_id, user_message_id }) => {
+                        if (aborted) return;
+                        const validation = validateTurnStart({
+                            currentGeneration: conversationGenerationRef.current,
+                            activeConversationId: activeConversationIdRef.current,
+                            activeCharacterId: activeCharacterIdRef.current,
+                            pendingRequest: pendingTurnRequestRef.current,
+                            isCancelRequested: cancelRequestedRef.current,
+                        }, {
+                            turn_id,
+                            client_request_id,
+                            conversation_id,
+                            user_message_id,
                         });
-                        return next;
-                    }
 
-                    return prev;
-                });
-
-                currentTurnRef.current = null;
-
-                const playback = getTtsPlaybackSettings();
-                if (status === "completed" && playback.enabled && cleanText.trim()) {
-                    console.log("[TTS] Auto-speak triggered, text length:", cleanText.length);
-                    const { enabled: _enabled, ...ttsConfig } = playback;
-                    synthesize(cleanText.trim(), ttsConfig).catch(err => console.error("[TTS] Auto-speak failed:", err));
-                }
-            });
-            if (aborted) { unDone(); return; }
-            cleanups.push(unDone);
-
-            const unFailure = await onChatFailure((failure: FailureEvent) => {
-                if (aborted) return;
-                if (!isFailureForActiveChat(
-                    failure,
-                    activeCharacterIdRef.current,
-                    currentTurnRef.current?.turnId ?? null,
-                )) return;
-                endTurnActivity();
-                setIsThinking(false);
-                const suffix = failure.stage ? ` (${failure.stage})` : "";
-                setError(`${failure.message}${suffix}`);
-                currentTurnRef.current = null;
-            });
-            if (aborted) { unFailure(); return; }
-            cleanups.push(unFailure);
-
-            const unError = await onChatError((err: string) => {
-                if (aborted) return;
-                if (shouldIgnoreLegacyChatError(currentTurnRef.current?.turnId ?? null)) return;
-                endTurnActivity();
-                setIsThinking(false);
-                setError(err);
-                currentTurnRef.current = null;
-            });
-            if (aborted) { unError(); return; }
-            cleanups.push(unError);
-
-            const unWarning = await onChatWarning((warning: string) => {
-                if (aborted) return;
-                setError(warning);
-            });
-            if (aborted) { unWarning(); return; }
-            cleanups.push(unWarning);
-
-            const unToolResult = await onChatTurnTool((event) => {
-                if (aborted || cancelRequestedRef.current) return;
-                logToolEvent(event);
-                const turn = currentTurnRef.current;
-                setMessages(prev => getToolEventStateUpdate(event, turn, event.turn_id)(prev));
-            });
-            if (aborted) { unToolResult(); return; }
-            cleanups.push(unToolResult);
-
-            const unVisionObservation = await onVisionObservation((observation) => {
-                if (aborted) return;
-                const summary = observation.summary.trim();
-                if (!summary) return;
-                pendingVisionContextRef.current = {
-                    role: "context",
-                    text: summary,
-                    capturedAt: observation.captured_at,
-                    source: observation.source,
-                };
-            });
-            if (aborted) { unVisionObservation(); return; }
-            cleanups.push(unVisionObservation);
-
-            const unTtsStart = await listen("tts:start", () => {
-                if (aborted) return;
-                ttsSpeakingRef.current = true;
-            });
-            if (aborted) { unTtsStart(); return; }
-            cleanups.push(unTtsStart);
-
-            const unTtsEnd = await listen("tts:end", () => {
-                if (aborted) return;
-                ttsSpeakingRef.current = false;
-            });
-            if (aborted) { unTtsEnd(); return; }
-            cleanups.push(unTtsEnd);
-
-            // Telegram chat sync — show messages from Telegram bot in desktop UI
-            const unTelegramSync = await onTelegramChatSync((data) => {
-                if (aborted) return;
-                if (data.role === "user") {
-                    setMessages(prev => [...prev, { role: "user", text: data.text }]);
-                } else {
-                    setMessages(prev => [...prev, { role: "kokoro", text: data.text, translation: data.translation }]);
-                }
-            });
-            if (aborted) { unTelegramSync(); return; }
-            cleanups.push(unTelegramSync);
-
-            // Interaction reactions (touch/click on Live2D model) handled via auto-generated LLM prompt in interaction-service.ts
-            // We no longer listen here to avoid double-handling or showing hardcoded lines.
-
-            // Listen for proactive triggers from backend (heartbeat)
-            const unProactive = await listen<any>("proactive-trigger", (event) => {
-                const browserSpeaking = typeof window !== "undefined"
-                    && Boolean(window.speechSynthesis?.speaking);
-                if (aborted || isBusyRef.current || ttsSpeakingRef.current || audioPlayer.isPlaying || browserSpeaking) return;
-                void (async () => {
-                    if (!await ensureMemoryModelReady({ silent: true })) {
-                        return;
-                    }
-
-                    console.log("[ChatPanel] Proactive trigger:", event.payload);
-
-                    const { instruction } = event.payload;
-
-                    // Start streaming — compose_prompt() handles full context (system prompt, memory, emotion, history, language)
-                    startStreaming();
-                    setIsThinking(true);
-                    userScrolledRef.current = false;
-                    resetReveal();
-                    rawResponseRef.current = "";
-                    currentTurnRef.current = null;
-
-                    streamChat({
-                        message: instruction,
-                        hidden: true,
-                        character_id: getActiveCharacterIdForRequest(),
-                    }).catch(err => {
-                        if (isTurnCancelledError(err) || cancelRequestedRef.current) {
-                            endTurnActivity();
-                            currentTurnRef.current = null;
+                        if (!validation.valid) {
+                            void cancelChatTurn(turn_id, `stale_turn_${validation.reason}`)
+                                .catch(err => console.warn("[ChatPanel] Failed to cancel stale turn start:", err));
                             return;
                         }
+
+                        if (validation.shouldUpdateConversation && validation.targetConversationId) {
+                            setActiveConversationId(validation.targetConversationId);
+                            activeConversationIdRef.current = validation.targetConversationId;
+                        }
+
+                        if (user_message_id) {
+                            const matchedRequestId = validation.matchedClientRequestId;
+                            setMessages(prev => {
+                                let idx = matchedRequestId ? prev.findIndex(m => m.clientRequestId === matchedRequestId) : -1;
+                                if (idx === -1 && !matchedRequestId) {
+                                    idx = prev.map(m => m.role).lastIndexOf("user");
+                                }
+                                if (idx !== -1 && !prev[idx].id) {
+                                    const updated = [...prev];
+                                    updated[idx] = { ...updated[idx], id: user_message_id };
+                                    return updated;
+                                }
+                                return prev;
+                            });
+                        }
+
+                        currentTurnRef.current = {
+                            turnId: turn_id,
+                            generation: conversationGenerationRef.current,
+                            conversationId: validation.targetConversationId ?? activeConversationIdRef.current,
+                            clientRequestId: validation.matchedClientRequestId,
+                            messageIndex: null,
+                            rawText: "",
+                            visibleTextStarted: false,
+                            translation: undefined,
+                            translationPending: false,
+                            tools: [],
+                            pendingContext: pendingVisionContextRef.current ?? undefined,
+                        };
+                        pendingVisionContextRef.current = null;
+                        rawResponseRef.current = "";
+                    }),
+
+                    onChatTurnDelta(({ turn_id, delta: rawDelta }) => {
+                        if (aborted || !isStreamingRef.current || cancelRequestedRef.current) return;
+                        const turn = currentTurnRef.current;
+                        if (!turn || turn.turnId !== turn_id || turn.generation !== conversationGenerationRef.current) return;
+
+                        const delta = stripStreamingMarkup(rawDelta);
+                        if (!delta) return;
+
+                        turn.rawText += delta;
+                        rawResponseRef.current = turn.rawText;
+
+                        const revealText = getStreamingRevealText({
+                            accumulatedText: turn.rawText,
+                            delta,
+                            hasVisibleTextStarted: turn.visibleTextStarted,
+                        });
+                        if (!revealText) return;
+
+                        setIsThinking(false);
+                        if (!turn.visibleTextStarted) {
+                            turn.visibleTextStarted = true;
+                            setMessages(prev => ensureTurnMessage(prev, turn));
+                        }
+
+                        pushDelta(revealText);
+                        if (userScrolledRef.current) {
+                            setHasNewMessagesBelow(true);
+                        }
+                    }),
+
+                    onChatTurnTextComplete(({ turn_id, text, translation_pending, translation }) => {
+                        if (aborted || cancelRequestedRef.current) return;
+                        const turn = currentTurnRef.current;
+                        if (!turn || turn.turnId !== turn_id || turn.generation !== conversationGenerationRef.current) return;
+
+                        turn.rawText = text;
+                        if (translation) {
+                            turn.translation = translation;
+                        }
+                        turn.translationPending = translation_pending;
+                        rawResponseRef.current = text;
+
+                        flushReveal();
+                        stopStreaming();
+                        setIsThinking(false);
+
+                        const cleanText = stripStoredMarkup(text);
+                        const hasContent = hasRenderableTurnContent(turn, cleanText);
+                        if (!hasContent) {
+                            setMessages(prev => removeTurnMessages(prev, turn));
+                            return;
+                        }
+
+                        setMessages(prev => {
+                            const ensured = ensureTurnMessage(prev, turn);
+                            return updateTurnMessage(ensured, turn, (current) => ({
+                                ...current,
+                                clientRequestId: current.clientRequestId ?? turn.clientRequestId ?? undefined,
+                                text: cleanText,
+                                translation: turn.translation,
+                                translationPending: translation_pending,
+                                tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
+                            }));
+                        });
+                    }),
+
+                    onChatTurnTranslation(({ turn_id, translation }) => {
+                        if (aborted || cancelRequestedRef.current) return;
+                        const turn = currentTurnRef.current;
+                        if (!turn || turn.turnId !== turn_id || turn.generation !== conversationGenerationRef.current) return;
+                        turn.translation = translation;
+                        turn.translationPending = false;
+                        setMessages(prev => updateTurnMessage(prev, turn, (current) => ({
+                            ...current,
+                            translation,
+                            translationPending: false,
+                        })));
+                    }),
+
+                    onChatTurnFinish(({ turn_id, status, conversation_id, assistant_message_id, client_request_id }) => {
+                        if (aborted) return;
+                        const turn = currentTurnRef.current;
+                        const validation = validateTurnFinish({
+                            currentGeneration: conversationGenerationRef.current,
+                            activeConversationId: activeConversationIdRef.current,
+                            currentTurn: turn
+                                ? {
+                                      turnId: turn.turnId,
+                                      generation: turn.generation ?? conversationGenerationRef.current,
+                                      conversationId: turn.conversationId ?? activeConversationIdRef.current,
+                                  }
+                                : null,
+                        }, {
+                            turn_id,
+                            status,
+                            conversation_id,
+                            assistant_message_id,
+                            client_request_id,
+                        });
+
+                        if (!validation.valid) {
+                            if (cancelRequestedRef.current) {
+                                endTurnActivity();
+                                currentTurnRef.current = null;
+                                pendingTurnRequestRef.current = null;
+                                setIsThinking(false);
+                            }
+                            return;
+                        }
+
+                        if (validation.shouldUpdateConversation && validation.targetConversationId) {
+                            setActiveConversationId(validation.targetConversationId);
+                            activeConversationIdRef.current = validation.targetConversationId;
+                        }
+
+                        if (!turn) return;
+
+                        flushReveal();
                         endTurnActivity();
                         setIsThinking(false);
-                        setError(getAsyncErrorMessage(err));
-                        currentTurnRef.current = null;
-                        // Remove the empty placeholder if one was created by delta handler
+
+                        const fullText = turn.rawText;
+                        rawResponseRef.current = fullText;
+                        const cleanText = stripStoredMarkup(fullText);
+
                         setMessages(prev => {
-                            const last = prev[prev.length - 1];
-                            if (last && last.role === "kokoro" && !last.text) {
-                                return prev.slice(0, -1);
+                            const hasContent = hasRenderableTurnContent(turn, cleanText);
+
+                            if (hasActiveKokoroBubble(prev, turn.messageIndex)) {
+                                if (!hasContent) {
+                                    return removeTurnMessages(prev, turn);
+                                }
+
+                                return updateTurnMessage(prev, turn, (current) => ({
+                                    ...current,
+                                    id: assistant_message_id ?? current.id,
+                                    clientRequestId: current.clientRequestId ?? turn.clientRequestId ?? undefined,
+                                    text: cleanText,
+                                    translation: turn.translation,
+                                    translationPending: false,
+                                    tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
+                                }));
                             }
+
+                            if (hasContent) {
+                                const next = [...prev];
+                                if (turn.pendingContext && !next.some(message => message.role === "context" && message.turnId === turn.turnId)) {
+                                    next.push({
+                                        ...turn.pendingContext,
+                                        turnId: turn.turnId,
+                                    });
+                                }
+                                next.push({
+                                    id: assistant_message_id ?? undefined,
+                                    role: "kokoro",
+                                    text: cleanText,
+                                    turnId: turn.turnId,
+                                    clientRequestId: turn.clientRequestId ?? undefined,
+                                    translation: turn.translation,
+                                    translationPending: false,
+                                    tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
+                                });
+                                return next;
+                            }
+
                             return prev;
                         });
-                    });
-                })();
-            });
-            cleanups.push(() => unProactive());
 
-            // Listen for interaction triggers (touch/click on Live2D model)
-            // interaction-service already calls streamChat, we just need to prepare ChatPanel for receiving deltas
-            const unInteraction = await listen<any>("interaction-trigger", () => {
-                if (aborted || isBusyRef.current) return;
+                        currentTurnRef.current = null;
+                        pendingTurnRequestRef.current = null;
 
-                startStreaming();
-                setIsThinking(true);
-                userScrolledRef.current = false;
-                resetReveal();
-                rawResponseRef.current = "";
-                currentTurnRef.current = null;
-            });
-            cleanups.push(() => unInteraction());
+                        const playback = getTtsPlaybackSettings();
+                        if (status === "completed" && playback.enabled && cleanText.trim()) {
+                            console.log("[TTS] Auto-speak triggered, text length:", cleanText.length);
+                            const { enabled: _enabled, ...ttsConfig } = playback;
+                            synthesize(cleanText.trim(), ttsConfig).catch(err => console.error("[TTS] Auto-speak failed:", err));
+                        }
+                    }),
 
-            // Listen for voice-interrupt-stt: when TTS is interrupted by voice, auto-start STT
-            const unVoiceInterruptStt = await listen<any>("voice-interrupt-stt", () => {
-                if (aborted || isBusyRef.current) return;
-                if (!sttEnabledRef.current || !sttAutoSendRef.current) return;
-                console.log("[ChatPanel] Voice interrupt → starting STT");
-                startVoiceRef.current({ autoStopOnSilence: true });
-            });
-            if (aborted) { unVoiceInterruptStt(); return; }
-            cleanups.push(() => unVoiceInterruptStt());
+                    onChatFailure((failure: FailureEvent) => {
+                        if (aborted) return;
+                        const turn = currentTurnRef.current;
+                        if (turn && turn.generation !== conversationGenerationRef.current) return;
+                        if (!isFailureForActiveChat(
+                            failure,
+                            activeCharacterIdRef.current,
+                            turn?.turnId ?? null,
+                        )) return;
+                        endTurnActivity();
+                        setIsThinking(false);
+                        const suffix = failure.stage ? ` (${failure.stage})` : "";
+                        setError(`${failure.message}${suffix}`);
+                        currentTurnRef.current = null;
+                        pendingTurnRequestRef.current = null;
+                    }),
+
+                    onChatError((err: string) => {
+                        if (aborted) return;
+                        const turn = currentTurnRef.current;
+                        if (turn && turn.generation !== conversationGenerationRef.current) return;
+                        if (shouldIgnoreLegacyChatError(turn?.turnId ?? null)) return;
+                        endTurnActivity();
+                        setIsThinking(false);
+                        setError(err);
+                        currentTurnRef.current = null;
+                        pendingTurnRequestRef.current = null;
+                    }),
+
+                    onChatWarning((warning: string) => {
+                        if (aborted) return;
+                        setError(warning);
+                    }),
+
+                    onChatTurnTool((event) => {
+                        if (aborted || cancelRequestedRef.current) return;
+                        logToolEvent(event);
+                        const turn = currentTurnRef.current;
+                        if (!turn || turn.turnId !== event.turn_id || turn.generation !== conversationGenerationRef.current) return;
+                        setMessages(prev => getToolEventStateUpdate(event, turn, event.turn_id)(prev));
+                    }),
+
+                    onVisionObservation((observation) => {
+                        if (aborted) return;
+                        const summary = observation.summary.trim();
+                        if (!summary) return;
+                        pendingVisionContextRef.current = {
+                            role: "context",
+                            text: summary,
+                            capturedAt: observation.captured_at,
+                            source: observation.source,
+                        };
+                    }),
+
+                    listen("tts:start", () => {
+                        if (aborted) return;
+                        ttsSpeakingRef.current = true;
+                    }),
+
+                    listen("tts:end", () => {
+                        if (aborted) return;
+                        ttsSpeakingRef.current = false;
+                    }),
+
+                    // Telegram chat sync — show messages from Telegram bot in desktop UI
+                    onTelegramChatSync((data) => {
+                        if (aborted) return;
+                        if (data.role === "user") {
+                            setMessages(prev => [...prev, { role: "user", text: data.text }]);
+                        } else {
+                            setMessages(prev => [...prev, { role: "kokoro", text: data.text, translation: data.translation }]);
+                        }
+                    }),
+
+                    // Listen for proactive triggers from backend (heartbeat)
+                    listen<any>("proactive-trigger", (event) => {
+                        const browserSpeaking = typeof window !== "undefined"
+                            && Boolean(window.speechSynthesis?.speaking);
+                        if (aborted || isBusyRef.current || ttsSpeakingRef.current || audioPlayer.isPlaying || browserSpeaking) return;
+                        void (async () => {
+                            if (!await ensureMemoryModelReady({ silent: true })) {
+                                return;
+                            }
+
+                            console.log("[ChatPanel] Proactive trigger:", event.payload);
+
+                            const { instruction } = event.payload;
+
+                            // Start streaming — compose_prompt() handles full context (system prompt, memory, emotion, history, language)
+                            pendingTurnRequestRef.current = {
+                                clientRequestId: null,
+                                generation: conversationGenerationRef.current,
+                                conversationId: activeConversationIdRef.current,
+                                characterId: activeCharacterIdRef.current,
+                            };
+                            startStreaming();
+                            setIsThinking(true);
+                            userScrolledRef.current = false;
+                            resetReveal();
+                            rawResponseRef.current = "";
+                            currentTurnRef.current = null;
+
+                            streamChat({
+                                message: instruction,
+                                hidden: true,
+                                character_id: getActiveCharacterIdForRequest(),
+                            }).catch(err => {
+                                if (isTurnCancelledError(err) || cancelRequestedRef.current) {
+                                    endTurnActivity();
+                                    currentTurnRef.current = null;
+                                    return;
+                                }
+                                endTurnActivity();
+                                setIsThinking(false);
+                                setError(getAsyncErrorMessage(err));
+                                currentTurnRef.current = null;
+                                // Remove the empty placeholder if one was created by delta handler
+                                setMessages(prev => {
+                                    const last = prev[prev.length - 1];
+                                    if (last && last.role === "kokoro" && !last.text) {
+                                        return prev.slice(0, -1);
+                                    }
+                                    return prev;
+                                });
+                            });
+                        })();
+                    }),
+
+                    // Listen for interaction triggers (touch/click on Live2D model)
+                    // interaction-service already calls streamChat, we just need to prepare ChatPanel for receiving deltas
+                    listen<any>("interaction-trigger", () => {
+                        if (aborted || isBusyRef.current) return;
+
+                        startStreaming();
+                        setIsThinking(true);
+                        userScrolledRef.current = false;
+                        resetReveal();
+                        rawResponseRef.current = "";
+                        currentTurnRef.current = null;
+                    }),
+
+                    // Listen for voice-interrupt-stt: when TTS is interrupted by voice, auto-start STT
+                    listen<any>("voice-interrupt-stt", () => {
+                        if (aborted || isBusyRef.current) return;
+                        if (!sttEnabledRef.current || !sttAutoSendRef.current) return;
+                        console.log("[ChatPanel] Voice interrupt → starting STT");
+                        startVoiceRef.current({ autoStopOnSilence: true });
+                    }),
+                ]);
+
+                if (aborted) {
+                    unlistens.forEach(fn => fn());
+                    return;
+                }
+                cleanups.push(...unlistens);
+            } catch (err) {
+                console.error("[ChatPanel] Failed to setup chat event listeners:", err);
+            } finally {
+                resolveReady();
+            }
         };
 
-        setup();
+        void setup();
         return () => {
             aborted = true;
             if (cancellationWatchdogTimerRef.current !== null) {
@@ -1336,6 +1436,7 @@ export default function ChatPanel({
                 cancellationWatchdogTimerRef.current = null;
             }
             cleanups.forEach(fn => fn());
+            listenersReadyPromiseRef.current = null;
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
@@ -1344,12 +1445,28 @@ export default function ChatPanel({
     const handleSend = async (e?: React.FormEvent) => {
         e?.preventDefault();
         if (interactionDisabled) return;
+
+        // 确保所有事件监听器已就绪，避免因初始化时序差错过 chat-turn-start / finish 事件
+        if (listenersReadyPromiseRef.current) {
+            await Promise.race([
+                listenersReadyPromiseRef.current,
+                new Promise(resolve => setTimeout(resolve, 1500)),
+            ]);
+        }
+
         const trimmed = input.trim();
         const messageImages = visionEnabled ? [...pendingImages] : [];
         if ((!trimmed && messageImages.length === 0) || isBusy) return;
         if (!await ensureMemoryModelReady()) return;
 
+        const requestGeneration = conversationGenerationRef.current;
         const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        pendingTurnRequestRef.current = {
+            clientRequestId,
+            generation: requestGeneration,
+            conversationId: activeConversationIdRef.current,
+            characterId: activeCharacterIdRef.current,
+        };
         setMessages(prev => [...prev, {
             role: "user",
             text: trimmed,
@@ -1381,22 +1498,29 @@ export default function ChatPanel({
                 character_id: getActiveCharacterIdForRequest(),
                 client_request_id: clientRequestId,
             });
-            if (res?.conversation_id) {
-                setActiveConversationId(res.conversation_id);
-                activeConversationIdRef.current = res.conversation_id;
-            }
-            if (res?.user_message_id) {
-                setMessages(prev => {
-                    const idx = prev.findIndex(m => m.clientRequestId === clientRequestId);
-                    if (idx !== -1 && !prev[idx].id) {
-                        const updated = [...prev];
-                        updated[idx] = { ...updated[idx], id: res.user_message_id ?? undefined };
-                        return updated;
-                    }
-                    return prev;
-                });
+            const streamResValidation = validateStreamChatResponse({
+                requestGeneration,
+                currentGeneration: conversationGenerationRef.current,
+                clientRequestId,
+                activeConversationId: activeConversationIdRef.current,
+            }, res);
+
+            if (streamResValidation.valid) {
+                if (streamResValidation.shouldUpdateConversation && streamResValidation.targetConversationId) {
+                    setActiveConversationId(streamResValidation.targetConversationId);
+                    activeConversationIdRef.current = streamResValidation.targetConversationId;
+                }
+                setMessages(prev => reconcileTurnMessageIds(
+                    prev,
+                    clientRequestId,
+                    res?.user_message_id,
+                    res?.assistant_message_id,
+                ));
             }
         } catch (err) {
+            if (conversationGenerationRef.current !== requestGeneration) {
+                return;
+            }
             if (isTurnCancelledError(err) || cancelRequestedRef.current) {
                 endTurnActivity();
                 currentTurnRef.current = null;
@@ -1572,6 +1696,19 @@ export default function ChatPanel({
 
     const executeClear = async () => {
         setShowClearConfirm(false);
+        const activeTurnId = currentTurnRef.current?.turnId;
+        if (activeTurnId) {
+            cancelRequestedRef.current = true;
+            setIsStopping(true);
+            try {
+                await cancelChatTurn(activeTurnId, "clear_history");
+            } catch (err) {
+                console.error("[ChatPanel] Failed to cancel prior turn before clear history:", err);
+            }
+        }
+        conversationGenerationRef.current += 1;
+        pendingTurnRequestRef.current = null;
+        currentTurnRef.current = null;
         try {
             await clearHistory();
         } catch {
@@ -1698,6 +1835,14 @@ export default function ChatPanel({
         const userMsg = msgs[userMsgIndex];
         if (!await ensureMemoryModelReady()) return;
 
+        // 确保所有事件监听器已就绪
+        if (listenersReadyPromiseRef.current) {
+            await Promise.race([
+                listenersReadyPromiseRef.current,
+                new Promise(resolve => setTimeout(resolve, 1500)),
+            ]);
+        }
+
         const messagesToDelete = msgs.length - globalIndex;
 
         try {
@@ -1707,6 +1852,15 @@ export default function ChatPanel({
             console.error("[ChatPanel] Failed to delete messages:", e);
         }
         setMessages(prev => prev.slice(0, globalIndex));
+
+        const requestGeneration = conversationGenerationRef.current;
+        const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        pendingTurnRequestRef.current = {
+            clientRequestId,
+            generation: requestGeneration,
+            conversationId: activeConversationIdRef.current,
+            characterId: activeCharacterIdRef.current,
+        };
 
         startStreaming();
         setIsThinking(true);
@@ -1722,8 +1876,31 @@ export default function ChatPanel({
             images: userMsg.images,
             allow_image_gen: allowImageGen,
             character_id: getActiveCharacterIdForRequest(),
+            client_request_id: clientRequestId,
             regenerate: true,
+        }).then(res => {
+            const streamResValidation = validateStreamChatResponse({
+                requestGeneration,
+                currentGeneration: conversationGenerationRef.current,
+                clientRequestId,
+                activeConversationId: activeConversationIdRef.current,
+            }, res);
+            if (streamResValidation.valid) {
+                if (streamResValidation.shouldUpdateConversation && streamResValidation.targetConversationId) {
+                    setActiveConversationId(streamResValidation.targetConversationId);
+                    activeConversationIdRef.current = streamResValidation.targetConversationId;
+                }
+                setMessages(prev => reconcileTurnMessageIds(
+                    prev,
+                    clientRequestId,
+                    res?.user_message_id,
+                    res?.assistant_message_id,
+                ));
+            }
         }).catch(err => {
+            if (conversationGenerationRef.current !== requestGeneration) {
+                return;
+            }
             if (isTurnCancelledError(err) || cancelRequestedRef.current) {
                 endTurnActivity();
                 currentTurnRef.current = null;
@@ -2244,6 +2421,10 @@ export default function ChatPanel({
                                         src={url}
                                         alt="pending"
                                         className="w-14 h-14 rounded-md object-cover border border-[var(--color-border)]"
+                                        onError={() => {
+                                            console.warn("[ChatPanel] Draft image failed to render, removing:", url);
+                                            removePendingImage(idx);
+                                        }}
                                     />
                                     <button
                                         type="button"

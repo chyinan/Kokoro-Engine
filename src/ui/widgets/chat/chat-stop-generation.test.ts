@@ -159,4 +159,96 @@ describe("chat stop generation race condition and 4-layer defense", () => {
 
         expect(requestTurnCancellation).not.toHaveBeenCalled();
     });
+
+    it("cancels active turn and awaits cancellation before starting empty conversation and clearHistory", async () => {
+        const sequence: string[] = [];
+        const cancelChatTurn = vi.fn(async (turnId: string, reason: string) => {
+            sequence.push(`cancel:${turnId}:${reason}`);
+        });
+        const startEmptyConversation = vi.fn((charId: string) => {
+            sequence.push(`startEmpty:${charId}`);
+        });
+        const clearHistory = vi.fn(async () => {
+            sequence.push("clearHistory");
+        });
+
+        let currentTurn: { turnId: string } | null = { turnId: "turn-running-123" };
+        let isStopping = false;
+        let cancelRequested = false;
+
+        const handleStartEmptyConversation = async (activeCharacterId: string): Promise<void> => {
+            const activeTurnId = currentTurn?.turnId;
+            if (activeTurnId) {
+                cancelRequested = true;
+                isStopping = true;
+                try {
+                    await cancelChatTurn(activeTurnId, "new_conversation_started");
+                } catch (err) {
+                    console.error(err);
+                }
+            }
+            startEmptyConversation(activeCharacterId);
+            try {
+                await clearHistory();
+            } catch (err) {
+                console.error(err);
+            }
+        };
+
+        await handleStartEmptyConversation("char-anya");
+
+        expect(cancelChatTurn).toHaveBeenCalledWith("turn-running-123", "new_conversation_started");
+        expect(startEmptyConversation).toHaveBeenCalledWith("char-anya");
+        expect(clearHistory).toHaveBeenCalled();
+        expect(isStopping).toBe(true);
+        expect(cancelRequested).toBe(true);
+        // Verify strict temporal ordering: cancel -> startEmpty -> clearHistory
+        expect(sequence).toEqual([
+            "cancel:turn-running-123:new_conversation_started",
+            "startEmpty:char-anya",
+            "clearHistory",
+        ]);
+    });
+
+    it("cancels active turn before switching conversation", async () => {
+        const sequence: string[] = [];
+        const cancelChatTurn = vi.fn(async (turnId: string, reason: string) => {
+            sequence.push(`cancel:${turnId}:${reason}`);
+        });
+        const synchronize = vi.fn(async (params: { characterId: string; preferredConversationId: string | null }) => {
+            sequence.push(`sync:${params.characterId}:${params.preferredConversationId}`);
+        });
+
+        let currentTurn: { turnId: string } | null = { turnId: "turn-running-456" };
+
+        const handleConversationSelection = async (
+            activeCharacterId: string,
+            preferredConversationId: string | null,
+        ): Promise<void> => {
+            const activeTurnId = currentTurn?.turnId;
+            if (activeTurnId) {
+                try {
+                    await cancelChatTurn(activeTurnId, "conversation_switched");
+                } catch (err) {
+                    console.error(err);
+                }
+            }
+            await synchronize({
+                characterId: activeCharacterId,
+                preferredConversationId,
+            });
+        };
+
+        await handleConversationSelection("char-anya", "conv-target-999");
+
+        expect(cancelChatTurn).toHaveBeenCalledWith("turn-running-456", "conversation_switched");
+        expect(synchronize).toHaveBeenCalledWith({
+            characterId: "char-anya",
+            preferredConversationId: "conv-target-999",
+        });
+        expect(sequence).toEqual([
+            "cancel:turn-running-456:conversation_switched",
+            "sync:char-anya:conv-target-999",
+        ]);
+    });
 });

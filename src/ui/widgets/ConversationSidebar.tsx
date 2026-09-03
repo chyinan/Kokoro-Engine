@@ -20,7 +20,7 @@ type ConversationSidebarProps = {
     onClose: () => void;
     characterId: string;
     activeConversationId: string | null;
-    onStartEmptyConversation: () => void;
+    onStartEmptyConversation: () => void | Promise<void>;
     onSelectConversation: (conversationId: string | null) => Promise<void>;
 };
 
@@ -135,7 +135,7 @@ export default function ConversationSidebar({
 
     const handleCreate = async () => {
         onClose();
-        onStartEmptyConversation();
+        await onStartEmptyConversation();
     };
 
     const handleDeleteClick = (e: React.MouseEvent, conv: Conversation) => {

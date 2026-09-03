@@ -5,6 +5,98 @@ export const CHAT_DRAFT_IMAGES_KEY_PREFIX = "kokoro_chat_draft_images_";
 export const DEFAULT_CHAT_DRAFT_DEBOUNCE_MS = 300;
 
 /**
+ * Returns the default storage for ephemeral image drafts (sessionStorage by default).
+ */
+export function getDefaultImageDraftStorage(): Storage | undefined {
+    if (typeof window !== "undefined") {
+        return window.sessionStorage;
+    }
+    return undefined;
+}
+
+/**
+ * Validates whether a candidate string is likely a valid image URL.
+ */
+export function isLikelyValidImageUrl(url: unknown): boolean {
+    if (typeof url !== "string") return false;
+    const trimmed = url.trim();
+    if (!trimmed) return false;
+    if (trimmed.startsWith("data:image/")) return true;
+    if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("asset://")) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Asynchronously probes whether an image URL is accessible.
+ * Returns true for accessible images, false for dead ports, 404s, or timeouts.
+ */
+export function checkImageAccessible(url: string, timeoutMs = 2000): Promise<boolean> {
+    if (!isLikelyValidImageUrl(url)) return Promise.resolve(false);
+    if (url.startsWith("data:image/")) return Promise.resolve(true);
+    if (typeof window === "undefined" || typeof Image === "undefined") {
+        return Promise.resolve(true);
+    }
+    return new Promise<boolean>((resolve) => {
+        let settled = false;
+        const img = new Image();
+        const timer = setTimeout(() => {
+            if (!settled) {
+                settled = true;
+                img.src = "";
+                resolve(false);
+            }
+        }, timeoutMs);
+
+        img.onload = () => {
+            if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                resolve(true);
+            }
+        };
+
+        img.onerror = () => {
+            if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                resolve(false);
+            }
+        };
+
+        img.src = url;
+    });
+}
+
+/**
+ * Cleans up legacy character draft images stored in localStorage from earlier versions.
+ * If characterId is provided, cleans up that character's key; otherwise cleans up all draft image keys.
+ */
+export function cleanupLegacyCharacterDraftImages(characterId?: string, storage?: Storage): void {
+    try {
+        const s = storage ?? (typeof window !== "undefined" ? window.localStorage : undefined);
+        if (!s) return;
+        if (characterId) {
+            s.removeItem(getCharacterDraftImagesStorageKey(characterId));
+        } else {
+            const keysToRemove: string[] = [];
+            for (let i = 0; i < s.length; i++) {
+                const key = s.key(i);
+                if (key && key.startsWith(CHAT_DRAFT_IMAGES_KEY_PREFIX)) {
+                    keysToRemove.push(key);
+                }
+            }
+            for (const key of keysToRemove) {
+                s.removeItem(key);
+            }
+        }
+    } catch {
+        // ignore storage errors
+    }
+}
+
+/**
  * Returns the storage key for character image drafts.
  */
 export function getCharacterDraftImagesStorageKey(characterId: string): string {
@@ -13,19 +105,24 @@ export function getCharacterDraftImagesStorageKey(characterId: string): string {
 }
 
 /**
- * Loads the saved character image draft from storage.
- * Returns array of image URLs if found and valid JSON, or empty array.
+ * Loads the saved character image draft from storage (sessionStorage by default).
+ * Returns array of valid image URLs if found, or empty array.
  */
 export function loadSavedCharacterDraftImages(characterId: string, storage?: Storage): string[] {
     try {
-        const s = storage ?? (typeof window !== "undefined" ? window.localStorage : undefined);
+        // Proactively clean up any legacy dead keys left behind in localStorage
+        if (!storage && typeof window !== "undefined" && window.localStorage) {
+            cleanupLegacyCharacterDraftImages(characterId, window.localStorage);
+        }
+
+        const s = storage ?? getDefaultImageDraftStorage();
         if (!s) return [];
         const key = getCharacterDraftImagesStorageKey(characterId);
         const saved = s.getItem(key);
         if (!saved) return [];
         const parsed = JSON.parse(saved);
         return Array.isArray(parsed)
-            ? parsed.filter(item => typeof item === "string" && item.trim().length > 0)
+            ? parsed.filter(item => isLikelyValidImageUrl(item))
             : [];
     } catch {
         return [];
@@ -33,15 +130,15 @@ export function loadSavedCharacterDraftImages(characterId: string, storage?: Sto
 }
 
 /**
- * Saves or clears the character image draft in storage.
+ * Saves or clears the character image draft in storage (sessionStorage by default).
  * If images array is empty, removes the item to avoid polluting storage.
  */
 export function saveCharacterDraftImages(characterId: string, images: string[], storage?: Storage): void {
     try {
-        const s = storage ?? (typeof window !== "undefined" ? window.localStorage : undefined);
+        const s = storage ?? getDefaultImageDraftStorage();
         if (!s) return;
         const key = getCharacterDraftImagesStorageKey(characterId);
-        const validImages = images.filter(img => typeof img === "string" && img.trim().length > 0);
+        const validImages = images.filter(img => isLikelyValidImageUrl(img));
         if (validImages.length === 0) {
             s.removeItem(key);
         } else {
@@ -57,10 +154,14 @@ export function saveCharacterDraftImages(characterId: string, images: string[], 
  */
 export function clearCharacterDraftImages(characterId: string, storage?: Storage): void {
     try {
-        const s = storage ?? (typeof window !== "undefined" ? window.localStorage : undefined);
-        if (!s) return;
-        const key = getCharacterDraftImagesStorageKey(characterId);
-        s.removeItem(key);
+        const s = storage ?? getDefaultImageDraftStorage();
+        if (s) {
+            const key = getCharacterDraftImagesStorageKey(characterId);
+            s.removeItem(key);
+        }
+        if (!storage && typeof window !== "undefined" && window.localStorage) {
+            cleanupLegacyCharacterDraftImages(characterId, window.localStorage);
+        }
     } catch {
         // ignore storage errors
     }

@@ -9,11 +9,14 @@ import {
     loadSavedCharacterDraftImages,
     saveCharacterDraft,
     saveCharacterDraftImages,
+    checkImageAccessible,
 } from "./chat-draft-layout";
 
 export interface UseCharacterChatDraftOptions {
     readonly debounceMs?: number;
     readonly storage?: Storage;
+    readonly imageStorage?: Storage;
+    readonly validateImage?: (url: string) => Promise<boolean>;
 }
 
 export interface UseCharacterChatDraftResult {
@@ -31,12 +34,14 @@ export function useCharacterChatDraft(
 ): UseCharacterChatDraftResult {
     const debounceMs = options?.debounceMs ?? DEFAULT_CHAT_DRAFT_DEBOUNCE_MS;
     const storage = options?.storage;
+    const imageStorage = options?.imageStorage ?? options?.storage;
+    const validateImage = options?.validateImage ?? checkImageAccessible;
 
     const [input, setInputState] = useState<string>(() =>
         loadSavedCharacterDraft(characterId, storage)
     );
     const [pendingImages, setPendingImagesState] = useState<string[]>(() =>
-        loadSavedCharacterDraftImages(characterId, storage)
+        loadSavedCharacterDraftImages(characterId, imageStorage)
     );
 
     const inputRef = useRef(input);
@@ -62,10 +67,40 @@ export function useCharacterChatDraft(
                 imageDebounceTimerRef.current = null;
             }
             saveCharacterDraft(targetCharId, text, storage);
-            saveCharacterDraftImages(targetCharId, images, storage);
+            saveCharacterDraftImages(targetCharId, images, imageStorage);
         },
-        [storage]
+        [imageStorage, storage]
     );
+
+    const validateAndPruneImages = useCallback(
+        async (targetCharId: string, candidateImages: string[]) => {
+            if (candidateImages.length === 0) return;
+            const results = await Promise.all(
+                candidateImages.map(async (url) => ({
+                    url,
+                    valid: await validateImage(url),
+                }))
+            );
+            // Ignore if active character changed during asynchronous validation
+            if (activeCharacterIdRef.current !== targetCharId) return;
+
+            const surviving = results.filter(r => r.valid).map(r => r.url);
+            if (surviving.length !== candidateImages.length) {
+                pendingImagesRef.current = surviving;
+                setPendingImagesState(surviving);
+                saveCharacterDraftImages(targetCharId, surviving, imageStorage);
+            }
+        },
+        [imageStorage, validateImage]
+    );
+
+    // Validate initial draft images on mount
+    useEffect(() => {
+        const initial = loadSavedCharacterDraftImages(characterId, imageStorage);
+        if (initial.length > 0) {
+            void validateAndPruneImages(characterId, initial);
+        }
+    }, [characterId, imageStorage, validateAndPruneImages]);
 
     const flushDraft = useCallback(() => {
         flushDraftFor(activeCharacterIdRef.current, inputRef.current, pendingImagesRef.current);
@@ -83,13 +118,16 @@ export function useCharacterChatDraft(
             inputRef.current = nextDraft;
             setInputState(nextDraft);
 
-            const nextImages = loadSavedCharacterDraftImages(characterId, storage);
+            const nextImages = loadSavedCharacterDraftImages(characterId, imageStorage);
             pendingImagesRef.current = nextImages;
             setPendingImagesState(nextImages);
+            if (nextImages.length > 0) {
+                void validateAndPruneImages(characterId, nextImages);
+            }
 
             prevCharacterIdRef.current = characterId;
         }
-    }, [characterId, flushDraftFor, storage]);
+    }, [characterId, flushDraftFor, imageStorage, storage, validateAndPruneImages]);
 
     // Set input with debounced persistence (timer managed outside setState updater)
     const setInput = useCallback(
@@ -127,10 +165,10 @@ export function useCharacterChatDraft(
             const targetCharId = activeCharacterIdRef.current;
             imageDebounceTimerRef.current = setTimeout(() => {
                 imageDebounceTimerRef.current = null;
-                saveCharacterDraftImages(targetCharId, pendingImagesRef.current, storage);
+                saveCharacterDraftImages(targetCharId, pendingImagesRef.current, imageStorage);
             }, debounceMs);
         },
-        [debounceMs, storage]
+        [debounceMs, imageStorage]
     );
 
     // Clear draft immediately (called on submit or auto-send)
@@ -144,12 +182,12 @@ export function useCharacterChatDraft(
             imageDebounceTimerRef.current = null;
         }
         clearCharacterDraft(activeCharacterIdRef.current, storage);
-        clearCharacterDraftImages(activeCharacterIdRef.current, storage);
+        clearCharacterDraftImages(activeCharacterIdRef.current, imageStorage);
         inputRef.current = "";
         setInputState("");
         pendingImagesRef.current = [];
         setPendingImagesState([]);
-    }, [storage]);
+    }, [imageStorage, storage]);
 
     // Flush on unmount or beforeunload
     useEffect(() => {

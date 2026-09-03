@@ -82,6 +82,8 @@ pub struct MemorySnippet {
     pub tier: String,
 }
 
+pub const MAX_IN_MEMORY_HISTORY_MESSAGES: usize = 20;
+pub const DEFAULT_MAX_MESSAGE_CHARS: usize = 2000;
 const TRUNCATION_MARKER: &str = "…[truncated]";
 
 pub fn truncate_message_content(content: String, max_chars: usize) -> String {
@@ -91,6 +93,52 @@ pub fn truncate_message_content(content: String, max_chars: usize) -> String {
     } else {
         content
     }
+}
+
+pub trait IntoHistoryMessage {
+    fn into_history_message(self, max_chars: usize) -> Message;
+}
+
+impl IntoHistoryMessage for (String, String, Option<String>) {
+    fn into_history_message(self, max_chars: usize) -> Message {
+        Message {
+            role: self.0,
+            content: truncate_message_content(self.1, max_chars),
+            metadata: self.2
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
+        }
+    }
+}
+
+impl IntoHistoryMessage for Message {
+    fn into_history_message(mut self, max_chars: usize) -> Message {
+        self.content = truncate_message_content(self.content, max_chars);
+        self
+    }
+}
+
+/// 统一历史窗口同步函数：
+/// 1. 严格保留最近的至多 MAX_IN_MEMORY_HISTORY_MESSAGES (20) 条消息；
+/// 2. 对每条消息应用 max_chars 截断；
+/// 3. 清空并重构 history；
+/// 4. 返回新历史长度，用于对齐 memory_history_boundary。
+pub fn sync_history_window<I, T>(
+    history: &mut VecDeque<Message>,
+    items: I,
+    max_chars: usize,
+) -> usize
+where
+    I: IntoIterator<Item = T>,
+    T: IntoHistoryMessage,
+{
+    let items: Vec<_> = items.into_iter().collect();
+    let start = items.len().saturating_sub(MAX_IN_MEMORY_HISTORY_MESSAGES);
+    history.clear();
+    for item in items.into_iter().skip(start) {
+        history.push_back(item.into_history_message(max_chars));
+    }
+    history.len()
 }
 
 fn normalized_language_name(language: &str) -> Option<&str> {
@@ -303,7 +351,7 @@ pub struct AIOrchestrator {
     /// Counts user messages that occurred while the memory system was enabled.
     memory_trigger_count: Arc<Mutex<u64>>,
     /// History index boundary used to prevent extracting conversations from disabled periods.
-    memory_history_boundary: Arc<Mutex<usize>>,
+    pub(crate) memory_history_boundary: Arc<Mutex<usize>>,
     /// Current character ID for memory isolation.
     pub(crate) character_id: Arc<Mutex<String>>,
     /// In-memory cooldown map for memory event trigger throttling.
@@ -577,6 +625,26 @@ impl AIOrchestrator {
         character_id: &str,
         summary_provider: Option<Arc<dyn LlmProvider>>,
     ) -> Result<(String, i64)> {
+        self.add_message_with_metadata_for_conversation(
+            role,
+            content,
+            metadata,
+            character_id,
+            None,
+            summary_provider,
+        )
+        .await
+    }
+
+    pub async fn add_message_with_metadata_for_conversation(
+        &self,
+        role: String,
+        content: String,
+        metadata: Option<String>,
+        character_id: &str,
+        target_conversation_id: Option<&str>,
+        summary_provider: Option<Arc<dyn LlmProvider>>,
+    ) -> Result<(String, i64)> {
         let summary_provider = summary_provider.clone();
         // Track user message count for memory extraction triggers
         if role == "user" {
@@ -594,39 +662,58 @@ impl AIOrchestrator {
 
         // Persist to database FIRST so no code path can skip it
         let (persisted_conv_id, persisted_msg_id) = self
-            .persist_message(&role, &content, metadata.as_deref(), character_id)
+            .persist_message(
+                &role,
+                &content,
+                metadata.as_deref(),
+                character_id,
+                target_conversation_id,
+            )
             .await?;
         let current_conversation_id = self.current_conversation_id.lock().await.clone();
 
-        let mut history = self.history.lock().await;
-        let parsed_metadata = metadata
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
-        history.push_back(Message {
-            role: role.clone(),
-            content: content.clone(),
-            metadata: parsed_metadata,
-        });
-
-        // Rolling window: keep at most 20 messages in memory. Summary generation is now
-        // non-destructive and derives from persisted conversation_messages instead of popped history.
-        let strategy = self.context_strategy.lock().await.clone();
-        let evicted = if history.len() > 20 {
-            history.pop_front();
-            true
-        } else {
-            false
+        // Only push to in-memory history if target_conversation_id is either None (implicit current)
+        // or matches the active current_conversation_id. This prevents an old turn from corrupting
+        // the active conversation after a conversation switch or clearHistory.
+        let should_push_history = match target_conversation_id {
+            Some(target_id) => current_conversation_id.as_deref() == Some(target_id),
+            None => true,
         };
-        drop(history);
 
-        if evicted {
-            let mut boundary = self.memory_history_boundary.lock().await;
-            *boundary = boundary.saturating_sub(1);
+        if should_push_history {
+            let mut history = self.history.lock().await;
+            let parsed_metadata = metadata
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            history.push_back(Message {
+                role: role.clone(),
+                content: content.clone(),
+                metadata: parsed_metadata,
+            });
+
+            // Rolling window: keep at most MAX_IN_MEMORY_HISTORY_MESSAGES messages in memory. Summary generation is now
+            // non-destructive and derives from persisted conversation_messages instead of popped history.
+            let evicted = if history.len() > MAX_IN_MEMORY_HISTORY_MESSAGES {
+                history.pop_front();
+                true
+            } else {
+                false
+            };
+            drop(history);
+
+            if evicted {
+                let mut boundary = self.memory_history_boundary.lock().await;
+                *boundary = boundary.saturating_sub(1);
+            }
         }
 
+        let strategy = self.context_strategy.lock().await.clone();
         if strategy == "summary" && self.is_memory_enabled() {
+            let conv_for_summary = target_conversation_id
+                .map(|s| s.to_string())
+                .or(current_conversation_id);
             if let (Some(conversation_id), Some(provider)) =
-                (current_conversation_id.clone(), summary_provider)
+                (conv_for_summary, summary_provider)
             {
                 let memory_manager = self.memory_manager.clone();
                 let cid = character_id.to_string();
@@ -698,53 +785,59 @@ impl AIOrchestrator {
         Ok((persisted_conv_id, persisted_msg_id))
     }
 
-    /// 将消息持久化到 SQLite，如果没有活跃对话则自动创建
+    /// 将消息持久化到 SQLite，如果没有活跃对话且未指定 target_conversation_id 则自动创建
     async fn persist_message(
         &self,
         role: &str,
         content: &str,
         metadata: Option<&str>,
         character_id: &str,
+        target_conversation_id: Option<&str>,
     ) -> Result<(String, i64)> {
         let cid = character_id;
-        let mut conv_id_lock = self.current_conversation_id.lock().await;
-
-        let conv_id = if let Some(ref id) = *conv_id_lock {
-            id.clone()
+        let conv_id = if let Some(target_id) = target_conversation_id {
+            target_id.to_string()
         } else {
-            // 自动创建新对话
-            let new_id = uuid::Uuid::new_v4().to_string();
-            let title = if role == "user" {
-                let chars: Vec<char> = content.chars().collect();
-                if chars.len() > 20 {
-                    format!("{}...", chars[..20].iter().collect::<String>())
-                } else {
-                    content.to_string()
-                }
+            let mut conv_id_lock = self.current_conversation_id.lock().await;
+
+            let resolved_id = if let Some(ref id) = *conv_id_lock {
+                id.clone()
             } else {
-                "新对话".to_string()
+                // 自动创建新对话
+                let new_id = uuid::Uuid::new_v4().to_string();
+                let title = if role == "user" {
+                    let chars: Vec<char> = content.chars().collect();
+                    if chars.len() > 20 {
+                        format!("{}...", chars[..20].iter().collect::<String>())
+                    } else {
+                        content.to_string()
+                    }
+                } else {
+                    "新对话".to_string()
+                };
+                let now = chrono::Utc::now().to_rfc3339();
+
+                sqlx::query(
+                    "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, ?, '', '{}', ?, ?)"
+                )
+                .bind(&new_id)
+                .bind(cid)
+                .bind(&title)
+                .bind(&now)
+                .bind(&now)
+                .execute(&self.db)
+                .await?;
+
+                *conv_id_lock = Some(new_id.clone());
+                // Persist conversation_id to disk for hot-reload recovery
+                if self.persist_conversation_selection {
+                    Self::persist_conversation_id(Some(&new_id));
+                }
+                new_id
             };
-            let now = chrono::Utc::now().to_rfc3339();
-
-            sqlx::query(
-                "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, ?, '', '{}', ?, ?)"
-            )
-            .bind(&new_id)
-            .bind(cid)
-            .bind(&title)
-            .bind(&now)
-            .bind(&now)
-            .execute(&self.db)
-            .await?;
-
-            *conv_id_lock = Some(new_id.clone());
-            // Persist conversation_id to disk for hot-reload recovery
-            if self.persist_conversation_selection {
-                Self::persist_conversation_id(Some(&new_id));
-            }
-            new_id
+            drop(conv_id_lock);
+            resolved_id
         };
-        drop(conv_id_lock);
 
         let now = chrono::Utc::now().to_rfc3339();
         let insert_res = sqlx::query(
@@ -764,31 +857,31 @@ impl AIOrchestrator {
         // normal user-derived title.
         if role == "user" {
             let chars: Vec<char> = content.chars().collect();
-            let title = if chars.len() > 20 {
+            let new_title = if chars.len() > 20 {
                 format!("{}...", chars[..20].iter().collect::<String>())
             } else {
                 content.to_string()
             };
-            sqlx::query(
+            let _ = sqlx::query(
                 "UPDATE conversations SET title = CASE WHEN title = '新对话' THEN ? ELSE title END, updated_at = ? WHERE id = ?"
             )
-            .bind(&title)
+            .bind(&new_title)
             .bind(&now)
             .bind(&conv_id)
             .execute(&self.db)
-            .await?;
+            .await;
         } else {
-            sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
+            let _ = sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
                 .bind(&now)
                 .bind(&conv_id)
                 .execute(&self.db)
-                .await?;
+                .await;
         }
 
         Ok((conv_id, message_id))
     }
 
-    /// Persist current_conversation_id to disk for hot-reload recovery.
+    /// Persist conversation_id to disk for hot-reload recovery.
     pub fn persist_conversation_id(id: Option<&str>) {
         let app_data = dirs_next::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -825,40 +918,17 @@ impl AIOrchestrator {
         v["character_id"].as_str().map(|s| s.to_string())
     }
 
-    /// Insert a streaming assistant draft into the DB. Returns the row id for later update.
-    pub async fn persist_streaming_draft(&self, content: &str, character_id: &str) -> Result<i64> {
-        let cid = character_id;
-        let mut conv_id_lock = self.current_conversation_id.lock().await;
-
-        // Ensure conversation exists
-        let conv_id = if let Some(ref id) = *conv_id_lock {
-            id.clone()
-        } else {
-            let new_id = uuid::Uuid::new_v4().to_string();
-            let now = chrono::Utc::now().to_rfc3339();
-            sqlx::query(
-                "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, ?, '', '{}', ?, ?)"
-            )
-            .bind(&new_id)
-            .bind(cid)
-            .bind("新对话")
-            .bind(&now)
-            .bind(&now)
-            .execute(&self.db)
-            .await?;
-            *conv_id_lock = Some(new_id.clone());
-            if self.persist_conversation_selection {
-                Self::persist_conversation_id(Some(&new_id));
-            }
-            new_id
-        };
-        drop(conv_id_lock);
-
+    /// Insert a streaming assistant draft into the DB for a specific conversation. Returns the row id for later update.
+    pub async fn persist_streaming_draft(
+        &self,
+        conversation_id: &str,
+        content: &str,
+    ) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
         let result = sqlx::query(
             "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, 'assistant', ?, NULL, ?)"
         )
-        .bind(&conv_id)
+        .bind(conversation_id)
         .bind(content)
         .bind(&now)
         .execute(&self.db)
@@ -881,16 +951,16 @@ impl AIOrchestrator {
             .execute(&self.db)
             .await?;
 
-        // Update conversation updated_at
-        let conv_id = self.current_conversation_id.lock().await.clone();
-        if let Some(ref id) = conv_id {
-            let now = chrono::Utc::now().to_rfc3339();
-            sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
-                .bind(&now)
-                .bind(id)
-                .execute(&self.db)
-                .await?;
-        }
+        // Update owning conversation updated_at directly via message row's conversation_id
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE conversations SET updated_at = ? WHERE id = (SELECT conversation_id FROM conversation_messages WHERE id = ?)",
+        )
+        .bind(&now)
+        .bind(row_id)
+        .execute(&self.db)
+        .await?;
+
         Ok(())
     }
 
@@ -966,7 +1036,7 @@ impl AIOrchestrator {
 
         let mut history = self.history.lock().await;
         history.push_back(message);
-        let evicted = if history.len() > 20 {
+        let evicted = if history.len() > MAX_IN_MEMORY_HISTORY_MESSAGES {
             history.pop_front();
             true
         } else {
@@ -1332,7 +1402,7 @@ impl AIOrchestrator {
             }
             used_chars += msg_chars;
             selected.push(msg);
-            if selected.len() >= 20 {
+            if selected.len() >= MAX_IN_MEMORY_HISTORY_MESSAGES {
                 break;
             }
         }
@@ -1401,6 +1471,20 @@ impl AIOrchestrator {
         self.history.lock().await.clear();
         *self.memory_history_boundary.lock().await = 0;
         *self.memory_trigger_count.lock().await = 0;
+    }
+
+    /// Resets and populates in-memory history from raw database rows or messages,
+    /// enforcing the unified MAX_IN_MEMORY_HISTORY_MESSAGES window and max_message_chars truncation.
+    pub async fn sync_history_from_rows<I, T>(&self, items: I) -> usize
+    where
+        I: IntoIterator<Item = T>,
+        T: IntoHistoryMessage,
+    {
+        let max_chars = *self.max_message_chars.lock().await;
+        let mut history = self.history.lock().await;
+        let count = sync_history_window(&mut history, items, max_chars);
+        *self.memory_history_boundary.lock().await = count;
+        count
     }
 
     pub async fn set_memory_history_boundary(&self, boundary: usize) {
@@ -2149,5 +2233,116 @@ mod tests {
 
         assert_eq!(conv_id_2, conv_id, "Subsequent message must share the same active conversation ID");
         assert!(msg_id_2 > msg_id_1, "Message ID must be auto-incremented in SQLite");
+    }
+
+    #[tokio::test]
+    async fn persist_streaming_draft_isolates_to_given_conversation_and_does_not_alter_current_conversation_id() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        // Ensure current_conversation_id is None
+        *orchestrator.current_conversation_id.lock().await = None;
+
+        // Insert conversation A
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES ('conv-A', 'test_char', 'Title', '', '{}', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&orchestrator.db)
+            .await
+            .unwrap();
+
+        let row_id = orchestrator
+            .persist_streaming_draft("conv-A", "draft chunk 1")
+            .await
+            .expect("persist_streaming_draft should succeed");
+        assert!(row_id > 0);
+
+        // Global current_conversation_id must remain None!
+        assert_eq!(*orchestrator.current_conversation_id.lock().await, None);
+
+        // Verify message was inserted into conv-A
+        let (role, content): (String, String) = sqlx::query_as("SELECT role, content FROM conversation_messages WHERE id = ?")
+            .bind(row_id)
+            .fetch_one(&orchestrator.db)
+            .await
+            .unwrap();
+        assert_eq!(role, "assistant");
+        assert_eq!(content, "draft chunk 1");
+    }
+
+    #[tokio::test]
+    async fn add_message_with_metadata_for_conversation_skips_history_push_when_conversation_mismatches() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        // Active conversation is conv-B
+        *orchestrator.current_conversation_id.lock().await = Some("conv-B".to_string());
+
+        // Insert conversation A
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES ('conv-A', 'test_char', 'Title A', '', '{}', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&orchestrator.db)
+            .await
+            .unwrap();
+
+        // Add message targeting conv-A while active is conv-B
+        let (cid, mid) = orchestrator
+            .add_message_with_metadata_for_conversation(
+                "assistant".to_string(),
+                "stale message".to_string(),
+                None,
+                "test_char",
+                Some("conv-A"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(cid, "conv-A");
+        assert!(mid > 0);
+
+        // In-memory history for active conversation (conv-B) must NOT be contaminated!
+        assert_eq!(orchestrator.history.lock().await.len(), 0);
+    }
+
+    #[test]
+    fn sync_history_window_enforces_20_limit_and_takes_most_recent() {
+        let mut history = VecDeque::new();
+        let rows: Vec<(String, String, Option<String>)> = (0..35)
+            .map(|i| ("user".to_string(), format!("Message {i}"), None))
+            .collect();
+
+        let count = sync_history_window(&mut history, rows, 2000);
+        assert_eq!(count, 20);
+        assert_eq!(history.len(), 20);
+        // Should contain the last 20 messages (indices 15..35)
+        assert_eq!(history[0].content, "Message 15");
+        assert_eq!(history[19].content, "Message 34");
+    }
+
+    #[test]
+    fn sync_history_window_keeps_all_when_fewer_than_20() {
+        let mut history = VecDeque::new();
+        let rows: Vec<(String, String, Option<String>)> = (0..7)
+            .map(|i| ("user".to_string(), format!("Message {i}"), None))
+            .collect();
+
+        let count = sync_history_window(&mut history, rows, 2000);
+        assert_eq!(count, 7);
+        assert_eq!(history.len(), 7);
+        assert_eq!(history[0].content, "Message 0");
+        assert_eq!(history[6].content, "Message 6");
+    }
+
+    #[test]
+    fn sync_history_window_applies_max_chars_truncation() {
+        let mut history = VecDeque::new();
+        let long_text = "A".repeat(100);
+        let rows = vec![("user".to_string(), long_text, None)];
+
+        let count = sync_history_window(&mut history, rows, 30);
+        assert_eq!(count, 1);
+        assert_eq!(history[0].content, format!("{}…[truncated]", "A".repeat(30)));
     }
 }

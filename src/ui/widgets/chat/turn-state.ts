@@ -22,6 +22,9 @@ export interface ChatPanelMessage {
 
 export interface PendingTurnState {
     turnId: string;
+    generation?: number;
+    conversationId?: string | null;
+    clientRequestId?: string | null;
     messageIndex: number | null;
     rawText: string;
     visibleTextStarted: boolean;
@@ -60,6 +63,7 @@ export const ensureTurnMessage = (messages: ChatPanelMessage[], turn: PendingTur
         role: "kokoro" as const,
         text: "",
         turnId: turn.turnId,
+        clientRequestId: turn.clientRequestId ?? undefined,
         ...(turn.tools.length > 0 ? { tools: [...turn.tools] } : {}),
     });
     turn.messageIndex = next.length - 1;

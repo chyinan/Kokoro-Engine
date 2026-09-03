@@ -378,5 +378,108 @@ describe("useCharacterChatDraft", () => {
             expect(loadSavedCharacterDraft("kiana", mockStorage)).toBe("");
             expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([]);
         });
+
+        it("automatically prunes dead images on mount when validateImage returns false", async () => {
+            saveCharacterDraftImages("kiana", ["http://test/alive.png", "http://test/dead.png"], mockStorage);
+
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+            await act(async () => {
+                root?.render(
+                    createElement(function CustomHarness() {
+                        const hook = useCharacterChatDraft("kiana", {
+                            storage: mockStorage,
+                            validateImage: async (url) => url.includes("alive"),
+                        });
+                        currentHook = hook;
+                        return null;
+                    })
+                );
+                // Allow async validation Promise to resolve and re-render
+                await Promise.resolve();
+            });
+
+            expect(currentHook.pendingImages).toEqual(["http://test/alive.png"]);
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual(["http://test/alive.png"]);
+        });
+
+        it("automatically prunes dead images on character switch when validateImage returns false", async () => {
+            saveCharacterDraftImages("bronya", ["http://test/expired.png"], mockStorage);
+
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+            await act(async () => {
+                root?.render(
+                    createElement(function SwitchHarness({ charId }: { charId: string }) {
+                        const hook = useCharacterChatDraft(charId, {
+                            storage: mockStorage,
+                            validateImage: async (url) => !url.includes("expired"),
+                        });
+                        currentHook = hook;
+                        return null;
+                    }, { charId: "kiana" })
+                );
+                await Promise.resolve();
+            });
+
+            expect(currentHook.pendingImages).toEqual([]);
+
+            // Switch to bronya who had an expired image
+            await act(async () => {
+                root?.render(
+                    createElement(function SwitchHarness({ charId }: { charId: string }) {
+                        const hook = useCharacterChatDraft(charId, {
+                            storage: mockStorage,
+                            validateImage: async (url) => !url.includes("expired"),
+                        });
+                        currentHook = hook;
+                        return null;
+                    }, { charId: "bronya" })
+                );
+                await Promise.resolve();
+            });
+
+            expect(currentHook.pendingImages).toEqual([]);
+            expect(loadSavedCharacterDraftImages("bronya", mockStorage)).toEqual([]);
+        });
+
+        it("supports separate imageStorage from text storage", () => {
+            const textStore: Record<string, string> = {};
+            const textStorage = {
+                getItem: (k: string) => textStore[k] ?? null,
+                setItem: (k: string, v: string) => { textStore[k] = v; },
+                removeItem: (k: string) => { delete textStore[k]; },
+            } as unknown as Storage;
+
+            const imageStore: Record<string, string> = {};
+            const imageStorage = {
+                getItem: (k: string) => imageStore[k] ?? null,
+                setItem: (k: string, v: string) => { imageStore[k] = v; },
+                removeItem: (k: string) => { delete imageStore[k]; },
+            } as unknown as Storage;
+
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+            act(() => {
+                root?.render(
+                    createElement(function StorageHarness() {
+                        const hook = useCharacterChatDraft("kiana", {
+                            storage: textStorage,
+                            imageStorage,
+                            debounceMs: 100,
+                        });
+                        currentHook = hook;
+                        return null;
+                    })
+                );
+            });
+
+            act(() => {
+                currentHook.setInput("text in textStorage");
+                currentHook.setPendingImages(["http://test/img.png"]);
+                vi.advanceTimersByTime(100);
+            });
+
+            expect(loadSavedCharacterDraft("kiana", textStorage)).toBe("text in textStorage");
+            expect(loadSavedCharacterDraftImages("kiana", textStorage)).toEqual([]);
+            expect(loadSavedCharacterDraftImages("kiana", imageStorage)).toEqual(["http://test/img.png"]);
+        });
     });
 });
