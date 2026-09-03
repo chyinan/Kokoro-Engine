@@ -295,6 +295,16 @@ async fn handle_text(
         .try_state::<LlmService>()
         .ok_or("LlmService not available")?;
 
+    if let Some(reason) = orchestrator.get_runtime_degraded().await {
+        return Err(format!(
+            "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings."
+        )
+        .into());
+    }
+    let _chat_turn_guard = orchestrator
+        .enter_chat_turn()
+        .map_err(|e| format!("Character activation is in progress: {e}"))?;
+
     // 1. Record user message
     // char_id 解析优先级：config 指定 > orchestrator 内存状态 > 磁盘文件 > "default"
     let char_id = match config.character_id.as_deref().filter(|s| !s.is_empty()) {
@@ -346,7 +356,7 @@ async fn handle_text(
     };
 
     let (prompt_messages, compose_warnings) = orchestrator
-        .compose_prompt(text, false, tool_prompt, false, &char_id)
+        .compose_prompt_with_guard(text, false, tool_prompt, false, &char_id, &_chat_turn_guard)
         .await
         .map_err(|e| e.to_string())?;
     for w in &compose_warnings {
@@ -751,6 +761,16 @@ async fn handle_photo(
         .try_state::<LlmService>()
         .ok_or("LlmService not available")?;
 
+    if let Some(reason) = orchestrator.get_runtime_degraded().await {
+        return Err(format!(
+            "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings."
+        )
+        .into());
+    }
+    let _chat_turn_guard = orchestrator
+        .enter_chat_turn()
+        .map_err(|e| format!("Character activation is in progress: {e}"))?;
+
     // Download photo file
     let file = bot.get_file(&photo.file.id).await?;
     let mut buf = Vec::new();
@@ -830,7 +850,14 @@ async fn handle_photo(
     };
 
     let (prompt_messages, compose_warnings) = orchestrator
-        .compose_prompt(&caption, false, tool_prompt, false, &char_id)
+        .compose_prompt_with_guard(
+            &caption,
+            false,
+            tool_prompt,
+            false,
+            &char_id,
+            &_chat_turn_guard,
+        )
         .await
         .map_err(|e| e.to_string())?;
     for w in &compose_warnings {
