@@ -177,10 +177,38 @@ impl std::fmt::Debug for ChatTurnGuard {
     }
 }
 
+struct ActivationReservation {
+    activating: Arc<AtomicBool>,
+    disarmed: bool,
+}
+
+impl ActivationReservation {
+    fn new(activating: Arc<AtomicBool>) -> Self {
+        activating.store(true, Ordering::SeqCst);
+        Self {
+            activating,
+            disarmed: false,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for ActivationReservation {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            self.activating.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
 impl ActivationGate {
     pub async fn acquire_activation_lock(&self) -> ActivationLockGuard {
-        self.activating.store(true, Ordering::SeqCst);
+        let reservation = ActivationReservation::new(self.activating.clone());
         let write_guard = self.lock.clone().write_owned().await;
+        reservation.disarm();
         ActivationLockGuard {
             _write_guard: write_guard,
             activating: self.activating.clone(),
