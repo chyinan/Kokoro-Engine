@@ -501,7 +501,7 @@ async fn handle_text(
     let metadata = translation
         .as_ref()
         .map(|t| serde_json::json!({ "translation": t }).to_string());
-    orchestrator
+    let _ = orchestrator
         .add_message_with_metadata(
             "assistant".to_string(),
             response.clone(),
@@ -1005,7 +1005,7 @@ async fn handle_photo(
     let metadata = translation
         .as_ref()
         .map(|t| serde_json::json!({ "translation": t }).to_string());
-    orchestrator
+    let _ = orchestrator
         .add_message_with_metadata(
             "assistant".to_string(),
             response.clone(),

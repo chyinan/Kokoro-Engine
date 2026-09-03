@@ -283,8 +283,13 @@ export interface ChatRequest {
     regenerate?: boolean;
 }
 
-export async function streamChat(request: ChatRequest): Promise<void> {
-    return invoke("stream_chat", { request });
+export interface StreamChatResponse {
+    conversation_id: string;
+    user_message_id?: number | null;
+}
+
+export async function streamChat(request: ChatRequest): Promise<StreamChatResponse> {
+    return invoke<StreamChatResponse>("stream_chat", { request });
 }
 
 export async function cancelChatTurn(turnId: string, reason?: string): Promise<void> {
@@ -433,6 +438,8 @@ export function parseLegacyChatError(payload: unknown): string {
 export interface ChatTurnStartEvent {
     turn_id: string;
     client_request_id?: string | null;
+    conversation_id?: string | null;
+    user_message_id?: number | null;
 }
 
 export interface ChatTurnDeltaEvent {
@@ -445,6 +452,8 @@ export interface ChatTurnFinishEvent {
     turn_id: string;
     status: "completed" | "error" | "cancelled";
     client_request_id?: string | null;
+    conversation_id?: string | null;
+    assistant_message_id?: number | null;
 }
 
 export interface ChatTurnTranslationEvent {

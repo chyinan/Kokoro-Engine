@@ -43,7 +43,7 @@ fn find_backup_candidates(path: &Path) -> Vec<std::path::PathBuf> {
                 }
             }
         }
-        uuid_backups.sort_by(|a, b| b.1.cmp(&a.1));
+        uuid_backups.sort_by_key(|a| std::cmp::Reverse(a.1));
         for (p, _) in uuid_backups {
             if !candidates.contains(&p) {
                 candidates.push(p);

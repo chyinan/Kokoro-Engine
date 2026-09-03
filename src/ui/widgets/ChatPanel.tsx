@@ -593,6 +593,9 @@ export default function ChatPanel({
 
     const handleStartEmptyConversation = useCallback((): void => {
         conversationSyncRef.current?.startEmptyConversation(activeCharacterId);
+        void clearHistory().catch((err) => {
+            console.error("[ChatPanel] Failed to clear backend history for empty conversation:", err);
+        });
     }, [activeCharacterId]);
 
     // STT (Speech-to-Text) — Advanced VAD Mode
@@ -647,8 +650,9 @@ export default function ChatPanel({
                 }
 
                 // Auto-send: inject directly into chat
+                const clientRequestId = `stt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
                 clearDraft();
-                setMessages(prev => [...prev, { role: "user", text: fullMessage }]);
+                setMessages(prev => [...prev, { role: "user", text: fullMessage, clientRequestId }]);
                 startStreaming();
                 setIsThinking(true);
                 userScrolledRef.current = false;
@@ -659,6 +663,23 @@ export default function ChatPanel({
                     message: fullMessage,
                     allow_image_gen: allowImageGen,
                     character_id: getActiveCharacterIdForRequest(),
+                    client_request_id: clientRequestId,
+                }).then(res => {
+                    if (res?.conversation_id) {
+                        setActiveConversationId(res.conversation_id);
+                        activeConversationIdRef.current = res.conversation_id;
+                    }
+                    if (res?.user_message_id) {
+                        setMessages(prev => {
+                            const idx = prev.findIndex(m => m.clientRequestId === clientRequestId);
+                            if (idx !== -1 && !prev[idx].id) {
+                                const updated = [...prev];
+                                updated[idx] = { ...updated[idx], id: res.user_message_id ?? undefined };
+                                return updated;
+                            }
+                            return prev;
+                        });
+                    }
                 }).catch(err => {
                     if (isTurnCancelledError(err) || cancelRequestedRef.current) {
                         endTurnActivity();
@@ -946,8 +967,26 @@ export default function ChatPanel({
             if (aborted) { unPetChat(); return; }
             cleanups.push(unPetChat);
 
-            const unTurnStart = await onChatTurnStart(({ turn_id }) => {
+            const unTurnStart = await onChatTurnStart(({ turn_id, client_request_id, conversation_id, user_message_id }) => {
                 if (aborted) return;
+                if (conversation_id) {
+                    setActiveConversationId(conversation_id);
+                    activeConversationIdRef.current = conversation_id;
+                }
+                if (user_message_id) {
+                    setMessages(prev => {
+                        let idx = client_request_id ? prev.findIndex(m => m.clientRequestId === client_request_id) : -1;
+                        if (idx === -1) {
+                            idx = prev.map(m => m.role).lastIndexOf("user");
+                        }
+                        if (idx !== -1 && !prev[idx].id) {
+                            const updated = [...prev];
+                            updated[idx] = { ...updated[idx], id: user_message_id };
+                            return updated;
+                        }
+                        return prev;
+                    });
+                }
                 currentTurnRef.current = {
                     turnId: turn_id,
                     messageIndex: null,
@@ -1053,8 +1092,12 @@ export default function ChatPanel({
             if (aborted) { unTranslation(); return; }
             cleanups.push(unTranslation);
 
-            const unDone = await onChatTurnFinish(({ turn_id, status }) => {
+            const unDone = await onChatTurnFinish(({ turn_id, status, conversation_id, assistant_message_id }) => {
                 if (aborted) return;
+                if (conversation_id) {
+                    setActiveConversationId(conversation_id);
+                    activeConversationIdRef.current = conversation_id;
+                }
                 const turn = currentTurnRef.current;
                 if (!turn || turn.turnId !== turn_id) {
                     if (cancelRequestedRef.current) {
@@ -1083,6 +1126,7 @@ export default function ChatPanel({
 
                         return updateTurnMessage(prev, turn, (current) => ({
                             ...current,
+                            id: assistant_message_id ?? current.id,
                             text: cleanText,
                             translation: turn.translation,
                             translationPending: false,
@@ -1099,6 +1143,7 @@ export default function ChatPanel({
                             });
                         }
                         next.push({
+                            id: assistant_message_id ?? undefined,
                             role: "kokoro",
                             text: cleanText,
                             translation: turn.translation,
@@ -1304,7 +1349,13 @@ export default function ChatPanel({
         if ((!trimmed && messageImages.length === 0) || isBusy) return;
         if (!await ensureMemoryModelReady()) return;
 
-        setMessages(prev => [...prev, { role: "user", text: trimmed, images: messageImages.length > 0 ? messageImages : undefined }]);
+        const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        setMessages(prev => [...prev, {
+            role: "user",
+            text: trimmed,
+            images: messageImages.length > 0 ? messageImages : undefined,
+            clientRequestId,
+        }]);
         const cameraFrame = visionEnabled ? getLatestCameraFrame() : null;
         const imagesToSend = cameraFrame ? [...messageImages, cameraFrame] : messageImages;
         clearDraft();
@@ -1323,12 +1374,28 @@ export default function ChatPanel({
         const allowImageGen = isGeneratedBackgroundMode();
 
         try {
-            await streamChat({
+            const res = await streamChat({
                 message: trimmed || "(image attached)",
                 allow_image_gen: allowImageGen,
                 images: imagesToSend.length > 0 ? imagesToSend : undefined,
                 character_id: getActiveCharacterIdForRequest(),
+                client_request_id: clientRequestId,
             });
+            if (res?.conversation_id) {
+                setActiveConversationId(res.conversation_id);
+                activeConversationIdRef.current = res.conversation_id;
+            }
+            if (res?.user_message_id) {
+                setMessages(prev => {
+                    const idx = prev.findIndex(m => m.clientRequestId === clientRequestId);
+                    if (idx !== -1 && !prev[idx].id) {
+                        const updated = [...prev];
+                        updated[idx] = { ...updated[idx], id: res.user_message_id ?? undefined };
+                        return updated;
+                    }
+                    return prev;
+                });
+            }
         } catch (err) {
             if (isTurnCancelledError(err) || cancelRequestedRef.current) {
                 endTurnActivity();
@@ -1534,6 +1601,10 @@ export default function ChatPanel({
         const targetMsg = messagesRef.current[globalIndex];
         if (!targetMsg) return;
 
+        const previousText = targetMsg.text;
+        const targetId = targetMsg.id;
+        const targetClientRequestId = targetMsg.clientRequestId;
+
         // 1. 本地乐观更新 UI
         setMessages(prev => {
             const updated = [...prev];
@@ -1545,27 +1616,79 @@ export default function ChatPanel({
 
         // 2. 异步持久化到 SQLite 并同步后端 LLM 上下文
         try {
+            let messageId = targetMsg.id;
+            const convId = activeConversationIdRef.current ?? undefined;
+            if (!messageId) {
+                // 若刚发送未完成握手，等待极短时间（最多 600ms）确保 ID 到达
+                for (let i = 0; i < 12; i++) {
+                    await new Promise(r => setTimeout(r, 50));
+                    const latest = messagesRef.current[globalIndex];
+                    if (latest?.id) {
+                        messageId = latest.id;
+                        break;
+                    }
+                }
+            }
+
+            if (!messageId) {
+                // 坚决禁止在无数据库 message_id 的情况下盲改数据库
+                throw new Error("Message ID not yet synchronized, cannot edit");
+            }
+
             const res = await editConversationMessage({
-                conversation_id: activeConversationIdRef.current ?? undefined,
-                message_id: targetMsg.id,
-                visible_index: globalIndex,
+                conversation_id: convId,
+                message_id: messageId,
                 new_content: trimmed,
             });
-            // 3. 回填生成的新 message_id（适用于刚发出的新消息）
-            if (res?.message_id && !targetMsg.id) {
+            // 3. 回填生成的新 message_id 并同步后端截断后的内容
+            if (res?.message_id) {
                 setMessages(prev => {
-                    const updated = [...prev];
-                    if (updated[globalIndex]) {
-                        updated[globalIndex] = { ...updated[globalIndex], id: res.message_id };
+                    const targetIdx = prev.findIndex(m => m.id === res.message_id);
+                    const idx = targetIdx !== -1 ? targetIdx : globalIndex;
+                    if (prev[idx]) {
+                        const updated = [...prev];
+                        updated[idx] = {
+                            ...updated[idx],
+                            id: res.message_id,
+                            text: res.updated_content ?? updated[idx].text,
+                        };
+                        return updated;
                     }
-                    return updated;
+                    return prev;
                 });
             }
         } catch (e) {
             console.error("[ChatPanel] Failed to persist message edit:", e);
+            // 1. 回滚恢复旧消息文本，避免乐观更新在持久化失败后残留脏数据
+            setMessages(prev => {
+                let targetIdx = targetId ? prev.findIndex(m => m.id === targetId) : -1;
+                if (targetIdx === -1 && targetClientRequestId) {
+                    targetIdx = prev.findIndex(m => m.clientRequestId === targetClientRequestId);
+                }
+                if (targetIdx === -1 && prev[globalIndex] && prev[globalIndex].text === trimmed) {
+                    targetIdx = globalIndex;
+                }
+                if (targetIdx !== -1 && prev[targetIdx].text === trimmed) {
+                    const updated = [...prev];
+                    updated[targetIdx] = { ...updated[targetIdx], text: previousText };
+                    return updated;
+                }
+                return prev;
+            });
+
             setError(t("chat.errors.edit_failed") ?? "Failed to save edited message");
+
+            // 2. 若当前不在流式生成中，尝试重新同步会话以确保与数据库绝对对齐
+            if (!isStreamingRef.current && activeConversationIdRef.current) {
+                void conversationSyncRef.current?.synchronize({
+                    characterId: activeCharacterId,
+                    preferredConversationId: activeConversationIdRef.current,
+                }).catch(err => {
+                    console.warn("[ChatPanel] Background re-synchronization after edit failure failed:", err);
+                });
+            }
         }
-    }, [t]);
+    }, [activeCharacterId, t]);
 
     const onRegenerate = useCallback(async (globalIndex: number) => {
         const msgs = messagesRef.current;

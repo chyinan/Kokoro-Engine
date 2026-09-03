@@ -390,32 +390,20 @@ pub async fn delete_last_messages(
     count: usize,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
-    let mut history = state.history.lock().await;
-    let current_len = history.len();
-    let to_remove = count.min(current_len);
-
-    if to_remove == 0 {
+    if count == 0 {
         return Ok(());
     }
 
-    history.truncate(current_len - to_remove);
-    tracing::info!(
-        target: "ai",
-        "Deleted last {} message(s) from history (now {} messages)",
-        to_remove,
-        history.len()
-    );
-
-    // 从数据库末尾删除，直到删够 to_remove 条「可见」消息为止。
+    // 从数据库末尾删除，直到删够 count 条「可见」消息为止。
     // 一条可见消息可能对应多行 DB（assistant_tool_calls + tool_result + assistant），
     // 需要跳过不可见行继续计数，否则重启后残留行会重新显示。
     let conv_id = state.current_conversation_id.lock().await.clone();
-    if let Some(conversation_id) = conv_id {
+    if let Some(ref conversation_id) = conv_id {
         // 从末尾倒序读取所有行（id + metadata）
         let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
             "SELECT id, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id DESC"
         )
-        .bind(&conversation_id)
+        .bind(conversation_id)
         .fetch_all(&state.db)
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
@@ -424,7 +412,7 @@ pub async fn delete_last_messages(
         let mut ids_to_delete: Vec<i64> = Vec::new();
         let mut visible_deleted = 0usize;
         for (id, metadata) in &rows {
-            if visible_deleted >= to_remove {
+            if visible_deleted >= count {
                 break;
             }
             ids_to_delete.push(*id);
@@ -470,6 +458,32 @@ pub async fn delete_last_messages(
                 visible_deleted
             );
         }
+
+        // 用权威数据库的剩余行重新同步 state.history，彻底杜绝孤儿技术行（assistant_tool_calls/tool_result）残留
+        let remaining_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC"
+        )
+        .bind(conversation_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+        let mut history = state.history.lock().await;
+        history.clear();
+        for (role, content, metadata) in remaining_rows {
+            history.push_back(crate::ai::context::Message {
+                role,
+                content,
+                metadata: metadata
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
+            });
+        }
+    } else {
+        let mut history = state.history.lock().await;
+        let current_len = history.len();
+        let to_remove = count.min(current_len);
+        history.truncate(current_len - to_remove);
     }
 
     Ok(())

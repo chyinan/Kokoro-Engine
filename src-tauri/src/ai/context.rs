@@ -84,7 +84,7 @@ pub struct MemorySnippet {
 
 const TRUNCATION_MARKER: &str = "…[truncated]";
 
-fn truncate_message_content(content: String, max_chars: usize) -> String {
+pub fn truncate_message_content(content: String, max_chars: usize) -> String {
     if content.chars().count() > max_chars {
         let truncated: String = content.chars().take(max_chars).collect();
         format!("{truncated}{TRUNCATION_MARKER}")
@@ -564,7 +564,8 @@ impl AIOrchestrator {
     }
 
     pub async fn add_message(&self, role: String, content: String, character_id: &str) {
-        self.add_message_with_metadata(role, content, None, character_id, None)
+        let _ = self
+            .add_message_with_metadata(role, content, None, character_id, None)
             .await;
     }
 
@@ -575,7 +576,7 @@ impl AIOrchestrator {
         metadata: Option<String>,
         character_id: &str,
         summary_provider: Option<Arc<dyn LlmProvider>>,
-    ) {
+    ) -> Result<(String, i64)> {
         let summary_provider = summary_provider.clone();
         // Track user message count for memory extraction triggers
         if role == "user" {
@@ -592,9 +593,9 @@ impl AIOrchestrator {
         let content = truncate_message_content(content, max_chars);
 
         // Persist to database FIRST so no code path can skip it
-        let _ = self
+        let (persisted_conv_id, persisted_msg_id) = self
             .persist_message(&role, &content, metadata.as_deref(), character_id)
-            .await;
+            .await?;
         let current_conversation_id = self.current_conversation_id.lock().await.clone();
 
         let mut history = self.history.lock().await;
@@ -693,6 +694,8 @@ impl AIOrchestrator {
                 });
             }
         }
+
+        Ok((persisted_conv_id, persisted_msg_id))
     }
 
     /// 将消息持久化到 SQLite，如果没有活跃对话则自动创建
@@ -702,7 +705,7 @@ impl AIOrchestrator {
         content: &str,
         metadata: Option<&str>,
         character_id: &str,
-    ) -> Result<()> {
+    ) -> Result<(String, i64)> {
         let cid = character_id;
         let mut conv_id_lock = self.current_conversation_id.lock().await;
 
@@ -744,7 +747,7 @@ impl AIOrchestrator {
         drop(conv_id_lock);
 
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
+        let insert_res = sqlx::query(
             "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)"
         )
         .bind(&conv_id)
@@ -754,6 +757,7 @@ impl AIOrchestrator {
         .bind(&now)
         .execute(&self.db)
         .await?;
+        let message_id = insert_res.last_insert_rowid();
 
         // 更新对话的 updated_at。If a hidden/context row created the
         // conversation first, let the first visible user turn restore the
@@ -781,7 +785,7 @@ impl AIOrchestrator {
                 .await?;
         }
 
-        Ok(())
+        Ok((conv_id, message_id))
     }
 
     /// Persist current_conversation_id to disk for hot-reload recovery.
@@ -2111,5 +2115,39 @@ mod tests {
             .await
             .expect("compose_prompt must succeed when degraded state is cleared");
         assert!(!messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_add_message_with_metadata_returns_conversation_and_message_id() {
+        let orchestrator = setup_test_orchestrator().await;
+        orchestrator.clear_history().await;
+
+        let (conv_id, msg_id_1) = orchestrator
+            .add_message_with_metadata(
+                "user".to_string(),
+                "Hello, first message!".to_string(),
+                None,
+                "test_char",
+                None,
+            )
+            .await
+            .expect("First message persistence should succeed");
+
+        assert!(!conv_id.is_empty(), "Auto-created conversation ID must not be empty");
+        assert!(msg_id_1 > 0, "First message ID must be positive integer");
+
+        let (conv_id_2, msg_id_2) = orchestrator
+            .add_message_with_metadata(
+                "assistant".to_string(),
+                "Hello there!".to_string(),
+                None,
+                "test_char",
+                None,
+            )
+            .await
+            .expect("Second message persistence should succeed");
+
+        assert_eq!(conv_id_2, conv_id, "Subsequent message must share the same active conversation ID");
+        assert!(msg_id_2 > msg_id_1, "Message ID must be auto-incremented in SQLite");
     }
 }

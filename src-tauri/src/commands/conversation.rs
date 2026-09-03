@@ -66,19 +66,34 @@ pub async fn list_conversations(
     list_conversations_inner(request, &state.db).await
 }
 
+pub fn is_pinned_conversation_state(pinned_state: &str) -> bool {
+    let normalized = pinned_state.trim();
+    if normalized.is_empty() || normalized == "{}" {
+        return false;
+    }
+    match serde_json::from_str::<serde_json::Value>(normalized) {
+        Ok(serde_json::Value::Object(map)) => {
+            map.get("pinned")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
 pub(crate) async fn list_conversations_inner(
     request: ListConversationsRequest,
     db: &sqlx::SqlitePool,
 ) -> Result<Vec<ConversationInfo>, KokoroError> {
     let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String)>(
-        "SELECT id, character_id, title, topic, pinned_state, created_at, updated_at FROM conversations WHERE character_id = ? ORDER BY CASE WHEN pinned_state != '' AND pinned_state != '{}' THEN 1 ELSE 0 END DESC, updated_at DESC",
+        "SELECT id, character_id, title, topic, pinned_state, created_at, updated_at FROM conversations WHERE character_id = ? ORDER BY updated_at DESC",
     )
     .bind(&request.character_id)
     .fetch_all(db)
     .await
     .map_err(|e| KokoroError::Database(e.to_string()))?;
 
-    Ok(rows
+    let mut list: Vec<ConversationInfo> = rows
         .into_iter()
         .map(
             |(id, character_id, title, topic, pinned_state, created_at, updated_at)| {
@@ -93,7 +108,18 @@ pub(crate) async fn list_conversations_inner(
                 }
             },
         )
-        .collect())
+        .collect();
+
+    // 采用与前端 hasPinnedConversationState 完全相同的统一置顶判断标准进行稳定复合排序 (pinned DESC -> updated_at DESC)
+    list.sort_by(|a, b| {
+        let a_pinned = is_pinned_conversation_state(&a.pinned_state);
+        let b_pinned = is_pinned_conversation_state(&b.pinned_state);
+        b_pinned
+            .cmp(&a_pinned)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+
+    Ok(list)
 }
 
 #[tauri::command]
@@ -285,6 +311,7 @@ pub async fn edit_conversation_message_inner(
     db: &sqlx::SqlitePool,
     history_lock: &tokio::sync::Mutex<std::collections::VecDeque<crate::ai::context::Message>>,
     current_conversation_id_lock: &tokio::sync::Mutex<Option<String>>,
+    max_message_chars: usize,
 ) -> Result<EditConversationMessageResponse, KokoroError> {
     let trimmed = request.new_content.trim();
     if trimmed.is_empty() {
@@ -292,13 +319,15 @@ pub async fn edit_conversation_message_inner(
             "Message content cannot be empty".to_string(),
         ));
     }
+    let content_to_persist =
+        crate::ai::context::truncate_message_content(trimmed.to_string(), max_message_chars);
 
     // Resolve target message_id
     let target_id = if let Some(id) = request.message_id {
         id
     } else if let (Some(conv_id), Some(index)) = (&request.conversation_id, request.visible_index) {
-        let rows = sqlx::query_as::<_, (i64, Option<String>)>(
-            "SELECT id, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
+        let rows = sqlx::query_as::<_, (i64, String, Option<String>)>(
+            "SELECT id, role, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
         )
         .bind(conv_id)
         .fetch_all(db)
@@ -307,17 +336,22 @@ pub async fn edit_conversation_message_inner(
 
         let visible_rows: Vec<i64> = rows
             .into_iter()
-            .filter(|(_, meta)| {
+            .filter(|(_, role, meta)| {
+                if role == "tool" {
+                    return false;
+                }
                 let technical_type = meta
                     .as_deref()
                     .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
                     .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()));
                 !matches!(
                     technical_type.as_deref(),
-                    Some("assistant_tool_calls") | Some("translation_instruction")
+                    Some("assistant_tool_calls")
+                        | Some("translation_instruction")
+                        | Some("tool_result")
                 )
             })
-            .map(|(id, _)| id)
+            .map(|(id, _, _)| id)
             .collect();
 
         *visible_rows.get(index).ok_or_else(|| {
@@ -332,9 +366,9 @@ pub async fn edit_conversation_message_inner(
         ));
     };
 
-    // 1. Update database row
+    // 1. Update database row with truncated content
     let update_res = sqlx::query("UPDATE conversation_messages SET content = ? WHERE id = ?")
-        .bind(trimmed)
+        .bind(&content_to_persist)
         .bind(target_id)
         .execute(db)
         .await
@@ -357,16 +391,17 @@ pub async fn edit_conversation_message_inner(
         .bind(target_id)
         .fetch_optional(db)
         .await
-        .unwrap_or(None)
+        .map_err(|e| KokoroError::Database(e.to_string()))?
     };
 
     let now = chrono::Utc::now().to_rfc3339();
     if let Some(ref conv_id) = conv_id_opt {
-        let _ = sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
             .bind(&now)
             .bind(conv_id)
             .execute(db)
-            .await;
+            .await
+            .map_err(|e| KokoroError::Database(e.to_string()))?;
     }
 
     // 3. If editing active conversation, sync state.history
@@ -397,7 +432,7 @@ pub async fn edit_conversation_message_inner(
 
     Ok(EditConversationMessageResponse {
         message_id: target_id,
-        updated_content: trimmed.to_string(),
+        updated_content: content_to_persist,
     })
 }
 
@@ -406,11 +441,13 @@ pub async fn edit_conversation_message(
     request: EditConversationMessageRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<EditConversationMessageResponse, KokoroError> {
+    let max_chars = *state.max_message_chars.lock().await;
     edit_conversation_message_inner(
         request,
         &state.db,
         &state.history,
         &state.current_conversation_id,
+        max_chars,
     )
     .await
 }
@@ -496,6 +533,7 @@ mod tests {
             &pool,
             &history,
             &current_conv_id,
+            2000,
         )
         .await
         .unwrap();
@@ -563,6 +601,7 @@ mod tests {
             &pool,
             &history,
             &current_conv_id,
+            2000,
         )
         .await
         .unwrap();
@@ -575,6 +614,114 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "new answer content");
+    }
+
+    #[tokio::test]
+    async fn test_edit_conversation_message_with_interleaved_tools_projection() {
+        let pool = setup_test_db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-tools', 'char-1', 'Test', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 1. User message (visible index 0, id 1)
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-tools', 'user', 'Search web for weather', NULL, ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 2. Technical tool calls (hidden, id 2)
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-tools', 'assistant', 'call tool', '{\"type\":\"assistant_tool_calls\"}', ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 3. Tool result (folded into assistant on frontend, role='tool', id 3)
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-tools', 'tool', '{\"temperature\": 25}', '{\"type\":\"tool_result\",\"tool\":\"weather\"}', ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 4. Assistant answer (visible index 1, id 4)
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-tools', 'assistant', 'The weather is 25C sunny.', NULL, ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 5. Follow-up user message (visible index 2, id 5)
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-tools', 'user', 'Thanks for the weather info!', NULL, ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let history = Arc::new(Mutex::new(VecDeque::new()));
+        let current_conv_id = Arc::new(Mutex::new(Some("conv-tools".to_string())));
+
+        // Editing visible_index 2 should target id 5 ('Thanks for the weather info!'), NOT id 3 (tool) or id 4 (assistant)
+        let res = edit_conversation_message_inner(
+            EditConversationMessageRequest {
+                conversation_id: Some("conv-tools".to_string()),
+                message_id: None,
+                visible_index: Some(2),
+                new_content: "Thanks! What about tomorrow?".to_string(),
+            },
+            &pool,
+            &history,
+            &current_conv_id,
+            2000,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.message_id, 5, "visible_index 2 must resolve to id 5, skipping both assistant_tool_calls and tool_result");
+        assert_eq!(res.updated_content, "Thanks! What about tomorrow?");
+
+        let (content_5,): (String,) = sqlx::query_as("SELECT content FROM conversation_messages WHERE id = 5")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(content_5, "Thanks! What about tomorrow?");
+
+        // Verify id 3 (tool) and id 4 (assistant) were untouched
+        let (content_3,): (String,) = sqlx::query_as("SELECT content FROM conversation_messages WHERE id = 3")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(content_3, "{\"temperature\": 25}");
+
+        let (content_4,): (String,) = sqlx::query_as("SELECT content FROM conversation_messages WHERE id = 4")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(content_4, "The weather is 25C sunny.");
+
+        // Also verify direct message_id edit on id 5
+        let res_by_id = edit_conversation_message_inner(
+            EditConversationMessageRequest {
+                conversation_id: Some("conv-tools".to_string()),
+                message_id: Some(5),
+                visible_index: None,
+                new_content: "Direct message_id edit on user question".to_string(),
+            },
+            &pool,
+            &history,
+            &current_conv_id,
+            2000,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res_by_id.message_id, 5);
+        assert_eq!(res_by_id.updated_content, "Direct message_id edit on user question");
     }
 
     #[tokio::test]
@@ -594,6 +741,7 @@ mod tests {
             &pool,
             &history,
             &current_conv_id,
+            2000,
         )
         .await
         .unwrap_err();
@@ -611,11 +759,65 @@ mod tests {
             &pool,
             &history,
             &current_conv_id,
+            2000,
         )
         .await
         .unwrap_err();
 
         assert!(matches!(err2, KokoroError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn test_edit_conversation_message_truncates_overlong_content() {
+        let pool = setup_test_db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-trunc', 'char-1', 'Test', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-trunc', 'user', 'short text', NULL, ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let history = Arc::new(Mutex::new(VecDeque::new()));
+        let current_conv_id = Arc::new(Mutex::new(Some("conv-trunc".to_string())));
+
+        // Set max_message_chars to 20, but provide 50 chars
+        let long_text = "12345678901234567890EXTRA_TEXT_EXCEEDING_LIMIT_HERE!";
+        let res = edit_conversation_message_inner(
+            EditConversationMessageRequest {
+                conversation_id: Some("conv-trunc".to_string()),
+                message_id: Some(1),
+                visible_index: None,
+                new_content: long_text.to_string(),
+            },
+            &pool,
+            &history,
+            &current_conv_id,
+            20,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.message_id, 1);
+        assert_eq!(res.updated_content, "12345678901234567890…[truncated]");
+
+        // Verify SQLite has the truncated text
+        let (content,): (String,) = sqlx::query_as("SELECT content FROM conversation_messages WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(content, "12345678901234567890…[truncated]");
+
+        // Verify history has the truncated text
+        let synced = history.lock().await;
+        assert_eq!(synced[0].content, "12345678901234567890…[truncated]");
     }
 
     #[tokio::test]
@@ -640,6 +842,18 @@ mod tests {
             .await
             .unwrap();
 
+        // conv-4: unpinned with explicit {"pinned":false}, newest updated_at (2026-01-05)
+        sqlx::query("INSERT INTO conversations (id, character_id, title, pinned_state, created_at, updated_at) VALUES ('conv-4', 'char-1', 'FalsePinned', '{\"pinned\":false}', '2026-01-05T00:00:00Z', '2026-01-05T00:00:00Z')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // conv-5: custom topic JSON without pinned field (2026-01-04)
+        sqlx::query("INSERT INTO conversations (id, character_id, title, pinned_state, created_at, updated_at) VALUES ('conv-5', 'char-1', 'TopicOnly', '{\"topic\":\"science\"}', '2026-01-04T00:00:00Z', '2026-01-04T00:00:00Z')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
         let list = list_conversations_inner(
             ListConversationsRequest {
                 character_id: "char-1".to_string(),
@@ -649,11 +863,30 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(list.len(), 3);
-        // conv-3 is pinned, so it must be first
+        assert_eq!(list.len(), 5);
+        // conv-3 is the ONLY truly pinned conversation, so it must be first
         assert_eq!(list[0].id, "conv-3");
-        // Between conv-2 and conv-1 (both unpinned), conv-2 has newer updated_at
-        assert_eq!(list[1].id, "conv-2");
-        assert_eq!(list[2].id, "conv-1");
+        // Remaining 4 are unpinned, ordered by updated_at DESC: conv-4 (Jan 5) -> conv-5 (Jan 4) -> conv-2 (Jan 3) -> conv-1 (Jan 1)
+        assert_eq!(list[1].id, "conv-4");
+        assert_eq!(list[2].id, "conv-5");
+        assert_eq!(list[3].id, "conv-2");
+        assert_eq!(list[4].id, "conv-1");
+    }
+
+    #[test]
+    fn test_is_pinned_conversation_state_matches_frontend_contract() {
+        assert!(!is_pinned_conversation_state(""));
+        assert!(!is_pinned_conversation_state("{}"));
+        assert!(!is_pinned_conversation_state("   "));
+        assert!(!is_pinned_conversation_state("not-json"));
+        assert!(!is_pinned_conversation_state("{invalid"));
+        assert!(!is_pinned_conversation_state("{\"topic\": \"science\"}"));
+        assert!(!is_pinned_conversation_state("{\"pinned\": false}"));
+        assert!(!is_pinned_conversation_state("{\"pinned\": 0}"));
+        assert!(!is_pinned_conversation_state("{\"pinned\": null}"));
+        assert!(!is_pinned_conversation_state("{\"pinned\": \"true\"}"));
+
+        assert!(is_pinned_conversation_state("{\"pinned\": true}"));
+        assert!(is_pinned_conversation_state("{\"pinned\": true, \"pinned_at\": \"2026-01-01T00:00:00Z\"}"));
     }
 }

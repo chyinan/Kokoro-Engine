@@ -17,6 +17,7 @@ export interface ChatPanelMessage {
     capturedAt?: string;
     source?: string;
     turnId?: string;
+    clientRequestId?: string;
 }
 
 export interface PendingTurnState {
