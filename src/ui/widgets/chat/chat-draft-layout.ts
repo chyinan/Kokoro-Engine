@@ -1,7 +1,70 @@
 // pattern: Functional Core
 
 export const CHAT_DRAFT_KEY_PREFIX = "kokoro_chat_draft_";
+export const CHAT_DRAFT_IMAGES_KEY_PREFIX = "kokoro_chat_draft_images_";
 export const DEFAULT_CHAT_DRAFT_DEBOUNCE_MS = 300;
+
+/**
+ * Returns the storage key for character image drafts.
+ */
+export function getCharacterDraftImagesStorageKey(characterId: string): string {
+    const sanitized = encodeURIComponent(characterId.trim() || "default");
+    return `${CHAT_DRAFT_IMAGES_KEY_PREFIX}${sanitized}`;
+}
+
+/**
+ * Loads the saved character image draft from storage.
+ * Returns array of image URLs if found and valid JSON, or empty array.
+ */
+export function loadSavedCharacterDraftImages(characterId: string, storage?: Storage): string[] {
+    try {
+        const s = storage ?? (typeof window !== "undefined" ? window.localStorage : undefined);
+        if (!s) return [];
+        const key = getCharacterDraftImagesStorageKey(characterId);
+        const saved = s.getItem(key);
+        if (!saved) return [];
+        const parsed = JSON.parse(saved);
+        return Array.isArray(parsed)
+            ? parsed.filter(item => typeof item === "string" && item.trim().length > 0)
+            : [];
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * Saves or clears the character image draft in storage.
+ * If images array is empty, removes the item to avoid polluting storage.
+ */
+export function saveCharacterDraftImages(characterId: string, images: string[], storage?: Storage): void {
+    try {
+        const s = storage ?? (typeof window !== "undefined" ? window.localStorage : undefined);
+        if (!s) return;
+        const key = getCharacterDraftImagesStorageKey(characterId);
+        const validImages = images.filter(img => typeof img === "string" && img.trim().length > 0);
+        if (validImages.length === 0) {
+            s.removeItem(key);
+        } else {
+            s.setItem(key, JSON.stringify(validImages));
+        }
+    } catch {
+        // storage disabled or quota exceeded
+    }
+}
+
+/**
+ * Clears the character image draft from storage immediately.
+ */
+export function clearCharacterDraftImages(characterId: string, storage?: Storage): void {
+    try {
+        const s = storage ?? (typeof window !== "undefined" ? window.localStorage : undefined);
+        if (!s) return;
+        const key = getCharacterDraftImagesStorageKey(characterId);
+        s.removeItem(key);
+    } catch {
+        // ignore storage errors
+    }
+}
 
 /**
  * Returns the storage key for a given character id.

@@ -22,6 +22,18 @@ type Locale = Readonly<{
       unpin: string;
       [key: string]: string;
     }>;
+    image: Readonly<{
+      zoom_in: string;
+      zoom_out: string;
+      rotate: string;
+      reset: string;
+      [key: string]: string;
+    }>;
+    input: Readonly<{
+      drop_image_title: string;
+      drop_image_hint: string;
+      [key: string]: unknown;
+    }>;
   }>;
 }>;
 
@@ -43,6 +55,17 @@ describe("locale keys parity", () => {
       for (const key of expectedKeys) {
         expect(messages.chat.history[key], `${locale} missing chat.history.${key}`).toBeTruthy();
       }
+    }
+  });
+
+  it("keeps chat image and dropzone keys translated in every supported locale", () => {
+    const expectedImageKeys = ["zoom_in", "zoom_out", "rotate", "reset"];
+    for (const [locale, messages] of Object.entries(locales)) {
+      for (const key of expectedImageKeys) {
+        expect(messages.chat.image[key], `${locale} missing chat.image.${key}`).toBeTruthy();
+      }
+      expect(messages.chat.input.drop_image_title, `${locale} missing chat.input.drop_image_title`).toBeTruthy();
+      expect(messages.chat.input.drop_image_hint, `${locale} missing chat.input.drop_image_hint`).toBeTruthy();
     }
   });
 });

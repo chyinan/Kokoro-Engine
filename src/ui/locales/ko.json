@@ -1164,7 +1164,15 @@
                     "speaking": "말하는 중...",
                     "transcribing": "변환 중..."
                 }
-            }
+            },
+            "drop_image_title": "이미지를 드롭하여 업로드",
+            "drop_image_hint": "PNG, JPG, WebP 지원 (최대 5MB)"
+        },
+        "image": {
+            "zoom_in": "확대",
+            "zoom_out": "축소",
+            "rotate": "회전",
+            "reset": "재설정"
         },
         "history": {
             "title": "대화 기록",

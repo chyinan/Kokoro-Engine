@@ -1165,7 +1165,15 @@
                     "speaking": "说话中...",
                     "transcribing": "转换中..."
                 }
-            }
+            },
+            "drop_image_title": "松开鼠标上传图片",
+            "drop_image_hint": "支持 PNG, JPG, WebP 格式 (单张最大 5MB)"
+        },
+        "image": {
+            "zoom_in": "放大",
+            "zoom_out": "缩小",
+            "rotate": "旋转",
+            "reset": "重置"
         },
         "history": {
             "title": "对话记录",

@@ -1164,7 +1164,15 @@
           "speaking": "Говорю...",
           "transcribing": "Распознавание..."
         }
-      }
+      },
+      "drop_image_title": "Отпустите для загрузки изображений",
+      "drop_image_hint": "Поддерживает PNG, JPG, WebP (до 5 МБ)"
+    },
+    "image": {
+      "zoom_in": "Увеличить",
+      "zoom_out": "Уменьшить",
+      "rotate": "Повернуть",
+      "reset": "Сброс"
     },
     "history": {
       "title": "История чатов",

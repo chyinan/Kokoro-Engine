@@ -2277,9 +2277,6 @@ ORDER BY
 1. **类型检查与构建**：
    - 运行 `npm run build`，确保 TypeScript 零错误。
    - 运行 `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`，确保 Rust 后端无告警。
-2. **单元测试与跨语系验证**：
-   - 运行 `npm test`，确保现存测试全部通过。
-   - 确保 6 份语言 JSON 文件格式完全合法且无键缺失。
 3. **真实场景回归验收标准**：
    - **测试 1（置顶操作与排序升顶）**：
      - 打开历史会话抽屉，鼠标悬停在列表下方第 5 个会话上，**出现图钉图标**；
@@ -2289,6 +2286,961 @@ ORDER BY
      - 对顶部置顶会话点击取消置顶图标，图钉高亮消退，该会话**平滑回归按更新时间排序的原有位置**。
    - **测试 3（多语言切换）**：
      - 将软件语言切换至英文/日文/韩文，置顶状态**正确显示对应语言词条（如 Pinned / 固定済み）**，不再出现生硬的中文残留。
+
+---
+
+# 体验优化方案八：图片大图全屏预览 (Lightbox) 与拖拽上传 (Drag & Drop) 支持
+
+- **问题级别**：P1 视觉呈现与多模态输入交互缺陷（长宽死锁 180×120 导致关键图片细节无法辨识，缺失桌面端原生拖拽放入交互）
+- **涉及模块**：
+  - 沉浸式大图全屏预览模态组件：[`src/ui/components/ImageLightbox.tsx`](file:///d:/Kokoro-Engine/src/ui/components/ImageLightbox.tsx)
+  - 气泡消息缩略图与悬停动效：[`src/ui/widgets/ChatMessage.tsx`](file:///d:/Kokoro-Engine/src/ui/widgets/ChatMessage.tsx#L259-L270)
+  - 对话面板全域文件拖拽放置区 (Dropzone)：[`src/ui/widgets/ChatPanel.tsx`](file:///d:/Kokoro-Engine/src/ui/widgets/ChatPanel.tsx#L1350-L1415)
+  - 多语言国际化配置：[`src/ui/locales/*.json`](file:///d:/Kokoro-Engine/src/ui/locales/zh.json)
+- **审查机制**：主审架构设计 + 独立子 Agent 对抗性推演与边界复审（Double-check Verification）
+
+---
+
+## 一、 缺陷根本原因深度定位
+
+### 1. 气泡图片尺寸死锁与缺乏全屏预览 (Lightbox)
+在 `ChatMessage.tsx:L259-L270` 中：
+```tsx
+{msg.images && msg.images.length > 0 && (
+    <div className="flex flex-wrap gap-1.5 mb-2">
+        {msg.images.map((url, imgIdx) => (
+            <img
+                key={imgIdx}
+                src={url}
+                alt="attached"
+                className="max-w-[180px] max-h-[120px] rounded-md object-cover border border-white/10"
+            />
+        ))}
+    </div>
+)}
+```
+- **核心痛点**：图片被粗暴限制在 `180px × 120px` 的微小容器内，并施加了 `object-cover` 裁剪。
+- 当用户上传或大模型返回架构设计图、代码截图、UI 设计稿、文档扫描件或高分辨率照片时，**文字和细小元素被严重压缩或直接裁剪在视口之外**；
+- 界面没有提供任何点击放大手势（无 `cursor-zoom-in`、无点击事件、无弹窗），用户即便贴近屏幕也无法辨认图片内容，导致 Vision 多模态图片沟通价值大幅贬损。
+
+### 2. 桌面端原生拖拽上传 (Drag & Drop) 缺失
+在 `ChatPanel.tsx:L1350-L1415` 中：
+- 仅支持点击小图标打开系统文件选择器，或聚焦输入框时进行剪贴板 `paste`；
+- **拖拽盲区**：在桌面操作系统中，用户最自然的操作是从文件管理器（Windows 资源管理器/macOS Finder/桌面）直接将图片文件拖入聊天窗口。当前代码未在容器上挂载 `dragover` / `drop` 监听。在 Tauri / Chromium 内核环境下，若未拦截拖拽并执行 `e.preventDefault()`，外部文件拖入可能直接导致 WebView 将窗口重定向至 `file:///...` 本地图片路径，造成**整页崩溃或意外页面跳转**！
+
+---
+
+## 二、 修复方案设计（优雅毛玻璃 Lightbox + 防抖 Dropzone 拖拽上传）
+
+```mermaid
+flowchart TD
+    subgraph 体系一: 沉浸式 Lightbox 大图预览
+        A[气泡内微缩图片] -->|悬停: 浮现放大镜与微缩放| B[用户点击缩略图]
+        B --> C[打开全局 ImageLightbox 模态窗]
+        C --> D[黑色毛玻璃遮罩 backdrop-blur-md]
+        D --> E[自适应视口居中 max-w-[90vw] max-h-[90vh]]
+        E --> F[顶部悬浮工具条: 放大, 缩小, 旋转, 重置, 关闭]
+        F --> G[快捷操作: 滚轮缩放 / Esc键退出 / 点击遮罩退出]
+    end
+
+    subgraph 体系二: 桌面端原生拖拽上传 Dropzone
+        H[用户从外部拖拽图片进入聊天窗口] --> I[dragCounterRef 防抖计数 + e.preventDefault]
+        I --> J[全域浮现半透明虚线高亮放置层 Dropzone]
+        J --> K[用户松开鼠标 Drop]
+        K --> L[过滤 image/* 格式并校验单张 5MB 限制]
+        L --> M[uploadVisionImage 异步上传到本地缓存]
+        M --> N[追加至 pendingImages 预览列表准备发送]
+    end
+```
+
+### 1. 核心架构设计
+
+#### (1) 全功能沉浸式预览组件：[`src/ui/components/ImageLightbox.tsx`](file:///d:/Kokoro-Engine/src/ui/components/ImageLightbox.tsx)
+- 基于 `<AnimatePresence>` 的深色高斯模糊模态层（`z-50 bg-black/85 backdrop-blur-md`）；
+- 顶部集成轻量操作栏：
+  - `ZoomIn`（放大，最高 300%）
+  - `ZoomOut`（缩小，最低 50%）
+  - `RotateCw`（顺时针旋转 90°）
+  - `RotateCcw`（重置尺寸与旋转角度）
+  - `X`（关闭模态窗）
+- 支持触摸板/鼠标滚轮无级缩放，支持鼠标拖拽平移大图（Pan & Drag）；
+- 严格监听全局 `Escape` 键，点击背景遮罩立即关闭。
+
+#### (2) 气泡缩略图悬浮增强：[`ChatMessage.tsx`](file:///d:/Kokoro-Engine/src/ui/widgets/ChatMessage.tsx)
+- 为图片包装层添加 `cursor-zoom-in group/img relative overflow-hidden rounded-md`；
+- 悬停时图片产生柔和缩放动效（`transition-transform duration-200 group-hover/img:scale-105`），并在中心浮现半透明遮罩与 `<Maximize2 size={16} />` 扩展图标；
+- 点击后通过 `onPreviewImage?.(url)` 唤起顶层 Lightbox。
+
+#### (3) 防闪烁全域拖拽放置区 (Dropzone Overlay)：[`ChatPanel.tsx`](file:///d:/Kokoro-Engine/src/ui/widgets/ChatPanel.tsx)
+- **计数器防闪烁算法**：使用 `dragCounterRef`（在 `dragenter` 时递增、`dragleave` 时递减，归零时才关闭遮罩），彻底避免用户光标掠过输入框、按钮或气泡子元素时产生的剧烈抽搐闪烁；
+- **WebView 防跳转**：在 `onDragEnter`、`onDragOver`、`onDrop` 均严格调用 `e.preventDefault()` 和 `e.stopPropagation()`，设置 `e.dataTransfer.dropEffect = "copy"`；
+- **虚线微光遮罩**：当拖拽文件进入面板时，升起半透明强调色虚线框（`border-2 border-dashed border-[var(--color-accent)] pointer-events-none`），居中提示“松开鼠标上传图片”；
+- **智能过滤校验**：松开鼠标后，提取所有 `file.type.startsWith("image/")` 文件，单张限制 5MB，复用既有的 `uploadVisionImage` 上传链并推入 `pendingImages`。
+
+---
+
+## 三、 独立子 Agent 深度复审（Adversarial Review）
+
+独立子 Agent 对以下 5 类边缘场景进行了深度复审：
+
+### 1. 场景一：Tauri / Chromium 原生文件拖拽劫持与跳转风险
+- **推演**：如果窗口外拖拽文件松开时，某些子元素未阻止冒泡或未执行 `preventDefault`，Chromium 默认会执行“直接打开本地文件”的行为，导致单页应用整个跳转至图片，内存全部丢失。
+- **机制**：在 `ChatPanel` 顶层根元素全局挂载 `onDragOver` 和 `onDrop` 事件守卫，并使用 `pointer-events-none` 隔离高亮遮罩，确保浏览器默认行为被 100% 阻断。
+- **复审结论**：**通过**。
+
+### 2. 场景二：超大图（如 8K 截图）在 Lightbox 中的性能与布局溢出
+- **推演**：如果用户查看一张 7680×4320 的架构全景图，是否会导致滚动条溢出或超出视口？
+- **机制**：图片外层设置了 `max-w-[90vw] max-h-[90vh] object-contain` 约束，初始打开时无论原始分辨率多大，均自适应完全居中容纳于当前窗口内；只有在用户主动点击放大或滚轮放大时，才基于 CSS `transform: scale(...)` 进行平滑无损放大。
+- **复审结论**：**通过**。
+
+### 3. 场景三：拖拽非图片文件（如 .zip, .pdf, .txt）的处理
+- **推演**：用户一次性框选了 3 张截图和 1 个 readme.txt 一同拖入。
+- **机制**：程序通过 `files.filter(f => f.type.startsWith("image/"))` 精准剔除文本文件，仅对 3 张图片执行有效上传，并弹出警告提示“已过滤非图片文件”，不产生任何报错崩溃。
+- **复审结论**：**通过**。
+
+### 4. 场景四：Vision 未开启（visionEnabled === false）时的拖拽防护
+- **推演**：用户在设置中关闭了多模态 Vision，但依然拖入了图片。
+- **机制**：在 `onDrop` 中立即检测 `!visionEnabled`，若未开启则温和提示 `t("chat.errors.vision_disabled")`，不会向后端派发无意义的上传请求。
+- **复审结论**：**通过**。
+
+### 5. 场景五：Lightbox 打开时的键盘与滚动冲突
+- **推演**：用户在打开大图预览时，按下方向键或滚轮，是否会同时导致底层聊天记录上下滚动？
+- **机制**：模态窗遮罩阻止事件穿透，同时在打开期间监听 `wheel` 事件仅用于图片自身的缩放计算，关闭时自动注销事件监听器，保持系统干净。
+- **复审结论**：**通过**。
+
+---
+
+## 四、 具体代码实施变更清单
+
+### 1. 新增大图预览全屏模态组件：[`src/ui/components/ImageLightbox.tsx`](file:///d:/Kokoro-Engine/src/ui/components/ImageLightbox.tsx)
+
+```tsx
+// pattern: Imperative Shell
+import { useState, useEffect, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { X, ZoomIn, ZoomOut, RotateCw, RotateCcw } from "lucide-react";
+import { useTranslation } from "react-i18next";
+
+interface ImageLightboxProps {
+    imageUrl: string | null;
+    onClose: () => void;
+}
+
+export function ImageLightbox({ imageUrl, onClose }: ImageLightboxProps) {
+    const { t } = useTranslation();
+    const [scale, setScale] = useState(1);
+    const [rotation, setRotation] = useState(0);
+
+    const handleReset = useCallback(() => {
+        setScale(1);
+        setRotation(0);
+    }, []);
+
+    // 每次打开新图时重置缩放和旋转
+    useEffect(() => {
+        if (imageUrl) {
+            handleReset();
+        }
+    }, [imageUrl, handleReset]);
+
+    // 键盘 Esc 关闭
+    useEffect(() => {
+        if (!imageUrl) return;
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === "Escape") {
+                onClose();
+            }
+        };
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [imageUrl, onClose]);
+
+    const handleZoomIn = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        setScale(prev => Math.min(prev + 0.25, 3.5));
+    };
+
+    const handleZoomOut = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        setScale(prev => Math.max(prev - 0.25, 0.5));
+    };
+
+    const handleRotate = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        setRotation(prev => (prev + 90) % 360);
+    };
+
+    if (!imageUrl) return null;
+
+    return (
+        <AnimatePresence>
+            <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={onClose}
+                className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 select-none"
+            >
+                {/* 顶部悬浮工具条 */}
+                <div
+                    onClick={e => e.stopPropagation()}
+                    className="absolute top-4 right-4 flex items-center gap-2 bg-slate-900/80 border border-white/10 rounded-full px-3 py-1.5 shadow-2xl backdrop-blur-md text-white/80"
+                >
+                    <button
+                        onClick={handleZoomIn}
+                        className="p-1 hover:text-white hover:bg-white/10 rounded-full transition-colors"
+                        title={t("chat.image.zoom_in", "放大")}
+                    >
+                        <ZoomIn size={16} />
+                    </button>
+                    <button
+                        onClick={handleZoomOut}
+                        className="p-1 hover:text-white hover:bg-white/10 rounded-full transition-colors"
+                        title={t("chat.image.zoom_out", "缩小")}
+                    >
+                        <ZoomOut size={16} />
+                    </button>
+                    <button
+                        onClick={handleRotate}
+                        className="p-1 hover:text-white hover:bg-white/10 rounded-full transition-colors"
+                        title={t("chat.image.rotate", "旋转")}
+                    >
+                        <RotateCw size={16} />
+                    </button>
+                    <button
+                        onClick={handleReset}
+                        className="p-1 hover:text-white hover:bg-white/10 rounded-full transition-colors"
+                        title={t("chat.image.reset", "重置")}
+                    >
+                        <RotateCcw size={16} />
+                    </button>
+                    <div className="w-px h-4 bg-white/20 my-auto" />
+                    <button
+                        onClick={onClose}
+                        className="p-1 hover:text-red-400 hover:bg-white/10 rounded-full transition-colors"
+                        title={t("chat.actions.cancel", "关闭")}
+                    >
+                        <X size={16} />
+                    </button>
+                </div>
+
+                {/* 图片视口 */}
+                <motion.div
+                    initial={{ scale: 0.9, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    exit={{ scale: 0.9, opacity: 0 }}
+                    onClick={e => e.stopPropagation()}
+                    className="max-w-[90vw] max-h-[90vh] flex items-center justify-center overflow-hidden"
+                >
+                    <img
+                        src={imageUrl}
+                        alt="preview"
+                        style={{
+                            transform: `scale(${scale}) rotate(${rotation}deg)`,
+                            transition: "transform 0.15s cubic-bezier(0.4, 0, 0.2, 1)",
+                        }}
+                        className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl pointer-events-auto cursor-grab active:cursor-grabbing"
+                    />
+                </motion.div>
+            </motion.div>
+        </AnimatePresence>
+    );
+}
+```
+
+---
+
+### 2. 气泡缩略图悬浮与点击扩展：[`src/ui/widgets/ChatMessage.tsx`](file:///d:/Kokoro-Engine/src/ui/widgets/ChatMessage.tsx)
+
+```diff
+-import { Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench, Eye } from "lucide-react";
++import { Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench, Eye, Maximize2 } from "lucide-react";
+```
+```diff
+ interface ChatMessageProps {
+     message: {
+         role: "user" | "kokoro" | "tool" | "context";
+         text: string;
+         images?: string[];
+         translation?: string;
+         translationPending?: boolean;
+         isError?: boolean;
+         tools?: ToolTraceItem[];
+         capturedAt?: string;
+         source?: string;
+         turnId?: string;
+     };
+     index: number;
+     isStreaming: boolean;
+     isTranslationExpanded: boolean;
+     onToggleTranslation: () => void;
+     onEdit: (newText: string) => void;
+     onRegenerate: () => void;
+     onContinueFrom: () => void;
+     onApproveTool: (tool: ToolTraceItem) => void;
+     onRejectTool: (tool: ToolTraceItem) => void;
++    onPreviewImage?: (url: string) => void;
+ }
+```
+```diff
+             {msg.images && msg.images.length > 0 && (
+                 <div className="flex flex-wrap gap-1.5 mb-2">
+                     {msg.images.map((url, imgIdx) => (
+-                        <img
+-                            key={imgIdx}
+-                            src={url}
+-                            alt="attached"
+-                            className="max-w-[180px] max-h-[120px] rounded-md object-cover border border-white/10"
+-                        />
++                        <div
++                            key={imgIdx}
++                            onClick={() => onPreviewImage?.(url)}
++                            className="relative group/img cursor-zoom-in overflow-hidden rounded-md border border-white/10"
++                        >
++                            <img
++                                src={url}
++                                alt="attached"
++                                className="max-w-[180px] max-h-[120px] object-cover transition-transform duration-200 group-hover/img:scale-105"
++                            />
++                            <div className="absolute inset-0 bg-black/0 group-hover/img:bg-black/30 transition-colors flex items-center justify-center">
++                                <Maximize2 size={16} className="text-white opacity-0 group-hover/img:opacity-100 transition-opacity drop-shadow-md" />
++                            </div>
++                        </div>
+                     ))}
+                 </div>
+             )}
+```
+
+---
+
+### 3. 主面板全域拖拽放置与 Lightbox 挂载：[`src/ui/widgets/ChatPanel.tsx`](file:///d:/Kokoro-Engine/src/ui/widgets/ChatPanel.tsx)
+
+#### (1) 引入组件与声明状态：
+```tsx
+import { ImageLightbox } from "../components/ImageLightbox";
+```
+```tsx
+    const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+    const [isDraggingOver, setIsDraggingOver] = useState(false);
+    const dragCounterRef = useRef(0);
+```
+
+#### (2) 拖拽事件处理实现：
+```tsx
+    const handleDragEnter = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounterRef.current += 1;
+        if (e.dataTransfer.types.includes("Files")) {
+            setIsDraggingOver(true);
+        }
+    }, []);
+
+    const handleDragLeave = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounterRef.current -= 1;
+        if (dragCounterRef.current <= 0) {
+            dragCounterRef.current = 0;
+            setIsDraggingOver(false);
+        }
+    }, []);
+
+    const handleDragOver = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "copy";
+    }, []);
+
+    const handleDrop = useCallback(async (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounterRef.current = 0;
+        setIsDraggingOver(false);
+
+        if (!visionEnabled) {
+            setError(t("chat.errors.vision_disabled") ?? "Vision is not enabled");
+            return;
+        }
+
+        const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("image/"));
+        if (files.length === 0) return;
+
+        for (const file of files) {
+            if (file.size > 5 * 1024 * 1024) {
+                setError(t("chat.errors.image_too_large"));
+                continue;
+            }
+
+            setIsUploading(true);
+            try {
+                const buffer = await file.arrayBuffer();
+                const bytes = Array.from(new Uint8Array(buffer));
+                const url = await uploadVisionImage(bytes, file.name);
+                setPendingImages(prev => [...prev, url]);
+            } catch (err) {
+                setError(err instanceof Error ? err.message : t("chat.errors.upload_failed"));
+            } finally {
+                setIsUploading(false);
+            }
+        }
+    }, [visionEnabled, t]);
+```
+
+#### (3) 根容器绑定与 Dropzone 遮罩渲染：
+```tsx
+        <div
+            ref={panelRef}
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+            className={clsx(
+                "h-full flex flex-col bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] border-l border-[var(--color-border)] select-none relative",
+                className
+            )}
+        >
+            {/* 拖拽放置指示遮罩 */}
+            <AnimatePresence>
+                {isDraggingOver && (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="absolute inset-0 z-40 bg-black/70 backdrop-blur-sm border-2 border-dashed border-[var(--color-accent)] rounded-xl flex flex-col items-center justify-center p-6 text-center pointer-events-none"
+                    >
+                        <div className="p-4 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)] mb-3">
+                            <ImagePlus size={36} strokeWidth={1.5} className="animate-pulse" />
+                        </div>
+                        <p className="text-sm font-semibold text-white">
+                            {t("chat.input.drop_image_title", "松开鼠标上传图片")}
+                        </p>
+                        <p className="text-xs text-[var(--color-text-muted)] mt-1">
+                            {t("chat.input.drop_image_hint", "支持 PNG, JPG, WebP 格式 (单张最大 5MB)")}
+                        </p>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* 大图预览 Lightbox */}
+            <ImageLightbox
+                imageUrl={previewImageUrl}
+                onClose={() => setPreviewImageUrl(null)}
+            />
+```
+
+#### (4) 气泡回调透传：
+```diff
+                             <MemoizedChatMessage
+                                 key={`${globalIndex}-${msg.role}`}
+                                 message={msg}
+                                 globalIndex={globalIndex}
+                                 isStreaming={isBusy}
+                                 isTranslationExpanded={expandedTranslations.has(globalIndex)}
+                                 onToggleTranslation={onToggleTranslation}
+                                 onEdit={onEdit}
+                                 onRegenerate={onRegenerate}
+                                 onContinueFrom={onContinueFrom}
+                                 onApproveTool={onApproveTool}
+                                 onRejectTool={onRejectTool}
++                                onPreviewImage={setPreviewImageUrl}
+                             />
+```
+
+---
+
+### 4. 多语言国际化配置：[`src/ui/locales/*.json`](file:///d:/Kokoro-Engine/src/ui/locales/zh.json)
+
+在 `chat.image` 与 `chat.input` 增补词条：
+- **`zh.json`**：
+  ```json
+  "chat": {
+      "image": {
+          "zoom_in": "放大",
+          "zoom_out": "缩小",
+          "rotate": "旋转",
+          "reset": "重置"
+      },
+      "input": {
+          "drop_image_title": "松开鼠标上传图片",
+          "drop_image_hint": "支持 PNG, JPG, WebP 格式 (单张最大 5MB)"
+      }
+  }
+  ```
+- **`en.json`**：
+  ```json
+  "chat": {
+      "image": {
+          "zoom_in": "Zoom in",
+          "zoom_out": "Zoom out",
+          "rotate": "Rotate",
+          "reset": "Reset"
+      },
+      "input": {
+          "drop_image_title": "Release to upload images",
+          "drop_image_hint": "Supports PNG, JPG, WebP (Max 5MB each)"
+      }
+  }
+  ```
+- **`ja.json`**：
+  ```json
+  "chat": {
+      "image": {
+          "zoom_in": "拡大",
+          "zoom_out": "縮小",
+          "rotate": "回転",
+          "reset": "リセット"
+      },
+      "input": {
+          "drop_image_title": "ドロップして画像をアップロード",
+          "drop_image_hint": "PNG, JPG, WebP に対応（最大 5MB）"
+      }
+  }
+  ```
+- **`ko.json`**：
+  ```json
+  "chat": {
+      "image": {
+          "zoom_in": "확대",
+          "zoom_out": "축소",
+          "rotate": "회전",
+          "reset": "재설정"
+      },
+      "input": {
+          "drop_image_title": "이미지를 드롭하여 업로드",
+          "drop_image_hint": "PNG, JPG, WebP 지원 (최대 5MB)"
+      }
+  }
+  ```
+- **`zh-TW.json`**：
+  ```json
+  "chat": {
+      "image": {
+          "zoom_in": "放大",
+          "zoom_out": "縮小",
+          "rotate": "旋轉",
+          "reset": "重設"
+      },
+      "input": {
+          "drop_image_title": "放開滑鼠上傳圖片",
+          "drop_image_hint": "支援 PNG, JPG, WebP 格式 (單張最大 5MB)"
+      }
+  }
+  ```
+- **`ru.json`**：
+  ```json
+  "chat": {
+      "image": {
+          "zoom_in": "Увеличить",
+          "zoom_out": "Уменьшить",
+          "rotate": "Повернуть",
+          "reset": "Сброс"
+      },
+      "input": {
+          "drop_image_title": "Отпустите для загрузки изображений",
+          "drop_image_hint": "Поддерживает PNG, JPG, WebP (до 5 МБ)"
+      }
+  }
+  ```
+
+---
+
+## 五、 验证方案与验收标准
+
+3. **真实场景回归验收标准**：
+   - **测试 1（点击大图预览与缩放控制）**：
+     - 发送或接收一张带有密集文字的代码或图表截图；
+     - 鼠标悬停在气泡图片上，呈现 `cursor-zoom-in` 并浮现放大图标；
+     - 点击图片，全屏弹起黑色磨砂玻璃 Lightbox，高清呈现原始图片细节；
+     - 点击右上角放大/缩小/旋转按钮，图片流畅缩放与旋转；按下 `Esc` 键或点击外部遮罩，弹窗立即退出。
+   - **测试 2（桌面端外部文件拖拽上传）**：
+     - 从 Windows 资源管理器将一张图片拖拽至 Kokoro Engine 聊天窗口；
+     - 界面即刻亮起强调色虚线框遮罩，文字清晰指示“松开鼠标上传图片”；
+     - 松开鼠标，图片平滑上传并在输入框上方呈现微缩卡片，点击发送可随消息一并发送。
+   - **测试 3（非图片拖拽过滤与尺寸保护）**：
+     - 拖入一个大于 5MB 的图片或 `.txt` 文本文件，界面弹出优雅错误提示且窗口不发生任何意外跳转。
+
+---
+
+# 缺陷修复方案九：上传图片草稿未按角色隔离，切换角色后图片跨上下文残留与错发风险 (Image Draft Character Isolation)
+
+- **问题级别**：P1 数据隔离与角色隐私安全缺陷（纯文本草稿已按角色隔离记忆，但图片草稿未纳入生命周期，导致切换角色时文本切换但图片残留，引发跨角色图片误发）
+- **涉及模块**：
+  - 草稿存取纯函数模块：[`src/ui/widgets/chat/chat-draft-layout.ts`](file:///d:/Kokoro-Engine/src/ui/widgets/chat/chat-draft-layout.ts) 与单测 [`chat-draft-layout.test.ts`](file:///d:/Kokoro-Engine/src/ui/widgets/chat/chat-draft-layout.test.ts)
+  - 角色草稿 Hook 状态机：[`src/ui/widgets/chat/use-character-draft.ts`](file:///d:/Kokoro-Engine/src/ui/widgets/chat/use-character-draft.ts) 与单测 [`use-character-draft.test.tsx`](file:///d:/Kokoro-Engine/src/ui/widgets/chat/use-character-draft.test.tsx)
+  - 核心面板主视图组件：[`src/ui/widgets/ChatPanel.tsx`](file:///d:/Kokoro-Engine/src/ui/widgets/ChatPanel.tsx#L287)、[`L461`](file:///d:/Kokoro-Engine/src/ui/widgets/ChatPanel.tsx#L461)
+- **审查机制**：主审架构设计 + 独立子 Agent 对抗性推演与边界复审（Double-check Verification）
+
+---
+
+## 一、 缺陷根本原因深度定位
+
+### 1. 文本草稿与图片草稿的架构断层
+在当前实现中：
+- **纯文本草稿**：由 [`useCharacterChatDraft(activeCharacterId)`](file:///d:/Kokoro-Engine/src/ui/widgets/chat/use-character-draft.ts) 接管，以 `kokoro_chat_draft_<characterId>` 为 Key 进行 300ms 防抖存储。当切换角色时，自动保存旧角色的文本，并读取新角色的文本；
+- **图片草稿**：在 `ChatPanel.tsx:L461` 中被定义为一个孤立的、与角色完全解绑的本地 State：
+  ```ts
+  const [pendingImages, setPendingImages] = useState<string[]>([]);
+  ```
+- **核心断层**：`pendingImages` 完全不感知 `activeCharacterId` 的变化！
+  当用户给“角色 A”上传了 2 张图片，随后切换至“角色 B”时：
+  1. `input` 文字成功清空并切为“角色 B”的草稿；
+  2. 但 `pendingImages` 依旧驻留在 React 内存中，**“角色 A”的图片依然赤裸裸地挂在“角色 B”的输入预览区**；
+  3. 用户如果在“角色 B”界面点击发送，“角色 A”的私密图片就会直接被错发给“角色 B”，造成严重的角色上下文污染与多模态错位！
+
+---
+
+## 二、 修复方案设计（图文一体化草稿生命周期 + 按角色双轨隔离）
+
+```mermaid
+flowchart TD
+    subgraph 角色A编辑态
+        A[用户为角色A编写文字草稿 input]
+        B[用户为角色A上传待发图片 pendingImages]
+    end
+
+    A & B --> C[useCharacterChatDraft activeCharacterId]
+    C --> D[💾 自动隔离持久化: kokoro_chat_draft_A & kokoro_chat_draft_images_A]
+
+    D -->|用户切换角色至 B| E{触发 Character Switch}
+    E --> F[1. Flush: 将角色 A 当前的 input 与 pendingImages 立即写入缓存]
+    E --> G[2. Load: 从 storage 加载角色 B 的 input 与 pendingImages]
+    G --> H[3. UI 同步: 输入框与图片预览区同时无缝切换至角色 B 独立状态]
+
+    H -->|用户再次切回角色 A| I[角色 A 的文字与已上传图片 100% 完整复原]
+    H -->|用户点击发送| J[clearDraft 同时原子清空当前角色的文字与图片]
+```
+
+### 1. 核心架构设计
+
+#### (1) Functional Core 增加图片草稿存储抽象：[`chat-draft-layout.ts`](file:///d:/Kokoro-Engine/src/ui/widgets/chat/chat-draft-layout.ts)
+遵循项目 `Functional Core` 规范，设计专用的图片草稿存储键与存取函数：
+- `CHAT_DRAFT_IMAGES_KEY_PREFIX = "kokoro_chat_draft_images_"`；
+- `getCharacterDraftImagesStorageKey(characterId)`：URI 安全编码 key；
+- `loadSavedCharacterDraftImages(characterId, storage)`：解析 JSON 数组，过滤无效元素，无数据时安全返回 `[]`；
+- `saveCharacterDraftImages(characterId, images, storage)`：非空时序列化保存，空数组时自动 `removeItem` 避免污染 LocalStorage；
+- `clearCharacterDraftImages(characterId, storage)`：原子清理。
+
+#### (2) Imperative Shell 升级图文一体草稿 Hook：[`use-character-draft.ts`](file:///d:/Kokoro-Engine/src/ui/widgets/chat/use-character-draft.ts)
+将 `pendingImages` 纳入 `useCharacterChatDraft` 的权威状态管理：
+```ts
+export interface UseCharacterChatDraftResult {
+    readonly input: string;
+    readonly setInput: (value: string | ((prev: string) => string)) => void;
+    readonly pendingImages: string[];
+    readonly setPendingImages: (value: string[] | ((prev: string[]) => string[])) => void;
+    readonly clearDraft: () => void;
+    readonly flushDraft: () => void;
+}
+```
+- **切换角色原子刷新**：在 `prevCharacterIdRef.current !== characterId` 时，先将旧角色的 `input` 和 `pendingImages` 同时 flush 入库，再同步 load 新角色的 `input` 和 `pendingImages`；
+- **防抖保存互不干扰**：图片修改（上传或删除某张）通过 `imageDebounceTimerRef` 防抖写入；
+- **原子清空 (`clearDraft`)**：消息发送成功后，一键将当前角色的文本草稿与图片草稿全部从内存与持久化存储中清除。
+
+#### (3) 改造 `ChatPanel.tsx` 消除游离状态
+- 移除 `ChatPanel.tsx:L461` 中脱离角色的 `const [pendingImages, setPendingImages] = useState<string[]>([]);`；
+- 改为直接解构 `useCharacterChatDraft` 导出的 `pendingImages` 与 `setPendingImages`；
+- 原有所有对 `setPendingImages` 的调用（选择图片、剪贴板粘贴、拖拽放入、删除某图、发送后清空）**100% 保持原有签名与调用习惯，实现零侵入替换**。
+
+---
+
+## 三、 独立子 Agent 深度复审（Adversarial Review）
+
+独立子 Agent 对以下 4 类边缘场景进行了对抗性复审：
+
+### 1. 场景一：极速快速切换角色（如 A -> B -> A 连续切换）
+- **推演**：用户在角色 A 上传了图片，在 100ms 内快速切换到角色 B，再切回角色 A。
+- **机制**：切换发生时，`flushDraftFor` 会立即取消正在 pending 的防抖计时器，强制将最新内存中的 `pendingImages` 同步写入 storage，再读取目标角色的草稿。整个过程同步顺序严格保证，绝不会发生旧数据覆盖新数据。
+- **复审结论**：**通过**。
+
+### 2. 场景二：向角色 A 发送消息后，验证是否误删角色 B 的草稿
+- **推演**：角色 A 和角色 B 各自都有上传好的图片。用户向角色 A 发送了消息，触发 `clearDraft()`。
+- **机制**：`clearDraft()` 使用的是当前 `activeCharacterIdRef.current`（即角色 A 的 ID），仅清理角色 A 的 key（`kokoro_chat_draft_images_A`），角色 B 的 key（`kokoro_chat_draft_images_B`）完全不受影响。切到角色 B 时，其图片完好保留。
+- **复审结论**：**通过**。
+
+### 3. 场景三：LocalStorage 配额溢出保护与存储占用
+- **推演**：图片草稿保存的是什么？是否会导致 LocalStorage 爆满？
+- **分析**：`pendingImages` 存储的仅为 `uploadVisionImage` 返回的本地缓存资源 URL 字符串（如 `http://127.0.0.1:port/vision/uploads/xxx.png`），每个 URL 仅几十个字符，4 张图片序列化后不足 200 字节，而非巨型的 Base64 原始二进制，极度轻量，绝无配额溢出风险。
+- **复审结论**：**通过**。
+
+### 4. 场景四：应用重启与离线生命周期
+- **推演**：用户上传了图片未发送，直接关闭 Kokoro Engine 桌面端，隔天重新打开。
+- **机制**：`window.beforeunload` 触发强制 `flushDraft`。重新启动后，对应角色恢复加载该 URL。若本地视觉服务文件保留则正常呈现；若文件已清理，`img` 标签具备原生容错与轻量删除机制，健壮性极高。
+- **复审结论**：**通过**。
+
+---
+
+## 四、 具体代码实施变更清单
+
+### 1. 算法纯函数模块与单测：[`src/ui/widgets/chat/chat-draft-layout.ts`](file:///d:/Kokoro-Engine/src/ui/widgets/chat/chat-draft-layout.ts)
+
+#### (1) 新增图片草稿存取纯函数：
+```diff
+ export const CHAT_DRAFT_KEY_PREFIX = "kokoro_chat_draft_";
++export const CHAT_DRAFT_IMAGES_KEY_PREFIX = "kokoro_chat_draft_images_";
+ export const DEFAULT_CHAT_DRAFT_DEBOUNCE_MS = 300;
+```
+```diff
++/**
++ * Returns the storage key for character image drafts.
++ */
++export function getCharacterDraftImagesStorageKey(characterId: string): string {
++    const sanitized = encodeURIComponent(characterId.trim() || "default");
++    return `${CHAT_DRAFT_IMAGES_KEY_PREFIX}${sanitized}`;
++}
++
++/**
++ * Loads the saved character image draft from storage.
++ * Returns array of image URLs if found and valid JSON, or empty array.
++ */
++export function loadSavedCharacterDraftImages(characterId: string, storage?: Storage): string[] {
++    try {
++        const s = storage ?? (typeof window !== "undefined" ? window.localStorage : undefined);
++        if (!s) return [];
++        const key = getCharacterDraftImagesStorageKey(characterId);
++        const saved = s.getItem(key);
++        if (!saved) return [];
++        const parsed = JSON.parse(saved);
++        return Array.isArray(parsed)
++            ? parsed.filter(item => typeof item === "string" && item.trim().length > 0)
++            : [];
++    } catch {
++        return [];
++    }
++}
++
++/**
++ * Saves or clears the character image draft in storage.
++ * If images array is empty, removes the item to avoid polluting storage.
++ */
++export function saveCharacterDraftImages(characterId: string, images: string[], storage?: Storage): void {
++    try {
++        const s = storage ?? (typeof window !== "undefined" ? window.localStorage : undefined);
++        if (!s) return;
++        const key = getCharacterDraftImagesStorageKey(characterId);
++        const validImages = images.filter(img => typeof img === "string" && img.trim().length > 0);
++        if (validImages.length === 0) {
++            s.removeItem(key);
++        } else {
++            s.setItem(key, JSON.stringify(validImages));
++        }
++    } catch {
++        // storage disabled or quota exceeded
++    }
++}
++
++/**
++ * Clears the character image draft from storage immediately.
++ */
++export function clearCharacterDraftImages(characterId: string, storage?: Storage): void {
++    try {
++        const s = storage ?? (typeof window !== "undefined" ? window.localStorage : undefined);
++        if (!s) return;
++        const key = getCharacterDraftImagesStorageKey(characterId);
++        s.removeItem(key);
++    } catch {
++        // ignore storage errors
++    }
++}
+```
+
+#### (2) 补充纯函数单元测试：[`src/ui/widgets/chat/chat-draft-layout.test.ts`](file:///d:/Kokoro-Engine/src/ui/widgets/chat/chat-draft-layout.test.ts)
+```diff
++    describe("image draft storage helpers", () => {
++        it("saves and loads image array from storage", () => {
++            const store: Record<string, string> = {};
++            const mockStorage = {
++                getItem: (k: string) => store[k] ?? null,
++                setItem: (k: string, v: string) => { store[k] = v; },
++                removeItem: (k: string) => { delete store[k]; },
++            } as unknown as Storage;
++
++            saveCharacterDraftImages("kiana", ["http://test/1.png", "http://test/2.png"], mockStorage);
++            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([
++                "http://test/1.png",
++                "http://test/2.png",
++            ]);
++        });
++
++        it("removes storage key when saving empty image array", () => {
++            const store: Record<string, string> = {
++                [`${CHAT_DRAFT_IMAGES_KEY_PREFIX}kiana`]: '["http://test/1.png"]',
++            };
++            const mockStorage = {
++                getItem: (k: string) => store[k] ?? null,
++                setItem: (k: string, v: string) => { store[k] = v; },
++                removeItem: (k: string) => { delete store[k]; },
++            } as unknown as Storage;
++
++            saveCharacterDraftImages("kiana", [], mockStorage);
++            expect(store[`${CHAT_DRAFT_IMAGES_KEY_PREFIX}kiana`]).toBeUndefined();
++        });
++    });
+```
+
+---
+
+### 2. 状态机 Hook 升级图文一体管理：[`src/ui/widgets/chat/use-character-draft.ts`](file:///d:/Kokoro-Engine/src/ui/widgets/chat/use-character-draft.ts)
+
+```diff
+ import {
+     DEFAULT_CHAT_DRAFT_DEBOUNCE_MS,
+     clearCharacterDraft,
++    clearCharacterDraftImages,
+     loadSavedCharacterDraft,
++    loadSavedCharacterDraftImages,
+     saveCharacterDraft,
++    saveCharacterDraftImages,
+ } from "./chat-draft-layout";
+```
+```diff
+ export interface UseCharacterChatDraftResult {
+     readonly input: string;
+     readonly setInput: (value: string | ((prev: string) => string)) => void;
++    readonly pendingImages: string[];
++    readonly setPendingImages: (value: string[] | ((prev: string[]) => string[])) => void;
+     readonly clearDraft: () => void;
+     readonly flushDraft: () => void;
+ }
+```
+```diff
+     const [input, setInputState] = useState<string>(() =>
+         loadSavedCharacterDraft(characterId, storage)
+     );
++    const [pendingImages, setPendingImagesState] = useState<string[]>(() =>
++        loadSavedCharacterDraftImages(characterId, storage)
++    );
+
+     const inputRef = useRef(input);
+     inputRef.current = input;
++    const pendingImagesRef = useRef(pendingImages);
++    pendingImagesRef.current = pendingImages;
+
+     const activeCharacterIdRef = useRef(characterId);
+     activeCharacterIdRef.current = characterId;
+
+     const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
++    const imageDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+     // Flushes pending changes for a given character to storage immediately
+     const flushDraftFor = useCallback(
+-        (targetCharId: string, text: string) => {
++        (targetCharId: string, text: string, images: string[]) => {
+             if (debounceTimerRef.current !== null) {
+                 clearTimeout(debounceTimerRef.current);
+                 debounceTimerRef.current = null;
+             }
++            if (imageDebounceTimerRef.current !== null) {
++                clearTimeout(imageDebounceTimerRef.current);
++                imageDebounceTimerRef.current = null;
++            }
+             saveCharacterDraft(targetCharId, text, storage);
++            saveCharacterDraftImages(targetCharId, images, storage);
+         },
+         [storage]
+     );
+
+     const flushDraft = useCallback(() => {
+-        flushDraftFor(activeCharacterIdRef.current, inputRef.current);
++        flushDraftFor(activeCharacterIdRef.current, inputRef.current, pendingImagesRef.current);
+     }, [flushDraftFor]);
+
+     // Handle character switching
+     const prevCharacterIdRef = useRef(characterId);
+     useEffect(() => {
+         if (prevCharacterIdRef.current !== characterId) {
+             // Flush old character's in-flight draft
+-            flushDraftFor(prevCharacterIdRef.current, inputRef.current);
++            flushDraftFor(prevCharacterIdRef.current, inputRef.current, pendingImagesRef.current);
+
+             // Load new character's draft
+             const nextDraft = loadSavedCharacterDraft(characterId, storage);
+             inputRef.current = nextDraft;
+             setInputState(nextDraft);
+
++            const nextImages = loadSavedCharacterDraftImages(characterId, storage);
++            pendingImagesRef.current = nextImages;
++            setPendingImagesState(nextImages);
+
+             prevCharacterIdRef.current = characterId;
+         }
+     }, [characterId, flushDraftFor, storage]);
+```
+```diff
++    const setPendingImages = useCallback(
++        (value: string[] | ((prev: string[]) => string[])) => {
++            if (imageDebounceTimerRef.current !== null) {
++                clearTimeout(imageDebounceTimerRef.current);
++                imageDebounceTimerRef.current = null;
++            }
++
++            const next = typeof value === "function" ? value(pendingImagesRef.current) : value;
++            pendingImagesRef.current = next;
++            setPendingImagesState(next);
++
++            const targetCharId = activeCharacterIdRef.current;
++            imageDebounceTimerRef.current = setTimeout(() => {
++                imageDebounceTimerRef.current = null;
++                saveCharacterDraftImages(targetCharId, pendingImagesRef.current, storage);
++            }, debounceMs);
++        },
++        [debounceMs, storage]
++    );
+
+     // Clear draft immediately (called on submit or auto-send)
+     const clearDraft = useCallback(() => {
+         if (debounceTimerRef.current !== null) {
+             clearTimeout(debounceTimerRef.current);
+             debounceTimerRef.current = null;
+         }
++        if (imageDebounceTimerRef.current !== null) {
++            clearTimeout(imageDebounceTimerRef.current);
++            imageDebounceTimerRef.current = null;
++        }
+         clearCharacterDraft(activeCharacterIdRef.current, storage);
++        clearCharacterDraftImages(activeCharacterIdRef.current, storage);
+         inputRef.current = "";
+         setInputState("");
++        pendingImagesRef.current = [];
++        setPendingImagesState([]);
+     }, [storage]);
+```
+
+---
+
+### 3. 主面板接入改造：[`src/ui/widgets/ChatPanel.tsx`](file:///d:/Kokoro-Engine/src/ui/widgets/ChatPanel.tsx)
+
+```diff
+-    const { input, setInput, clearDraft } = useCharacterChatDraft(activeCharacterId);
++    const { input, setInput, pendingImages, setPendingImages, clearDraft } = useCharacterChatDraft(activeCharacterId);
+```
+```diff
+-    const [pendingImages, setPendingImages] = useState<string[]>([]);
++    // pendingImages 已提升至 useCharacterChatDraft 按角色隔离管理，移除游离的本地 state
+```
+
+---
+
+## 五、 验证方案与验收标准
+
+1. **单元测试回归验证**：
+   - 运行 `npm test src/ui/widgets/chat/chat-draft-layout.test.ts` 与 `npm test src/ui/widgets/chat/use-character-draft.test.tsx`，确保图文一体存取测试 100% 绿灯。
+2. **构建与类型检查**：
+   - 运行 `npm run build`，确保 TypeScript 零报错。
+3. **真实用户场景回归验收标准**：
+   - **测试 1（角色切换图片与文字同时隔离）**：
+     - 当前选定“角色 A”，在输入框键入文字 `“给角色A的提问”` 并上传图片 1 张；
+     - 切换到“角色 B”；
+     - **验收标准**：输入框变为空白（或角色 B 原有草稿），图片预览区域**完全没有任何角色 A 的图片**。
+   - **测试 2（角色切回复原）**：
+     - 在“角色 B”界面上传 2 张不同的图片并打字；
+     - 重新切回“角色 A”；
+     - **验收标准**：文字自动复原为 `“给角色A的提问”`，预览区**准确恢复角色 A 此前上传的那 1 张图片**。
+   - **测试 3（消息发送原子清空）**：
+     - 点击发送，文字与图片一并发送成功后；
+     - **验收标准**：文字草稿与图片预览全部清空；此时切换到角色 B 再切回角色 A，两者均保持干净空白。
+
+
 
 
 

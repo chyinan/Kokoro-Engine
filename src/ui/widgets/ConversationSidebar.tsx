@@ -37,6 +37,47 @@ export default function ConversationSidebar({
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editTitle, setEditTitle] = useState("");
     const editInputRef = useRef<HTMLInputElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [deletingConv, setDeletingConv] = useState<Conversation | null>(null);
+    const deletingConvRef = useRef<Conversation | null>(null);
+    deletingConvRef.current = deletingConv;
+
+    // 点击外部或按 Esc 键关闭侧边栏
+    useEffect(() => {
+        if (!open) return;
+
+        const handlePointerDown = (event: MouseEvent | TouchEvent) => {
+            if (
+                containerRef.current !== null &&
+                event.target instanceof Node &&
+                !containerRef.current.contains(event.target)
+            ) {
+                const toggleBtn = (event.target as HTMLElement).closest?.("[data-chat-history-toggle]");
+                if (toggleBtn) return;
+                onClose();
+            }
+        };
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape") {
+                event.preventDefault();
+                if (deletingConvRef.current !== null) {
+                    setDeletingConv(null);
+                    return;
+                }
+                onClose();
+            }
+        };
+
+        document.addEventListener("mousedown", handlePointerDown);
+        document.addEventListener("touchstart", handlePointerDown);
+        window.addEventListener("keydown", handleKeyDown);
+        return () => {
+            document.removeEventListener("mousedown", handlePointerDown);
+            document.removeEventListener("touchstart", handlePointerDown);
+            window.removeEventListener("keydown", handleKeyDown);
+        };
+    }, [open, onClose]);
 
     const refresh = useCallback(async () => {
         try {
@@ -97,9 +138,15 @@ export default function ConversationSidebar({
         onStartEmptyConversation();
     };
 
-    const handleDelete = async (e: React.MouseEvent, id: string) => {
+    const handleDeleteClick = (e: React.MouseEvent, conv: Conversation) => {
         e.stopPropagation();
-        if (!confirm(t("chat.history.confirmDelete"))) return;
+        setDeletingConv(conv);
+    };
+
+    const executeDelete = async () => {
+        if (!deletingConv) return;
+        const id = deletingConv.id;
+        setDeletingConv(null);
         try {
             await deleteConversation(id);
             if (activeConversationId === id) {
@@ -166,6 +213,21 @@ export default function ConversationSidebar({
         <AnimatePresence>
             {open && (
                 <motion.div
+                    key="conversation-sidebar-backdrop"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.15 }}
+                    onClick={onClose}
+                    className="absolute inset-0 bg-black/20 backdrop-blur-[0.5px] z-20 cursor-pointer"
+                    data-testid="conversation-sidebar-backdrop"
+                    aria-hidden="true"
+                />
+            )}
+            {open && (
+                <motion.div
+                    key="conversation-sidebar-drawer"
+                    ref={containerRef}
                     initial={{ x: "100%" }}
                     animate={{ x: 0 }}
                     exit={{ x: "100%" }}
@@ -279,7 +341,7 @@ export default function ConversationSidebar({
                                                 <Pencil size={12} strokeWidth={1.5} />
                                             </button>
                                             <button
-                                                onClick={(e) => handleDelete(e, conv.id)}
+                                                onClick={(e) => handleDeleteClick(e, conv)}
                                                 className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-error)] transition-colors"
                                                 title={t("chat.history.delete")}
                                             >
@@ -291,6 +353,69 @@ export default function ConversationSidebar({
                             ))
                         )}
                     </div>
+
+                    {/* 删除会话二次确认模态窗 */}
+                    <AnimatePresence>
+                        {deletingConv && (
+                            <motion.div
+                                key="conversation-delete-confirm-modal"
+                                data-testid="conversation-delete-confirm-modal"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="absolute inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-3"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDeletingConv(null);
+                                }}
+                            >
+                                <motion.div
+                                    initial={{ scale: 0.9, opacity: 0 }}
+                                    animate={{ scale: 1, opacity: 1 }}
+                                    exit={{ scale: 0.9, opacity: 0 }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="w-full max-w-[260px] bg-[var(--color-bg-secondary,#1e293b)] border border-[var(--color-border)] rounded-xl p-4 shadow-2xl space-y-3"
+                                >
+                                    <div className="flex items-center gap-2 text-[var(--color-error,#ef4444)]">
+                                        <Trash2 size={16} strokeWidth={2} />
+                                        <span className="font-semibold text-sm">
+                                            {t("chat.history.delete")}
+                                        </span>
+                                    </div>
+                                    <div className="space-y-1">
+                                        <p className="text-xs text-[var(--color-text-primary)] font-medium truncate" title={getConversationDisplayTitle(deletingConv)}>
+                                            {getConversationDisplayTitle(deletingConv)}
+                                        </p>
+                                        <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+                                            {t("chat.history.confirmDelete")}
+                                        </p>
+                                    </div>
+                                    <div className="flex items-center justify-end gap-2 pt-1">
+                                        <button
+                                            type="button"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setDeletingConv(null);
+                                            }}
+                                            className="px-3 py-1.5 rounded-lg text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-slate-700/50 transition-colors"
+                                        >
+                                            {t("chat.actions.cancel")}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                void executeDelete();
+                                            }}
+                                            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 transition-colors"
+                                        >
+                                            {t("chat.history.delete")}
+                                        </button>
+                                    </div>
+                                </motion.div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
                 </motion.div>
             )}
         </AnimatePresence>

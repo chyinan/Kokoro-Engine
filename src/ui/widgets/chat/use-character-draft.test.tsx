@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
     loadSavedCharacterDraft,
+    loadSavedCharacterDraftImages,
     saveCharacterDraft,
+    saveCharacterDraftImages,
 } from "./chat-draft-layout";
 import { useCharacterChatDraft } from "./use-character-draft";
 
@@ -239,5 +241,142 @@ describe("useCharacterChatDraft", () => {
         });
 
         expect(loadSavedCharacterDraft("kiana", mockStorage)).toBe("Unmount test");
+    });
+
+    describe("image draft character isolation", () => {
+        it("initializes with saved image draft from storage", () => {
+            saveCharacterDraftImages("kiana", ["http://test/1.png"], mockStorage);
+
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "kiana",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            expect(currentHook.pendingImages).toEqual(["http://test/1.png"]);
+        });
+
+        it("debounces saving pendingImages to storage after 300ms", () => {
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "kiana",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            act(() => {
+                currentHook.setPendingImages(["http://test/new.png"]);
+            });
+
+            // Not saved yet before debounce expires
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([]);
+
+            // Advance timers by 300ms
+            act(() => {
+                vi.advanceTimersByTime(300);
+            });
+
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual(["http://test/new.png"]);
+        });
+
+        it("switches character and isolates both text and image drafts", () => {
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "kiana",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            act(() => {
+                currentHook.setInput("Kiana's text");
+                currentHook.setPendingImages(["http://test/kiana.png"]);
+            });
+
+            // Switch to bronya
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "bronya",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            // Bronya should start empty
+            expect(currentHook.input).toBe("");
+            expect(currentHook.pendingImages).toEqual([]);
+
+            // Set Bronya's draft
+            act(() => {
+                currentHook.setInput("Bronya's text");
+                currentHook.setPendingImages(["http://test/bronya.png"]);
+            });
+
+            // Switch back to kiana
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "kiana",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            // Kiana's text and images should be preserved
+            expect(currentHook.input).toBe("Kiana's text");
+            expect(currentHook.pendingImages).toEqual(["http://test/kiana.png"]);
+        });
+
+        it("clears both text and image drafts atomically on clearDraft()", () => {
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "kiana",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            act(() => {
+                currentHook.setInput("Will be cleared");
+                currentHook.setPendingImages(["http://test/clear.png"]);
+                vi.advanceTimersByTime(300);
+            });
+
+            expect(loadSavedCharacterDraft("kiana", mockStorage)).toBe("Will be cleared");
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual(["http://test/clear.png"]);
+
+            act(() => {
+                currentHook.clearDraft();
+            });
+
+            expect(currentHook.input).toBe("");
+            expect(currentHook.pendingImages).toEqual([]);
+            expect(loadSavedCharacterDraft("kiana", mockStorage)).toBe("");
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([]);
+        });
     });
 });

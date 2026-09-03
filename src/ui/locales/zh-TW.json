@@ -1164,7 +1164,15 @@
                     "speaking": "說話中...",
                     "transcribing": "轉換中..."
                 }
-            }
+            },
+            "drop_image_title": "放開滑鼠上傳圖片",
+            "drop_image_hint": "支援 PNG, JPG, WebP 格式 (單張最大 5MB)"
+        },
+        "image": {
+            "zoom_in": "放大",
+            "zoom_out": "縮小",
+            "rotate": "旋轉",
+            "reset": "重設"
         },
         "history": {
             "title": "對話記錄",

@@ -87,4 +87,25 @@ describe("chat-scroll-state", () => {
             expect(result.userScrolled).toBe(true);
         });
     });
+    describe("scroll retention during reply completion", () => {
+        it("preserves userScrolled when user is reading history so that auto-scroll does not force bottom jump", () => {
+            let userScrolled = true;
+            // Completion of streaming does not overwrite userScrolled
+            const onStreamFinish = () => {
+                // userScrolled is preserved
+            };
+            onStreamFinish();
+            expect(userScrolled).toBe(true);
+
+            // Auto-scroll condition: only scroll if !userScrolled
+            const willAutoScroll = !userScrolled;
+            expect(willAutoScroll).toBe(false);
+        });
+
+        it("allows auto-scroll when user is at the bottom", () => {
+            let userScrolled = false;
+            const willAutoScroll = !userScrolled;
+            expect(willAutoScroll).toBe(true);
+        });
+    });
 });

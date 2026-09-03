@@ -3,11 +3,16 @@
 import { describe, expect, it } from "vitest";
 import {
     CHAT_DRAFT_KEY_PREFIX,
+    CHAT_DRAFT_IMAGES_KEY_PREFIX,
     clearCharacterDraft,
+    clearCharacterDraftImages,
     combineDraftWithTranscription,
+    getCharacterDraftImagesStorageKey,
     getCharacterDraftStorageKey,
     loadSavedCharacterDraft,
+    loadSavedCharacterDraftImages,
     saveCharacterDraft,
+    saveCharacterDraftImages,
 } from "./chat-draft-layout";
 
 describe("chat-draft-layout", () => {
@@ -144,6 +149,91 @@ describe("chat-draft-layout", () => {
 
             clearCharacterDraft("kiana", mockStorage);
             expect(store[`${CHAT_DRAFT_KEY_PREFIX}kiana`]).toBeUndefined();
+        });
+    });
+
+    describe("image draft storage helpers", () => {
+        it("returns key with prefix and character id", () => {
+            expect(getCharacterDraftImagesStorageKey("kiana")).toBe(`${CHAT_DRAFT_IMAGES_KEY_PREFIX}kiana`);
+            expect(getCharacterDraftImagesStorageKey("  bronya  ")).toBe(`${CHAT_DRAFT_IMAGES_KEY_PREFIX}bronya`);
+            expect(getCharacterDraftImagesStorageKey("")).toBe(`${CHAT_DRAFT_IMAGES_KEY_PREFIX}default`);
+        });
+
+        it("saves and loads image array from storage", () => {
+            const store: Record<string, string> = {};
+            const mockStorage = {
+                getItem: (k: string) => store[k] ?? null,
+                setItem: (k: string, v: string) => { store[k] = v; },
+                removeItem: (k: string) => { delete store[k]; },
+            } as unknown as Storage;
+
+            saveCharacterDraftImages("kiana", ["http://test/1.png", "http://test/2.png"], mockStorage);
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([
+                "http://test/1.png",
+                "http://test/2.png",
+            ]);
+        });
+
+        it("filters out invalid entries when loading image draft", () => {
+            const store: Record<string, string> = {
+                [`${CHAT_DRAFT_IMAGES_KEY_PREFIX}kiana`]: JSON.stringify(["http://test/1.png", "", 123, null, "http://test/2.png"]),
+            };
+            const mockStorage = {
+                getItem: (k: string) => store[k] ?? null,
+                setItem: () => {},
+                removeItem: () => {},
+            } as unknown as Storage;
+
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([
+                "http://test/1.png",
+                "http://test/2.png",
+            ]);
+        });
+
+        it("removes storage key when saving empty image array", () => {
+            const store: Record<string, string> = {
+                [`${CHAT_DRAFT_IMAGES_KEY_PREFIX}kiana`]: '["http://test/1.png"]',
+            };
+            const mockStorage = {
+                getItem: (k: string) => store[k] ?? null,
+                setItem: (k: string, v: string) => { store[k] = v; },
+                removeItem: (k: string) => { delete store[k]; },
+            } as unknown as Storage;
+
+            saveCharacterDraftImages("kiana", [], mockStorage);
+            expect(store[`${CHAT_DRAFT_IMAGES_KEY_PREFIX}kiana`]).toBeUndefined();
+        });
+
+        it("clears character image draft immediately", () => {
+            const store: Record<string, string> = {
+                [`${CHAT_DRAFT_IMAGES_KEY_PREFIX}kiana`]: '["http://test/1.png"]',
+            };
+            const mockStorage = {
+                getItem: (k: string) => store[k] ?? null,
+                setItem: () => {},
+                removeItem: (k: string) => { delete store[k]; },
+            } as unknown as Storage;
+
+            clearCharacterDraftImages("kiana", mockStorage);
+            expect(store[`${CHAT_DRAFT_IMAGES_KEY_PREFIX}kiana`]).toBeUndefined();
+        });
+
+        it("handles storage exceptions gracefully", () => {
+            const throwingStorage = {
+                setItem: () => {
+                    throw new Error("Quota exceeded");
+                },
+                getItem: () => {
+                    throw new Error("Storage disabled");
+                },
+                removeItem: () => {
+                    throw new Error("Storage disabled");
+                },
+            } as unknown as Storage;
+
+            expect(() => saveCharacterDraftImages("kiana", ["http://test.png"], throwingStorage)).not.toThrow();
+            expect(loadSavedCharacterDraftImages("kiana", throwingStorage)).toEqual([]);
+            expect(() => clearCharacterDraftImages("kiana", throwingStorage)).not.toThrow();
         });
     });
 });

@@ -1164,7 +1164,15 @@
                     "speaking": "発話中...",
                     "transcribing": "変換中..."
                 }
-            }
+            },
+            "drop_image_title": "ドロップして画像をアップロード",
+            "drop_image_hint": "PNG, JPG, WebP に対応（最大 5MB）"
+        },
+        "image": {
+            "zoom_in": "拡大",
+            "zoom_out": "縮小",
+            "rotate": "回転",
+            "reset": "リセット"
         },
         "history": {
             "title": "会話履歴",

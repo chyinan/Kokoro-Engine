@@ -1165,7 +1165,15 @@
                     "speaking": "Speaking...",
                     "transcribing": "Transcribing..."
                 }
-            }
+            },
+            "drop_image_title": "Release to upload images",
+            "drop_image_hint": "Supports PNG, JPG, WebP (Max 5MB each)"
+        },
+        "image": {
+            "zoom_in": "Zoom in",
+            "zoom_out": "Zoom out",
+            "rotate": "Rotate",
+            "reset": "Reset"
         },
         "history": {
             "title": "Chat History",

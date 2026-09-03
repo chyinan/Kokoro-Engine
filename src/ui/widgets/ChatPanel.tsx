@@ -10,6 +10,7 @@ import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal, useWakeWord } from "../hooks";
 import { useTranslation } from "react-i18next";
+import { ImageLightbox } from "../components/ImageLightbox";
 import ConversationSidebar from "./ConversationSidebar";
 import { ChatMessage } from "./ChatMessage";
 import { createChatCharacterSynchronizer, type ChatCharacterSynchronizer } from "./chat-character-sync";
@@ -201,6 +202,7 @@ interface MemoizedChatMessageProps {
     onContinueFrom: (index: number) => Promise<void>;
     onApproveTool: (index: number, tool: ToolTraceItem) => Promise<void>;
     onRejectTool: (index: number, tool: ToolTraceItem) => Promise<void>;
+    onPreviewImage?: (url: string) => void;
 }
 
 function createToolActionHandler<TArgs extends Array<unknown>>(
@@ -213,6 +215,7 @@ function createToolActionHandler<TArgs extends Array<unknown>>(
 const MemoizedChatMessage = memo(function MemoizedChatMessage({
     message, globalIndex, isStreaming, isTranslationExpanded,
     onToggleTranslation, onEdit, onRegenerate, onContinueFrom, onApproveTool, onRejectTool,
+    onPreviewImage,
 }: MemoizedChatMessageProps) {
     return (
         <ChatMessage
@@ -226,6 +229,7 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
             onContinueFrom={() => onContinueFrom(globalIndex)}
             onApproveTool={createToolActionHandler(globalIndex, onApproveTool)}
             onRejectTool={createToolActionHandler(globalIndex, onRejectTool)}
+            onPreviewImage={onPreviewImage}
         />
     );
 });
@@ -285,7 +289,7 @@ export default function ChatPanel({
     const isPrependingRef = useRef(false);
     const prevScrollHeightRef = useRef(0);
     const prevScrollTopRef = useRef(0);
-    const { input, setInput, clearDraft } = useCharacterChatDraft(activeCharacterId);
+    const { input, setInput, pendingImages, setPendingImages, clearDraft } = useCharacterChatDraft(activeCharacterId);
     const inputRef = useRef(input);
     inputRef.current = input;
     const sttBaseDraftRef = useRef<string | null>(null);
@@ -337,6 +341,9 @@ export default function ChatPanel({
         });
     }, []);
 
+    const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+    const [isDraggingOver, setIsDraggingOver] = useState(false);
+    const dragCounterRef = useRef(0);
     const [isStreaming, setIsStreaming] = useState(false);
     const isStreamingRef = useRef(false);
     const [isBusy, setIsBusy] = useState(false);
@@ -451,7 +458,7 @@ export default function ChatPanel({
             {},
         ).camera_enabled === true
     );
-    const [pendingImages, setPendingImages] = useState<string[]>([]);
+    // pendingImages is managed by useCharacterChatDraft with character-scoped persistence
     const [isUploading, setIsUploading] = useState(false);
 
     // 对话历史侧边栏
@@ -1009,7 +1016,6 @@ export default function ChatPanel({
                 flushReveal();
                 stopStreaming();
                 setIsThinking(false);
-                userScrolledRef.current = false;
 
                 const cleanText = stripStoredMarkup(text);
                 const hasContent = hasRenderableTurnContent(turn, cleanText);
@@ -1062,7 +1068,6 @@ export default function ChatPanel({
                 flushReveal();
                 endTurnActivity();
                 setIsThinking(false);
-                userScrolledRef.current = false;
 
                 const fullText = turn.rawText;
                 rawResponseRef.current = fullText;
@@ -1416,6 +1421,72 @@ export default function ChatPanel({
         }
     };
 
+    // ── Drag and Drop image upload ──────────────────────────
+    const handleDragEnter = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounterRef.current += 1;
+        if (e.dataTransfer.types.includes("Files")) {
+            setIsDraggingOver(true);
+        }
+    }, []);
+
+    const handleDragLeave = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounterRef.current -= 1;
+        if (dragCounterRef.current <= 0) {
+            dragCounterRef.current = 0;
+            setIsDraggingOver(false);
+        }
+    }, []);
+
+    const handleDragOver = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "copy";
+    }, []);
+
+    const handleDrop = useCallback(async (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounterRef.current = 0;
+        setIsDraggingOver(false);
+
+        if (!visionEnabled) {
+            setError(t("chat.errors.vision_disabled") ?? "Vision is not enabled");
+            return;
+        }
+
+        const rawFiles = Array.from(e.dataTransfer.files);
+        const files = rawFiles.filter(f => f.type.startsWith("image/"));
+        if (files.length === 0) {
+            if (rawFiles.length > 0) {
+                setError(t("chat.errors.only_images"));
+            }
+            return;
+        }
+
+        for (const file of files) {
+            if (file.size > 5 * 1024 * 1024) {
+                setError(t("chat.errors.image_too_large"));
+                continue;
+            }
+
+            setIsUploading(true);
+            try {
+                const buffer = await file.arrayBuffer();
+                const bytes = Array.from(new Uint8Array(buffer));
+                const url = await uploadVisionImage(bytes, file.name);
+                setPendingImages(prev => [...prev, url]);
+            } catch (err) {
+                setError(err instanceof Error ? err.message : t("chat.errors.upload_failed"));
+            } finally {
+                setIsUploading(false);
+            }
+        }
+    }, [visionEnabled, t]);
+
     // ── STT: Advanced VAD Microphone toggle ─────────────────
     const handleMicToggle = useCallback(() => {
         if (voiceState === VoiceState.Idle) {
@@ -1755,6 +1826,10 @@ export default function ChatPanel({
             onPointerDownCapture={blockDisabledInteraction}
             onKeyDownCapture={blockDisabledInteraction}
             onFocusCapture={blockDisabledInteraction}
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ type: "spring", stiffness: 300, damping: 30 }}
@@ -1786,6 +1861,36 @@ export default function ChatPanel({
                     )}
                 />
             )}
+
+            {/* 拖拽放置指示遮罩 */}
+            <AnimatePresence>
+                {isDraggingOver && (
+                    <motion.div
+                        key="chat-dropzone-overlay"
+                        data-testid="chat-dropzone-overlay"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="absolute inset-0 z-40 bg-black/70 backdrop-blur-sm border-2 border-dashed border-[var(--color-accent)] rounded-xl flex flex-col items-center justify-center p-6 text-center pointer-events-none"
+                    >
+                        <div className="p-4 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)] mb-3">
+                            <ImagePlus size={36} strokeWidth={1.5} className="animate-pulse" />
+                        </div>
+                        <p className="text-sm font-semibold text-white">
+                            {t("chat.input.drop_image_title", "松开鼠标上传图片")}
+                        </p>
+                        <p className="text-xs text-[var(--color-text-muted)] mt-1">
+                            {t("chat.input.drop_image_hint", "支持 PNG, JPG, WebP 格式 (单张最大 5MB)")}
+                        </p>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* 大图预览 Lightbox */}
+            <ImageLightbox
+                imageUrl={previewImageUrl}
+                onClose={() => setPreviewImageUrl(null)}
+            />
 
             {/* Error toast */}
             <AnimatePresence>
@@ -1876,6 +1981,7 @@ export default function ChatPanel({
                 </div>
                 <div className="flex items-center gap-1">
                     <motion.button
+                        data-chat-history-toggle="true"
                         whileHover={{ scale: 1.1 }}
                         whileTap={{ scale: 0.95 }}
                         onClick={() => setSidebarOpen(prev => !prev)}
@@ -1946,6 +2052,7 @@ export default function ChatPanel({
                                 onContinueFrom={onContinueFrom}
                                 onApproveTool={onApproveTool}
                                 onRejectTool={onRejectTool}
+                                onPreviewImage={setPreviewImageUrl}
                             />
                         );
                     })}
