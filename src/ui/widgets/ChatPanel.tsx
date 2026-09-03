@@ -47,6 +47,7 @@ import {
     saveChatInputHeight,
     toggleChatInputResetHeight,
 } from "./chat/chat-input-layout";
+import { useCharacterChatDraft } from "./chat/use-character-draft";
 import { requestMemoryModelDialog } from "../../lib/memory-model-gate";
 import { getChatPanelInteractionProps } from "../layout/layout-interaction";
 import { audioPlayer } from "../../core/services";
@@ -277,7 +278,7 @@ export default function ChatPanel({
     activeConversationIdRef.current = activeConversationId;
     const deferredMessages = useDeferredValue(messages);
     const [visibleCount, setVisibleCount] = useState(20);
-    const [input, setInput] = useState("");
+    const { input, setInput, clearDraft } = useCharacterChatDraft(activeCharacterId);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [inputHeight, setInputHeight] = useState<number>(loadSavedChatInputHeight);
     const inputHeightRef = useRef(inputHeight);
@@ -589,7 +590,7 @@ export default function ChatPanel({
                 }
 
                 // Auto-send: inject directly into chat
-                setInput("");
+                clearDraft();
                 setMessages(prev => [...prev, { role: "user", text: trimmed }]);
                 startStreaming();
                 setIsThinking(true);
@@ -1178,7 +1179,7 @@ export default function ChatPanel({
         setMessages(prev => [...prev, { role: "user", text: trimmed, images: messageImages.length > 0 ? messageImages : undefined }]);
         const cameraFrame = visionEnabled ? getLatestCameraFrame() : null;
         const imagesToSend = cameraFrame ? [...messageImages, cameraFrame] : messageImages;
-        setInput("");
+        clearDraft();
         setPendingImages([]);
         startStreaming();
         setIsThinking(true);
