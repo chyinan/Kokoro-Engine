@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createChatCharacterSynchronizer,
+  getCharacterHeaderDisplayName,
   getInitialCharacterConversationTarget,
   isFailureForActiveChat,
   shouldIgnoreLegacyChatError,
@@ -188,5 +189,14 @@ describe("character conversation synchronization", () => {
 
     expect(clearVisibleConversation).toHaveBeenLastCalledWith("pico");
     expect(applyVisibleConversation).not.toHaveBeenCalled();
+  });
+
+  it("normalizes character display names for header presentation", () => {
+    expect(getCharacterHeaderDisplayName("Kiana")).toBe("Kiana");
+    expect(getCharacterHeaderDisplayName("  Bronya  ")).toBe("Bronya");
+    expect(getCharacterHeaderDisplayName("")).toBe("");
+    expect(getCharacterHeaderDisplayName("   ")).toBe("");
+    expect(getCharacterHeaderDisplayName(null)).toBe("");
+    expect(getCharacterHeaderDisplayName(undefined)).toBe("");
   });
 });
