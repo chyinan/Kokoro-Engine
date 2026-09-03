@@ -8,7 +8,7 @@ import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Spa
 import { ModList } from "../mods/ModList";
 import ContentLibrary from "./ContentLibrary";
 import { Select } from "@/components/ui/select";
-import CharacterManager from "./CharacterManager";
+import CharacterManager, { type CharacterManagerRef, type CharacterSaveResult } from "./CharacterManager";
 import type { CharacterRuntimeOverrides } from "../../features/characters/character-runtime-overrides";
 import ImageGenSettings from "./ImageGenSettings";
 import MemoryPanel from "./MemoryPanel";
@@ -25,7 +25,39 @@ import { BackupTab } from "./settings/BackupTab";
 import PetTab from "./settings/PetTab";
 import AboutTab from "./settings/AboutTab";
 import { useTranslation } from "react-i18next";
-import { setUserLanguage, listTtsProviders, listTtsVoices, getTtsConfig, saveTtsConfig, saveImageGenConfig, getSttConfig, saveSttConfig, getBotConfig, saveBotConfig, saveLlmConfig } from "../../lib/kokoro-bridge";
+import {
+    setUserLanguage,
+    listTtsProviders,
+    listTtsVoices,
+    getTtsConfig,
+    saveTtsConfig,
+    saveImageGenConfig,
+    getSttConfig,
+    saveSttConfig,
+    getBotConfig,
+    saveBotConfig,
+    saveLlmConfig,
+    saveVisionConfig,
+    getJailbreakPrompt,
+    setJailbreakPrompt,
+    getAutoBackupConfig,
+    saveAutoBackupConfig,
+    getKokoroErrorMessage,
+} from "../../lib/kokoro-bridge";
+import {
+    isAutoBackupConfigDirty,
+    isBackgroundConfigDirty,
+    isBotConfigDirty,
+    isImageGenConfigDirty,
+    isJailbreakPromptDirty,
+    isLlmConfigDirty,
+    isRuntimeDirty,
+    isSttConfigDirty,
+    isTtsConfigDirty,
+    isTtsParamsDirty,
+    isVisionConfigDirty,
+    type TtsParamSnapshot,
+} from "./settings-dirty-check";
 import type {
     ProviderStatus,
     VoiceProfile,
@@ -302,6 +334,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     const overlayRef = useRef<HTMLDivElement>(null);
     const latestLlmConfigRef = useRef<LlmConfig | null>(llmConfigProp ?? null);
     const bgConfigDirtyRef = useRef(false);
+    const characterManagerRef = useRef<CharacterManagerRef | null>(null);
 
     // ── Local Buffer State ───────────────────────────────
     // We hold changes locally until "Save" is clicked.
@@ -316,6 +349,53 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         ...normalizeBackgroundConfigForImageCount(bg.config, bg.imageCount),
     }));
 
+    // Vision Config
+    const [localVisionConfig, setLocalVisionConfig] = useState<VisionConfig | null>(visionConfigProp ?? null);
+
+    // Jailbreak Prompt
+    const [localJailbreakPrompt, setLocalJailbreakPrompt] = useState("");
+    const [isJailbreakLoading, setIsJailbreakLoading] = useState(true);
+
+    // Save error feedback
+    const [saveError, setSaveError] = useState<string | null>(null);
+
+    // Render FPS
+    const [localRenderFps, setLocalRenderFps] = useState(renderFps);
+
+    // Auto Backup Config
+    const [localAutoBackupConfig, setLocalAutoBackupConfig] = useState<AutoBackupConfig | null>(null);
+    const [isAutoBackupLoading, setIsAutoBackupLoading] = useState(true);
+    const openRevisionRef = useRef(0);
+    const ttsRefreshRevisionRef = useRef(0);
+    const botRefreshRevisionRef = useRef(0);
+    const pendingRuntimePersonaRef = useRef<{ characterId: string; persona: string } | null>(null);
+
+    // Baseline snapshots (recorded when opening Settings to support dirty checking and cancel reset)
+    const baselineDisplayModeRef = useRef(displayMode);
+    const baselineCustomModelPathRef = useRef(customModelPath);
+    const baselineGazeTrackingRef = useRef(gazeTrackingProp ?? true);
+    const baselineRenderFpsRef = useRef(renderFps);
+    const baselineBgConfigRef = useRef(localBgConfig);
+    const baselineTtsParamsRef = useRef<TtsParamSnapshot>({
+        enabled: false,
+        providerId: "browser",
+        voice: "",
+        speed: "1.0",
+        pitch: "1.0",
+    });
+    const baselineTtsConfigRef = useRef<TtsSystemConfig | null>(null);
+    const baselineSttConfigRef = useRef<SttConfig | null>(null);
+    const baselineVoiceInterruptRef = useRef(false);
+    const baselineImageGenConfigRef = useRef<ImageGenSystemConfig | null>(null);
+    const baselineBotConfigRef = useRef<BotConfig | null>(null);
+    const baselineLlmConfigRef = useRef<LlmConfig | null>(null);
+    const baselineVisionConfigRef = useRef<VisionConfig | null>(null);
+    const baselineVisionEnabledRef = useRef(false);
+    const baselineUserLangRef = useRef("");
+    const baselineResponseLangRef = useRef("");
+    const baselineJailbreakPromptRef = useRef("");
+    const baselineAutoBackupConfigRef = useRef<AutoBackupConfig | null>(null);
+
     // Sync local state only when the panel opens; while editing, keep local form state authoritative.
     useEffect(() => {
         if (isOpen) {
@@ -323,26 +403,102 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             setLocalCustomModelPath(customModelPath);
             latestLlmConfigRef.current = llmConfigProp ?? null;
             setLocalGazeTracking(gazeTrackingProp ?? true);
+            setLocalRenderFps(renderFps);
             bgConfigDirtyRef.current = false;
-            setLocalBgConfig({ ...normalizeBackgroundConfigForImageCount(bg.config, bg.imageCount) });
-            setTtsVoice(readStringSetting(APP_SETTING_KEYS.ttsVoice, ""));
-            setTtsSpeed(readStringSetting(APP_SETTING_KEYS.ttsSpeed, "1.0"));
-            setTtsPitch(readStringSetting(APP_SETTING_KEYS.ttsPitch, "1.0"));
-            setTtsProviderId(readStringSetting(APP_SETTING_KEYS.ttsProvider, "browser"));
-            setTtsEnabled(readBooleanSetting(APP_SETTING_KEYS.ttsEnabled, false));
-            setVisionEnabled(readBooleanSetting(APP_SETTING_KEYS.visionEnabled, false));
-            setVoiceInterrupt(readBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, false));
-            setResponseLang(readStringSetting(APP_SETTING_KEYS.responseLanguage, ""));
-            setUserLang(readStringSetting(APP_SETTING_KEYS.userLanguage, ""));
+            const currentBg = { ...normalizeBackgroundConfigForImageCount(bg.config, bg.imageCount) };
+            setLocalBgConfig(currentBg);
+
+            const voice = readStringSetting(APP_SETTING_KEYS.ttsVoice, "");
+            const speed = readStringSetting(APP_SETTING_KEYS.ttsSpeed, "1.0");
+            const pitch = readStringSetting(APP_SETTING_KEYS.ttsPitch, "1.0");
+            const provider = readStringSetting(APP_SETTING_KEYS.ttsProvider, "browser");
+            const enabled = readBooleanSetting(APP_SETTING_KEYS.ttsEnabled, false);
+            const vision = readBooleanSetting(APP_SETTING_KEYS.visionEnabled, false);
+            const voiceInt = readBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, false);
+            const respLang = readStringSetting(APP_SETTING_KEYS.responseLanguage, "");
+            const uLang = readStringSetting(APP_SETTING_KEYS.userLanguage, "");
+
+            setTtsVoice(voice);
+            setTtsSpeed(speed);
+            setTtsPitch(pitch);
+            setTtsProviderId(provider);
+            setTtsEnabled(enabled);
+            setVisionEnabled(vision);
+            setVoiceInterrupt(voiceInt);
+            setResponseLang(respLang);
+            setUserLang(uLang);
             setLocalBotConfig(null);
-            fetchData();
-            fetchBotConfig();
+            setLocalVisionConfig(visionConfigProp ?? null);
+
+            // Record baseline snapshots
+            baselineDisplayModeRef.current = displayMode;
+            baselineCustomModelPathRef.current = customModelPath;
+            baselineGazeTrackingRef.current = gazeTrackingProp ?? true;
+            baselineRenderFpsRef.current = renderFps;
+            baselineBgConfigRef.current = currentBg;
+            baselineTtsParamsRef.current = {
+                enabled,
+                providerId: provider,
+                voice,
+                speed,
+                pitch,
+            };
+            baselineVisionEnabledRef.current = vision;
+            baselineVoiceInterruptRef.current = voiceInt;
+            baselineResponseLangRef.current = respLang;
+            baselineUserLangRef.current = uLang;
+            baselineImageGenConfigRef.current = imageGenConfigProp ?? null;
+            baselineLlmConfigRef.current = llmConfigProp ?? null;
+            baselineVisionConfigRef.current = visionConfigProp ?? null;
+
+            const currentRevision = ++openRevisionRef.current;
+            setIsJailbreakLoading(true);
+            setIsAutoBackupLoading(true);
+            setSaveError(null);
+            pendingRuntimePersonaRef.current = null;
+            getJailbreakPrompt()
+                .then((loaded) => {
+                    if (openRevisionRef.current !== currentRevision) return;
+                    setLocalJailbreakPrompt(loaded);
+                    baselineJailbreakPromptRef.current = loaded;
+                })
+                .catch((e) => console.error("[SettingsPanel] Failed to fetch jailbreak prompt:", e))
+                .finally(() => {
+                    if (openRevisionRef.current === currentRevision) {
+                        setIsJailbreakLoading(false);
+                    }
+                });
+
+            getAutoBackupConfig()
+                .then((cfg) => {
+                    if (openRevisionRef.current !== currentRevision) return;
+                    setLocalAutoBackupConfig(cfg);
+                    baselineAutoBackupConfigRef.current = cfg;
+                })
+                .catch((e) => console.error("[SettingsPanel] Failed to fetch auto backup config:", e))
+                .finally(() => {
+                    if (openRevisionRef.current === currentRevision) {
+                        setIsAutoBackupLoading(false);
+                    }
+                });
+
+            fetchData(currentRevision);
+            fetchBotConfig(currentRevision);
+        } else {
+            openRevisionRef.current++;
         }
+        return () => {
+            openRevisionRef.current++;
+        };
     }, [isOpen]);
 
     useEffect(() => {
-        if (!isOpen || bgConfigDirtyRef.current) return;
-        setLocalBgConfig({ ...normalizeBackgroundConfigForImageCount(bg.config, bg.imageCount) });
+        if (!isOpen) return;
+        if (!bgConfigDirtyRef.current) {
+            setLocalBgConfig({ ...normalizeBackgroundConfigForImageCount(bg.config, bg.imageCount) });
+        } else if (bg.imageCount === 0) {
+            setLocalBgConfig(prev => normalizeBackgroundConfigForImageCount(prev, 0));
+        }
     }, [isOpen, bg.config, bg.imageCount]);
 
     const [mountedTabs, setMountedTabs] = useState<Set<SettingsTabId>>(() => new Set([activeTab]));
@@ -365,8 +521,20 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     // Update local BG config helper
     const updateBgConfig = (update: Partial<BackgroundConfig>) => {
         bgConfigDirtyRef.current = true;
-        setLocalBgConfig(prev => ({ ...prev, ...update }));
+        setLocalBgConfig(prev => {
+            const merged = { ...prev, ...update };
+            return normalizeBackgroundConfigForImageCount(merged, bg.imageCount);
+        });
     };
+
+    useEffect(() => {
+        if (
+            pendingRuntimePersonaRef.current &&
+            pendingRuntimePersonaRef.current.characterId !== activeCharacterId
+        ) {
+            pendingRuntimePersonaRef.current = null;
+        }
+    }, [activeCharacterId]);
 
 
     // TTS state
@@ -482,50 +650,61 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     useEffect(() => {
         const handleClick = (e: MouseEvent) => {
             if (overlayRef.current && e.target === overlayRef.current) {
-                onClose();
+                handleCancel();
             }
         };
         if (isOpen) {
             document.addEventListener("mousedown", handleClick);
         }
         return () => document.removeEventListener("mousedown", handleClick);
-    }, [isOpen, onClose]);
+    }, [isOpen]);
 
     // Escape to close
     useEffect(() => {
         const handleKey = (e: KeyboardEvent) => {
-            if (e.key === "Escape") onClose();
+            if (e.key === "Escape") handleCancel();
         };
         if (isOpen) {
             document.addEventListener("keydown", handleKey);
         }
         return () => document.removeEventListener("keydown", handleKey);
-    }, [isOpen, onClose]);
+    }, [isOpen]);
 
-    const fetchData = async () => {
+    const fetchData = async (explicitRevision?: number | unknown) => {
+        const sessionRevision = typeof explicitRevision === "number" ? explicitRevision : openRevisionRef.current;
+        const refreshRevision = ++ttsRefreshRevisionRef.current;
         setIsTtsLoading(true);
         try {
-            const [providers, voices, ttsConfig] = await Promise.all([
+            const [providers, voices, ttsConfig, sttConfig] = await Promise.all([
                 listTtsProviders(),
                 listTtsVoices(),
                 getTtsConfig(),
+                getSttConfig(),
             ]);
+            if (openRevisionRef.current !== sessionRevision || ttsRefreshRevisionRef.current !== refreshRevision) return;
             setTtsProviders(providers);
             setTtsVoices(voices);
             setLocalTtsConfig(ttsConfig);
-            const sttConfig = await getSttConfig();
+            baselineTtsConfigRef.current = ttsConfig;
             setLocalSttConfig(sttConfig);
+            baselineSttConfigRef.current = sttConfig;
         } catch (e) {
             console.error("[SettingsPanel] Failed to fetch data:", e);
         } finally {
-            setIsTtsLoading(false);
+            if (openRevisionRef.current === sessionRevision && ttsRefreshRevisionRef.current === refreshRevision) {
+                setIsTtsLoading(false);
+            }
         }
     };
 
-    const fetchBotConfig = async () => {
+    const fetchBotConfig = async (explicitRevision?: number | unknown) => {
+        const sessionRevision = typeof explicitRevision === "number" ? explicitRevision : openRevisionRef.current;
+        const refreshRevision = ++botRefreshRevisionRef.current;
         try {
             const botConfig = await getBotConfig();
+            if (openRevisionRef.current !== sessionRevision || botRefreshRevisionRef.current !== refreshRevision) return;
             setLocalBotConfig(botConfig);
+            baselineBotConfigRef.current = botConfig;
         } catch (e) {
             console.error("[SettingsPanel] Failed to fetch bot config:", e);
         }
@@ -556,41 +735,145 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     };
 
     const handleSave = async () => {
-        // Persist to localStorage (non-LLM settings)
-        writeBooleanSetting(APP_SETTING_KEYS.visionEnabled, visionEnabled);
-        dispatchRuntimeSettingsChanged("vision");
-        if (localSttConfig) {
-            const activeSttProvider = localSttConfig.providers?.find(p => p.id === localSttConfig.active_provider);
-            writeBooleanSetting(APP_SETTING_KEYS.sttEnabled, activeSttProvider?.enabled === true);
-            writeBooleanSetting(APP_SETTING_KEYS.sttAutoSend, localSttConfig.auto_send);
-            writeStringSetting(APP_SETTING_KEYS.sttLanguage, localSttConfig.language || "");
-            writeBooleanSetting(APP_SETTING_KEYS.sttContinuousListening, localSttConfig.continuous_listening);
-            writeBooleanSetting(APP_SETTING_KEYS.wakeWordEnabled, localSttConfig.wake_word_enabled);
-            writeStringSetting(APP_SETTING_KEYS.wakeWord, localSttConfig.wake_word || "");
-        }
-        dispatchRuntimeSettingsChanged("stt");
-        writeBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, voiceInterrupt);
-        writeStringSetting(APP_SETTING_KEYS.userLanguage, userLang);
+        setSaveError(null);
+        const saveErrors: string[] = [];
 
-        // Commit core settings
-        onDisplayModeChange(localDisplayMode);
-        onGazeTrackingChange?.(localGazeTracking);
-
-        // Commit background config
-        bg.setConfig(localBgConfig);
-        bgConfigDirtyRef.current = false;
-
-        showSaveFeedback();
-
-        // Send user language to backend
+        // 1. Commit Persona Draft
+        let personaSaveResult: CharacterSaveResult | undefined;
         try {
-            await setUserLanguage(userLang);
+            personaSaveResult = await characterManagerRef.current?.saveDraft();
+            if (personaSaveResult?.errors && personaSaveResult.errors.length > 0) {
+                saveErrors.push(...personaSaveResult.errors);
+            }
         } catch (e) {
-            console.error("[SettingsPanel] Failed to set user language:", e);
+            console.error("[SettingsPanel] Failed to save character draft:", e);
+            saveErrors.push(getKokoroErrorMessage(e));
+        }
+        const isCurrentActiveCharacter = personaSaveResult?.changedCharacter?.id === activeCharacterId;
+        const personaDirty = Boolean(personaSaveResult?.characterDirty && isCurrentActiveCharacter);
+        if (
+            personaDirty &&
+            personaSaveResult?.changedCharacter?.persona &&
+            personaSaveResult?.changedCharacter?.id
+        ) {
+            pendingRuntimePersonaRef.current = {
+                characterId: personaSaveResult.changedCharacter.id,
+                persona: personaSaveResult.changedCharacter.persona,
+            };
         }
 
-        // Persist TTS Config
-        if (localTtsConfig) {
+        // 2. Commit Vision Settings & Config
+        const visionEnabledDirty = visionEnabled !== baselineVisionEnabledRef.current;
+        const visionConfigDirty = isVisionConfigDirty(baselineVisionConfigRef.current, localVisionConfig);
+        let visionSaveFailed = false;
+        if (visionConfigDirty && localVisionConfig) {
+            try {
+                await saveVisionConfig(localVisionConfig);
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to save Vision config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
+                visionSaveFailed = true;
+            }
+        }
+        if (!visionSaveFailed) {
+            if (visionConfigDirty && localVisionConfig) {
+                localStorage.setItem("kokoro_vision_config", JSON.stringify(localVisionConfig));
+                baselineVisionConfigRef.current = { ...localVisionConfig };
+                onVisionConfigChange?.(localVisionConfig);
+                window.dispatchEvent(new Event("kokoro-vision-settings-changed"));
+            }
+            if (visionEnabledDirty) {
+                writeBooleanSetting(APP_SETTING_KEYS.visionEnabled, visionEnabled);
+                baselineVisionEnabledRef.current = visionEnabled;
+            }
+            if (visionEnabledDirty || visionConfigDirty) {
+                dispatchRuntimeSettingsChanged("vision");
+            }
+        }
+
+        // 3. Commit STT Settings & Config
+        const voiceInterruptDirty = voiceInterrupt !== baselineVoiceInterruptRef.current;
+        const sttConfigDirty = isSttConfigDirty(
+            baselineSttConfigRef.current,
+            localSttConfig,
+            baselineVoiceInterruptRef.current,
+            baselineVoiceInterruptRef.current,
+        );
+        let sttSaveFailed = false;
+        if (sttConfigDirty && localSttConfig) {
+            try {
+                await saveSttConfig(localSttConfig);
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to save STT config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
+                sttSaveFailed = true;
+            }
+        }
+        if (!sttSaveFailed) {
+            if (sttConfigDirty && localSttConfig) {
+                const activeSttProvider = localSttConfig.providers?.find(p => p.id === localSttConfig.active_provider);
+                writeBooleanSetting(APP_SETTING_KEYS.sttEnabled, activeSttProvider?.enabled === true);
+                writeBooleanSetting(APP_SETTING_KEYS.sttAutoSend, localSttConfig.auto_send);
+                writeStringSetting(APP_SETTING_KEYS.sttLanguage, localSttConfig.language || "");
+                writeBooleanSetting(APP_SETTING_KEYS.sttContinuousListening, localSttConfig.continuous_listening);
+                writeBooleanSetting(APP_SETTING_KEYS.wakeWordEnabled, localSttConfig.wake_word_enabled);
+                writeStringSetting(APP_SETTING_KEYS.wakeWord, localSttConfig.wake_word || "");
+                baselineSttConfigRef.current = { ...localSttConfig };
+            }
+            if (voiceInterruptDirty) {
+                writeBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, voiceInterrupt);
+                baselineVoiceInterruptRef.current = voiceInterrupt;
+            }
+            if (sttConfigDirty || voiceInterruptDirty) {
+                dispatchRuntimeSettingsChanged("stt");
+            }
+        }
+
+        // 4. Commit Core Display & Gaze Tracking
+        const displayModeDirty = localDisplayMode !== baselineDisplayModeRef.current;
+        if (displayModeDirty) {
+            onDisplayModeChange(localDisplayMode);
+            baselineDisplayModeRef.current = localDisplayMode;
+        }
+        const gazeTrackingDirty = localGazeTracking !== baselineGazeTrackingRef.current;
+        if (gazeTrackingDirty) {
+            onGazeTrackingChange?.(localGazeTracking);
+            baselineGazeTrackingRef.current = localGazeTracking;
+        }
+
+        // 5. Commit Background Config
+        const finalBgConfig = normalizeBackgroundConfigForImageCount(localBgConfig, bg.imageCount);
+        const bgDirty = bgConfigDirtyRef.current || isBackgroundConfigDirty(baselineBgConfigRef.current, finalBgConfig);
+        if (bgDirty) {
+            bg.setConfig(finalBgConfig);
+            baselineBgConfigRef.current = { ...finalBgConfig };
+            bgConfigDirtyRef.current = false;
+        }
+
+        // 6. Commit User Language (Translation)
+        const userLangDirty = userLang !== baselineUserLangRef.current;
+        if (userLangDirty) {
+            try {
+                await setUserLanguage(userLang);
+                writeStringSetting(APP_SETTING_KEYS.userLanguage, userLang);
+                baselineUserLangRef.current = userLang;
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to set user language:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
+            }
+        }
+
+        // 7. Commit TTS System Config
+        const currentTtsParams: TtsParamSnapshot = {
+            enabled: ttsEnabled,
+            providerId: ttsProviderId,
+            voice: ttsVoice,
+            speed: ttsSpeed,
+            pitch: ttsPitch,
+        };
+        const ttsParamsDirty = isTtsParamsDirty(baselineTtsParamsRef.current, currentTtsParams);
+        const ttsConfigDirty = isTtsConfigDirty(baselineTtsConfigRef.current, localTtsConfig);
+        if (ttsConfigDirty && localTtsConfig) {
             const ttsConfigToSave: TtsSystemConfig = {
                 ...localTtsConfig,
                 providers: localTtsConfig.providers.map((provider) => {
@@ -610,6 +893,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             try {
                 await saveTtsConfig(ttsConfigToSave);
                 setLocalTtsConfig(ttsConfigToSave);
+                baselineTtsConfigRef.current = ttsConfigToSave;
                 // Refresh provider status after saving config
                 const [providers, voices] = await Promise.all([
                     listTtsProviders(),
@@ -619,68 +903,186 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 setTtsVoices(voices);
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save TTS config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
+            }
+        }
+        // 8. Track Live2D Model & Response Language changes
+        const modelDirty = localCustomModelPath !== baselineCustomModelPathRef.current;
+        const responseLangDirty = responseLang !== baselineResponseLangRef.current;
+
+        // 9. CONDITIONAL RUNTIME RELOAD:
+        // Only trigger onCharacterRuntimeChange if one of the runtime-sensitive fields changed!
+        const pendingRuntime = pendingRuntimePersonaRef.current;
+        const pendingForActive = (pendingRuntime && pendingRuntime.characterId === activeCharacterId)
+            ? pendingRuntime.persona
+            : null;
+        const personaToApply = personaDirty
+            ? (personaSaveResult?.changedCharacter?.persona ?? null)
+            : pendingForActive;
+        const runtimeDirty = isRuntimeDirty({
+            personaDirty: Boolean(personaToApply),
+            ttsDirty: ttsParamsDirty,
+            modelDirty,
+            responseLangDirty,
+        });
+
+        if (runtimeDirty) {
+            const selectedTtsProvider = localTtsConfig?.providers?.find(
+                (provider) => provider.id === ttsProviderId,
+            ) ?? null;
+            try {
+                await onCharacterRuntimeChange({
+                    ...(responseLangDirty ? { responseLanguage: responseLang } : {}),
+                    ...(modelDirty ? { live2dModel: localCustomModelPath } : {}),
+                    ...(personaToApply ? { persona: personaToApply } : {}),
+                    ...(ttsParamsDirty ? {
+                        tts: {
+                            enabled: ttsEnabled,
+                            providerId: ttsProviderId || null,
+                            providerType: selectedTtsProvider?.provider_type ?? null,
+                            voice: ttsVoice || null,
+                            speed: Number.parseFloat(ttsSpeed) || 1,
+                            pitch: Number.parseFloat(ttsPitch) || 1,
+                        },
+                    } : {}),
+                });
+                pendingRuntimePersonaRef.current = null;
+                if (responseLangDirty) {
+                    baselineResponseLangRef.current = responseLang;
+                }
+                if (modelDirty) {
+                    baselineCustomModelPathRef.current = localCustomModelPath;
+                }
+                if (ttsParamsDirty) {
+                    baselineTtsParamsRef.current = currentTtsParams;
+                }
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to apply character runtime:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
+            }
+        } else {
+            if (responseLangDirty) {
+                baselineResponseLangRef.current = responseLang;
+            }
+            if (modelDirty) {
+                baselineCustomModelPathRef.current = localCustomModelPath;
+            }
+            if (ttsParamsDirty) {
+                baselineTtsParamsRef.current = currentTtsParams;
             }
         }
 
-        const selectedTtsProvider = localTtsConfig?.providers.find(
-            (provider) => provider.id === ttsProviderId,
-        ) ?? null;
-        try {
-            await onCharacterRuntimeChange({
-                responseLanguage: responseLang,
-                live2dModel: localCustomModelPath,
-                tts: {
-                    enabled: ttsEnabled,
-                    providerId: ttsProviderId || null,
-                    providerType: selectedTtsProvider?.provider_type ?? null,
-                    voice: ttsVoice || null,
-                    speed: Number.parseFloat(ttsSpeed) || 1,
-                    pitch: Number.parseFloat(ttsPitch) || 1,
-                },
-            });
-        } catch (e) {
-            console.error("[SettingsPanel] Failed to apply character runtime:", e);
-        }
-
-        // Commit Image Gen Config
-        if (localImageGenConfig) {
+        // 10. Commit Image Gen Config
+        const imageGenDirty = isImageGenConfigDirty(baselineImageGenConfigRef.current, localImageGenConfig);
+        if (imageGenDirty && localImageGenConfig) {
             try {
                 await saveImageGenConfig(localImageGenConfig);
+                baselineImageGenConfigRef.current = { ...localImageGenConfig };
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Image Gen config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
             }
         }
 
-        // Commit STT Config
-        if (localSttConfig) {
+        // 11. Commit Bot Config
+        const botDirty = isBotConfigDirty(baselineBotConfigRef.current, localBotConfig);
+        if (botDirty && localBotConfig) {
             try {
-                await saveSttConfig(localSttConfig);
-            } catch (e) {
-                console.error("[SettingsPanel] Failed to save STT config:", e);
-            }
-        }
-
-        // Commit Bot Config
-        if (localBotConfig) {
-            try {
-                setLocalBotConfig(await saveBotConfig(localBotConfig));
+                const savedBot = await saveBotConfig(localBotConfig);
+                setLocalBotConfig(savedBot);
+                baselineBotConfigRef.current = savedBot;
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Bot config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
             }
         }
 
-        // Commit LLM Config (if ApiTab has unsaved changes)
-        if (latestLlmConfigRef.current) {
+        // 12. Commit LLM Config (if ApiTab has unsaved changes)
+        const llmDirty = isLlmConfigDirty(baselineLlmConfigRef.current, latestLlmConfigRef.current);
+        if (llmDirty && latestLlmConfigRef.current) {
             try {
                 await saveLlmConfig(latestLlmConfigRef.current);
+                baselineLlmConfigRef.current = latestLlmConfigRef.current;
                 onLlmConfigSaved?.(latestLlmConfigRef.current);
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save LLM config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
             }
         }
+
+        // 13. Commit Jailbreak Prompt
+        const jailbreakDirty = isJailbreakPromptDirty(baselineJailbreakPromptRef.current, localJailbreakPrompt);
+        if (jailbreakDirty) {
+            try {
+                await setJailbreakPrompt(localJailbreakPrompt);
+                baselineJailbreakPromptRef.current = localJailbreakPrompt;
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to save Jailbreak prompt:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
+            }
+        }
+
+        // 14. Commit Render FPS
+        const renderFpsDirty = localRenderFps !== baselineRenderFpsRef.current;
+        if (renderFpsDirty) {
+            onRenderFpsChange(localRenderFps);
+            baselineRenderFpsRef.current = localRenderFps;
+        }
+
+        // 15. Commit Auto Backup Config
+        const autoBackupDirty = isAutoBackupConfigDirty(baselineAutoBackupConfigRef.current, localAutoBackupConfig);
+        if (autoBackupDirty && localAutoBackupConfig) {
+            try {
+                await saveAutoBackupConfig(localAutoBackupConfig);
+                baselineAutoBackupConfigRef.current = { ...localAutoBackupConfig };
+            } catch (e) {
+                console.error("[SettingsPanel] Failed to save Auto Backup config:", e);
+                saveErrors.push(getKokoroErrorMessage(e));
+            }
+        }
+
+        if (saveErrors.length > 0) {
+            setSaveError(saveErrors.join("; "));
+            return;
+        }
+
+        setSaveError(null);
+        showSaveFeedback();
     };
 
     const handleCancel = () => {
+        openRevisionRef.current++;
+        setSaveError(null);
+        pendingRuntimePersonaRef.current = null;
+        characterManagerRef.current?.resetDraft();
+        setLocalDisplayMode(baselineDisplayModeRef.current);
+        setLocalCustomModelPath(baselineCustomModelPathRef.current);
+        setLocalGazeTracking(baselineGazeTrackingRef.current);
+        setLocalRenderFps(baselineRenderFpsRef.current);
+        const restoredBg = normalizeBackgroundConfigForImageCount(baselineBgConfigRef.current, bg.imageCount);
+        setLocalBgConfig(restoredBg);
+        bg.setConfig(restoredBg);
+        bgConfigDirtyRef.current = false;
+        setUserLang(baselineUserLangRef.current);
+        setResponseLang(baselineResponseLangRef.current);
+        setTtsVoice(baselineTtsParamsRef.current.voice);
+        setTtsSpeed(baselineTtsParamsRef.current.speed);
+        setTtsPitch(baselineTtsParamsRef.current.pitch);
+        setTtsProviderId(baselineTtsParamsRef.current.providerId);
+        setTtsEnabled(baselineTtsParamsRef.current.enabled);
+        setLocalTtsConfig(baselineTtsConfigRef.current);
+        setLocalSttConfig(baselineSttConfigRef.current);
+        setVoiceInterrupt(baselineVoiceInterruptRef.current);
+        setLocalImageGenConfig(baselineImageGenConfigRef.current);
+        setLocalBotConfig(baselineBotConfigRef.current);
+        latestLlmConfigRef.current = baselineLlmConfigRef.current;
+        setVisionEnabled(baselineVisionEnabledRef.current);
+        setLocalVisionConfig(baselineVisionConfigRef.current);
+        if (baselineVisionConfigRef.current) {
+            onVisionConfigChange?.(baselineVisionConfigRef.current);
+        }
+        setLocalJailbreakPrompt(baselineJailbreakPromptRef.current);
+        setLocalAutoBackupConfig(baselineAutoBackupConfigRef.current);
         onClose();
     };
 
@@ -719,7 +1121,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                     whileHover="hover"
                                     whileTap={{ scale: 0.97 }}
                                     transition={{ type: "spring", stiffness: 380, damping: 26 }}
-                                    onClick={onClose}
+                                    onClick={handleCancel}
                                     data-onboarding-id="settings-close-button"
                                     className="inline-flex h-9 w-9 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-[color,border-color,box-shadow,background-color] duration-200 ease-out hover:bg-[var(--color-accent)]/8 hover:text-[var(--color-accent)]"
                                     aria-label="Close settings"
@@ -795,6 +1197,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                             {mountedTabs.has("persona") && (
                                 <div className={activeTab === "persona" ? "block" : "hidden"}>
                                     <CharacterManager
+                                        ref={characterManagerRef}
                                         onActivateCharacter={onActivateCharacter}
                                         onCharacterRuntimeChange={onCharacterRuntimeChange}
                                         onCharactersChanged={onCharactersChanged}
@@ -861,8 +1264,8 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                         onCustomModelPathChange={setLocalCustomModelPath}
                                         gazeTracking={localGazeTracking}
                                         onGazeTrackingChange={setLocalGazeTracking}
-                                        renderFps={renderFps}
-                                        onRenderFpsChange={onRenderFpsChange}
+                                        renderFps={localRenderFps}
+                                        onRenderFpsChange={setLocalRenderFps}
                                     />
                                 </div>
                             )}
@@ -902,8 +1305,11 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                             {mountedTabs.has("vision") && (
                                 <div className={activeTab === "vision" ? "block" : "hidden"}>
                                     <VisionTab
-                                        initialConfig={visionConfigProp ?? null}
-                                        onConfigChange={onVisionConfigChange}
+                                        initialConfig={localVisionConfig}
+                                        committedConfig={baselineVisionConfigRef.current}
+                                        onConfigChange={(cfg) => {
+                                            setLocalVisionConfig(cfg);
+                                        }}
                                     />
                                 </div>
                             )}
@@ -928,12 +1334,26 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                             )}
                             {mountedTabs.has("jailbreak") && (
                                 <div className={activeTab === "jailbreak" ? "block" : "hidden"}>
-                                    <JailbreakTab />
+                                    <JailbreakTab
+                                        value={localJailbreakPrompt}
+                                        loading={isJailbreakLoading}
+                                        onChange={setLocalJailbreakPrompt}
+                                        onSaveSuccess={(prompt) => {
+                                            baselineJailbreakPromptRef.current = prompt;
+                                        }}
+                                    />
                                 </div>
                             )}
                             {mountedTabs.has("backup") && (
                                 <div className={activeTab === "backup" ? "block" : "hidden"}>
-                                    <BackupTab />
+                                    <BackupTab
+                                        autoBackupConfig={localAutoBackupConfig}
+                                        loading={isAutoBackupLoading}
+                                        onAutoBackupConfigChange={setLocalAutoBackupConfig}
+                                        onAutoBackupSaved={(cfg) => {
+                                            baselineAutoBackupConfigRef.current = cfg;
+                                        }}
+                                    />
                                 </div>
                             )}
                             {mountedTabs.has("pet") && (
@@ -966,6 +1386,11 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                             </div>
 
                             <div className="flex items-center gap-3">
+                                {saveError && (
+                                    <span className="text-xs text-red-400 font-medium mr-2 max-w-xs truncate" title={saveError}>
+                                        {saveError}
+                                    </span>
+                                )}
                                 <motion.button
                                     whileHover={{ scale: 1.02 }}
                                     whileTap={{ scale: 0.98 }}
@@ -985,6 +1410,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                     whileHover={{ scale: 1.05 }}
                                     whileTap={{ scale: 0.95 }}
                                     onClick={handleSave}
+                                    data-onboarding-id="settings-save-button"
                                     className={clsx(
                                         "inline-flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-heading font-semibold tracking-wider uppercase",
                                         "bg-[var(--color-accent)] text-black",

@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
-    getVisionConfig, saveVisionConfig, captureScreenNow,
+    getVisionConfig, captureScreenNow,
     listOllamaModels,
     listAnthropicModels,
     getLlamaCppStatus,
@@ -16,6 +16,7 @@ import {
 } from "../../../lib/kokoro-bridge";
 import type { VisionConfig, OllamaModelInfo, VisionScreenInfo } from "../../../lib/kokoro-bridge";
 import { Select } from "@/components/ui/select";
+import { isVisionConfigDirty } from "../settings-dirty-check";
 
 type CameraPreviewIssue = "no_devices" | "permission_denied" | "unsupported" | "unavailable";
 type VisionContextHistoryMode = VisionConfig["vision_context_history_mode"];
@@ -29,10 +30,21 @@ function getCameraPreviewIssue(error: unknown): CameraPreviewIssue {
     return "unavailable";
 }
 
-export default function VisionTab({ initialConfig = null, onConfigChange }: { initialConfig?: VisionConfig | null; onConfigChange?: (cfg: VisionConfig) => void } = {}) {
+export interface VisionTabProps {
+    initialConfig?: VisionConfig | null;
+    committedConfig?: VisionConfig | null;
+    onConfigChange?: (cfg: VisionConfig) => void;
+}
+
+export default function VisionTab({
+    initialConfig = null,
+    committedConfig = null,
+    onConfigChange,
+}: VisionTabProps = {}) {
     const { t } = useTranslation();
-    const [config, setConfig] = useState<VisionConfig | null>(initialConfig);
-    const [loading, setLoading] = useState(initialConfig === null);
+    const [config, setConfig] = useState<VisionConfig | null>(initialConfig ?? committedConfig);
+    const committedConfigRef = useRef<VisionConfig | null>(committedConfig ?? initialConfig);
+    const [loading, setLoading] = useState(initialConfig === null && committedConfig === null);
     const [capturing, setCapturing] = useState(false);
     const [captureResult, setCaptureResult] = useState<string | null>(null);
     const [ollamaModels, setOllamaModels] = useState<OllamaModelInfo[]>([]);
@@ -57,9 +69,13 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
     const [cameraPreviewIssue, setCameraPreviewIssue] = useState<CameraPreviewIssue | null>(null);
     const previewVideoRef = useRef<HTMLVideoElement>(null);
     const previewStreamRef = useRef<MediaStream | null>(null);
+    const previewRequestIdRef = useRef(0);
+    const enumerateRequestIdRef = useRef(0);
 
     useEffect(() => {
         if (!config?.camera_enabled) {
+            previewRequestIdRef.current++;
+            enumerateRequestIdRef.current++;
             stopPreview();
             setCameraDevicesLoaded(false);
             setCameraPreviewLoading(false);
@@ -76,7 +92,14 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
         startPreview(selectedDeviceId);
     }, [selectedDeviceId, config?.camera_enabled, cameraDevicesLoaded, cameraDevices.length]);
 
+    useEffect(() => {
+        if (config?.camera_device_id && config.camera_device_id !== selectedDeviceId) {
+            setSelectedDeviceId(config.camera_device_id);
+        }
+    }, [config?.camera_device_id, selectedDeviceId]);
+
     async function enumerateDevices(preferredId: string = "") {
+        const requestId = ++enumerateRequestIdRef.current;
         stopPreview();
         setCameraDevicesLoaded(false);
         setCameraPreviewLoading(true);
@@ -84,6 +107,7 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
         setCameraPreviewIssue(null);
 
         if (!navigator.mediaDevices?.getUserMedia || !navigator.mediaDevices?.enumerateDevices) {
+            if (requestId !== enumerateRequestIdRef.current) return;
             setCameraDevices([]);
             setSelectedDeviceId("");
             setCameraPreviewIssue("unsupported");
@@ -94,8 +118,11 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
 
         try {
             // Request permission first so labels are populated
-            await navigator.mediaDevices.getUserMedia({ video: true }).then(s => s.getTracks().forEach(t => t.stop()));
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            stream.getTracks().forEach(t => t.stop());
+            if (requestId !== enumerateRequestIdRef.current) return;
             const devices = await navigator.mediaDevices.enumerateDevices();
+            if (requestId !== enumerateRequestIdRef.current) return;
             const videoDevices = devices.filter(d => d.kind === "videoinput");
             setCameraDevices(videoDevices);
             if (videoDevices.length === 0) {
@@ -108,23 +135,28 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                 : videoDevices[0]?.deviceId ?? "";
             setSelectedDeviceId(initial);
         } catch (err) {
+            if (requestId !== enumerateRequestIdRef.current) return;
             console.error("[VisionTab] enumerateDevices failed:", err);
             setCameraDevices([]);
             setSelectedDeviceId("");
             setCameraPreviewIssue(getCameraPreviewIssue(err));
         } finally {
-            setCameraPreviewLoading(false);
-            setCameraDevicesLoaded(true);
+            if (requestId === enumerateRequestIdRef.current) {
+                setCameraPreviewLoading(false);
+                setCameraDevicesLoaded(true);
+            }
         }
     }
 
     async function startPreview(deviceId: string) {
+        const requestId = ++previewRequestIdRef.current;
         stopPreview();
         setCameraPreviewLoading(true);
         setCameraPreviewReady(false);
         setCameraPreviewIssue(null);
 
         if (!navigator.mediaDevices?.getUserMedia) {
+            if (requestId !== previewRequestIdRef.current) return;
             setCameraPreviewIssue("unsupported");
             setCameraPreviewLoading(false);
             return;
@@ -135,18 +167,25 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                 ? { video: { deviceId: { exact: deviceId } } }
                 : { video: true };
             const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            if (requestId !== previewRequestIdRef.current) {
+                stream.getTracks().forEach(t => t.stop());
+                return;
+            }
             previewStreamRef.current = stream;
             if (previewVideoRef.current) {
                 previewVideoRef.current.srcObject = stream;
-                await previewVideoRef.current.play();
+                await previewVideoRef.current.play().catch(() => {});
             }
             setCameraPreviewReady(true);
         } catch (err) {
+            if (requestId !== previewRequestIdRef.current) return;
             console.error("[VisionTab] preview failed:", err);
             setCameraPreviewIssue(getCameraPreviewIssue(err));
             stopPreview();
         } finally {
-            setCameraPreviewLoading(false);
+            if (requestId === previewRequestIdRef.current) {
+                setCameraPreviewLoading(false);
+            }
         }
     }
 
@@ -156,7 +195,28 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
         if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
     }
 
-    // Load config on mount
+    // Cleanup preview on component unmount only
+    useEffect(() => {
+        return () => {
+            previewRequestIdRef.current++;
+            enumerateRequestIdRef.current++;
+            stopPreview();
+        };
+    }, []);
+
+    // Ensure preview stream remains attached to video element if stream is active
+    useEffect(() => {
+        if (
+            previewVideoRef.current &&
+            previewStreamRef.current &&
+            previewVideoRef.current.srcObject !== previewStreamRef.current
+        ) {
+            previewVideoRef.current.srcObject = previewStreamRef.current;
+            previewVideoRef.current.play().catch(() => {});
+        }
+    });
+
+    // Load config on mount and synchronize external baseline changes
     useEffect(() => {
         if (initialConfig) {
             setConfig(initialConfig);
@@ -164,10 +224,17 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
         } else {
             loadConfig();
         }
-        return () => {
-            stopPreview();
-        };
     }, [initialConfig]);
+
+    useEffect(() => {
+        committedConfigRef.current = committedConfig ?? initialConfig;
+        if (committedConfig || initialConfig) {
+            const current = config ?? initialConfig ?? committedConfig;
+            if (current) {
+                setDirty(isVisionConfigDirty(committedConfig ?? initialConfig, current));
+            }
+        }
+    }, [committedConfig, initialConfig]);
 
     useEffect(() => {
         let cancelled = false;
@@ -177,7 +244,7 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
             try {
                 const list = await listVisionScreens();
                 if (cancelled) return;
-                setScreens(list);
+                setScreens(Array.isArray(list) ? list : []);
             } catch (error) {
                 if (cancelled) return;
                 setScreens([]);
@@ -301,11 +368,52 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
         };
     }, [config?.vlm_provider, config?.vlm_base_url, config?.vlm_api_key]);
 
+    useEffect(() => {
+        if (committedConfig !== undefined && committedConfig !== null) {
+            committedConfigRef.current = committedConfig;
+            setConfig((prev) => {
+                if (!prev) return committedConfig;
+                setDirty(isVisionConfigDirty(committedConfig, prev));
+                return prev;
+            });
+        }
+    }, [committedConfig]);
+
+    useEffect(() => {
+        if (config === null) {
+            const base = committedConfig ?? initialConfig;
+            if (base) {
+                setConfig(base);
+                committedConfigRef.current = base;
+                setLoading(false);
+                setDirty(false);
+            }
+        }
+    }, [initialConfig, committedConfig, config]);
+
+    useEffect(() => {
+        const handleSaved = () => {
+            try {
+                const raw = localStorage.getItem("kokoro_vision_config");
+                if (raw) {
+                    const saved = JSON.parse(raw) as VisionConfig;
+                    committedConfigRef.current = saved;
+                    setConfig(saved);
+                }
+            } catch {}
+            setDirty(false);
+        };
+        window.addEventListener("kokoro-vision-settings-changed", handleSaved);
+        return () => window.removeEventListener("kokoro-vision-settings-changed", handleSaved);
+    }, []);
+
     const loadConfig = async () => {
         try {
             const cfg = await getVisionConfig();
             setConfig(cfg);
+            committedConfigRef.current = cfg;
             setLoading(false);
+            setDirty(false);
         } catch (e) {
             console.error("[VisionTab] Failed to load config:", e);
             setLoading(false);
@@ -314,25 +422,11 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
 
     const update = (patch: Partial<VisionConfig>) => {
         if (!config) return;
-        setConfig({ ...config, ...patch });
-        setDirty(true);
-    };
-
-    const persistVisionConfig = async (cfg: VisionConfig) => {
-        await saveVisionConfig(cfg);
-        localStorage.setItem("kokoro_vision_config", JSON.stringify(cfg));
-        window.dispatchEvent(new Event("kokoro-vision-settings-changed"));
-        onConfigChange?.(cfg);
-    };
-
-    const handleSave = async () => {
-        if (!config) return;
-        try {
-            await persistVisionConfig(config);
-            setDirty(false);
-        } catch (e) {
-            console.error("[VisionTab] Failed to save config:", e);
-        }
+        const next = { ...config, ...patch };
+        setConfig(next);
+        const isDirty = isVisionConfigDirty(committedConfigRef.current, next);
+        setDirty(isDirty);
+        onConfigChange?.(next);
     };
 
     const handleTestCapture = async () => {
@@ -428,11 +522,10 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                 </div>
                 <motion.button
                     whileTap={{ scale: 0.95 }}
-                    onClick={async () => {
-                        const next = { ...config, vlm_enabled: !config.vlm_enabled };
-                        setConfig(next);
-                        setDirty(false);
-                        try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                    aria-label="vlm-enable-toggle"
+                    aria-pressed={config.vlm_enabled}
+                    onClick={() => {
+                        update({ vlm_enabled: !config.vlm_enabled });
                     }}
                     className={clsx(
                         "w-12 h-6 rounded-full relative transition-colors duration-200",
@@ -780,12 +873,8 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                     </div>
                     <Select
                         value={config.vision_context_history_mode ?? "latest"}
-                        onChange={async (value) => {
-                            const mode = value as VisionContextHistoryMode;
-                            const next = { ...config, vision_context_history_mode: mode };
-                            setConfig(next);
-                            setDirty(false);
-                            try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                        onChange={(value) => {
+                            update({ vision_context_history_mode: value as VisionContextHistoryMode });
                         }}
                         options={[
                             { value: "latest", label: t("settings.vision.contextHistory.latest") },
@@ -823,11 +912,9 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                             </div>
                             <motion.button
                                 whileTap={{ scale: 0.95 }}
-                                onClick={async () => {
-                                    const next = { ...config, auto_vision_enabled: !config.auto_vision_enabled };
-                                    setConfig(next);
-                                    setDirty(false);
-                                    try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                                aria-label="auto-vision-enable-toggle"
+                                onClick={() => {
+                                    update({ auto_vision_enabled: !config.auto_vision_enabled });
                                 }}
                                 className={clsx(
                                     "w-12 h-6 rounded-full relative transition-colors duration-200 shrink-0",
@@ -862,11 +949,9 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                             </div>
                             <motion.button
                                 whileTap={{ scale: 0.95 }}
-                                onClick={async () => {
-                                    const next = { ...config, proactive_vision_enabled: !config.proactive_vision_enabled };
-                                    setConfig(next);
-                                    setDirty(false);
-                                    try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                                aria-label="proactive-vision-enable-toggle"
+                                onClick={() => {
+                                    update({ proactive_vision_enabled: !config.proactive_vision_enabled });
                                 }}
                                 className={clsx(
                                     "w-12 h-6 rounded-full relative transition-colors duration-200 shrink-0",
@@ -888,23 +973,6 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                         </div>
                     </div>
                 </div>
-
-                {/* Save Config Button */}
-                {dirty && (
-                    <motion.button
-                        initial={{ opacity: 0, y: 5 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        whileTap={{ scale: 0.97 }}
-                        onClick={handleSave}
-                        className={clsx(
-                            "w-full py-2 rounded-lg text-sm font-heading font-semibold tracking-wider uppercase",
-                            "bg-[var(--color-accent)] text-black",
-                            "hover:bg-white transition-colors"
-                        )}
-                    >
-                        {t("settings.vision.save")}
-                    </motion.button>
-                )}
 
                 {/* Test Capture Button */}
                 <div className="space-y-2">
@@ -967,11 +1035,10 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                     </div>
                     <motion.button
                         whileTap={{ scale: 0.95 }}
-                        onClick={async () => {
-                            const next = { ...config, camera_enabled: !config.camera_enabled };
-                            setConfig(next);
-                            setDirty(false);
-                            try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                        aria-label="camera-enable-toggle"
+                        aria-pressed={config.camera_enabled}
+                        onClick={() => {
+                            update({ camera_enabled: !config.camera_enabled });
                         }}
                         className={clsx(
                             "w-12 h-6 rounded-full relative transition-colors duration-200",
@@ -1011,12 +1078,9 @@ export default function VisionTab({ initialConfig = null, onConfigChange }: { in
                                     </div>
                                     <Select
                                         value={selectedDeviceId}
-                                        onChange={async v => {
+                                        onChange={v => {
                                             setSelectedDeviceId(v);
-                                            const next = { ...config, camera_device_id: v || null };
-                                            setConfig(next);
-                                            setDirty(false);
-                                            try { await persistVisionConfig(next); } catch (e) { console.error("[VisionTab] auto-save failed:", e); }
+                                            update({ camera_device_id: v || null });
                                         }}
                                         options={cameraDevices.map(d => ({
                                             value: d.deviceId,

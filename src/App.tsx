@@ -1992,10 +1992,10 @@ function App() {
       bgSlideshow.setConfig(detail.data);
     }
     if (detail.action === 'remove_bg_image' && detail.data?.index !== undefined) {
-      bgSlideshow.removeImage(detail.data.index);
+      bgSlideshow.removeImage(detail.data.index).catch((e) => console.error("remove_bg_image event failed:", e));
     }
     if (detail.action === 'clear_bg_images') {
-      bgSlideshow.clearImages();
+      bgSlideshow.clearImages().catch((e) => console.error("clear_bg_images event failed:", e));
     }
     if (detail.action === 'import_bg_images') {
       import('@tauri-apps/plugin-dialog').then(async ({ open }) => {

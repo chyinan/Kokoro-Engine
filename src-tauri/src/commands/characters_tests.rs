@@ -5,6 +5,7 @@ use crate::characters::catalog::CharacterCatalog;
 use serde_json::json;
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use std::fs;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 async fn migrated_pool() -> SqlitePool {
@@ -1086,4 +1087,1457 @@ async fn production_activation_backend_applies_and_persists_complete_selection()
     .unwrap();
     assert_eq!(active["character_id"], "persistent-character");
     assert_eq!(conversation["conversation_id"], "persistent-conversation");
+}
+
+#[tokio::test]
+async fn orchestrator_activation_backend_restore_restores_history_and_memory_boundary() {
+    let orchestrator = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+    let temp = TempDir::new().unwrap();
+
+    sqlx::query(
+        "INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-1', 'restored-char', 'Test', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+    )
+    .execute(&orchestrator.db)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES ('conv-1', 'user', 'Hi there', '2026-01-01T00:00:01Z'), ('conv-1', 'assistant', 'Hello!', '2026-01-01T00:00:02Z')",
+    )
+    .execute(&orchestrator.db)
+    .await
+    .unwrap();
+
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+
+    let snapshot = BackendRuntimeSnapshot {
+        character_id: "restored-char".into(),
+        character_name: "Restored Name".into(),
+        current_conversation_id: Some("conv-1".into()),
+        ..Default::default()
+    };
+
+    backend.restore(&snapshot).await.unwrap();
+
+    assert_eq!(orchestrator.get_character_id().await, "restored-char");
+    let history = orchestrator.history.lock().await;
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].content, "Hi there");
+    assert_eq!(history[1].content, "Hello!");
+    assert_eq!(orchestrator.memory_history_boundary().await, 2);
+}
+
+#[tokio::test]
+async fn orchestrator_runtime_degraded_blocks_prompt_and_clears_on_successful_apply() {
+    let orchestrator = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+    let temp = TempDir::new().unwrap();
+
+    orchestrator
+        .set_runtime_degraded(Some("Startup recovery failed".to_string()))
+        .await;
+    assert!(orchestrator.get_runtime_degraded().await.is_some());
+
+    let err = orchestrator
+        .compose_prompt("Hello", false, None, false, "char-1")
+        .await
+        .expect_err("compose_prompt must fail when degraded");
+    assert!(err.to_string().contains("Character runtime is degraded"));
+
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let snapshot = BackendRuntimeSnapshot {
+        character_id: "char-1".into(),
+        character_name: "Char One".into(),
+        ..Default::default()
+    };
+    backend.apply(&snapshot).await.unwrap();
+
+    // Degradation is NOT cleared by apply alone (history sync has not completed yet)
+    assert!(orchestrator.get_runtime_degraded().await.is_some());
+
+    // Successful restore (or completed coordinator activation with history sync) clears degradation
+    backend.restore(&snapshot).await.unwrap();
+    assert!(orchestrator.get_runtime_degraded().await.is_none());
+    let (messages, _) = orchestrator
+        .compose_prompt("Hello", false, None, false, "char-1")
+        .await
+        .expect("compose_prompt should succeed once runtime is applied");
+    assert!(!messages.is_empty());
+}
+
+#[tokio::test]
+async fn non_startup_activation_recovery_failure_sets_degraded_and_blocks_chat() {
+    let orchestrator = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+    let temp = TempDir::new().unwrap();
+    let coordinator = ActivationCoordinator::default();
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+
+    // 1. Set up two characters in database with empty greetings so staging doesn't touch messages table
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-1".into(),
+            name: "Char One".into(),
+            persona: "You are Char One.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-2".into(),
+            name: "Char Two".into(),
+            persona: "You are Char Two.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // 2. Activate char-1 successfully first (non-degraded)
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let token1 = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend)
+        .await
+        .unwrap();
+    coordinator
+        .commit(&orchestrator.db, token1, &backend)
+        .await
+        .unwrap();
+
+    assert_eq!(orchestrator.get_character_id().await, "char-1");
+    assert!(orchestrator.get_runtime_degraded().await.is_none());
+
+    // 3. Prepare activation for char-2
+    let token2 = coordinator
+        .prepare(&orchestrator.db, "char-2", &tts_config, &[], &backend)
+        .await
+        .unwrap();
+
+    // 4. Rename conversation_messages table so history sync fails on SELECT,
+    // causing both the new activation sync and the rollback restore sync to fail!
+    sqlx::query("ALTER TABLE conversation_messages RENAME TO conversation_messages_backup")
+        .execute(&orchestrator.db)
+        .await
+        .unwrap();
+
+    // 5. Attempt commit in non-startup context
+    let err = coordinator
+        .commit(&orchestrator.db, token2, &backend)
+        .await
+        .expect_err("activation commit must fail when history sync fails");
+
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("failed to sync history")
+            || err_str.contains("failed to sync conversation history"),
+        "error was: {err_str}"
+    );
+
+    // 6. Verify that the runtime is now degraded and in-memory history is cleared
+    let degraded_reason = orchestrator.get_runtime_degraded().await;
+    assert!(
+        degraded_reason.is_some(),
+        "orchestrator runtime_degraded MUST be set when recovery fails"
+    );
+    assert!(
+        orchestrator.history.lock().await.is_empty(),
+        "history must be cleared when sync fails during recovery"
+    );
+
+    // 7. Verify compose_prompt is rejected with degraded error
+    let prompt_err = orchestrator
+        .compose_prompt("Hello", false, None, false, "char-1")
+        .await
+        .expect_err("compose_prompt must be blocked when runtime is degraded");
+    assert!(
+        prompt_err
+            .to_string()
+            .contains("Character runtime is degraded"),
+        "prompt error was: {prompt_err}"
+    );
+}
+
+struct DelayedActivationBackend {
+    orchestrator: Arc<AIOrchestrator>,
+    app_data: PathBuf,
+    delay_ms: u64,
+}
+
+#[async_trait::async_trait]
+impl ActivationRuntimeBackend for DelayedActivationBackend {
+    async fn snapshot(&self) -> Result<BackendRuntimeSnapshot, KokoroError> {
+        let backend = OrchestratorActivationBackend {
+            orchestrator: &self.orchestrator,
+            app_data: self.app_data.clone(),
+        };
+        backend.snapshot().await
+    }
+    async fn apply(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
+        let backend = OrchestratorActivationBackend {
+            orchestrator: &self.orchestrator,
+            app_data: self.app_data.clone(),
+        };
+        backend.apply(snapshot).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+        Ok(())
+    }
+    async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
+        let backend = OrchestratorActivationBackend {
+            orchestrator: &self.orchestrator,
+            app_data: self.app_data.clone(),
+        };
+        backend.restore(snapshot).await
+    }
+    async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
+        let backend = OrchestratorActivationBackend {
+            orchestrator: &self.orchestrator,
+            app_data: self.app_data.clone(),
+        };
+        backend.sync_history(conversation_id).await
+    }
+    async fn set_degraded(&self, reason: Option<String>) {
+        self.orchestrator.set_runtime_degraded(reason).await;
+    }
+    async fn clear_degraded(&self) {
+        self.orchestrator.clear_runtime_degraded().await;
+    }
+    async fn lock_activation(&self) -> Result<Box<dyn std::any::Any + Send>, KokoroError> {
+        let guard = self.orchestrator.acquire_activation_lock().await;
+        Ok(Box::new(guard))
+    }
+    fn arm_activation_mutation(&self, lock: &mut (dyn std::any::Any + Send)) {
+        if let Some(guard) = lock.downcast_mut::<crate::ai::context::ActivationLockGuard>() {
+            guard.arm_mutation();
+        }
+    }
+    fn mark_activation_completed(&self, lock: &mut (dyn std::any::Any + Send)) {
+        if let Some(guard) = lock.downcast_mut::<crate::ai::context::ActivationLockGuard>() {
+            guard.mark_completed();
+        }
+    }
+}
+
+#[tokio::test]
+async fn concurrent_chat_during_activation_is_blocked_and_prevents_context_leak_and_message_loss() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+
+    // 1. Create Char 1 and Char 2 in SQLite
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-1".into(),
+            name: "Char One".into(),
+            persona: "You are Character One.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-2".into(),
+            name: "Char Two".into(),
+            persona: "You are Character Two.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+
+    // 2. Activate char-1
+    let backend1 = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let token1 = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+    coordinator
+        .commit(&orchestrator.db, token1, &backend1)
+        .await
+        .unwrap();
+
+    // Append a message to char-1's in-memory history
+    orchestrator
+        .push_history_message(crate::ai::context::Message {
+            role: "user".into(),
+            content: "Hello from char-1 conversation".into(),
+            metadata: None,
+        })
+        .await;
+
+    assert_eq!(orchestrator.get_character_id().await, "char-1");
+    assert!(!orchestrator.history.lock().await.is_empty());
+    assert!(!orchestrator.is_activating());
+
+    // 3. Prepare activation for char-2
+    let token2 = coordinator
+        .prepare(&orchestrator.db, "char-2", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+
+    // 4. Commit char-2 activation with an artificial delay in apply
+    let delayed_backend = DelayedActivationBackend {
+        orchestrator: orchestrator.clone(),
+        app_data: temp.path().to_path_buf(),
+        delay_ms: 100,
+    };
+
+    let coord_clone = coordinator.clone();
+    let db_clone = orchestrator.db.clone();
+    let orch_clone = orchestrator.clone();
+
+    // Spawn the activation in a background task
+    let activation_task = tokio::spawn(async move {
+        coord_clone
+            .commit(&db_clone, token2, &delayed_backend)
+            .await
+    });
+
+    // Wait briefly so the background task enters the activation lock and is sleeping in apply
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    // 5. Verify that during activation, chat turns and compose_prompt are BLOCKED by the gate
+    assert!(
+        orch_clone.is_activating(),
+        "orchestrator must report is_activating() = true during activation"
+    );
+
+    // Attempting to enter chat turn must fail
+    let turn_err = orch_clone
+        .enter_chat_turn()
+        .expect_err("enter_chat_turn must be blocked during activation");
+    assert!(
+        turn_err.contains("Character activation is in progress"),
+        "error was: {turn_err}"
+    );
+
+    // Attempting to compose prompt must fail
+    let prompt_err = orch_clone
+        .compose_prompt("Hello during activation", false, None, false, "char-1")
+        .await
+        .expect_err("compose_prompt must be blocked during activation");
+    assert!(
+        prompt_err
+            .to_string()
+            .contains("Character activation is in progress"),
+        "error was: {prompt_err}"
+    );
+
+    // 6. Await activation completion
+    let commit_res = activation_task.await.unwrap();
+    assert!(commit_res.is_ok(), "activation must complete successfully");
+
+    // 7. Verify gate is released and normal chat succeeds with new character
+    assert!(
+        !orchestrator.is_activating(),
+        "activation gate must be released after commit"
+    );
+    assert_eq!(orchestrator.get_character_id().await, "char-2");
+
+    let chat_guard = orchestrator.enter_chat_turn();
+    assert!(
+        chat_guard.is_ok(),
+        "chat turn must be allowed after activation completes"
+    );
+    drop(chat_guard);
+
+    let (messages, _) = orchestrator
+        .compose_prompt("Hello after activation", false, None, false, "char-2")
+        .await
+        .expect("compose_prompt must succeed after activation completes");
+    assert!(!messages.is_empty());
+}
+
+#[tokio::test]
+async fn test_active_stream_chat_turn_completes_when_activation_starts_concurrently() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-1".into(),
+            name: "Char One".into(),
+            persona: "You are Character One.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-2".into(),
+            name: "Char Two".into(),
+            persona: "You are Character Two.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend1 = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let token1 = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+    coordinator
+        .commit(&orchestrator.db, token1, &backend1)
+        .await
+        .unwrap();
+
+    assert_eq!(orchestrator.get_character_id().await, "char-1");
+
+    // 1. stream_chat begins: acquires turn guard at entry
+    let chat_turn_guard = orchestrator
+        .enter_chat_turn()
+        .expect("must enter chat turn before activation");
+
+    // 2. stream_chat records user message
+    orchestrator
+        .add_message(
+            "user".into(),
+            "User message during active turn".into(),
+            "char-1",
+        )
+        .await;
+
+    // 3. Concurrently, activation for char-2 begins in background
+    let token2 = coordinator
+        .prepare(&orchestrator.db, "char-2", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+
+    let delayed_backend = DelayedActivationBackend {
+        orchestrator: orchestrator.clone(),
+        app_data: temp.path().to_path_buf(),
+        delay_ms: 100,
+    };
+
+    let coord_clone = coordinator.clone();
+    let db_clone = orchestrator.db.clone();
+    let activation_task = tokio::spawn(async move {
+        coord_clone
+            .commit(&db_clone, token2, &delayed_backend)
+            .await
+    });
+
+    // Wait briefly so activation sets `activating = true` and waits on write lock
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert!(
+        orchestrator.is_activating(),
+        "orchestrator must be in activating state"
+    );
+
+    // 4. stream_chat calls compose_prompt_with_guard:
+    // With compose_prompt_with_guard, this MUST SUCCEED even though is_activating() == true!
+    let (messages, _) = orchestrator
+        .compose_prompt_with_guard(
+            "User message during active turn",
+            false,
+            None,
+            false,
+            "char-1",
+            &chat_turn_guard,
+        )
+        .await
+        .expect("active turn holding guard must be able to compose prompt despite activating=true");
+    assert!(!messages.is_empty());
+
+    // 5. stream_chat finishes: persists assistant message and then drops guard
+    orchestrator
+        .add_message(
+            "assistant".into(),
+            "Assistant reply completing the turn".into(),
+            "char-1",
+        )
+        .await;
+    drop(chat_turn_guard);
+
+    // 6. Activation completes
+    let commit_res = activation_task.await.unwrap();
+    assert!(
+        commit_res.is_ok(),
+        "activation must succeed after turn completes"
+    );
+
+    assert_eq!(orchestrator.get_character_id().await, "char-2");
+    assert!(!orchestrator.is_activating());
+
+    // 7. Verify char-1 history has the complete turn
+    let rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT role, content FROM conversation_messages ORDER BY id ASC",
+    )
+    .fetch_all(&orchestrator.db)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, "user");
+    assert_eq!(rows[1].0, "assistant");
+}
+
+#[tokio::test]
+async fn test_non_webhook_bot_turn_during_activation_is_blocked_at_entry_without_message_pollution()
+{
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-1".into(),
+            name: "Char One".into(),
+            persona: "You are Character One.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-2".into(),
+            name: "Char Two".into(),
+            persona: "You are Character Two.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend1 = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let token1 = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+    coordinator
+        .commit(&orchestrator.db, token1, &backend1)
+        .await
+        .unwrap();
+
+    // 1. Begin activation for char-2 with a delay
+    let token2 = coordinator
+        .prepare(&orchestrator.db, "char-2", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+
+    let delayed_backend = DelayedActivationBackend {
+        orchestrator: orchestrator.clone(),
+        app_data: temp.path().to_path_buf(),
+        delay_ms: 100,
+    };
+
+    let coord_clone = coordinator.clone();
+    let db_clone = orchestrator.db.clone();
+    let activation_task = tokio::spawn(async move {
+        coord_clone
+            .commit(&db_clone, token2, &delayed_backend)
+            .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert!(orchestrator.is_activating());
+
+    // 2. Simulate Non-Webhook Bot (e.g. LINE, Discord, QQ, Telegram) receiving a message during activation:
+    // With the fix, the bot entry checks enter_chat_turn() BEFORE add_message!
+    let bot_turn_res = orchestrator.enter_chat_turn();
+    assert!(
+        bot_turn_res.is_err(),
+        "bot turn entry must be rejected during activation"
+    );
+    let err_msg = bot_turn_res.err().unwrap();
+    assert!(
+        err_msg.contains("Character activation is in progress"),
+        "error was: {err_msg}"
+    );
+
+    // 3. Verify NO user message was added to the database or history (no partial turn pollution)
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+        .fetch_one(&orchestrator.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "no messages should be written when bot turn is blocked at entry"
+    );
+    assert!(orchestrator.history.lock().await.is_empty());
+
+    // 4. Await activation completion
+    let commit_res = activation_task.await.unwrap();
+    assert!(commit_res.is_ok());
+    assert_eq!(orchestrator.get_character_id().await, "char-2");
+
+    // 5. Bot retry after activation completes succeeds cleanly under char-2
+    let bot_turn_retry = orchestrator.enter_chat_turn();
+    assert!(
+        bot_turn_retry.is_ok(),
+        "bot turn must succeed after activation completes"
+    );
+    let guard = bot_turn_retry.unwrap();
+    orchestrator
+        .add_message("user".into(), "Hello to char 2".into(), "char-2")
+        .await;
+    let (messages, _) = orchestrator
+        .compose_prompt_with_guard("Hello to char 2", false, None, false, "char-2", &guard)
+        .await
+        .expect("compose prompt must succeed for new character");
+    assert!(!messages.is_empty());
+    drop(guard);
+}
+
+#[tokio::test]
+async fn test_activation_lock_cancellation_cleans_up_activating_flag_and_allows_chat() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+
+    // 1. Acquire read guard (simulating an active chat turn holding read lock)
+    let turn_guard = orchestrator
+        .enter_chat_turn()
+        .expect("must enter chat turn initially");
+
+    // 2. Spawn a task to acquire the activation lock (will block waiting for read guard)
+    let orch_clone = orchestrator.clone();
+    let activation_task =
+        tokio::spawn(async move { orch_clone.activation_gate.acquire_activation_lock().await });
+
+    // Wait briefly so task begins and sets activating = true
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    // Verify activating flag is true while activation lock is waiting
+    assert!(
+        orchestrator.is_activating(),
+        "activating flag must be true while activation lock is waiting"
+    );
+
+    // Any new turn during this wait is rejected
+    assert!(
+        orchestrator.enter_chat_turn().is_err(),
+        "new chat turn must be blocked while activation is waiting"
+    );
+
+    // 3. Abort the waiting activation task (simulating timeout, UI cancellation, or shutdown)
+    activation_task.abort();
+    let join_res = activation_task.await;
+    assert!(join_res.unwrap_err().is_cancelled());
+
+    // 4. Release the active turn read guard
+    drop(turn_guard);
+
+    // 5. Verify the activating flag was reset to false by ActivationReservation Drop
+    assert!(
+        !orchestrator.is_activating(),
+        "is_activating() must be false after aborted activation lock"
+    );
+
+    // 6. Verify a new chat turn can enter cleanly without being blocked
+    let new_turn = orchestrator.enter_chat_turn();
+    assert!(
+        new_turn.is_ok(),
+        "new chat turn must be able to enter after cancelled activation"
+    );
+    let new_guard = new_turn.unwrap();
+    assert!(
+        !orchestrator.is_activating(),
+        "must remain false while new chat turn runs"
+    );
+    drop(new_guard);
+}
+
+struct InterceptedActivationBackend {
+    orchestrator: Arc<AIOrchestrator>,
+    app_data: PathBuf,
+    on_apply: Option<Arc<tokio::sync::Notify>>,
+    pause_apply: Option<Arc<tokio::sync::Notify>>,
+    on_sync_history: Option<Arc<tokio::sync::Notify>>,
+    pause_sync_history: Option<Arc<tokio::sync::Notify>>,
+    on_restore: Option<Arc<tokio::sync::Notify>>,
+    pause_restore: Option<Arc<tokio::sync::Notify>>,
+    fail_sync_history: bool,
+}
+
+#[async_trait::async_trait]
+impl ActivationRuntimeBackend for InterceptedActivationBackend {
+    async fn snapshot(&self) -> Result<BackendRuntimeSnapshot, KokoroError> {
+        let backend = OrchestratorActivationBackend {
+            orchestrator: &self.orchestrator,
+            app_data: self.app_data.clone(),
+        };
+        backend.snapshot().await
+    }
+
+    async fn apply(&self, runtime: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
+        let backend = OrchestratorActivationBackend {
+            orchestrator: &self.orchestrator,
+            app_data: self.app_data.clone(),
+        };
+        let res = backend.apply(runtime).await;
+        if let Some(notify) = &self.on_apply {
+            notify.notify_one();
+        }
+        if let Some(pause) = &self.pause_apply {
+            pause.notified().await;
+        }
+        res
+    }
+
+    async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
+        if let Some(notify) = &self.on_restore {
+            notify.notify_one();
+        }
+        if let Some(pause) = &self.pause_restore {
+            pause.notified().await;
+        }
+        let backend = OrchestratorActivationBackend {
+            orchestrator: &self.orchestrator,
+            app_data: self.app_data.clone(),
+        };
+        backend.restore(snapshot).await
+    }
+
+    async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
+        if self.fail_sync_history {
+            return Err(KokoroError::Internal(
+                "simulated sync history failure".into(),
+            ));
+        }
+        if let Some(notify) = &self.on_sync_history {
+            notify.notify_one();
+        }
+        if let Some(pause) = &self.pause_sync_history {
+            pause.notified().await;
+        }
+        let backend = OrchestratorActivationBackend {
+            orchestrator: &self.orchestrator,
+            app_data: self.app_data.clone(),
+        };
+        backend.sync_history(conversation_id).await
+    }
+
+    async fn set_degraded(&self, reason: Option<String>) {
+        self.orchestrator.set_runtime_degraded(reason).await;
+    }
+
+    async fn clear_degraded(&self) {
+        self.orchestrator.clear_runtime_degraded().await;
+    }
+
+    async fn lock_activation(&self) -> Result<Box<dyn std::any::Any + Send>, KokoroError> {
+        let guard = self.orchestrator.acquire_activation_lock().await;
+        Ok(Box::new(guard))
+    }
+
+    fn arm_activation_mutation(&self, lock: &mut (dyn std::any::Any + Send)) {
+        if let Some(guard) = lock.downcast_mut::<crate::ai::context::ActivationLockGuard>() {
+            guard.arm_mutation();
+        }
+    }
+
+    fn mark_activation_completed(&self, lock: &mut (dyn std::any::Any + Send)) {
+        if let Some(guard) = lock.downcast_mut::<crate::ai::context::ActivationLockGuard>() {
+            guard.mark_completed();
+        }
+    }
+}
+
+async fn create_two_characters_for_cancellation_test(orchestrator: &AIOrchestrator) {
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-1".into(),
+            name: "Char One".into(),
+            persona: "You are Character One.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example 1".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    create_character_in_pool(
+        &orchestrator.db,
+        CreateCharacterRequest {
+            id: "char-2".into(),
+            name: "Char Two".into(),
+            persona: "You are Character Two.".into(),
+            user_nickname: "User".into(),
+            source_format: "test".into(),
+            created_at: 1,
+            updated_at: 1,
+            template_id: None,
+            template_version: None,
+            template_snapshot_json: None,
+            description: String::new(),
+            avatar_path: None,
+            greeting: String::new(),
+            example_dialogue: "Example 2".into(),
+            runtime_profile_json: "{}".into(),
+            user_modified_at: None,
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_cancellation_after_apply_blocks_chat_until_recovered_consistently() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+    create_two_characters_for_cancellation_test(&orchestrator).await;
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend1 = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let token1 = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+    coordinator
+        .commit(&orchestrator.db, token1, &backend1)
+        .await
+        .unwrap();
+    assert_eq!(*orchestrator.character_id.lock().await, "char-1");
+
+    // Add a message to char-1
+    orchestrator
+        .add_message("user".into(), "Hello to char 1".into(), "char-1")
+        .await;
+
+    // Prepare activation for char-2
+    let token2 = coordinator
+        .prepare(&orchestrator.db, "char-2", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+
+    let on_apply = Arc::new(tokio::sync::Notify::new());
+    let pause_apply = Arc::new(tokio::sync::Notify::new());
+    let intercepted_backend = Arc::new(InterceptedActivationBackend {
+        orchestrator: orchestrator.clone(),
+        app_data: temp.path().to_path_buf(),
+        on_apply: Some(on_apply.clone()),
+        pause_apply: Some(pause_apply.clone()),
+        on_sync_history: None,
+        pause_sync_history: None,
+        on_restore: None,
+        pause_restore: None,
+        fail_sync_history: false,
+    });
+
+    let coord_clone = coordinator.clone();
+    let orch_clone = orchestrator.clone();
+    let activation_task = tokio::spawn(async move {
+        coord_clone
+            .commit(&orch_clone.db, token2, &*intercepted_backend)
+            .await
+    });
+
+    // Wait until backend.apply has completed
+    on_apply.notified().await;
+    // At this moment, backend has applied char-2, but SQLite transaction has not committed
+    assert_eq!(*orchestrator.character_id.lock().await, "char-2");
+
+    // Abort the activation task in-flight (simulating task abort / cancellation)
+    activation_task.abort();
+    let join_res = activation_task.await;
+    assert!(join_res.unwrap_err().is_cancelled());
+
+    // 1. Assert chat gate is BLOCKED
+    assert!(
+        orchestrator.is_activating(),
+        "is_activating() MUST remain true when activation is aborted in-flight"
+    );
+    assert!(
+        orchestrator.enter_chat_turn().is_err(),
+        "enter_chat_turn MUST fail while activation gate is locked from incomplete activation"
+    );
+
+    // 2. Perform recovery
+    let recovery_backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let recovered = coordinator
+        .recover_committed(&orchestrator.db, &recovery_backend)
+        .await
+        .unwrap()
+        .expect("committed character must exist");
+
+    // 3. Assert three-way consistency (backend, SQLite, history)
+    assert_eq!(recovered.runtime.character_id, "char-1");
+    assert_eq!(*orchestrator.character_id.lock().await, "char-1");
+    assert_eq!(
+        orchestrator.history.lock().await.len(),
+        1,
+        "history must retain char-1's message"
+    );
+    assert_eq!(
+        orchestrator.history.lock().await[0].content,
+        "Hello to char 1"
+    );
+
+    // 4. Assert gate is unblocked and chat works cleanly
+    assert!(
+        !orchestrator.is_activating(),
+        "is_activating() must be false after recovery completes"
+    );
+    let guard = orchestrator
+        .enter_chat_turn()
+        .expect("chat turn must succeed after recovery");
+    drop(guard);
+}
+
+#[tokio::test]
+async fn test_cancellation_after_sqlite_commit_blocks_chat_until_recovered_consistently() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+    create_two_characters_for_cancellation_test(&orchestrator).await;
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend1 = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let token1 = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+    coordinator
+        .commit(&orchestrator.db, token1, &backend1)
+        .await
+        .unwrap();
+
+    let token2 = coordinator
+        .prepare(&orchestrator.db, "char-2", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+
+    let on_sync = Arc::new(tokio::sync::Notify::new());
+    let pause_sync = Arc::new(tokio::sync::Notify::new());
+    let intercepted_backend = Arc::new(InterceptedActivationBackend {
+        orchestrator: orchestrator.clone(),
+        app_data: temp.path().to_path_buf(),
+        on_apply: None,
+        pause_apply: None,
+        on_sync_history: Some(on_sync.clone()),
+        pause_sync_history: Some(pause_sync.clone()),
+        on_restore: None,
+        pause_restore: None,
+        fail_sync_history: false,
+    });
+
+    let coord_clone = coordinator.clone();
+    let orch_clone = orchestrator.clone();
+    let activation_task = tokio::spawn(async move {
+        coord_clone
+            .commit(&orch_clone.db, token2, &*intercepted_backend)
+            .await
+    });
+
+    // Wait until transaction commit finishes and sync_history is entered
+    on_sync.notified().await;
+
+    // Abort activation task right after SQLite transaction commit
+    activation_task.abort();
+    let join_res = activation_task.await;
+    assert!(join_res.unwrap_err().is_cancelled());
+
+    // 1. Assert chat gate is BLOCKED
+    assert!(
+        orchestrator.is_activating(),
+        "is_activating() MUST remain true when cancelled after SQLite commit"
+    );
+    assert!(
+        orchestrator.enter_chat_turn().is_err(),
+        "enter_chat_turn MUST fail"
+    );
+
+    // 2. Perform recovery
+    let recovery_backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let recovered = coordinator
+        .recover_committed(&orchestrator.db, &recovery_backend)
+        .await
+        .unwrap()
+        .expect("committed character must exist");
+
+    // 3. Assert three-way consistency (backend, SQLite, history)
+    // Because SQLite committed char-2, recovery reconciled everything to char-2!
+    assert_eq!(recovered.runtime.character_id, "char-2");
+    assert_eq!(*orchestrator.character_id.lock().await, "char-2");
+
+    // 4. Assert gate is unblocked and chat works cleanly
+    assert!(!orchestrator.is_activating());
+    let guard = orchestrator
+        .enter_chat_turn()
+        .expect("chat turn must succeed after recovery");
+    drop(guard);
+}
+
+#[tokio::test]
+async fn test_cancellation_during_history_sync_blocks_chat_until_recovered_consistently() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+    create_two_characters_for_cancellation_test(&orchestrator).await;
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend1 = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let token1 = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+    coordinator
+        .commit(&orchestrator.db, token1, &backend1)
+        .await
+        .unwrap();
+
+    let token2 = coordinator
+        .prepare(&orchestrator.db, "char-2", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+
+    let on_sync = Arc::new(tokio::sync::Notify::new());
+    let pause_sync = Arc::new(tokio::sync::Notify::new());
+    let intercepted_backend = Arc::new(InterceptedActivationBackend {
+        orchestrator: orchestrator.clone(),
+        app_data: temp.path().to_path_buf(),
+        on_apply: None,
+        pause_apply: None,
+        on_sync_history: Some(on_sync.clone()),
+        pause_sync_history: Some(pause_sync.clone()),
+        on_restore: None,
+        pause_restore: None,
+        fail_sync_history: false,
+    });
+
+    let coord_clone = coordinator.clone();
+    let orch_clone = orchestrator.clone();
+    let activation_task = tokio::spawn(async move {
+        coord_clone
+            .commit(&orch_clone.db, token2, &*intercepted_backend)
+            .await
+    });
+
+    // Wait until history sync is in progress
+    on_sync.notified().await;
+
+    // Abort activation task during history sync
+    activation_task.abort();
+    let join_res = activation_task.await;
+    assert!(join_res.unwrap_err().is_cancelled());
+
+    // 1. Assert chat gate is BLOCKED
+    assert!(
+        orchestrator.is_activating(),
+        "is_activating() MUST remain true when cancelled during history sync"
+    );
+    assert!(
+        orchestrator.enter_chat_turn().is_err(),
+        "enter_chat_turn MUST fail"
+    );
+
+    // 2. Perform recovery
+    let recovery_backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let recovered = coordinator
+        .recover_committed(&orchestrator.db, &recovery_backend)
+        .await
+        .unwrap()
+        .expect("committed character must exist");
+
+    // 3. Assert three-way consistency
+    assert_eq!(recovered.runtime.character_id, "char-2");
+    assert_eq!(*orchestrator.character_id.lock().await, "char-2");
+
+    // 4. Assert gate is unblocked and chat works cleanly
+    assert!(!orchestrator.is_activating());
+    let guard = orchestrator
+        .enter_chat_turn()
+        .expect("chat turn must succeed after recovery");
+    drop(guard);
+}
+
+#[tokio::test]
+async fn test_cancellation_during_rollback_blocks_chat_until_recovered_consistently() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+    create_two_characters_for_cancellation_test(&orchestrator).await;
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend1 = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let token1 = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+    coordinator
+        .commit(&orchestrator.db, token1, &backend1)
+        .await
+        .unwrap();
+
+    let token2 = coordinator
+        .prepare(&orchestrator.db, "char-2", &tts_config, &[], &backend1)
+        .await
+        .unwrap();
+
+    let on_restore = Arc::new(tokio::sync::Notify::new());
+    let pause_restore = Arc::new(tokio::sync::Notify::new());
+    let intercepted_backend = Arc::new(InterceptedActivationBackend {
+        orchestrator: orchestrator.clone(),
+        app_data: temp.path().to_path_buf(),
+        on_apply: None,
+        pause_apply: None,
+        on_sync_history: None,
+        pause_sync_history: None,
+        on_restore: Some(on_restore.clone()),
+        pause_restore: Some(pause_restore.clone()),
+        fail_sync_history: true, // Will fail during sync_history and trigger rollback/restore!
+    });
+
+    let coord_clone = coordinator.clone();
+    let orch_clone = orchestrator.clone();
+    let activation_task = tokio::spawn(async move {
+        coord_clone
+            .commit(&orch_clone.db, token2, &*intercepted_backend)
+            .await
+    });
+
+    // Wait until rollback / restore is entered
+    on_restore.notified().await;
+
+    // Abort activation task in the middle of rollback!
+    activation_task.abort();
+    let join_res = activation_task.await;
+    assert!(join_res.unwrap_err().is_cancelled());
+
+    // 1. Assert chat gate is BLOCKED
+    assert!(
+        orchestrator.is_activating(),
+        "is_activating() MUST remain true when cancelled mid-rollback"
+    );
+    assert!(
+        orchestrator.enter_chat_turn().is_err(),
+        "enter_chat_turn MUST fail"
+    );
+
+    // 2. Perform recovery
+    let recovery_backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+    let recovered = coordinator
+        .recover_committed(&orchestrator.db, &recovery_backend)
+        .await
+        .unwrap()
+        .expect("committed character must exist");
+
+    // 3. Assert three-way consistency
+    assert_eq!(recovered.runtime.character_id, "char-1");
+    assert_eq!(*orchestrator.character_id.lock().await, "char-1");
+
+    // 4. Assert gate is unblocked and chat works cleanly
+    assert!(!orchestrator.is_activating());
+    let guard = orchestrator
+        .enter_chat_turn()
+        .expect("chat turn must succeed after recovery");
+    drop(guard);
+}
+
+#[tokio::test]
+async fn test_activation_early_return_when_character_deleted_releases_gate_and_allows_chat() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+    create_two_characters_for_cancellation_test(&orchestrator).await;
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+
+    // 1. Prepare activation for char-1
+    let token = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend)
+        .await
+        .unwrap();
+
+    // 2. Delete char-1 from SQLite before commit runs
+    sqlx::query("DELETE FROM characters WHERE id = ?")
+        .bind("char-1")
+        .execute(&orchestrator.db)
+        .await
+        .unwrap();
+
+    // 3. Commit should fail with NotFound
+    let err = coordinator
+        .commit(&orchestrator.db, token, &backend)
+        .await
+        .expect_err("commit must fail when character was deleted");
+    assert!(matches!(err, KokoroError::NotFound(_)));
+
+    // 4. Assert gate is cleanly released and runtime is NOT degraded
+    assert!(
+        !orchestrator.is_activating(),
+        "activating flag MUST be false after early return"
+    );
+    assert!(
+        orchestrator.get_runtime_degraded().await.is_none(),
+        "runtime_degraded MUST NOT be set for clean pre-mutation early exit"
+    );
+
+    // 5. Assert chat can enter cleanly
+    let guard = orchestrator
+        .enter_chat_turn()
+        .expect("chat turn must succeed after clean early exit");
+    drop(guard);
+}
+
+#[tokio::test]
+async fn test_activation_early_return_when_stale_token_releases_gate_and_allows_chat() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+    create_two_characters_for_cancellation_test(&orchestrator).await;
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+
+    // 1. Prepare activation for char-1
+    let token = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend)
+        .await
+        .unwrap();
+
+    // 2. Update character updated_at in SQLite before commit runs
+    sqlx::query("UPDATE characters SET updated_at = updated_at + 10 WHERE id = ?")
+        .bind("char-1")
+        .execute(&orchestrator.db)
+        .await
+        .unwrap();
+
+    // 3. Commit should fail with stale token error
+    let err = coordinator
+        .commit(&orchestrator.db, token, &backend)
+        .await
+        .expect_err("commit must fail when token is stale");
+    assert!(matches!(err, KokoroError::Validation(_)));
+
+    // 4. Assert gate is cleanly released and runtime is NOT degraded
+    assert!(
+        !orchestrator.is_activating(),
+        "activating flag MUST be false after stale token early exit"
+    );
+    assert!(
+        orchestrator.get_runtime_degraded().await.is_none(),
+        "runtime_degraded MUST NOT be set for clean pre-mutation early exit"
+    );
+
+    // 5. Assert chat can enter cleanly
+    let guard = orchestrator
+        .enter_chat_turn()
+        .expect("chat turn must succeed after clean early exit");
+    drop(guard);
+}
+
+#[tokio::test]
+async fn test_activation_early_return_when_stage_greeting_or_db_fails_releases_gate_and_allows_chat(
+) {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+    let temp = TempDir::new().unwrap();
+    let coordinator = Arc::new(ActivationCoordinator::default());
+    create_two_characters_for_cancellation_test(&orchestrator).await;
+
+    let tts_config = crate::tts::config::TtsSystemConfig::default();
+    let backend = OrchestratorActivationBackend {
+        orchestrator: &orchestrator,
+        app_data: temp.path().to_path_buf(),
+    };
+
+    // 1. Prepare activation for char-1
+    let token = coordinator
+        .prepare(&orchestrator.db, "char-1", &tts_config, &[], &backend)
+        .await
+        .unwrap();
+
+    // 2. Close the SQLite pool so pool.begin() in commit fails immediately
+    orchestrator.db.close().await;
+
+    // 3. Commit should fail with DB error
+    let err = coordinator
+        .commit(&orchestrator.db, token, &backend)
+        .await
+        .expect_err("commit must fail when pool is closed");
+    assert!(matches!(err, KokoroError::Database(_)));
+
+    // 4. Assert gate is cleanly released and runtime is NOT degraded
+    assert!(
+        !orchestrator.is_activating(),
+        "activating flag MUST be false after db failure early exit"
+    );
+    assert!(
+        orchestrator.get_runtime_degraded().await.is_none(),
+        "runtime_degraded MUST NOT be set for clean pre-mutation early exit"
+    );
+
+    // 5. Assert chat gate can enter cleanly
+    let guard = orchestrator
+        .activation_gate
+        .enter_chat_turn()
+        .expect("chat turn guard must be available after early exit");
+    drop(guard);
 }

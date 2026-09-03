@@ -149,7 +149,9 @@ export function useBackgroundSlideshow() {
     // Remove a single image
     const removeImage = useCallback(async (index: number) => {
         const item = storedImages[index];
-        if (!item) return;
+        if (!item) {
+            throw new Error(`Image not found at index ${index}`);
+        }
 
         try {
             await db.deleteImage(item.id);
@@ -166,6 +168,7 @@ export function useBackgroundSlideshow() {
             }
         } catch (e) {
             console.error("Failed to delete image:", e);
+            throw e;
         }
     }, [storedImages]);
 
@@ -185,6 +188,7 @@ export function useBackgroundSlideshow() {
             });
         } catch (e) {
             console.error("Failed to clear images:", e);
+            throw e;
         }
     }, [storedImages]);
 

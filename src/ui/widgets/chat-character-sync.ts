@@ -14,6 +14,7 @@ export {
   getInitialCharacterConversationTarget,
   isFailureForActiveChat,
   shouldIgnoreLegacyChatError,
+  shouldSynchronizeOnRuntimeChanged,
 } from "./chat-character-sync-core";
 
 export type CharacterConversationTarget = {

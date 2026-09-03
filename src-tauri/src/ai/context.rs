@@ -133,6 +133,164 @@ fn build_conversation_summary_prompt(transcript: &str, target_language: &str) ->
     )
 }
 
+#[derive(Debug)]
+pub struct ActivationGate {
+    lock: Arc<tokio::sync::RwLock<()>>,
+    activating: Arc<AtomicBool>,
+}
+
+impl Default for ActivationGate {
+    fn default() -> Self {
+        Self {
+            lock: Arc::new(tokio::sync::RwLock::new(())),
+            activating: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+pub struct ActivationLockGuard {
+    _write_guard: tokio::sync::OwnedRwLockWriteGuard<()>,
+    activating: Arc<AtomicBool>,
+    degraded: Option<Arc<Mutex<Option<String>>>>,
+    fail_closed: bool,
+    completed: bool,
+}
+
+impl ActivationLockGuard {
+    pub fn arm_mutation(&mut self) {
+        self.fail_closed = true;
+    }
+
+    pub fn mark_completed(&mut self) {
+        self.completed = true;
+    }
+
+    pub fn set_degraded_target(&mut self, degraded: Arc<Mutex<Option<String>>>) {
+        self.degraded = Some(degraded);
+    }
+}
+
+impl std::fmt::Debug for ActivationLockGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActivationLockGuard")
+            .field("activating", &self.activating.load(Ordering::SeqCst))
+            .field("fail_closed", &self.fail_closed)
+            .field("completed", &self.completed)
+            .finish()
+    }
+}
+
+impl Drop for ActivationLockGuard {
+    fn drop(&mut self) {
+        if self.completed || !self.fail_closed {
+            // Clean exit: either activation completed cleanly, or it exited early (e.g. character not found,
+            // stale token, db begin failure) before entering irreversible runtime mutation.
+            self.activating.store(false, Ordering::SeqCst);
+        } else {
+            // Guard dropped after entering irreversible mutation without being marked completed (e.g. cancelled in-flight / aborted / panic).
+            // 1. Keep activating = true to prevent new chat turns from entering an unverified/torn state.
+            // 2. Mark runtime degraded if degraded hook is available so prompt composition is also blocked.
+            if let Some(degraded) = &self.degraded {
+                if let Ok(mut lock) = degraded.try_lock() {
+                    if lock.is_none() {
+                        *lock = Some(
+                            "Character activation was interrupted before completion. Please re-activate or select a character."
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            tracing::warn!(
+                "ActivationLockGuard dropped without completion after mutation armed (in-flight cancellation); keeping activation gate closed and runtime degraded."
+            );
+        }
+    }
+}
+
+pub struct ChatTurnGuard {
+    _read_guard: tokio::sync::OwnedRwLockReadGuard<()>,
+}
+
+impl std::fmt::Debug for ChatTurnGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatTurnGuard").finish()
+    }
+}
+
+struct ActivationReservation {
+    activating: Arc<AtomicBool>,
+    was_already_active: bool,
+    disarmed: bool,
+}
+
+impl ActivationReservation {
+    fn new(activating: Arc<AtomicBool>) -> Self {
+        let was_already_active = activating.swap(true, Ordering::SeqCst);
+        Self {
+            activating,
+            was_already_active,
+            disarmed: false,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for ActivationReservation {
+    fn drop(&mut self) {
+        if !self.disarmed && !self.was_already_active {
+            self.activating.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
+impl ActivationGate {
+    pub async fn acquire_activation_lock(&self) -> ActivationLockGuard {
+        let reservation = ActivationReservation::new(self.activating.clone());
+        let write_guard = self.lock.clone().write_owned().await;
+        reservation.disarm();
+        ActivationLockGuard {
+            _write_guard: write_guard,
+            activating: self.activating.clone(),
+            degraded: None,
+            fail_closed: false,
+            completed: false,
+        }
+    }
+
+    pub fn enter_chat_turn(&self) -> Result<ChatTurnGuard, String> {
+        if self.activating.load(Ordering::SeqCst) {
+            return Err(
+                "Character activation is in progress. Please retry after activation completes."
+                    .to_string(),
+            );
+        }
+        match self.lock.clone().try_read_owned() {
+            Ok(read_guard) => {
+                if self.activating.load(Ordering::SeqCst) {
+                    return Err(
+                        "Character activation is in progress. Please retry after activation completes."
+                            .to_string(),
+                    );
+                }
+                Ok(ChatTurnGuard {
+                    _read_guard: read_guard,
+                })
+            }
+            Err(_) => Err(
+                "Character activation is in progress. Please retry after activation completes."
+                    .to_string(),
+            ),
+        }
+    }
+
+    pub fn is_activating(&self) -> bool {
+        self.activating.load(Ordering::SeqCst)
+    }
+}
+
 pub struct AIOrchestrator {
     pub db: SqlitePool,
     pub system_prompt: Arc<Mutex<String>>,
@@ -147,7 +305,7 @@ pub struct AIOrchestrator {
     /// History index boundary used to prevent extracting conversations from disabled periods.
     memory_history_boundary: Arc<Mutex<usize>>,
     /// Current character ID for memory isolation.
-    character_id: Arc<Mutex<String>>,
+    pub(crate) character_id: Arc<Mutex<String>>,
     /// In-memory cooldown map for memory event trigger throttling.
     memory_event_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
     /// Global toggle for all automatic memory reads/writes/injection.
@@ -160,8 +318,8 @@ pub struct AIOrchestrator {
     pub response_language: Arc<Mutex<String>>,
     /// User's display language for inline translation (e.g. "中文"). Empty = disabled.
     pub user_language: Arc<Mutex<String>>,
-    /// Jailbreak prompt prefix (prepended to all system prompts). Empty = disabled.
-    pub jailbreak_prompt: Arc<Mutex<String>>,
+    /// Jailbreak prompt prefix (prepended to all system prompts). None = not loaded from disk yet, Some("") = explicitly empty.
+    pub jailbreak_prompt: Arc<Mutex<Option<String>>>,
     /// Character name for {{char}} placeholder replacement.
     character_name: Arc<Mutex<String>>,
     /// User name for {{user}} placeholder replacement.
@@ -183,6 +341,11 @@ pub struct AIOrchestrator {
     pub max_message_chars: Arc<Mutex<usize>>,
     /// Screen context history injected into the LLM prompt: "latest" | "full".
     pub vision_context_history_mode: Arc<Mutex<String>>,
+    /// If startup or activation recovery failed, stores the degradation reason.
+    /// While set, LLM chat requests are blocked to prevent cross-character context leakage.
+    pub runtime_degraded: Arc<Mutex<Option<String>>>,
+    /// Concurrency gate to block chat turns during character activation and recovery.
+    pub activation_gate: Arc<ActivationGate>,
 }
 
 impl AIOrchestrator {
@@ -221,7 +384,7 @@ impl AIOrchestrator {
             conversation_count: Arc::new(Mutex::new(0)),
             response_language: Arc::new(Mutex::new(String::new())),
             user_language: Arc::new(Mutex::new(String::new())),
-            jailbreak_prompt: Arc::new(Mutex::new(String::new())),
+            jailbreak_prompt: Arc::new(Mutex::new(None)),
             character_name: Arc::new(Mutex::new("Kokoro".to_string())),
             user_name: Arc::new(Mutex::new("User".to_string())),
             curiosity: Arc::new(Mutex::new(CuriosityModule::new())),
@@ -233,6 +396,8 @@ impl AIOrchestrator {
             context_strategy: Arc::new(Mutex::new("window".to_string())),
             max_message_chars: Arc::new(Mutex::new(2000)),
             vision_context_history_mode: Arc::new(Mutex::new("latest".to_string())),
+            runtime_degraded: Arc::new(Mutex::new(None)),
+            activation_gate: Arc::new(ActivationGate::default()),
         })
     }
 
@@ -266,7 +431,35 @@ impl AIOrchestrator {
             context_strategy: self.context_strategy.clone(),
             max_message_chars: self.max_message_chars.clone(),
             vision_context_history_mode: self.vision_context_history_mode.clone(),
+            runtime_degraded: self.runtime_degraded.clone(),
+            activation_gate: self.activation_gate.clone(),
         }
+    }
+
+    pub async fn acquire_activation_lock(&self) -> ActivationLockGuard {
+        let mut guard = self.activation_gate.acquire_activation_lock().await;
+        guard.set_degraded_target(self.runtime_degraded.clone());
+        guard
+    }
+
+    pub fn enter_chat_turn(&self) -> Result<ChatTurnGuard, String> {
+        self.activation_gate.enter_chat_turn()
+    }
+
+    pub fn is_activating(&self) -> bool {
+        self.activation_gate.is_activating()
+    }
+
+    pub async fn set_runtime_degraded(&self, reason: Option<String>) {
+        *self.runtime_degraded.lock().await = reason;
+    }
+
+    pub async fn get_runtime_degraded(&self) -> Option<String> {
+        self.runtime_degraded.lock().await.clone()
+    }
+
+    pub async fn clear_runtime_degraded(&self) {
+        *self.runtime_degraded.lock().await = None;
     }
 
     pub async fn apply_character_profile(&self, character_id: &str) -> Result<bool> {
@@ -302,10 +495,10 @@ impl AIOrchestrator {
 
     pub async fn set_jailbreak_prompt(&self, prompt: String) {
         let mut jp = self.jailbreak_prompt.lock().await;
-        *jp = prompt;
+        *jp = Some(prompt);
     }
 
-    pub async fn get_jailbreak_prompt(&self) -> String {
+    pub async fn get_jailbreak_prompt(&self) -> Option<String> {
         let jp = self.jailbreak_prompt.lock().await;
         jp.clone()
     }
@@ -783,8 +976,51 @@ impl AIOrchestrator {
         }
     }
 
-    /// Composes a prompt based on the user query, budgeting tokens for context
+    /// Composes a prompt based on the user query, budgeting tokens for context.
+    /// Acquires a temporary [`ChatTurnGuard`] for standalone callers.
     pub async fn compose_prompt(
+        &self,
+        query: &str,
+        allow_image_gen: bool,
+        tool_prompt: Option<String>,
+        native_tools_enabled: bool,
+        character_id: &str,
+    ) -> Result<(Vec<Message>, Vec<String>)> {
+        let _turn_guard = self
+            .enter_chat_turn()
+            .map_err(|reason| anyhow::anyhow!("{reason}"))?;
+        self.compose_prompt_inner(
+            query,
+            allow_image_gen,
+            tool_prompt,
+            native_tools_enabled,
+            character_id,
+        )
+        .await
+    }
+
+    /// Composes a prompt within an existing chat turn that already holds a [`ChatTurnGuard`].
+    /// Does not re-enter the activation gate, ensuring an active turn can complete without re-entrancy issues.
+    pub async fn compose_prompt_with_guard(
+        &self,
+        query: &str,
+        allow_image_gen: bool,
+        tool_prompt: Option<String>,
+        native_tools_enabled: bool,
+        character_id: &str,
+        _guard: &ChatTurnGuard,
+    ) -> Result<(Vec<Message>, Vec<String>)> {
+        self.compose_prompt_inner(
+            query,
+            allow_image_gen,
+            tool_prompt,
+            native_tools_enabled,
+            character_id,
+        )
+        .await
+    }
+
+    async fn compose_prompt_inner(
         &self,
         query: &str,
         _allow_image_gen: bool,
@@ -792,6 +1028,12 @@ impl AIOrchestrator {
         native_tools_enabled: bool,
         character_id: &str,
     ) -> Result<(Vec<Message>, Vec<String>)> {
+        if let Some(reason) = self.get_runtime_degraded().await {
+            anyhow::bail!(
+                "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings."
+            );
+        }
+
         // 1. Determine Model logic
         let model_type = self.router.route(query);
         let _max_context = match model_type {
@@ -895,7 +1137,12 @@ impl AIOrchestrator {
         ));
 
         // Section 2: Character persona (jailbreak + system prompt)
-        let jailbreak = self.jailbreak_prompt.lock().await.clone();
+        let jailbreak = self
+            .jailbreak_prompt
+            .lock()
+            .await
+            .clone()
+            .unwrap_or_default();
         let character_block = if !jailbreak.is_empty() {
             let char_name = self.character_name.lock().await.clone();
             let user_name = self.user_name.lock().await.clone();
@@ -1144,6 +1391,20 @@ impl AIOrchestrator {
         if self.persist_conversation_selection {
             Self::persist_conversation_id(None);
         }
+    }
+
+    pub async fn reset_history_and_boundary(&self) {
+        self.history.lock().await.clear();
+        *self.memory_history_boundary.lock().await = 0;
+        *self.memory_trigger_count.lock().await = 0;
+    }
+
+    pub async fn set_memory_history_boundary(&self, boundary: usize) {
+        *self.memory_history_boundary.lock().await = boundary;
+    }
+
+    pub async fn memory_history_boundary(&self) -> usize {
+        *self.memory_history_boundary.lock().await
     }
 
     pub async fn should_trigger_memory_event(
@@ -1828,5 +2089,27 @@ mod tests {
             count, 0,
             "Message count should remain 0 for non-user messages"
         );
+    }
+
+    #[tokio::test]
+    async fn test_degraded_runtime_blocks_compose_prompt_and_clearing_allows_it() {
+        let orchestrator = setup_test_orchestrator().await;
+        orchestrator
+            .set_runtime_degraded(Some("Startup history sync failed".to_string()))
+            .await;
+
+        let err = orchestrator
+            .compose_prompt("Hello", false, None, false, "default")
+            .await
+            .expect_err("compose_prompt must fail when runtime is degraded");
+        assert!(err.to_string().contains("Character runtime is degraded"));
+        assert!(err.to_string().contains("Startup history sync failed"));
+
+        orchestrator.clear_runtime_degraded().await;
+        let (messages, _) = orchestrator
+            .compose_prompt("Hello", false, None, false, "default")
+            .await
+            .expect("compose_prompt must succeed when degraded state is cleared");
+        assert!(!messages.is_empty());
     }
 }

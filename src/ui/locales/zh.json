@@ -592,12 +592,28 @@
             }
         },
         "background": {
+            "library": {
+                "title": "图片资源库",
+                "badge": "即时存储 • 立即生效",
+                "notice": "导入或删除图片会直接持久化到本地媒体库并即时生效；底部的“取消”按钮仅回滚下方的显示偏好草稿，不会撤回已导入或已删除的文件。",
+                "imported": "已成功导入 {{count}} 张图片",
+                "no_valid_images": "未找到有效的图片文件",
+                "deleted": "图片已从媒体库移除",
+                "cleared": "已清空本地图片库",
+                "clear_confirm": "确认清空全部？",
+                "clear_cancel": "取消",
+                "empty": "媒体库中暂无图片。导入图片后即可开启轮播。"
+            },
+            "preferences": {
+                "title": "显示与轮播设置"
+            },
             "import": {
                 "label": "导入图片",
                 "files": "文件",
                 "folder": "文件夹",
                 "clear": "清除全部",
-                "count": "已加载 {{count}} 张图片"
+                "count": "已加载 {{count}} 张图片",
+                "notice": "导入或删除图片资源会直接作用于本地存储，取消设置不会回滚该操作。"
             },
             "enable": "启用背景",
             "mode": {

@@ -1138,6 +1138,15 @@ pub async fn stream_chat(
         std::sync::Arc<tokio::sync::Mutex<crate::vision::server::VisionServer>>,
     >,
 ) -> Result<(), KokoroError> {
+    // Gate chat if runtime is degraded (e.g. startup recovery failure)
+    if let Some(reason) = state.get_runtime_degraded().await {
+        return Err(KokoroError::Chat(format!(
+            "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings before sending messages."
+        )));
+    }
+
+    let _chat_turn_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+
     // 0. Resolve character ID for this request (not stored in shared state)
     let char_id = request
         .character_id
@@ -1282,12 +1291,13 @@ pub async fn stream_chat(
 
     // Compose Persona Prompt
     let (prompt_messages, compose_warnings) = state
-        .compose_prompt(
+        .compose_prompt_with_guard(
             &request.message,
             request.allow_image_gen.unwrap_or(false),
             tool_prompt,
             native_tools_enabled,
             &char_id,
+            &_chat_turn_guard,
         )
         .await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;

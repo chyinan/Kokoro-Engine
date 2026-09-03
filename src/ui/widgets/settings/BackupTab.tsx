@@ -19,7 +19,19 @@ function formatBytes(bytes: number): string {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function BackupTab() {
+export interface BackupTabProps {
+    autoBackupConfig?: AutoBackupConfig | null;
+    loading?: boolean;
+    onAutoBackupConfigChange?: (cfg: AutoBackupConfig) => void;
+    onAutoBackupSaved?: (cfg: AutoBackupConfig) => void;
+}
+
+export function BackupTab({
+    autoBackupConfig,
+    loading = false,
+    onAutoBackupConfigChange,
+    onAutoBackupSaved,
+}: BackupTabProps = {}) {
     const { t } = useTranslation();
 
     // Export state
@@ -41,21 +53,32 @@ export function BackupTab() {
     const [conflictStrategy, setConflictStrategy] = useState<"skip" | "overwrite">("overwrite");
 
     // Auto backup state
-    const [autoBackup, setAutoBackup] = useState<AutoBackupConfig>({
+    const [internalAutoBackup, setInternalAutoBackup] = useState<AutoBackupConfig>({
         enabled: false,
         backup_dir: '',
         interval_days: 1,
         auto_cleanup: false,
         keep_days: 30,
     });
+    const isControlledAutoBackup = autoBackupConfig !== undefined && autoBackupConfig !== null;
+    const autoBackup = isControlledAutoBackup ? autoBackupConfig : internalAutoBackup;
+
+    const setAutoBackup = (update: AutoBackupConfig | ((prev: AutoBackupConfig) => AutoBackupConfig)) => {
+        const next = typeof update === 'function' ? update(autoBackup) : update;
+        setInternalAutoBackup(next);
+        onAutoBackupConfigChange?.(next);
+    };
+
     const [autoBackupSaved, setAutoBackupSaved] = useState(false);
     const [autoBackupError, setAutoBackupError] = useState<string | null>(null);
     const [runningNow, setRunningNow] = useState(false);
     const [runNowResult, setRunNowResult] = useState<string | null>(null);
 
     useEffect(() => {
-        getAutoBackupConfig().then(setAutoBackup).catch(() => {});
-    }, []);
+        if (!isControlledAutoBackup) {
+            getAutoBackupConfig().then(setInternalAutoBackup).catch(() => {});
+        }
+    }, [isControlledAutoBackup]);
 
     const handleSaveAutoBackup = async () => {
         setAutoBackupError(null);
@@ -63,6 +86,7 @@ export function BackupTab() {
         try {
             await saveAutoBackupConfig(autoBackup);
             setAutoBackupSaved(true);
+            onAutoBackupSaved?.(autoBackup);
             setTimeout(() => setAutoBackupSaved(false), 2000);
         } catch (e: any) {
             setAutoBackupError(typeof e === 'string' ? e : (e?.message ?? JSON.stringify(e)));
@@ -275,16 +299,22 @@ export function BackupTab() {
                 <div className={clsx(sectionHeadingClasses, "mb-3")}>{t('settings.backup.auto_title')}</div>
                 <p className="text-xs text-[var(--color-text-muted)] mb-4">{t('settings.backup.auto_desc')}</p>
 
-                <div className="space-y-3">
-                    {/* Enable toggle */}
-                    <label className="flex items-center gap-2 text-xs text-[var(--color-text-primary)] cursor-pointer">
-                        <input type="checkbox" checked={autoBackup.enabled}
-                            onChange={e => setAutoBackup(prev => ({ ...prev, enabled: e.target.checked }))}
-                            className={clsx(toggleClasses, autoBackup.enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]")}
-                            style={{ appearance: 'none' }}
-                        />
-                        {t('settings.backup.auto_enable')}
-                    </label>
+                {loading ? (
+                    <div className="flex items-center gap-2 py-4 text-xs text-[var(--color-text-muted)]">
+                        <Loader2 size={14} className="animate-spin" />
+                        <span>{t('settings.backup.auto_loading', 'Loading auto backup configuration...')}</span>
+                    </div>
+                ) : (
+                    <div className="space-y-3">
+                        {/* Enable toggle */}
+                        <label className="flex items-center gap-2 text-xs text-[var(--color-text-primary)] cursor-pointer">
+                            <input type="checkbox" checked={autoBackup.enabled}
+                                onChange={e => setAutoBackup(prev => ({ ...prev, enabled: e.target.checked }))}
+                                className={clsx(toggleClasses, autoBackup.enabled ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]")}
+                                style={{ appearance: 'none' }}
+                            />
+                            {t('settings.backup.auto_enable')}
+                        </label>
 
                     {autoBackup.enabled && (
                         <div className="space-y-3 pl-1">
@@ -393,6 +423,7 @@ export function BackupTab() {
                         </div>
                     )}
                 </div>
+                )}
             </div>
 
             <div className="border-t border-[var(--color-border)]" />

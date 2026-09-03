@@ -125,6 +125,23 @@ pub trait ActivationRuntimeBackend: Send + Sync {
     async fn snapshot(&self) -> Result<BackendRuntimeSnapshot, KokoroError>;
     async fn apply(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError>;
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError>;
+    async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
+        let _ = conversation_id;
+        Ok(())
+    }
+    async fn set_degraded(&self, reason: Option<String>) {
+        let _ = reason;
+    }
+    async fn clear_degraded(&self) {}
+    async fn lock_activation(&self) -> Result<Box<dyn std::any::Any + Send>, KokoroError> {
+        Ok(Box::new(()))
+    }
+    fn arm_activation_mutation(&self, lock: &mut (dyn std::any::Any + Send)) {
+        let _ = lock;
+    }
+    fn mark_activation_completed(&self, lock: &mut (dyn std::any::Any + Send)) {
+        let _ = lock;
+    }
 }
 
 #[derive(Clone)]
@@ -329,6 +346,8 @@ impl ActivationCoordinator {
         // prompt, greeting, conversation, and rollback fields come from this server-owned copy.
         let token = prepared.token;
 
+        let mut _activation_lock = backend.lock_activation().await?;
+
         let mut transaction = pool.begin().await?;
         let live_updated_at =
             sqlx::query_scalar::<_, i64>("SELECT updated_at FROM characters WHERE id = ?")
@@ -371,26 +390,180 @@ impl ActivationCoordinator {
         .execute(&mut *transaction)
         .await?;
 
+        // Arm the mutation barrier: from this point onward, backend runtime mutation begins.
+        // If an in-flight abort occurs after this barrier, the gate fails closed to prevent torn state.
+        backend.arm_activation_mutation(&mut *_activation_lock);
+
         if let Err(error) = backend.apply(&applied_runtime).await {
             if let Err(restore_error) = backend.restore(&token.previous_committed).await {
+                let recover_res = self.recover_committed_backend(pool, backend).await;
+                if let Err(recover_error) = recover_res {
+                    let reason = format!(
+                        "failed to apply activation: {error}; failed to restore backend: {restore_error}; failed to recover backend from DB: {recover_error}"
+                    );
+                    backend.set_degraded(Some(reason.clone())).await;
+                    backend.mark_activation_completed(&mut *_activation_lock);
+                    return Err(KokoroError::Internal(reason));
+                }
+                backend.mark_activation_completed(&mut *_activation_lock);
                 return Err(KokoroError::Internal(format!(
-                    "failed to apply activation: {error}; failed to restore backend: {restore_error}"
+                    "failed to apply activation: {error}; failed to restore backend: {restore_error} (recovered from committed state)"
                 )));
             }
+            backend.mark_activation_completed(&mut *_activation_lock);
             return Err(error);
         }
         if let Err(error) = transaction.commit().await {
             let restore_result = backend.restore(&token.previous_committed).await;
             if let Err(restore_error) = restore_result {
+                let recover_res = self.recover_committed_backend(pool, backend).await;
+                if let Err(recover_error) = recover_res {
+                    let reason = format!(
+                        "failed to commit activation: {error}; failed to restore backend: {restore_error}; failed to recover backend from DB: {recover_error}"
+                    );
+                    backend.set_degraded(Some(reason.clone())).await;
+                    backend.mark_activation_completed(&mut *_activation_lock);
+                    return Err(KokoroError::Internal(reason));
+                }
+                backend.mark_activation_completed(&mut *_activation_lock);
                 return Err(KokoroError::Internal(format!(
-                    "failed to commit activation: {error}; failed to restore backend: {restore_error}"
+                    "failed to commit activation: {error}; failed to restore backend: {restore_error} (recovered from committed state)"
                 )));
             }
+            backend.mark_activation_completed(&mut *_activation_lock);
             return Err(error.into());
         }
 
+        if let Err(history_err) = backend
+            .sync_history(applied_runtime.current_conversation_id.as_deref())
+            .await
+        {
+            tracing::error!(
+                "Failed to sync conversation history after character activation: {history_err}"
+            );
+            let rollback_db_result = self
+                .rollback_committed_state(pool, &token, state.committed_revision)
+                .await;
+
+            if let Err(rollback_error) = rollback_db_result {
+                tracing::error!(
+                    "Failed to rollback committed state in SQLite after history sync failure: {rollback_error}. Re-aligning backend to committed SQLite state."
+                );
+                state.committed_revision = token.revision;
+                let recover_result = self.recover_committed_backend(pool, backend).await;
+                if let Err(recover_error) = recover_result {
+                    let reason = format!(
+                        "failed to sync history: {history_err}; failed to rollback committed state: {rollback_error}; failed to re-align backend: {recover_error}"
+                    );
+                    backend.set_degraded(Some(reason.clone())).await;
+                    backend.mark_activation_completed(&mut *_activation_lock);
+                    return Err(KokoroError::Internal(reason));
+                }
+                backend.mark_activation_completed(&mut *_activation_lock);
+                return Err(KokoroError::Internal(format!(
+                    "failed to sync history: {history_err}; failed to rollback committed state: {rollback_error} (backend retained committed runtime)"
+                )));
+            }
+
+            let restore_result = backend.restore(&token.previous_committed).await;
+            if let Err(restore_error) = restore_result {
+                tracing::error!(
+                    "Failed to restore backend after DB rollback: {restore_error}. Re-aligning backend from committed SQLite state."
+                );
+                let recover_result = self.recover_committed_backend(pool, backend).await;
+                if let Err(recover_error) = recover_result {
+                    let reason = format!(
+                        "failed to sync history: {history_err}; failed to restore backend: {restore_error}; failed to recover backend from DB: {recover_error}"
+                    );
+                    backend.set_degraded(Some(reason.clone())).await;
+                    backend.mark_activation_completed(&mut *_activation_lock);
+                    return Err(KokoroError::Internal(reason));
+                }
+                backend.mark_activation_completed(&mut *_activation_lock);
+                return Err(KokoroError::Internal(format!(
+                    "failed to sync history: {history_err}; failed to restore backend: {restore_error}"
+                )));
+            }
+
+            backend.mark_activation_completed(&mut *_activation_lock);
+            return Err(KokoroError::Internal(format!(
+                "failed to sync conversation history: {history_err}"
+            )));
+        }
+
         state.committed_revision = token.revision;
+        backend.clear_degraded().await;
+        backend.mark_activation_completed(&mut *_activation_lock);
         Ok(committed)
+    }
+
+    async fn rollback_committed_state(
+        &self,
+        pool: &SqlitePool,
+        token: &CharacterActivationToken,
+        previous_revision: u64,
+    ) -> Result<(), KokoroError> {
+        let mut transaction = pool.begin().await?;
+        rollback_committed_runtime_table_in_tx(
+            &mut transaction,
+            &token.previous_committed,
+            previous_revision,
+        )
+        .await?;
+        revert_staged_greeting_in_tx(&mut transaction, token).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn recover_committed_backend<B: ActivationRuntimeBackend>(
+        &self,
+        pool: &SqlitePool,
+        backend: &B,
+    ) -> Result<(), KokoroError> {
+        let Some(committed) = self.get_committed(pool).await? else {
+            let clear_res = backend.sync_history(None).await;
+            let reason =
+                "no committed character runtime found in database during recovery".to_string();
+            backend.set_degraded(Some(reason.clone())).await;
+            if let Err(clear_err) = clear_res {
+                return Err(KokoroError::Internal(format!(
+                    "{reason}; failed to clear in-memory history: {clear_err}"
+                )));
+            }
+            return Err(KokoroError::Internal(reason));
+        };
+        if let Err(apply_err) = backend.apply(&committed.runtime).await {
+            let clear_res = backend.sync_history(None).await;
+            let reason = format!("failed to apply committed runtime during recovery: {apply_err}");
+            backend.set_degraded(Some(reason.clone())).await;
+            if let Err(clear_err) = clear_res {
+                return Err(KokoroError::Internal(format!(
+                    "{reason}; failed to clear in-memory history: {clear_err}"
+                )));
+            }
+            return Err(KokoroError::Internal(reason));
+        }
+        if let Err(sync_err) = backend
+            .sync_history(committed.runtime.current_conversation_id.as_deref())
+            .await
+        {
+            tracing::warn!(
+                target: "activation",
+                "Failed to sync conversation history during backend recovery: {sync_err}. Clearing in-memory history."
+            );
+            let clear_res = backend.sync_history(None).await;
+            let reason =
+                format!("failed to sync conversation history during backend recovery: {sync_err}");
+            backend.set_degraded(Some(reason.clone())).await;
+            if let Err(clear_err) = clear_res {
+                return Err(KokoroError::Internal(format!(
+                    "{reason}; also failed to clear in-memory history: {clear_err}"
+                )));
+            }
+            return Err(KokoroError::Internal(reason));
+        }
+        backend.clear_degraded().await;
+        Ok(())
     }
 
     pub async fn recover_committed<B: ActivationRuntimeBackend>(
@@ -402,9 +575,38 @@ impl ActivationCoordinator {
         let Some(committed) = self.get_committed(pool).await? else {
             return Ok(None);
         };
-        backend.apply(&committed.runtime).await?;
+        let initial_snapshot = backend.snapshot().await?;
+        let mut _activation_lock = backend.lock_activation().await?;
+        backend.arm_activation_mutation(&mut *_activation_lock);
+        if let Err(apply_err) = backend.apply(&committed.runtime).await {
+            let err = compensate_recovery_failure(
+                backend,
+                &initial_snapshot,
+                "failed to apply committed runtime",
+                apply_err,
+            )
+            .await;
+            backend.mark_activation_completed(&mut *_activation_lock);
+            return Err(err);
+        }
+        if let Err(sync_err) = backend
+            .sync_history(committed.runtime.current_conversation_id.as_deref())
+            .await
+        {
+            let err = compensate_recovery_failure(
+                backend,
+                &initial_snapshot,
+                "failed to recover conversation history",
+                sync_err,
+            )
+            .await;
+            backend.mark_activation_completed(&mut *_activation_lock);
+            return Err(err);
+        }
+        backend.clear_degraded().await;
         state.next_revision = state.next_revision.max(committed.revision);
         state.committed_revision = state.committed_revision.max(committed.revision);
+        backend.mark_activation_completed(&mut *_activation_lock);
         Ok(Some(committed))
     }
 
@@ -434,6 +636,45 @@ impl ActivationCoordinator {
         })
         .transpose()
     }
+}
+
+/// Encapsulates compensation during recovery failure to guarantee consistent state:
+/// Restores initial snapshot, clears dirty in-memory history, marks degraded, and returns accurate diagnostics.
+async fn compensate_recovery_failure<B: ActivationRuntimeBackend>(
+    backend: &B,
+    initial_snapshot: &BackendRuntimeSnapshot,
+    context_prefix: &str,
+    primary_error: KokoroError,
+) -> KokoroError {
+    let restore_res = backend.restore(initial_snapshot).await;
+    let clear_res = backend.sync_history(None).await;
+    let reason = format!("{context_prefix}: {primary_error}");
+
+    backend.set_degraded(Some(reason.clone())).await;
+
+    let mut compensation_details = Vec::new();
+    match (restore_res, clear_res) {
+        (Ok(()), Ok(())) => {
+            compensation_details.push("cleared dirty history and rolled back runtime".to_string());
+        }
+        (Ok(()), Err(clear_err)) => {
+            compensation_details.push(format!(
+                "rolled back runtime; failed to clear dirty history: {clear_err}"
+            ));
+        }
+        (Err(restore_err), Ok(())) => {
+            compensation_details.push(format!(
+                "failed to restore backend: {restore_err}; cleared dirty history"
+            ));
+        }
+        (Err(restore_err), Err(clear_err)) => {
+            compensation_details.push(format!(
+                "failed to restore backend: {restore_err}; failed to clear dirty history: {clear_err}"
+            ));
+        }
+    }
+
+    KokoroError::Internal(format!("{reason} ({})", compensation_details.join("; ")))
 }
 
 fn normalized_user_name(name: String) -> String {
@@ -904,6 +1145,86 @@ async fn stage_greeting(
         return Err(stale_token_error());
     }
     Ok(())
+}
+
+async fn rollback_committed_runtime_table_in_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    previous_committed: &BackendRuntimeSnapshot,
+    previous_revision: u64,
+) -> Result<(), KokoroError> {
+    if previous_committed.character_id.is_empty() {
+        sqlx::query("DELETE FROM character_activation_runtime WHERE singleton = 1")
+            .execute(&mut **transaction)
+            .await?;
+    } else {
+        let previous_record = CommittedCharacterRuntime {
+            revision: previous_revision,
+            runtime: previous_committed.clone(),
+            target_conversation_id: previous_committed
+                .current_conversation_id
+                .clone()
+                .unwrap_or_default(),
+        };
+        let previous_json = serde_json::to_string(&previous_record).map_err(|error| {
+            KokoroError::Internal(format!(
+                "failed to serialize previous committed character runtime: {error}"
+            ))
+        })?;
+        sqlx::query(
+            "INSERT INTO character_activation_runtime (singleton, revision, runtime_json) \
+             VALUES (1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET revision = excluded.revision, runtime_json = excluded.runtime_json",
+        )
+        .bind(i64::try_from(previous_revision).map_err(|_| {
+            KokoroError::Internal("character activation revision exceeds SQLite range".into())
+        })?)
+        .bind(previous_json)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn revert_staged_greeting_in_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    token: &CharacterActivationToken,
+) -> Result<(), KokoroError> {
+    match &token.greeting_action {
+        GreetingAction::None => Ok(()),
+        GreetingAction::ConsumeWithoutEmit => {
+            sqlx::query(
+                "UPDATE characters SET greeting_consumed_at = NULL, greeting_message_id = NULL \
+                 WHERE id = ?",
+            )
+            .bind(&token.resolved_runtime.character_id)
+            .execute(&mut **transaction)
+            .await?;
+            Ok(())
+        }
+        GreetingAction::Emit { .. } => {
+            let message_id = sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT greeting_message_id FROM characters WHERE id = ?",
+            )
+            .bind(&token.resolved_runtime.character_id)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .flatten();
+
+            if let Some(msg_id) = message_id {
+                sqlx::query("DELETE FROM conversation_messages WHERE id = ?")
+                    .bind(msg_id)
+                    .execute(&mut **transaction)
+                    .await?;
+            }
+            sqlx::query(
+                "UPDATE characters SET greeting_consumed_at = NULL, greeting_message_id = NULL \
+                 WHERE id = ?",
+            )
+            .bind(&token.resolved_runtime.character_id)
+            .execute(&mut **transaction)
+            .await?;
+            Ok(())
+        }
+    }
 }
 
 async fn ensure_committed_runtime_table(

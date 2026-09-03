@@ -67,7 +67,45 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
     }
 
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
-        apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await
+        apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await?;
+        sync_orchestrator_history(
+            self.orchestrator,
+            snapshot.current_conversation_id.as_deref(),
+        )
+        .await?;
+        if !snapshot.character_id.is_empty() {
+            self.orchestrator.clear_runtime_degraded().await;
+        }
+        Ok(())
+    }
+
+    async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
+        sync_orchestrator_history(self.orchestrator, conversation_id).await
+    }
+
+    async fn set_degraded(&self, reason: Option<String>) {
+        self.orchestrator.set_runtime_degraded(reason).await;
+    }
+
+    async fn clear_degraded(&self) {
+        self.orchestrator.clear_runtime_degraded().await;
+    }
+
+    async fn lock_activation(&self) -> Result<Box<dyn std::any::Any + Send>, KokoroError> {
+        let guard = self.orchestrator.acquire_activation_lock().await;
+        Ok(Box::new(guard))
+    }
+
+    fn arm_activation_mutation(&self, lock: &mut (dyn std::any::Any + Send)) {
+        if let Some(guard) = lock.downcast_mut::<crate::ai::context::ActivationLockGuard>() {
+            guard.arm_mutation();
+        }
+    }
+
+    fn mark_activation_completed(&self, lock: &mut (dyn std::any::Any + Send)) {
+        if let Some(guard) = lock.downcast_mut::<crate::ai::context::ActivationLockGuard>() {
+            guard.mark_completed();
+        }
     }
 }
 
@@ -92,7 +130,54 @@ async fn apply_orchestrator_runtime(
         .await;
     orchestrator.set_proactive_enabled(snapshot.proactive_enabled);
     *orchestrator.current_conversation_id.lock().await = snapshot.current_conversation_id.clone();
-    orchestrator.history.lock().await.clear();
+    Ok(())
+}
+
+async fn sync_orchestrator_history(
+    orchestrator: &AIOrchestrator,
+    conversation_id: Option<&str>,
+) -> Result<(), KokoroError> {
+    let new_messages = if let Some(conv_id) = conversation_id {
+        let rows = match sqlx::query_as::<_, (String, String, Option<String>, String)>(
+            "SELECT role, content, metadata, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
+        )
+        .bind(conv_id)
+        .fetch_all(&orchestrator.db)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                orchestrator.reset_history_and_boundary().await;
+                return Err(KokoroError::Database(format!(
+                    "failed to load conversation messages: {e}"
+                )));
+            }
+        };
+
+        let mut msgs = Vec::with_capacity(rows.len());
+        for (role, content, metadata, _) in rows {
+            msgs.push(crate::ai::context::Message {
+                role,
+                content,
+                metadata: metadata
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
+            });
+        }
+        msgs
+    } else {
+        Vec::new()
+    };
+
+    orchestrator.reset_history_and_boundary().await;
+    let count = new_messages.len();
+    {
+        let mut history = orchestrator.history.lock().await;
+        for msg in new_messages {
+            history.push_back(msg);
+        }
+    }
+    orchestrator.set_memory_history_boundary(count).await;
     Ok(())
 }
 

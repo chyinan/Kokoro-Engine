@@ -45,3 +45,25 @@ export function isFailureForActiveChat(
 export function shouldIgnoreLegacyChatError(_activeTurnId: string | null): boolean {
   return true;
 }
+
+/**
+ * Determines whether an incoming character runtime changed event requires
+ * re-synchronizing conversations and resetting visible chat state.
+ * If the event is for the already active character, visible chat state should
+ * remain untouched to prevent UI flickering.
+ */
+export function shouldSynchronizeOnRuntimeChanged(
+  activeCharacterId: string,
+  eventCharacterId: string | null | undefined,
+  currentConversationId?: string | null,
+  targetConversationId?: string | null,
+  options?: { readonly force?: boolean },
+): boolean {
+  if (options?.force) return true;
+  if (!eventCharacterId) return false;
+  if (eventCharacterId !== activeCharacterId) return true;
+  if (targetConversationId !== undefined && currentConversationId !== undefined) {
+    return (targetConversationId ?? null) !== (currentConversationId ?? null);
+  }
+  return false;
+}

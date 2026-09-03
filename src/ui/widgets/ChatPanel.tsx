@@ -17,6 +17,7 @@ import {
     getInitialCharacterConversationTarget,
     isFailureForActiveChat,
     shouldIgnoreLegacyChatError,
+    shouldSynchronizeOnRuntimeChanged,
 } from "./chat-character-sync-core";
 import { getStreamingRevealText, hasActiveKokoroBubble, shouldRenderTypingIndicator } from "./chat-streaming-state";
 import {
@@ -238,6 +239,8 @@ export default function ChatPanel({
     );
     const activeCharacterIdRef = useRef(activeCharacterId);
     const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+    const activeConversationIdRef = useRef(activeConversationId);
+    activeConversationIdRef.current = activeConversationId;
     const deferredMessages = useDeferredValue(messages);
     const [visibleCount, setVisibleCount] = useState(20);
     const [input, setInput] = useState("");
@@ -380,6 +383,7 @@ export default function ChatPanel({
                 setActiveCharacterId(characterId);
                 activeCharacterIdRef.current = characterId;
                 setActiveConversationId(null);
+                activeConversationIdRef.current = null;
                 setMessages([]);
                 setExpandedTranslations(new Set());
             },
@@ -387,6 +391,7 @@ export default function ChatPanel({
                 setActiveCharacterId(conversation.characterId);
                 activeCharacterIdRef.current = conversation.characterId;
                 setActiveConversationId(conversation.conversationId);
+                activeConversationIdRef.current = conversation.conversationId;
                 setMessages([...conversation.messages]);
                 setExpandedTranslations(new Set());
             },
@@ -428,8 +433,17 @@ export default function ChatPanel({
         synchronize(initialTarget.characterId, initialTarget.preferredConversationId);
         const handleRuntimeChanged = (event: Event): void => {
             const detail = (event as CustomEvent<CommittedCharacterRuntime>).detail;
-            if (!detail?.runtime.character_id) return;
-            synchronize(detail.runtime.character_id, detail.target_conversation_id);
+            const eventCharacterId = detail?.runtime?.character_id;
+            const targetConversationId = detail?.target_conversation_id ?? null;
+            if (!shouldSynchronizeOnRuntimeChanged(
+                activeCharacterIdRef.current,
+                eventCharacterId,
+                activeConversationIdRef.current,
+                targetConversationId,
+            )) {
+                return;
+            }
+            synchronize(eventCharacterId, targetConversationId);
         };
         window.addEventListener("kokoro-character-runtime-changed", handleRuntimeChanged);
         return () => {

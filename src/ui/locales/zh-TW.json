@@ -592,6 +592,21 @@
             }
         },
         "background": {
+            "library": {
+                "title": "圖片資源庫",
+                "badge": "即時存儲 • 立即生效",
+                "notice": "匯入或刪除圖片會直接持久化到本地媒體庫並即時生效；底部的「取消」按鈕僅回滾下方的顯示偏好草稿，不會撤回已匯入或已刪除的檔案。",
+                "imported": "已成功匯入 {{count}} 張圖片",
+                "no_valid_images": "未找到有效的圖片檔案",
+                "deleted": "圖片已從媒體庫移除",
+                "cleared": "已清空本地圖片庫",
+                "clear_confirm": "確認清空全部？",
+                "clear_cancel": "取消",
+                "empty": "媒體庫中暫無圖片。匯入圖片後即可開啟輪播。"
+            },
+            "preferences": {
+                "title": "顯示與輪播設定"
+            },
             "import": {
                 "label": "匯入圖片",
                 "files": "檔案",

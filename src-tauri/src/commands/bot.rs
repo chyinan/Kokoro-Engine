@@ -863,6 +863,17 @@ async fn generate_bot_reply(
         .try_state::<AIOrchestrator>()
         .ok_or("AIOrchestrator not available")?;
     let orchestrator = orchestrator_override.unwrap_or(&managed_orchestrator);
+
+    if let Some(reason) = orchestrator.get_runtime_degraded().await {
+        return Err(format!(
+            "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings."
+        ));
+    }
+
+    let _chat_turn_guard = orchestrator
+        .enter_chat_turn()
+        .map_err(|e| format!("Character activation is in progress: {e}"))?;
+
     let llm_service = app
         .try_state::<LlmService>()
         .ok_or("LlmService not available")?;
@@ -922,7 +933,14 @@ async fn generate_bot_reply(
     };
 
     let (prompt_messages, compose_warnings) = orchestrator
-        .compose_prompt(&prompt_text, false, tool_prompt, false, &char_id)
+        .compose_prompt_with_guard(
+            &prompt_text,
+            false,
+            tool_prompt,
+            false,
+            &char_id,
+            &_chat_turn_guard,
+        )
         .await
         .map_err(|e| e.to_string())?;
     for warning in compose_warnings {
@@ -2331,6 +2349,12 @@ async fn handle_generic_webhook(
         Some(orchestrator) => orchestrator,
         None => return server_error("AIOrchestrator not available"),
     };
+    if base_orchestrator.is_activating() {
+        return json_response(
+            json!({ "error": "Character activation is in progress" }),
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+    }
     let webhook_orchestrator = base_orchestrator.fork_with_isolated_history().await;
     let explicit_character_id = parsed
         .character_id
@@ -2383,7 +2407,16 @@ async fn handle_generic_webhook(
             }
             json_response(json!(reply), StatusCode::OK)
         }
-        Err(error) => server_error(&error),
+        Err(error) => {
+            if error.contains("Character activation is in progress") {
+                json_response(
+                    json!({ "error": "Character activation is in progress" }),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+            } else {
+                server_error(&error)
+            }
+        }
     }
 }
 

@@ -348,14 +348,12 @@ pub fn run() {
                         orchestrator.set_memory_enabled(memory_enabled).await;
                         tracing::info!(target: "ai", "Restored memory_enabled={}", memory_enabled);
 
-                        // Restore jailbreak_prompt from disk
+                        // Restore jailbreak_prompt from disk (with backup recovery)
                         let jailbreak_path = app_data_dir.join("jailbreak_prompt.json");
-                        if let Ok(content) = std::fs::read_to_string(&jailbreak_path) {
-                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                                if let Some(prompt) = val.get("prompt").and_then(|v| v.as_str()) {
-                                    orchestrator.set_jailbreak_prompt(prompt.to_string()).await;
-                                    tracing::info!(target: "ai", "Restored jailbreak_prompt ({} chars)", prompt.len());
-                                }
+                        if let Some(prompt) = crate::config::load_jailbreak_prompt(&jailbreak_path) {
+                            if !prompt.is_empty() {
+                                orchestrator.set_jailbreak_prompt(prompt.clone()).await;
+                                tracing::info!(target: "ai", "Restored jailbreak_prompt ({} chars)", prompt.len());
                             }
                         }
 
@@ -450,23 +448,32 @@ pub fn run() {
                         )
                         .await
                         {
-                            Ok(Some(committed)) => tracing::info!(
-                                target: "ai",
-                                "Restored committed character runtime: character_id={} revision={}",
-                                committed.runtime.character_id,
-                                committed.revision
-                            ),
+                            Ok(Some(committed)) => {
+                                orch.clear_runtime_degraded().await;
+                                tracing::info!(
+                                    target: "ai",
+                                    "Restored committed character runtime: character_id={} revision={}",
+                                    committed.runtime.character_id,
+                                    committed.revision
+                                );
+                            }
                             Ok(None) => {
+                                orch.clear_runtime_degraded().await;
                                 if let Some(char_id) = crate::ai::context::AIOrchestrator::load_active_character_id() {
                                     orch.set_character_id(char_id.clone()).await;
                                     tracing::info!(target: "ai", "Restored legacy active_character_id: {}", char_id);
                                 }
                             }
-                            Err(error) => tracing::error!(
-                                target: "ai",
-                                "Failed to restore committed character runtime: {}",
-                                error
-                            ),
+                            Err(error) => {
+                                let error_message = format!("Failed to restore committed character runtime: {error}");
+                                tracing::error!(
+                                    target: "ai",
+                                    "{}",
+                                    error_message
+                                );
+                                orch.set_runtime_degraded(Some(error_message)).await;
+                                orch.reset_history_and_boundary().await;
+                            }
                         }
 
                     }

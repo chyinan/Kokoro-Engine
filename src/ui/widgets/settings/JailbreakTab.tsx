@@ -8,26 +8,49 @@ import { save, open } from '@tauri-apps/plugin-dialog';
 import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs';
 import { inputClasses, labelClasses } from '../../styles/settings-primitives';
 
-export const JailbreakTab: React.FC = () => {
+export interface JailbreakTabProps {
+    value?: string;
+    loading?: boolean;
+    onChange?: (prompt: string) => void;
+    onSaveSuccess?: (prompt: string) => void;
+}
+
+export const JailbreakTab: React.FC<JailbreakTabProps> = ({
+    value,
+    loading: loadingProp,
+    onChange,
+    onSaveSuccess,
+}) => {
     const { t } = useTranslation();
-    const [prompt, setPrompt] = useState('');
-    const [loading, setLoading] = useState(true);
+    const [internalPrompt, setInternalPrompt] = useState('');
+    const [internalLoading, setInternalLoading] = useState(value === undefined);
+    const loading = loadingProp !== undefined ? loadingProp : internalLoading;
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
 
+    const isControlled = value !== undefined;
+    const prompt = isControlled ? value : internalPrompt;
+
     useEffect(() => {
-        loadPrompt();
-    }, []);
+        if (!isControlled) {
+            loadPrompt();
+        }
+    }, [isControlled]);
 
     const loadPrompt = async () => {
         try {
             const loaded = await getJailbreakPrompt();
-            setPrompt(loaded);
+            setInternalPrompt(loaded);
         } catch (error) {
             console.error('Failed to load jailbreak prompt:', error);
         } finally {
-            setLoading(false);
+            setInternalLoading(false);
         }
+    };
+
+    const handlePromptChange = (next: string) => {
+        setInternalPrompt(next);
+        onChange?.(next);
     };
 
     const handleSave = async () => {
@@ -36,6 +59,7 @@ export const JailbreakTab: React.FC = () => {
         try {
             await setJailbreakPrompt(prompt);
             setSaved(true);
+            onSaveSuccess?.(prompt);
             setTimeout(() => setSaved(false), 2000);
         } catch (error) {
             console.error('Failed to save jailbreak prompt:', error);
@@ -68,7 +92,7 @@ export const JailbreakTab: React.FC = () => {
 
             if (selected && typeof selected === 'string') {
                 const content = await readTextFile(selected);
-                setPrompt(content);
+                handlePromptChange(content);
             }
         } catch (error) {
             console.error('Failed to import prompt:', error);
@@ -77,7 +101,7 @@ export const JailbreakTab: React.FC = () => {
 
     const handleClear = () => {
         if (confirm(t('settings.jailbreak.clearConfirm'))) {
-            setPrompt('');
+            handlePromptChange('');
         }
     };
 
@@ -111,7 +135,7 @@ export const JailbreakTab: React.FC = () => {
                 </label>
                 <textarea
                     value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
+                    onChange={(e) => handlePromptChange(e.target.value)}
                     placeholder={t('settings.jailbreak.promptPlaceholder')}
                     className={clsx(
                         inputClasses,

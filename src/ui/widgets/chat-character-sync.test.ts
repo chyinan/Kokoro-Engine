@@ -7,6 +7,7 @@ import {
   getInitialCharacterConversationTarget,
   isFailureForActiveChat,
   shouldIgnoreLegacyChatError,
+  shouldSynchronizeOnRuntimeChanged,
 } from "./chat-character-sync";
 
 type PendingValue<TValue> = {
@@ -47,6 +48,21 @@ function loaded(content: string) {
 }
 
 describe("character conversation synchronization", () => {
+  it("does not re-synchronize when the character runtime changed event is for the currently active character and same conversation", () => {
+    expect(shouldSynchronizeOnRuntimeChanged("kokoro", "kokoro")).toBe(false);
+    expect(shouldSynchronizeOnRuntimeChanged("kokoro", "kokoro", "conv-1", "conv-1")).toBe(false);
+    expect(shouldSynchronizeOnRuntimeChanged("kokoro", null)).toBe(false);
+    expect(shouldSynchronizeOnRuntimeChanged("kokoro", undefined)).toBe(false);
+    expect(shouldSynchronizeOnRuntimeChanged("kokoro", "pico")).toBe(true);
+    expect(shouldSynchronizeOnRuntimeChanged("kokoro", "kokoro", "conv-1", "conv-1", { force: true })).toBe(true);
+  });
+
+  it("re-synchronizes when the same character has switched target conversation id", () => {
+    expect(shouldSynchronizeOnRuntimeChanged("kokoro", "kokoro", "conv-1", "conv-2")).toBe(true);
+    expect(shouldSynchronizeOnRuntimeChanged("kokoro", "kokoro", null, "conv-2")).toBe(true);
+    expect(shouldSynchronizeOnRuntimeChanged("kokoro", "kokoro", "conv-1", null)).toBe(true);
+  });
+
   it("drops unverifiable legacy chat errors while a turn is active", () => {
     expect(shouldIgnoreLegacyChatError("turn-1")).toBe(true);
     expect(shouldIgnoreLegacyChatError(null)).toBe(true);
