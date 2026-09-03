@@ -151,19 +151,51 @@ impl Default for ActivationGate {
 pub struct ActivationLockGuard {
     _write_guard: tokio::sync::OwnedRwLockWriteGuard<()>,
     activating: Arc<AtomicBool>,
+    degraded: Option<Arc<Mutex<Option<String>>>>,
+    completed: bool,
+}
+
+impl ActivationLockGuard {
+    pub fn mark_completed(&mut self) {
+        self.completed = true;
+    }
+
+    pub fn set_degraded_target(&mut self, degraded: Arc<Mutex<Option<String>>>) {
+        self.degraded = Some(degraded);
+    }
 }
 
 impl std::fmt::Debug for ActivationLockGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ActivationLockGuard")
             .field("activating", &self.activating.load(Ordering::SeqCst))
+            .field("completed", &self.completed)
             .finish()
     }
 }
 
 impl Drop for ActivationLockGuard {
     fn drop(&mut self) {
-        self.activating.store(false, Ordering::SeqCst);
+        if self.completed {
+            self.activating.store(false, Ordering::SeqCst);
+        } else {
+            // Guard dropped without being explicitly marked completed (e.g. cancelled in-flight / aborted / panic).
+            // 1. Keep activating = true to prevent new chat turns from entering an unverified/torn state.
+            // 2. Mark runtime degraded if degraded hook is available so prompt composition is also blocked.
+            if let Some(degraded) = &self.degraded {
+                if let Ok(mut lock) = degraded.try_lock() {
+                    if lock.is_none() {
+                        *lock = Some(
+                            "Character activation was interrupted before completion. Please re-activate or select a character."
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            tracing::warn!(
+                "ActivationLockGuard dropped without completion (in-flight cancellation); keeping activation gate closed and runtime degraded."
+            );
+        }
     }
 }
 
@@ -179,14 +211,16 @@ impl std::fmt::Debug for ChatTurnGuard {
 
 struct ActivationReservation {
     activating: Arc<AtomicBool>,
+    was_already_active: bool,
     disarmed: bool,
 }
 
 impl ActivationReservation {
     fn new(activating: Arc<AtomicBool>) -> Self {
-        activating.store(true, Ordering::SeqCst);
+        let was_already_active = activating.swap(true, Ordering::SeqCst);
         Self {
             activating,
+            was_already_active,
             disarmed: false,
         }
     }
@@ -198,7 +232,7 @@ impl ActivationReservation {
 
 impl Drop for ActivationReservation {
     fn drop(&mut self) {
-        if !self.disarmed {
+        if !self.disarmed && !self.was_already_active {
             self.activating.store(false, Ordering::SeqCst);
         }
     }
@@ -212,6 +246,8 @@ impl ActivationGate {
         ActivationLockGuard {
             _write_guard: write_guard,
             activating: self.activating.clone(),
+            degraded: None,
+            completed: false,
         }
     }
 
@@ -260,7 +296,7 @@ pub struct AIOrchestrator {
     /// History index boundary used to prevent extracting conversations from disabled periods.
     memory_history_boundary: Arc<Mutex<usize>>,
     /// Current character ID for memory isolation.
-    character_id: Arc<Mutex<String>>,
+    pub(crate) character_id: Arc<Mutex<String>>,
     /// In-memory cooldown map for memory event trigger throttling.
     memory_event_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
     /// Global toggle for all automatic memory reads/writes/injection.
@@ -392,7 +428,9 @@ impl AIOrchestrator {
     }
 
     pub async fn acquire_activation_lock(&self) -> ActivationLockGuard {
-        self.activation_gate.acquire_activation_lock().await
+        let mut guard = self.activation_gate.acquire_activation_lock().await;
+        guard.set_degraded_target(self.runtime_degraded.clone());
+        guard
     }
 
     pub fn enter_chat_turn(&self) -> Result<ChatTurnGuard, String> {

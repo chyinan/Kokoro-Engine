@@ -95,6 +95,12 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
         let guard = self.orchestrator.acquire_activation_lock().await;
         Ok(Box::new(guard))
     }
+
+    fn mark_activation_completed(&self, lock: &mut (dyn std::any::Any + Send)) {
+        if let Some(guard) = lock.downcast_mut::<crate::ai::context::ActivationLockGuard>() {
+            guard.mark_completed();
+        }
+    }
 }
 
 async fn apply_orchestrator_runtime(
