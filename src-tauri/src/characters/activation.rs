@@ -136,6 +136,9 @@ pub trait ActivationRuntimeBackend: Send + Sync {
     async fn lock_activation(&self) -> Result<Box<dyn std::any::Any + Send>, KokoroError> {
         Ok(Box::new(()))
     }
+    fn mark_activation_completed(&self, lock: &mut (dyn std::any::Any + Send)) {
+        let _ = lock;
+    }
 }
 
 #[derive(Clone)]
@@ -340,7 +343,7 @@ impl ActivationCoordinator {
         // prompt, greeting, conversation, and rollback fields come from this server-owned copy.
         let token = prepared.token;
 
-        let _activation_lock = backend.lock_activation().await?;
+        let mut _activation_lock = backend.lock_activation().await?;
 
         let mut transaction = pool.begin().await?;
         let live_updated_at =
@@ -392,12 +395,15 @@ impl ActivationCoordinator {
                         "failed to apply activation: {error}; failed to restore backend: {restore_error}; failed to recover backend from DB: {recover_error}"
                     );
                     backend.set_degraded(Some(reason.clone())).await;
+                    backend.mark_activation_completed(&mut *_activation_lock);
                     return Err(KokoroError::Internal(reason));
                 }
+                backend.mark_activation_completed(&mut *_activation_lock);
                 return Err(KokoroError::Internal(format!(
                     "failed to apply activation: {error}; failed to restore backend: {restore_error} (recovered from committed state)"
                 )));
             }
+            backend.mark_activation_completed(&mut *_activation_lock);
             return Err(error);
         }
         if let Err(error) = transaction.commit().await {
@@ -409,12 +415,15 @@ impl ActivationCoordinator {
                         "failed to commit activation: {error}; failed to restore backend: {restore_error}; failed to recover backend from DB: {recover_error}"
                     );
                     backend.set_degraded(Some(reason.clone())).await;
+                    backend.mark_activation_completed(&mut *_activation_lock);
                     return Err(KokoroError::Internal(reason));
                 }
+                backend.mark_activation_completed(&mut *_activation_lock);
                 return Err(KokoroError::Internal(format!(
                     "failed to commit activation: {error}; failed to restore backend: {restore_error} (recovered from committed state)"
                 )));
             }
+            backend.mark_activation_completed(&mut *_activation_lock);
             return Err(error.into());
         }
 
@@ -440,8 +449,10 @@ impl ActivationCoordinator {
                         "failed to sync history: {history_err}; failed to rollback committed state: {rollback_error}; failed to re-align backend: {recover_error}"
                     );
                     backend.set_degraded(Some(reason.clone())).await;
+                    backend.mark_activation_completed(&mut *_activation_lock);
                     return Err(KokoroError::Internal(reason));
                 }
+                backend.mark_activation_completed(&mut *_activation_lock);
                 return Err(KokoroError::Internal(format!(
                     "failed to sync history: {history_err}; failed to rollback committed state: {rollback_error} (backend retained committed runtime)"
                 )));
@@ -458,13 +469,16 @@ impl ActivationCoordinator {
                         "failed to sync history: {history_err}; failed to restore backend: {restore_error}; failed to recover backend from DB: {recover_error}"
                     );
                     backend.set_degraded(Some(reason.clone())).await;
+                    backend.mark_activation_completed(&mut *_activation_lock);
                     return Err(KokoroError::Internal(reason));
                 }
+                backend.mark_activation_completed(&mut *_activation_lock);
                 return Err(KokoroError::Internal(format!(
                     "failed to sync history: {history_err}; failed to restore backend: {restore_error}"
                 )));
             }
 
+            backend.mark_activation_completed(&mut *_activation_lock);
             return Err(KokoroError::Internal(format!(
                 "failed to sync conversation history: {history_err}"
             )));
@@ -472,6 +486,7 @@ impl ActivationCoordinator {
 
         state.committed_revision = token.revision;
         backend.clear_degraded().await;
+        backend.mark_activation_completed(&mut *_activation_lock);
         Ok(committed)
     }
 
@@ -554,31 +569,36 @@ impl ActivationCoordinator {
             return Ok(None);
         };
         let initial_snapshot = backend.snapshot().await?;
-        let _activation_lock = backend.lock_activation().await?;
+        let mut _activation_lock = backend.lock_activation().await?;
         if let Err(apply_err) = backend.apply(&committed.runtime).await {
-            return Err(compensate_recovery_failure(
+            let err = compensate_recovery_failure(
                 backend,
                 &initial_snapshot,
                 "failed to apply committed runtime",
                 apply_err,
             )
-            .await);
+            .await;
+            backend.mark_activation_completed(&mut *_activation_lock);
+            return Err(err);
         }
         if let Err(sync_err) = backend
             .sync_history(committed.runtime.current_conversation_id.as_deref())
             .await
         {
-            return Err(compensate_recovery_failure(
+            let err = compensate_recovery_failure(
                 backend,
                 &initial_snapshot,
                 "failed to recover conversation history",
                 sync_err,
             )
-            .await);
+            .await;
+            backend.mark_activation_completed(&mut *_activation_lock);
+            return Err(err);
         }
         backend.clear_degraded().await;
         state.next_revision = state.next_revision.max(committed.revision);
         state.committed_revision = state.committed_revision.max(committed.revision);
+        backend.mark_activation_completed(&mut *_activation_lock);
         Ok(Some(committed))
     }
 
