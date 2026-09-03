@@ -1802,3 +1802,60 @@ async fn test_non_webhook_bot_turn_during_activation_is_blocked_at_entry_without
     assert!(!messages.is_empty());
     drop(guard);
 }
+
+#[tokio::test]
+async fn test_activation_lock_cancellation_cleans_up_activating_flag_and_allows_chat() {
+    let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+
+    // 1. Acquire read guard (simulating an active chat turn holding read lock)
+    let turn_guard = orchestrator
+        .enter_chat_turn()
+        .expect("must enter chat turn initially");
+
+    // 2. Spawn a task to acquire the activation lock (will block waiting for read guard)
+    let orch_clone = orchestrator.clone();
+    let activation_task =
+        tokio::spawn(async move { orch_clone.activation_gate.acquire_activation_lock().await });
+
+    // Wait briefly so task begins and sets activating = true
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    // Verify activating flag is true while activation lock is waiting
+    assert!(
+        orchestrator.is_activating(),
+        "activating flag must be true while activation lock is waiting"
+    );
+
+    // Any new turn during this wait is rejected
+    assert!(
+        orchestrator.enter_chat_turn().is_err(),
+        "new chat turn must be blocked while activation is waiting"
+    );
+
+    // 3. Abort the waiting activation task (simulating timeout, UI cancellation, or shutdown)
+    activation_task.abort();
+    let join_res = activation_task.await;
+    assert!(join_res.unwrap_err().is_cancelled());
+
+    // 4. Release the active turn read guard
+    drop(turn_guard);
+
+    // 5. Verify the activating flag was reset to false by ActivationReservation Drop
+    assert!(
+        !orchestrator.is_activating(),
+        "is_activating() must be false after aborted activation lock"
+    );
+
+    // 6. Verify a new chat turn can enter cleanly without being blocked
+    let new_turn = orchestrator.enter_chat_turn();
+    assert!(
+        new_turn.is_ok(),
+        "new chat turn must be able to enter after cancelled activation"
+    );
+    let new_guard = new_turn.unwrap();
+    assert!(
+        !orchestrator.is_activating(),
+        "must remain false while new chat turn runs"
+    );
+    drop(new_guard);
+}
