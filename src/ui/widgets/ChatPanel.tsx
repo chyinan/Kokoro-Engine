@@ -306,7 +306,7 @@ export default function ChatPanel({
     const isPrependingRef = useRef(false);
     const prevScrollHeightRef = useRef(0);
     const prevScrollTopRef = useRef(0);
-    const { input, setInput, pendingImages, setPendingImages, clearDraft } = useCharacterChatDraft(activeCharacterId);
+    const { input, setInput, pendingImages, setPendingImages, clearDraft, clearDraftImages, getImageDraftContext, appendPendingImage } = useCharacterChatDraft(activeCharacterId);
     const inputRef = useRef(input);
     inputRef.current = input;
     const sttBaseDraftRef = useRef<string | null>(null);
@@ -902,7 +902,7 @@ export default function ChatPanel({
         const checkVision = () => {
             const nextVisionEnabled = readBooleanSetting(APP_SETTING_KEYS.visionEnabled, false);
             setVisionEnabled(nextVisionEnabled);
-            if (!nextVisionEnabled) setPendingImages([]);
+            if (!nextVisionEnabled) clearDraftImages();
             const cfg = readJsonSetting<{ camera_enabled?: boolean }>(
                 APP_SETTING_KEYS.visionConfig,
                 {},
@@ -1549,7 +1549,6 @@ export default function ChatPanel({
         const cameraFrame = visionEnabled ? getLatestCameraFrame() : null;
         const imagesToSend = cameraFrame ? [...messageImages, cameraFrame] : messageImages;
         clearDraft();
-        setPendingImages([]);
         startStreaming();
         setIsThinking(true);
         userScrolledRef.current = false;
@@ -1653,12 +1652,16 @@ export default function ChatPanel({
             return;
         }
 
+        // 在首个 await 之前捕获草稿上下文:上传期间切换角色时,图片仍归发起角色
+        const draftContext = getImageDraftContext();
         setIsUploading(true);
         try {
             const buffer = await file.arrayBuffer();
             const bytes = Array.from(new Uint8Array(buffer));
             const url = await uploadVisionImage(bytes, file.name);
-            setPendingImages(prev => [...prev, url]);
+            if (!appendPendingImage(draftContext, url)) {
+                setError(t("chat.errors.image_upload_cancelled", "图片上传已取消"));
+            }
         } catch (err) {
             setError(err instanceof Error ? err.message : t("chat.errors.upload_failed"));
         } finally {
@@ -1688,13 +1691,17 @@ export default function ChatPanel({
             return;
         }
 
+        // 在首个 await 之前捕获草稿上下文:上传期间切换角色时,图片仍归发起角色
+        const draftContext = getImageDraftContext();
         setIsUploading(true);
         try {
             const buffer = await file.arrayBuffer();
             const bytes = Array.from(new Uint8Array(buffer));
             const filename = `paste_${Date.now()}.png`;
             const url = await uploadVisionImage(bytes, filename);
-            setPendingImages(prev => [...prev, url]);
+            if (!appendPendingImage(draftContext, url)) {
+                setError(t("chat.errors.image_upload_cancelled", "图片上传已取消"));
+            }
         } catch (err) {
             setError(err instanceof Error ? err.message : t("chat.errors.upload_failed"));
         } finally {
@@ -1748,25 +1755,31 @@ export default function ChatPanel({
             return;
         }
 
-        for (const file of files) {
-            if (file.size > 5 * 1024 * 1024) {
-                setError(t("chat.errors.image_too_large"));
-                continue;
-            }
+        // 一次拖放 = 一个手势 = 一个发起角色:循环前捕获一次,中途切换后剩余文件仍归发起角色
+        const draftContext = getImageDraftContext();
+        setIsUploading(true);
+        try {
+            for (const file of files) {
+                if (file.size > 5 * 1024 * 1024) {
+                    setError(t("chat.errors.image_too_large"));
+                    continue;
+                }
 
-            setIsUploading(true);
-            try {
-                const buffer = await file.arrayBuffer();
-                const bytes = Array.from(new Uint8Array(buffer));
-                const url = await uploadVisionImage(bytes, file.name);
-                setPendingImages(prev => [...prev, url]);
-            } catch (err) {
-                setError(err instanceof Error ? err.message : t("chat.errors.upload_failed"));
-            } finally {
-                setIsUploading(false);
+                try {
+                    const buffer = await file.arrayBuffer();
+                    const bytes = Array.from(new Uint8Array(buffer));
+                    const url = await uploadVisionImage(bytes, file.name);
+                    if (!appendPendingImage(draftContext, url)) {
+                        setError(t("chat.errors.image_upload_cancelled", "图片上传已取消"));
+                    }
+                } catch (err) {
+                    setError(err instanceof Error ? err.message : t("chat.errors.upload_failed"));
+                }
             }
+        } finally {
+            setIsUploading(false);
         }
-    }, [visionEnabled, t]);
+    }, [visionEnabled, t, getImageDraftContext, appendPendingImage]);
 
     // ── STT: Advanced VAD Microphone toggle ─────────────────
     const handleMicToggle = useCallback(() => {

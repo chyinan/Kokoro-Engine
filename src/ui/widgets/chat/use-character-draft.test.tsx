@@ -481,5 +481,328 @@ describe("useCharacterChatDraft", () => {
             expect(loadSavedCharacterDraftImages("kiana", textStorage)).toEqual([]);
             expect(loadSavedCharacterDraftImages("kiana", imageStorage)).toEqual(["http://test/img.png"]);
         });
+
+        it("appends a same-character upload to the live list and persists after debounce", () => {
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "kiana",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            const context = currentHook.getImageDraftContext();
+            expect(context.characterId).toBe("kiana");
+            expect(context.generation).toBe(0);
+            expect(context.listVersion).toBe(0);
+
+            let applied = false;
+            act(() => {
+                applied = currentHook.appendPendingImage(context, "http://test/new.png");
+            });
+
+            expect(applied).toBe(true);
+            expect(currentHook.pendingImages).toEqual(["http://test/new.png"]);
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([]);
+
+            act(() => {
+                vi.advanceTimersByTime(300);
+            });
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual(["http://test/new.png"]);
+        });
+
+        it("composes a late same-character append with user edits made during the upload", () => {
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "kiana",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            const context = currentHook.getImageDraftContext();
+
+            // 上传期间用户编辑了候选列表
+            act(() => {
+                currentHook.setPendingImages(["http://test/edited.png"]);
+            });
+
+            let applied = false;
+            act(() => {
+                applied = currentHook.appendPendingImage(context, "http://test/late.png");
+            });
+
+            expect(applied).toBe(true);
+            expect(currentHook.pendingImages).toEqual(["http://test/edited.png", "http://test/late.png"]);
+        });
+
+        it("routes a late upload to the initiating character's storage when the character switches during upload", () => {
+            saveCharacterDraftImages("kiana", ["http://test/before.png"], mockStorage);
+
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "kiana",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            const context = currentHook.getImageDraftContext();
+
+            // 上传期间切换到 bronya
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "bronya",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            let applied = false;
+            act(() => {
+                applied = currentHook.appendPendingImage(context, "http://test/late.png");
+            });
+
+            expect(applied).toBe(true);
+            // 新角色实时列表与存储均不被污染
+            expect(currentHook.pendingImages).toEqual([]);
+            expect(loadSavedCharacterDraftImages("bronya", mockStorage)).toEqual([]);
+            // 图片进入发起角色的存储
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual(["http://test/before.png", "http://test/late.png"]);
+        });
+
+        it("routes every file of one drop gesture to the initiating character after a mid-drop switch", () => {
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "kiana",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            // 一次拖放手势共享同一个上下文快照
+            const gestureContext = currentHook.getImageDraftContext();
+
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "bronya",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            let appliedAll = true;
+            act(() => {
+                appliedAll = currentHook.appendPendingImage(gestureContext, "http://test/1.png") && appliedAll;
+                appliedAll = currentHook.appendPendingImage(gestureContext, "http://test/2.png") && appliedAll;
+            });
+
+            expect(appliedAll).toBe(true);
+            expect(currentHook.pendingImages).toEqual([]);
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual(["http://test/1.png", "http://test/2.png"]);
+        });
+
+        it("drops a late upload when the draft was cleared after the upload began", () => {
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "kiana",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            const context = currentHook.getImageDraftContext();
+
+            // 上传期间用户发送消息,草稿被清空
+            act(() => {
+                currentHook.clearDraft();
+            });
+
+            let applied = false;
+            act(() => {
+                applied = currentHook.appendPendingImage(context, "http://test/ghost.png");
+            });
+
+            expect(applied).toBe(false);
+            expect(currentHook.pendingImages).toEqual([]);
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([]);
+
+            // 清空之后发起的新上传不受墓碑影响
+            const freshContext = currentHook.getImageDraftContext();
+            act(() => {
+                applied = currentHook.appendPendingImage(freshContext, "http://test/fresh.png");
+            });
+            expect(applied).toBe(true);
+            expect(currentHook.pendingImages).toEqual(["http://test/fresh.png"]);
+        });
+
+        it("clearDraftImages tombstones in-flight uploads without touching the text draft", () => {
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+            act(() => {
+                root?.render(
+                    createElement(TestHarness, {
+                        characterId: "kiana",
+                        onHook: (h) => {
+                            currentHook = h;
+                        },
+                    })
+                );
+            });
+
+            act(() => {
+                currentHook.setInput("keep this text");
+                currentHook.setPendingImages(["http://test/existing.png"]);
+                vi.advanceTimersByTime(300);
+            });
+
+            const context = currentHook.getImageDraftContext();
+
+            // 关闭 vision:仅清空图片并记墓碑
+            act(() => {
+                currentHook.clearDraftImages();
+            });
+
+            expect(currentHook.input).toBe("keep this text");
+            expect(currentHook.pendingImages).toEqual([]);
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([]);
+            expect(loadSavedCharacterDraft("kiana", mockStorage)).toBe("keep this text");
+
+            let applied = false;
+            act(() => {
+                applied = currentHook.appendPendingImage(context, "http://test/ghost.png");
+            });
+
+            expect(applied).toBe(false);
+            expect(currentHook.pendingImages).toEqual([]);
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([]);
+        });
+
+        it("does not clobber user edits made while validation is in flight", async () => {
+            saveCharacterDraftImages("kiana", ["http://test/alive.png", "http://test/dead.png"], mockStorage);
+
+            const pending: Array<{ url: string; resolve: (valid: boolean) => void }> = [];
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+
+            await act(async () => {
+                root?.render(
+                    createElement(function DeferredHarness() {
+                        const hook = useCharacterChatDraft("kiana", {
+                            storage: mockStorage,
+                            validateImage: (url) =>
+                                new Promise<boolean>((resolve) => {
+                                    pending.push({ url, resolve });
+                                }),
+                        });
+                        currentHook = hook;
+                        return null;
+                    })
+                );
+                await Promise.resolve();
+            });
+
+            // 校验挂起中,用户编辑了候选列表
+            expect(pending.length).toBe(2);
+            act(() => {
+                currentHook.setPendingImages(["http://test/edited.png"]);
+            });
+
+            // 陈旧校验返回:alive=true、dead=false,但结果必须被放弃
+            await act(async () => {
+                pending.forEach(({ url, resolve }) => resolve(url.includes("alive")));
+                await Promise.resolve();
+            });
+
+            expect(currentHook.pendingImages).toEqual(["http://test/edited.png"]);
+
+            act(() => {
+                vi.advanceTimersByTime(300);
+            });
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual(["http://test/edited.png"]);
+        });
+
+        it("does not apply a stale prune after switching away and back (ABA)", async () => {
+            saveCharacterDraftImages("kiana", ["http://test/dead.png"], mockStorage);
+
+            const pending: Array<{ url: string; resolve: (valid: boolean) => void }> = [];
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+
+            const renderChar = (charId: string) => {
+                root?.render(
+                    createElement(function DeferredHarness({ charId }: { charId: string }) {
+                        const hook = useCharacterChatDraft(charId, {
+                            storage: mockStorage,
+                            validateImage: (url) =>
+                                new Promise<boolean>((resolve) => {
+                                    pending.push({ url, resolve });
+                                }),
+                        });
+                        currentHook = hook;
+                        return null;
+                    }, { charId })
+                );
+            };
+
+            await act(async () => {
+                renderChar("kiana");
+                await Promise.resolve();
+            });
+            expect(pending.length).toBe(1);
+
+            // 校验挂起期间:切走再切回(ABA 往返)
+            await act(async () => {
+                renderChar("bronya");
+                await Promise.resolve();
+            });
+            await act(async () => {
+                renderChar("kiana");
+                await Promise.resolve();
+            });
+
+            // 切换回来时重新装载并再次发起校验(挂载期 1 次 + 返回后 2 次)
+            expect(pending.length).toBeGreaterThanOrEqual(2);
+
+            // 先 resolve 挂载期的陈旧校验:必须被代次/版本校验放弃
+            await act(async () => {
+                pending[0].resolve(false);
+                await Promise.resolve();
+            });
+            expect(currentHook.pendingImages).toEqual(["http://test/dead.png"]);
+
+            // 再 resolve 其余(最新)校验:剪枝正常应用
+            await act(async () => {
+                for (const entry of pending.slice(1)) {
+                    entry.resolve(false);
+                }
+                await Promise.resolve();
+            });
+            expect(currentHook.pendingImages).toEqual([]);
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([]);
+        });
     });
 });
