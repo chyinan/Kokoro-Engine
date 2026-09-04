@@ -1109,7 +1109,7 @@ async fn generate_bot_reply(
         .as_ref()
         .map(|value| json!({ "translation": value }).to_string());
     if !reply.is_empty() {
-        let _ = orchestrator
+        if let Err(e) = orchestrator
             .add_message_with_metadata(
                 "assistant".to_string(),
                 reply.clone(),
@@ -1117,7 +1117,15 @@ async fn generate_bot_reply(
                 &char_id,
                 None,
             )
-            .await;
+            .await
+        {
+            tracing::error!(
+                target: "bot",
+                "[{}] Failed to persist assistant message: {}",
+                platform,
+                e
+            );
+        }
     }
 
     trigger_bot_memory_tasks(

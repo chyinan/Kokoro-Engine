@@ -683,7 +683,7 @@ async fn persist_vision_context_message(
     if let Some(turn_id) = turn_id {
         metadata["turn_id"] = serde_json::Value::String(turn_id.to_string());
     }
-    let _ = state
+    if let Err(e) = state
         .add_message_with_metadata(
             "context".to_string(),
             observation.summary.clone(),
@@ -691,7 +691,14 @@ async fn persist_vision_context_message(
             character_id,
             None,
         )
-        .await;
+        .await
+    {
+        tracing::error!(
+            target: "chat",
+            "[Chat] Failed to persist vision context message: {}",
+            e
+        );
+    }
 }
 
 fn is_proactive_noop_response(text: &str) -> bool {
@@ -1242,7 +1249,11 @@ pub(crate) async fn resolve_trailing_visible_user_message(
         let technical_type = metadata
             .as_deref()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()));
+            .and_then(|v| {
+                v.get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
+            });
         if matches!(
             technical_type.as_deref(),
             Some("assistant_tool_calls") | Some("translation_instruction") | Some("tool_result")
@@ -1347,7 +1358,10 @@ pub async fn stream_chat(
             match resolve_trailing_visible_user_message(&state.db, cid).await {
                 Ok(res) => res,
                 Err(e) => {
-                    tracing::warn!("[stream_chat] Failed to query trailing visible message: {}", e);
+                    tracing::warn!(
+                        "[stream_chat] Failed to query trailing visible message: {}",
+                        e
+                    );
                     None
                 }
             }
@@ -1359,7 +1373,11 @@ pub async fn stream_chat(
     };
 
     let has_trailing_user = trailing_visible_user.is_some();
-    let should_insert = should_insert_user_message_for_request(request.hidden, request.regenerate, has_trailing_user);
+    let should_insert = should_insert_user_message_for_request(
+        request.hidden,
+        request.regenerate,
+        has_trailing_user,
+    );
 
     let (conversation_id, user_message_id) = if should_insert {
         if let Some(observation) = selected_vision_observation.as_ref() {
@@ -1395,8 +1413,7 @@ pub async fn stream_chat(
         }
         (cid, Some(mid))
     } else {
-        let cid = current_conv_id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let cid = current_conv_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let mid = trailing_visible_user.map(|(id, _)| id);
 
         // 防御性对齐：若因长会话预算或回溯导致当前 history 尾部缺失该用户消息，在内存中补齐供当前 turn 组装 prompt
@@ -2011,7 +2028,7 @@ pub async fn stream_chat(
                     serde_json::Value::Array(round_provider_data.clone());
             }
             let assistant_tool_call_metadata = assistant_tool_call_metadata_value.to_string();
-            let _ = state
+            if let Err(e) = state
                 .add_message_with_metadata_for_conversation(
                     "assistant".to_string(),
                     cleaned_text.clone(),
@@ -2020,10 +2037,17 @@ pub async fn stream_chat(
                     Some(&conversation_id),
                     None,
                 )
-                .await;
+                .await
+            {
+                tracing::error!(
+                    target: "chat::tools",
+                    "[Chat] Failed to persist assistant tool call message: {}",
+                    e
+                );
+            }
             for (tool_metadata, tool_message) in &persisted_native_tool_results {
                 let tool_content = extract_message_text(tool_message);
-                let _ = state
+                if let Err(e) = state
                     .add_message_with_metadata_for_conversation(
                         "tool".to_string(),
                         tool_content,
@@ -2032,7 +2056,14 @@ pub async fn stream_chat(
                         Some(&conversation_id),
                         None,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        target: "chat::tools",
+                        "[Chat] Failed to persist tool result message: {}",
+                        e
+                    );
+                }
             }
             client_messages.push(LlmChatMessage {
                 message: assistant_tool_calls_message(
@@ -3880,13 +3911,20 @@ mod tests {
             .unwrap();
 
         // When assistant answer is present, trailing visible message is assistant (NOT user)
-        let trailing_before = resolve_trailing_visible_user_message(&pool, "conv-tools").await.unwrap();
-        assert!(trailing_before.is_none(), "When assistant message is at the end, trailing visible user message must be None");
+        let trailing_before = resolve_trailing_visible_user_message(&pool, "conv-tools")
+            .await
+            .unwrap();
+        assert!(
+            trailing_before.is_none(),
+            "When assistant message is at the end, trailing visible user message must be None"
+        );
 
         // Delete the trailing visible assistant turn using the real delete_last_messages command logic.
         // It must automatically remove id 4 (assistant) and its preceding technical messages (ids 3, 2).
-        let history = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
-        let current_conv = std::sync::Arc::new(tokio::sync::Mutex::new(Some("conv-tools".to_string())));
+        let history =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
+        let current_conv =
+            std::sync::Arc::new(tokio::sync::Mutex::new(Some("conv-tools".to_string())));
         let switch_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
         crate::commands::context::delete_last_messages_inner(
             1,
@@ -3911,11 +3949,20 @@ mod tests {
         assert_eq!(remaining_ids, vec![1]);
 
         // Now, the trailing visible message should be the user message (id 1)
-        let trailing_after = resolve_trailing_visible_user_message(&pool, "conv-tools").await.unwrap();
-        assert_eq!(trailing_after, Some((1, "What is the weather?".to_string())));
+        let trailing_after = resolve_trailing_visible_user_message(&pool, "conv-tools")
+            .await
+            .unwrap();
+        assert_eq!(
+            trailing_after,
+            Some((1, "What is the weather?".to_string()))
+        );
 
         // Verify deduplication decision
-        assert!(!should_insert_user_message_for_request(false, true, trailing_after.is_some()));
+        assert!(!should_insert_user_message_for_request(
+            false,
+            true,
+            trailing_after.is_some()
+        ));
     }
 
     #[tokio::test]
@@ -3954,7 +4001,9 @@ mod tests {
             .unwrap();
 
         // Check trailing visible user message
-        let trailing = resolve_trailing_visible_user_message(&pool, "conv-long").await.unwrap();
+        let trailing = resolve_trailing_visible_user_message(&pool, "conv-long")
+            .await
+            .unwrap();
         assert!(trailing.is_some());
         let (id, content) = trailing.unwrap();
         assert_eq!(id, 49);

@@ -502,7 +502,7 @@ async fn handle_text(
     let metadata = translation
         .as_ref()
         .map(|t| serde_json::json!({ "translation": t }).to_string());
-    let _ = orchestrator
+    if let Err(e) = orchestrator
         .add_message_with_metadata(
             "assistant".to_string(),
             response.clone(),
@@ -510,7 +510,14 @@ async fn handle_text(
             &char_id,
             None,
         )
-        .await;
+        .await
+    {
+        tracing::error!(
+            target: "telegram",
+            "[Telegram] Failed to persist assistant message: {}",
+            e
+        );
+    }
 
     // Event-driven + periodic memory extraction
     let msg_count = orchestrator.get_message_count().await;
@@ -1006,7 +1013,7 @@ async fn handle_photo(
     let metadata = translation
         .as_ref()
         .map(|t| serde_json::json!({ "translation": t }).to_string());
-    let _ = orchestrator
+    if let Err(e) = orchestrator
         .add_message_with_metadata(
             "assistant".to_string(),
             response.clone(),
@@ -1014,7 +1021,14 @@ async fn handle_photo(
             &char_id,
             None,
         )
-        .await;
+        .await
+    {
+        tracing::error!(
+            target: "telegram",
+            "[Telegram] Failed to persist assistant message: {}",
+            e
+        );
+    }
 
     // Trigger periodic memory extraction (every 5 user messages)
     let msg_count = orchestrator.get_message_count().await;
