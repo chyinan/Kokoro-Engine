@@ -212,6 +212,15 @@ export function validateStreamChatResponse(
     };
 }
 
+export type TurnMessageIdReconciliation = {
+    readonly messages: Array<ChatPanelMessage>;
+    /**
+     * true 表示权威 ID 无法在内存中可靠对齐（assistant 气泡缺失或已挂有冲突 ID）。
+     * 调用方应放弃对齐并从后端重新同步消息列表，而不是按"最后一条消息"猜测写入。
+     */
+    readonly needsResync: boolean;
+};
+
 /**
  * 协调并将 StreamChatResponse 返回的权威消息 ID（user_message_id 与 assistant_message_id）
  * 补偿填充到前端消息列表中。
@@ -219,35 +228,34 @@ export function validateStreamChatResponse(
  * 当因组件初始化、生命周期切换或异步事件丢失而未收到 chat-turn-finish 事件时，
  * 该函数可防止 assistant 消息缺少 ID 导致后续无法编辑的问题。
  *
+ * 对齐策略为按 clientRequestId 严格精确匹配，绝不按位置猜测：找不到明确匹配项时
+ * 返回 needsResync = true，由调用方从后端重新同步，避免把新消息 ID 绑定到
+ * Telegram、已取消旧 turn 等无关消息上（否则后续编辑会修改错误记录）。
+ *
  * @param messages 当前消息列表
  * @param clientRequestId 客户端请求唯一标识符
  * @param userMessageId 后端持久化返回的用户消息权威 ID
  * @param assistantMessageId 后端持久化返回的助手消息权威 ID
- * @returns 补齐 ID 后的消息列表副本；若无需变更则返回原数组以保留对象引用
+ * @returns 补齐 ID 后的消息列表副本；若无需变更则 messages 字段保留原数组引用
  */
 export function reconcileTurnMessageIds(
     messages: ReadonlyArray<ChatPanelMessage>,
     clientRequestId?: string | null,
     userMessageId?: number | null,
     assistantMessageId?: number | null,
-): Array<ChatPanelMessage> {
+): TurnMessageIdReconciliation {
     if (!userMessageId && !assistantMessageId) {
-        return messages as Array<ChatPanelMessage>;
+        return { messages: messages as Array<ChatPanelMessage>, needsResync: false };
     }
 
     let isModified = false;
+    let needsResync = false;
     const nextMessages = [...messages];
 
-    // 第一步：如果提供了 userMessageId，定位并补齐用户消息 ID
-    if (userMessageId) {
-        let userIndex = clientRequestId
-            ? nextMessages.findIndex(m => m.clientRequestId === clientRequestId)
-            : -1;
-
-        if (userIndex === -1 && !clientRequestId) {
-            userIndex = nextMessages.map(m => m.role).lastIndexOf("user");
-        }
-
+    // 第一步：如果提供了 userMessageId，按 clientRequestId 精确补齐用户消息 ID；
+    // 未匹配时静默跳过（编辑时 onEdit 会安全失败，不会写错记录）
+    if (userMessageId && clientRequestId) {
+        const userIndex = nextMessages.findIndex(m => m.clientRequestId === clientRequestId);
         if (userIndex !== -1 && !nextMessages[userIndex].id) {
             nextMessages[userIndex] = {
                 ...nextMessages[userIndex],
@@ -257,46 +265,87 @@ export function reconcileTurnMessageIds(
         }
     }
 
-    // 第二步：如果提供了 assistantMessageId，定位并补齐助手消息 ID
+    // 第二步：如果提供了 assistantMessageId，按 clientRequestId 精确补齐助手消息 ID
     if (assistantMessageId) {
-        let assistantIndex = -1;
-
-        // 优先根据 clientRequestId 匹配 assistant 气泡
-        if (clientRequestId) {
-            assistantIndex = nextMessages.findIndex(
+        const assistantIndex = clientRequestId
+            ? nextMessages.findIndex(
                 m => m.role === "kokoro" && m.clientRequestId === clientRequestId,
-            );
-        }
+            )
+            : -1;
 
-        // 次选：若 assistant 气泡尚未打上 clientRequestId，寻找紧随该 user 消息之后的第一个 kokoro 气泡
-        if (assistantIndex === -1 && clientRequestId) {
-            const userIndex = nextMessages.findIndex(m => m.clientRequestId === clientRequestId);
-            if (userIndex !== -1) {
-                for (let i = userIndex + 1; i < nextMessages.length; i++) {
-                    if (nextMessages[i].role === "kokoro") {
-                        assistantIndex = i;
-                        break;
-                    }
-                }
-            }
-        }
-
-        // 兜底（如重新生成无新 user 消息）：取最后一条 kokoro 助手气泡
         if (assistantIndex === -1) {
-            assistantIndex = nextMessages.map(m => m.role).lastIndexOf("kokoro");
-        }
-
-        if (assistantIndex !== -1 && !nextMessages[assistantIndex].id) {
+            // 找不到明确匹配项：不猜测，交由调用方从后端重新同步
+            needsResync = true;
+        } else if (!nextMessages[assistantIndex].id) {
             nextMessages[assistantIndex] = {
                 ...nextMessages[assistantIndex],
                 id: assistantMessageId,
-                clientRequestId: nextMessages[assistantIndex].clientRequestId ?? clientRequestId ?? undefined,
             };
             isModified = true;
+        } else if (nextMessages[assistantIndex].id !== assistantMessageId) {
+            // 已挂有冲突 ID（历史误绑或重复对齐）：内存态不可信，交由后端重新同步
+            needsResync = true;
         }
     }
 
-    return isModified ? nextMessages : (messages as Array<ChatPanelMessage>);
+    return {
+        messages: isModified ? nextMessages : (messages as Array<ChatPanelMessage>),
+        needsResync,
+    };
+}
+
+/**
+ * resync 入口守卫：仅当 UI 空闲、或当前活动仍归属本次请求（turn-start/finish 事件
+ * 丢失导致的残留）时允许重同步。busy 归属其他请求时返回 false，避免覆盖其乐观消息。
+ */
+export function shouldResyncConversation(
+    clientRequestId: string,
+    activeTurnClientRequestId: string | null | undefined,
+    isBusy: boolean,
+    pendingClientRequestId: string | null | undefined,
+): boolean {
+    if (activeTurnClientRequestId) {
+        return activeTurnClientRequestId === clientRequestId;
+    }
+    if (!isBusy) {
+        return true;
+    }
+    return pendingClientRequestId === clientRequestId;
+}
+
+/**
+ * 将后端权威消息列表应用到当前内存消息列表（resync 专用）。
+ *
+ * 当前列表尾部"未绑定"的消息（无 id、无 clientRequestId、无 turnId——如 Telegram
+ * 同步气泡、错误提示气泡）可能尚未进入 DB 或不属于当前会话，直接整体替换会丢失
+ * 它们，因此将其保留并追加到权威列表之后；与权威列表内容重复（同角色同文本）的
+ * 则丢弃，避免 DB 快照已包含该消息时出现重复气泡。
+ */
+export function mergeResyncedConversationMessages(
+    current: ReadonlyArray<ChatPanelMessage>,
+    authoritative: ReadonlyArray<ChatPanelMessage>,
+): Array<ChatPanelMessage> {
+    const trailing: ChatPanelMessage[] = [];
+    for (let i = current.length - 1; i >= 0; i--) {
+        const message = current[i];
+        const isUnbound = message.id === undefined
+            && message.clientRequestId === undefined
+            && message.turnId === undefined;
+        if (!isUnbound) break;
+        trailing.unshift(message);
+    }
+
+    if (trailing.length === 0) {
+        return authoritative as Array<ChatPanelMessage>;
+    }
+
+    const kept = trailing.filter(trailingMessage => !authoritative.some(
+        dbMessage => dbMessage.role === trailingMessage.role && dbMessage.text === trailingMessage.text,
+    ));
+
+    return kept.length === 0
+        ? (authoritative as Array<ChatPanelMessage>)
+        : [...authoritative, ...kept];
 }
 
 /**

@@ -42,8 +42,11 @@ import {
     validateTurnFinish,
     validateStreamChatResponse,
     reconcileTurnMessageIds,
+    shouldResyncConversation,
+    mergeResyncedConversationMessages,
     isChatSessionCurrent,
 } from "./chat/chat-turn-lifecycle";
+import { buildChatMessagesFromConversation } from "./chat-history";
 import {
     computeTargetScrollTop,
     isScrollAtBottom,
@@ -414,6 +417,73 @@ export default function ChatPanel({
     const rawResponseRef = useRef("");
     const currentTurnRef = useRef<PendingTurnState | null>(null);
     const pendingVisionContextRef = useRef<ChatMessage | null>(null);
+
+    // reconcile 无法可靠对齐权威消息 ID 时，从后端重新加载会话消息。
+    // 仅允许覆盖"空闲或仍属本次请求残留"的状态，避免抹掉并发新 turn 的乐观消息。
+    const resyncConversationMessages = useCallback(async (request: {
+        conversationId: string;
+        startGeneration: number;
+        clientRequestId: string;
+    }) => {
+        const { conversationId, startGeneration, clientRequestId } = request;
+
+        // 入口归属判定：当前活动若不属于本次请求，立即放弃（新 turn 会自行对齐）
+        if (!shouldResyncConversation(
+            clientRequestId,
+            currentTurnRef.current?.clientRequestId,
+            isBusyRef.current,
+            pendingTurnRequestRef.current?.clientRequestId,
+        )) {
+            console.warn("[ChatPanel] Skipping conversation resync: another turn is active");
+            return;
+        }
+
+        let loaded: Awaited<ReturnType<typeof loadConversation>>;
+        try {
+            loaded = await loadConversation(conversationId);
+        } catch (err) {
+            // 补救性重同步失败不影响主流程，绝不向上抛，
+            // 避免误入 handleSend 的 catch 产生错误气泡并污染 lastFailedRequestRef
+            console.warn("[ChatPanel] Failed to load conversation for resync:", err);
+            return;
+        }
+
+        // 加载期间会话可能切换：双守卫（代次 + 会话 ID）
+        if (!isChatSessionCurrent(
+            startGeneration,
+            conversationId,
+            conversationGenerationRef.current,
+            activeConversationIdRef.current,
+        )) {
+            return;
+        }
+
+        // 加载期间不得出现新活动：活动仍归属本次请求才算安全，否则放弃覆盖
+        if (!shouldResyncConversation(
+            clientRequestId,
+            currentTurnRef.current?.clientRequestId,
+            isBusyRef.current,
+            pendingTurnRequestRef.current?.clientRequestId,
+        )) {
+            return;
+        }
+
+        // 本次请求的残留活动（turn-start/finish 事件丢失未收尾）：清理，避免 UI 卡在忙碌态
+        if (currentTurnRef.current || isBusyRef.current) {
+            currentTurnRef.current = null;
+            pendingTurnRequestRef.current = null;
+            endTurnActivity();
+        }
+
+        // merge 式应用：保留尾部未绑定消息（Telegram/错误气泡），避免整体替换丢消息；
+        // onEdit 期间的乐观文本可能被瞬时回滚，随后编辑响应到达会按 id 回填自愈
+        setMessages(prev => mergeResyncedConversationMessages(
+            prev,
+            buildChatMessagesFromConversation(loaded.messages),
+        ));
+        // 替换可能改变消息条数与索引，重置翻译展开状态防止错位
+        setExpandedTranslations(new Set());
+    }, [endTurnActivity]);
 
     // Typing reveal: per-character animation
     const { pushDelta, flush: flushReveal, reset: resetReveal } = useTypingReveal({
@@ -1060,6 +1130,8 @@ export default function ChatPanel({
                             setMessages(prev => {
                                 let idx = matchedRequestId ? prev.findIndex(m => m.clientRequestId === matchedRequestId) : -1;
                                 if (idx === -1 && !matchedRequestId) {
+                                    // TODO: lastIndexOf("user") 兜底与"找不到明确匹配项时应放弃对齐"的原则相悖，
+                                    // 若 Telegram user 消息与之交错可能误绑 ID；收紧需配套 pet/proactive 路径改造
                                     idx = prev.map(m => m.role).lastIndexOf("user");
                                 }
                                 if (idx !== -1 && !prev[idx].id) {
@@ -1511,12 +1583,29 @@ export default function ChatPanel({
                     setActiveConversationId(streamResValidation.targetConversationId);
                     activeConversationIdRef.current = streamResValidation.targetConversationId;
                 }
-                setMessages(prev => reconcileTurnMessageIds(
-                    prev,
+                // 先按已提交的消息快照判定是否需要后端重同步；实际写入仍走 updater，
+                // 与其他排队更新正确组合。快照与 prev 的微小背离在严格匹配 + merge
+                // 式 resync 下无破坏性后果。
+                const reconciliation = reconcileTurnMessageIds(
+                    messagesRef.current,
                     clientRequestId,
                     res?.user_message_id,
                     res?.assistant_message_id,
-                ));
+                );
+                if (reconciliation.needsResync && streamResValidation.targetConversationId) {
+                    void resyncConversationMessages({
+                        conversationId: streamResValidation.targetConversationId,
+                        startGeneration: requestGeneration,
+                        clientRequestId,
+                    });
+                } else {
+                    setMessages(prev => reconcileTurnMessageIds(
+                        prev,
+                        clientRequestId,
+                        res?.user_message_id,
+                        res?.assistant_message_id,
+                    ).messages);
+                }
             }
         } catch (err) {
             if (conversationGenerationRef.current !== requestGeneration) {
@@ -1908,12 +1997,29 @@ export default function ChatPanel({
                     setActiveConversationId(streamResValidation.targetConversationId);
                     activeConversationIdRef.current = streamResValidation.targetConversationId;
                 }
-                setMessages(prev => reconcileTurnMessageIds(
-                    prev,
+                // 先按已提交的消息快照判定是否需要后端重同步；实际写入仍走 updater，
+                // 与其他排队更新正确组合。快照与 prev 的微小背离在严格匹配 + merge
+                // 式 resync 下无破坏性后果。
+                const reconciliation = reconcileTurnMessageIds(
+                    messagesRef.current,
                     clientRequestId,
                     res?.user_message_id,
                     res?.assistant_message_id,
-                ));
+                );
+                if (reconciliation.needsResync && streamResValidation.targetConversationId) {
+                    void resyncConversationMessages({
+                        conversationId: streamResValidation.targetConversationId,
+                        startGeneration: requestGeneration,
+                        clientRequestId,
+                    });
+                } else {
+                    setMessages(prev => reconcileTurnMessageIds(
+                        prev,
+                        clientRequestId,
+                        res?.user_message_id,
+                        res?.assistant_message_id,
+                    ).messages);
+                }
             }
         }).catch(err => {
             if (conversationGenerationRef.current !== requestGeneration) {

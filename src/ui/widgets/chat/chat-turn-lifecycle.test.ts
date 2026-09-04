@@ -6,6 +6,8 @@ import {
     validateTurnFinish,
     validateStreamChatResponse,
     reconcileTurnMessageIds,
+    shouldResyncConversation,
+    mergeResyncedConversationMessages,
     isChatSessionCurrent,
     type TurnStartValidationContext,
     type TurnFinishValidationContext,
@@ -487,8 +489,9 @@ describe("chat turn lifecycle validation", () => {
                 102, // assistantMessageId from StreamChatResponse
             );
 
-            expect(reconciled[0].id).toBe(101);
-            expect(reconciled[1].id).toBe(102);
+            expect(reconciled.needsResync).toBe(false);
+            expect(reconciled.messages[0].id).toBe(101);
+            expect(reconciled.messages[1].id).toBe(102);
         });
 
         it("is idempotent and leaves existing message ids intact", () => {
@@ -510,39 +513,112 @@ describe("chat turn lifecycle validation", () => {
             const reconciled = reconcileTurnMessageIds(
                 initialMessages,
                 "req-1",
-                999,
-                888,
+                101,
+                102,
             );
 
             // Returns original array reference when no changes are needed
-            expect(reconciled).toBe(initialMessages);
-            expect(reconciled[0].id).toBe(101);
-            expect(reconciled[1].id).toBe(102);
+            expect(reconciled.needsResync).toBe(false);
+            expect(reconciled.messages).toBe(initialMessages);
+            expect(reconciled.messages[0].id).toBe(101);
+            expect(reconciled.messages[1].id).toBe(102);
         });
 
-        it("reconciles assistant message id for regenerated turn using lastIndexOf fallback", () => {
+        it("does not bind assistant id to an unrelated trailing message and requests resync", () => {
+            // 回归测试 [P2]：最后一条 kokoro 来自 Telegram（无 id、无 clientRequestId），
+            // 绝不能把新请求的 assistant id 写到它上面
             const initialMessages: ChatPanelMessage[] = [
                 {
                     id: 50,
                     role: "user",
                     text: "Tell me a joke",
+                    clientRequestId: "req-1",
                 },
                 {
                     role: "kokoro",
-                    text: "Why did the chicken cross the road?",
+                    text: "Message from Telegram",
                 },
             ];
 
             const reconciled = reconcileTurnMessageIds(
                 initialMessages,
-                "regen-req-1",
+                "req-1",
                 null,
                 52, // assistantMessageId
             );
 
-            expect(reconciled[0].id).toBe(50);
-            expect(reconciled[1].id).toBe(52);
-            expect(reconciled[1].clientRequestId).toBe("regen-req-1");
+            expect(reconciled.needsResync).toBe(true);
+            expect(reconciled.messages).toBe(initialMessages);
+            expect(reconciled.messages[1].id).toBeUndefined();
+            expect(reconciled.messages[1].clientRequestId).toBeUndefined();
+        });
+
+        it("does not guess a user message id when clientRequestId is absent", () => {
+            const initialMessages: ChatPanelMessage[] = [
+                {
+                    role: "user",
+                    text: "From pet window",
+                },
+            ];
+
+            const reconciled = reconcileTurnMessageIds(
+                initialMessages,
+                null,
+                77,
+                null,
+            );
+
+            expect(reconciled.needsResync).toBe(false);
+            expect(reconciled.messages).toBe(initialMessages);
+            expect(reconciled.messages[0].id).toBeUndefined();
+        });
+
+        it("requests resync when matched assistant bubble already carries a conflicting id", () => {
+            const initialMessages: ChatPanelMessage[] = [
+                {
+                    id: 11,
+                    role: "user",
+                    text: "Hello",
+                    clientRequestId: "req-1",
+                },
+                {
+                    id: 999, // 历史误绑的其他消息 ID
+                    role: "kokoro",
+                    text: "Hi there!",
+                    clientRequestId: "req-1",
+                },
+            ];
+
+            const reconciled = reconcileTurnMessageIds(
+                initialMessages,
+                "req-1",
+                null,
+                102,
+            );
+
+            expect(reconciled.needsResync).toBe(true);
+            expect(reconciled.messages).toBe(initialMessages);
+            expect(reconciled.messages[1].id).toBe(999);
+        });
+
+        it("applies user id while flagging assistant as unmatched for resync", () => {
+            const initialMessages: ChatPanelMessage[] = [
+                {
+                    role: "user",
+                    text: "Hello",
+                    clientRequestId: "req-1",
+                },
+            ];
+
+            const reconciled = reconcileTurnMessageIds(
+                initialMessages,
+                "req-1",
+                101,
+                102,
+            );
+
+            expect(reconciled.needsResync).toBe(true);
+            expect(reconciled.messages[0].id).toBe(101);
         });
 
         it("returns original array when both user and assistant message ids are null/undefined", () => {
@@ -560,7 +636,99 @@ describe("chat turn lifecycle validation", () => {
                 null,
             );
 
-            expect(reconciled).toBe(initialMessages);
+            expect(reconciled.needsResync).toBe(false);
+            expect(reconciled.messages).toBe(initialMessages);
+        });
+    });
+
+    describe("shouldResyncConversation", () => {
+        it("allows resync when the UI is idle", () => {
+            expect(shouldResyncConversation("req-1", null, false, null)).toBe(true);
+        });
+
+        it("allows resync when the active turn still belongs to the request (missed finish)", () => {
+            expect(shouldResyncConversation("req-1", "req-1", true, "req-1")).toBe(true);
+        });
+
+        it("allows resync when busy without an active turn and the pending request is ours (missed turn-start)", () => {
+            expect(shouldResyncConversation("req-1", null, true, "req-1")).toBe(true);
+        });
+
+        it("rejects resync when another turn is active", () => {
+            expect(shouldResyncConversation("req-1", "req-2", true, "req-2")).toBe(false);
+        });
+
+        it("rejects resync when busy belongs to another or unknown request", () => {
+            expect(shouldResyncConversation("req-1", null, true, "req-2")).toBe(false);
+            expect(shouldResyncConversation("req-1", null, true, null)).toBe(false);
+        });
+
+        it("rejects resync when an untracked turn (pet/proactive) keeps the UI busy", () => {
+            // active turn 无 clientRequestId（pet/proactive 路径）+ busy
+            expect(shouldResyncConversation("req-1", null, true, null)).toBe(false);
+        });
+    });
+
+    describe("mergeResyncedConversationMessages", () => {
+        it("replaces bound messages with the authoritative list", () => {
+            const current: ChatPanelMessage[] = [
+                { id: 1, role: "user", text: "Hello", clientRequestId: "req-1" },
+                { role: "kokoro", text: "Hi", clientRequestId: "req-1" },
+            ];
+            const authoritative: ChatPanelMessage[] = [
+                { id: 1, role: "user", text: "Hello" },
+                { id: 2, role: "kokoro", text: "Hi" },
+            ];
+
+            const merged = mergeResyncedConversationMessages(current, authoritative);
+
+            expect(merged).toEqual(authoritative);
+        });
+
+        it("keeps unbound trailing messages (telegram/error bubbles) missing from the DB snapshot", () => {
+            const current: ChatPanelMessage[] = [
+                { id: 1, role: "user", text: "Hello" },
+                { role: "kokoro", text: "From Telegram" },
+            ];
+            const authoritative: ChatPanelMessage[] = [
+                { id: 1, role: "user", text: "Hello" },
+            ];
+
+            const merged = mergeResyncedConversationMessages(current, authoritative);
+
+            expect(merged).toHaveLength(2);
+            expect(merged[1]).toEqual({ role: "kokoro", text: "From Telegram" });
+        });
+
+        it("drops unbound trailing messages already present in the DB snapshot", () => {
+            const current: ChatPanelMessage[] = [
+                { id: 1, role: "user", text: "Hello" },
+                { role: "kokoro", text: "From Telegram" },
+            ];
+            const authoritative: ChatPanelMessage[] = [
+                { id: 1, role: "user", text: "Hello" },
+                { id: 2, role: "kokoro", text: "From Telegram" },
+            ];
+
+            const merged = mergeResyncedConversationMessages(current, authoritative);
+
+            expect(merged).toHaveLength(2);
+            expect(merged[1].id).toBe(2);
+        });
+
+        it("does not treat bound trailing messages as keepable", () => {
+            const current: ChatPanelMessage[] = [
+                { id: 1, role: "user", text: "Hello", clientRequestId: "req-1" },
+                { role: "kokoro", text: "Pending reply", clientRequestId: "req-1" },
+            ];
+            const authoritative: ChatPanelMessage[] = [
+                { id: 1, role: "user", text: "Hello" },
+                { id: 2, role: "kokoro", text: "Persisted reply" },
+            ];
+
+            const merged = mergeResyncedConversationMessages(current, authoritative);
+
+            expect(merged).toEqual(authoritative);
         });
     });
 });
