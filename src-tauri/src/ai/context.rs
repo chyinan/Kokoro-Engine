@@ -381,6 +381,10 @@ pub struct AIOrchestrator {
     pub proactive_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// 当前活跃对话 ID
     pub current_conversation_id: Arc<Mutex<Option<String>>>,
+    /// Serializes conversation history/pointer rewrites (delete/edit/clear/switch/activation)
+    /// so a stale operation can never clobber the active conversation's in-memory context.
+    /// Must be the OUTERMOST lock wherever it is taken.
+    pub conversation_switch_lock: Arc<Mutex<()>>,
     /// Whether this orchestrator should update the desktop hot-reload conversation pointer.
     persist_conversation_selection: bool,
     /// Context management strategy: "window" | "summary"
@@ -440,6 +444,7 @@ impl AIOrchestrator {
             idle_behaviors: Arc::new(Mutex::new(IdleBehaviorSystem::new())),
             proactive_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             current_conversation_id: Arc::new(Mutex::new(None)),
+            conversation_switch_lock: Arc::new(Mutex::new(())),
             persist_conversation_selection: true,
             context_strategy: Arc::new(Mutex::new("window".to_string())),
             max_message_chars: Arc::new(Mutex::new(2000)),
@@ -475,6 +480,7 @@ impl AIOrchestrator {
             idle_behaviors: self.idle_behaviors.clone(),
             proactive_enabled: self.proactive_enabled.clone(),
             current_conversation_id: Arc::new(Mutex::new(None)),
+            conversation_switch_lock: Arc::new(Mutex::new(())),
             persist_conversation_selection: false,
             context_strategy: self.context_strategy.clone(),
             max_message_chars: self.max_message_chars.clone(),
@@ -670,6 +676,9 @@ impl AIOrchestrator {
                 target_conversation_id,
             )
             .await?;
+        // 会话切换锁：conv 校验与 history push 必须原子，防止会话切换窗口内
+        // 把旧会话的消息推入新会话的内存历史
+        let _switch_guard = self.conversation_switch_lock.lock().await;
         let current_conversation_id = self.current_conversation_id.lock().await.clone();
 
         // Only push to in-memory history if target_conversation_id is either None (implicit current)
@@ -706,6 +715,7 @@ impl AIOrchestrator {
                 *boundary = boundary.saturating_sub(1);
             }
         }
+        drop(_switch_guard);
 
         let strategy = self.context_strategy.lock().await.clone();
         if strategy == "summary" && self.is_memory_enabled() {
@@ -989,6 +999,9 @@ impl AIOrchestrator {
         turn_id: &str,
         extra_row_ids: &[i64],
     ) -> Result<usize> {
+        // 会话切换锁：与 load_conversation / delete_last_messages / edit 等历史重写路径互斥，
+        // 防止清理期间发生会话切换时把旧会话历史覆盖到新会话的内存上下文
+        let _switch_guard = self.conversation_switch_lock.lock().await;
         let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
             "SELECT id, metadata FROM conversation_messages WHERE conversation_id = ? AND metadata IS NOT NULL",
         )
@@ -1039,9 +1052,9 @@ impl AIOrchestrator {
         tx.commit().await?;
 
         // Resync the in-memory history only when the turn's conversation is still the
-        // active one (mirrors delete_last_messages_inner). Residual race: a brand-new
-        // turn started between its DB persist and its history push could be double
-        // pushed by this resync; the same race already exists in delete_last_messages.
+        // active one (mirrors delete_last_messages_inner). The whole method runs under
+        // conversation_switch_lock, so no conversation switch can interleave with this
+        // check-then-resync sequence.
         if self.current_conversation_id.lock().await.as_deref() == Some(conversation_id) {
             let remaining_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
                 "SELECT role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
@@ -1549,6 +1562,9 @@ impl AIOrchestrator {
     }
 
     pub async fn clear_history(&self) {
+        // 会话切换锁：清空历史+重置会话指针必须与删除/加载/编辑等路径互斥，
+        // 防止清空期间在途的删除操作把旧历史写回新会话
+        let _switch_guard = self.conversation_switch_lock.lock().await;
         let mut history = self.history.lock().await;
         history.clear();
         drop(history);

@@ -219,9 +219,10 @@ async fn handle_command(
         "/new" => {
             // Clear orchestrator history to start fresh
             if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
-                let mut history = orchestrator.history.lock().await;
-                history.clear();
-                drop(history);
+                // 会话切换锁：清空历史+重置会话指针与删除/加载等路径互斥；
+                // reset_history_and_boundary 同时重置记忆边界与触发计数，与 clear_history 保持一致
+                let _switch_guard = orchestrator.conversation_switch_lock.lock().await;
+                orchestrator.reset_history_and_boundary().await;
                 let mut conv_id = orchestrator.current_conversation_id.lock().await;
                 *conv_id = None;
             }

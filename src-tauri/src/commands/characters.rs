@@ -63,10 +63,15 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
     }
 
     async fn apply(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
+        // 会话切换锁：会话指针写入必须与删除/加载等历史重写路径互斥
+        let _switch_guard = self.orchestrator.conversation_switch_lock.lock().await;
         apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await
     }
 
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
+        // 会话切换锁：覆盖整个「会话指针写入 + 历史重同步」序列，防止在途删除操作
+        // 把旧会话历史写回刚恢复的新会话
+        let _switch_guard = self.orchestrator.conversation_switch_lock.lock().await;
         apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await?;
         sync_orchestrator_history(
             self.orchestrator,
@@ -80,6 +85,8 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
     }
 
     async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
+        // 会话切换锁：历史重同步与删除/加载互斥
+        let _switch_guard = self.orchestrator.conversation_switch_lock.lock().await;
         sync_orchestrator_history(self.orchestrator, conversation_id).await
     }
 

@@ -130,6 +130,10 @@ pub async fn get_latest_memory_retrieval_eval_summary(
 mod tests {
     use super::*;
 
+    fn switch_lock() -> Arc<Mutex<()>> {
+        Arc::new(Mutex::new(()))
+    }
+
     #[test]
     fn memory_upgrade_config_roundtrip_uses_shared_path_rules() {
         let path = memory_upgrade_config_path();
@@ -320,9 +324,18 @@ mod tests {
         let current_conv = Arc::new(Mutex::new(Some("conv-1".to_string())));
 
         // Call delete_last_messages_inner(1) to delete the final assistant response
-        delete_last_messages_inner(1, &pool, &history, &current_conv, 2000, None, None)
-            .await
-            .unwrap();
+        delete_last_messages_inner(
+            1,
+            &pool,
+            &history,
+            &current_conv,
+            2000,
+            None,
+            None,
+            &switch_lock(),
+        )
+        .await
+        .unwrap();
 
         // Ensure rows 2, 3, 4 are completely deleted, and only id 1 remains
         let remaining_ids: Vec<i64> = sqlx::query_scalar(
@@ -376,9 +389,18 @@ mod tests {
         let current_conv = Arc::new(Mutex::new(Some("conv-2".to_string())));
 
         // Delete 1 visible message (Turn 2 Answer)
-        delete_last_messages_inner(1, &pool, &history, &current_conv, 2000, None, None)
-            .await
-            .unwrap();
+        delete_last_messages_inner(
+            1,
+            &pool,
+            &history,
+            &current_conv,
+            2000,
+            None,
+            None,
+            &switch_lock(),
+        )
+        .await
+        .unwrap();
 
         // Should keep ids 1..=5 (Turn 1 completely intact + Turn 2 User), delete ids 6, 7, 8
         let remaining_ids: Vec<i64> = sqlx::query_scalar(
@@ -390,9 +412,18 @@ mod tests {
         assert_eq!(remaining_ids, vec![1, 2, 3, 4, 5]);
 
         // Delete another 2 visible messages (Turn 2 User [5] and Turn 1 Answer [4])
-        delete_last_messages_inner(2, &pool, &history, &current_conv, 2000, None, None)
-            .await
-            .unwrap();
+        delete_last_messages_inner(
+            2,
+            &pool,
+            &history,
+            &current_conv,
+            2000,
+            None,
+            None,
+            &switch_lock(),
+        )
+        .await
+        .unwrap();
 
         // Only Turn 1 User (id 1) should remain, all subsequent tool rows and answers removed
         let remaining_ids2: Vec<i64> = sqlx::query_scalar(
@@ -435,9 +466,18 @@ mod tests {
         }
 
         // Delete last 1 visible message
-        delete_last_messages_inner(1, &pool, &history, &current_conv, 2000, None, None)
-            .await
-            .unwrap();
+        delete_last_messages_inner(
+            1,
+            &pool,
+            &history,
+            &current_conv,
+            2000,
+            None,
+            None,
+            &switch_lock(),
+        )
+        .await
+        .unwrap();
 
         let hist = history.lock().await;
         assert_eq!(hist.len(), 1);
@@ -488,6 +528,7 @@ mod tests {
             40,
             Some(&memory_boundary),
             None,
+            &switch_lock(),
         )
         .await
         .unwrap();
@@ -550,6 +591,7 @@ mod tests {
             2000,
             None,
             Some("conv-other"),
+            &switch_lock(),
         )
         .await
         .unwrap();
@@ -564,6 +606,124 @@ mod tests {
             remaining, 2,
             "Stale delete must not touch the current conversation"
         );
+    }
+
+    #[tokio::test]
+    async fn test_delete_serializes_with_conversation_switch() {
+        let pool = setup_test_context_db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // 会话 A 与 B 各一条可见消息
+        for (conv, msg) in [("conv-a", "A message"), ("conv-b", "B message")] {
+            sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES (?, 'char-1', 'Test', ?, ?)")
+                .bind(conv)
+                .bind(&now)
+                .bind(&now)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, 'assistant', ?, NULL, ?)")
+                .bind(conv)
+                .bind(msg)
+                .bind(&now)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let history = Arc::new(Mutex::new(VecDeque::new()));
+        let current_conv = Arc::new(Mutex::new(Some("conv-a".to_string())));
+        let switch_lock = Arc::new(Mutex::new(()));
+
+        // 模拟删除在途：先持有会话切换锁，删除与切换任务在锁上排队
+        let guard = switch_lock.lock().await;
+
+        let delete_task = {
+            let history = history.clone();
+            let current_conv = current_conv.clone();
+            let switch_lock = switch_lock.clone();
+            tokio::spawn(async move {
+                delete_last_messages_inner(
+                    1,
+                    &pool,
+                    &history,
+                    &current_conv,
+                    2000,
+                    None,
+                    None,
+                    &switch_lock,
+                )
+                .await
+            })
+        };
+
+        // 与 load_conversation 相同的持锁语义：先写 history，后置 conv
+        let switch_task = {
+            let history = history.clone();
+            let current_conv = current_conv.clone();
+            let switch_lock = switch_lock.clone();
+            tokio::spawn(async move {
+                let _guard = switch_lock.lock().await;
+                *current_conv.lock().await = Some("conv-b".to_string());
+                let mut hist = history.lock().await;
+                crate::ai::context::sync_history_window(
+                    &mut hist,
+                    vec![("assistant".to_string(), "B message".to_string(), None)],
+                    2000,
+                );
+            })
+        };
+
+        // 锁被外部持有期间，删除与切换都必须保持挂起（串行化生效）
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!delete_task.is_finished(), "delete must wait for the switch lock");
+        assert!(!switch_task.is_finished(), "switch must wait for the switch lock");
+
+        drop(guard);
+        delete_task.await.unwrap().unwrap();
+        switch_task.await.unwrap();
+
+        // tokio Mutex 为 FIFO：删除先执行、切换后执行。最终历史必须属于会话 B，
+        // 旧删除操作绝不覆盖新会话的内存上下文
+        assert_eq!(*current_conv.lock().await, Some("conv-b".to_string()));
+        let hist = history.lock().await;
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].content, "B message");
+    }
+
+    #[tokio::test]
+    async fn test_delete_waits_for_conversation_switch_lock() {
+        let pool = setup_test_context_db().await;
+        let history = Arc::new(Mutex::new(VecDeque::new()));
+        let current_conv = Arc::new(Mutex::new(Some("conv-a".to_string())));
+        let switch_lock = Arc::new(Mutex::new(()));
+
+        let guard = switch_lock.lock().await;
+        let task = {
+            let history = history.clone();
+            let current_conv = current_conv.clone();
+            let switch_lock = switch_lock.clone();
+            tokio::spawn(async move {
+                delete_last_messages_inner(
+                    1,
+                    &pool,
+                    &history,
+                    &current_conv,
+                    2000,
+                    None,
+                    None,
+                    &switch_lock,
+                )
+                .await
+            })
+        };
+
+        // 锁覆盖整个函数体：外部持锁期间删除不得推进
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!task.is_finished(), "delete must not proceed while the switch lock is held");
+
+        drop(guard);
+        task.await.unwrap().unwrap();
     }
 }
 
@@ -771,6 +931,8 @@ pub fn is_visible_message_raw(role: &str, metadata: Option<&str>) -> bool {
     is_visible_message_meta(role, meta_val.as_ref())
 }
 
+// 依赖项以参数显式传入以保持可测试性（与既有测试注入风格一致）
+#[allow(clippy::too_many_arguments)]
 pub async fn delete_last_messages_inner(
     count: usize,
     db: &sqlx::SqlitePool,
@@ -779,10 +941,16 @@ pub async fn delete_last_messages_inner(
     max_chars: usize,
     memory_history_boundary: Option<&Arc<Mutex<usize>>>,
     expected_conversation_id: Option<&str>,
+    conversation_switch_lock: &Arc<Mutex<()>>,
 ) -> Result<(), KokoroError> {
     if count == 0 {
         return Ok(());
     }
+
+    // 会话切换锁：与 load_conversation / clear_history / edit 等会话历史重写路径互斥。
+    // 持有到函数结束，确保删除期间发生的会话切换要么等待、要么在删除前完成，
+    // 旧删除操作永远不会把旧会话的历史覆盖到新会话的内存上下文上。
+    let _switch_guard = conversation_switch_lock.lock().await;
 
     let conv_id = current_conversation_id.lock().await.clone();
     // 竞态防护：调用方声明了发起删除时所属的会话。若后端当前会话已在删除 IPC 在途期间
@@ -911,6 +1079,7 @@ pub async fn delete_last_messages(
         max_chars,
         Some(&state.memory_history_boundary),
         expected_conversation_id.as_deref(),
+        &state.conversation_switch_lock,
     )
     .await
 }

@@ -1401,6 +1401,8 @@ pub async fn stream_chat(
 
         // 防御性对齐：若因长会话预算或回溯导致当前 history 尾部缺失该用户消息，在内存中补齐供当前 turn 组装 prompt
         if !request.hidden {
+            // 会话切换锁：与删除/加载/清空等历史重写路径互斥
+            let _switch_guard = state.conversation_switch_lock.lock().await;
             let mut history = state.history.lock().await;
             let trailing_matches = history.back().is_some_and(|m| m.role == "user");
             if !trailing_matches {
@@ -2329,14 +2331,18 @@ pub async fn stream_chat(
 
             // Add to in-memory history only if this conversation is still the active one (DB already persisted).
             // push_history_message applies the context message length limit.
-            if state.current_conversation_id.lock().await.as_deref() == Some(conversation_id.as_str()) {
-                state
-                    .push_history_message(Message {
-                        role: "assistant".to_string(),
-                        content: full_response.clone(),
-                        metadata: Some(metadata_value),
-                    })
-                    .await;
+            {
+                // 会话切换锁：校验与推送原子，防止切换窗口内把旧会话消息推入新会话历史
+                let _switch_guard = state.conversation_switch_lock.lock().await;
+                if state.current_conversation_id.lock().await.as_deref() == Some(conversation_id.as_str()) {
+                    state
+                        .push_history_message(Message {
+                            role: "assistant".to_string(),
+                            content: full_response.clone(),
+                            metadata: Some(metadata_value),
+                        })
+                        .await;
+                }
             }
         }
     }
@@ -3881,9 +3887,19 @@ mod tests {
         // It must automatically remove id 4 (assistant) and its preceding technical messages (ids 3, 2).
         let history = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
         let current_conv = std::sync::Arc::new(tokio::sync::Mutex::new(Some("conv-tools".to_string())));
-        crate::commands::context::delete_last_messages_inner(1, &pool, &history, &current_conv, 2000, None, None)
-            .await
-            .unwrap();
+        let switch_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        crate::commands::context::delete_last_messages_inner(
+            1,
+            &pool,
+            &history,
+            &current_conv,
+            2000,
+            None,
+            None,
+            &switch_lock,
+        )
+        .await
+        .unwrap();
 
         // Verify that id 2, 3, 4 are truly deleted from database
         let remaining_ids: Vec<i64> = sqlx::query_scalar(

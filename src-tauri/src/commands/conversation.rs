@@ -142,21 +142,26 @@ pub async fn load_conversation(
     .map_err(|e| KokoroError::Database(e.to_string()))?;
 
     {
-        let max_chars = *state.max_message_chars.lock().await;
-        let history_messages: Vec<(String, String, Option<String>)> = rows
-            .iter()
-            .map(|(_, role, content, metadata, _)| {
-                (role.clone(), content.clone(), metadata.clone())
-            })
-            .collect();
-        let mut history = state.history.lock().await;
-        crate::ai::context::sync_history_window(&mut history, history_messages, max_chars);
-    }
+        // 会话切换锁：与删除/编辑/清空等历史重写路径互斥，确保加载会话期间
+        // 不会有过期的异步操作（如 delete_last_messages）把旧会话历史覆盖回来
+        let _switch_guard = state.conversation_switch_lock.lock().await;
+        {
+            let max_chars = *state.max_message_chars.lock().await;
+            let history_messages: Vec<(String, String, Option<String>)> = rows
+                .iter()
+                .map(|(_, role, content, metadata, _)| {
+                    (role.clone(), content.clone(), metadata.clone())
+                })
+                .collect();
+            let mut history = state.history.lock().await;
+            crate::ai::context::sync_history_window(&mut history, history_messages, max_chars);
+        }
 
-    {
-        let mut conv_id = state.current_conversation_id.lock().await;
-        *conv_id = Some(request.id.clone());
-        crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&request.id));
+        {
+            let mut conv_id = state.current_conversation_id.lock().await;
+            *conv_id = Some(request.id.clone());
+            crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&request.id));
+        }
     }
 
     let messages = rows
@@ -312,6 +317,7 @@ pub async fn edit_conversation_message_inner(
     history_lock: &tokio::sync::Mutex<std::collections::VecDeque<crate::ai::context::Message>>,
     current_conversation_id_lock: &tokio::sync::Mutex<Option<String>>,
     max_message_chars: usize,
+    conversation_switch_lock: &tokio::sync::Mutex<()>,
 ) -> Result<EditConversationMessageResponse, KokoroError> {
     let trimmed = request.new_content.trim();
     if trimmed.is_empty() {
@@ -319,6 +325,9 @@ pub async fn edit_conversation_message_inner(
             "Message content cannot be empty".to_string(),
         ));
     }
+    // 会话切换锁：编辑期间的会话重同步与删除/加载/清空等历史重写路径互斥，
+    // 防止编辑在会话切换窗口内把旧会话历史覆盖到新会话
+    let _switch_guard = conversation_switch_lock.lock().await;
     let content_to_persist =
         crate::ai::context::truncate_message_content(trimmed.to_string(), max_message_chars);
 
@@ -474,6 +483,7 @@ pub async fn edit_conversation_message(
         &state.history,
         &state.current_conversation_id,
         max_chars,
+        &state.conversation_switch_lock,
     )
     .await
 }
@@ -485,6 +495,10 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
     use tokio::sync::Mutex;
+
+    fn switch_lock() -> Arc<Mutex<()>> {
+        Arc::new(Mutex::new(()))
+    }
 
     async fn setup_test_db() -> SqlitePool {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
@@ -560,6 +574,7 @@ mod tests {
             &history,
             &current_conv_id,
             2000,
+            &switch_lock(),
         )
         .await
         .unwrap();
@@ -625,6 +640,7 @@ mod tests {
             &history,
             &current_conv_id,
             2000,
+            &switch_lock(),
         )
         .await
         .unwrap_err();
@@ -700,6 +716,7 @@ mod tests {
             &history,
             &current_conv_id,
             2000,
+            &switch_lock(),
         )
         .await
         .unwrap();
@@ -767,6 +784,7 @@ mod tests {
             &history,
             &current_conv_id,
             2000,
+            &switch_lock(),
         )
         .await
         .unwrap_err();
@@ -842,6 +860,7 @@ mod tests {
             &history,
             &current_conv_id,
             2000,
+            &switch_lock(),
         )
         .await
         .unwrap();
@@ -919,6 +938,7 @@ mod tests {
             &history,
             &current_conv_id,
             2000,
+            &switch_lock(),
         )
         .await
         .unwrap();
@@ -960,6 +980,7 @@ mod tests {
             &history,
             &current_conv_id,
             2000,
+            &switch_lock(),
         )
         .await
         .unwrap();
@@ -989,6 +1010,7 @@ mod tests {
             &history,
             &current_conv_id,
             2000,
+            &switch_lock(),
         )
         .await
         .unwrap_err();
@@ -1007,6 +1029,7 @@ mod tests {
             &history,
             &current_conv_id,
             2000,
+            &switch_lock(),
         )
         .await
         .unwrap_err();
@@ -1025,6 +1048,7 @@ mod tests {
             &history,
             &current_conv_id,
             2000,
+            &switch_lock(),
         )
         .await
         .unwrap_err();
@@ -1066,6 +1090,7 @@ mod tests {
             &history,
             &current_conv_id,
             20,
+            &switch_lock(),
         )
         .await
         .unwrap();
