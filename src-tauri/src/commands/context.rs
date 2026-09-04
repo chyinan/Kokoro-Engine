@@ -544,11 +544,18 @@ mod tests {
 
         // Check in-memory history: must NOT have 34 messages! Must be strictly capped at 20!
         let hist = history.lock().await;
-        assert_eq!(hist.len(), 20, "Memory history must enforce 20 message window limit");
+        assert_eq!(
+            hist.len(),
+            20,
+            "Memory history must enforce 20 message window limit"
+        );
         // Messages remaining in DB are 0..34. The last 20 are indices 14..34.
         assert_eq!(hist[0].content, "Message 14");
         // Message 30 should be present in history and truncated to 40 chars
-        let msg_30 = hist.iter().find(|m| m.content.starts_with("LLLL")).expect("Message 30 should be in history");
+        let msg_30 = hist
+            .iter()
+            .find(|m| m.content.starts_with("LLLL"))
+            .expect("Message 30 should be in history");
         assert!(msg_30.content.ends_with("…[truncated]"));
         assert_eq!(msg_30.content, format!("{}…[truncated]", "L".repeat(40)));
 
@@ -676,8 +683,14 @@ mod tests {
 
         // 锁被外部持有期间，删除与切换都必须保持挂起（串行化生效）
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(!delete_task.is_finished(), "delete must wait for the switch lock");
-        assert!(!switch_task.is_finished(), "switch must wait for the switch lock");
+        assert!(
+            !delete_task.is_finished(),
+            "delete must wait for the switch lock"
+        );
+        assert!(
+            !switch_task.is_finished(),
+            "switch must wait for the switch lock"
+        );
 
         drop(guard);
         delete_task.await.unwrap().unwrap();
@@ -720,7 +733,10 @@ mod tests {
 
         // 锁覆盖整个函数体：外部持锁期间删除不得推进
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(!task.is_finished(), "delete must not proceed while the switch lock is held");
+        assert!(
+            !task.is_finished(),
+            "delete must not proceed while the switch lock is held"
+        );
 
         drop(guard);
         task.await.unwrap().unwrap();
@@ -913,9 +929,7 @@ pub fn is_visible_message_meta(role: &str, meta: Option<&serde_json::Value>) -> 
     if role == "tool" {
         return false;
     }
-    let technical_type = meta
-        .and_then(|v| v.get("type"))
-        .and_then(|t| t.as_str());
+    let technical_type = meta.and_then(|v| v.get("type")).and_then(|t| t.as_str());
     !matches!(
         technical_type,
         Some("assistant_tool_calls") | Some("translation_instruction") | Some("tool_result")
@@ -926,8 +940,7 @@ pub fn is_visible_message_raw(role: &str, metadata: Option<&str>) -> bool {
     if role == "tool" {
         return false;
     }
-    let meta_val = metadata
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    let meta_val = metadata.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
     is_visible_message_meta(role, meta_val.as_ref())
 }
 
@@ -994,7 +1007,10 @@ pub async fn delete_last_messages_inner(
             let keep_visible_count = total_visible - count;
             let last_keep_idx = visible_indices[keep_visible_count - 1];
             // 从最后一条保留的可见消息之后的所有行（包括伴生的 assistant_tool_calls / tool_result 等不可见技术行与待删可见消息）全部删除
-            rows[last_keep_idx + 1..].iter().map(|(id, _, _)| *id).collect()
+            rows[last_keep_idx + 1..]
+                .iter()
+                .map(|(id, _, _)| *id)
+                .collect()
         };
 
         if !ids_to_delete.is_empty() {
