@@ -205,6 +205,7 @@ pub fn run() {
             commands::conversation::create_conversation,
             commands::conversation::rename_conversation,
             commands::conversation::update_conversation_state,
+            commands::conversation::edit_conversation_message,
             commands::conversation::list_character_ids,
             commands::llm::get_llm_config,
             commands::llm::save_llm_config,
@@ -402,18 +403,9 @@ pub fn run() {
                                     .bind(id)
                                     .fetch_all(&orchestrator.db)
                                     .await {
-                                        let mut history = orchestrator.history.lock().await;
-                                        history.clear();
-                                        for (role, content, metadata) in &rows {
-                                            history.push_back(crate::ai::context::Message {
-                                                role: role.clone(),
-                                                content: content.clone(),
-                                                metadata: metadata
-                                                    .as_deref()
-                                                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
-                                            });
-                                        }
-                                        tracing::info!(target: "ai", "Restored current_conversation_id: {} ({} messages)", id, rows.len());
+                                        let total = rows.len();
+                                        orchestrator.sync_history_from_rows(rows).await;
+                                        tracing::info!(target: "ai", "Restored current_conversation_id: {} ({} messages, windowed to {})", id, total, orchestrator.history.lock().await.len());
                                     }
                                 }
                             }

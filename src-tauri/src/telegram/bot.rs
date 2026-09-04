@@ -219,9 +219,10 @@ async fn handle_command(
         "/new" => {
             // Clear orchestrator history to start fresh
             if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
-                let mut history = orchestrator.history.lock().await;
-                history.clear();
-                drop(history);
+                // 会话切换锁：清空历史+重置会话指针与删除/加载等路径互斥；
+                // reset_history_and_boundary 同时重置记忆边界与触发计数，与 clear_history 保持一致
+                let _switch_guard = orchestrator.conversation_switch_lock.lock().await;
+                orchestrator.reset_history_and_boundary().await;
                 let mut conv_id = orchestrator.current_conversation_id.lock().await;
                 *conv_id = None;
             }
@@ -501,7 +502,7 @@ async fn handle_text(
     let metadata = translation
         .as_ref()
         .map(|t| serde_json::json!({ "translation": t }).to_string());
-    orchestrator
+    if let Err(e) = orchestrator
         .add_message_with_metadata(
             "assistant".to_string(),
             response.clone(),
@@ -509,7 +510,14 @@ async fn handle_text(
             &char_id,
             None,
         )
-        .await;
+        .await
+    {
+        tracing::error!(
+            target: "telegram",
+            "[Telegram] Failed to persist assistant message: {}",
+            e
+        );
+    }
 
     // Event-driven + periodic memory extraction
     let msg_count = orchestrator.get_message_count().await;
@@ -1005,7 +1013,7 @@ async fn handle_photo(
     let metadata = translation
         .as_ref()
         .map(|t| serde_json::json!({ "translation": t }).to_string());
-    orchestrator
+    if let Err(e) = orchestrator
         .add_message_with_metadata(
             "assistant".to_string(),
             response.clone(),
@@ -1013,7 +1021,14 @@ async fn handle_photo(
             &char_id,
             None,
         )
-        .await;
+        .await
+    {
+        tracing::error!(
+            target: "telegram",
+            "[Telegram] Failed to persist assistant message: {}",
+            e
+        );
+    }
 
     // Trigger periodic memory extraction (every 5 user messages)
     let msg_count = orchestrator.get_message_count().await;

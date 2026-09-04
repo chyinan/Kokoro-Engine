@@ -63,10 +63,15 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
     }
 
     async fn apply(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
+        // 会话切换锁：会话指针写入必须与删除/加载等历史重写路径互斥
+        let _switch_guard = self.orchestrator.conversation_switch_lock.lock().await;
         apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await
     }
 
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
+        // 会话切换锁：覆盖整个「会话指针写入 + 历史重同步」序列，防止在途删除操作
+        // 把旧会话历史写回刚恢复的新会话
+        let _switch_guard = self.orchestrator.conversation_switch_lock.lock().await;
         apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await?;
         sync_orchestrator_history(
             self.orchestrator,
@@ -80,6 +85,8 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
     }
 
     async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
+        // 会话切换锁：历史重同步与删除/加载互斥
+        let _switch_guard = self.orchestrator.conversation_switch_lock.lock().await;
         sync_orchestrator_history(self.orchestrator, conversation_id).await
     }
 
@@ -137,7 +144,7 @@ async fn sync_orchestrator_history(
     orchestrator: &AIOrchestrator,
     conversation_id: Option<&str>,
 ) -> Result<(), KokoroError> {
-    let new_messages = if let Some(conv_id) = conversation_id {
+    if let Some(conv_id) = conversation_id {
         let rows = match sqlx::query_as::<_, (String, String, Option<String>, String)>(
             "SELECT role, content, metadata, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
         )
@@ -154,30 +161,16 @@ async fn sync_orchestrator_history(
             }
         };
 
-        let mut msgs = Vec::with_capacity(rows.len());
-        for (role, content, metadata, _) in rows {
-            msgs.push(crate::ai::context::Message {
-                role,
-                content,
-                metadata: metadata
-                    .as_deref()
-                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
-            });
-        }
-        msgs
+        // Strip created_at to get (role, content, metadata) tuples for sync_history_from_rows
+        let messages: Vec<(String, String, Option<String>)> = rows
+            .into_iter()
+            .map(|(role, content, metadata, _)| (role, content, metadata))
+            .collect();
+        orchestrator.sync_history_from_rows(messages).await;
     } else {
-        Vec::new()
-    };
-
-    orchestrator.reset_history_and_boundary().await;
-    let count = new_messages.len();
-    {
-        let mut history = orchestrator.history.lock().await;
-        for msg in new_messages {
-            history.push_back(msg);
-        }
+        orchestrator.reset_history_and_boundary().await;
     }
-    orchestrator.set_memory_history_boundary(count).await;
+
     Ok(())
 }
 

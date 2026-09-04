@@ -669,7 +669,7 @@ The tables below list the current IPC commands. The `Bridge` column shows whethe
 | `set_memory_enabled` | none | `enabled: boolean` | `void` | Enables or disables memory persistence. |
 | `get_memory_enabled` | none | none | `boolean` | Returns memory toggle state. |
 | `clear_history` | `clearHistory` | none | `void` | Clears conversation history. |
-| `delete_last_messages` | `deleteLastMessages` | `count: number` | `void` | Deletes the last visible messages. |
+| `delete_last_messages` | `deleteLastMessages` | `count: number`, `expectedConversationId?: string \| null` | `void` | Deletes the last visible messages. Skipped (no-op) when `expectedConversationId` does not match the backend's current conversation, preventing stale deletes after a conversation switch. |
 | `get_context_settings` | `getContextSettings` | none | `ContextSettings` | Returns chat context strategy settings. |
 | `set_context_settings` | `setContextSettings` | `settings: ContextSettings` | `void` | Saves chat context strategy settings. |
 | `end_session` | none | `request: EndSessionRequest` | `void` | Generates a summary in the background and clears history. |

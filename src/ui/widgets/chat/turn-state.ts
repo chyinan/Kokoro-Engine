@@ -6,6 +6,7 @@ import {
 } from "../chat-streaming-state";
 
 export interface ChatPanelMessage {
+    id?: number;
     role: "user" | "kokoro" | "tool" | "context";
     text: string;
     images?: string[];
@@ -16,10 +17,14 @@ export interface ChatPanelMessage {
     capturedAt?: string;
     source?: string;
     turnId?: string;
+    clientRequestId?: string;
 }
 
 export interface PendingTurnState {
     turnId: string;
+    generation?: number;
+    conversationId?: string | null;
+    clientRequestId?: string | null;
     messageIndex: number | null;
     rawText: string;
     visibleTextStarted: boolean;
@@ -58,6 +63,7 @@ export const ensureTurnMessage = (messages: ChatPanelMessage[], turn: PendingTur
         role: "kokoro" as const,
         text: "",
         turnId: turn.turnId,
+        clientRequestId: turn.clientRequestId ?? undefined,
         ...(turn.tools.length > 0 ? { tools: [...turn.tools] } : {}),
     });
     turn.messageIndex = next.length - 1;

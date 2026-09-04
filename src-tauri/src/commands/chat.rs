@@ -173,16 +173,26 @@ struct PendingToolApproval {
     decision_rx: Option<oneshot::Receiver<ToolApprovalDecision>>,
 }
 
-#[derive(Default)]
 pub struct TurnCancellationState {
     cancelled: RwLock<HashMap<String, Option<String>>>,
+    finished_tx: tokio::sync::broadcast::Sender<String>,
 }
 
 const TURN_CANCELLED_BY_USER_MESSAGE: &str = "turn cancelled by user";
 
+impl Default for TurnCancellationState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TurnCancellationState {
     pub fn new() -> Self {
-        Self::default()
+        let (finished_tx, _) = tokio::sync::broadcast::channel(64);
+        Self {
+            cancelled: RwLock::new(HashMap::new()),
+            finished_tx,
+        }
     }
 
     async fn register_turn(&self, turn_id: &str) {
@@ -229,8 +239,43 @@ impl TurnCancellationState {
             .unwrap_or(false)
     }
 
+    async fn has_turn(&self, turn_id: &str) -> bool {
+        self.cancelled.read().await.contains_key(turn_id)
+    }
+
     async fn clear_turn(&self, turn_id: &str) {
         self.cancelled.write().await.remove(turn_id);
+        let _ = self.finished_tx.send(turn_id.to_string());
+    }
+
+    async fn cancel_turn_and_wait(
+        &self,
+        turn_id: &str,
+        reason: Option<String>,
+        timeout: std::time::Duration,
+    ) -> Result<(), String> {
+        let mut rx = self.finished_tx.subscribe();
+        self.cancel_turn(turn_id, reason).await?;
+
+        if !self.has_turn(turn_id).await {
+            return Ok(());
+        }
+
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            let remaining = timeout.saturating_sub(start.elapsed());
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(finished_id)) if finished_id == turn_id => return Ok(()),
+                Ok(Ok(_)) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                    if !self.has_turn(turn_id).await {
+                        return Ok(());
+                    }
+                }
+                _ => break,
+            }
+        }
+        Ok(())
     }
 }
 
@@ -258,6 +303,40 @@ async fn build_turn_delta_payload_if_not_cancelled(
 
 fn is_turn_cancelled_error_message(message: &str) -> bool {
     message == TURN_CANCELLED_BY_USER_MESSAGE
+}
+
+/// Best-effort cleanup of the conversation rows left behind by a cancelled or failed
+/// turn: technical rows (assistant_tool_calls / tool_result) matched by `turn_id`, plus
+/// the streaming draft when `draft_row_id` is Some. Cleanup must never mask the
+/// original error, so failures are only logged.
+async fn cleanup_turn_artifacts(
+    state: &AIOrchestrator,
+    conversation_id: &str,
+    turn_id: &str,
+    draft_row_id: Option<i64>,
+) {
+    let extra_row_ids = draft_row_id.into_iter().collect::<Vec<_>>();
+    match state
+        .delete_turn_artifacts(conversation_id, turn_id, &extra_row_ids)
+        .await
+    {
+        Ok(deleted) => {
+            tracing::info!(
+                target: "chat",
+                "[Chat] Cleaned up {} row(s) for turn {}",
+                deleted,
+                turn_id
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                target: "chat",
+                "[Chat] Failed to clean up turn {} artifacts: {}",
+                turn_id,
+                error
+            );
+        }
+    }
 }
 
 struct TurnCancellationGuard {
@@ -412,7 +491,9 @@ async fn cancel_chat_turn_inner(
     reason: Option<String>,
     cancel_state: Arc<TurnCancellationState>,
 ) -> Result<(), String> {
-    cancel_state.cancel_turn(&turn_id, reason).await
+    cancel_state
+        .cancel_turn_and_wait(&turn_id, reason, std::time::Duration::from_millis(1000))
+        .await
 }
 
 #[command]
@@ -510,6 +591,17 @@ pub struct ChatRequest {
     /// Optional caller correlation echoed on turn lifecycle events.
     #[serde(default)]
     pub client_request_id: Option<String>,
+    /// If true, this turn is regenerating an assistant reply for the last user message.
+    #[serde(default)]
+    pub regenerate: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct StreamChatResponse {
+    pub conversation_id: String,
+    pub user_message_id: Option<i64>,
+    #[serde(default)]
+    pub assistant_message_id: Option<i64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -591,7 +683,7 @@ async fn persist_vision_context_message(
     if let Some(turn_id) = turn_id {
         metadata["turn_id"] = serde_json::Value::String(turn_id.to_string());
     }
-    state
+    if let Err(e) = state
         .add_message_with_metadata(
             "context".to_string(),
             observation.summary.clone(),
@@ -599,7 +691,14 @@ async fn persist_vision_context_message(
             character_id,
             None,
         )
-        .await;
+        .await
+    {
+        tracing::error!(
+            target: "chat",
+            "[Chat] Failed to persist vision context message: {}",
+            e
+        );
+    }
 }
 
 fn is_proactive_noop_response(text: &str) -> bool {
@@ -1116,6 +1215,61 @@ fn tool_trace_success_message() -> Option<String> {
     .map(ToString::to_string)
 }
 
+#[inline]
+pub(crate) fn should_insert_user_message_for_request(
+    hidden: bool,
+    regenerate: bool,
+    has_trailing_user_message: bool,
+) -> bool {
+    if hidden {
+        return false;
+    }
+    if regenerate {
+        !has_trailing_user_message
+    } else {
+        true
+    }
+}
+
+pub(crate) async fn resolve_trailing_visible_user_message(
+    db: &sqlx::SqlitePool,
+    conversation_id: &str,
+) -> Result<Option<(i64, String)>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (i64, String, String, Option<String>)>(
+        "SELECT id, role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 50"
+    )
+    .bind(conversation_id)
+    .fetch_all(db)
+    .await?;
+
+    for (id, role, content, metadata) in rows {
+        if role == "tool" {
+            continue;
+        }
+        let technical_type = metadata
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|v| {
+                v.get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
+            });
+        if matches!(
+            technical_type.as_deref(),
+            Some("assistant_tool_calls") | Some("translation_instruction") | Some("tool_result")
+        ) {
+            continue;
+        }
+
+        if role == "user" {
+            return Ok(Some((id, content)));
+        } else {
+            return Ok(None);
+        }
+    }
+    Ok(None)
+}
+
 // ── Stream Chat Command ────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -1137,7 +1291,7 @@ pub async fn stream_chat(
         '_,
         std::sync::Arc<tokio::sync::Mutex<crate::vision::server::VisionServer>>,
     >,
-) -> Result<(), KokoroError> {
+) -> Result<StreamChatResponse, KokoroError> {
     // Gate chat if runtime is degraded (e.g. startup recovery failure)
     if let Some(reason) = state.get_runtime_degraded().await {
         return Err(KokoroError::Chat(format!(
@@ -1196,14 +1350,41 @@ pub async fn stream_chat(
         .latest_completed_observation(chrono::Utc::now())
         .await;
 
-    // 2. Update History with User Message (skip for hidden/touch interactions)
+    // 2. Update History with User Message (skip for hidden/touch interactions, or regenerate when user msg already trailing in DB)
     let system_provider = llm_state.system_provider().await;
-    if !request.hidden {
+    let current_conv_id = state.current_conversation_id.lock().await.clone();
+    let trailing_visible_user = if request.regenerate {
+        if let Some(ref cid) = current_conv_id {
+            match resolve_trailing_visible_user_message(&state.db, cid).await {
+                Ok(res) => res,
+                Err(e) => {
+                    tracing::warn!(
+                        "[stream_chat] Failed to query trailing visible message: {}",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let has_trailing_user = trailing_visible_user.is_some();
+    let should_insert = should_insert_user_message_for_request(
+        request.hidden,
+        request.regenerate,
+        has_trailing_user,
+    );
+
+    let (conversation_id, user_message_id) = if should_insert {
         if let Some(observation) = selected_vision_observation.as_ref() {
             persist_vision_context_message(&state, observation, &char_id, None).await;
         }
 
-        state
+        let (cid, mid) = state
             .add_message_with_metadata(
                 "user".to_string(),
                 request.message.clone(),
@@ -1211,14 +1392,15 @@ pub async fn stream_chat(
                 &char_id,
                 Some(system_provider.clone()),
             )
-            .await;
+            .await
+            .map_err(|e| KokoroError::Database(e.to_string()))?;
 
         if let Some(hooks) = hook_runtime.as_ref() {
             hooks
                 .emit_best_effort(
                     &HookEvent::AfterUserMessagePersisted,
                     &build_chat_hook_payload(
-                        conversation_id.clone(),
+                        Some(cid.clone()),
                         &char_id,
                         None,
                         Some(request.message.clone()),
@@ -1229,7 +1411,32 @@ pub async fn stream_chat(
                 )
                 .await;
         }
-    }
+        (cid, Some(mid))
+    } else {
+        let cid = current_conv_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let mid = trailing_visible_user.map(|(id, _)| id);
+
+        // 防御性对齐：若因长会话预算或回溯导致当前 history 尾部缺失该用户消息，在内存中补齐供当前 turn 组装 prompt
+        if !request.hidden {
+            // 会话切换锁：与删除/加载/清空等历史重写路径互斥
+            let _switch_guard = state.conversation_switch_lock.lock().await;
+            let mut history = state.history.lock().await;
+            let trailing_matches = history.back().is_some_and(|m| m.role == "user");
+            if !trailing_matches {
+                history.push_back(crate::ai::context::Message {
+                    role: "user".to_string(),
+                    content: request.message.clone(),
+                    metadata: None,
+                });
+                // Enforce rolling window limit even on defensive path
+                while history.len() > crate::ai::context::MAX_IN_MEMORY_HISTORY_MESSAGES {
+                    history.pop_front();
+                }
+            }
+        }
+
+        (cid, mid)
+    };
 
     // ── LAYER 1 & 2: SYSTEM SETUP ───────────────────────────────
 
@@ -1313,9 +1520,12 @@ pub async fn stream_chat(
     let _turn_guard =
         TurnCancellationGuard::new(cancel_state.inner().clone(), assistant_turn_id.clone());
 
-    let stream_result: Result<(), KokoroError> = async {
+    let draft_row_id_holder = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    let draft_row_id_for_stream = std::sync::Arc::clone(&draft_row_id_holder);
+
+    let stream_result: Result<Option<i64>, KokoroError> = async {
     let mut before_llm_request_payload = build_before_llm_request_payload(
-        conversation_id.clone(),
+        Some(conversation_id.clone()),
         &char_id,
         Some(assistant_turn_id.clone()),
         request.message.clone(),
@@ -1342,7 +1552,7 @@ pub async fn stream_chat(
             .emit_best_effort(
                 &HookEvent::BeforeLlmRequest,
                 &build_chat_hook_payload(
-                    conversation_id.clone(),
+                    Some(conversation_id.clone()),
                     &char_id,
                     Some(assistant_turn_id.clone()),
                     Some(effective_request_message.clone()),
@@ -1358,6 +1568,8 @@ pub async fn stream_chat(
         serde_json::json!({
             "turn_id": assistant_turn_id,
             "client_request_id": request.client_request_id,
+            "conversation_id": conversation_id,
+            "user_message_id": user_message_id,
         }),
     )
     .map_err(|e| KokoroError::Chat(e.to_string()))?;
@@ -1535,7 +1747,7 @@ pub async fn stream_chat(
                             .map_err(|emit_error| KokoroError::Chat(emit_error.to_string()))?;
 
                         let failure_event = err_payload.clone().into_failure_event(
-                            conversation_id.clone(),
+                            Some(conversation_id.clone()),
                             Some(assistant_turn_id.clone()),
                             Some(char_id.clone()),
                             None,
@@ -1623,18 +1835,19 @@ pub async fn stream_chat(
         // Persist visible assistant drafts incrementally. Hidden proactive/touch
         // turns are persisted only after final no-op filtering, so PASS/empty
         // proactive vision responses leave no DB rows.
-        if !request.hidden && !all_cleaned_text.is_empty() {
+        if !request.hidden && !all_cleaned_text.is_empty() && !cancel_state.is_cancelled(&assistant_turn_id).await {
             let draft_content = strip_leaked_tags(&all_cleaned_text);
             if !draft_content.is_empty() {
                 match draft_row_id {
                     None => {
                         // First round: insert draft row
                         match state
-                            .persist_streaming_draft(&draft_content, &char_id)
+                            .persist_streaming_draft(&conversation_id, &draft_content)
                             .await
                         {
                             Ok(id) => {
                                 draft_row_id = Some(id);
+                                *draft_row_id_for_stream.lock().await = Some(id);
                             }
                             Err(e) => {
                                 tracing::error!(target: "chat", "[Chat] Failed to persist streaming draft: {}", e);
@@ -1815,26 +2028,42 @@ pub async fn stream_chat(
                     serde_json::Value::Array(round_provider_data.clone());
             }
             let assistant_tool_call_metadata = assistant_tool_call_metadata_value.to_string();
-            state
-                .add_message_with_metadata(
+            if let Err(e) = state
+                .add_message_with_metadata_for_conversation(
                     "assistant".to_string(),
                     cleaned_text.clone(),
                     Some(assistant_tool_call_metadata),
                     &char_id,
+                    Some(&conversation_id),
                     None,
                 )
-                .await;
+                .await
+            {
+                tracing::error!(
+                    target: "chat::tools",
+                    "[Chat] Failed to persist assistant tool call message: {}",
+                    e
+                );
+            }
             for (tool_metadata, tool_message) in &persisted_native_tool_results {
                 let tool_content = extract_message_text(tool_message);
-                state
-                    .add_message_with_metadata(
+                if let Err(e) = state
+                    .add_message_with_metadata_for_conversation(
                         "tool".to_string(),
                         tool_content,
                         Some(tool_metadata.to_string()),
                         &char_id,
+                        Some(&conversation_id),
                         None,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        target: "chat::tools",
+                        "[Chat] Failed to persist tool result message: {}",
+                        e
+                    );
+                }
             }
             client_messages.push(LlmChatMessage {
                 message: assistant_tool_calls_message(
@@ -1888,6 +2117,7 @@ pub async fn stream_chat(
 
     if request.hidden && is_proactive_noop_response(&full_response) {
         if let Some(row_id) = draft_row_id {
+            *draft_row_id_for_stream.lock().await = None;
             if let Err(error) = state.delete_message_by_id(row_id).await {
                 tracing::error!(
                     target: "chat",
@@ -1895,7 +2125,11 @@ pub async fn stream_chat(
                     error
                 );
             }
+            draft_row_id = None;
         }
+        // A hidden no-op turn may still have persisted assistant_tool_calls/tool rows
+        // from earlier tool rounds; remove them so no orphan tool exchange survives.
+        cleanup_turn_artifacts(&state, &conversation_id, &assistant_turn_id, draft_row_id).await;
         app.emit(
             "chat-turn-text-complete",
             serde_json::json!({
@@ -1912,10 +2146,12 @@ pub async fn stream_chat(
                 "turn_id": assistant_turn_id,
                 "status": "completed",
                 "client_request_id": request.client_request_id,
+                "conversation_id": conversation_id,
+                "assistant_message_id": draft_row_id,
             }),
         )
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
-        return Ok(());
+        return Ok(None);
     }
 
     if let Some(hooks) = hook_runtime.as_ref() {
@@ -1923,7 +2159,7 @@ pub async fn stream_chat(
             .emit_best_effort(
                 &HookEvent::AfterLlmResponse,
                 &build_chat_hook_payload(
-                    conversation_id.clone(),
+                    Some(conversation_id.clone()),
                     &char_id,
                     Some(assistant_turn_id.clone()),
                     Some(request.message.clone()),
@@ -2090,15 +2326,29 @@ pub async fn stream_chat(
                 )
                 .await;
             }
-            state
-                .add_message_with_metadata(
+            let persisted_assistant_id = match state
+                .add_message_with_metadata_for_conversation(
                     "assistant".to_string(),
                     full_response.clone(),
                     metadata,
                     &char_id,
+                    Some(&conversation_id),
                     None,
                 )
-                .await;
+                .await
+            {
+                Ok((_, msg_id)) => Some(msg_id),
+                Err(error) => {
+                    tracing::error!(
+                        target: "chat",
+                        "[Chat] Failed to persist hidden assistant message: {}",
+                        error
+                    );
+                    None
+                }
+            };
+            draft_row_id = persisted_assistant_id;
+            *draft_row_id_for_stream.lock().await = persisted_assistant_id;
         } else {
             // Update the draft row with final content + metadata (DB already has the row)
             if let Some(row_id) = draft_row_id {
@@ -2110,15 +2360,21 @@ pub async fn stream_chat(
                 }
             }
 
-            // Add to in-memory history only (DB already persisted).
+            // Add to in-memory history only if this conversation is still the active one (DB already persisted).
             // push_history_message applies the context message length limit.
-            state
-                .push_history_message(Message {
-                    role: "assistant".to_string(),
-                    content: full_response.clone(),
-                    metadata: Some(metadata_value),
-                })
-                .await;
+            {
+                // 会话切换锁：校验与推送原子，防止切换窗口内把旧会话消息推入新会话历史
+                let _switch_guard = state.conversation_switch_lock.lock().await;
+                if state.current_conversation_id.lock().await.as_deref() == Some(conversation_id.as_str()) {
+                    state
+                        .push_history_message(Message {
+                            role: "assistant".to_string(),
+                            content: full_response.clone(),
+                            metadata: Some(metadata_value),
+                        })
+                        .await;
+                }
+            }
         }
     }
 
@@ -2140,10 +2396,7 @@ pub async fn stream_chat(
 
     if !request.hidden && state.is_memory_enabled() {
         if let Some(decision) = select_memory_ingress_decision(&request.message, &ingress_options) {
-            let conversation_key = conversation_id
-                .as_deref()
-                .unwrap_or("no-conversation")
-                .to_string();
+            let conversation_key = conversation_id.clone();
             let cooldown_key =
                 build_cooldown_key(&char_id, &conversation_key, decision.event.event_type);
             if state
@@ -2350,6 +2603,14 @@ pub async fn stream_chat(
         });
     }
 
+    // A failed turn with no visible text may still have persisted tool rows from
+    // earlier rounds; remove them so the failed turn leaves no orphan tool exchange.
+    let mut finish_draft_row_id = draft_row_id;
+    if stream_failed && full_response.is_empty() {
+        cleanup_turn_artifacts(&state, &conversation_id, &assistant_turn_id, draft_row_id).await;
+        finish_draft_row_id = None;
+    }
+
     let finish_status = if stream_failed && full_response.is_empty() {
         "error"
     } else {
@@ -2361,34 +2622,57 @@ pub async fn stream_chat(
             "turn_id": assistant_turn_id,
             "status": finish_status,
             "client_request_id": request.client_request_id,
+            "conversation_id": conversation_id,
+            "assistant_message_id": finish_draft_row_id,
         }),
     )
     .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
-    Ok(())
+    Ok(finish_draft_row_id)
     }
     .await;
 
     match stream_result {
-        Ok(()) => Ok(()),
+        Ok(assistant_message_id) => Ok(StreamChatResponse {
+            conversation_id,
+            user_message_id,
+            assistant_message_id,
+        }),
         Err(KokoroError::Chat(message)) if is_turn_cancelled_error_message(&message) => {
             tracing::info!(
                 target: "chat",
                 "[Chat] Turn {} cancelled by user",
                 assistant_turn_id
             );
+            // Remove the turn's technical rows (assistant_tool_calls/tool_result) and the
+            // streaming draft, then emit the cancelled finish so the frontend reloads a
+            // clean conversation.
+            let draft_row_id = *draft_row_id_holder.lock().await;
+            cleanup_turn_artifacts(&state, &conversation_id, &assistant_turn_id, draft_row_id)
+                .await;
             app.emit(
                 "chat-turn-finish",
                 serde_json::json!({
                     "turn_id": assistant_turn_id,
                     "status": "cancelled",
                     "client_request_id": request.client_request_id,
+                    "conversation_id": conversation_id,
+                    "assistant_message_id": serde_json::Value::Null,
                 }),
             )
             .map_err(|e| KokoroError::Chat(e.to_string()))?;
-            Ok(())
+            Ok(StreamChatResponse {
+                conversation_id,
+                user_message_id,
+                assistant_message_id: None,
+            })
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            // Non-cancel failures keep any partial draft and already-finalized rows, but
+            // the turn's technical rows must not survive as orphan tool exchanges.
+            cleanup_turn_artifacts(&state, &conversation_id, &assistant_turn_id, None).await;
+            Err(error)
+        }
     }
 }
 
@@ -2407,6 +2691,29 @@ mod tests {
         MemoryEventType,
     };
     use crate::hooks::HookPayload;
+
+    /// 验证 StreamChatResponse 序列化及向前兼容性（当缺少 assistant_message_id 时默认解析为 None）。
+    #[test]
+    fn test_stream_chat_response_serialization_and_backward_compatibility() {
+        // 包含 assistant_message_id 时的正向序列化与反序列化
+        let res = StreamChatResponse {
+            conversation_id: "conv-123".to_string(),
+            user_message_id: Some(10),
+            assistant_message_id: Some(11),
+        };
+        let json_str = serde_json::to_string(&res).expect("serialization succeeds");
+        let deserialized: StreamChatResponse =
+            serde_json::from_str(&json_str).expect("deserialization succeeds");
+        assert_eq!(deserialized, res);
+
+        // 向前兼容验证：如果接收到没有 assistant_message_id 的旧版 JSON
+        let legacy_json = r#"{"conversation_id":"conv-legacy","user_message_id":42}"#;
+        let legacy_res: StreamChatResponse =
+            serde_json::from_str(legacy_json).expect("legacy deserialization succeeds");
+        assert_eq!(legacy_res.conversation_id, "conv-legacy");
+        assert_eq!(legacy_res.user_message_id, Some(42));
+        assert_eq!(legacy_res.assistant_message_id, None);
+    }
 
     #[test]
     fn chat_memory_ingress_triggers_immediate_extraction_for_profile_event() {
@@ -3492,5 +3799,215 @@ mod tests {
             cancel_chat_turn_inner("not-exists".to_string(), Some("user".into()), state).await;
         assert!(result.is_err());
         assert!(result.err().unwrap().contains("unknown turn_id"));
+    }
+
+    #[test]
+    fn chat_request_deserializes_regenerate_default_and_explicit() {
+        let default_req: ChatRequest = serde_json::from_str(r#"{"message":"hi"}"#).unwrap();
+        assert!(!default_req.regenerate);
+
+        let regen_req: ChatRequest =
+            serde_json::from_str(r#"{"message":"hi","regenerate":true}"#).unwrap();
+        assert!(regen_req.regenerate);
+    }
+
+    #[test]
+    fn should_insert_user_message_skips_when_hidden() {
+        assert!(!should_insert_user_message_for_request(true, false, false));
+        assert!(!should_insert_user_message_for_request(true, true, false));
+        assert!(!should_insert_user_message_for_request(true, true, true));
+    }
+
+    #[test]
+    fn should_insert_user_message_always_inserts_for_normal_non_hidden_turn() {
+        assert!(should_insert_user_message_for_request(false, false, false));
+        assert!(should_insert_user_message_for_request(false, false, true));
+    }
+
+    #[test]
+    fn should_insert_user_message_skips_when_regenerating_and_history_has_trailing_user() {
+        // Normal regeneration: trailing user message already in history -> skip duplicate insertion
+        assert!(!should_insert_user_message_for_request(false, true, true));
+    }
+
+    #[test]
+    fn should_insert_user_message_heals_when_regenerating_but_history_lacks_trailing_user() {
+        // Defensive self-healing: if history was truncated/empty, fallback to inserting
+        assert!(should_insert_user_message_for_request(false, true, false));
+    }
+
+    async fn setup_test_chat_db() -> sqlx::SqlitePool {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE conversations (
+                id TEXT PRIMARY KEY,
+                character_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                topic TEXT NOT NULL DEFAULT '',
+                pinned_state TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE conversation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                metadata TEXT,
+                created_at TEXT NOT NULL
+            );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        pool
+    }
+
+    #[tokio::test]
+    async fn test_resolve_trailing_visible_user_message_with_tools() {
+        let pool = setup_test_chat_db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-tools', 'char-1', 'Test', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 1. User message (id 1)
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-tools', 'user', 'What is the weather?', NULL, ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 2. Technical tool call message (id 2)
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-tools', 'assistant', 'call weather', '{\"type\":\"assistant_tool_calls\"}', ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 3. Technical tool result message (id 3)
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-tools', 'tool', '{\"temperature\": 25}', '{\"type\":\"tool_result\"}', ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 4. Final assistant answer (id 4)
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-tools', 'assistant', 'The weather is 25C sunny.', NULL, ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // When assistant answer is present, trailing visible message is assistant (NOT user)
+        let trailing_before = resolve_trailing_visible_user_message(&pool, "conv-tools")
+            .await
+            .unwrap();
+        assert!(
+            trailing_before.is_none(),
+            "When assistant message is at the end, trailing visible user message must be None"
+        );
+
+        // Delete the trailing visible assistant turn using the real delete_last_messages command logic.
+        // It must automatically remove id 4 (assistant) and its preceding technical messages (ids 3, 2).
+        let history =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
+        let current_conv =
+            std::sync::Arc::new(tokio::sync::Mutex::new(Some("conv-tools".to_string())));
+        let switch_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        crate::commands::context::delete_last_messages_inner(
+            1,
+            &pool,
+            &history,
+            &current_conv,
+            2000,
+            None,
+            None,
+            &switch_lock,
+        )
+        .await
+        .unwrap();
+
+        // Verify that id 2, 3, 4 are truly deleted from database
+        let remaining_ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM conversation_messages WHERE conversation_id = 'conv-tools' ORDER BY id ASC"
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining_ids, vec![1]);
+
+        // Now, the trailing visible message should be the user message (id 1)
+        let trailing_after = resolve_trailing_visible_user_message(&pool, "conv-tools")
+            .await
+            .unwrap();
+        assert_eq!(
+            trailing_after,
+            Some((1, "What is the weather?".to_string()))
+        );
+
+        // Verify deduplication decision
+        assert!(!should_insert_user_message_for_request(
+            false,
+            true,
+            trailing_after.is_some()
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_trailing_visible_user_message_in_long_conversation() {
+        let pool = setup_test_chat_db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-long', 'char-1', 'Test', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Populate 25 turns (50 messages: 25 users + 25 assistants)
+        for i in 1..=25 {
+            sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-long', 'user', ?, NULL, ?)")
+                .bind(format!("User question {}", i))
+                .bind(&now)
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-long', 'assistant', ?, NULL, ?)")
+                .bind(format!("Assistant reply {}", i))
+                .bind(&now)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // Delete the last assistant reply (turn 25)
+        sqlx::query("DELETE FROM conversation_messages WHERE id = 50")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Check trailing visible user message
+        let trailing = resolve_trailing_visible_user_message(&pool, "conv-long")
+            .await
+            .unwrap();
+        assert!(trailing.is_some());
+        let (id, content) = trailing.unwrap();
+        assert_eq!(id, 49);
+        assert_eq!(content, "User question 25");
+        assert!(!should_insert_user_message_for_request(false, true, true));
     }
 }

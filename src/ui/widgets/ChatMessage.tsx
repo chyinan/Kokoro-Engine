@@ -1,7 +1,7 @@
 import { useState, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench, Eye } from "lucide-react";
+import { Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench, Eye, Maximize2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ToolTraceItem } from "../../lib/kokoro-bridge";
 
@@ -27,6 +27,7 @@ interface ChatMessageProps {
     onContinueFrom: () => void;
     onApproveTool: (tool: ToolTraceItem) => void;
     onRejectTool: (tool: ToolTraceItem) => void;
+    onPreviewImage?: (url: string) => void;
 }
 
 function canResolvePendingTool(tool: ToolTraceItem): boolean {
@@ -174,6 +175,7 @@ export const ChatMessage = memo(function ChatMessage({
     onContinueFrom,
     onApproveTool,
     onRejectTool,
+    onPreviewImage,
 }: ChatMessageProps) {
     const { t } = useTranslation();
     const [isEditing, setIsEditing] = useState(false);
@@ -186,6 +188,7 @@ export const ChatMessage = memo(function ChatMessage({
     };
 
     const handleSaveEdit = () => {
+        if (!editingText.trim()) return;
         onEdit(editingText);
         setIsEditing(false);
     };
@@ -258,12 +261,20 @@ export const ChatMessage = memo(function ChatMessage({
             {msg.images && msg.images.length > 0 && (
                 <div className="flex flex-wrap gap-1.5 mb-2">
                     {msg.images.map((url, imgIdx) => (
-                        <img
+                        <div
                             key={imgIdx}
-                            src={url}
-                            alt="attached"
-                            className="max-w-[180px] max-h-[120px] rounded-md object-cover border border-white/10"
-                        />
+                            onClick={() => onPreviewImage?.(url)}
+                            className="relative group/img cursor-zoom-in overflow-hidden rounded-md border border-white/10"
+                        >
+                            <img
+                                src={url}
+                                alt="attached"
+                                className="max-w-[180px] max-h-[120px] object-cover transition-transform duration-200 group-hover/img:scale-105"
+                            />
+                            <div className="absolute inset-0 bg-black/0 group-hover/img:bg-black/30 transition-colors flex items-center justify-center pointer-events-none">
+                                <Maximize2 size={16} className="text-white opacity-0 group-hover/img:opacity-100 transition-opacity drop-shadow-md" />
+                            </div>
+                        </div>
                     ))}
                 </div>
             )}

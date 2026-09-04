@@ -1127,12 +1127,17 @@
             "save": "保存 (Ctrl+Enter)",
             "cancel": "キャンセル (Esc)",
             "clear": "会話をクリア",
+            "confirm_clear_title": "会話をクリア",
+            "confirm_clear": "この会話のすべてのメッセージを消去してもよろしいですか？この操作は元に戻せません。",
+            "confirm_clear_button": "すべて消去",
             "collapse": "チャットを折りたたむ",
             "open": "チャットを開く",
             "resize": "チャット幅を調整",
             "retry": "再試行",
             "stop": "生成を停止",
-            "stopping": "停止中..."
+            "stopping": "停止中...",
+            "to_bottom": "一番下へ",
+            "new_messages": "新着メッセージ ↓"
         },
         "errors": {
             "image_too_large": "画像が大きすぎます (最大 5MB)",
@@ -1140,7 +1145,8 @@
             "upload_failed": "画像のアップロードに失敗しました",
             "connection_error": "接続に問題が発生しました。API設定を確認してください。 💭",
             "memory_model_required": "ローカル記憶モデルはまだ準備中です。チャットは続けられますが、意味検索は一時的に使われません。",
-            "memory_model_check_failed": "ローカル記憶モデルの状態を確認できませんでした。チャットは続けられるため、都合のよい時にダウンロード画面を確認してください。"
+            "memory_model_check_failed": "ローカル記憶モデルの状態を確認できませんでした。チャットは続けられるため、都合のよい時にダウンロード画面を確認してください。",
+            "edit_failed": "編集したメッセージの保存に失敗しました"
         },
         "input": {
             "placeholder": "話しかけてください...",
@@ -1158,7 +1164,15 @@
                     "speaking": "発話中...",
                     "transcribing": "変換中..."
                 }
-            }
+            },
+            "drop_image_title": "ドロップして画像をアップロード",
+            "drop_image_hint": "PNG, JPG, WebP に対応（最大 5MB）"
+        },
+        "image": {
+            "zoom_in": "拡大",
+            "zoom_out": "縮小",
+            "rotate": "回転",
+            "reset": "リセット"
         },
         "history": {
             "title": "会話履歴",
@@ -1166,7 +1180,10 @@
             "delete": "会話を削除",
             "rename": "名前を変更",
             "empty": "会話履歴はありません",
-            "confirmDelete": "この会話を削除しますか？"
+            "confirmDelete": "この会話を削除しますか？",
+            "pinned": "固定済み",
+            "pin": "ピン留め",
+            "unpin": "ピン留めを解除"
         },
         "tools": {
             "header": "ツール ({{count}})",

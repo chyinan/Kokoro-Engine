@@ -1128,12 +1128,17 @@
             "save": "保存 (Ctrl+Enter)",
             "cancel": "取消 (Esc)",
             "clear": "清空对话",
+            "confirm_clear_title": "清空当前对话",
+            "confirm_clear": "确定要清空当前对话的所有记录吗？此操作无法撤销。",
+            "confirm_clear_button": "确认清空",
             "collapse": "折叠对话",
             "open": "展开对话",
             "resize": "调整对话宽度",
             "retry": "重试",
             "stop": "停止生成",
-            "stopping": "正在停止..."
+            "stopping": "正在停止...",
+            "to_bottom": "回到底部",
+            "new_messages": "有新消息 ↓"
         },
         "errors": {
             "image_too_large": "图片过大 (最大 5MB)",
@@ -1141,7 +1146,8 @@
             "upload_failed": "图片上传失败",
             "connection_error": "连接出现问题，请检查 API 设置。 💭",
             "memory_model_required": "本地记忆模型还没准备好。聊天仍可继续，但暂时不会使用语义记忆。",
-            "memory_model_check_failed": "暂时无法确认本地记忆模型状态。聊天仍可继续，方便时再检查下载弹窗。"
+            "memory_model_check_failed": "暂时无法确认本地记忆模型状态。聊天仍可继续，方便时再检查下载弹窗。",
+            "edit_failed": "保存编辑消息失败"
         },
         "input": {
             "placeholder": "与你的同伴对话...",
@@ -1159,7 +1165,15 @@
                     "speaking": "说话中...",
                     "transcribing": "转换中..."
                 }
-            }
+            },
+            "drop_image_title": "松开鼠标上传图片",
+            "drop_image_hint": "支持 PNG, JPG, WebP 格式 (单张最大 5MB)"
+        },
+        "image": {
+            "zoom_in": "放大",
+            "zoom_out": "缩小",
+            "rotate": "旋转",
+            "reset": "重置"
         },
         "history": {
             "title": "对话记录",
@@ -1167,7 +1181,10 @@
             "delete": "删除对话",
             "rename": "重命名",
             "empty": "暂无对话记录",
-            "confirmDelete": "确定删除这条对话记录吗？"
+            "confirmDelete": "确定删除这条对话记录吗？",
+            "pinned": "已固定",
+            "pin": "固定会话",
+            "unpin": "取消固定"
         },
         "tools": {
             "header": "工具 ({{count}})",

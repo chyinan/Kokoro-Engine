@@ -8,10 +8,10 @@ use crate::ai::memory::{MemoryManager, MemoryRetrievalMode, MemorySearchResult};
 use crate::ai::router::{ModelRouter, ModelType};
 use crate::llm::messages::user_text_message;
 use crate::llm::provider::LlmProvider;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -82,15 +82,64 @@ pub struct MemorySnippet {
     pub tier: String,
 }
 
+pub const MAX_IN_MEMORY_HISTORY_MESSAGES: usize = 20;
+pub const DEFAULT_MAX_MESSAGE_CHARS: usize = 2000;
 const TRUNCATION_MARKER: &str = "…[truncated]";
 
-fn truncate_message_content(content: String, max_chars: usize) -> String {
+pub fn truncate_message_content(content: String, max_chars: usize) -> String {
     if content.chars().count() > max_chars {
         let truncated: String = content.chars().take(max_chars).collect();
         format!("{truncated}{TRUNCATION_MARKER}")
     } else {
         content
     }
+}
+
+pub trait IntoHistoryMessage {
+    fn into_history_message(self, max_chars: usize) -> Message;
+}
+
+impl IntoHistoryMessage for (String, String, Option<String>) {
+    fn into_history_message(self, max_chars: usize) -> Message {
+        Message {
+            role: self.0,
+            content: truncate_message_content(self.1, max_chars),
+            metadata: self
+                .2
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
+        }
+    }
+}
+
+impl IntoHistoryMessage for Message {
+    fn into_history_message(mut self, max_chars: usize) -> Message {
+        self.content = truncate_message_content(self.content, max_chars);
+        self
+    }
+}
+
+/// 统一历史窗口同步函数：
+/// 1. 严格保留最近的至多 MAX_IN_MEMORY_HISTORY_MESSAGES (20) 条消息；
+/// 2. 对每条消息应用 max_chars 截断；
+/// 3. 清空并重构 history；
+/// 4. 返回新历史长度，用于对齐 memory_history_boundary。
+pub fn sync_history_window<I, T>(
+    history: &mut VecDeque<Message>,
+    items: I,
+    max_chars: usize,
+) -> usize
+where
+    I: IntoIterator<Item = T>,
+    T: IntoHistoryMessage,
+{
+    let items: Vec<_> = items.into_iter().collect();
+    let start = items.len().saturating_sub(MAX_IN_MEMORY_HISTORY_MESSAGES);
+    history.clear();
+    for item in items.into_iter().skip(start) {
+        history.push_back(item.into_history_message(max_chars));
+    }
+    history.len()
 }
 
 fn normalized_language_name(language: &str) -> Option<&str> {
@@ -303,7 +352,7 @@ pub struct AIOrchestrator {
     /// Counts user messages that occurred while the memory system was enabled.
     memory_trigger_count: Arc<Mutex<u64>>,
     /// History index boundary used to prevent extracting conversations from disabled periods.
-    memory_history_boundary: Arc<Mutex<usize>>,
+    pub(crate) memory_history_boundary: Arc<Mutex<usize>>,
     /// Current character ID for memory isolation.
     pub(crate) character_id: Arc<Mutex<String>>,
     /// In-memory cooldown map for memory event trigger throttling.
@@ -333,6 +382,10 @@ pub struct AIOrchestrator {
     pub proactive_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// 当前活跃对话 ID
     pub current_conversation_id: Arc<Mutex<Option<String>>>,
+    /// Serializes conversation history/pointer rewrites (delete/edit/clear/switch/activation)
+    /// so a stale operation can never clobber the active conversation's in-memory context.
+    /// Must be the OUTERMOST lock wherever it is taken.
+    pub conversation_switch_lock: Arc<Mutex<()>>,
     /// Whether this orchestrator should update the desktop hot-reload conversation pointer.
     persist_conversation_selection: bool,
     /// Context management strategy: "window" | "summary"
@@ -352,6 +405,22 @@ impl AIOrchestrator {
     pub async fn new(db_url: &str) -> Result<Self> {
         // Create database if it doesn't exist
         let options = sqlx::sqlite::SqliteConnectOptions::from_str(db_url)?.create_if_missing(true);
+        Self::with_connect_options(options).await
+    }
+
+    /// Test-only constructor that can disable SQLite foreign key enforcement
+    /// so failure paths (orphan inserts, missing parent tables) can be
+    /// exercised deterministically. Production always runs with FK ON.
+    #[cfg(test)]
+    async fn new_for_tests_with_foreign_keys(db_url: &str, fk_on: bool) -> Result<Self> {
+        let options = sqlx::sqlite::SqliteConnectOptions::from_str(db_url)?
+            .create_if_missing(true)
+            .foreign_keys(fk_on);
+        Self::with_connect_options(options).await
+    }
+
+    /// Shared constructor body so tests can tweak connection options.
+    async fn with_connect_options(options: sqlx::sqlite::SqliteConnectOptions) -> Result<Self> {
         let pool = SqlitePool::connect_with(options).await?;
 
         // Run all database migrations
@@ -392,6 +461,7 @@ impl AIOrchestrator {
             idle_behaviors: Arc::new(Mutex::new(IdleBehaviorSystem::new())),
             proactive_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             current_conversation_id: Arc::new(Mutex::new(None)),
+            conversation_switch_lock: Arc::new(Mutex::new(())),
             persist_conversation_selection: true,
             context_strategy: Arc::new(Mutex::new("window".to_string())),
             max_message_chars: Arc::new(Mutex::new(2000)),
@@ -427,6 +497,7 @@ impl AIOrchestrator {
             idle_behaviors: self.idle_behaviors.clone(),
             proactive_enabled: self.proactive_enabled.clone(),
             current_conversation_id: Arc::new(Mutex::new(None)),
+            conversation_switch_lock: Arc::new(Mutex::new(())),
             persist_conversation_selection: false,
             context_strategy: self.context_strategy.clone(),
             max_message_chars: self.max_message_chars.clone(),
@@ -564,8 +635,16 @@ impl AIOrchestrator {
     }
 
     pub async fn add_message(&self, role: String, content: String, character_id: &str) {
-        self.add_message_with_metadata(role, content, None, character_id, None)
-            .await;
+        if let Err(e) = self
+            .add_message_with_metadata(role, content, None, character_id, None)
+            .await
+        {
+            tracing::error!(
+                target: "context",
+                "[Context] Failed to persist message: {}",
+                e
+            );
+        }
     }
 
     pub async fn add_message_with_metadata(
@@ -575,7 +654,27 @@ impl AIOrchestrator {
         metadata: Option<String>,
         character_id: &str,
         summary_provider: Option<Arc<dyn LlmProvider>>,
-    ) {
+    ) -> Result<(String, i64)> {
+        self.add_message_with_metadata_for_conversation(
+            role,
+            content,
+            metadata,
+            character_id,
+            None,
+            summary_provider,
+        )
+        .await
+    }
+
+    pub async fn add_message_with_metadata_for_conversation(
+        &self,
+        role: String,
+        content: String,
+        metadata: Option<String>,
+        character_id: &str,
+        target_conversation_id: Option<&str>,
+        summary_provider: Option<Arc<dyn LlmProvider>>,
+    ) -> Result<(String, i64)> {
         let summary_provider = summary_provider.clone();
         // Track user message count for memory extraction triggers
         if role == "user" {
@@ -591,42 +690,66 @@ impl AIOrchestrator {
         let max_chars = *self.max_message_chars.lock().await;
         let content = truncate_message_content(content, max_chars);
 
-        // Persist to database FIRST so no code path can skip it
-        let _ = self
-            .persist_message(&role, &content, metadata.as_deref(), character_id)
-            .await;
+        // Persist to database FIRST so no code path can skip it. The message
+        // row and the conversation metadata bump (title/updated_at) commit
+        // atomically inside persist_message: if the metadata update fails, the
+        // whole persist errors and nothing half-saved is reported as success.
+        let (persisted_conv_id, persisted_msg_id) = self
+            .persist_message(
+                &role,
+                &content,
+                metadata.as_deref(),
+                character_id,
+                target_conversation_id,
+            )
+            .await?;
+        // 会话切换锁：conv 校验与 history push 必须原子，防止会话切换窗口内
+        // 把旧会话的消息推入新会话的内存历史
+        let _switch_guard = self.conversation_switch_lock.lock().await;
         let current_conversation_id = self.current_conversation_id.lock().await.clone();
 
-        let mut history = self.history.lock().await;
-        let parsed_metadata = metadata
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
-        history.push_back(Message {
-            role: role.clone(),
-            content: content.clone(),
-            metadata: parsed_metadata,
-        });
-
-        // Rolling window: keep at most 20 messages in memory. Summary generation is now
-        // non-destructive and derives from persisted conversation_messages instead of popped history.
-        let strategy = self.context_strategy.lock().await.clone();
-        let evicted = if history.len() > 20 {
-            history.pop_front();
-            true
-        } else {
-            false
+        // Only push to in-memory history if target_conversation_id is either None (implicit current)
+        // or matches the active current_conversation_id. This prevents an old turn from corrupting
+        // the active conversation after a conversation switch or clearHistory.
+        let should_push_history = match target_conversation_id {
+            Some(target_id) => current_conversation_id.as_deref() == Some(target_id),
+            None => true,
         };
-        drop(history);
 
-        if evicted {
-            let mut boundary = self.memory_history_boundary.lock().await;
-            *boundary = boundary.saturating_sub(1);
+        if should_push_history {
+            let mut history = self.history.lock().await;
+            let parsed_metadata = metadata
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            history.push_back(Message {
+                role: role.clone(),
+                content: content.clone(),
+                metadata: parsed_metadata,
+            });
+
+            // Rolling window: keep at most MAX_IN_MEMORY_HISTORY_MESSAGES messages in memory. Summary generation is now
+            // non-destructive and derives from persisted conversation_messages instead of popped history.
+            let evicted = if history.len() > MAX_IN_MEMORY_HISTORY_MESSAGES {
+                history.pop_front();
+                true
+            } else {
+                false
+            };
+            drop(history);
+
+            if evicted {
+                let mut boundary = self.memory_history_boundary.lock().await;
+                *boundary = boundary.saturating_sub(1);
+            }
         }
+        drop(_switch_guard);
 
+        let strategy = self.context_strategy.lock().await.clone();
         if strategy == "summary" && self.is_memory_enabled() {
-            if let (Some(conversation_id), Some(provider)) =
-                (current_conversation_id.clone(), summary_provider)
-            {
+            let conv_for_summary = target_conversation_id
+                .map(|s| s.to_string())
+                .or(current_conversation_id);
+            if let (Some(conversation_id), Some(provider)) = (conv_for_summary, summary_provider) {
                 let memory_manager = self.memory_manager.clone();
                 let cid = character_id.to_string();
                 let summary_language = self.response_language.lock().await.clone();
@@ -693,58 +816,72 @@ impl AIOrchestrator {
                 });
             }
         }
+
+        Ok((persisted_conv_id, persisted_msg_id))
     }
 
-    /// 将消息持久化到 SQLite，如果没有活跃对话则自动创建
+    /// 将消息持久化到 SQLite，如果没有活跃对话且未指定 target_conversation_id 则自动创建
     async fn persist_message(
         &self,
         role: &str,
         content: &str,
         metadata: Option<&str>,
         character_id: &str,
-    ) -> Result<()> {
+        target_conversation_id: Option<&str>,
+    ) -> Result<(String, i64)> {
         let cid = character_id;
-        let mut conv_id_lock = self.current_conversation_id.lock().await;
-
-        let conv_id = if let Some(ref id) = *conv_id_lock {
-            id.clone()
+        let conv_id = if let Some(target_id) = target_conversation_id {
+            target_id.to_string()
         } else {
-            // 自动创建新对话
-            let new_id = uuid::Uuid::new_v4().to_string();
-            let title = if role == "user" {
-                let chars: Vec<char> = content.chars().collect();
-                if chars.len() > 20 {
-                    format!("{}...", chars[..20].iter().collect::<String>())
-                } else {
-                    content.to_string()
-                }
+            let mut conv_id_lock = self.current_conversation_id.lock().await;
+
+            let resolved_id = if let Some(ref id) = *conv_id_lock {
+                id.clone()
             } else {
-                "新对话".to_string()
+                // 自动创建新对话
+                let new_id = uuid::Uuid::new_v4().to_string();
+                let title = if role == "user" {
+                    let chars: Vec<char> = content.chars().collect();
+                    if chars.len() > 20 {
+                        format!("{}...", chars[..20].iter().collect::<String>())
+                    } else {
+                        content.to_string()
+                    }
+                } else {
+                    "新对话".to_string()
+                };
+                let now = chrono::Utc::now().to_rfc3339();
+
+                sqlx::query(
+                    "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, ?, '', '{}', ?, ?)"
+                )
+                .bind(&new_id)
+                .bind(cid)
+                .bind(&title)
+                .bind(&now)
+                .bind(&now)
+                .execute(&self.db)
+                .await?;
+
+                *conv_id_lock = Some(new_id.clone());
+                // Persist conversation_id to disk for hot-reload recovery
+                if self.persist_conversation_selection {
+                    Self::persist_conversation_id(Some(&new_id));
+                }
+                new_id
             };
-            let now = chrono::Utc::now().to_rfc3339();
-
-            sqlx::query(
-                "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, ?, '', '{}', ?, ?)"
-            )
-            .bind(&new_id)
-            .bind(cid)
-            .bind(&title)
-            .bind(&now)
-            .bind(&now)
-            .execute(&self.db)
-            .await?;
-
-            *conv_id_lock = Some(new_id.clone());
-            // Persist conversation_id to disk for hot-reload recovery
-            if self.persist_conversation_selection {
-                Self::persist_conversation_id(Some(&new_id));
-            }
-            new_id
+            drop(conv_id_lock);
+            resolved_id
         };
-        drop(conv_id_lock);
 
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
+
+        // Message row and conversation metadata (title/updated_at) are written
+        // in a single transaction: a metadata UPDATE failure rolls the message
+        // row back too, so callers never observe a half-saved turn reported as
+        // success.
+        let mut tx = self.db.begin().await?;
+        let insert_res = sqlx::query(
             "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)"
         )
         .bind(&conv_id)
@@ -752,15 +889,17 @@ impl AIOrchestrator {
         .bind(content)
         .bind(metadata)
         .bind(&now)
-        .execute(&self.db)
-        .await?;
+        .execute(&mut *tx)
+        .await
+        .with_context(|| format!("failed to insert message row for conversation '{}'", conv_id))?;
+        let message_id = insert_res.last_insert_rowid();
 
         // 更新对话的 updated_at。If a hidden/context row created the
         // conversation first, let the first visible user turn restore the
         // normal user-derived title.
-        if role == "user" {
+        let meta_update = if role == "user" {
             let chars: Vec<char> = content.chars().collect();
-            let title = if chars.len() > 20 {
+            let new_title = if chars.len() > 20 {
                 format!("{}...", chars[..20].iter().collect::<String>())
             } else {
                 content.to_string()
@@ -768,23 +907,53 @@ impl AIOrchestrator {
             sqlx::query(
                 "UPDATE conversations SET title = CASE WHEN title = '新对话' THEN ? ELSE title END, updated_at = ? WHERE id = ?"
             )
-            .bind(&title)
+            .bind(&new_title)
             .bind(&now)
             .bind(&conv_id)
-            .execute(&self.db)
-            .await?;
+            .execute(&mut *tx)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to update title/updated_at for conversation '{}' after persisting message {}",
+                    conv_id, message_id
+                )
+            })?
         } else {
             sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
                 .bind(&now)
                 .bind(&conv_id)
-                .execute(&self.db)
-                .await?;
+                .execute(&mut *tx)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to update updated_at for conversation '{}' after persisting message {}",
+                        conv_id, message_id
+                    )
+                })?
+        };
+
+        // The conversation row can vanish mid-turn when the user deletes the
+        // conversation concurrently (FK cascade takes care of the message row).
+        // Nothing is left to update; that is a benign race, not a failure.
+        if meta_update.rows_affected() == 0 {
+            tracing::warn!(
+                target: "context",
+                "[Context] Conversation '{}' vanished while persisting message {}; metadata update skipped",
+                conv_id, message_id
+            );
         }
 
-        Ok(())
+        tx.commit().await.with_context(|| {
+            format!(
+                "failed to commit persistence for conversation '{}', message {}",
+                conv_id, message_id
+            )
+        })?;
+
+        Ok((conv_id, message_id))
     }
 
-    /// Persist current_conversation_id to disk for hot-reload recovery.
+    /// Persist conversation_id to disk for hot-reload recovery.
     pub fn persist_conversation_id(id: Option<&str>) {
         let app_data = dirs_next::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -821,40 +990,17 @@ impl AIOrchestrator {
         v["character_id"].as_str().map(|s| s.to_string())
     }
 
-    /// Insert a streaming assistant draft into the DB. Returns the row id for later update.
-    pub async fn persist_streaming_draft(&self, content: &str, character_id: &str) -> Result<i64> {
-        let cid = character_id;
-        let mut conv_id_lock = self.current_conversation_id.lock().await;
-
-        // Ensure conversation exists
-        let conv_id = if let Some(ref id) = *conv_id_lock {
-            id.clone()
-        } else {
-            let new_id = uuid::Uuid::new_v4().to_string();
-            let now = chrono::Utc::now().to_rfc3339();
-            sqlx::query(
-                "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, ?, '', '{}', ?, ?)"
-            )
-            .bind(&new_id)
-            .bind(cid)
-            .bind("新对话")
-            .bind(&now)
-            .bind(&now)
-            .execute(&self.db)
-            .await?;
-            *conv_id_lock = Some(new_id.clone());
-            if self.persist_conversation_selection {
-                Self::persist_conversation_id(Some(&new_id));
-            }
-            new_id
-        };
-        drop(conv_id_lock);
-
+    /// Insert a streaming assistant draft into the DB for a specific conversation. Returns the row id for later update.
+    pub async fn persist_streaming_draft(
+        &self,
+        conversation_id: &str,
+        content: &str,
+    ) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
         let result = sqlx::query(
             "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, 'assistant', ?, NULL, ?)"
         )
-        .bind(&conv_id)
+        .bind(conversation_id)
         .bind(content)
         .bind(&now)
         .execute(&self.db)
@@ -877,16 +1023,16 @@ impl AIOrchestrator {
             .execute(&self.db)
             .await?;
 
-        // Update conversation updated_at
-        let conv_id = self.current_conversation_id.lock().await.clone();
-        if let Some(ref id) = conv_id {
-            let now = chrono::Utc::now().to_rfc3339();
-            sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
-                .bind(&now)
-                .bind(id)
-                .execute(&self.db)
-                .await?;
-        }
+        // Update owning conversation updated_at directly via message row's conversation_id
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE conversations SET updated_at = ? WHERE id = (SELECT conversation_id FROM conversation_messages WHERE id = ?)",
+        )
+        .bind(&now)
+        .bind(row_id)
+        .execute(&self.db)
+        .await?;
+
         Ok(())
     }
 
@@ -896,6 +1042,104 @@ impl AIOrchestrator {
             .execute(&self.db)
             .await?;
         Ok(())
+    }
+
+    /// Delete the DB rows left behind by a cancelled or failed chat turn:
+    /// - rows whose metadata carries the turn's `turn_id` and a technical `type`
+    ///   (`assistant_tool_calls` | `tool_result`);
+    /// - `extra_row_ids` whose metadata is still NULL (unfinalized streaming drafts).
+    ///
+    /// A row passed via `extra_row_ids` with non-NULL metadata (e.g. a finalized
+    /// assistant message) is never removed, so a fully generated answer cannot be
+    /// deleted through this path. All deletes run in a single transaction. When the
+    /// turn's conversation is still the active one, the in-memory history is resynced
+    /// from the authoritative DB rows so the technical rows cannot leak into the next
+    /// turn's prompt composition. Returns the number of deleted rows.
+    pub async fn delete_turn_artifacts(
+        &self,
+        conversation_id: &str,
+        turn_id: &str,
+        extra_row_ids: &[i64],
+    ) -> Result<usize> {
+        // 会话切换锁：与 load_conversation / delete_last_messages / edit 等历史重写路径互斥，
+        // 防止清理期间发生会话切换时把旧会话历史覆盖到新会话的内存上下文
+        let _switch_guard = self.conversation_switch_lock.lock().await;
+        let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT id, metadata FROM conversation_messages WHERE conversation_id = ? AND metadata IS NOT NULL",
+        )
+        .bind(conversation_id)
+        .fetch_all(&self.db)
+        .await?;
+
+        let mut ids_to_delete: HashSet<i64> = rows
+            .iter()
+            .filter(|(_, metadata)| {
+                metadata
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .is_some_and(|meta| {
+                        meta.get("turn_id").and_then(|v| v.as_str()) == Some(turn_id)
+                            && matches!(
+                                meta.get("type").and_then(|t| t.as_str()),
+                                Some("assistant_tool_calls") | Some("tool_result")
+                            )
+                    })
+            })
+            .map(|(id, _)| *id)
+            .collect();
+
+        // Only unfinalized drafts (metadata still NULL) may be removed by id.
+        for row_id in extra_row_ids {
+            let stored: Option<Option<String>> =
+                sqlx::query_scalar("SELECT metadata FROM conversation_messages WHERE id = ?")
+                    .bind(row_id)
+                    .fetch_optional(&self.db)
+                    .await?;
+            if matches!(stored, Some(None)) {
+                ids_to_delete.insert(*row_id);
+            }
+        }
+
+        if ids_to_delete.is_empty() {
+            return Ok(0);
+        }
+
+        let mut tx = self.db.begin().await?;
+        for id in &ids_to_delete {
+            sqlx::query("DELETE FROM conversation_messages WHERE id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+
+        // Resync the in-memory history only when the turn's conversation is still the
+        // active one (mirrors delete_last_messages_inner). The whole method runs under
+        // conversation_switch_lock, so no conversation switch can interleave with this
+        // check-then-resync sequence.
+        if self.current_conversation_id.lock().await.as_deref() == Some(conversation_id) {
+            let remaining_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
+            )
+            .bind(conversation_id)
+            .fetch_all(&self.db)
+            .await?;
+
+            let max_chars = *self.max_message_chars.lock().await;
+            let mut history = self.history.lock().await;
+            let new_len = sync_history_window(&mut history, remaining_rows, max_chars);
+            let mut boundary = self.memory_history_boundary.lock().await;
+            *boundary = (*boundary).min(new_len);
+        }
+
+        tracing::info!(
+            target: "ai",
+            "Deleted {} turn artifact row(s) for turn {} in conversation {}",
+            ids_to_delete.len(),
+            turn_id,
+            conversation_id
+        );
+        Ok(ids_to_delete.len())
     }
 
     /// Returns the total count of user messages in this session.
@@ -962,7 +1206,7 @@ impl AIOrchestrator {
 
         let mut history = self.history.lock().await;
         history.push_back(message);
-        let evicted = if history.len() > 20 {
+        let evicted = if history.len() > MAX_IN_MEMORY_HISTORY_MESSAGES {
             history.pop_front();
             true
         } else {
@@ -1328,7 +1572,7 @@ impl AIOrchestrator {
             }
             used_chars += msg_chars;
             selected.push(msg);
-            if selected.len() >= 20 {
+            if selected.len() >= MAX_IN_MEMORY_HISTORY_MESSAGES {
                 break;
             }
         }
@@ -1380,6 +1624,9 @@ impl AIOrchestrator {
     }
 
     pub async fn clear_history(&self) {
+        // 会话切换锁：清空历史+重置会话指针必须与删除/加载/编辑等路径互斥，
+        // 防止清空期间在途的删除操作把旧历史写回新会话
+        let _switch_guard = self.conversation_switch_lock.lock().await;
         let mut history = self.history.lock().await;
         history.clear();
         drop(history);
@@ -1397,6 +1644,20 @@ impl AIOrchestrator {
         self.history.lock().await.clear();
         *self.memory_history_boundary.lock().await = 0;
         *self.memory_trigger_count.lock().await = 0;
+    }
+
+    /// Resets and populates in-memory history from raw database rows or messages,
+    /// enforcing the unified MAX_IN_MEMORY_HISTORY_MESSAGES window and max_message_chars truncation.
+    pub async fn sync_history_from_rows<I, T>(&self, items: I) -> usize
+    where
+        I: IntoIterator<Item = T>,
+        T: IntoHistoryMessage,
+    {
+        let max_chars = *self.max_message_chars.lock().await;
+        let mut history = self.history.lock().await;
+        let count = sync_history_window(&mut history, items, max_chars);
+        *self.memory_history_boundary.lock().await = count;
+        count
     }
 
     pub async fn set_memory_history_boundary(&self, boundary: usize) {
@@ -1434,6 +1695,267 @@ mod tests {
         AIOrchestrator::new("sqlite::memory:")
             .await
             .expect("Failed to create test orchestrator")
+    }
+
+    async fn insert_conversation_row(
+        orchestrator: &AIOrchestrator,
+        conversation_id: &str,
+        role: &str,
+        content: &str,
+        metadata: Option<&str>,
+    ) -> i64 {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(conversation_id)
+        .bind(role)
+        .bind(content)
+        .bind(metadata)
+        .bind(&now)
+        .execute(&orchestrator.db)
+        .await
+        .expect("conversation row insert should succeed")
+        .last_insert_rowid()
+    }
+
+    async fn insert_test_conversation(orchestrator: &AIOrchestrator, conversation_id: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES (?, 'test', 'Test', ?, ?)",
+        )
+        .bind(conversation_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&orchestrator.db)
+        .await
+        .expect("conversation insert should succeed");
+    }
+
+    async fn fetch_conversation_rows(
+        orchestrator: &AIOrchestrator,
+        conversation_id: &str,
+    ) -> Vec<(i64, String, String, Option<String>)> {
+        sqlx::query_as(
+            "SELECT id, role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
+        )
+        .bind(conversation_id)
+        .fetch_all(&orchestrator.db)
+        .await
+        .expect("conversation rows should load")
+    }
+
+    #[tokio::test]
+    async fn delete_turn_artifacts_removes_only_turn_technical_rows_and_unfinalized_extras() {
+        let orchestrator = setup_test_orchestrator().await;
+        insert_test_conversation(&orchestrator, "conv-1").await;
+        *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
+        *orchestrator.memory_history_boundary.lock().await = 100;
+
+        let user_id = insert_conversation_row(&orchestrator, "conv-1", "user", "hello", None).await;
+        let draft_id =
+            insert_conversation_row(&orchestrator, "conv-1", "assistant", "partial draft", None)
+                .await;
+        let turn_a_calls = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "assistant",
+            "call weather",
+            Some(r#"{"type":"assistant_tool_calls","turn_id":"turn-a"}"#),
+        )
+        .await;
+        let turn_a_tool = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "tool",
+            "sunny",
+            Some(r#"{"type":"tool_result","turn_id":"turn-a"}"#),
+        )
+        .await;
+        let turn_a_final = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "assistant",
+            "final answer",
+            Some(r#"{"turn_id":"turn-a"}"#),
+        )
+        .await;
+        let turn_a_vision = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "context",
+            "screen observation",
+            Some(r#"{"type":"vision_observation","turn_id":"turn-a"}"#),
+        )
+        .await;
+        let turn_b_calls = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "assistant",
+            "call email",
+            Some(r#"{"type":"assistant_tool_calls","turn_id":"turn-b"}"#),
+        )
+        .await;
+        let turn_b_tool = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "tool",
+            "sent",
+            Some(r#"{"type":"tool_result","turn_id":"turn-b"}"#),
+        )
+        .await;
+        let failure_id = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "system",
+            "stream failed",
+            Some(r#"{"type":"failure_event","event":{"turn_id":"turn-a"}}"#),
+        )
+        .await;
+
+        let deleted = orchestrator
+            .delete_turn_artifacts("conv-1", "turn-a", &[draft_id])
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(deleted, 3);
+
+        let remaining_ids: Vec<i64> = fetch_conversation_rows(&orchestrator, "conv-1")
+            .await
+            .iter()
+            .map(|(id, _, _, _)| *id)
+            .collect();
+        assert!(!remaining_ids.contains(&draft_id));
+        assert!(!remaining_ids.contains(&turn_a_calls));
+        assert!(!remaining_ids.contains(&turn_a_tool));
+        for kept in [
+            user_id,
+            turn_a_final,
+            turn_a_vision,
+            turn_b_calls,
+            turn_b_tool,
+            failure_id,
+        ] {
+            assert!(remaining_ids.contains(&kept), "row {kept} must survive");
+        }
+
+        // In-memory history is resynced from DB and the boundary clamps down to it.
+        let history = orchestrator.history.lock().await;
+        let roles: Vec<&str> = history.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec![
+                "user",
+                "assistant",
+                "context",
+                "assistant",
+                "tool",
+                "system"
+            ]
+        );
+        assert_eq!(
+            *orchestrator.memory_history_boundary.lock().await,
+            history.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_turn_artifacts_skips_finalized_extras_and_noop_cleanup() {
+        let orchestrator = setup_test_orchestrator().await;
+        insert_test_conversation(&orchestrator, "conv-1").await;
+        *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
+        let finalized_id = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "assistant",
+            "final answer",
+            Some(r#"{"turn_id":"turn-a"}"#),
+        )
+        .await;
+        let tool_id = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "tool",
+            "sunny",
+            Some(r#"{"type":"tool_result","turn_id":"turn-a"}"#),
+        )
+        .await;
+
+        // A finalized row passed as an extra must never be deleted.
+        let deleted = orchestrator
+            .delete_turn_artifacts("conv-1", "turn-a", &[finalized_id])
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(deleted, 1);
+        let remaining_ids: Vec<i64> = fetch_conversation_rows(&orchestrator, "conv-1")
+            .await
+            .iter()
+            .map(|(id, _, _, _)| *id)
+            .collect();
+        assert!(remaining_ids.contains(&finalized_id));
+        assert!(!remaining_ids.contains(&tool_id));
+
+        // Unknown turn id deletes nothing and leaves history untouched.
+        orchestrator
+            .push_history_message(Message {
+                role: "user".to_string(),
+                content: "in-memory only".to_string(),
+                metadata: None,
+            })
+            .await;
+        let history_len_before = orchestrator.history.lock().await.len();
+        let deleted = orchestrator
+            .delete_turn_artifacts("conv-1", "turn-unknown", &[])
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(deleted, 0);
+        assert_eq!(orchestrator.history.lock().await.len(), history_len_before);
+    }
+
+    #[tokio::test]
+    async fn delete_turn_artifacts_resyncs_only_active_conversation() {
+        let orchestrator = setup_test_orchestrator().await;
+        insert_test_conversation(&orchestrator, "conv-1").await;
+        // The turn's conversation is no longer the active one (user switched away).
+        *orchestrator.current_conversation_id.lock().await = Some("other-conv".to_string());
+        insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "assistant",
+            "call weather",
+            Some(r#"{"type":"assistant_tool_calls","turn_id":"turn-a"}"#),
+        )
+        .await;
+        insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "tool",
+            "sunny",
+            Some(r#"{"type":"tool_result","turn_id":"turn-a"}"#),
+        )
+        .await;
+        orchestrator
+            .push_history_message(Message {
+                role: "user".to_string(),
+                content: "active conversation message".to_string(),
+                metadata: None,
+            })
+            .await;
+
+        let deleted = orchestrator
+            .delete_turn_artifacts("conv-1", "turn-a", &[])
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(deleted, 2);
+        assert!(fetch_conversation_rows(&orchestrator, "conv-1")
+            .await
+            .is_empty());
+        // History must not be resynced for a conversation that is no longer active.
+        let history = orchestrator.history.lock().await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.front().unwrap().content,
+            "active conversation message"
+        );
     }
 
     #[tokio::test]
@@ -2111,5 +2633,340 @@ mod tests {
             .await
             .expect("compose_prompt must succeed when degraded state is cleared");
         assert!(!messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_add_message_with_metadata_returns_conversation_and_message_id() {
+        let orchestrator = setup_test_orchestrator().await;
+        orchestrator.clear_history().await;
+
+        let (conv_id, msg_id_1) = orchestrator
+            .add_message_with_metadata(
+                "user".to_string(),
+                "Hello, first message!".to_string(),
+                None,
+                "test_char",
+                None,
+            )
+            .await
+            .expect("First message persistence should succeed");
+
+        assert!(
+            !conv_id.is_empty(),
+            "Auto-created conversation ID must not be empty"
+        );
+        assert!(msg_id_1 > 0, "First message ID must be positive integer");
+
+        let (conv_id_2, msg_id_2) = orchestrator
+            .add_message_with_metadata(
+                "assistant".to_string(),
+                "Hello there!".to_string(),
+                None,
+                "test_char",
+                None,
+            )
+            .await
+            .expect("Second message persistence should succeed");
+
+        assert_eq!(
+            conv_id_2, conv_id,
+            "Subsequent message must share the same active conversation ID"
+        );
+        assert!(
+            msg_id_2 > msg_id_1,
+            "Message ID must be auto-incremented in SQLite"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_message_propagates_conversation_metadata_update_failure() {
+        // FK enforcement is disabled so the message INSERT succeeds even
+        // though the conversations table is gone; only the metadata UPDATE
+        // fails, which is exactly the error path this test targets.
+        let orchestrator =
+            AIOrchestrator::new_for_tests_with_foreign_keys("sqlite::memory:", false)
+                .await
+                .expect("FK-off test orchestrator should build");
+        insert_test_conversation(&orchestrator, "conv-err").await;
+        sqlx::query("DROP TABLE conversations")
+            .execute(&orchestrator.db)
+            .await
+            .unwrap();
+
+        let err = orchestrator
+            .add_message_with_metadata_for_conversation(
+                "user".to_string(),
+                "hello".to_string(),
+                None,
+                "test_char",
+                Some("conv-err"),
+                None,
+            )
+            .await
+            .expect_err("metadata update failure must surface as an error");
+
+        assert!(
+            err.to_string()
+                .contains("failed to update title/updated_at"),
+            "error should carry conversation metadata context, got: {}",
+            err
+        );
+
+        // The failed transaction must roll the message row back so callers
+        // never observe a half-saved turn.
+        let orphan_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+            .fetch_one(&orchestrator.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            orphan_count, 0,
+            "failed transaction must roll back the message row"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_message_tolerates_conversation_row_vanishing_mid_persist() {
+        // With FK enforcement off, a concurrently deleted conversation lets
+        // the message INSERT succeed while the metadata UPDATE touches zero
+        // rows. That is a benign race (in production FK cascade removes the
+        // message), not a hard failure.
+        let orchestrator =
+            AIOrchestrator::new_for_tests_with_foreign_keys("sqlite::memory:", false)
+                .await
+                .expect("FK-off test orchestrator should build");
+        insert_test_conversation(&orchestrator, "conv-gone").await;
+        sqlx::query("DELETE FROM conversations WHERE id = 'conv-gone'")
+            .execute(&orchestrator.db)
+            .await
+            .unwrap();
+
+        let (conv_id, msg_id) = orchestrator
+            .add_message_with_metadata_for_conversation(
+                "user".to_string(),
+                "hello".to_string(),
+                None,
+                "test_char",
+                Some("conv-gone"),
+                None,
+            )
+            .await
+            .expect("vanished conversation must not fail message persistence");
+
+        assert_eq!(conv_id, "conv-gone");
+        assert!(msg_id > 0);
+    }
+
+    #[tokio::test]
+    async fn persist_message_updates_conversation_title_and_updated_at() {
+        let orchestrator = setup_test_orchestrator().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES ('conv-title', 'test_char', '新对话', '', '{}', ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&orchestrator.db)
+        .await
+        .unwrap();
+
+        orchestrator
+            .add_message_with_metadata_for_conversation(
+                "user".to_string(),
+                "This is a long enough message to be truncated".to_string(),
+                None,
+                "test_char",
+                Some("conv-title"),
+                None,
+            )
+            .await
+            .expect("persist should succeed");
+
+        let (title, updated_at): (String, String) =
+            sqlx::query_as("SELECT title, updated_at FROM conversations WHERE id = 'conv-title'")
+                .fetch_one(&orchestrator.db)
+                .await
+                .unwrap();
+        assert_eq!(title, "This is a long enoug...");
+        assert!(
+            updated_at >= now,
+            "updated_at should be bumped, was {} (before {})",
+            updated_at,
+            now
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_message_preserves_non_default_conversation_title() {
+        let orchestrator = setup_test_orchestrator().await;
+        // insert_test_conversation uses a non-default title ('Test') that the
+        // user-message CASE WHEN must never overwrite.
+        insert_test_conversation(&orchestrator, "conv-keep").await;
+
+        orchestrator
+            .add_message_with_metadata_for_conversation(
+                "user".to_string(),
+                "Hello!".to_string(),
+                None,
+                "test_char",
+                Some("conv-keep"),
+                None,
+            )
+            .await
+            .expect("persist should succeed");
+
+        let title: String =
+            sqlx::query_scalar("SELECT title FROM conversations WHERE id = 'conv-keep'")
+                .fetch_one(&orchestrator.db)
+                .await
+                .unwrap();
+        assert_eq!(title, "Test");
+    }
+
+    #[tokio::test]
+    async fn persist_message_bumps_updated_at_for_assistant_messages_without_touching_title() {
+        let orchestrator = setup_test_orchestrator().await;
+        insert_test_conversation(&orchestrator, "conv-bump").await;
+        let before: String =
+            sqlx::query_scalar("SELECT updated_at FROM conversations WHERE id = 'conv-bump'")
+                .fetch_one(&orchestrator.db)
+                .await
+                .unwrap();
+
+        orchestrator
+            .add_message_with_metadata_for_conversation(
+                "assistant".to_string(),
+                "Reply".to_string(),
+                None,
+                "test_char",
+                Some("conv-bump"),
+                None,
+            )
+            .await
+            .expect("persist should succeed");
+
+        let (title, updated_at): (String, String) =
+            sqlx::query_as("SELECT title, updated_at FROM conversations WHERE id = 'conv-bump'")
+                .fetch_one(&orchestrator.db)
+                .await
+                .unwrap();
+        assert_eq!(title, "Test");
+        assert!(updated_at >= before, "updated_at should be bumped");
+    }
+
+    #[tokio::test]
+    async fn persist_streaming_draft_isolates_to_given_conversation_and_does_not_alter_current_conversation_id(
+    ) {
+        let orchestrator = setup_test_orchestrator().await;
+
+        // Ensure current_conversation_id is None
+        *orchestrator.current_conversation_id.lock().await = None;
+
+        // Insert conversation A
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES ('conv-A', 'test_char', 'Title', '', '{}', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&orchestrator.db)
+            .await
+            .unwrap();
+
+        let row_id = orchestrator
+            .persist_streaming_draft("conv-A", "draft chunk 1")
+            .await
+            .expect("persist_streaming_draft should succeed");
+        assert!(row_id > 0);
+
+        // Global current_conversation_id must remain None!
+        assert_eq!(*orchestrator.current_conversation_id.lock().await, None);
+
+        // Verify message was inserted into conv-A
+        let (role, content): (String, String) =
+            sqlx::query_as("SELECT role, content FROM conversation_messages WHERE id = ?")
+                .bind(row_id)
+                .fetch_one(&orchestrator.db)
+                .await
+                .unwrap();
+        assert_eq!(role, "assistant");
+        assert_eq!(content, "draft chunk 1");
+    }
+
+    #[tokio::test]
+    async fn add_message_with_metadata_for_conversation_skips_history_push_when_conversation_mismatches(
+    ) {
+        let orchestrator = setup_test_orchestrator().await;
+
+        // Active conversation is conv-B
+        *orchestrator.current_conversation_id.lock().await = Some("conv-B".to_string());
+
+        // Insert conversation A
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES ('conv-A', 'test_char', 'Title A', '', '{}', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&orchestrator.db)
+            .await
+            .unwrap();
+
+        // Add message targeting conv-A while active is conv-B
+        let (cid, mid) = orchestrator
+            .add_message_with_metadata_for_conversation(
+                "assistant".to_string(),
+                "stale message".to_string(),
+                None,
+                "test_char",
+                Some("conv-A"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(cid, "conv-A");
+        assert!(mid > 0);
+
+        // In-memory history for active conversation (conv-B) must NOT be contaminated!
+        assert_eq!(orchestrator.history.lock().await.len(), 0);
+    }
+
+    #[test]
+    fn sync_history_window_enforces_20_limit_and_takes_most_recent() {
+        let mut history = VecDeque::new();
+        let rows: Vec<(String, String, Option<String>)> = (0..35)
+            .map(|i| ("user".to_string(), format!("Message {i}"), None))
+            .collect();
+
+        let count = sync_history_window(&mut history, rows, 2000);
+        assert_eq!(count, 20);
+        assert_eq!(history.len(), 20);
+        // Should contain the last 20 messages (indices 15..35)
+        assert_eq!(history[0].content, "Message 15");
+        assert_eq!(history[19].content, "Message 34");
+    }
+
+    #[test]
+    fn sync_history_window_keeps_all_when_fewer_than_20() {
+        let mut history = VecDeque::new();
+        let rows: Vec<(String, String, Option<String>)> = (0..7)
+            .map(|i| ("user".to_string(), format!("Message {i}"), None))
+            .collect();
+
+        let count = sync_history_window(&mut history, rows, 2000);
+        assert_eq!(count, 7);
+        assert_eq!(history.len(), 7);
+        assert_eq!(history[0].content, "Message 0");
+        assert_eq!(history[6].content, "Message 6");
+    }
+
+    #[test]
+    fn sync_history_window_applies_max_chars_truncation() {
+        let mut history = VecDeque::new();
+        let long_text = "A".repeat(100);
+        let rows = vec![("user".to_string(), long_text, None)];
+
+        let count = sync_history_window(&mut history, rows, 30);
+        assert_eq!(count, 1);
+        assert_eq!(
+            history[0].content,
+            format!("{}…[truncated]", "A".repeat(30))
+        );
     }
 }

@@ -1109,7 +1109,7 @@ async fn generate_bot_reply(
         .as_ref()
         .map(|value| json!({ "translation": value }).to_string());
     if !reply.is_empty() {
-        orchestrator
+        if let Err(e) = orchestrator
             .add_message_with_metadata(
                 "assistant".to_string(),
                 reply.clone(),
@@ -1117,7 +1117,15 @@ async fn generate_bot_reply(
                 &char_id,
                 None,
             )
-            .await;
+            .await
+        {
+            tracing::error!(
+                target: "bot",
+                "[{}] Failed to persist assistant message: {}",
+                platform,
+                e
+            );
+        }
     }
 
     trigger_bot_memory_tasks(
@@ -2283,18 +2291,22 @@ async fn prepare_webhook_conversation(
     .await
     .map_err(|error| format!("failed to load webhook conversation: {error}"))?;
 
-    for (role, content, metadata) in rows {
-        orchestrator
-            .push_history_message(crate::ai::context::Message {
-                role,
-                content,
-                metadata: metadata
-                    .as_deref()
-                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok()),
-            })
-            .await;
+    {
+        // 会话切换锁：webhook 会话的历史装载与会话指针写入与删除/加载等路径互斥
+        let _switch_guard = orchestrator.conversation_switch_lock.lock().await;
+        for (role, content, metadata) in rows {
+            orchestrator
+                .push_history_message(crate::ai::context::Message {
+                    role,
+                    content,
+                    metadata: metadata
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str::<Value>(raw).ok()),
+                })
+                .await;
+        }
+        *orchestrator.current_conversation_id.lock().await = Some(conversation_id.clone());
     }
-    *orchestrator.current_conversation_id.lock().await = Some(conversation_id.clone());
     Ok(conversation_id)
 }
 
