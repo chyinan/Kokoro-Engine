@@ -11,7 +11,7 @@ use crate::llm::provider::LlmProvider;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -972,6 +972,101 @@ impl AIOrchestrator {
         Ok(())
     }
 
+    /// Delete the DB rows left behind by a cancelled or failed chat turn:
+    /// - rows whose metadata carries the turn's `turn_id` and a technical `type`
+    ///   (`assistant_tool_calls` | `tool_result`);
+    /// - `extra_row_ids` whose metadata is still NULL (unfinalized streaming drafts).
+    ///
+    /// A row passed via `extra_row_ids` with non-NULL metadata (e.g. a finalized
+    /// assistant message) is never removed, so a fully generated answer cannot be
+    /// deleted through this path. All deletes run in a single transaction. When the
+    /// turn's conversation is still the active one, the in-memory history is resynced
+    /// from the authoritative DB rows so the technical rows cannot leak into the next
+    /// turn's prompt composition. Returns the number of deleted rows.
+    pub async fn delete_turn_artifacts(
+        &self,
+        conversation_id: &str,
+        turn_id: &str,
+        extra_row_ids: &[i64],
+    ) -> Result<usize> {
+        let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT id, metadata FROM conversation_messages WHERE conversation_id = ? AND metadata IS NOT NULL",
+        )
+        .bind(conversation_id)
+        .fetch_all(&self.db)
+        .await?;
+
+        let mut ids_to_delete: HashSet<i64> = rows
+            .iter()
+            .filter(|(_, metadata)| {
+                metadata
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .is_some_and(|meta| {
+                        meta.get("turn_id").and_then(|v| v.as_str()) == Some(turn_id)
+                            && matches!(
+                                meta.get("type").and_then(|t| t.as_str()),
+                                Some("assistant_tool_calls") | Some("tool_result")
+                            )
+                    })
+            })
+            .map(|(id, _)| *id)
+            .collect();
+
+        // Only unfinalized drafts (metadata still NULL) may be removed by id.
+        for row_id in extra_row_ids {
+            let stored: Option<Option<String>> =
+                sqlx::query_scalar("SELECT metadata FROM conversation_messages WHERE id = ?")
+                    .bind(row_id)
+                    .fetch_optional(&self.db)
+                    .await?;
+            if matches!(stored, Some(None)) {
+                ids_to_delete.insert(*row_id);
+            }
+        }
+
+        if ids_to_delete.is_empty() {
+            return Ok(0);
+        }
+
+        let mut tx = self.db.begin().await?;
+        for id in &ids_to_delete {
+            sqlx::query("DELETE FROM conversation_messages WHERE id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+
+        // Resync the in-memory history only when the turn's conversation is still the
+        // active one (mirrors delete_last_messages_inner). Residual race: a brand-new
+        // turn started between its DB persist and its history push could be double
+        // pushed by this resync; the same race already exists in delete_last_messages.
+        if self.current_conversation_id.lock().await.as_deref() == Some(conversation_id) {
+            let remaining_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
+            )
+            .bind(conversation_id)
+            .fetch_all(&self.db)
+            .await?;
+
+            let max_chars = *self.max_message_chars.lock().await;
+            let mut history = self.history.lock().await;
+            let new_len = sync_history_window(&mut history, remaining_rows, max_chars);
+            let mut boundary = self.memory_history_boundary.lock().await;
+            *boundary = (*boundary).min(new_len);
+        }
+
+        tracing::info!(
+            target: "ai",
+            "Deleted {} turn artifact row(s) for turn {} in conversation {}",
+            ids_to_delete.len(),
+            turn_id,
+            conversation_id
+        );
+        Ok(ids_to_delete.len())
+    }
+
     /// Returns the total count of user messages in this session.
     pub async fn get_message_count(&self) -> u64 {
         *self.message_count.lock().await
@@ -1522,6 +1617,267 @@ mod tests {
         AIOrchestrator::new("sqlite::memory:")
             .await
             .expect("Failed to create test orchestrator")
+    }
+
+    async fn insert_conversation_row(
+        orchestrator: &AIOrchestrator,
+        conversation_id: &str,
+        role: &str,
+        content: &str,
+        metadata: Option<&str>,
+    ) -> i64 {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(conversation_id)
+        .bind(role)
+        .bind(content)
+        .bind(metadata)
+        .bind(&now)
+        .execute(&orchestrator.db)
+        .await
+        .expect("conversation row insert should succeed")
+        .last_insert_rowid()
+    }
+
+    async fn insert_test_conversation(orchestrator: &AIOrchestrator, conversation_id: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES (?, 'test', 'Test', ?, ?)",
+        )
+        .bind(conversation_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&orchestrator.db)
+        .await
+        .expect("conversation insert should succeed");
+    }
+
+    async fn fetch_conversation_rows(
+        orchestrator: &AIOrchestrator,
+        conversation_id: &str,
+    ) -> Vec<(i64, String, String, Option<String>)> {
+        sqlx::query_as(
+            "SELECT id, role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
+        )
+        .bind(conversation_id)
+        .fetch_all(&orchestrator.db)
+        .await
+        .expect("conversation rows should load")
+    }
+
+    #[tokio::test]
+    async fn delete_turn_artifacts_removes_only_turn_technical_rows_and_unfinalized_extras() {
+        let orchestrator = setup_test_orchestrator().await;
+        insert_test_conversation(&orchestrator, "conv-1").await;
+        *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
+        *orchestrator.memory_history_boundary.lock().await = 100;
+
+        let user_id = insert_conversation_row(&orchestrator, "conv-1", "user", "hello", None).await;
+        let draft_id =
+            insert_conversation_row(&orchestrator, "conv-1", "assistant", "partial draft", None)
+                .await;
+        let turn_a_calls = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "assistant",
+            "call weather",
+            Some(r#"{"type":"assistant_tool_calls","turn_id":"turn-a"}"#),
+        )
+        .await;
+        let turn_a_tool = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "tool",
+            "sunny",
+            Some(r#"{"type":"tool_result","turn_id":"turn-a"}"#),
+        )
+        .await;
+        let turn_a_final = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "assistant",
+            "final answer",
+            Some(r#"{"turn_id":"turn-a"}"#),
+        )
+        .await;
+        let turn_a_vision = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "context",
+            "screen observation",
+            Some(r#"{"type":"vision_observation","turn_id":"turn-a"}"#),
+        )
+        .await;
+        let turn_b_calls = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "assistant",
+            "call email",
+            Some(r#"{"type":"assistant_tool_calls","turn_id":"turn-b"}"#),
+        )
+        .await;
+        let turn_b_tool = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "tool",
+            "sent",
+            Some(r#"{"type":"tool_result","turn_id":"turn-b"}"#),
+        )
+        .await;
+        let failure_id = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "system",
+            "stream failed",
+            Some(r#"{"type":"failure_event","event":{"turn_id":"turn-a"}}"#),
+        )
+        .await;
+
+        let deleted = orchestrator
+            .delete_turn_artifacts("conv-1", "turn-a", &[draft_id])
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(deleted, 3);
+
+        let remaining_ids: Vec<i64> = fetch_conversation_rows(&orchestrator, "conv-1")
+            .await
+            .iter()
+            .map(|(id, _, _, _)| *id)
+            .collect();
+        assert!(!remaining_ids.contains(&draft_id));
+        assert!(!remaining_ids.contains(&turn_a_calls));
+        assert!(!remaining_ids.contains(&turn_a_tool));
+        for kept in [
+            user_id,
+            turn_a_final,
+            turn_a_vision,
+            turn_b_calls,
+            turn_b_tool,
+            failure_id,
+        ] {
+            assert!(remaining_ids.contains(&kept), "row {kept} must survive");
+        }
+
+        // In-memory history is resynced from DB and the boundary clamps down to it.
+        let history = orchestrator.history.lock().await;
+        let roles: Vec<&str> = history.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec![
+                "user",
+                "assistant",
+                "context",
+                "assistant",
+                "tool",
+                "system"
+            ]
+        );
+        assert_eq!(
+            *orchestrator.memory_history_boundary.lock().await,
+            history.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_turn_artifacts_skips_finalized_extras_and_noop_cleanup() {
+        let orchestrator = setup_test_orchestrator().await;
+        insert_test_conversation(&orchestrator, "conv-1").await;
+        *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
+        let finalized_id = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "assistant",
+            "final answer",
+            Some(r#"{"turn_id":"turn-a"}"#),
+        )
+        .await;
+        let tool_id = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "tool",
+            "sunny",
+            Some(r#"{"type":"tool_result","turn_id":"turn-a"}"#),
+        )
+        .await;
+
+        // A finalized row passed as an extra must never be deleted.
+        let deleted = orchestrator
+            .delete_turn_artifacts("conv-1", "turn-a", &[finalized_id])
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(deleted, 1);
+        let remaining_ids: Vec<i64> = fetch_conversation_rows(&orchestrator, "conv-1")
+            .await
+            .iter()
+            .map(|(id, _, _, _)| *id)
+            .collect();
+        assert!(remaining_ids.contains(&finalized_id));
+        assert!(!remaining_ids.contains(&tool_id));
+
+        // Unknown turn id deletes nothing and leaves history untouched.
+        orchestrator
+            .push_history_message(Message {
+                role: "user".to_string(),
+                content: "in-memory only".to_string(),
+                metadata: None,
+            })
+            .await;
+        let history_len_before = orchestrator.history.lock().await.len();
+        let deleted = orchestrator
+            .delete_turn_artifacts("conv-1", "turn-unknown", &[])
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(deleted, 0);
+        assert_eq!(orchestrator.history.lock().await.len(), history_len_before);
+    }
+
+    #[tokio::test]
+    async fn delete_turn_artifacts_resyncs_only_active_conversation() {
+        let orchestrator = setup_test_orchestrator().await;
+        insert_test_conversation(&orchestrator, "conv-1").await;
+        // The turn's conversation is no longer the active one (user switched away).
+        *orchestrator.current_conversation_id.lock().await = Some("other-conv".to_string());
+        insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "assistant",
+            "call weather",
+            Some(r#"{"type":"assistant_tool_calls","turn_id":"turn-a"}"#),
+        )
+        .await;
+        insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "tool",
+            "sunny",
+            Some(r#"{"type":"tool_result","turn_id":"turn-a"}"#),
+        )
+        .await;
+        orchestrator
+            .push_history_message(Message {
+                role: "user".to_string(),
+                content: "active conversation message".to_string(),
+                metadata: None,
+            })
+            .await;
+
+        let deleted = orchestrator
+            .delete_turn_artifacts("conv-1", "turn-a", &[])
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(deleted, 2);
+        assert!(fetch_conversation_rows(&orchestrator, "conv-1")
+            .await
+            .is_empty());
+        // History must not be resynced for a conversation that is no longer active.
+        let history = orchestrator.history.lock().await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.front().unwrap().content,
+            "active conversation message"
+        );
     }
 
     #[tokio::test]

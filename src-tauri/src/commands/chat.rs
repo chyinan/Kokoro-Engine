@@ -305,6 +305,40 @@ fn is_turn_cancelled_error_message(message: &str) -> bool {
     message == TURN_CANCELLED_BY_USER_MESSAGE
 }
 
+/// Best-effort cleanup of the conversation rows left behind by a cancelled or failed
+/// turn: technical rows (assistant_tool_calls / tool_result) matched by `turn_id`, plus
+/// the streaming draft when `draft_row_id` is Some. Cleanup must never mask the
+/// original error, so failures are only logged.
+async fn cleanup_turn_artifacts(
+    state: &AIOrchestrator,
+    conversation_id: &str,
+    turn_id: &str,
+    draft_row_id: Option<i64>,
+) {
+    let extra_row_ids = draft_row_id.into_iter().collect::<Vec<_>>();
+    match state
+        .delete_turn_artifacts(conversation_id, turn_id, &extra_row_ids)
+        .await
+    {
+        Ok(deleted) => {
+            tracing::info!(
+                target: "chat",
+                "[Chat] Cleaned up {} row(s) for turn {}",
+                deleted,
+                turn_id
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                target: "chat",
+                "[Chat] Failed to clean up turn {} artifacts: {}",
+                turn_id,
+                error
+            );
+        }
+    }
+}
+
 struct TurnCancellationGuard {
     state: Arc<TurnCancellationState>,
     turn_id: String,
@@ -2060,6 +2094,9 @@ pub async fn stream_chat(
             }
             draft_row_id = None;
         }
+        // A hidden no-op turn may still have persisted assistant_tool_calls/tool rows
+        // from earlier tool rounds; remove them so no orphan tool exchange survives.
+        cleanup_turn_artifacts(&state, &conversation_id, &assistant_turn_id, draft_row_id).await;
         app.emit(
             "chat-turn-text-complete",
             serde_json::json!({
@@ -2529,6 +2566,14 @@ pub async fn stream_chat(
         });
     }
 
+    // A failed turn with no visible text may still have persisted tool rows from
+    // earlier rounds; remove them so the failed turn leaves no orphan tool exchange.
+    let mut finish_draft_row_id = draft_row_id;
+    if stream_failed && full_response.is_empty() {
+        cleanup_turn_artifacts(&state, &conversation_id, &assistant_turn_id, draft_row_id).await;
+        finish_draft_row_id = None;
+    }
+
     let finish_status = if stream_failed && full_response.is_empty() {
         "error"
     } else {
@@ -2541,12 +2586,12 @@ pub async fn stream_chat(
             "status": finish_status,
             "client_request_id": request.client_request_id,
             "conversation_id": conversation_id,
-            "assistant_message_id": draft_row_id,
+            "assistant_message_id": finish_draft_row_id,
         }),
     )
     .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
-    Ok(draft_row_id)
+    Ok(finish_draft_row_id)
     }
     .await;
 
@@ -2562,11 +2607,12 @@ pub async fn stream_chat(
                 "[Chat] Turn {} cancelled by user",
                 assistant_turn_id
             );
-            if let Some(row_id) = *draft_row_id_holder.lock().await {
-                if let Err(e) = state.delete_message_by_id(row_id).await {
-                    tracing::error!(target: "chat", "[Chat] Failed to clean up cancelled streaming draft: {}", e);
-                }
-            }
+            // Remove the turn's technical rows (assistant_tool_calls/tool_result) and the
+            // streaming draft, then emit the cancelled finish so the frontend reloads a
+            // clean conversation.
+            let draft_row_id = *draft_row_id_holder.lock().await;
+            cleanup_turn_artifacts(&state, &conversation_id, &assistant_turn_id, draft_row_id)
+                .await;
             app.emit(
                 "chat-turn-finish",
                 serde_json::json!({
@@ -2584,7 +2630,12 @@ pub async fn stream_chat(
                 assistant_message_id: None,
             })
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            // Non-cancel failures keep any partial draft and already-finalized rows, but
+            // the turn's technical rows must not survive as orphan tool exchanges.
+            cleanup_turn_artifacts(&state, &conversation_id, &assistant_turn_id, None).await;
+            Err(error)
+        }
     }
 }
 
