@@ -6,6 +6,7 @@ import {
     validateTurnFinish,
     validateStreamChatResponse,
     reconcileTurnMessageIds,
+    isChatSessionCurrent,
     type TurnStartValidationContext,
     type TurnFinishValidationContext,
     type StreamChatResponseValidationContext,
@@ -561,5 +562,31 @@ describe("chat turn lifecycle validation", () => {
 
             expect(reconciled).toBe(initialMessages);
         });
+    });
+});
+
+describe("isChatSessionCurrent", () => {
+    it("returns true when both generation and conversation id are unchanged", () => {
+        expect(isChatSessionCurrent(1, "conv-1", 1, "conv-1")).toBe(true);
+    });
+
+    it("returns true for null conversation ids when generation is unchanged", () => {
+        expect(isChatSessionCurrent(2, null, 2, null)).toBe(true);
+    });
+
+    it("returns false when generation changed", () => {
+        expect(isChatSessionCurrent(1, "conv-1", 2, "conv-1")).toBe(false);
+    });
+
+    it("returns false when conversation id changed", () => {
+        expect(isChatSessionCurrent(1, "conv-1", 1, "conv-2")).toBe(false);
+    });
+
+    it("returns false when conversation id materialized from null", () => {
+        expect(isChatSessionCurrent(1, null, 1, "conv-1")).toBe(false);
+    });
+
+    it("returns false when both generation and conversation id changed", () => {
+        expect(isChatSessionCurrent(1, "conv-1", 2, "conv-2")).toBe(false);
     });
 });

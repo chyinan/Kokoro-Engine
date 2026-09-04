@@ -298,3 +298,22 @@ export function reconcileTurnMessageIds(
 
     return isModified ? nextMessages : (messages as Array<ChatPanelMessage>);
 }
+
+/**
+ * 判断跨多个 await 的异步链路（重新生成/继续）在入口处捕获的会话快照是否仍然有效。
+ *
+ * 在第一次异步操作前捕获代次与会话 ID，每个 await 返回后调用本函数校验：
+ * 若期间用户切换了角色或会话（代次必递增，会话 ID 会变化），必须立即中止后续的
+ * 删除与请求，防止操作作用到新会话上。
+ */
+export function isChatSessionCurrent(
+    startGeneration: number,
+    startConversationId: string | null,
+    currentGeneration: number,
+    currentConversationId: string | null,
+): boolean {
+    return (
+        currentGeneration === startGeneration &&
+        currentConversationId === startConversationId
+    );
+}

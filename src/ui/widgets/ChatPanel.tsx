@@ -42,6 +42,7 @@ import {
     validateTurnFinish,
     validateStreamChatResponse,
     reconcileTurnMessageIds,
+    isChatSessionCurrent,
 } from "./chat/chat-turn-lifecycle";
 import {
     computeTargetScrollTop,
@@ -1828,6 +1829,17 @@ export default function ChatPanel({
     }, [activeCharacterId, t]);
 
     const onRegenerate = useCallback(async (globalIndex: number) => {
+        // 第一次异步操作前捕获会话代次与会话 ID：等待监听器/删除期间若用户切换会话，
+        // 后续校验将立即中止，防止删除与重新生成请求作用到新会话上
+        const startGeneration = conversationGenerationRef.current;
+        const startConversationId = activeConversationIdRef.current;
+        const isSessionCurrent = () => isChatSessionCurrent(
+            startGeneration,
+            startConversationId,
+            conversationGenerationRef.current,
+            activeConversationIdRef.current,
+        );
+
         const msgs = messagesRef.current;
         const lastUserIndex = msgs.slice(0, globalIndex).reverse().findIndex(m => m.role === "user");
         if (lastUserIndex === -1) return;
@@ -1842,23 +1854,29 @@ export default function ChatPanel({
                 new Promise(resolve => setTimeout(resolve, 1500)),
             ]);
         }
+        // 等待监听器期间会话可能已切换：立即中止，不删除、不发起请求
+        if (!isSessionCurrent()) return;
 
         const messagesToDelete = msgs.length - globalIndex;
 
         try {
             // 先删除数据库，再更新 UI，避免竞态条件
-            await deleteLastMessages(messagesToDelete);
+            await deleteLastMessages(messagesToDelete, startConversationId);
         } catch (e) {
             console.error("[ChatPanel] Failed to delete messages:", e);
         }
+        // 删除期间会话可能已切换：立即中止，不截断新会话 UI、不发起请求
+        if (!isSessionCurrent()) return;
+
         setMessages(prev => prev.slice(0, globalIndex));
 
-        const requestGeneration = conversationGenerationRef.current;
+        // 使用入口捕获的会话代次（上方校验已保证与当前一致），恢复下游 stale-turn 防护的效力
+        const requestGeneration = startGeneration;
         const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         pendingTurnRequestRef.current = {
             clientRequestId,
             generation: requestGeneration,
-            conversationId: activeConversationIdRef.current,
+            conversationId: startConversationId,
             characterId: activeCharacterIdRef.current,
         };
 
@@ -1915,12 +1933,25 @@ export default function ChatPanel({
     }, [endTurnActivity, ensureMemoryModelReady, startStreaming, resetReveal, setError]);
 
     const onContinueFrom = useCallback(async (globalIndex: number) => {
+        // 第一次异步操作前捕获会话代次与会话 ID，防止删除期间会话切换导致截断作用到新会话
+        const startGeneration = conversationGenerationRef.current;
+        const startConversationId = activeConversationIdRef.current;
+
         const msgs = messagesRef.current;
         const messagesToDelete = msgs.length - globalIndex - 1;
         if (messagesToDelete > 0) {
             try {
                 // 先删除数据库，再更新 UI，避免竞态条件
-                await deleteLastMessages(messagesToDelete);
+                await deleteLastMessages(messagesToDelete, startConversationId);
+                // 删除期间会话已切换：立即中止，不截断新会话 UI
+                if (!isChatSessionCurrent(
+                    startGeneration,
+                    startConversationId,
+                    conversationGenerationRef.current,
+                    activeConversationIdRef.current,
+                )) {
+                    return;
+                }
                 setMessages(prev => prev.slice(0, globalIndex + 1));
             } catch (e) {
                 console.error("[ChatPanel] Failed to delete messages:", e);

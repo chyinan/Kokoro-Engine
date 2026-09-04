@@ -169,8 +169,8 @@ export async function setContextSettings(settings: ContextSettings): Promise<voi
     return invoke("set_context_settings", { settings });
 }
 
-export async function deleteLastMessages(count: number): Promise<void> {
-    return invoke("delete_last_messages", { count });
+export async function deleteLastMessages(count: number, expectedConversationId?: string | null): Promise<void> {
+    return invoke("delete_last_messages", { count, expectedConversationId: expectedConversationId ?? null });
 }
 
 // ── LLM Config Management ──────────────────────────

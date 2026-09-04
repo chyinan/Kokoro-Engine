@@ -3830,7 +3830,7 @@ mod tests {
         // It must automatically remove id 4 (assistant) and its preceding technical messages (ids 3, 2).
         let history = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
         let current_conv = std::sync::Arc::new(tokio::sync::Mutex::new(Some("conv-tools".to_string())));
-        crate::commands::context::delete_last_messages_inner(1, &pool, &history, &current_conv, 2000, None)
+        crate::commands::context::delete_last_messages_inner(1, &pool, &history, &current_conv, 2000, None, None)
             .await
             .unwrap();
 

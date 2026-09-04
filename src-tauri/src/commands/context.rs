@@ -320,7 +320,7 @@ mod tests {
         let current_conv = Arc::new(Mutex::new(Some("conv-1".to_string())));
 
         // Call delete_last_messages_inner(1) to delete the final assistant response
-        delete_last_messages_inner(1, &pool, &history, &current_conv, 2000, None)
+        delete_last_messages_inner(1, &pool, &history, &current_conv, 2000, None, None)
             .await
             .unwrap();
 
@@ -376,7 +376,7 @@ mod tests {
         let current_conv = Arc::new(Mutex::new(Some("conv-2".to_string())));
 
         // Delete 1 visible message (Turn 2 Answer)
-        delete_last_messages_inner(1, &pool, &history, &current_conv, 2000, None)
+        delete_last_messages_inner(1, &pool, &history, &current_conv, 2000, None, None)
             .await
             .unwrap();
 
@@ -390,7 +390,7 @@ mod tests {
         assert_eq!(remaining_ids, vec![1, 2, 3, 4, 5]);
 
         // Delete another 2 visible messages (Turn 2 User [5] and Turn 1 Answer [4])
-        delete_last_messages_inner(2, &pool, &history, &current_conv, 2000, None)
+        delete_last_messages_inner(2, &pool, &history, &current_conv, 2000, None, None)
             .await
             .unwrap();
 
@@ -435,7 +435,7 @@ mod tests {
         }
 
         // Delete last 1 visible message
-        delete_last_messages_inner(1, &pool, &history, &current_conv, 2000, None)
+        delete_last_messages_inner(1, &pool, &history, &current_conv, 2000, None, None)
             .await
             .unwrap();
 
@@ -480,9 +480,17 @@ mod tests {
         let memory_boundary = Arc::new(Mutex::new(0));
 
         // Delete the last visible message (message 34, leaving 34 messages: 0..34)
-        delete_last_messages_inner(1, &pool, &history, &current_conv, 40, Some(&memory_boundary))
-            .await
-            .unwrap();
+        delete_last_messages_inner(
+            1,
+            &pool,
+            &history,
+            &current_conv,
+            40,
+            Some(&memory_boundary),
+            None,
+        )
+        .await
+        .unwrap();
 
         // Check DB row count: 34 rows remain
         let total_db_rows: i64 = sqlx::query_scalar(
@@ -505,6 +513,57 @@ mod tests {
 
         // Memory boundary should be synchronized to 20
         assert_eq!(*memory_boundary.lock().await, 20);
+    }
+
+    #[tokio::test]
+    async fn test_delete_last_messages_skips_when_conversation_changed() {
+        let pool = setup_test_context_db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-current', 'char-1', 'Current', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        for i in 0..2 {
+            let role = if i == 0 { "user" } else { "assistant" };
+            sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-current', ?, ?, NULL, ?)")
+                .bind(role)
+                .bind(format!("Message {i}"))
+                .bind(&now)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let history = Arc::new(Mutex::new(VecDeque::new()));
+        let current_conv = Arc::new(Mutex::new(Some("conv-current".to_string())));
+
+        // 期望会话与后端当前会话不一致（用户已在删除 IPC 在途期间切换会话）→ 应整体放弃删除
+        delete_last_messages_inner(
+            1,
+            &pool,
+            &history,
+            &current_conv,
+            2000,
+            None,
+            Some("conv-other"),
+        )
+        .await
+        .unwrap();
+
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = 'conv-current'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            remaining, 2,
+            "Stale delete must not touch the current conversation"
+        );
     }
 }
 
@@ -719,12 +778,27 @@ pub async fn delete_last_messages_inner(
     current_conversation_id: &Arc<Mutex<Option<String>>>,
     max_chars: usize,
     memory_history_boundary: Option<&Arc<Mutex<usize>>>,
+    expected_conversation_id: Option<&str>,
 ) -> Result<(), KokoroError> {
     if count == 0 {
         return Ok(());
     }
 
     let conv_id = current_conversation_id.lock().await.clone();
+    // 竞态防护：调用方声明了发起删除时所属的会话。若后端当前会话已在删除 IPC 在途期间
+    // 被切换（如用户点选了另一会话，load_conversation 会更新 current_conversation_id），
+    // 则放弃删除，防止误删新会话的消息。
+    if let Some(expected) = expected_conversation_id {
+        if conv_id.as_deref() != Some(expected) {
+            tracing::warn!(
+                target: "ai",
+                "Skipping delete_last_messages: expected conversation {:?} but current is {:?}",
+                expected,
+                conv_id
+            );
+            return Ok(());
+        }
+    }
     if let Some(ref conversation_id) = conv_id {
         // 读取该会话的所有行（id, role, metadata），按 id 升序排列
         let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
@@ -825,6 +899,7 @@ pub async fn delete_last_messages_inner(
 #[tauri::command]
 pub async fn delete_last_messages(
     count: usize,
+    expected_conversation_id: Option<String>,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
     let max_chars = *state.max_message_chars.lock().await;
@@ -835,6 +910,7 @@ pub async fn delete_last_messages(
         &state.current_conversation_id,
         max_chars,
         Some(&state.memory_history_boundary),
+        expected_conversation_id.as_deref(),
     )
     .await
 }
