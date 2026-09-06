@@ -1146,7 +1146,8 @@
             "connection_error": "연결에 문제가 발생했습니다. API 설정을 확인해주세요. 💭",
             "memory_model_required": "로컬 메모리 모델이 아직 준비되지 않았습니다. 채팅은 계속할 수 있지만 의미 메모리는 잠시 건너뜁니다.",
             "memory_model_check_failed": "로컬 메모리 모델 상태를 확인하지 못했습니다. 채팅은 계속할 수 있으니 편할 때 다운로드 대화상자를 확인하세요.",
-            "edit_failed": "편집된 메시지를 저장하지 못했습니다"
+            "edit_failed": "편집된 메시지를 저장하지 못했습니다",
+            "delete_failed": "메시지를 삭제하지 못했습니다"
         },
         "input": {
             "placeholder": "대화를 시작하세요...",

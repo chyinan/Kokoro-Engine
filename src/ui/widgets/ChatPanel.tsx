@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
 import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, editConversationMessage, listCharacters, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
-import type { CommittedCharacterRuntime, FailureEvent, ToolTraceItem } from "../../lib/kokoro-bridge";
+import type { CommittedCharacterRuntime, FailureEvent, ToolTraceItem, StreamChatResponse } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal, useWakeWord } from "../hooks";
@@ -748,6 +748,79 @@ export default function ChatPanel({
         };
     }, []);
 
+    // 统一处理 streamChat 的响应解析、代次校验、消息 ID 对齐（补偿）与异常收敛
+    const processTurnStreamResult = useCallback(async (options: {
+        clientRequestId: string;
+        requestGeneration: number;
+        streamChatPromise: Promise<StreamChatResponse | undefined | null>;
+        onCatchError?: (err: unknown) => void;
+    }) => {
+        const { clientRequestId, requestGeneration, streamChatPromise, onCatchError } = options;
+        try {
+            const res = await streamChatPromise;
+            const streamResValidation = validateStreamChatResponse({
+                requestGeneration,
+                currentGeneration: conversationGenerationRef.current,
+                clientRequestId,
+                activeConversationId: activeConversationIdRef.current,
+            }, res);
+
+            if (streamResValidation.valid) {
+                if (streamResValidation.shouldUpdateConversation && streamResValidation.targetConversationId) {
+                    setActiveConversationId(streamResValidation.targetConversationId);
+                    activeConversationIdRef.current = streamResValidation.targetConversationId;
+                }
+                // 先按已提交的消息快照判定是否需要后端重同步；实际写入仍走 updater，
+                // 与其他排队更新正确组合。快照与 prev 的微小背离在严格匹配 + merge
+                // 式 resync 下无破坏性后果。
+                const reconciliation = reconcileTurnMessageIds(
+                    messagesRef.current,
+                    clientRequestId,
+                    res?.user_message_id,
+                    res?.assistant_message_id,
+                );
+                if (reconciliation.needsResync && streamResValidation.targetConversationId) {
+                    void resyncConversationMessages({
+                        conversationId: streamResValidation.targetConversationId,
+                        startGeneration: requestGeneration,
+                        clientRequestId,
+                    });
+                } else {
+                    setMessages(prev => reconcileTurnMessageIds(
+                        prev,
+                        clientRequestId,
+                        res?.user_message_id,
+                        res?.assistant_message_id,
+                    ).messages);
+                }
+            }
+        } catch (err) {
+            if (conversationGenerationRef.current !== requestGeneration) {
+                return;
+            }
+            if (isTurnCancelledError(err) || cancelRequestedRef.current) {
+                endTurnActivity();
+                currentTurnRef.current = null;
+                if (pendingTurnRequestRef.current?.clientRequestId === clientRequestId) {
+                    pendingTurnRequestRef.current = null;
+                }
+                setIsThinking(false);
+                return;
+            }
+            endTurnActivity();
+            currentTurnRef.current = null;
+            if (pendingTurnRequestRef.current?.clientRequestId === clientRequestId) {
+                pendingTurnRequestRef.current = null;
+            }
+            setIsThinking(false);
+            setError(getAsyncErrorMessage(err));
+
+            if (onCatchError) {
+                onCatchError(err);
+            }
+        }
+    }, [endTurnActivity, resyncConversationMessages, setError]);
+
     const handleTranscription = useCallback((text: string) => {
         const trimmed = text.trim();
         if (!trimmed) {
@@ -765,60 +838,85 @@ export default function ChatPanel({
 
         if (sttAutoSend) {
             void (async () => {
+                // 忙碌态/禁用态降级保护：转为填充输入框草稿，绝不并发冲撞
+                if (interactionDisabled || isBusyRef.current) {
+                    setInput(fullMessage);
+                    return;
+                }
+
+                // 确保所有事件监听器已就绪，避免因初始化时序差错过 chat-turn-start / finish 事件
+                if (listenersReadyPromiseRef.current) {
+                    await Promise.race([
+                        listenersReadyPromiseRef.current,
+                        new Promise(resolve => setTimeout(resolve, 1500)),
+                    ]);
+                }
+
+                if (interactionDisabled || isBusyRef.current) {
+                    setInput(fullMessage);
+                    return;
+                }
+
+                const startGeneration = conversationGenerationRef.current;
+                const startConversationId = activeConversationIdRef.current;
+                const startCharacterId = activeCharacterIdRef.current;
+
                 if (!await ensureMemoryModelReady()) {
                     setInput(fullMessage);
                     return;
                 }
 
+                // 校验模型检查异步排队期间会话是否已被切换
+                if (
+                    conversationGenerationRef.current !== startGeneration ||
+                    activeCharacterIdRef.current !== startCharacterId ||
+                    activeConversationIdRef.current !== startConversationId
+                ) {
+                    setInput(fullMessage);
+                    return;
+                }
+
                 // Auto-send: inject directly into chat
+                const requestGeneration = conversationGenerationRef.current;
                 const clientRequestId = `stt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                pendingTurnRequestRef.current = {
+                    clientRequestId,
+                    generation: requestGeneration,
+                    conversationId: activeConversationIdRef.current,
+                    characterId: activeCharacterIdRef.current,
+                };
+
                 clearDraft();
                 setMessages(prev => [...prev, { role: "user", text: fullMessage, clientRequestId }]);
                 startStreaming();
                 setIsThinking(true);
                 userScrolledRef.current = false;
+                savedScrollSnapshotRef.current = null;
+                // Lock out handleScroll until deferredMessages DOM update settles (~200ms)
+                isProgrammaticScrollRef.current = true;
+                setTimeout(() => { isProgrammaticScrollRef.current = false; }, 200);
+                resetReveal();
+                rawResponseRef.current = "";
+                currentTurnRef.current = null;
 
                 const allowImageGen = isGeneratedBackgroundMode();
 
-                streamChat({
-                    message: fullMessage,
-                    allow_image_gen: allowImageGen,
-                    character_id: getActiveCharacterIdForRequest(),
-                    client_request_id: clientRequestId,
-                }).then(res => {
-                    if (res?.conversation_id) {
-                        setActiveConversationId(res.conversation_id);
-                        activeConversationIdRef.current = res.conversation_id;
-                    }
-                    if (res?.user_message_id) {
-                        setMessages(prev => {
-                            const idx = prev.findIndex(m => m.clientRequestId === clientRequestId);
-                            if (idx !== -1 && !prev[idx].id) {
-                                const updated = [...prev];
-                                updated[idx] = { ...updated[idx], id: res.user_message_id ?? undefined };
-                                return updated;
-                            }
-                            return prev;
-                        });
-                    }
-                }).catch(err => {
-                    if (isTurnCancelledError(err) || cancelRequestedRef.current) {
-                        endTurnActivity();
-                        currentTurnRef.current = null;
-                        setIsThinking(false);
-                        return;
-                    }
-                    endTurnActivity();
-                    currentTurnRef.current = null;
-                    setIsThinking(false);
-                    setError(getAsyncErrorMessage(err));
+                await processTurnStreamResult({
+                    clientRequestId,
+                    requestGeneration,
+                    streamChatPromise: streamChat({
+                        message: fullMessage,
+                        allow_image_gen: allowImageGen,
+                        character_id: getActiveCharacterIdForRequest(),
+                        client_request_id: clientRequestId,
+                    }),
                 });
             })();
         } else {
             // Fill input box with merged text for user review
             setInput(fullMessage);
         }
-    }, [endTurnActivity, ensureMemoryModelReady, sttAutoSend, startStreaming, clearDraft, setInput]);
+    }, [clearDraft, ensureMemoryModelReady, interactionDisabled, processTurnStreamResult, resetReveal, setInput, startStreaming, sttAutoSend]);
 
     const { state: voiceState, volume: micVolume, partialText: sttPartialText, start: startVoice, stop: stopVoice } = useVoiceInput(handleTranscription);
 
@@ -1562,76 +1660,29 @@ export default function ChatPanel({
 
         const allowImageGen = isGeneratedBackgroundMode();
 
-        try {
-            const res = await streamChat({
+        await processTurnStreamResult({
+            clientRequestId,
+            requestGeneration,
+            streamChatPromise: streamChat({
                 message: trimmed || "(image attached)",
                 allow_image_gen: allowImageGen,
                 images: imagesToSend.length > 0 ? imagesToSend : undefined,
                 character_id: getActiveCharacterIdForRequest(),
                 client_request_id: clientRequestId,
-            });
-            const streamResValidation = validateStreamChatResponse({
-                requestGeneration,
-                currentGeneration: conversationGenerationRef.current,
-                clientRequestId,
-                activeConversationId: activeConversationIdRef.current,
-            }, res);
+            }),
+            onCatchError: () => {
+                // Save failed request for retry
+                lastFailedRequestRef.current = { message: trimmed || "(image attached)", images: imagesToSend.length > 0 ? imagesToSend : undefined, allowImageGen };
 
-            if (streamResValidation.valid) {
-                if (streamResValidation.shouldUpdateConversation && streamResValidation.targetConversationId) {
-                    setActiveConversationId(streamResValidation.targetConversationId);
-                    activeConversationIdRef.current = streamResValidation.targetConversationId;
-                }
-                // 先按已提交的消息快照判定是否需要后端重同步；实际写入仍走 updater，
-                // 与其他排队更新正确组合。快照与 prev 的微小背离在严格匹配 + merge
-                // 式 resync 下无破坏性后果。
-                const reconciliation = reconcileTurnMessageIds(
-                    messagesRef.current,
-                    clientRequestId,
-                    res?.user_message_id,
-                    res?.assistant_message_id,
-                );
-                if (reconciliation.needsResync && streamResValidation.targetConversationId) {
-                    void resyncConversationMessages({
-                        conversationId: streamResValidation.targetConversationId,
-                        startGeneration: requestGeneration,
-                        clientRequestId,
-                    });
-                } else {
-                    setMessages(prev => reconcileTurnMessageIds(
-                        prev,
-                        clientRequestId,
-                        res?.user_message_id,
-                        res?.assistant_message_id,
-                    ).messages);
-                }
-            }
-        } catch (err) {
-            if (conversationGenerationRef.current !== requestGeneration) {
-                return;
-            }
-            if (isTurnCancelledError(err) || cancelRequestedRef.current) {
-                endTurnActivity();
-                currentTurnRef.current = null;
-                setIsThinking(false);
-                return;
-            }
-            endTurnActivity();
-            currentTurnRef.current = null;
-            setIsThinking(false);
-            setError(getAsyncErrorMessage(err));
-
-            // Save failed request for retry
-            lastFailedRequestRef.current = { message: trimmed || "(image attached)", images: imagesToSend.length > 0 ? imagesToSend : undefined, allowImageGen };
-
-            setTimeout(() => {
-                setMessages(prev => [...prev, {
-                    role: "kokoro",
-                    text: t("chat.errors.connection_error"),
-                    isError: true,
-                }]);
-            }, 500);
-        }
+                setTimeout(() => {
+                    setMessages(prev => [...prev, {
+                        role: "kokoro",
+                        text: t("chat.errors.connection_error"),
+                        isError: true,
+                    }]);
+                }, 500);
+            },
+        });
     };
 
     // ── Image upload ───────────────────────────────────────
@@ -1931,6 +1982,8 @@ export default function ChatPanel({
     }, [activeCharacterId, t]);
 
     const onRegenerate = useCallback(async (globalIndex: number) => {
+        if (isBusyRef.current || isStreamingRef.current) return;
+
         // 第一次异步操作前捕获会话代次与会话 ID：等待监听器/删除期间若用户切换会话，
         // 后续校验将立即中止，防止删除与重新生成请求作用到新会话上
         const startGeneration = conversationGenerationRef.current;
@@ -1966,6 +2019,16 @@ export default function ChatPanel({
             await deleteLastMessages(messagesToDelete, startConversationId);
         } catch (e) {
             console.error("[ChatPanel] Failed to delete messages:", e);
+            if (!isSessionCurrent()) return;
+            setError(t("chat.errors.delete_failed") ?? "Failed to delete messages");
+            if (startConversationId) {
+                void resyncConversationMessages({
+                    conversationId: startConversationId,
+                    startGeneration,
+                    clientRequestId: `resync_del_fail_${Date.now()}`,
+                });
+            }
+            return;
         }
         // 删除期间会话可能已切换：立即中止，不截断新会话 UI、不发起请求
         if (!isSessionCurrent()) return;
@@ -1991,67 +2054,23 @@ export default function ChatPanel({
 
         const allowImageGen = isGeneratedBackgroundMode();
 
-        streamChat({
-            message: userMsg.text,
-            images: userMsg.images,
-            allow_image_gen: allowImageGen,
-            character_id: getActiveCharacterIdForRequest(),
-            client_request_id: clientRequestId,
-            regenerate: true,
-        }).then(res => {
-            const streamResValidation = validateStreamChatResponse({
-                requestGeneration,
-                currentGeneration: conversationGenerationRef.current,
-                clientRequestId,
-                activeConversationId: activeConversationIdRef.current,
-            }, res);
-            if (streamResValidation.valid) {
-                if (streamResValidation.shouldUpdateConversation && streamResValidation.targetConversationId) {
-                    setActiveConversationId(streamResValidation.targetConversationId);
-                    activeConversationIdRef.current = streamResValidation.targetConversationId;
-                }
-                // 先按已提交的消息快照判定是否需要后端重同步；实际写入仍走 updater，
-                // 与其他排队更新正确组合。快照与 prev 的微小背离在严格匹配 + merge
-                // 式 resync 下无破坏性后果。
-                const reconciliation = reconcileTurnMessageIds(
-                    messagesRef.current,
-                    clientRequestId,
-                    res?.user_message_id,
-                    res?.assistant_message_id,
-                );
-                if (reconciliation.needsResync && streamResValidation.targetConversationId) {
-                    void resyncConversationMessages({
-                        conversationId: streamResValidation.targetConversationId,
-                        startGeneration: requestGeneration,
-                        clientRequestId,
-                    });
-                } else {
-                    setMessages(prev => reconcileTurnMessageIds(
-                        prev,
-                        clientRequestId,
-                        res?.user_message_id,
-                        res?.assistant_message_id,
-                    ).messages);
-                }
-            }
-        }).catch(err => {
-            if (conversationGenerationRef.current !== requestGeneration) {
-                return;
-            }
-            if (isTurnCancelledError(err) || cancelRequestedRef.current) {
-                endTurnActivity();
-                currentTurnRef.current = null;
-                setIsThinking(false);
-                return;
-            }
-            endTurnActivity();
-            currentTurnRef.current = null;
-            setIsThinking(false);
-            setError(getAsyncErrorMessage(err));
+        void processTurnStreamResult({
+            clientRequestId,
+            requestGeneration,
+            streamChatPromise: streamChat({
+                message: userMsg.text,
+                images: userMsg.images,
+                allow_image_gen: allowImageGen,
+                character_id: getActiveCharacterIdForRequest(),
+                client_request_id: clientRequestId,
+                regenerate: true,
+            }),
         });
-    }, [endTurnActivity, ensureMemoryModelReady, startStreaming, resetReveal, setError]);
+    }, [ensureMemoryModelReady, processTurnStreamResult, resetReveal, startStreaming, t]);
 
     const onContinueFrom = useCallback(async (globalIndex: number) => {
+        if (isBusyRef.current || isStreamingRef.current) return;
+
         // 第一次异步操作前捕获会话代次与会话 ID，防止删除期间会话切换导致截断作用到新会话
         const startGeneration = conversationGenerationRef.current;
         const startConversationId = activeConversationIdRef.current;
@@ -2074,9 +2093,25 @@ export default function ChatPanel({
                 setMessages(prev => prev.slice(0, globalIndex + 1));
             } catch (e) {
                 console.error("[ChatPanel] Failed to delete messages:", e);
+                if (!isChatSessionCurrent(
+                    startGeneration,
+                    startConversationId,
+                    conversationGenerationRef.current,
+                    activeConversationIdRef.current,
+                )) {
+                    return;
+                }
+                setError(t("chat.errors.delete_failed") ?? "Failed to delete messages");
+                if (startConversationId) {
+                    void resyncConversationMessages({
+                        conversationId: startConversationId,
+                        startGeneration,
+                        clientRequestId: `resync_continue_fail_${Date.now()}`,
+                    });
+                }
             }
         }
-    }, []);
+    }, [resyncConversationMessages, setError, t]);
 
     const onApproveTool = useCallback(async (globalIndex: number, tool: ToolTraceItem) => {
         if (!canSubmitApproval(tool)) {

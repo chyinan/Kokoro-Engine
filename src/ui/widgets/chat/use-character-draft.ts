@@ -80,6 +80,9 @@ export function useCharacterChatDraft(
     const characterGenerationRef = useRef(0);
     // 候选图片列表版本:任何实时列表变更 +1(setPendingImages / clearDraft / clearDraftImages / 切换装载 / 剪枝应用)
     const imageListVersionRef = useRef(0);
+    // 当前最新的异步图片校验请求 ID,每次发起校验分配新 ID;
+    // 并在角色切换、草稿清空、组件卸载时递增使在途校验失效
+    const latestValidationRequestIdRef = useRef(0);
     // clearDraft 墓碑:记录每个角色最后一次清空草稿时的列表版本,
     // 丢弃在清空之前发起、清空之后才返回的迟到上传,避免复活已清除的图片
     const clearedImageVersionsRef = useRef(new Map<string, number>());
@@ -105,27 +108,39 @@ export function useCharacterChatDraft(
     );
 
     const validateAndPruneImages = useCallback(
-        async (targetCharId: string, candidateImages: string[]) => {
+        async (targetCharId: string, candidateImages: readonly string[]) => {
             if (candidateImages.length === 0) return;
-            // 捕获校验开始时的角色代次与列表版本
+            // 绑定本次校验唯一请求 ID,捕获候选图片不可变快照、角色代次与列表版本
+            const requestId = ++latestValidationRequestIdRef.current;
+            const candidateSnapshot = Object.freeze([...candidateImages]);
             const startGeneration = characterGenerationRef.current;
             const startVersion = imageListVersionRef.current;
             const results = await Promise.all(
-                candidateImages.map(async (url) => ({
-                    url,
-                    valid: await validateImage(url),
-                }))
+                candidateSnapshot.map(async (url) => {
+                    try {
+                        return {
+                            url,
+                            valid: await validateImage(url),
+                        };
+                    } catch {
+                        return { url, valid: false };
+                    }
+                })
             );
-            // 校验期间角色已切换(含 A→B→A 往返):放弃陈旧结果
+            // 应用前确认:
+            // 1. 目标角色仍然处于激活状态
             if (activeCharacterIdRef.current !== targetCharId) return;
+            // 2. 角色代次未发生变化(避免 A->B->A 往返应用)
             if (characterGenerationRef.current !== startGeneration) return;
-            // 候选列表版本已变化(用户增删图片/清空草稿):放弃,避免覆盖用户刚做的修改
+            // 3. 当前校验请求仍是最新发起的请求(丢弃被后发校验覆盖的旧请求)
+            if (latestValidationRequestIdRef.current !== requestId) return;
+            // 4. 候选列表版本未发生变更(用户未在此期间增删或清空草稿)
             if (imageListVersionRef.current !== startVersion) return;
-            // 内容一致性兜底:防任何未计版本的列表突变路径
-            if (!haveSameImageList(pendingImagesRef.current, candidateImages)) return;
+            // 5. 实时列表内容仍与发起校验时的快照完全一致
+            if (!haveSameImageList(pendingImagesRef.current, candidateSnapshot)) return;
 
             const surviving = results.filter(r => r.valid).map(r => r.url);
-            if (surviving.length !== candidateImages.length) {
+            if (surviving.length !== candidateSnapshot.length) {
                 imageListVersionRef.current += 1;
                 pendingImagesRef.current = surviving;
                 setPendingImagesState(surviving);
@@ -156,6 +171,7 @@ export function useCharacterChatDraft(
         if (prevCharacterIdRef.current !== characterId) {
             activeCharacterIdRef.current = characterId;
             characterGenerationRef.current += 1;
+            latestValidationRequestIdRef.current += 1;
 
             // Flush old character's in-flight draft
             flushDraftFor(prevCharacterIdRef.current, inputRef.current, pendingImagesRef.current);
@@ -232,6 +248,7 @@ export function useCharacterChatDraft(
         }
         // 记录墓碑:在清空之前发起、清空之后才返回的迟到上传将被丢弃,不复活已清除的图片
         imageListVersionRef.current += 1;
+        latestValidationRequestIdRef.current += 1;
         clearedImageVersionsRef.current.set(activeCharacterIdRef.current, imageListVersionRef.current);
         clearCharacterDraft(activeCharacterIdRef.current, storage);
         clearCharacterDraftImages(activeCharacterIdRef.current, imageStorage);
@@ -248,6 +265,7 @@ export function useCharacterChatDraft(
             imageDebounceTimerRef.current = null;
         }
         imageListVersionRef.current += 1;
+        latestValidationRequestIdRef.current += 1;
         clearedImageVersionsRef.current.set(activeCharacterIdRef.current, imageListVersionRef.current);
         clearCharacterDraftImages(activeCharacterIdRef.current, imageStorage);
         pendingImagesRef.current = [];
@@ -298,6 +316,7 @@ export function useCharacterChatDraft(
         }
 
         return () => {
+            latestValidationRequestIdRef.current += 1;
             if (typeof window !== "undefined") {
                 window.removeEventListener("beforeunload", handleBeforeUnload);
             }

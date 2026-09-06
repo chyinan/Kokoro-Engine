@@ -758,3 +758,109 @@ describe("isChatSessionCurrent", () => {
         expect(isChatSessionCurrent(1, "conv-1", 2, "conv-2")).toBe(false);
     });
 });
+
+describe("STT turn lifecycle integration", () => {
+    it("correlates STT turn start with generation and clientRequestId", () => {
+        const clientRequestId = "stt_1717000000_abc123";
+        const context: TurnStartValidationContext = {
+            currentGeneration: 3,
+            activeConversationId: "conv-stt",
+            activeCharacterId: "char-kokoro",
+            pendingRequest: {
+                clientRequestId,
+                generation: 3,
+                conversationId: "conv-stt",
+                characterId: "char-kokoro",
+            },
+            isCancelRequested: false,
+        };
+
+        const result = validateTurnStart(context, {
+            turn_id: "turn-stt-1",
+            client_request_id: clientRequestId,
+            conversation_id: "conv-stt",
+            user_message_id: 88,
+        });
+
+        expect(result).toEqual({
+            valid: true,
+            shouldUpdateConversation: true,
+            targetConversationId: "conv-stt",
+            matchedClientRequestId: clientRequestId,
+        });
+    });
+
+    it("rejects STT turn start if session switched while STT was running", () => {
+        const clientRequestId = "stt_1717000000_abc123";
+        const context: TurnStartValidationContext = {
+            currentGeneration: 4, // switched conversation session
+            activeConversationId: "conv-new",
+            activeCharacterId: "char-kokoro",
+            pendingRequest: {
+                clientRequestId,
+                generation: 3, // initiated in session 3
+                conversationId: "conv-old",
+                characterId: "char-kokoro",
+            },
+            isCancelRequested: false,
+        };
+
+        const result = validateTurnStart(context, {
+            turn_id: "turn-stt-1",
+            client_request_id: clientRequestId,
+            conversation_id: "conv-old",
+            user_message_id: 88,
+        });
+
+        expect(result).toEqual({
+            valid: false,
+            reason: "generation_mismatch",
+        });
+    });
+
+    it("rejects STT stream response if generation changed during inference", () => {
+        const result = validateStreamChatResponse({
+            requestGeneration: 2,
+            currentGeneration: 3, // user navigated away
+            clientRequestId: "stt_1717000000_abc123",
+            activeConversationId: "conv-new",
+        }, {
+            conversation_id: "conv-old",
+            user_message_id: 10,
+            assistant_message_id: 11,
+        });
+
+        expect(result).toEqual({
+            valid: false,
+            reason: "generation_mismatch",
+        });
+    });
+
+    it("reconciles both user and assistant message ids for STT request when finish event was dropped", () => {
+        const clientRequestId = "stt_1717000000_abc123";
+        const initialMessages: ChatPanelMessage[] = [
+            {
+                role: "user",
+                text: "Voice input text",
+                clientRequestId,
+            },
+            {
+                role: "kokoro",
+                text: "Voice reply from Kokoro",
+                clientRequestId,
+            },
+        ];
+
+        const reconciled = reconcileTurnMessageIds(
+            initialMessages,
+            clientRequestId,
+            201, // userMessageId from StreamChatResponse
+            202, // assistantMessageId from StreamChatResponse
+        );
+
+        expect(reconciled.needsResync).toBe(false);
+        expect(reconciled.messages[0].id).toBe(201);
+        expect(reconciled.messages[1].id).toBe(202);
+    });
+});
+

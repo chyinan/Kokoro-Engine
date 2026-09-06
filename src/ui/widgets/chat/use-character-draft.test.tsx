@@ -804,5 +804,113 @@ describe("useCharacterChatDraft", () => {
             expect(currentHook.pendingImages).toEqual([]);
             expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([]);
         });
+
+        it("drops stale validation results from earlier request when a newer validation request for the same candidate set succeeds first", async () => {
+            saveCharacterDraftImages("kiana", ["http://test/1.png", "http://test/2.png"], mockStorage);
+
+            const pending: Array<{ url: string; resolve: (valid: boolean) => void }> = [];
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+
+            const renderHarness = (storageInst: Storage) => {
+                root?.render(
+                    createElement(function InterleavedHarness({ st }: { st: Storage }) {
+                        const hook = useCharacterChatDraft("kiana", {
+                            storage: st,
+                            imageStorage: st,
+                            validateImage: (url) =>
+                                new Promise<boolean>((resolve) => {
+                                    pending.push({ url, resolve });
+                                }),
+                        });
+                        currentHook = hook;
+                        return null;
+                    }, { st: storageInst })
+                );
+            };
+
+            await act(async () => {
+                renderHarness(mockStorage);
+                await Promise.resolve();
+            });
+
+            // First validation is in flight for [1.png, 2.png]
+            expect(pending.length).toBe(2);
+
+            // Re-render with new storage instance reference, triggering second validation
+            const secondStorage = { ...mockStorage };
+            await act(async () => {
+                renderHarness(secondStorage);
+                await Promise.resolve();
+            });
+
+            // Second validation is also in flight for [1.png, 2.png]
+            expect(pending.length).toBe(4);
+
+            // Second (newer) validation resolves first: both images are valid
+            await act(async () => {
+                pending[2].resolve(true); // 1.png valid
+                pending[3].resolve(true); // 2.png valid
+                await Promise.resolve();
+            });
+
+            // Since both were valid, list was not pruned, version did not bump
+            expect(currentHook.pendingImages).toEqual(["http://test/1.png", "http://test/2.png"]);
+
+            // First (older, stale) validation now resolves: erroneously claims 2.png is dead
+            await act(async () => {
+                pending[0].resolve(true);  // 1.png valid
+                pending[1].resolve(false); // 2.png dead in stale request
+                await Promise.resolve();
+            });
+
+            // Assert: Stale request is dropped because it is superseded by the newer request ID
+            expect(currentHook.pendingImages).toEqual(["http://test/1.png", "http://test/2.png"]);
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([
+                "http://test/1.png",
+                "http://test/2.png",
+            ]);
+        });
+
+        it("invalidates in-flight validation immediately when draft is cleared", async () => {
+            saveCharacterDraftImages("kiana", ["http://test/1.png"], mockStorage);
+
+            const pending: Array<{ url: string; resolve: (valid: boolean) => void }> = [];
+            let currentHook!: ReturnType<typeof useCharacterChatDraft>;
+
+            await act(async () => {
+                root?.render(
+                    createElement(function DeferredHarness() {
+                        const hook = useCharacterChatDraft("kiana", {
+                            storage: mockStorage,
+                            validateImage: (url) =>
+                                new Promise<boolean>((resolve) => {
+                                    pending.push({ url, resolve });
+                                }),
+                        });
+                        currentHook = hook;
+                        return null;
+                    })
+                );
+                await Promise.resolve();
+            });
+
+            expect(pending.length).toBe(1);
+
+            // Clear draft while validation is in flight
+            act(() => {
+                currentHook.clearDraft();
+            });
+            expect(currentHook.pendingImages).toEqual([]);
+
+            // Late validation resolves valid
+            await act(async () => {
+                pending[0].resolve(true);
+                await Promise.resolve();
+            });
+
+            // Must remain empty and not resurrect
+            expect(currentHook.pendingImages).toEqual([]);
+            expect(loadSavedCharacterDraftImages("kiana", mockStorage)).toEqual([]);
+        });
     });
 });

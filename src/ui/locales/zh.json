@@ -1147,7 +1147,8 @@
             "connection_error": "连接出现问题，请检查 API 设置。 💭",
             "memory_model_required": "本地记忆模型还没准备好。聊天仍可继续，但暂时不会使用语义记忆。",
             "memory_model_check_failed": "暂时无法确认本地记忆模型状态。聊天仍可继续，方便时再检查下载弹窗。",
-            "edit_failed": "保存编辑消息失败"
+            "edit_failed": "保存编辑消息失败",
+            "delete_failed": "删除消息失败"
         },
         "input": {
             "placeholder": "与你的同伴对话...",

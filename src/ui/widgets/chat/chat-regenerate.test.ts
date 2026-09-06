@@ -46,4 +46,66 @@ describe("chat regeneration contract and logic", () => {
         const messagesToDelete1 = msgs.length - targetIndex1;
         expect(messagesToDelete1).toBe(3);
     });
+
+    it("aborts regeneration and does not slice UI when deleteLastMessages fails", async () => {
+        let uiMessages = ["Q1", "A1", "Q2", "A2"];
+        let isStreamingStarted = false;
+        let errorMessage: string | null = null;
+        let resynced = false;
+
+        const fakeDeleteLastMessages = async () => {
+            throw new Error("database disk image is malformed");
+        };
+
+        const executeRegenerateFlow = async (isSessionCurrent: () => boolean, conversationId: string | null) => {
+            try {
+                await fakeDeleteLastMessages();
+            } catch (e) {
+                if (!isSessionCurrent()) return;
+                errorMessage = "Failed to delete messages";
+                if (conversationId) {
+                    resynced = true;
+                }
+                return;
+            }
+            uiMessages = uiMessages.slice(0, 3);
+            isStreamingStarted = true;
+        };
+
+        await executeRegenerateFlow(() => true, "conv-1");
+
+        expect(isStreamingStarted).toBe(false);
+        expect(uiMessages).toHaveLength(4);
+        expect(errorMessage).toBe("Failed to delete messages");
+        expect(resynced).toBe(true);
+    });
+
+    it("does not set error or resync when session changed during failed delete", async () => {
+        let errorMessage: string | null = null;
+        let resynced = false;
+
+        const fakeDeleteLastMessages = async () => {
+            throw new Error("ipc disconnected");
+        };
+
+        const executeRegenerateFlow = async (isSessionCurrent: () => boolean, conversationId: string | null) => {
+            try {
+                await fakeDeleteLastMessages();
+            } catch (e) {
+                if (!isSessionCurrent()) return;
+                errorMessage = "Failed to delete messages";
+                if (conversationId) {
+                    resynced = true;
+                }
+                return;
+            }
+        };
+
+        // Simulating session switched during delete
+        await executeRegenerateFlow(() => false, "conv-1");
+
+        expect(errorMessage).toBeNull();
+        expect(resynced).toBe(false);
+    });
 });
+
