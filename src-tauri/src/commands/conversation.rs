@@ -120,16 +120,24 @@ pub(crate) async fn list_conversations_inner(
     Ok(list)
 }
 
-#[tauri::command]
-pub async fn load_conversation(
+pub async fn load_conversation_inner(
     request: LoadConversationRequest,
-    state: State<'_, AIOrchestrator>,
+    db: &sqlx::SqlitePool,
+    history: &tokio::sync::Mutex<std::collections::VecDeque<crate::ai::context::Message>>,
+    current_conversation_id: &tokio::sync::Mutex<Option<String>>,
+    max_message_chars: usize,
+    conversation_switch_lock: &tokio::sync::Mutex<()>,
+    persist_selection: bool,
 ) -> Result<LoadedConversation, KokoroError> {
+    // 会话切换锁：覆盖整个数据库查询、内存历史装载与会话指针设置过程，
+    // 确保与删除/编辑/清空等历史重写路径互斥，防止并发加载时旧请求后完成并覆盖新会话状态
+    let _switch_guard = conversation_switch_lock.lock().await;
+
     let conversation_row = sqlx::query_as::<_, (String, String)>(
         "SELECT topic, pinned_state FROM conversations WHERE id = ?",
     )
     .bind(&request.id)
-    .fetch_one(&state.db)
+    .fetch_one(db)
     .await
     .map_err(|e| KokoroError::Database(e.to_string()))?;
 
@@ -137,32 +145,30 @@ pub async fn load_conversation(
         "SELECT id, role, content, metadata, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
     )
     .bind(&request.id)
-    .fetch_all(&state.db)
+    .fetch_all(db)
     .await
     .map_err(|e| KokoroError::Database(e.to_string()))?;
 
     {
-        // 会话切换锁：与删除/编辑/清空等历史重写路径互斥，确保加载会话期间
-        // 不会有过期的异步操作（如 delete_last_messages）把旧会话历史覆盖回来
-        let _switch_guard = state.conversation_switch_lock.lock().await;
-        {
-            let max_chars = *state.max_message_chars.lock().await;
-            let history_messages: Vec<(String, String, Option<String>)> = rows
-                .iter()
-                .map(|(_, role, content, metadata, _)| {
-                    (role.clone(), content.clone(), metadata.clone())
-                })
-                .collect();
-            let mut history = state.history.lock().await;
-            crate::ai::context::sync_history_window(&mut history, history_messages, max_chars);
-        }
+        let history_messages: Vec<(String, String, Option<String>)> = rows
+            .iter()
+            .map(|(_, role, content, metadata, _)| {
+                (role.clone(), content.clone(), metadata.clone())
+            })
+            .collect();
+        let mut history_guard = history.lock().await;
+        crate::ai::context::sync_history_window(&mut history_guard, history_messages, max_message_chars);
+    }
 
-        {
-            let mut conv_id = state.current_conversation_id.lock().await;
-            *conv_id = Some(request.id.clone());
+    {
+        let mut conv_id = current_conversation_id.lock().await;
+        *conv_id = Some(request.id.clone());
+        if persist_selection {
             crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&request.id));
         }
     }
+
+    drop(_switch_guard);
 
     let messages = rows
         .into_iter()
@@ -198,30 +204,95 @@ pub async fn load_conversation(
 }
 
 #[tauri::command]
-pub async fn delete_conversation(
-    request: DeleteConversationRequest,
+pub async fn load_conversation(
+    request: LoadConversationRequest,
     state: State<'_, AIOrchestrator>,
+) -> Result<LoadedConversation, KokoroError> {
+    let max_chars = *state.max_message_chars.lock().await;
+    load_conversation_inner(
+        request,
+        &state.db,
+        &state.history,
+        &state.current_conversation_id,
+        max_chars,
+        &state.conversation_switch_lock,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn delete_conversation_inner(
+    request: DeleteConversationRequest,
+    db: &sqlx::SqlitePool,
+    history: &tokio::sync::Mutex<std::collections::VecDeque<crate::ai::context::Message>>,
+    current_conversation_id: &tokio::sync::Mutex<Option<String>>,
+    memory_history_boundary: Option<&tokio::sync::Mutex<usize>>,
+    memory_trigger_count: Option<&tokio::sync::Mutex<u64>>,
+    conversation_switch_lock: &tokio::sync::Mutex<()>,
+    persist_selection: bool,
 ) -> Result<(), KokoroError> {
+    // 会话切换锁：覆盖整个数据库事务删除及活跃内存清理过程，
+    // 确保与加载/编辑/清空/写消息等操作互斥，防止并发删除引发数据或内存竞争
+    let _switch_guard = conversation_switch_lock.lock().await;
+
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| KokoroError::Database(e.to_string()))?;
+
     sqlx::query("DELETE FROM conversation_messages WHERE conversation_id = ?")
         .bind(&request.id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
 
     sqlx::query("DELETE FROM conversations WHERE id = ?")
         .bind(&request.id)
-        .execute(&state.db)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+    tx.commit()
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
 
     {
-        let mut conv_id = state.current_conversation_id.lock().await;
+        let mut conv_id = current_conversation_id.lock().await;
         if conv_id.as_deref() == Some(&request.id) {
             *conv_id = None;
+            history.lock().await.clear();
+            if let Some(boundary) = memory_history_boundary {
+                *boundary.lock().await = 0;
+            }
+            if let Some(trigger_count) = memory_trigger_count {
+                *trigger_count.lock().await = 0;
+            }
+            if persist_selection {
+                crate::ai::context::AIOrchestrator::persist_conversation_id(None);
+            }
         }
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_conversation(
+    request: DeleteConversationRequest,
+    state: State<'_, AIOrchestrator>,
+) -> Result<(), KokoroError> {
+    delete_conversation_inner(
+        request,
+        &state.db,
+        &state.history,
+        &state.current_conversation_id,
+        Some(&state.memory_history_boundary),
+        Some(&state.memory_trigger_count),
+        &state.conversation_switch_lock,
+        true,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1181,5 +1252,182 @@ mod tests {
         assert!(is_pinned_conversation_state(
             "{\"pinned\": true, \"pinned_at\": \"2026-01-01T00:00:00Z\"}"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_load_conversation_waits_for_switch_lock() {
+        let pool = setup_test_db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-1', 'char-1', 'Title', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-1', 'user', 'hello', NULL, ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let history = Arc::new(Mutex::new(VecDeque::new()));
+        let current_conv = Arc::new(Mutex::new(None));
+        let lock = switch_lock();
+
+        let guard = lock.lock().await;
+        let task = {
+            let pool = pool.clone();
+            let history = history.clone();
+            let current_conv = current_conv.clone();
+            let lock = lock.clone();
+            tokio::spawn(async move {
+                load_conversation_inner(
+                    LoadConversationRequest {
+                        id: "conv-1".to_string(),
+                    },
+                    &pool,
+                    &history,
+                    &current_conv,
+                    2000,
+                    &lock,
+                    false,
+                )
+                .await
+            })
+        };
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !task.is_finished(),
+            "load_conversation must not proceed while switch_lock is held"
+        );
+
+        drop(guard);
+        let res = task.await.unwrap();
+        assert!(res.is_ok());
+
+        assert_eq!(*current_conv.lock().await, Some("conv-1".to_string()));
+        let hist = history.lock().await;
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].content, "hello");
+    }
+
+    #[tokio::test]
+    async fn test_delete_conversation_clears_history_when_active() {
+        let pool = setup_test_db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-1', 'char-1', 'Title', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-1', 'user', 'msg', NULL, ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let history = Arc::new(Mutex::new(VecDeque::from([crate::ai::context::Message {
+            role: "user".to_string(),
+            content: "msg".to_string(),
+            metadata: None,
+        }])));
+        let current_conv = Arc::new(Mutex::new(Some("conv-1".to_string())));
+        let boundary = Arc::new(Mutex::new(1usize));
+        let trigger_count = Arc::new(Mutex::new(5u64));
+        let lock = switch_lock();
+
+        let res = delete_conversation_inner(
+            DeleteConversationRequest {
+                id: "conv-1".to_string(),
+            },
+            &pool,
+            &history,
+            &current_conv,
+            Some(&boundary),
+            Some(&trigger_count),
+            &lock,
+            false,
+        )
+        .await;
+
+        assert!(res.is_ok());
+        assert_eq!(*current_conv.lock().await, None);
+        assert_eq!(history.lock().await.len(), 0);
+        assert_eq!(*boundary.lock().await, 0);
+        assert_eq!(*trigger_count.lock().await, 0);
+
+        let conv_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(conv_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_conversation_preserves_history_when_inactive() {
+        let pool = setup_test_db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-1', 'char-1', 'Active', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-2', 'char-1', 'Archived', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let history = Arc::new(Mutex::new(VecDeque::from([crate::ai::context::Message {
+            role: "user".to_string(),
+            content: "active message".to_string(),
+            metadata: None,
+        }])));
+        let current_conv = Arc::new(Mutex::new(Some("conv-1".to_string())));
+        let boundary = Arc::new(Mutex::new(1usize));
+        let trigger_count = Arc::new(Mutex::new(5u64));
+        let lock = switch_lock();
+
+        let res = delete_conversation_inner(
+            DeleteConversationRequest {
+                id: "conv-2".to_string(),
+            },
+            &pool,
+            &history,
+            &current_conv,
+            Some(&boundary),
+            Some(&trigger_count),
+            &lock,
+            false,
+        )
+        .await;
+
+        assert!(res.is_ok());
+        // Active conversation must remain completely undisturbed
+        assert_eq!(*current_conv.lock().await, Some("conv-1".to_string()));
+        assert_eq!(history.lock().await.len(), 1);
+        assert_eq!(*boundary.lock().await, 1);
+        assert_eq!(*trigger_count.lock().await, 5);
+
+        // conv-2 deleted, conv-1 preserved
+        let conv2_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-2'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(conv2_count, 0);
+        let conv1_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(conv1_count, 1);
     }
 }

@@ -350,7 +350,7 @@ pub struct AIOrchestrator {
     /// Counts user messages for periodic memory extraction triggers.
     message_count: Arc<Mutex<u64>>,
     /// Counts user messages that occurred while the memory system was enabled.
-    memory_trigger_count: Arc<Mutex<u64>>,
+    pub(crate) memory_trigger_count: Arc<Mutex<u64>>,
     /// History index boundary used to prevent extracting conversations from disabled periods.
     pub(crate) memory_history_boundary: Arc<Mutex<usize>>,
     /// Current character ID for memory isolation.
@@ -690,10 +690,11 @@ impl AIOrchestrator {
         let max_chars = *self.max_message_chars.lock().await;
         let content = truncate_message_content(content, max_chars);
 
-        // Persist to database FIRST so no code path can skip it. The message
-        // row and the conversation metadata bump (title/updated_at) commit
-        // atomically inside persist_message: if the metadata update fails, the
-        // whole persist errors and nothing half-saved is reported as success.
+        // 会话切换锁：完整保护「会话解析/自动建会话 + SQLite 事务持久化 + 内存历史更新」全序列，
+        // 确保与 load_conversation / clear_history / delete / edit / activation 等历史重写路径互斥，
+        // 防止写库窗口期间发生会话切换或清空导致旧会话消息推入新会话的内存历史。
+        let _switch_guard = self.conversation_switch_lock.lock().await;
+
         let (persisted_conv_id, persisted_msg_id) = self
             .persist_message(
                 &role,
@@ -703,18 +704,13 @@ impl AIOrchestrator {
                 target_conversation_id,
             )
             .await?;
-        // 会话切换锁：conv 校验与 history push 必须原子，防止会话切换窗口内
-        // 把旧会话的消息推入新会话的内存历史
-        let _switch_guard = self.conversation_switch_lock.lock().await;
+
         let current_conversation_id = self.current_conversation_id.lock().await.clone();
 
-        // Only push to in-memory history if target_conversation_id is either None (implicit current)
-        // or matches the active current_conversation_id. This prevents an old turn from corrupting
-        // the active conversation after a conversation switch or clearHistory.
-        let should_push_history = match target_conversation_id {
-            Some(target_id) => current_conversation_id.as_deref() == Some(target_id),
-            None => true,
-        };
+        // 仅当实际写入的会话仍然是当前活跃会话时才推入内存历史。
+        // 这既支持 target_conversation_id == None（隐式当前会话且在锁内保证一致），
+        // 也保证 target_conversation_id == Some(后台会话) 时绝不会错误推入活跃内存。
+        let should_push_history = current_conversation_id.as_deref() == Some(&persisted_conv_id);
 
         if should_push_history {
             let mut history = self.history.lock().await;
@@ -2925,6 +2921,73 @@ mod tests {
 
         // In-memory history for active conversation (conv-B) must NOT be contaminated!
         assert_eq!(orchestrator.history.lock().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn add_message_with_implicit_target_pushes_to_history_and_persists() {
+        let orchestrator = setup_test_orchestrator().await;
+        insert_test_conversation(&orchestrator, "conv-active").await;
+        *orchestrator.current_conversation_id.lock().await = Some("conv-active".to_string());
+
+        let (cid, mid) = orchestrator
+            .add_message_with_metadata(
+                "user".to_string(),
+                "Hello world".to_string(),
+                None,
+                "test_char",
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(cid, "conv-active");
+        assert!(mid > 0);
+
+        // Memory history should contain the user message
+        let history = orchestrator.history.lock().await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[0].content, "Hello world");
+    }
+
+    #[tokio::test]
+    async fn add_message_waits_for_conversation_switch_lock() {
+        let orchestrator = Arc::new(setup_test_orchestrator().await);
+        insert_test_conversation(&orchestrator, "conv-active").await;
+        *orchestrator.current_conversation_id.lock().await = Some("conv-active".to_string());
+
+        let guard = orchestrator.conversation_switch_lock.lock().await;
+        let task = {
+            let orchestrator = orchestrator.clone();
+            tokio::spawn(async move {
+                orchestrator
+                    .add_message_with_metadata(
+                        "user".to_string(),
+                        "Blocked message".to_string(),
+                        None,
+                        "test_char",
+                        None,
+                    )
+                    .await
+            })
+        };
+
+        // 锁覆盖整个函数体：外部持锁期间 add_message 不得推进
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !task.is_finished(),
+            "add_message must not proceed while the switch lock is held"
+        );
+
+        drop(guard);
+        let res = task.await.unwrap();
+        assert!(res.is_ok());
+        let (cid, _) = res.unwrap();
+        assert_eq!(cid, "conv-active");
+
+        let history = orchestrator.history.lock().await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].content, "Blocked message");
     }
 
     #[test]
