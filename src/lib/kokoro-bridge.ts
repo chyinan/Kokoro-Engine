@@ -281,12 +281,15 @@ export interface ChatRequest {
     client_request_id?: string;
     /** If true, this turn is regenerating an assistant reply for the last user message. */
     regenerate?: boolean;
+    /** Optional target conversation ID. If specified, backend binds strictly to this conversation. */
+    conversation_id?: string | null;
 }
 
 export interface StreamChatResponse {
     conversation_id: string;
     user_message_id?: number | null;
     assistant_message_id?: number | null;
+    client_request_id?: string | null;
 }
 
 export async function streamChat(request: ChatRequest): Promise<StreamChatResponse> {

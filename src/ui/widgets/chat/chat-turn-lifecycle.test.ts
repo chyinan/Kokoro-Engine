@@ -7,6 +7,7 @@ import {
     validateStreamChatResponse,
     reconcileTurnMessageIds,
     shouldResyncConversation,
+    hasResidualActiveTurn,
     mergeResyncedConversationMessages,
     isChatSessionCurrent,
     type TurnStartValidationContext,
@@ -376,6 +377,70 @@ describe("chat turn lifecycle validation", () => {
             expect(result).toEqual({
                 valid: false,
                 reason: "generation_mismatch",
+            });
+        });
+
+        it("rejects late streamChat response when a newer request has been initiated (continuous STT or retry)", () => {
+            const context: StreamChatResponseValidationContext = {
+                requestGeneration: 1,
+                currentGeneration: 1, // still same conversation session
+                clientRequestId: "stt_1_old",
+                activeConversationId: "conv-1",
+                expectedClientRequestId: "stt_2_new", // superseded by newer request
+            };
+
+            const result = validateStreamChatResponse(context, {
+                conversation_id: "conv-1",
+                user_message_id: 5,
+            });
+
+            expect(result).toEqual({
+                valid: false,
+                reason: "request_mismatch",
+            });
+        });
+
+        it("rejects streamChat response when payload client_request_id conflicts with request identity", () => {
+            const context: StreamChatResponseValidationContext = {
+                requestGeneration: 1,
+                currentGeneration: 1,
+                clientRequestId: "req-1",
+                activeConversationId: "conv-1",
+                expectedClientRequestId: "req-1",
+            };
+
+            const result = validateStreamChatResponse(context, {
+                conversation_id: "conv-1",
+                user_message_id: 5,
+                client_request_id: "req-mismatched",
+            });
+
+            expect(result).toEqual({
+                valid: false,
+                reason: "request_mismatch",
+            });
+        });
+
+        it("accepts streamChat response when both generation and request identity match expected", () => {
+            const context: StreamChatResponseValidationContext = {
+                requestGeneration: 1,
+                currentGeneration: 1,
+                clientRequestId: "stt_2_new",
+                activeConversationId: "conv-1",
+                expectedClientRequestId: "stt_2_new",
+            };
+
+            const result = validateStreamChatResponse(context, {
+                conversation_id: "conv-1",
+                user_message_id: 10,
+                assistant_message_id: 11,
+                client_request_id: "stt_2_new",
+            });
+
+            expect(result).toEqual({
+                valid: true,
+                shouldUpdateConversation: true,
+                targetConversationId: "conv-1",
             });
         });
     });
@@ -861,6 +926,62 @@ describe("STT turn lifecycle integration", () => {
         expect(reconciled.needsResync).toBe(false);
         expect(reconciled.messages[0].id).toBe(201);
         expect(reconciled.messages[1].id).toBe(202);
+    });
+
+    describe("hasResidualActiveTurn", () => {
+        it("returns true when activeTurnClientRequestId matches current clientRequestId", () => {
+            expect(hasResidualActiveTurn({
+                clientRequestId: "req-1",
+                isBusy: true,
+                activeTurnClientRequestId: "req-1",
+                pendingClientRequestId: null,
+            })).toBe(true);
+        });
+
+        it("returns false when activeTurnClientRequestId belongs to a different request", () => {
+            expect(hasResidualActiveTurn({
+                clientRequestId: "req-1",
+                isBusy: true,
+                activeTurnClientRequestId: "req-2",
+                pendingClientRequestId: null,
+            })).toBe(false);
+        });
+
+        it("returns true when pendingClientRequestId matches current clientRequestId", () => {
+            expect(hasResidualActiveTurn({
+                clientRequestId: "req-1",
+                isBusy: true,
+                activeTurnClientRequestId: null,
+                pendingClientRequestId: "req-1",
+            })).toBe(true);
+        });
+
+        it("returns false when pendingClientRequestId belongs to a different request", () => {
+            expect(hasResidualActiveTurn({
+                clientRequestId: "req-1",
+                isBusy: true,
+                activeTurnClientRequestId: null,
+                pendingClientRequestId: "req-2",
+            })).toBe(false);
+        });
+
+        it("returns true when isBusy is true and neither active nor pending requestId is specified (residual busy)", () => {
+            expect(hasResidualActiveTurn({
+                clientRequestId: "req-1",
+                isBusy: true,
+                activeTurnClientRequestId: null,
+                pendingClientRequestId: null,
+            })).toBe(true);
+        });
+
+        it("returns false when isBusy is false and no matching active or pending request exists (normal completed)", () => {
+            expect(hasResidualActiveTurn({
+                clientRequestId: "req-1",
+                isBusy: false,
+                activeTurnClientRequestId: null,
+                pendingClientRequestId: null,
+            })).toBe(false);
+        });
     });
 });
 

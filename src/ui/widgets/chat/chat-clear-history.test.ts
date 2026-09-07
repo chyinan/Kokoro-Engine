@@ -60,17 +60,25 @@ describe("chat clear history defensive guards and confirmation lifecycle", () =>
         expect(messages).toHaveLength(1);
     });
 
-    it("executes clearHistory and empties messages when confirmed", async () => {
+    it("executes clearHistory and empties messages when confirmed with busy lock", async () => {
         let showClearConfirm = true;
+        let isBusy = false;
+        let busyDuringClear: boolean | null = null;
         let messages = [{ text: "delete me 1" }, { text: "delete me 2" }];
-        const clearHistory = vi.fn(async () => {});
+        const clearHistory = vi.fn(async () => {
+            busyDuringClear = isBusy;
+        });
 
         const executeClear = async () => {
             showClearConfirm = false;
+            if (isBusy) return;
+            isBusy = true;
             try {
                 await clearHistory();
             } catch {
                 // Backend might not be ready
+            } finally {
+                isBusy = false;
             }
             messages = [];
         };
@@ -78,6 +86,8 @@ describe("chat clear history defensive guards and confirmation lifecycle", () =>
         await executeClear();
 
         expect(showClearConfirm).toBe(false);
+        expect(busyDuringClear).toBe(true);
+        expect(isBusy).toBe(false);
         expect(clearHistory).toHaveBeenCalledTimes(1);
         expect(messages).toHaveLength(0);
     });

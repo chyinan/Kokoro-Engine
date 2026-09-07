@@ -160,16 +160,22 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         expect(requestTurnCancellation).not.toHaveBeenCalled();
     });
 
-    it("cancels active turn and awaits cancellation before starting empty conversation and clearHistory", async () => {
+    it("cancels active turn and awaits cancellation before starting empty conversation and clearHistory with busy lock", async () => {
         const sequence: string[] = [];
+        let isBusy = false;
+        let isSwitchingConversation = false;
+        let busyStateDuringClearHistory: boolean | null = null;
         const cancelChatTurn = vi.fn(async (turnId: string, reason: string) => {
             sequence.push(`cancel:${turnId}:${reason}`);
         });
         const startEmptyConversation = vi.fn((charId: string) => {
             sequence.push(`startEmpty:${charId}`);
+            // Simulates clearVisibleConversation calling endTurnActivity() which clears isBusy
+            isBusy = false;
         });
         const clearHistory = vi.fn(async () => {
             sequence.push("clearHistory");
+            busyStateDuringClearHistory = isBusy;
         });
 
         let currentTurn: { turnId: string } | null = { turnId: "turn-running-123" };
@@ -177,21 +183,31 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         let cancelRequested = false;
 
         const handleStartEmptyConversation = async (activeCharacterId: string): Promise<void> => {
-            const activeTurnId = currentTurn?.turnId;
-            if (activeTurnId) {
-                cancelRequested = true;
-                isStopping = true;
+            if (isSwitchingConversation || isBusy) return;
+            isSwitchingConversation = true;
+            isBusy = true;
+            try {
+                const activeTurnId = currentTurn?.turnId;
+                if (activeTurnId) {
+                    cancelRequested = true;
+                    isStopping = true;
+                    try {
+                        await cancelChatTurn(activeTurnId, "new_conversation_started");
+                    } catch (err) {
+                        console.error(err);
+                    }
+                }
+                startEmptyConversation(activeCharacterId);
+                // Re-assert busy state because clearVisibleConversation's endTurnActivity cleared it
+                isBusy = true;
                 try {
-                    await cancelChatTurn(activeTurnId, "new_conversation_started");
+                    await clearHistory();
                 } catch (err) {
                     console.error(err);
                 }
-            }
-            startEmptyConversation(activeCharacterId);
-            try {
-                await clearHistory();
-            } catch (err) {
-                console.error(err);
+            } finally {
+                isSwitchingConversation = false;
+                isBusy = false;
             }
         };
 
@@ -202,12 +218,51 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         expect(clearHistory).toHaveBeenCalled();
         expect(isStopping).toBe(true);
         expect(cancelRequested).toBe(true);
+        expect(busyStateDuringClearHistory).toBe(true);
+        expect(isBusy).toBe(false);
         // Verify strict temporal ordering: cancel -> startEmpty -> clearHistory
         expect(sequence).toEqual([
             "cancel:turn-running-123:new_conversation_started",
             "startEmpty:char-anya",
             "clearHistory",
         ]);
+    });
+
+    it("blocks concurrent or re-entrant start empty conversation calls while in-flight", async () => {
+        let isBusy = false;
+        let isSwitchingConversation = false;
+        let resolveClearHistory: (() => void) | null = null;
+        const clearHistory = vi.fn(() => new Promise<void>((resolve) => {
+            resolveClearHistory = resolve;
+        }));
+        const startEmptyConversation = vi.fn();
+
+        const handleStartEmptyConversation = async (activeCharacterId: string): Promise<void> => {
+            if (isSwitchingConversation || isBusy) return;
+            isSwitchingConversation = true;
+            isBusy = true;
+            try {
+                startEmptyConversation(activeCharacterId);
+                isBusy = true;
+                await clearHistory();
+            } finally {
+                isSwitchingConversation = false;
+                isBusy = false;
+            }
+        };
+
+        const firstCall = handleStartEmptyConversation("char-anya");
+        // Second call while first call is in flight
+        const secondCall = handleStartEmptyConversation("char-anya");
+
+        await secondCall;
+        expect(startEmptyConversation).toHaveBeenCalledTimes(1);
+        expect(clearHistory).toHaveBeenCalledTimes(1);
+
+        const done = resolveClearHistory as unknown as (() => void);
+        done();
+        await firstCall;
+        expect(isBusy).toBe(false);
     });
 
     it("cancels active turn before switching conversation", async () => {

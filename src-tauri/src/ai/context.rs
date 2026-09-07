@@ -387,7 +387,7 @@ pub struct AIOrchestrator {
     /// Must be the OUTERMOST lock wherever it is taken.
     pub conversation_switch_lock: Arc<Mutex<()>>,
     /// Whether this orchestrator should update the desktop hot-reload conversation pointer.
-    persist_conversation_selection: bool,
+    pub(crate) persist_conversation_selection: bool,
     /// Context management strategy: "window" | "summary"
     pub context_strategy: Arc<Mutex<String>>,
     /// Max characters per message before truncation
@@ -675,6 +675,30 @@ impl AIOrchestrator {
         target_conversation_id: Option<&str>,
         summary_provider: Option<Arc<dyn LlmProvider>>,
     ) -> Result<(String, i64)> {
+        // 会话切换锁：完整保护「会话解析/自动建会话 + SQLite 事务持久化 + 内存历史更新」全序列，
+        // 确保与 load_conversation / clear_history / delete / edit / activation 等历史重写路径互斥，
+        // 防止写库窗口期间发生会话切换或清空导致旧会话消息推入新会话的内存历史。
+        let _switch_guard = self.conversation_switch_lock.lock().await;
+        self.add_message_with_metadata_for_conversation_locked(
+            role,
+            content,
+            metadata,
+            character_id,
+            target_conversation_id,
+            summary_provider,
+        )
+        .await
+    }
+
+    pub async fn add_message_with_metadata_for_conversation_locked(
+        &self,
+        role: String,
+        content: String,
+        metadata: Option<String>,
+        character_id: &str,
+        target_conversation_id: Option<&str>,
+        summary_provider: Option<Arc<dyn LlmProvider>>,
+    ) -> Result<(String, i64)> {
         let summary_provider = summary_provider.clone();
         // Track user message count for memory extraction triggers
         if role == "user" {
@@ -689,11 +713,6 @@ impl AIOrchestrator {
         // Truncate single message before it enters persisted conversation history.
         let max_chars = *self.max_message_chars.lock().await;
         let content = truncate_message_content(content, max_chars);
-
-        // 会话切换锁：完整保护「会话解析/自动建会话 + SQLite 事务持久化 + 内存历史更新」全序列，
-        // 确保与 load_conversation / clear_history / delete / edit / activation 等历史重写路径互斥，
-        // 防止写库窗口期间发生会话切换或清空导致旧会话消息推入新会话的内存历史。
-        let _switch_guard = self.conversation_switch_lock.lock().await;
 
         let (persisted_conv_id, persisted_msg_id) = self
             .persist_message(
@@ -738,7 +757,6 @@ impl AIOrchestrator {
                 *boundary = boundary.saturating_sub(1);
             }
         }
-        drop(_switch_guard);
 
         let strategy = self.context_strategy.lock().await.clone();
         if strategy == "summary" && self.is_memory_enabled() {
@@ -1046,11 +1064,13 @@ impl AIOrchestrator {
     /// - `extra_row_ids` whose metadata is still NULL (unfinalized streaming drafts).
     ///
     /// A row passed via `extra_row_ids` with non-NULL metadata (e.g. a finalized
-    /// assistant message) is never removed, so a fully generated answer cannot be
-    /// deleted through this path. All deletes run in a single transaction. When the
-    /// turn's conversation is still the active one, the in-memory history is resynced
-    /// from the authoritative DB rows so the technical rows cannot leak into the next
-    /// turn's prompt composition. Returns the number of deleted rows.
+    /// assistant message) or belonging to a different conversation is never removed,
+    /// so a fully generated answer or another conversation's message cannot be
+    /// deleted through this path. All deletes run atomically in a single transaction
+    /// with conditional matching (`conversation_id` and `metadata IS NULL`). When the
+    /// turn's conversation is still the active one and rows were deleted, the in-memory
+    /// history is resynced from the authoritative DB rows so technical rows cannot leak
+    /// into the next turn's prompt composition. Returns the number of actually deleted rows.
     pub async fn delete_turn_artifacts(
         &self,
         conversation_id: &str,
@@ -1067,7 +1087,7 @@ impl AIOrchestrator {
         .fetch_all(&self.db)
         .await?;
 
-        let mut ids_to_delete: HashSet<i64> = rows
+        let technical_ids: HashSet<i64> = rows
             .iter()
             .filter(|(_, metadata)| {
                 metadata
@@ -1084,30 +1104,49 @@ impl AIOrchestrator {
             .map(|(id, _)| *id)
             .collect();
 
-        // Only unfinalized drafts (metadata still NULL) may be removed by id.
-        for row_id in extra_row_ids {
-            let stored: Option<Option<String>> =
-                sqlx::query_scalar("SELECT metadata FROM conversation_messages WHERE id = ?")
-                    .bind(row_id)
-                    .fetch_optional(&self.db)
-                    .await?;
-            if matches!(stored, Some(None)) {
-                ids_to_delete.insert(*row_id);
-            }
-        }
-
-        if ids_to_delete.is_empty() {
+        if technical_ids.is_empty() && extra_row_ids.is_empty() {
             return Ok(0);
         }
 
         let mut tx = self.db.begin().await?;
-        for id in &ids_to_delete {
-            sqlx::query("DELETE FROM conversation_messages WHERE id = ?")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+        let mut total_deleted: usize = 0;
+
+        for id in &technical_ids {
+            let result = sqlx::query(
+                "DELETE FROM conversation_messages WHERE id = ? AND conversation_id = ?",
+            )
+            .bind(id)
+            .bind(conversation_id)
+            .execute(&mut *tx)
+            .await?;
+            total_deleted += result.rows_affected() as usize;
         }
+
+        let unique_extra_ids: HashSet<i64> = extra_row_ids
+            .iter()
+            .copied()
+            .filter(|id| !technical_ids.contains(id))
+            .collect();
+
+        for row_id in unique_extra_ids {
+            // Only unfinalized drafts (metadata still NULL) belonging to this conversation
+            // may be removed by id. An atomic conditional DELETE prevents check-then-delete
+            // race conditions with concurrent finalization and blocks cross-conversation leakage.
+            let result = sqlx::query(
+                "DELETE FROM conversation_messages WHERE id = ? AND conversation_id = ? AND metadata IS NULL",
+            )
+            .bind(row_id)
+            .bind(conversation_id)
+            .execute(&mut *tx)
+            .await?;
+            total_deleted += result.rows_affected() as usize;
+        }
+
         tx.commit().await?;
+
+        if total_deleted == 0 {
+            return Ok(0);
+        }
 
         // Resync the in-memory history only when the turn's conversation is still the
         // active one (mirrors delete_last_messages_inner). The whole method runs under
@@ -1131,11 +1170,11 @@ impl AIOrchestrator {
         tracing::info!(
             target: "ai",
             "Deleted {} turn artifact row(s) for turn {} in conversation {}",
-            ids_to_delete.len(),
+            total_deleted,
             turn_id,
             conversation_id
         );
-        Ok(ids_to_delete.len())
+        Ok(total_deleted)
     }
 
     /// Returns the total count of user messages in this session.
@@ -1952,6 +1991,101 @@ mod tests {
             history.front().unwrap().content,
             "active conversation message"
         );
+    }
+
+    #[tokio::test]
+    async fn delete_turn_artifacts_rejects_cross_conversation_extras() {
+        let orchestrator = setup_test_orchestrator().await;
+        insert_test_conversation(&orchestrator, "conv-1").await;
+        insert_test_conversation(&orchestrator, "conv-2").await;
+        *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
+
+        // An unfinalized draft in conv-2 (metadata is NULL).
+        let conv_2_draft_id = insert_conversation_row(
+            &orchestrator,
+            "conv-2",
+            "assistant",
+            "draft in conv-2",
+            None,
+        )
+        .await;
+
+        // Try to clean up with conv_2_draft_id passed while targeting conv-1.
+        let deleted = orchestrator
+            .delete_turn_artifacts("conv-1", "turn-a", &[conv_2_draft_id])
+            .await
+            .expect("cleanup should succeed");
+
+        assert_eq!(deleted, 0);
+
+        // conv-2 draft row must still exist untouched.
+        let conv_2_rows = fetch_conversation_rows(&orchestrator, "conv-2").await;
+        assert_eq!(conv_2_rows.len(), 1);
+        assert_eq!(conv_2_rows[0].0, conv_2_draft_id);
+    }
+
+    #[tokio::test]
+    async fn delete_turn_artifacts_atomic_skips_finalized_extras() {
+        let orchestrator = setup_test_orchestrator().await;
+        insert_test_conversation(&orchestrator, "conv-1").await;
+        *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
+
+        // Insert a draft row that has been finalized (metadata is non-NULL)
+        let finalized_row_id = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "assistant",
+            "final answer",
+            Some(r#"{"turn_id":"turn-a","model":"gpt"}"#),
+        )
+        .await;
+
+        let deleted = orchestrator
+            .delete_turn_artifacts("conv-1", "turn-a", &[finalized_row_id])
+            .await
+            .expect("cleanup should succeed");
+
+        assert_eq!(deleted, 0);
+
+        let conv_1_rows = fetch_conversation_rows(&orchestrator, "conv-1").await;
+        assert_eq!(conv_1_rows.len(), 1);
+        assert_eq!(conv_1_rows[0].0, finalized_row_id);
+    }
+
+    #[tokio::test]
+    async fn delete_turn_artifacts_handles_duplicate_and_overlapping_extras() {
+        let orchestrator = setup_test_orchestrator().await;
+        insert_test_conversation(&orchestrator, "conv-1").await;
+        *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
+
+        let draft_id = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "assistant",
+            "draft message",
+            None,
+        )
+        .await;
+        let tool_id = insert_conversation_row(
+            &orchestrator,
+            "conv-1",
+            "tool",
+            "sunny",
+            Some(r#"{"type":"tool_result","turn_id":"turn-a"}"#),
+        )
+        .await;
+
+        // Pass draft_id twice and also pass tool_id (a technical row) in extra_row_ids
+        let deleted = orchestrator
+            .delete_turn_artifacts("conv-1", "turn-a", &[draft_id, draft_id, tool_id])
+            .await
+            .expect("cleanup should succeed");
+
+        // Exactly 2 distinct rows should be deleted (tool_id + draft_id)
+        assert_eq!(deleted, 2);
+
+        let conv_1_rows = fetch_conversation_rows(&orchestrator, "conv-1").await;
+        assert!(conv_1_rows.is_empty());
     }
 
     #[tokio::test]
@@ -3032,4 +3166,34 @@ mod tests {
             format!("{}…[truncated]", "A".repeat(30))
         );
     }
+
+    #[tokio::test]
+    async fn test_add_message_with_metadata_for_conversation_locked_avoids_deadlock() {
+        let orchestrator = setup_test_orchestrator().await;
+        insert_test_conversation(&orchestrator, "conv-locked-test").await;
+        *orchestrator.current_conversation_id.lock().await = Some("conv-locked-test".to_string());
+
+        // Caller acquires switch lock upfront
+        let _guard = orchestrator.conversation_switch_lock.lock().await;
+
+        let (cid, mid) = orchestrator
+            .add_message_with_metadata_for_conversation_locked(
+                "user".to_string(),
+                "test locked message".to_string(),
+                None,
+                "test_char",
+                Some("conv-locked-test"),
+                None,
+            )
+            .await
+            .expect("should not deadlock and persist successfully");
+
+        assert_eq!(cid, "conv-locked-test");
+        assert!(mid > 0);
+
+        let history = orchestrator.history.lock().await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].content, "test locked message");
+    }
 }
+

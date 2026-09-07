@@ -173,12 +173,16 @@ export type StreamChatResponseValidationContext = {
     readonly currentGeneration: number;
     readonly clientRequestId?: string | null;
     readonly activeConversationId: string | null;
+    /** 当前会话预期的活跃请求标识符（通常为最新发起的请求） */
+    readonly expectedClientRequestId?: string | null;
+    readonly activeClientRequestId?: string | null;
 };
 
 export type StreamChatResponsePayload = {
     readonly conversation_id: string;
     readonly user_message_id?: number | null;
     readonly assistant_message_id?: number | null;
+    readonly client_request_id?: string | null;
 };
 
 export type StreamChatResponseValidationResult =
@@ -189,7 +193,7 @@ export type StreamChatResponseValidationResult =
       }
     | {
           readonly valid: false;
-          readonly reason: "generation_mismatch";
+          readonly reason: "generation_mismatch" | "request_mismatch";
       };
 
 /**
@@ -202,6 +206,23 @@ export function validateStreamChatResponse(
 ): StreamChatResponseValidationResult {
     if (context.requestGeneration !== context.currentGeneration) {
         return { valid: false, reason: "generation_mismatch" };
+    }
+
+    const expectedRequestId = context.expectedClientRequestId ?? context.activeClientRequestId;
+    if (
+        expectedRequestId &&
+        context.clientRequestId &&
+        expectedRequestId !== context.clientRequestId
+    ) {
+        return { valid: false, reason: "request_mismatch" };
+    }
+
+    if (
+        payload?.client_request_id &&
+        context.clientRequestId &&
+        payload.client_request_id !== context.clientRequestId
+    ) {
+        return { valid: false, reason: "request_mismatch" };
     }
 
     const conversationId = payload?.conversation_id ?? context.activeConversationId;
@@ -311,6 +332,31 @@ export function shouldResyncConversation(
         return true;
     }
     return pendingClientRequestId === clientRequestId;
+}
+
+export type TurnResidualActivityContext = {
+    readonly clientRequestId: string;
+    readonly isBusy: boolean;
+    readonly activeTurnClientRequestId?: string | null;
+    readonly pendingClientRequestId?: string | null;
+};
+
+/**
+ * 判断 streamChat 成功返回后，当前 UI 是否仍存在属于本次请求的残留活跃状态
+ * （例如因 chat-turn-finish 事件丢失、迟到或监听器未就绪导致未执行收尾清理）。
+ *
+ * 当 activeTurnClientRequestId 或 pendingClientRequestId 显式匹配当前请求，
+ * 或在没有其他请求认领的情况下 isBusy 为 true 时，返回 true，指示调用方需要执行兜底收尾。
+ * 若当前活动已归属其他新请求，则返回 false，防止越权中断新 turn。
+ */
+export function hasResidualActiveTurn(context: TurnResidualActivityContext): boolean {
+    if (context.activeTurnClientRequestId) {
+        return context.activeTurnClientRequestId === context.clientRequestId;
+    }
+    if (context.pendingClientRequestId) {
+        return context.pendingClientRequestId === context.clientRequestId;
+    }
+    return context.isBusy;
 }
 
 /**

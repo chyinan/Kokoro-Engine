@@ -594,6 +594,10 @@ pub struct ChatRequest {
     /// If true, this turn is regenerating an assistant reply for the last user message.
     #[serde(default)]
     pub regenerate: bool,
+    /// Optional target conversation ID. If specified, backend strictly validates that this request
+    /// belongs to this conversation; if unspecified, it binds to the active conversation at entry.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -602,6 +606,8 @@ pub struct StreamChatResponse {
     pub user_message_id: Option<i64>,
     #[serde(default)]
     pub assistant_message_id: Option<i64>,
+    #[serde(default)]
+    pub client_request_id: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -677,6 +683,7 @@ async fn persist_vision_context_message(
     state: &AIOrchestrator,
     observation: &crate::vision::context::VisionObservation,
     character_id: &str,
+    target_conversation_id: Option<&str>,
     turn_id: Option<&str>,
 ) {
     let mut metadata = vision_context_metadata_value(observation);
@@ -684,11 +691,42 @@ async fn persist_vision_context_message(
         metadata["turn_id"] = serde_json::Value::String(turn_id.to_string());
     }
     if let Err(e) = state
-        .add_message_with_metadata(
+        .add_message_with_metadata_for_conversation(
             "context".to_string(),
             observation.summary.clone(),
             Some(metadata.to_string()),
             character_id,
+            target_conversation_id,
+            None,
+        )
+        .await
+    {
+        tracing::error!(
+            target: "chat",
+            "[Chat] Failed to persist vision context message: {}",
+            e
+        );
+    }
+}
+
+async fn persist_vision_context_message_locked(
+    state: &AIOrchestrator,
+    observation: &crate::vision::context::VisionObservation,
+    character_id: &str,
+    target_conversation_id: Option<&str>,
+    turn_id: Option<&str>,
+) {
+    let mut metadata = vision_context_metadata_value(observation);
+    if let Some(turn_id) = turn_id {
+        metadata["turn_id"] = serde_json::Value::String(turn_id.to_string());
+    }
+    if let Err(e) = state
+        .add_message_with_metadata_for_conversation_locked(
+            "context".to_string(),
+            observation.summary.clone(),
+            Some(metadata.to_string()),
+            character_id,
+            target_conversation_id,
             None,
         )
         .await
@@ -1306,7 +1344,8 @@ pub async fn stream_chat(
         .character_id
         .clone()
         .unwrap_or_else(|| "default".to_string());
-    let conversation_id = state.current_conversation_id.lock().await.clone();
+    let requested_conversation_id = request.conversation_id.clone();
+    let initial_conversation_id = state.current_conversation_id.lock().await.clone();
     let hook_runtime = app.try_state::<HookRuntime>();
     // Keep shared character_id in sync for modules that still read it (heartbeat)
     state.set_character_id(char_id.clone()).await;
@@ -1316,7 +1355,9 @@ pub async fn stream_chat(
             .emit_best_effort(
                 &HookEvent::BeforeUserMessage,
                 &build_chat_hook_payload(
-                    conversation_id.clone(),
+                    requested_conversation_id
+                        .clone()
+                        .or_else(|| initial_conversation_id.clone()),
                     &char_id,
                     None,
                     Some(request.message.clone()),
@@ -1350,16 +1391,83 @@ pub async fn stream_chat(
         .latest_completed_observation(chrono::Utc::now())
         .await;
 
-    // 2. Update History with User Message (skip for hidden/touch interactions, or regenerate when user msg already trailing in DB)
+    // 2. Update History with User Message under conversation_switch_lock
     let system_provider = llm_state.system_provider().await;
-    let current_conv_id = state.current_conversation_id.lock().await.clone();
-    let trailing_visible_user = if request.regenerate {
-        if let Some(ref cid) = current_conv_id {
-            match resolve_trailing_visible_user_message(&state.db, cid).await {
+
+    let (conversation_id, user_message_id) = {
+        let _switch_guard = state.conversation_switch_lock.lock().await;
+        let current_conv_id = state.current_conversation_id.lock().await.clone();
+
+        // 校验目标会话一致性，防止跨会话串写或清空后复活幽灵会话
+        let is_valid = match (
+            &requested_conversation_id,
+            &initial_conversation_id,
+            &current_conv_id,
+        ) {
+            // 请求显式指定了目标会话：当前锁内会话必须严格匹配
+            (Some(req_cid), _, Some(curr)) => req_cid == curr,
+            (Some(_), _, None) => false, // 指定了会话，但当前已被清空（如 clear_history）
+            // 请求未指定会话：
+            (None, Some(init), Some(curr)) => init == curr, // 进入时有会话，锁内未变
+            (None, None, None) => true,                     // 进入时无会话，锁内仍无会话（合法新建会话）
+            _ => false,                                     // 其他情况均为排队期间会话已变化
+        };
+
+        if !is_valid {
+            tracing::warn!(
+                target: "chat",
+                "[stream_chat] Aborting chat turn: target conversation changed while request was queued. requested={:?}, initial={:?}, current={:?}",
+                requested_conversation_id,
+                initial_conversation_id,
+                current_conv_id
+            );
+            return Err(KokoroError::Chat(
+                "Conversation changed while request was in-flight".to_string(),
+            ));
+        }
+
+        let resolved_conv_id = if let Some(cid) = current_conv_id {
+            cid
+        } else {
+            // 请求和当前均为 None：原子创建新会话
+            let new_id = uuid::Uuid::new_v4().to_string();
+            let title = if request.hidden {
+                "新对话".to_string()
+            } else {
+                let chars: Vec<char> = request.message.chars().collect();
+                if chars.len() > 20 {
+                    format!("{}...", chars[..20].iter().collect::<String>())
+                } else {
+                    request.message.clone()
+                }
+            };
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, ?, '', '{}', ?, ?)"
+            )
+            .bind(&new_id)
+            .bind(&char_id)
+            .bind(&title)
+            .bind(&now)
+            .bind(&now)
+            .execute(&state.db)
+            .await
+            .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+            *state.current_conversation_id.lock().await = Some(new_id.clone());
+            if state.persist_conversation_selection {
+                crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
+            }
+            new_id
+        };
+
+        let trailing_visible_user = if request.regenerate {
+            match resolve_trailing_visible_user_message(&state.db, &resolved_conv_id).await {
                 Ok(res) => res,
                 Err(e) => {
                     tracing::warn!(
-                        "[stream_chat] Failed to query trailing visible message: {}",
+                        "[stream_chat] Failed to query trailing visible message for '{}': {}",
+                        resolved_conv_id,
                         e
                     );
                     None
@@ -1367,76 +1475,83 @@ pub async fn stream_chat(
             }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
-    let has_trailing_user = trailing_visible_user.is_some();
-    let should_insert = should_insert_user_message_for_request(
-        request.hidden,
-        request.regenerate,
-        has_trailing_user,
-    );
+        let has_trailing_user = trailing_visible_user.is_some();
+        let should_insert = should_insert_user_message_for_request(
+            request.hidden,
+            request.regenerate,
+            has_trailing_user,
+        );
 
-    let (conversation_id, user_message_id) = if should_insert {
-        if let Some(observation) = selected_vision_observation.as_ref() {
-            persist_vision_context_message(&state, observation, &char_id, None).await;
-        }
-
-        let (cid, mid) = state
-            .add_message_with_metadata(
-                "user".to_string(),
-                request.message.clone(),
-                None,
-                &char_id,
-                Some(system_provider.clone()),
-            )
-            .await
-            .map_err(|e| KokoroError::Database(e.to_string()))?;
-
-        if let Some(hooks) = hook_runtime.as_ref() {
-            hooks
-                .emit_best_effort(
-                    &HookEvent::AfterUserMessagePersisted,
-                    &build_chat_hook_payload(
-                        Some(cid.clone()),
-                        &char_id,
-                        None,
-                        Some(request.message.clone()),
-                        None,
-                        None,
-                        request.hidden,
-                    ),
+        let (cid, mid) = if should_insert {
+            if let Some(observation) = selected_vision_observation.as_ref() {
+                persist_vision_context_message_locked(
+                    &state,
+                    observation,
+                    &char_id,
+                    Some(&resolved_conv_id),
+                    None,
                 )
                 .await;
-        }
-        (cid, Some(mid))
-    } else {
-        let cid = current_conv_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let mid = trailing_visible_user.map(|(id, _)| id);
+            }
 
-        // 防御性对齐：若因长会话预算或回溯导致当前 history 尾部缺失该用户消息，在内存中补齐供当前 turn 组装 prompt
-        if !request.hidden {
-            // 会话切换锁：与删除/加载/清空等历史重写路径互斥
-            let _switch_guard = state.conversation_switch_lock.lock().await;
-            let mut history = state.history.lock().await;
-            let trailing_matches = history.back().is_some_and(|m| m.role == "user");
-            if !trailing_matches {
-                history.push_back(crate::ai::context::Message {
-                    role: "user".to_string(),
-                    content: request.message.clone(),
-                    metadata: None,
-                });
-                // Enforce rolling window limit even on defensive path
-                while history.len() > crate::ai::context::MAX_IN_MEMORY_HISTORY_MESSAGES {
-                    history.pop_front();
+            let (cid, mid) = state
+                .add_message_with_metadata_for_conversation_locked(
+                    "user".to_string(),
+                    request.message.clone(),
+                    None,
+                    &char_id,
+                    Some(&resolved_conv_id),
+                    Some(system_provider.clone()),
+                )
+                .await
+                .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+            (cid, Some(mid))
+        } else {
+            let cid = resolved_conv_id.clone();
+            let mid = trailing_visible_user.map(|(id, _)| id);
+
+            // 防御性对齐：若因长会话预算或回溯导致当前 history 尾部缺失该用户消息，在内存中补齐供当前 turn 组装 prompt
+            if !request.hidden {
+                let mut history = state.history.lock().await;
+                let trailing_matches = history.back().is_some_and(|m| m.role == "user");
+                if !trailing_matches {
+                    history.push_back(crate::ai::context::Message {
+                        role: "user".to_string(),
+                        content: request.message.clone(),
+                        metadata: None,
+                    });
+                    // Enforce rolling window limit even on defensive path
+                    while history.len() > crate::ai::context::MAX_IN_MEMORY_HISTORY_MESSAGES {
+                        history.pop_front();
+                    }
                 }
             }
-        }
+
+            (cid, mid)
+        };
 
         (cid, mid)
     };
+
+    if let Some(hooks) = hook_runtime.as_ref() {
+        hooks
+            .emit_best_effort(
+                &HookEvent::AfterUserMessagePersisted,
+                &build_chat_hook_payload(
+                    Some(conversation_id.clone()),
+                    &char_id,
+                    None,
+                    Some(request.message.clone()),
+                    None,
+                    None,
+                    request.hidden,
+                ),
+            )
+            .await;
+    }
 
     // ── LAYER 1 & 2: SYSTEM SETUP ───────────────────────────────
 
@@ -2322,6 +2437,7 @@ pub async fn stream_chat(
                     &state,
                     observation,
                     &char_id,
+                    Some(&conversation_id),
                     Some(&assistant_turn_id),
                 )
                 .await;
@@ -2637,6 +2753,7 @@ pub async fn stream_chat(
             conversation_id,
             user_message_id,
             assistant_message_id,
+            client_request_id: request.client_request_id,
         }),
         Err(KokoroError::Chat(message)) if is_turn_cancelled_error_message(&message) => {
             tracing::info!(
@@ -2665,6 +2782,7 @@ pub async fn stream_chat(
                 conversation_id,
                 user_message_id,
                 assistant_message_id: None,
+                client_request_id: request.client_request_id,
             })
         }
         Err(error) => {
@@ -2692,27 +2810,29 @@ mod tests {
     };
     use crate::hooks::HookPayload;
 
-    /// 验证 StreamChatResponse 序列化及向前兼容性（当缺少 assistant_message_id 时默认解析为 None）。
+    /// 验证 StreamChatResponse 序列化及向前兼容性（当缺少 assistant_message_id/client_request_id 时默认解析为 None）。
     #[test]
     fn test_stream_chat_response_serialization_and_backward_compatibility() {
-        // 包含 assistant_message_id 时的正向序列化与反序列化
+        // 包含 assistant_message_id 与 client_request_id 时的正向序列化与反序列化
         let res = StreamChatResponse {
             conversation_id: "conv-123".to_string(),
             user_message_id: Some(10),
             assistant_message_id: Some(11),
+            client_request_id: Some("req-123".to_string()),
         };
         let json_str = serde_json::to_string(&res).expect("serialization succeeds");
         let deserialized: StreamChatResponse =
             serde_json::from_str(&json_str).expect("deserialization succeeds");
         assert_eq!(deserialized, res);
 
-        // 向前兼容验证：如果接收到没有 assistant_message_id 的旧版 JSON
+        // 向前兼容验证：如果接收到没有 assistant_message_id / client_request_id 的旧版 JSON
         let legacy_json = r#"{"conversation_id":"conv-legacy","user_message_id":42}"#;
         let legacy_res: StreamChatResponse =
             serde_json::from_str(legacy_json).expect("legacy deserialization succeeds");
         assert_eq!(legacy_res.conversation_id, "conv-legacy");
         assert_eq!(legacy_res.user_message_id, Some(42));
         assert_eq!(legacy_res.assistant_message_id, None);
+        assert_eq!(legacy_res.client_request_id, None);
     }
 
     #[test]
@@ -3805,10 +3925,54 @@ mod tests {
     fn chat_request_deserializes_regenerate_default_and_explicit() {
         let default_req: ChatRequest = serde_json::from_str(r#"{"message":"hi"}"#).unwrap();
         assert!(!default_req.regenerate);
+        assert_eq!(default_req.conversation_id, None);
 
         let regen_req: ChatRequest =
-            serde_json::from_str(r#"{"message":"hi","regenerate":true}"#).unwrap();
+            serde_json::from_str(r#"{"message":"hi","regenerate":true,"conversation_id":"conv-123"}"#).unwrap();
         assert!(regen_req.regenerate);
+        assert_eq!(regen_req.conversation_id.as_deref(), Some("conv-123"));
+
+        let null_conv_req: ChatRequest =
+            serde_json::from_str(r#"{"message":"hi","conversation_id":null}"#).unwrap();
+        assert_eq!(null_conv_req.conversation_id, None);
+    }
+
+    #[test]
+    fn test_chat_session_validation_logic() {
+        let check = |req: Option<&str>, init: Option<&str>, curr: Option<&str>| -> bool {
+            match (req, init, curr) {
+                (Some(r), _, Some(c)) => r == c,
+                (Some(_), _, None) => false,
+                (None, Some(i), Some(c)) => i == c,
+                (None, None, None) => true,
+                _ => false,
+            }
+        };
+
+        // 1. Explicit target matches current active
+        assert!(check(Some("conv-A"), Some("conv-A"), Some("conv-A")));
+        assert!(check(Some("conv-A"), None, Some("conv-A")));
+
+        // 2. Explicit target differs from current active (switched to B)
+        assert!(!check(Some("conv-A"), Some("conv-A"), Some("conv-B")));
+
+        // 3. Explicit target cleared while in flight (clear_history)
+        assert!(!check(Some("conv-A"), Some("conv-A"), None));
+
+        // 4. Implicit target (new conversation), stays None -> valid new conversation
+        assert!(check(None, None, None));
+
+        // 5. Implicit target (new conversation), but user clicked B while in flight -> invalid!
+        assert!(!check(None, None, Some("conv-B")));
+
+        // 6. Ambient caller without target, initial A, current A -> valid
+        assert!(check(None, Some("conv-A"), Some("conv-A")));
+
+        // 7. Ambient caller without target, initial A, switched to B -> invalid!
+        assert!(!check(None, Some("conv-A"), Some("conv-B")));
+
+        // 8. Ambient caller without target, initial A, cleared -> invalid!
+        assert!(!check(None, Some("conv-A"), None));
     }
 
     #[test]
