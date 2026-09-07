@@ -314,6 +314,8 @@ export default function ChatPanel({
     inputRef.current = input;
     const sttBaseDraftRef = useRef<string | null>(null);
     const sttBaseCharacterIdRef = useRef<string | null>(null);
+    const sttBaseConversationIdRef = useRef<string | null>(null);
+    const sttBaseGenerationRef = useRef<number | null>(null);
     const prevVoiceStateRef = useRef<VoiceState>(VoiceState.Idle);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [inputHeight, setInputHeight] = useState<number>(loadSavedChatInputHeight);
@@ -592,14 +594,18 @@ export default function ChatPanel({
             loadConversation,
             clearVisibleConversation: (characterId) => {
                 conversationGenerationRef.current += 1;
+                const turnId = currentTurnRef.current?.turnId;
+                const pendingClientRequestId = pendingTurnRequestRef.current?.clientRequestId;
                 pendingTurnRequestRef.current = null;
                 latestClientRequestIdRef.current = null;
-                const turnId = currentTurnRef.current?.turnId;
                 endTurnActivity();
                 cancelRequestedRef.current = true;
                 if (turnId) {
                     void cancelChatTurn(turnId, "character_switched")
                         .catch(error => console.error("[ChatPanel] Failed to cancel prior character turn:", error));
+                } else if (pendingClientRequestId) {
+                    void cancelChatTurn(pendingClientRequestId, "character_switched")
+                        .catch(error => console.error("[ChatPanel] Failed to cancel prior pending request:", error));
                 }
                 currentTurnRef.current = null;
                 pendingVisionContextRef.current = null;
@@ -615,14 +621,18 @@ export default function ChatPanel({
             },
             applyVisibleConversation: (conversation) => {
                 conversationGenerationRef.current += 1;
+                const turnId = currentTurnRef.current?.turnId;
+                const pendingClientRequestId = pendingTurnRequestRef.current?.clientRequestId;
                 pendingTurnRequestRef.current = null;
                 latestClientRequestIdRef.current = null;
-                const turnId = currentTurnRef.current?.turnId;
                 endTurnActivity();
                 cancelRequestedRef.current = true;
                 if (turnId) {
                     void cancelChatTurn(turnId, "conversation_switched")
                         .catch(error => console.error("[ChatPanel] Failed to cancel prior turn on conversation switch:", error));
+                } else if (pendingClientRequestId) {
+                    void cancelChatTurn(pendingClientRequestId, "conversation_switched")
+                        .catch(error => console.error("[ChatPanel] Failed to cancel prior pending request on conversation switch:", error));
                 }
                 currentTurnRef.current = null;
                 cancelRequestedRef.current = false;
@@ -657,8 +667,11 @@ export default function ChatPanel({
         }, 5000);
 
         const activeTurnId = currentTurnRef.current?.turnId;
+        const pendingClientRequestId = pendingTurnRequestRef.current?.clientRequestId;
         if (activeTurnId) {
             void requestTurnCancellation(activeTurnId);
+        } else if (pendingClientRequestId) {
+            void requestTurnCancellation(pendingClientRequestId);
         }
     }, [isStopping, requestTurnCancellation, endTurnActivity]);
 
@@ -715,6 +728,7 @@ export default function ChatPanel({
         isBusyRef.current = true;
         try {
             const activeTurnId = currentTurnRef.current?.turnId;
+            const pendingClientRequestId = pendingTurnRequestRef.current?.clientRequestId;
             if (activeTurnId) {
                 cancelRequestedRef.current = true;
                 setIsStopping(true);
@@ -723,10 +737,15 @@ export default function ChatPanel({
                 } catch (err) {
                     console.error("[ChatPanel] Failed to cancel prior turn before switching conversation:", err);
                 }
-            } else if (pendingTurnRequestRef.current) {
+            } else if (pendingClientRequestId) {
                 cancelRequestedRef.current = true;
                 setIsStopping(true);
                 pendingTurnRequestRef.current = null;
+                try {
+                    await cancelChatTurn(pendingClientRequestId, "conversation_switched");
+                } catch (err) {
+                    console.error("[ChatPanel] Failed to cancel prior pending request before switching conversation:", err);
+                }
             }
             await conversationSyncRef.current?.synchronize({
                 characterId: activeCharacterId,
@@ -760,6 +779,7 @@ export default function ChatPanel({
 
         try {
             const activeTurnId = currentTurnRef.current?.turnId;
+            const pendingClientRequestId = pendingTurnRequestRef.current?.clientRequestId;
             if (activeTurnId) {
                 cancelRequestedRef.current = true;
                 setIsStopping(true);
@@ -768,10 +788,15 @@ export default function ChatPanel({
                 } catch (err) {
                     console.error("[ChatPanel] Failed to cancel prior turn before new conversation:", err);
                 }
-            } else if (pendingTurnRequestRef.current) {
+            } else if (pendingClientRequestId) {
                 cancelRequestedRef.current = true;
                 setIsStopping(true);
                 pendingTurnRequestRef.current = null;
+                try {
+                    await cancelChatTurn(pendingClientRequestId, "new_conversation_started");
+                } catch (err) {
+                    console.error("[ChatPanel] Failed to cancel prior pending request before new conversation:", err);
+                }
             }
 
             // 先执行后端清空与重置，确保后端 current_conversation_id 与历史已置空
@@ -965,6 +990,9 @@ export default function ChatPanel({
         const { clientRequestId, requestGeneration, streamChatPromise, onCatchError } = options;
         try {
             const res = await streamChatPromise;
+            if (res?.status === "error") {
+                throw new Error(t("chat.errors.connection_error"));
+            }
             const streamResValidation = validateStreamChatResponse({
                 requestGeneration,
                 currentGeneration: conversationGenerationRef.current,
@@ -1052,13 +1080,21 @@ export default function ChatPanel({
                 onCatchError(err);
             }
         }
-    }, [endTurnActivity, finalizeActiveTurnIfCurrent, resyncConversationMessages, setError]);
+    }, [endTurnActivity, finalizeActiveTurnIfCurrent, resyncConversationMessages, setError, t]);
 
     const handleTranscription = useCallback((text: string) => {
-        // 记录发起识别时的会话三元组快照
-        const startGeneration = conversationGenerationRef.current;
-        const startConversationId = activeConversationIdRef.current;
+        // 读取发起录音时捕获的会话快照（若无则回退到当前快照，如 continuousListening 场景）
+        const startGeneration = sttBaseGenerationRef.current ?? conversationGenerationRef.current;
+        const startConversationId = sttBaseConversationIdRef.current ?? activeConversationIdRef.current;
         const startCharacterId = sttBaseCharacterIdRef.current ?? activeCharacterIdRef.current;
+        const base = sttBaseDraftRef.current ?? "";
+
+        const resetSttSessionSnapshot = () => {
+            sttBaseDraftRef.current = null;
+            sttBaseCharacterIdRef.current = null;
+            sttBaseConversationIdRef.current = null;
+            sttBaseGenerationRef.current = null;
+        };
 
         // 若会话已不再是当前会话（角色切换、同一角色跨会话切换、或代次变更），
         // 降级保存转录文本，绝不静默丢弃
@@ -1071,7 +1107,7 @@ export default function ChatPanel({
                 // 防御性合并：若用户在切换期间在输入框键入了额外内容，保留键入内容与转录的组合
                 if (transcriptionText) {
                     setInput(prev => {
-                        if (prev && prev !== (sttBaseDraftRef.current ?? "") && !prev.includes(transcriptionText)) {
+                        if (prev && prev !== base && !prev.includes(transcriptionText)) {
                             return combineDraftWithTranscription(prev, transcriptionText);
                         }
                         return draftText;
@@ -1088,15 +1124,12 @@ export default function ChatPanel({
             // 空文本或未识别：恢复原草稿并重置快照
             if (sttBaseDraftRef.current !== null) {
                 preserveSttDraft(sttBaseDraftRef.current);
-                sttBaseDraftRef.current = null;
-                sttBaseCharacterIdRef.current = null;
             }
+            resetSttSessionSnapshot();
             return;
         }
 
-        const base = sttBaseDraftRef.current ?? "";
-        sttBaseDraftRef.current = null; // 正常结算，解除锁定
-        sttBaseCharacterIdRef.current = null;
+        resetSttSessionSnapshot(); // 正常结算，解除锁定
         const fullMessage = combineDraftWithTranscription(base, trimmed);
 
         if (sttAutoSend) {
@@ -1194,10 +1227,15 @@ export default function ChatPanel({
             })();
         } else {
             // Fill input box with merged text for user review
-            if (activeCharacterIdRef.current !== startCharacterId) {
-                saveCharacterDraft(startCharacterId, fullMessage);
-            } else {
+            const isSessionCurrent = () =>
+                conversationGenerationRef.current === startGeneration &&
+                activeConversationIdRef.current === startConversationId &&
+                activeCharacterIdRef.current === startCharacterId;
+
+            if (isSessionCurrent()) {
                 setInput(fullMessage);
+            } else {
+                preserveSttDraft(fullMessage, trimmed);
             }
         }
     }, [clearDraft, ensureMemoryModelReady, interactionDisabled, processTurnStreamResult, resetReveal, setInput, startStreaming, sttAutoSend]);
@@ -1256,6 +1294,8 @@ export default function ChatPanel({
             }
             sttBaseDraftRef.current = inputRef.current;
             sttBaseCharacterIdRef.current = activeCharacterIdRef.current;
+            sttBaseConversationIdRef.current = activeConversationIdRef.current;
+            sttBaseGenerationRef.current = conversationGenerationRef.current;
             startVoice({ autoStopOnSilence: true });
         }, [continuousListening, handleTranscription, startVoice]),
     });
@@ -1263,9 +1303,18 @@ export default function ChatPanel({
     // Effect: Sync partial STT text to input box for real-time feedback
     useEffect(() => {
         if (voiceState === VoiceState.Listening && sttPartialText) {
-            const base = sttBaseDraftRef.current ?? "";
-            const combined = combineDraftWithTranscription(base, sttPartialText);
-            setInput(combined);
+            const targetCharId = sttBaseCharacterIdRef.current ?? activeCharacterIdRef.current;
+            const targetGen = sttBaseGenerationRef.current ?? conversationGenerationRef.current;
+            const targetConvId = sttBaseConversationIdRef.current ?? activeConversationIdRef.current;
+            if (
+                activeCharacterIdRef.current === targetCharId &&
+                conversationGenerationRef.current === targetGen &&
+                activeConversationIdRef.current === targetConvId
+            ) {
+                const base = sttBaseDraftRef.current ?? "";
+                const combined = combineDraftWithTranscription(base, sttPartialText);
+                setInput(combined);
+            }
         }
     }, [sttPartialText, voiceState, setInput]);
 
@@ -1279,9 +1328,11 @@ export default function ChatPanel({
                 } else {
                     saveCharacterDraft(targetCharId, sttBaseDraftRef.current);
                 }
-                sttBaseDraftRef.current = null;
-                sttBaseCharacterIdRef.current = null;
             }
+            sttBaseDraftRef.current = null;
+            sttBaseCharacterIdRef.current = null;
+            sttBaseConversationIdRef.current = null;
+            sttBaseGenerationRef.current = null;
         }
         prevVoiceStateRef.current = voiceState;
     }, [voiceState, setInput]);
@@ -1498,6 +1549,10 @@ export default function ChatPanel({
                         startStreaming();
                         setIsThinking(true);
                         userScrolledRef.current = false;
+                        emit("pet-chat-accepted", {
+                            client_request_id: clientRequestId,
+                            conversation_id: activeConversationIdRef.current ?? undefined,
+                        }).catch(() => {});
                     }),
 
                     listen<{ client_request_id?: string; error?: string }>("pet-chat-failed", (event) => {
@@ -1957,6 +2012,10 @@ export default function ChatPanel({
                         resetReveal();
                         rawResponseRef.current = "";
                         currentTurnRef.current = null;
+                        emit("interaction-trigger-accepted", {
+                            client_request_id: clientRequestId,
+                            conversation_id: activeConversationIdRef.current ?? undefined,
+                        }).catch(() => {});
                     }),
 
                     listen<{ client_request_id?: string; error?: string }>("interaction-trigger-failed", (event) => {
@@ -1982,6 +2041,10 @@ export default function ChatPanel({
                         if (aborted || isBusyRef.current) return;
                         if (!sttEnabledRef.current || !sttAutoSendRef.current) return;
                         console.log("[ChatPanel] Voice interrupt → starting STT");
+                        sttBaseDraftRef.current = inputRef.current;
+                        sttBaseCharacterIdRef.current = activeCharacterIdRef.current;
+                        sttBaseConversationIdRef.current = activeConversationIdRef.current;
+                        sttBaseGenerationRef.current = conversationGenerationRef.current;
                         startVoiceRef.current({ autoStopOnSilence: true });
                     }),
                 ]);
@@ -2238,6 +2301,8 @@ export default function ChatPanel({
         if (voiceState === VoiceState.Idle) {
             sttBaseDraftRef.current = inputRef.current;
             sttBaseCharacterIdRef.current = activeCharacterIdRef.current;
+            sttBaseConversationIdRef.current = activeConversationIdRef.current;
+            sttBaseGenerationRef.current = conversationGenerationRef.current;
             startVoice({ autoStopOnSilence: true });
         } else {
             stopVoice();
@@ -2257,6 +2322,7 @@ export default function ChatPanel({
         isBusyRef.current = true;
         try {
             const activeTurnId = currentTurnRef.current?.turnId;
+            const pendingClientRequestId = pendingTurnRequestRef.current?.clientRequestId;
             if (activeTurnId) {
                 cancelRequestedRef.current = true;
                 setIsStopping(true);
@@ -2264,6 +2330,14 @@ export default function ChatPanel({
                     await cancelChatTurn(activeTurnId, "clear_history");
                 } catch (err) {
                     console.error("[ChatPanel] Failed to cancel prior turn before clear history:", err);
+                }
+            } else if (pendingClientRequestId) {
+                cancelRequestedRef.current = true;
+                setIsStopping(true);
+                try {
+                    await cancelChatTurn(pendingClientRequestId, "clear_history");
+                } catch (err) {
+                    console.error("[ChatPanel] Failed to cancel prior pending request before clear history:", err);
                 }
             }
             conversationGenerationRef.current += 1;

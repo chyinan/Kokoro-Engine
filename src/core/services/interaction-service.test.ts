@@ -19,6 +19,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("../../lib/kokoro-bridge", () => ({
     streamChat: vi.fn(async () => ({ status: "completed" })),
+    cancelChatTurn: vi.fn(async () => {}),
     onChatTurnStart: vi.fn(async (cb: any) => {
         listeners["chat-turn-start"] = cb;
         return () => {};
@@ -54,6 +55,14 @@ describe("InteractionService", () => {
             playCue: vi.fn(),
             resolveInteractionSemanticCue: vi.fn(() => null),
         };
+        vi.spyOn(eventApi, "emit").mockImplementation(async (event: string, payload: any) => {
+            if (event === "interaction-trigger") {
+                const reqId = (payload as any)?.client_request_id;
+                listeners["interaction-trigger-accepted"]?.({
+                    payload: { client_request_id: reqId, conversation_id: "conv-mock" },
+                });
+            }
+        });
         service = new InteractionService();
     });
 
@@ -231,5 +240,26 @@ describe("InteractionService", () => {
 
         await service.triggerInteraction(gesture, mockController as any);
         expect(bridge.streamChat).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not call streamChat when interaction-trigger is rejected during handshake", async () => {
+        vi.spyOn(eventApi, "emit").mockImplementation(async (event: string, payload: any) => {
+            if (event === "interaction-trigger") {
+                const reqId = (payload as any)?.client_request_id;
+                listeners["interaction-trigger-rejected"]?.({
+                    payload: { client_request_id: reqId, reason: "busy" },
+                });
+            }
+        });
+
+        const gesture: GestureEvent = {
+            hitArea: "head",
+            gesture: "tap",
+            consecutiveTaps: 1,
+        };
+
+        const result = await service.triggerInteraction(gesture, mockController as any);
+        expect(result).not.toBeNull();
+        expect(bridge.streamChat).not.toHaveBeenCalled();
     });
 });

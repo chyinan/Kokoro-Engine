@@ -6,7 +6,7 @@
  *
  */
 import type { CueName } from "../../features/live2d/Live2DController";
-import { streamChat, onChatTurnFinish, onChatTurnStart, isChatBusy, isChatTurnBusyError, getMemoryEmbeddingModelStatus } from "../../lib/kokoro-bridge";
+import { streamChat, cancelChatTurn, onChatTurnFinish, onChatTurnStart, isChatBusy, isChatTurnBusyError, getMemoryEmbeddingModelStatus } from "../../lib/kokoro-bridge";
 import { emit, listen } from "@tauri-apps/api/event";
 import { requestMemoryModelDialog } from "../../lib/memory-model-gate";
 
@@ -67,7 +67,9 @@ export class InteractionService {
     private pendingGesture: { gesture: GestureEvent; controller: ControllerProxy } | null = null;
     private unlistenChatDone: (() => void) | null = null;
     private unlistenChatStart: (() => void) | null = null;
+    private unlistenChatAccepted: (() => void) | null = null;
     private unlistenChatRejected: (() => void) | null = null;
+    private pendingHandshakes = new Map<string, (val: { accepted: true; conversation_id?: string } | { accepted: false; reason?: string; timeout?: boolean }) => void>();
 
     constructor() {
         // Listen for turn-start to know when any chat turn begins (ChatPanel, PetWindow, etc.)
@@ -78,15 +80,36 @@ export class InteractionService {
             this.isChatBusy = true;
         }).then(fn => { this.unlistenChatStart = fn; });
 
+        // Listen for acceptance from ChatPanel
+        listen<{ client_request_id?: string; conversation_id?: string }>("interaction-trigger-accepted", (event) => {
+            const payload = (event as any)?.payload ?? event;
+            const reqId = payload?.client_request_id;
+            if (reqId && this.pendingHandshakes.has(reqId)) {
+                this.pendingHandshakes.get(reqId)!({
+                    accepted: true,
+                    conversation_id: payload?.conversation_id,
+                });
+                this.pendingHandshakes.delete(reqId);
+            }
+        }).then(fn => { this.unlistenChatAccepted = fn; });
+
         // Listen for rejection from ChatPanel if it was busy
         listen<{ client_request_id?: string; reason?: string }>("interaction-trigger-rejected", (event) => {
             const payload = (event as any)?.payload ?? event;
             const reqId = payload?.client_request_id;
+            if (reqId && this.pendingHandshakes.has(reqId)) {
+                this.pendingHandshakes.get(reqId)!({
+                    accepted: false,
+                    reason: payload?.reason,
+                });
+                this.pendingHandshakes.delete(reqId);
+            }
             if (reqId && reqId !== this.activeClientRequestId) {
                 return;
             }
             if (this.activeClientRequestId && reqId === this.activeClientRequestId) {
                 this.activeClientRequestId = null;
+                cancelChatTurn(reqId, "interaction_trigger_rejected").catch(() => {});
             }
             this.isChatBusy = true;
         }).then(fn => { this.unlistenChatRejected = fn; });
@@ -201,6 +224,15 @@ export class InteractionService {
         const clientRequestId = `interaction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         this.activeClientRequestId = clientRequestId;
 
+        const handshakePromise = new Promise<{ accepted: true; conversation_id?: string } | { accepted: false; reason?: string; timeout?: boolean }>((resolve) => {
+            this.pendingHandshakes.set(clientRequestId, resolve);
+        });
+
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
+        const timeoutPromise = new Promise<{ accepted: false; timeout: true }>((resolve) => {
+            timeoutId = setTimeout(() => resolve({ accepted: false, timeout: true }), 1000);
+        });
+
         // Notify ChatPanel to start streaming (same pattern as proactive-trigger)
         await emit("interaction-trigger", {
             gesture: gesture.gesture,
@@ -208,15 +240,38 @@ export class InteractionService {
             client_request_id: clientRequestId,
         });
 
+        const handshake = await Promise.race([handshakePromise, timeoutPromise]);
+        if (timeoutId) clearTimeout(timeoutId);
+        this.pendingHandshakes.delete(clientRequestId);
+
+        if (!handshake.accepted) {
+            console.warn("[InteractionService] Interaction trigger rejected or timed out:", handshake);
+            if (this.activeClientRequestId === clientRequestId) {
+                this.activeClientRequestId = null;
+            }
+            this.isChatBusy = true;
+            this.pendingGesture = { gesture, controller: _controller };
+            const event: InteractionEvent = {
+                hitArea: gesture.hitArea,
+                gesture: gesture.gesture,
+                isCombo: gesture.gesture === "rapid_tap",
+            };
+            this.broadcast(event);
+            return event;
+        }
+
         try {
             await streamChat({
                 message,
                 character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
                 client_request_id: clientRequestId,
+                conversation_id: handshake.conversation_id,
                 hidden: true,
             });
         } catch (err) {
             console.error("[InteractionService] Failed to trigger LLM:", err);
+            this.pendingHandshakes.delete(clientRequestId);
+            if (timeoutId) clearTimeout(timeoutId);
             if (this.activeClientRequestId === clientRequestId) {
                 this.activeClientRequestId = null;
             }
@@ -285,6 +340,7 @@ export class InteractionService {
 
     destroy(): void {
         this.unlistenChatStart?.();
+        this.unlistenChatAccepted?.();
         this.unlistenChatRejected?.();
         this.unlistenChatDone?.();
     }

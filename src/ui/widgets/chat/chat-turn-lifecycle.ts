@@ -12,6 +12,7 @@ export type TurnStartValidationContext = {
         readonly characterId: string;
     } | null;
     readonly isCancelRequested: boolean;
+    readonly allowUntracked?: boolean;
 };
 
 export type TurnStartEventPayload = {
@@ -35,7 +36,8 @@ export type TurnStartValidationResult =
               | "generation_mismatch"
               | "request_mismatch"
               | "conversation_mismatch"
-              | "missing_request_id";
+              | "missing_request_id"
+              | "no_pending_request";
       };
 
 /**
@@ -82,7 +84,12 @@ export function validateTurnStart(
         };
     }
 
-    // No pending request recorded (e.g. external trigger or background turn)
+    // No pending request recorded: default to rejection for safe convergence
+    // unless allowUntracked is explicitly set to true.
+    if (!context.allowUntracked) {
+        return { valid: false, reason: "no_pending_request" };
+    }
+
     if (payload.conversation_id) {
         if (
             context.activeConversationId !== null &&

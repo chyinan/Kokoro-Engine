@@ -75,6 +75,7 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
     let turnFinishCb: ((event: any) => void) | null = null;
 
     let streamChatResolver: ((res: any) => void) | null = null;
+    let streamChatRejecter: ((err: any) => void) | null = null;
     let streamChatMock: ReturnType<typeof vi.fn>;
     let loadConversationMock: ReturnType<typeof vi.fn>;
 
@@ -84,9 +85,11 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
         turnDeltaCb = null;
         turnFinishCb = null;
         streamChatResolver = null;
+        streamChatRejecter = null;
 
-        streamChatMock = vi.fn(() => new Promise((resolve) => {
+        streamChatMock = vi.fn(() => new Promise((resolve, reject) => {
             streamChatResolver = resolve;
+            streamChatRejecter = reject;
         }));
 
         loadConversationMock = vi.fn(async () => ({
@@ -433,5 +436,138 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
 
         expect(streamChatMock).toHaveBeenCalledTimes(2);
         expect(streamChatMock.mock.calls[1][0].message).toBe("Next message after cancel");
+    });
+
+    it("handles stream failure when chat-failure is lost and streamChat rejects (Plan A)", async () => {
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        const form = container.querySelector("form") as HTMLFormElement;
+
+        await act(async () => {
+            setTextareaValue(textarea, "Failure test message");
+        });
+
+        await act(async () => {
+            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(streamChatMock).toHaveBeenCalledTimes(1);
+        const requestPayload = streamChatMock.mock.calls[0][0];
+        const clientRequestId = requestPayload.client_request_id;
+
+        // UI is busy
+        expect(textarea.disabled).toBe(true);
+
+        // Turn finish event fires with status = "error"
+        await act(async () => {
+            turnFinishCb?.({
+                turn_id: "turn-fail-1",
+                status: "error",
+                client_request_id: clientRequestId,
+                conversation_id: "conv-1",
+                assistant_message_id: null,
+            });
+        });
+
+        // NOTE: chat-failure is LOST (never emitted), but streamChat Promise rejects with Kokoro error!
+        await act(async () => {
+            streamChatRejecter?.("LLM provider connection timed out after 30s");
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Fast-forward timeout for error bubble if needed (setTimeout 500ms in onCatchError)
+        await act(async () => {
+            await new Promise((r) => setTimeout(r, 600));
+        });
+
+        // UI is unblocked
+        expect(textarea.disabled).toBe(false);
+
+        // User can send another message without being blocked
+        await act(async () => {
+            setTextareaValue(textarea, "Retry message after failure");
+        });
+
+        await act(async () => {
+            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(streamChatMock).toHaveBeenCalledTimes(2);
+        expect(streamChatMock.mock.calls[1][0].message).toBe("Retry message after failure");
+    });
+
+    it("handles defensive stream failure when streamChat resolves with status: error (Plan C)", async () => {
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        const form = container.querySelector("form") as HTMLFormElement;
+
+        await act(async () => {
+            setTextareaValue(textarea, "Defensive failure test message");
+        });
+
+        await act(async () => {
+            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(streamChatMock).toHaveBeenCalledTimes(1);
+        const requestPayload = streamChatMock.mock.calls[0][0];
+        const clientRequestId = requestPayload.client_request_id;
+
+        // UI is busy
+        expect(textarea.disabled).toBe(true);
+
+        // Turn finish event fires with status = "error"
+        await act(async () => {
+            turnFinishCb?.({
+                turn_id: "turn-fail-2",
+                status: "error",
+                client_request_id: clientRequestId,
+                conversation_id: "conv-1",
+                assistant_message_id: null,
+            });
+        });
+
+        // streamChat resolves with status = "error"
+        await act(async () => {
+            streamChatResolver?.({
+                conversation_id: "conv-1",
+                user_message_id: 501,
+                assistant_message_id: null,
+                client_request_id: clientRequestId,
+                status: "error",
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        await act(async () => {
+            await new Promise((r) => setTimeout(r, 600));
+        });
+
+        // UI is unblocked
+        expect(textarea.disabled).toBe(false);
+
+        // User can send another message without being blocked
+        await act(async () => {
+            setTextareaValue(textarea, "Retry message after defensive error");
+        });
+
+        await act(async () => {
+            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(streamChatMock).toHaveBeenCalledTimes(2);
+        expect(streamChatMock.mock.calls[1][0].message).toBe("Retry message after defensive error");
     });
 });

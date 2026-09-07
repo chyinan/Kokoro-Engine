@@ -173,8 +173,19 @@ struct PendingToolApproval {
     decision_rx: Option<oneshot::Receiver<ToolApprovalDecision>>,
 }
 
+struct TurnCancellationRecord {
+    reason: Option<String>,
+    cancel_tx: tokio::sync::watch::Sender<bool>,
+}
+
+#[derive(Default)]
+struct TurnCancellationInner {
+    cancelled: HashMap<String, TurnCancellationRecord>,
+    request_to_turn: HashMap<String, String>,
+}
+
 pub struct TurnCancellationState {
-    cancelled: RwLock<HashMap<String, Option<String>>>,
+    inner: RwLock<TurnCancellationInner>,
     finished_tx: tokio::sync::broadcast::Sender<String>,
 }
 
@@ -190,14 +201,27 @@ impl TurnCancellationState {
     pub fn new() -> Self {
         let (finished_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
-            cancelled: RwLock::new(HashMap::new()),
+            inner: RwLock::new(TurnCancellationInner::default()),
             finished_tx,
         }
     }
 
-    async fn register_turn(&self, turn_id: &str) {
-        let mut map = self.cancelled.write().await;
-        map.entry(turn_id.to_string()).or_insert(None);
+    pub async fn register_turn(&self, turn_id: &str) {
+        self.register_turn_with_request(turn_id, None).await;
+    }
+
+    pub async fn register_turn_with_request(&self, turn_id: &str, client_request_id: Option<&str>) {
+        let mut inner = self.inner.write().await;
+        if let std::collections::hash_map::Entry::Vacant(e) = inner.cancelled.entry(turn_id.to_string()) {
+            let (tx, _) = tokio::sync::watch::channel(false);
+            e.insert(TurnCancellationRecord {
+                reason: None,
+                cancel_tx: tx,
+            });
+        }
+        if let Some(req_id) = client_request_id {
+            inner.request_to_turn.insert(req_id.to_string(), turn_id.to_string());
+        }
     }
 
     async fn ensure_turn_not_cancelled(&self, turn_id: &str) -> Result<(), String> {
@@ -219,45 +243,96 @@ impl TurnCancellationState {
         }))
     }
 
-    async fn cancel_turn(&self, turn_id: &str, reason: Option<String>) -> Result<(), String> {
-        let mut map = self.cancelled.write().await;
-        if let Some(entry) = map.get_mut(turn_id) {
-            if entry.is_none() {
-                *entry = reason;
+    async fn cancel_turn(&self, target_id: &str, reason: Option<String>) -> Result<(), String> {
+        let mut inner = self.inner.write().await;
+        if let Some(entry) = inner.cancelled.get_mut(target_id) {
+            if entry.reason.is_none() {
+                entry.reason = reason;
             }
+            let _ = entry.cancel_tx.send(true);
             return Ok(());
         }
-        Err(format!("unknown turn_id: {}", turn_id))
+
+        if let Some(turn_id) = inner.request_to_turn.get(target_id).cloned() {
+            if let Some(entry) = inner.cancelled.get_mut(&turn_id) {
+                if entry.reason.is_none() {
+                    entry.reason = reason;
+                }
+                let _ = entry.cancel_tx.send(true);
+                return Ok(());
+            }
+        }
+
+        Err(format!("unknown turn_id: {}", target_id))
     }
 
     async fn is_cancelled(&self, turn_id: &str) -> bool {
-        self.cancelled
-            .read()
-            .await
-            .get(turn_id)
-            .map(|v| v.is_some())
-            .unwrap_or(false)
+        let inner = self.inner.read().await;
+        if let Some(v) = inner.cancelled.get(turn_id) {
+            return v.reason.is_some();
+        }
+        if let Some(tid) = inner.request_to_turn.get(turn_id) {
+            if let Some(v) = inner.cancelled.get(tid) {
+                return v.reason.is_some();
+            }
+        }
+        false
     }
 
     async fn has_turn(&self, turn_id: &str) -> bool {
-        self.cancelled.read().await.contains_key(turn_id)
+        let inner = self.inner.read().await;
+        inner.cancelled.contains_key(turn_id)
+            || inner.request_to_turn.get(turn_id).is_some_and(|tid| inner.cancelled.contains_key(tid))
+    }
+
+    pub async fn subscribe_cancellation(
+        &self,
+        turn_id: &str,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        let inner = self.inner.read().await;
+        if let Some(v) = inner.cancelled.get(turn_id) {
+            return Some(v.cancel_tx.subscribe());
+        }
+        if let Some(tid) = inner.request_to_turn.get(turn_id) {
+            if let Some(v) = inner.cancelled.get(tid) {
+                return Some(v.cancel_tx.subscribe());
+            }
+        }
+        None
     }
 
     async fn clear_turn(&self, turn_id: &str) {
-        self.cancelled.write().await.remove(turn_id);
+        {
+            let mut inner = self.inner.write().await;
+            inner.cancelled.remove(turn_id);
+            inner.request_to_turn.retain(|_, v| v != turn_id);
+        }
         let _ = self.finished_tx.send(turn_id.to_string());
     }
 
     async fn cancel_turn_and_wait(
         &self,
-        turn_id: &str,
+        target_id: &str,
         reason: Option<String>,
         timeout: std::time::Duration,
     ) -> Result<(), String> {
         let mut rx = self.finished_tx.subscribe();
-        self.cancel_turn(turn_id, reason).await?;
+        self.cancel_turn(target_id, reason).await?;
 
-        if !self.has_turn(turn_id).await {
+        let resolved_turn_id = {
+            let inner = self.inner.read().await;
+            if inner.cancelled.contains_key(target_id) {
+                Some(target_id.to_string())
+            } else {
+                inner.request_to_turn.get(target_id).cloned()
+            }
+        };
+
+        let Some(resolved_turn_id) = resolved_turn_id else {
+            return Ok(());
+        };
+
+        if !self.has_turn(&resolved_turn_id).await {
             return Ok(());
         }
 
@@ -265,10 +340,10 @@ impl TurnCancellationState {
         while start.elapsed() < timeout {
             let remaining = timeout.saturating_sub(start.elapsed());
             match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Ok(finished_id)) if finished_id == turn_id => return Ok(()),
+                Ok(Ok(finished_id)) if finished_id == resolved_turn_id => return Ok(()),
                 Ok(Ok(_)) => continue,
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
-                    if !self.has_turn(turn_id).await {
+                    if !self.has_turn(&resolved_turn_id).await {
                         return Ok(());
                     }
                 }
@@ -276,6 +351,69 @@ impl TurnCancellationState {
             }
         }
         Ok(())
+    }
+}
+
+async fn wait_for_cancel_event(rx: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    if let Some(rx) = rx.as_mut() {
+        if *rx.borrow() {
+            return;
+        }
+        let is_ok = rx.wait_for(|&c| c).await.is_ok();
+        if !is_ok && !*rx.borrow() {
+            std::future::pending::<()>().await;
+        }
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+fn stream_first_chunk_timeout() -> std::time::Duration {
+    std::env::var("KOKORO_LLM_FIRST_CHUNK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(90))
+}
+
+fn stream_chunk_idle_timeout() -> std::time::Duration {
+    std::env::var("KOKORO_LLM_CHUNK_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(60))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum StreamPollResult<T> {
+    Item(T),
+    Cancelled,
+    TimedOut(String),
+    StreamEnded,
+}
+
+pub async fn poll_stream_with_cancellation_and_timeout<S, T>(
+    stream: &mut S,
+    cancel_rx: &mut Option<tokio::sync::watch::Receiver<bool>>,
+    timeout_duration: std::time::Duration,
+) -> StreamPollResult<T>
+where
+    S: futures::Stream<Item = T> + Unpin,
+{
+    tokio::select! {
+        biased;
+        _ = wait_for_cancel_event(cancel_rx) => {
+            StreamPollResult::Cancelled
+        }
+        _ = tokio::time::sleep(timeout_duration) => {
+            StreamPollResult::TimedOut(format!("timeout after {}s", timeout_duration.as_secs()))
+        }
+        item = stream.next() => {
+            match item {
+                Some(val) => StreamPollResult::Item(val),
+                None => StreamPollResult::StreamEnded,
+            }
+        }
     }
 }
 
@@ -1589,9 +1727,31 @@ pub async fn stream_chat(
     let mut request = request;
     ensure_client_request_id(&mut request.client_request_id);
 
+    let client_request_id = request
+        .client_request_id
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+
     let _turn_execution_guard = state
-        .try_acquire_chat_turn(request.client_request_id.as_deref().unwrap_or("default"))
+        .try_acquire_chat_turn(&client_request_id)
         .map_err(KokoroError::Chat)?;
+
+    let assistant_turn_id = uuid::Uuid::new_v4().to_string();
+    cancel_state
+        .register_turn_with_request(&assistant_turn_id, Some(&client_request_id))
+        .await;
+    let _turn_guard =
+        TurnCancellationGuard::new(cancel_state.inner().clone(), assistant_turn_id.clone());
+
+    if cancel_state.is_cancelled(&assistant_turn_id).await {
+        tracing::info!(
+            target: "chat",
+            "[stream_chat] Turn {} (request {}) cancelled immediately after turn acquisition",
+            assistant_turn_id,
+            client_request_id
+        );
+        return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+    }
 
     // 0. Resolve character ID for this request (not stored in shared state)
     let char_id = request
@@ -1599,7 +1759,8 @@ pub async fn stream_chat(
         .clone()
         .unwrap_or_else(|| "default".to_string());
     let requested_conversation_id = request.conversation_id.clone();
-    let initial_conversation_id = state.current_conversation_id.lock().await.clone();
+    let (initial_conversation_id, initial_generation) =
+        state.conversation_state_snapshot().await;
     let hook_runtime = app.try_state::<HookRuntime>();
     // Keep shared character_id in sync for modules that still read it (heartbeat)
     state.set_character_id(char_id.clone()).await;
@@ -1651,10 +1812,11 @@ pub async fn stream_chat(
     let (mut conversation_id, user_message_id, history_snapshot, bound_generation) = {
         let _switch_guard = state.conversation_switch_lock.lock().await;
         let current_conv_id = state.current_conversation_id.lock().await.clone();
-        let bound_generation = state.current_conversation_generation();
+        let current_generation = state.current_conversation_generation();
 
-        // 校验目标会话一致性，防止跨会话串写或清空后复活幽灵会话
-        let is_valid = match (
+        // 校验目标会话一致性与世代一致性，防止跨会话串写、清空后复活幽灵会话、或 A -> B -> A 绕过校验
+        let generation_valid = current_generation == initial_generation;
+        let conversation_valid = match (
             &requested_conversation_id,
             &initial_conversation_id,
             &current_conv_id,
@@ -1667,19 +1829,24 @@ pub async fn stream_chat(
             (None, None, None) => true,                     // 进入时无会话，锁内仍无会话（合法新建会话）
             _ => false,                                     // 其他情况均为排队期间会话已变化
         };
+        let is_valid = generation_valid && conversation_valid;
 
         if !is_valid {
             tracing::warn!(
                 target: "chat",
-                "[stream_chat] Aborting chat turn: target conversation changed while request was queued. requested={:?}, initial={:?}, current={:?}",
+                "[stream_chat] Aborting chat turn: target conversation changed while request was queued. requested={:?}, initial={:?}, current={:?}, initial_gen={}, current_gen={}",
                 requested_conversation_id,
                 initial_conversation_id,
-                current_conv_id
+                current_conv_id,
+                initial_generation,
+                current_generation
             );
             return Err(KokoroError::Chat(
                 "Conversation changed while request was in-flight".to_string(),
             ));
         }
+
+        let bound_generation = initial_generation;
 
         let resolved_conv_id = if let Some(cid) = current_conv_id {
             Some(cid)
@@ -1882,6 +2049,16 @@ pub async fn stream_chat(
     };
     let memory_target_language = state.response_language.lock().await.clone();
 
+    if cancel_state.is_cancelled(&assistant_turn_id).await {
+        tracing::info!(
+            target: "chat",
+            "[stream_chat] Turn {} (request {}) cancelled before prompt composition",
+            assistant_turn_id,
+            client_request_id
+        );
+        return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+    }
+
     // Compose Persona Prompt with immutable history snapshot and explicit conversation scoping
     let (prompt_messages, compose_warnings) = state
         .compose_prompt_for_conversation_with_guard(
@@ -1902,11 +2079,6 @@ pub async fn stream_chat(
         tracing::warn!("[compose_prompt] {}", warning);
         let _ = app.emit("chat-warning", &warning);
     }
-
-    let assistant_turn_id = uuid::Uuid::new_v4().to_string();
-    cancel_state.register_turn(&assistant_turn_id).await;
-    let _turn_guard =
-        TurnCancellationGuard::new(cancel_state.inner().clone(), assistant_turn_id.clone());
 
     let draft_row_id_holder = std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let draft_row_id_for_stream = std::sync::Arc::clone(&draft_row_id_holder);
@@ -1951,6 +2123,17 @@ pub async fn stream_chat(
             )
             .await;
     }
+
+    if cancel_state.is_cancelled(&assistant_turn_id).await {
+        tracing::info!(
+            target: "chat",
+            "[stream_chat] Turn {} (request {}) cancelled before chat-turn-start emit",
+            assistant_turn_id,
+            client_request_id
+        );
+        return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+    }
+
     app.emit(
         "chat-turn-start",
         serde_json::json!({
@@ -2055,8 +2238,11 @@ pub async fn stream_chat(
     let mut cue_set_by_tool = false;
     let mut draft_row_id: Option<i64> = None;
     let mut stream_failed = false;
+    let mut stream_failure_message: Option<String> = None;
     let mut all_reasoning_content = String::new();
     let mut final_provider_data = Vec::new();
+
+    let mut cancel_rx = cancel_state.subscribe_cancellation(&assistant_turn_id).await;
 
     for round in 0..max_tool_rounds {
         tracing::info!(target: "chat", "[Chat] Tool loop round {}", round + 1);
@@ -2064,18 +2250,83 @@ pub async fn stream_chat(
             .await
             .map_err(KokoroError::Chat)?;
 
+        let stream_connect_timeout = stream_first_chunk_timeout();
+        let stream_creation_fut = async {
+            if native_tools_enabled {
+                chat_provider
+                    .chat_stream_with_tools_rich(client_messages.clone(), None, native_tools.clone())
+                    .await
+            } else {
+                chat_provider
+                    .chat_stream_rich(client_messages.clone(), None)
+                    .await
+            }
+        };
+
         let mut stream: std::pin::Pin<
             Box<dyn futures::Stream<Item = Result<LlmStreamEvent, String>> + Send>,
-        > = if native_tools_enabled {
-            chat_provider
-                .chat_stream_with_tools_rich(client_messages.clone(), None, native_tools.clone())
-                .await
-                .map_err(KokoroError::Chat)?
-        } else {
-            chat_provider
-                .chat_stream_rich(client_messages.clone(), None)
-                .await
-                .map_err(KokoroError::Chat)?
+        > = tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut cancel_rx) => {
+                tracing::info!(
+                    target: "chat",
+                    "[Chat] Turn {} cancelled before stream created",
+                    assistant_turn_id
+                );
+                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+            }
+            _ = tokio::time::sleep(stream_connect_timeout) => {
+                let err_msg = format!(
+                    "LLM provider connection timed out after {}s",
+                    stream_connect_timeout.as_secs()
+                );
+                tracing::error!(
+                    target: "chat",
+                    "[Chat] Turn {} connection timeout: {}",
+                    assistant_turn_id,
+                    err_msg
+                );
+                let err_payload = build_chat_error_event(
+                    "stream_connect",
+                    &err_msg,
+                    &assistant_turn_id,
+                    true,
+                );
+                let failure_event = err_payload.into_failure_event(
+                    conversation_id.clone(),
+                    Some(assistant_turn_id.clone()),
+                    Some(char_id.clone()),
+                    None,
+                );
+                emit_and_persist_failure_event(&app, &state, failure_event).await?;
+                stream_failure_message = Some(err_msg);
+                stream_failed = true;
+                break;
+            }
+            res = stream_creation_fut => {
+                match res {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        let err_payload = build_chat_error_event(
+                            "stream_connect",
+                            &err_msg,
+                            &assistant_turn_id,
+                            true,
+                        );
+                        let failure_event = err_payload.into_failure_event(
+                            conversation_id.clone(),
+                            Some(assistant_turn_id.clone()),
+                            Some(char_id.clone()),
+                            None,
+                        );
+                        emit_and_persist_failure_event(&app, &state, failure_event).await?;
+                        stream_failure_message = Some(err_msg);
+                        stream_failed = true;
+                        break;
+                    }
+                }
+            }
         };
 
         let mut round_response = String::new();
@@ -2083,8 +2334,58 @@ pub async fn stream_chat(
         let mut round_provider_data = Vec::new();
         let mut emit_buffer = String::new();
         let mut native_tool_calls = Vec::new();
+        let mut received_any_chunk = false;
 
-        while let Some(result) = stream.next().await {
+        loop {
+            let timeout_duration = if received_any_chunk {
+                stream_chunk_idle_timeout()
+            } else {
+                stream_first_chunk_timeout()
+            };
+
+            let poll_result = poll_stream_with_cancellation_and_timeout(
+                &mut stream,
+                &mut cancel_rx,
+                timeout_duration,
+            )
+            .await;
+
+            let result = match poll_result {
+                StreamPollResult::Cancelled => {
+                    tracing::info!(
+                        target: "chat",
+                        "[Chat] Turn {} cancelled during stream",
+                        assistant_turn_id
+                    );
+                    return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+                }
+                StreamPollResult::TimedOut(_) => {
+                    let err_msg = if received_any_chunk {
+                        format!(
+                            "LLM stream chunk idle timeout after {}s",
+                            timeout_duration.as_secs()
+                        )
+                    } else {
+                        format!(
+                            "LLM provider stream initial response timeout after {}s",
+                            timeout_duration.as_secs()
+                        )
+                    };
+                    tracing::error!(
+                        target: "chat",
+                        "[Chat] Turn {} timed out: {}",
+                        assistant_turn_id,
+                        err_msg
+                    );
+                    Err(err_msg)
+                }
+                StreamPollResult::StreamEnded => {
+                    break;
+                }
+                StreamPollResult::Item(item) => item,
+            };
+            received_any_chunk = true;
+
             match result {
                 Ok(event) => {
                     match event {
@@ -2109,7 +2410,7 @@ pub async fn stream_chat(
                                     .map_err(|e| KokoroError::Chat(e.to_string()))?;
                             }
                         }
-        LlmStreamEvent::ReasoningContent(content) => {
+                        LlmStreamEvent::ReasoningContent(content) => {
                             round_reasoning_content.push_str(&content);
                         }
                         LlmStreamEvent::ToolCall(tool_call) => {
@@ -2126,10 +2427,12 @@ pub async fn stream_chat(
                 }
                 Err(e) => {
                     if round_response.is_empty() && emit_buffer.is_empty() {
+                        let err_msg = e.to_string();
+                        stream_failure_message = Some(err_msg.clone());
                         stream_failed = true;
                         let err_payload = build_chat_error_event(
                             "stream_receive",
-                            &e.to_string(),
+                            &err_msg,
                             &assistant_turn_id,
                             true,
                         );
@@ -3138,6 +3441,12 @@ pub async fn stream_chat(
     )
     .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
+    if stream_failed && full_response.is_empty() {
+        let err_msg = stream_failure_message
+            .unwrap_or_else(|| "Chat stream failed before producing any response".to_string());
+        return Err(KokoroError::Chat(err_msg));
+    }
+
     Ok(finish_draft_row_id)
     }
     .await;
@@ -3285,6 +3594,18 @@ mod tests {
         let deserialized_cancelled: StreamChatResponse =
             serde_json::from_str(&cancelled_json).expect("cancelled deserialization succeeds");
         assert_eq!(deserialized_cancelled, cancelled_res);
+
+        let error_res = StreamChatResponse {
+            conversation_id: "conv-123".to_string(),
+            user_message_id: Some(10),
+            assistant_message_id: None,
+            client_request_id: Some("req-123".to_string()),
+            status: Some("error".to_string()),
+        };
+        let error_json = serde_json::to_string(&error_res).expect("error serialization succeeds");
+        let deserialized_error: StreamChatResponse =
+            serde_json::from_str(&error_json).expect("error deserialization succeeds");
+        assert_eq!(deserialized_error, error_res);
 
         // 向前兼容验证：如果接收到没有 assistant_message_id / client_request_id / status 的旧版 JSON
         let legacy_json = r#"{"conversation_id":"conv-legacy","user_message_id":42}"#;
@@ -4383,6 +4704,36 @@ mod tests {
         assert!(result.err().unwrap().contains("unknown turn_id"));
     }
 
+    #[tokio::test]
+    async fn turn_cancellation_state_supports_client_request_id() {
+        let state = Arc::new(TurnCancellationState::new());
+        state
+            .register_turn_with_request("turn-real-123", Some("req-client-456"))
+            .await;
+
+        assert!(!state.is_cancelled("turn-real-123").await);
+        assert!(!state.is_cancelled("req-client-456").await);
+        assert!(state.has_turn("turn-real-123").await);
+        assert!(state.has_turn("req-client-456").await);
+
+        // Cancel via client_request_id
+        let res = cancel_chat_turn_inner(
+            "req-client-456".to_string(),
+            Some("new_conversation_started".into()),
+            state.clone(),
+        )
+        .await;
+        assert!(res.is_ok());
+
+        assert!(state.is_cancelled("turn-real-123").await);
+        assert!(state.is_cancelled("req-client-456").await);
+
+        // Clearing turn also cleans up request_to_turn mapping
+        state.clear_turn("turn-real-123").await;
+        assert!(!state.has_turn("turn-real-123").await);
+        assert!(!state.has_turn("req-client-456").await);
+    }
+
     #[test]
     fn chat_request_deserializes_regenerate_default_and_explicit() {
         let default_req: ChatRequest = serde_json::from_str(r#"{"message":"hi"}"#).unwrap();
@@ -4401,40 +4752,71 @@ mod tests {
 
     #[test]
     fn test_chat_session_validation_logic() {
-        let check = |req: Option<&str>, init: Option<&str>, curr: Option<&str>| -> bool {
-            match (req, init, curr) {
+        let check = |req: Option<&str>,
+                     init: Option<&str>,
+                     curr: Option<&str>,
+                     init_gen: u64,
+                     curr_gen: u64|
+         -> bool {
+            let gen_valid = init_gen == curr_gen;
+            let conv_valid = match (req, init, curr) {
                 (Some(r), _, Some(c)) => r == c,
                 (Some(_), _, None) => false,
                 (None, Some(i), Some(c)) => i == c,
                 (None, None, None) => true,
                 _ => false,
-            }
+            };
+            gen_valid && conv_valid
         };
 
-        // 1. Explicit target matches current active
-        assert!(check(Some("conv-A"), Some("conv-A"), Some("conv-A")));
-        assert!(check(Some("conv-A"), None, Some("conv-A")));
+        // 1. Explicit target matches current active, generation unchanged
+        assert!(check(Some("conv-A"), Some("conv-A"), Some("conv-A"), 1, 1));
+        assert!(check(Some("conv-A"), None, Some("conv-A"), 1, 1));
 
-        // 2. Explicit target differs from current active (switched to B)
-        assert!(!check(Some("conv-A"), Some("conv-A"), Some("conv-B")));
+        // 2. Explicit target with generation changed (ABA scenario: A -> B -> A)
+        assert!(!check(Some("conv-A"), Some("conv-A"), Some("conv-A"), 1, 3));
 
-        // 3. Explicit target cleared while in flight (clear_history)
-        assert!(!check(Some("conv-A"), Some("conv-A"), None));
+        // 3. Explicit target differs from current active (switched to B)
+        assert!(!check(Some("conv-A"), Some("conv-A"), Some("conv-B"), 1, 2));
 
-        // 4. Implicit target (new conversation), stays None -> valid new conversation
-        assert!(check(None, None, None));
+        // 4. Explicit target cleared while in flight (clear_history)
+        assert!(!check(Some("conv-A"), Some("conv-A"), None, 1, 2));
 
-        // 5. Implicit target (new conversation), but user clicked B while in flight -> invalid!
-        assert!(!check(None, None, Some("conv-B")));
+        // 5. Implicit target (new conversation), stays None -> valid new conversation
+        assert!(check(None, None, None, 1, 1));
 
-        // 6. Ambient caller without target, initial A, current A -> valid
-        assert!(check(None, Some("conv-A"), Some("conv-A")));
+        // 6. Implicit target, but generation changed (None -> B -> None ABA scenario)
+        assert!(!check(None, None, None, 1, 3));
 
-        // 7. Ambient caller without target, initial A, switched to B -> invalid!
-        assert!(!check(None, Some("conv-A"), Some("conv-B")));
+        // 7. Implicit target (new conversation), but user clicked B while in flight -> invalid!
+        assert!(!check(None, None, Some("conv-B"), 1, 2));
 
-        // 8. Ambient caller without target, initial A, cleared -> invalid!
-        assert!(!check(None, Some("conv-A"), None));
+        // 8. Ambient caller without target, initial A, current A, unchanged generation -> valid
+        assert!(check(None, Some("conv-A"), Some("conv-A"), 1, 1));
+
+        // 9. Ambient caller without target, initial A, current A, generation changed (ABA) -> invalid!
+        assert!(!check(None, Some("conv-A"), Some("conv-A"), 1, 3));
+
+        // 10. Ambient caller without target, initial A, switched to B -> invalid!
+        assert!(!check(None, Some("conv-A"), Some("conv-B"), 1, 2));
+
+        // 11. Ambient caller without target, initial A, cleared -> invalid!
+        assert!(!check(None, Some("conv-A"), None, 1, 2));
+    }
+
+    #[tokio::test]
+    async fn test_conversation_state_snapshot_tracks_generation_and_id() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        let (init_id, init_gen) = state.conversation_state_snapshot().await;
+        assert_eq!(init_id, None);
+        assert_eq!(init_gen, 0);
+
+        *state.current_conversation_id.lock().await = Some("conv-test".to_string());
+        state.bump_conversation_generation();
+
+        let (updated_id, updated_gen) = state.conversation_state_snapshot().await;
+        assert_eq!(updated_id.as_deref(), Some("conv-test"));
+        assert_eq!(updated_gen, 1);
     }
 
     #[test]
@@ -5086,6 +5468,195 @@ mod tests {
         // Current conversation pointer reset to None
         assert!(state.current_conversation_id.lock().await.is_none());
         assert!(state.history.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_poll_stream_with_cancellation_notified_immediately() {
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-cancel-test").await;
+        let mut cancel_rx = cancel_state
+            .subscribe_cancellation("turn-cancel-test")
+            .await;
+
+        let mut stream = futures::stream::pending::<Result<LlmStreamEvent, String>>();
+
+        // Trigger cancellation
+        cancel_state
+            .cancel_turn("turn-cancel-test", Some("user_abort".to_string()))
+            .await
+            .unwrap();
+
+        let res = poll_stream_with_cancellation_and_timeout(
+            &mut stream,
+            &mut cancel_rx,
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+
+        assert!(matches!(res, StreamPollResult::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn test_poll_stream_with_timeout_when_stream_hangs() {
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-timeout-test").await;
+        let mut cancel_rx = cancel_state
+            .subscribe_cancellation("turn-timeout-test")
+            .await;
+
+        let mut stream = futures::stream::pending::<Result<LlmStreamEvent, String>>();
+
+        let res = poll_stream_with_cancellation_and_timeout(
+            &mut stream,
+            &mut cancel_rx,
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+
+        assert!(matches!(res, StreamPollResult::TimedOut(_)));
+    }
+
+    #[tokio::test]
+    async fn test_hung_provider_stream_cancelled_and_reacquired_successfully() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-hung-1").await;
+
+        assert!(!orchestrator.is_chat_busy());
+
+        // Turn 1 acquires lock
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        // Concurrent Turn 2 while turn 1 is active must fail with chat_turn_busy
+        let busy_err = orchestrator
+            .try_acquire_chat_turn("req-2")
+            .expect_err("turn 2 must be rejected while turn 1 is active");
+        assert!(busy_err.contains("chat_turn_busy"));
+
+        // Simulate turn 1 consuming a hung stream in an async task
+        let cancel_state_clone = Arc::clone(&cancel_state);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let mut cancel_rx = cancel_state_clone
+                .subscribe_cancellation("turn-hung-1")
+                .await;
+            let mut stream = futures::stream::pending::<Result<LlmStreamEvent, String>>();
+            let _turn_guard = TurnCancellationGuard::new(
+                cancel_state_clone.clone(),
+                "turn-hung-1".to_string(),
+            );
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            // Blocked waiting for hung stream or cancellation
+            let poll_res = poll_stream_with_cancellation_and_timeout(
+                &mut stream,
+                &mut cancel_rx,
+                std::time::Duration::from_secs(60),
+            )
+            .await;
+
+            assert!(matches!(poll_res, StreamPollResult::Cancelled));
+            // _execution_guard and _turn_guard drop upon return
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        // Simulate cancel_chat_turn_inner (e.g. user clicked Stop)
+        let cancel_res = cancel_chat_turn_inner(
+            "turn-hung-1".to_string(),
+            Some("user_stop".to_string()),
+            cancel_state.clone(),
+        )
+        .await;
+        assert!(cancel_res.is_ok(), "cancellation should succeed");
+
+        // The background task exits promptly
+        handle.await.expect("background task finished");
+
+        // Global lock must be released!
+        assert!(
+            !orchestrator.is_chat_busy(),
+            "chat turn lock must be released after cancellation"
+        );
+
+        // Turn 2 can now acquire lock and proceed without chat_turn_busy!
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-2")
+            .expect("turn 2 must succeed after turn 1 was cancelled");
+        assert_eq!(guard2.context().unwrap().client_request_id, "req-2");
+        assert!(orchestrator.is_chat_busy());
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
+    }
+
+    #[tokio::test]
+    async fn test_hung_provider_stream_times_out_and_releases_lock() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-timeout-1").await;
+
+        assert!(!orchestrator.is_chat_busy());
+
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-timeout-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        // Concurrent Turn 2 is rejected
+        let busy_err = orchestrator
+            .try_acquire_chat_turn("req-timeout-2")
+            .expect_err("must be rejected while busy");
+        assert!(busy_err.contains("chat_turn_busy"));
+
+        // Simulate hung stream that hits timeout
+        let cancel_state_clone = Arc::clone(&cancel_state);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let mut cancel_rx = cancel_state_clone
+                .subscribe_cancellation("turn-timeout-1")
+                .await;
+            let mut stream = futures::stream::pending::<Result<LlmStreamEvent, String>>();
+            let _turn_guard = TurnCancellationGuard::new(
+                cancel_state_clone.clone(),
+                "turn-timeout-1".to_string(),
+            );
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            let poll_res = poll_stream_with_cancellation_and_timeout(
+                &mut stream,
+                &mut cancel_rx,
+                std::time::Duration::from_millis(50),
+            )
+            .await;
+
+            assert!(matches!(poll_res, StreamPollResult::TimedOut(_)));
+            // Drops _execution_guard upon task exit
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        handle.await.expect("task finished");
+
+        // Lock released automatically after timeout
+        assert!(
+            !orchestrator.is_chat_busy(),
+            "chat turn lock must be released after timeout"
+        );
+
+        // Subsequent request succeeds
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-timeout-2")
+            .expect("subsequent request must acquire lock after timeout");
+        assert_eq!(guard2.context().unwrap().client_request_id, "req-timeout-2");
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
     }
 }
 

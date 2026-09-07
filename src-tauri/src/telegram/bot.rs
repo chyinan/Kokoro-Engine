@@ -219,12 +219,8 @@ async fn handle_command(
         "/new" => {
             // Clear orchestrator history to start fresh
             if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
-                // 会话切换锁：清空历史+重置会话指针与删除/加载等路径互斥；
-                // reset_history_and_boundary 同时重置记忆边界与触发计数，与 clear_history 保持一致
-                let _switch_guard = orchestrator.conversation_switch_lock.lock().await;
-                orchestrator.reset_history_and_boundary().await;
-                let mut conv_id = orchestrator.current_conversation_id.lock().await;
-                *conv_id = None;
+                // 标准清空路径：持有会话切换锁、重置历史与边界、置空会话指针、递增 generation 并持久化
+                orchestrator.clear_history().await;
             }
             {
                 let mut s = sessions.write().await;
@@ -1532,5 +1528,21 @@ mod tests {
         );
         assert!(rendered.starts_with("[ERROR][Telegram]"));
         assert!(rendered.contains("Network timeout"));
+    }
+
+    #[tokio::test]
+    async fn test_telegram_new_conversation_bumps_generation_and_clears_active_id() {
+        let orchestrator = crate::ai::context::AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        *orchestrator.current_conversation_id.lock().await = Some("conv-active".to_string());
+        let initial_gen = orchestrator.current_conversation_generation();
+
+        // Simulate /new action calling clear_history()
+        orchestrator.clear_history().await;
+
+        assert!(orchestrator.current_conversation_id.lock().await.is_none());
+        assert_eq!(
+            orchestrator.current_conversation_generation(),
+            initial_gen + 1
+        );
     }
 }

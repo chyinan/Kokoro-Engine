@@ -182,13 +182,35 @@ describe("chat turn lifecycle validation", () => {
             });
         });
 
-        it("handles untracked external trigger matching active conversation", () => {
+        it("rejects untracked external trigger by default when pendingRequest is null and allowUntracked omitted", () => {
             const context: TurnStartValidationContext = {
                 currentGeneration: 1,
                 activeConversationId: "conv-1",
                 activeCharacterId: "char-1",
                 pendingRequest: null,
                 isCancelRequested: false,
+            };
+
+            const result = validateTurnStart(context, {
+                turn_id: "turn-external",
+                client_request_id: "req-ext-1",
+                conversation_id: "conv-1",
+            });
+
+            expect(result).toEqual({
+                valid: false,
+                reason: "no_pending_request",
+            });
+        });
+
+        it("handles untracked external trigger matching active conversation when allowUntracked is true", () => {
+            const context: TurnStartValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: "conv-1",
+                activeCharacterId: "char-1",
+                pendingRequest: null,
+                isCancelRequested: false,
+                allowUntracked: true,
             };
 
             const result = validateTurnStart(context, {
@@ -212,6 +234,7 @@ describe("chat turn lifecycle validation", () => {
                 activeCharacterId: "char-1",
                 pendingRequest: null,
                 isCancelRequested: false,
+                allowUntracked: true,
             };
 
             const result = validateTurnStart(context, {
@@ -236,13 +259,14 @@ describe("chat turn lifecycle validation", () => {
             });
         });
 
-        it("rejects untracked external trigger targeting a different conversation", () => {
+        it("rejects untracked external trigger targeting a different conversation when allowUntracked is true", () => {
             const context: TurnStartValidationContext = {
                 currentGeneration: 1,
                 activeConversationId: "conv-active",
                 activeCharacterId: "char-1",
                 pendingRequest: null,
                 isCancelRequested: false,
+                allowUntracked: true,
             };
 
             const result = validateTurnStart(context, {

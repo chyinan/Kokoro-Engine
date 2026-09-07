@@ -560,4 +560,103 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         expect(synthesize).not.toHaveBeenCalled();
         expect(endTurnActivity).toHaveBeenCalledTimes(1);
     });
+
+    it("cancels pending request by clientRequestId when New Chat is clicked before turn-start", async () => {
+        let isStopping = false;
+        let cancelRequested = false;
+        let pendingTurnRequest: any = {
+            clientRequestId: "req-pending-before-turn-start-1",
+            generation: 1,
+            conversationId: "conv-old",
+            characterId: "char-anya",
+        };
+        let currentTurn: any = null; // turn-start has NOT arrived yet!
+
+        const cancelChatTurn = vi.fn(async (_targetId: string, _reason: string) => {});
+        const clearHistory = vi.fn(async () => {});
+        const startEmptyConversation = vi.fn((_charId: string) => {});
+
+        const handleStartEmptyConversation = async (activeCharacterId: string) => {
+            try {
+                const activeTurnId = currentTurn?.turnId;
+                const pendingClientRequestId = pendingTurnRequest?.clientRequestId;
+                if (activeTurnId) {
+                    cancelRequested = true;
+                    isStopping = true;
+                    await cancelChatTurn(activeTurnId, "new_conversation_started");
+                } else if (pendingClientRequestId) {
+                    cancelRequested = true;
+                    isStopping = true;
+                    pendingTurnRequest = null;
+                    await cancelChatTurn(pendingClientRequestId, "new_conversation_started");
+                }
+                await clearHistory();
+                startEmptyConversation(activeCharacterId);
+                return true;
+            } finally {
+                cancelRequested = false;
+                isStopping = false;
+            }
+        };
+
+        const result = await handleStartEmptyConversation("char-anya");
+
+        expect(result).toBe(true);
+        expect(cancelChatTurn).toHaveBeenCalledWith(
+            "req-pending-before-turn-start-1",
+            "new_conversation_started",
+        );
+        expect(pendingTurnRequest).toBeNull();
+        expect(clearHistory).toHaveBeenCalled();
+        expect(startEmptyConversation).toHaveBeenCalledWith("char-anya");
+        expect(cancelRequested).toBe(false);
+        expect(isStopping).toBe(false);
+    });
+
+    it("cancels pending request by clientRequestId when switching conversation before turn-start", async () => {
+        let isStopping = false;
+        let cancelRequested = false;
+        let pendingTurnRequest: any = {
+            clientRequestId: "req-pending-before-turn-start-2",
+            generation: 1,
+            conversationId: "conv-1",
+            characterId: "char-anya",
+        };
+        let currentTurn: any = null; // turn-start has NOT arrived yet!
+
+        const cancelChatTurn = vi.fn(async (_targetId: string, _reason: string) => {});
+        const synchronize = vi.fn(async () => {});
+
+        const handleSelectConversation = async (_preferredConversationId: string | null) => {
+            try {
+                const activeTurnId = currentTurn?.turnId;
+                const pendingClientRequestId = pendingTurnRequest?.clientRequestId;
+                if (activeTurnId) {
+                    cancelRequested = true;
+                    isStopping = true;
+                    await cancelChatTurn(activeTurnId, "conversation_switched");
+                } else if (pendingClientRequestId) {
+                    cancelRequested = true;
+                    isStopping = true;
+                    pendingTurnRequest = null;
+                    await cancelChatTurn(pendingClientRequestId, "conversation_switched");
+                }
+                await synchronize();
+            } finally {
+                cancelRequested = false;
+                isStopping = false;
+            }
+        };
+
+        await handleSelectConversation("conv-2");
+
+        expect(cancelChatTurn).toHaveBeenCalledWith(
+            "req-pending-before-turn-start-2",
+            "conversation_switched",
+        );
+        expect(pendingTurnRequest).toBeNull();
+        expect(synchronize).toHaveBeenCalled();
+        expect(cancelRequested).toBe(false);
+        expect(isStopping).toBe(false);
+    });
 });

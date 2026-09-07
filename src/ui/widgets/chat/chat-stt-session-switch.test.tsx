@@ -33,6 +33,7 @@ vi.mock("react-i18next", () => ({
 }));
 
 let capturedOnFinalTranscription: ((text: string) => void) | null = null;
+let capturedOnWakeWordDetected: ((text?: string) => void) | null = null;
 let voiceInputState = "idle";
 
 // Mock hooks
@@ -48,7 +49,10 @@ vi.mock("../../hooks", () => ({
             stop: vi.fn(),
         };
     },
-    useWakeWord: () => ({ state: "idle", isListening: false, start: vi.fn(), stop: vi.fn() }),
+    useWakeWord: ({ onWakeWordDetected }: any = {}) => {
+        capturedOnWakeWordDetected = onWakeWordDetected;
+        return { state: "idle", isListening: false, start: vi.fn(), stop: vi.fn() };
+    },
     useTypingReveal: ({ onReveal }: any) => ({
         pushDelta: (delta: string) => onReveal?.(delta),
         flush: vi.fn(),
@@ -83,6 +87,7 @@ describe("ChatPanel STT session switch draft preservation", () => {
         localStorage.setItem("kokoro_stt_auto_send", "true");
 
         capturedOnFinalTranscription = null;
+        capturedOnWakeWordDetected = null;
         voiceInputState = "idle";
         streamChatMock = vi.fn(async () => ({ status: "completed" }));
 
@@ -313,5 +318,141 @@ describe("ChatPanel STT session switch draft preservation", () => {
         });
 
         expect(textarea.value).toBe("Pre-existing draft");
+    });
+
+    it("does not auto-send to new conversation when switching conversation for same character during mic recording", async () => {
+        let memoryStatusResolve: ((value: any) => void) | null = null;
+        vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockImplementation(() => {
+            return new Promise((resolve) => {
+                memoryStatusResolve = resolve;
+            });
+        });
+
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // 1. User is on conv-1. Click mic to start recording
+        const micBtn = container.querySelector('button[title="chat.input.mic.title.idle"]') as HTMLButtonElement;
+        expect(micBtn).not.toBeNull();
+        await act(async () => {
+            micBtn.click();
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // 2. WHILE recording is active, user switches to conv-2 for the same character
+        await act(async () => {
+            window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
+                detail: {
+                    runtime: { character_id: "char-1", character_name: "Character 1" },
+                    target_conversation_id: "conv-2",
+                },
+            }));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // 3. User finishes speaking; final transcription arrives
+        await act(async () => {
+            capturedOnFinalTranscription!("Speech recorded while on conv-1");
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // 4. Memory check resolves
+        await act(async () => {
+            memoryStatusResolve?.({ installed: true });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // MUST NOT call streamChat because conversation was switched during recording!
+        expect(streamChatMock).not.toHaveBeenCalled();
+
+        // But STT text MUST be preserved in input box and character draft
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        expect(textarea.value).toBe("Speech recorded while on conv-1");
+        expect(loadSavedCharacterDraft("char-1")).toBe("Speech recorded while on conv-1");
+    });
+
+    it("does not auto-send when switching conversation for same character during wake-word recording", async () => {
+        let memoryStatusResolve: ((value: any) => void) | null = null;
+        vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockImplementation(() => {
+            return new Promise((resolve) => {
+                memoryStatusResolve = resolve;
+            });
+        });
+
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(capturedOnWakeWordDetected).toBeTypeOf("function");
+
+        // 1. Wake word detected while on conv-1, starts recording
+        await act(async () => {
+            capturedOnWakeWordDetected!();
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // 2. While recording, user switches to conv-2 for the same character
+        await act(async () => {
+            window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
+                detail: {
+                    runtime: { character_id: "char-1", character_name: "Character 1" },
+                    target_conversation_id: "conv-2",
+                },
+            }));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // 3. Speech completes and final transcription arrives
+        await act(async () => {
+            capturedOnFinalTranscription!("Wake-word speech from conv-1");
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // 4. Memory check resolves
+        await act(async () => {
+            memoryStatusResolve?.({ installed: true });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // MUST NOT call streamChat because session changed!
+        expect(streamChatMock).not.toHaveBeenCalled();
+
+        // Preserved in input and draft
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        expect(textarea.value).toBe("Wake-word speech from conv-1");
+        expect(loadSavedCharacterDraft("char-1")).toBe("Wake-word speech from conv-1");
+    });
+
+    it("auto-sends correctly when conversation does not switch during mic recording", async () => {
+        vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockResolvedValue({ installed: true } as any);
+
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Click mic to record
+        const micBtn = container.querySelector('button[title="chat.input.mic.title.idle"]') as HTMLButtonElement;
+        await act(async () => {
+            micBtn.click();
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Final transcription arrives without any conversation switch
+        await act(async () => {
+            capturedOnFinalTranscription!("Send this message");
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(streamChatMock).toHaveBeenCalledTimes(1);
+        expect(streamChatMock).toHaveBeenCalledWith(
+            expect.objectContaining({
+                message: "Send this message",
+                conversation_id: "conv-1",
+            })
+        );
     });
 });

@@ -395,6 +395,9 @@ describe("ChatPanel Pet & Proactive Turn Concurrency", () => {
 
         // After interaction trigger, ChatPanel is in streaming/busy state
         expect(textarea.disabled).toBe(true);
+        expect(eventApi.emit).toHaveBeenCalledWith("interaction-trigger-accepted", expect.objectContaining({
+            client_request_id: "interaction_test_123",
+        }));
     });
 
     it("emits pet-chat-rejected when ChatPanel is busy", async () => {
@@ -410,6 +413,10 @@ describe("ChatPanel Pet & Proactive Turn Concurrency", () => {
             });
             for (let i = 0; i < 5; i++) await Promise.resolve();
         });
+
+        expect(eventApi.emit).toHaveBeenCalledWith("pet-chat-accepted", expect.objectContaining({
+            client_request_id: "pet_first_1",
+        }));
 
         // Now ChatPanel is busy. Send a second pet-chat-start
         await act(async () => {

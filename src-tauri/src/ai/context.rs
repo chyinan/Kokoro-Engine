@@ -563,6 +563,14 @@ impl AIOrchestrator {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    pub async fn conversation_state_snapshot(&self) -> (Option<String>, u64) {
+        let _switch_guard = self.conversation_switch_lock.lock().await;
+        (
+            self.current_conversation_id.lock().await.clone(),
+            self.current_conversation_generation(),
+        )
+    }
+
     pub fn enter_chat_turn(&self) -> Result<ChatTurnGuard, String> {
         self.activation_gate.enter_chat_turn()
     }
