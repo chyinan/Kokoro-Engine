@@ -186,6 +186,7 @@ export type StreamChatResponsePayload = {
     readonly user_message_id?: number | null;
     readonly assistant_message_id?: number | null;
     readonly client_request_id?: string | null;
+    readonly status?: "completed" | "error" | "cancelled" | string | null;
 };
 
 export type StreamChatResponseValidationResult =

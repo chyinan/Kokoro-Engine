@@ -137,6 +137,7 @@ async fn apply_orchestrator_runtime(
         .await;
     orchestrator.set_proactive_enabled(snapshot.proactive_enabled);
     *orchestrator.current_conversation_id.lock().await = snapshot.current_conversation_id.clone();
+    orchestrator.bump_conversation_generation();
     Ok(())
 }
 

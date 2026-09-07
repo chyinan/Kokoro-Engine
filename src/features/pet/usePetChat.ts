@@ -11,6 +11,7 @@ export interface PetChatState {
 export function usePetChat(): PetChatState {
     const [isStreaming, setIsStreaming] = useState(false);
     const activeTurnIdRef = useRef<string | null>(null);
+    const activeClientRequestIdRef = useRef<string | null>(null);
     const accumulatedRef = useRef("");
     const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -39,6 +40,7 @@ export function usePetChat(): PetChatState {
         const unlistenDone = listen<{ turn_id: string; status: "completed" | "error" | "cancelled" }>("chat-turn-finish", (event) => {
             if (activeTurnIdRef.current !== event.payload.turn_id) return;
             setIsStreaming(false);
+            activeClientRequestIdRef.current = null;
             if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
             hideTimerRef.current = setTimeout(async () => {
                 activeTurnIdRef.current = null;
@@ -50,7 +52,20 @@ export function usePetChat(): PetChatState {
         const unlistenError = listen("chat-error", () => {
             setIsStreaming(false);
             activeTurnIdRef.current = null;
+            activeClientRequestIdRef.current = null;
             accumulatedRef.current = "";
+            invoke("hide_bubble_window").catch(() => {});
+        });
+
+        const unlistenRejected = listen<{ client_request_id?: string; reason?: string }>("pet-chat-rejected", (event) => {
+            if (activeClientRequestIdRef.current && event.payload?.client_request_id && activeClientRequestIdRef.current !== event.payload.client_request_id) {
+                return;
+            }
+            setIsStreaming(false);
+            activeTurnIdRef.current = null;
+            activeClientRequestIdRef.current = null;
+            accumulatedRef.current = "";
+            if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
             invoke("hide_bubble_window").catch(() => {});
         });
 
@@ -59,14 +74,24 @@ export function usePetChat(): PetChatState {
             unlistenDelta.then(fn => fn());
             unlistenDone.then(fn => fn());
             unlistenError.then(fn => fn());
+            unlistenRejected.then(fn => fn());
             if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
         };
     }, []);
 
     const sendMessage = async (text: string) => {
         const trimmed = text.trim();
-        if (!trimmed || isStreaming || activeTurnIdRef.current !== null) return;
+        if (!trimmed || isStreaming || activeTurnIdRef.current !== null || activeClientRequestIdRef.current !== null) return;
+
+        try {
+            const busy = await invoke<boolean>("is_chat_busy");
+            if (busy) return;
+        } catch {
+            // If check fails (e.g. IPC mock), proceed
+        }
+
         const clientRequestId = `pet_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        activeClientRequestIdRef.current = clientRequestId;
         activeTurnIdRef.current = null;
         accumulatedRef.current = "";
         setIsStreaming(true);
@@ -86,7 +111,14 @@ export function usePetChat(): PetChatState {
             console.error("[PetChat] stream_chat error:", e);
             setIsStreaming(false);
             activeTurnIdRef.current = null;
+            activeClientRequestIdRef.current = null;
+            accumulatedRef.current = "";
+            if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
             invoke("hide_bubble_window").catch(() => {});
+            emit("pet-chat-failed", {
+                client_request_id: clientRequestId,
+                error: e instanceof Error ? e.message : String(e),
+            }).catch(() => {});
         }
     };
 

@@ -38,6 +38,7 @@ describe("usePetChat", () => {
             listeners[event] = cb;
             return Promise.resolve(() => {});
         });
+        vi.spyOn(coreApi, "invoke").mockImplementation(async () => {});
 
         container = document.createElement("div");
         document.body.appendChild(container);
@@ -108,5 +109,60 @@ describe("usePetChat", () => {
 
         expect(eventApi.emit).not.toHaveBeenCalled();
         expect(coreApi.invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything());
+    });
+
+    it("aborts sendMessage if is_chat_busy returns true", async () => {
+        expect(hookState).not.toBeNull();
+        vi.spyOn(coreApi, "invoke").mockImplementation(async (cmd: string) => {
+            if (cmd === "is_chat_busy") return true;
+            return undefined;
+        });
+
+        await act(async () => {
+            await hookState?.sendMessage("Hello when busy");
+        });
+
+        expect(eventApi.emit).not.toHaveBeenCalled();
+        expect(coreApi.invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything());
+    });
+
+    it("emits pet-chat-failed and hides bubble if stream_chat fails", async () => {
+        expect(hookState).not.toBeNull();
+        vi.spyOn(coreApi, "invoke").mockImplementation(async (cmd: string) => {
+            if (cmd === "stream_chat") throw new Error("chat_turn_busy: Chat turn is currently busy");
+            return undefined;
+        });
+
+        await act(async () => {
+            await hookState?.sendMessage("Hello that will fail");
+        });
+
+        expect(eventApi.emit).toHaveBeenCalledWith("pet-chat-failed", expect.objectContaining({
+            client_request_id: expect.stringMatching(/^pet_\d+_[a-z0-9]+$/),
+            error: "chat_turn_busy: Chat turn is currently busy",
+        }));
+        expect(coreApi.invoke).toHaveBeenCalledWith("hide_bubble_window");
+        expect(hookState?.isStreaming).toBe(false);
+    });
+
+    it("resets streaming and hides bubble when pet-chat-rejected is received", async () => {
+        expect(hookState).not.toBeNull();
+
+        // Start a turn
+        await act(async () => {
+            await hookState?.sendMessage("Hello pet");
+        });
+        expect(hookState?.isStreaming).toBe(true);
+
+        const emitArgs = (eventApi.emit as any).mock.calls.find((call: any[]) => call[0] === "pet-chat-start");
+        const clientRequestId = emitArgs[1].client_request_id;
+
+        // Simulate rejection from ChatPanel
+        await act(async () => {
+            listeners["pet-chat-rejected"]?.({ payload: { client_request_id: clientRequestId, reason: "busy" } });
+        });
+
+        expect(hookState?.isStreaming).toBe(false);
+        expect(coreApi.invoke).toHaveBeenCalledWith("hide_bubble_window");
     });
 });

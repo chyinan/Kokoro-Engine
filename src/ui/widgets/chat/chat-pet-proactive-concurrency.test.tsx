@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import ChatPanel from "../ChatPanel";
 import * as bridge from "../../../lib/kokoro-bridge";
+import * as eventApi from "@tauri-apps/api/event";
 
 // Event listener capture for @tauri-apps/api/event
 let listeners: Record<string, (event: any) => void> = {};
@@ -394,6 +395,127 @@ describe("ChatPanel Pet & Proactive Turn Concurrency", () => {
 
         // After interaction trigger, ChatPanel is in streaming/busy state
         expect(textarea.disabled).toBe(true);
+    });
+
+    it("emits pet-chat-rejected when ChatPanel is busy", async () => {
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Trigger a first turn to make ChatPanel busy
+        await act(async () => {
+            listeners["pet-chat-start"]?.({
+                payload: { message: "First message", client_request_id: "pet_first_1" }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Now ChatPanel is busy. Send a second pet-chat-start
+        await act(async () => {
+            listeners["pet-chat-start"]?.({
+                payload: { message: "Second message", client_request_id: "pet_second_2" }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(eventApi.emit).toHaveBeenCalledWith("pet-chat-rejected", {
+            client_request_id: "pet_second_2",
+            reason: "busy",
+        });
+    });
+
+    it("rolls back optimistic user message when pet-chat-failed is received", async () => {
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Pet chat starts optimistically
+        await act(async () => {
+            listeners["pet-chat-start"]?.({
+                payload: { message: "Optimistic message", client_request_id: "pet_opt_123" }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Message should be visible
+        expect(container.textContent).toContain("Optimistic message");
+
+        // Backend stream_chat failed, emitting pet-chat-failed
+        await act(async () => {
+            listeners["pet-chat-failed"]?.({
+                payload: { client_request_id: "pet_opt_123", error: "chat_turn_busy" }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Optimistic message should be rolled back and removed
+        expect(container.textContent).not.toContain("Optimistic message");
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        expect(textarea.disabled).toBe(false);
+    });
+
+    it("emits interaction-trigger-rejected when ChatPanel is busy", async () => {
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Make ChatPanel busy
+        await act(async () => {
+            listeners["pet-chat-start"]?.({
+                payload: { message: "Turn 1", client_request_id: "pet_busy_1" }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Trigger interaction while busy
+        await act(async () => {
+            listeners["interaction-trigger"]?.({
+                payload: {
+                    gesture: "tap",
+                    hitArea: "head",
+                    client_request_id: "interaction_busy_2",
+                }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(eventApi.emit).toHaveBeenCalledWith("interaction-trigger-rejected", {
+            client_request_id: "interaction_busy_2",
+            reason: "busy",
+        });
+    });
+
+    it("clears busy state when interaction-trigger-failed is received", async () => {
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        await act(async () => {
+            listeners["interaction-trigger"]?.({
+                payload: {
+                    gesture: "tap",
+                    hitArea: "head",
+                    client_request_id: "interaction_to_fail",
+                }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        expect(textarea.disabled).toBe(true);
+
+        await act(async () => {
+            listeners["interaction-trigger-failed"]?.({
+                payload: { client_request_id: "interaction_to_fail", error: "failed" }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(textarea.disabled).toBe(false);
     });
 });
 

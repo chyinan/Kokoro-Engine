@@ -162,7 +162,7 @@ describe("chat stop generation race condition and 4-layer defense", () => {
 
     it("cancels active turn, clears backend history, and only then starts empty conversation under busy lock", async () => {
         const sequence: string[] = [];
-        let isBusy = false;
+        let isBusy = true; // Active generation has isBusy = true
         let isSwitchingConversation = false;
         let busyStateDuringClearHistory: boolean | null = null;
         const cancelChatTurn = vi.fn(async (turnId: string, reason: string) => {
@@ -180,8 +180,8 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         let isStopping = false;
         let cancelRequested = false;
 
-        const handleStartEmptyConversation = async (activeCharacterId: string): Promise<void> => {
-            if (isSwitchingConversation || isBusy) return;
+        const handleStartEmptyConversation = async (activeCharacterId: string): Promise<boolean> => {
+            if (isSwitchingConversation) return false;
             isSwitchingConversation = true;
             isBusy = true;
             try {
@@ -199,19 +199,23 @@ describe("chat stop generation race condition and 4-layer defense", () => {
                 await clearHistory();
                 // Then commit visible empty conversation
                 startEmptyConversation(activeCharacterId);
+                return true;
             } finally {
+                cancelRequested = false;
+                isStopping = false;
                 isSwitchingConversation = false;
                 isBusy = false;
             }
         };
 
-        await handleStartEmptyConversation("char-anya");
+        const result = await handleStartEmptyConversation("char-anya");
 
+        expect(result).toBe(true);
         expect(cancelChatTurn).toHaveBeenCalledWith("turn-running-123", "new_conversation_started");
         expect(clearHistory).toHaveBeenCalled();
         expect(startEmptyConversation).toHaveBeenCalledWith("char-anya");
-        expect(isStopping).toBe(true);
-        expect(cancelRequested).toBe(true);
+        expect(isStopping).toBe(false);
+        expect(cancelRequested).toBe(false);
         expect(busyStateDuringClearHistory).toBe(true);
         expect(isBusy).toBe(false);
         // Verify strict temporal ordering: cancel -> clearHistory -> startEmpty
@@ -222,9 +226,35 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         ]);
     });
 
+    it("preserves isBusy under endTurnActivity if conversation switching is in flight", () => {
+        let isBusy = true;
+        let isStreaming = true;
+        let isStopping = true;
+        let cancelRequested = true;
+        const isSwitchingConversation = true;
+
+        const endTurnActivity = () => {
+            cancelRequested = false;
+            isStopping = false;
+            isStreaming = false;
+            if (!isSwitchingConversation) {
+                isBusy = false;
+            }
+        };
+
+        endTurnActivity();
+
+        expect(isStreaming).toBe(false);
+        expect(isStopping).toBe(false);
+        expect(cancelRequested).toBe(false);
+        expect(isBusy).toBe(true); // Must remain held!
+    });
+
     it("does NOT clear visible conversation and preserves existing state when clearHistory fails", async () => {
-        let isBusy = false;
+        let isBusy = true;
         let isSwitchingConversation = false;
+        let isStopping = false;
+        let cancelRequested = false;
         let errorMessage: string | null = null;
         const clearHistory = vi.fn(async () => {
             throw new Error("Backend IPC error");
@@ -233,25 +263,32 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         let visibleMessages = ["old message 1", "old message 2"];
         let activeConversationId: string | null = "conv-old-123";
 
-        const handleStartEmptyConversation = async (activeCharacterId: string): Promise<void> => {
-            if (isSwitchingConversation || isBusy) return;
+        const handleStartEmptyConversation = async (activeCharacterId: string): Promise<boolean> => {
+            if (isSwitchingConversation) return false;
             isSwitchingConversation = true;
             isBusy = true;
+            cancelRequested = true;
+            isStopping = true;
             try {
                 await clearHistory();
                 startEmptyConversation(activeCharacterId);
                 visibleMessages = [];
                 activeConversationId = null;
+                return true;
             } catch (err) {
                 errorMessage = "新建会话失败，已保留当前会话";
+                return false;
             } finally {
+                cancelRequested = false;
+                isStopping = false;
                 isSwitchingConversation = false;
                 isBusy = false;
             }
         };
 
-        await handleStartEmptyConversation("char-anya");
+        const result = await handleStartEmptyConversation("char-anya");
 
+        expect(result).toBe(false);
         expect(clearHistory).toHaveBeenCalledTimes(1);
         expect(startEmptyConversation).not.toHaveBeenCalled();
         // Visible messages and active conversation ID remain intact
@@ -259,6 +296,8 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         expect(activeConversationId).toBe("conv-old-123");
         expect(errorMessage).toBe("新建会话失败，已保留当前会话");
         expect(isBusy).toBe(false);
+        expect(isStopping).toBe(false);
+        expect(cancelRequested).toBe(false);
         expect(isSwitchingConversation).toBe(false);
     });
 
@@ -334,13 +373,14 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         }));
         const startEmptyConversation = vi.fn();
 
-        const handleStartEmptyConversation = async (activeCharacterId: string): Promise<void> => {
-            if (isSwitchingConversation || isBusy) return;
+        const handleStartEmptyConversation = async (activeCharacterId: string): Promise<boolean> => {
+            if (isSwitchingConversation) return false;
             isSwitchingConversation = true;
             isBusy = true;
             try {
                 await clearHistory();
                 startEmptyConversation(activeCharacterId);
+                return true;
             } finally {
                 isSwitchingConversation = false;
                 isBusy = false;
@@ -402,5 +442,122 @@ describe("chat stop generation race condition and 4-layer defense", () => {
             "cancel:turn-running-456:conversation_switched",
             "sync:char-anya:conv-target-999",
         ]);
+    });
+
+    it("distinguishes cancellation in fallback teardown, cleans up bubble, and suppresses TTS", () => {
+        const removeTurnMessages = vi.fn((messages: any[], turn: any) => {
+            return messages.filter((_m, idx) => idx !== turn.messageIndex);
+        });
+        const synthesize = vi.fn(async () => {});
+        const resetReveal = vi.fn();
+        const flushReveal = vi.fn();
+        const endTurnActivity = vi.fn();
+
+        let messages = [
+            { role: "user", text: "Hello", clientRequestId: "req-1" },
+            { role: "kokoro", text: "Partial text...", clientRequestId: "req-1" },
+        ];
+        let currentTurn: any = {
+            clientRequestId: "req-1",
+            turnId: "turn-1",
+            rawText: "Partial text...",
+            messageIndex: 1,
+        };
+        let cancelRequested = false;
+
+        const finalizeActiveTurn = (clientRequestId: string, res?: any) => {
+            const isExplicitlyCancelled = res?.status === "cancelled";
+            const isCancelRequested = cancelRequested;
+            const hasCommittedAssistantMessage = Boolean(res?.assistant_message_id && res?.status === "completed");
+            const shouldTreatAsCancelled = isExplicitlyCancelled || (isCancelRequested && !hasCommittedAssistantMessage);
+
+            if (shouldTreatAsCancelled) {
+                resetReveal();
+                if (currentTurn?.clientRequestId === clientRequestId) {
+                    messages = removeTurnMessages(messages, currentTurn);
+                }
+                currentTurn = null;
+                endTurnActivity();
+                return;
+            }
+
+            flushReveal();
+            if (!isCancelRequested && res?.status !== "cancelled") {
+                void synthesize();
+            }
+            endTurnActivity();
+        };
+
+        // Scenario 1: Backend cancelled response arrives
+        finalizeActiveTurn("req-1", {
+            conversation_id: "conv-1",
+            status: "cancelled",
+            assistant_message_id: null,
+            client_request_id: "req-1",
+        });
+
+        expect(resetReveal).toHaveBeenCalledTimes(1);
+        expect(flushReveal).not.toHaveBeenCalled();
+        expect(synthesize).not.toHaveBeenCalled();
+        expect(endTurnActivity).toHaveBeenCalledTimes(1);
+        expect(currentTurn).toBeNull();
+        expect(messages).toEqual([
+            { role: "user", text: "Hello", clientRequestId: "req-1" },
+        ]);
+    });
+
+    it("suppresses TTS when user clicked cancel but backend already completed with committed message ID", () => {
+        const synthesize = vi.fn(async () => {});
+        const flushReveal = vi.fn();
+        const endTurnActivity = vi.fn();
+
+        let messages = [
+            { role: "user", text: "Hello", clientRequestId: "req-2" },
+            { role: "kokoro", text: "Completed reply", clientRequestId: "req-2" },
+        ];
+        let currentTurn: any = {
+            clientRequestId: "req-2",
+            turnId: "turn-2",
+            rawText: "Completed reply",
+            messageIndex: 1,
+        };
+        const cancelRequested = true; // User clicked Stop right at the finish line
+
+        const finalizeActiveTurn = (clientRequestId: string, res?: any) => {
+            const isExplicitlyCancelled = res?.status === "cancelled";
+            const isCancelRequested = cancelRequested;
+            const hasCommittedAssistantMessage = Boolean(res?.assistant_message_id && res?.status === "completed");
+            const shouldTreatAsCancelled = isExplicitlyCancelled || (isCancelRequested && !hasCommittedAssistantMessage);
+
+            if (shouldTreatAsCancelled) {
+                messages = messages.filter(m => m.clientRequestId !== clientRequestId);
+                currentTurn = null;
+                endTurnActivity();
+                return;
+            }
+
+            flushReveal();
+            if (currentTurn?.clientRequestId === clientRequestId) {
+                currentTurn = null;
+            }
+            // TTS MUST be suppressed because cancel was requested
+            if (!isCancelRequested && res?.status !== "cancelled") {
+                void synthesize();
+            }
+            endTurnActivity();
+        };
+
+        finalizeActiveTurn("req-2", {
+            conversation_id: "conv-1",
+            status: "completed",
+            assistant_message_id: 200,
+            client_request_id: "req-2",
+        });
+
+        // Messages kept because DB committed it
+        expect(messages.length).toBe(2);
+        // But TTS was suppressed
+        expect(synthesize).not.toHaveBeenCalled();
+        expect(endTurnActivity).toHaveBeenCalledTimes(1);
     });
 });

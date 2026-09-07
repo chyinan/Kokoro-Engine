@@ -2306,6 +2306,7 @@ async fn prepare_webhook_conversation(
                 .await;
         }
         *orchestrator.current_conversation_id.lock().await = Some(conversation_id.clone());
+        orchestrator.bump_conversation_generation();
     }
     Ok(conversation_id)
 }

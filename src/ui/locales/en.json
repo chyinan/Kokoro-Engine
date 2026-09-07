@@ -1187,7 +1187,9 @@
             "confirmDelete": "Delete this conversation?",
             "pinned": "Pinned",
             "pin": "Pin conversation",
-            "unpin": "Unpin conversation"
+            "unpin": "Unpin conversation",
+            "creating": "Creating new chat...",
+            "switching": "Switching chat..."
         },
         "tools": {
             "header": "Tools ({{count}})",

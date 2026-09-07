@@ -344,57 +344,219 @@ async fn ensure_conversation_created_for_hidden_turn(
     char_id: &str,
     conversation_id: &mut Option<String>,
     is_newly_created_for_hidden: &mut bool,
+    turn_id: &str,
+    bound_generation: u64,
+    cancel_state: &TurnCancellationState,
 ) -> Result<String, KokoroError> {
     if let Some(ref cid) = conversation_id {
         return Ok(cid.clone());
     }
     let _switch_guard = state.conversation_switch_lock.lock().await;
+    let current_gen = state.current_conversation_generation();
     let current_conv_id = state.current_conversation_id.lock().await.clone();
-    let id = if let Some(cid) = current_conv_id {
-        cid
-    } else {
-        let new_id = uuid::Uuid::new_v4().to_string();
-        let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, '新对话', '', '{}', ?, ?)"
-        )
-        .bind(&new_id)
-        .bind(char_id)
-        .bind(&now)
-        .bind(&now)
-        .execute(&state.db)
-        .await
-        .map_err(|e| KokoroError::Database(e.to_string()))?;
 
-        *state.current_conversation_id.lock().await = Some(new_id.clone());
-        if state.persist_conversation_selection {
-            crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
-        }
-        *is_newly_created_for_hidden = true;
-        new_id
-    };
-    *conversation_id = Some(id.clone());
-    Ok(id)
+    // 关键一致性校验：
+    // hidden turn 启动时记录了 bound_generation（且初始会话状态必定为 None）。
+    // 在模型等待期间，若全局会话状态发生任何变化（例如用户或其他来源新建了会话、切换了会话、清空了历史，
+    // 导致 current_conv_id != None 或 current_gen != bound_generation），
+    // 坚决不能无条件采纳新的全局会话，而必须立即取消当前旧 turn！
+    if current_gen != bound_generation || current_conv_id.is_some() {
+        tracing::warn!(
+            target: "chat",
+            "[Chat] Conversation state changed during hidden turn {} (bound_gen={}, current_gen={}, current_conv_id={:?}); cancelling turn",
+            turn_id,
+            bound_generation,
+            current_gen,
+            current_conv_id
+        );
+        let _ = cancel_state
+            .cancel_turn(
+                turn_id,
+                Some("conversation state changed during hidden turn".to_string()),
+            )
+            .await;
+        return Err(KokoroError::Chat(
+            TURN_CANCELLED_BY_USER_MESSAGE.to_string(),
+        ));
+    }
+
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, '新对话', '', '{}', ?, ?)"
+    )
+    .bind(&new_id)
+    .bind(char_id)
+    .bind(&now)
+    .bind(&now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+    *state.current_conversation_id.lock().await = Some(new_id.clone());
+    state.bump_conversation_generation();
+    if state.persist_conversation_selection {
+        crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
+    }
+    *is_newly_created_for_hidden = true;
+    *conversation_id = Some(new_id.clone());
+    Ok(new_id)
 }
 
 async fn delete_empty_conversation_if_unused(
     state: &AIOrchestrator,
     conversation_id: &str,
-) -> Result<(), KokoroError> {
-    crate::commands::conversation::delete_conversation_inner(
-        crate::commands::conversation::DeleteConversationRequest {
-            id: conversation_id.to_string(),
-        },
-        &state.db,
-        &state.history,
-        &state.current_conversation_id,
-        Some(&state.memory_history_boundary),
-        Some(&state.memory_trigger_count),
-        &state.conversation_switch_lock,
-        state.persist_conversation_selection,
+    expected_turn_id: Option<&str>,
+    draft_row_id: Option<i64>,
+) -> Result<bool, KokoroError> {
+    let _switch_guard = state.conversation_switch_lock.lock().await;
+
+    // 1. Query all message rows currently belonging to this conversation
+    let rows: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
     )
+    .bind(conversation_id)
+    .fetch_all(&state.db)
     .await
+    .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+    // 2. Classify rows into current turn's artifacts vs other messages
+    let mut turn_artifact_ids = HashSet::new();
+    let mut other_message_count = 0;
+
+    for (id, _role, _content, metadata) in &rows {
+        let is_turn_technical = if let Some(expected_turn) = expected_turn_id {
+            metadata
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .is_some_and(|meta| {
+                    meta.get("turn_id").and_then(|v| v.as_str()) == Some(expected_turn)
+                        && matches!(
+                            meta.get("type").and_then(|t| t.as_str()),
+                            Some("assistant_tool_calls") | Some("tool_result")
+                        )
+                })
+        } else {
+            false
+        };
+
+        let is_turn_draft = if let Some(expected_draft_id) = draft_row_id {
+            *id == expected_draft_id
+                && (metadata.is_none()
+                    || expected_turn_id.is_some_and(|et| {
+                        metadata.as_deref().is_some_and(|m| m.contains(et))
+                    }))
+        } else {
+            false
+        };
+
+        if is_turn_technical || is_turn_draft {
+            turn_artifact_ids.insert(*id);
+        } else {
+            other_message_count += 1;
+        }
+    }
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+    // 3. Delete only the current turn's technical rows / draft by their specific IDs
+    // (Never delete wholesale by conversation_id)
+    for id in &turn_artifact_ids {
+        sqlx::query("DELETE FROM conversation_messages WHERE id = ? AND conversation_id = ?")
+            .bind(id)
+            .bind(conversation_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| KokoroError::Database(e.to_string()))?;
+    }
+
+    // 4. If other messages exist (e.g. from pet, Telegram, user, or other turns), keep the conversation!
+    if other_message_count > 0 {
+        tx.commit()
+            .await
+            .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+        // If this conversation is currently active, resync in-memory history to reflect removed turn artifacts
+        if state.current_conversation_id.lock().await.as_deref() == Some(conversation_id) {
+            let remaining_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
+            )
+            .bind(conversation_id)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+            let max_chars = *state.max_message_chars.lock().await;
+            let mut history = state.history.lock().await;
+            let new_len =
+                crate::ai::context::sync_history_window(&mut history, remaining_rows, max_chars);
+            let mut boundary = state.memory_history_boundary.lock().await;
+            *boundary = (*boundary).min(new_len);
+        }
+
+        tracing::info!(
+            target: "chat",
+            "[Chat] Preserved temporary conversation '{}' because it contains {} real message(s)",
+            conversation_id,
+            other_message_count
+        );
+        return Ok(false);
+    }
+
+    // 5. Sanity check: Ensure 0 messages remain in conversation_messages for this conversation
+    let remaining_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ?",
+    )
+    .bind(conversation_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+    if remaining_count > 0 {
+        tx.commit()
+            .await
+            .map_err(|e| KokoroError::Database(e.to_string()))?;
+        return Ok(false);
+    }
+
+    // 6. Delete the empty conversation record
+    sqlx::query("DELETE FROM conversations WHERE id = ?")
+        .bind(conversation_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+    // 7. Reset active conversation state if it matched
+    {
+        let mut current_id = state.current_conversation_id.lock().await;
+        if current_id.as_deref() == Some(conversation_id) {
+            *current_id = None;
+            state.bump_conversation_generation();
+            state.history.lock().await.clear();
+            *state.memory_history_boundary.lock().await = 0;
+            *state.memory_trigger_count.lock().await = 0;
+            if state.persist_conversation_selection {
+                crate::ai::context::AIOrchestrator::persist_conversation_id(None);
+            }
+        }
+    }
+
+    tracing::info!(
+        target: "chat",
+        "[Chat] Successfully deleted unused empty temporary conversation '{}'",
+        conversation_id
+    );
+    Ok(true)
 }
+
 
 struct TurnCancellationGuard {
     state: Arc<TurnCancellationState>,
@@ -579,6 +741,11 @@ pub async fn cancel_chat_turn(
     cancel_chat_turn_inner(turn_id, reason, cancel_state.inner().clone()).await
 }
 
+#[tauri::command]
+pub fn is_chat_busy(state: State<'_, AIOrchestrator>) -> bool {
+    state.is_chat_busy()
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct ContextSettings {
     pub strategy: String,
@@ -665,6 +832,8 @@ pub struct StreamChatResponse {
     pub assistant_message_id: Option<i64>,
     #[serde(default)]
     pub client_request_id: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1420,6 +1589,10 @@ pub async fn stream_chat(
     let mut request = request;
     ensure_client_request_id(&mut request.client_request_id);
 
+    let _turn_execution_guard = state
+        .try_acquire_chat_turn(request.client_request_id.as_deref().unwrap_or("default"))
+        .map_err(KokoroError::Chat)?;
+
     // 0. Resolve character ID for this request (not stored in shared state)
     let char_id = request
         .character_id
@@ -1475,9 +1648,10 @@ pub async fn stream_chat(
     // 2. Update History with User Message under conversation_switch_lock
     let system_provider = llm_state.system_provider().await;
 
-    let (mut conversation_id, user_message_id, history_snapshot) = {
+    let (mut conversation_id, user_message_id, history_snapshot, bound_generation) = {
         let _switch_guard = state.conversation_switch_lock.lock().await;
         let current_conv_id = state.current_conversation_id.lock().await.clone();
+        let bound_generation = state.current_conversation_generation();
 
         // 校验目标会话一致性，防止跨会话串写或清空后复活幽灵会话
         let is_valid = match (
@@ -1537,6 +1711,7 @@ pub async fn stream_chat(
             .map_err(|e| KokoroError::Database(e.to_string()))?;
 
             *state.current_conversation_id.lock().await = Some(new_id.clone());
+            state.bump_conversation_generation();
             if state.persist_conversation_selection {
                 crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
             }
@@ -1627,7 +1802,7 @@ pub async fn stream_chat(
         let history_snapshot: Vec<crate::ai::context::Message> =
             state.history.lock().await.iter().cloned().collect();
 
-        (cid, mid, history_snapshot)
+        (cid, mid, history_snapshot, bound_generation)
     };
 
     let mut is_newly_created_for_hidden = false;
@@ -2247,6 +2422,9 @@ pub async fn stream_chat(
                     &char_id,
                     &mut conversation_id,
                     &mut is_newly_created_for_hidden,
+                    &assistant_turn_id,
+                    bound_generation,
+                    cancel_state.inner().as_ref(),
                 )
                 .await
                 {
@@ -2257,7 +2435,7 @@ pub async fn stream_chat(
                             "[Chat] Failed to ensure conversation for hidden tool turn: {}",
                             e
                         );
-                        None
+                        return Err(e);
                     }
                 }
             } else {
@@ -2367,17 +2545,36 @@ pub async fn stream_chat(
         // A hidden no-op turn may still have persisted assistant_tool_calls/tool rows
         // from earlier tool rounds; remove them so no orphan tool exchange survives.
         if let Some(ref cid) = conversation_id {
-            cleanup_turn_artifacts(&state, cid, &assistant_turn_id, draft_row_id).await;
             if is_newly_created_for_hidden {
-                if let Err(e) = delete_empty_conversation_if_unused(&state, cid).await {
-                    tracing::error!(
-                        target: "chat",
-                        "[Chat] Failed to delete temporary empty conversation '{}' for hidden no-op turn: {}",
-                        cid,
-                        e
-                    );
+                match delete_empty_conversation_if_unused(
+                    &state,
+                    cid,
+                    Some(&assistant_turn_id),
+                    draft_row_id,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        conversation_id = None;
+                    }
+                    Ok(false) => {
+                        tracing::info!(
+                            target: "chat",
+                            "[Chat] Preserved temporary conversation '{}' for hidden no-op turn because it contains other messages",
+                            cid
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            target: "chat",
+                            "[Chat] Failed to clean up temporary conversation '{}' for hidden no-op turn: {}",
+                            cid,
+                            e
+                        );
+                    }
                 }
-                conversation_id = None;
+            } else {
+                cleanup_turn_artifacts(&state, cid, &assistant_turn_id, draft_row_id).await;
             }
         }
         app.emit(
@@ -2573,6 +2770,9 @@ pub async fn stream_chat(
                     &char_id,
                     &mut conversation_id,
                     &mut is_newly_created_for_hidden,
+                    &assistant_turn_id,
+                    bound_generation,
+                    cancel_state.inner().as_ref(),
                 )
                 .await
                 {
@@ -2583,7 +2783,7 @@ pub async fn stream_chat(
                             "[Chat] Failed to ensure conversation for hidden assistant message: {}",
                             e
                         );
-                        None
+                        return Err(e);
                     }
                 }
             } else {
@@ -2886,17 +3086,36 @@ pub async fn stream_chat(
     let mut finish_draft_row_id = draft_row_id;
     if stream_failed && full_response.is_empty() {
         if let Some(ref cid) = conversation_id {
-            cleanup_turn_artifacts(&state, cid, &assistant_turn_id, draft_row_id).await;
             if is_newly_created_for_hidden {
-                if let Err(e) = delete_empty_conversation_if_unused(&state, cid).await {
-                    tracing::error!(
-                        target: "chat",
-                        "[Chat] Failed to delete temporary empty conversation '{}' on stream failure: {}",
-                        cid,
-                        e
-                    );
+                match delete_empty_conversation_if_unused(
+                    &state,
+                    cid,
+                    Some(&assistant_turn_id),
+                    draft_row_id,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        conversation_id = None;
+                    }
+                    Ok(false) => {
+                        tracing::info!(
+                            target: "chat",
+                            "[Chat] Preserved temporary conversation '{}' on stream failure because it contains other messages",
+                            cid
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            target: "chat",
+                            "[Chat] Failed to clean up temporary conversation '{}' on stream failure: {}",
+                            cid,
+                            e
+                        );
+                    }
                 }
-                conversation_id = None;
+            } else {
+                cleanup_turn_artifacts(&state, cid, &assistant_turn_id, draft_row_id).await;
             }
         }
         finish_draft_row_id = None;
@@ -2929,6 +3148,7 @@ pub async fn stream_chat(
             user_message_id,
             assistant_message_id,
             client_request_id: request.client_request_id,
+            status: Some("completed".to_string()),
         }),
         Err(KokoroError::Chat(message)) if is_turn_cancelled_error_message(&message) => {
             tracing::info!(
@@ -2941,18 +3161,37 @@ pub async fn stream_chat(
             // clean conversation.
             let draft_row_id = *draft_row_id_holder.lock().await;
             if let Some(ref cid) = conversation_id {
-                cleanup_turn_artifacts(&state, cid, &assistant_turn_id, draft_row_id)
-                    .await;
                 if is_newly_created_for_hidden {
-                    if let Err(e) = delete_empty_conversation_if_unused(&state, cid).await {
-                        tracing::error!(
-                            target: "chat",
-                            "[Chat] Failed to delete temporary empty conversation '{}' on turn cancel: {}",
-                            cid,
-                            e
-                        );
+                    match delete_empty_conversation_if_unused(
+                        &state,
+                        cid,
+                        Some(&assistant_turn_id),
+                        draft_row_id,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            conversation_id = None;
+                        }
+                        Ok(false) => {
+                            tracing::info!(
+                                target: "chat",
+                                "[Chat] Preserved temporary conversation '{}' on turn cancel because it contains other messages",
+                                cid
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                target: "chat",
+                                "[Chat] Failed to clean up temporary conversation '{}' on turn cancel: {}",
+                                cid,
+                                e
+                            );
+                        }
                     }
-                    conversation_id = None;
+                } else {
+                    cleanup_turn_artifacts(&state, cid, &assistant_turn_id, draft_row_id)
+                        .await;
                 }
             }
             app.emit(
@@ -2971,22 +3210,31 @@ pub async fn stream_chat(
                 user_message_id,
                 assistant_message_id: None,
                 client_request_id: request.client_request_id,
+                status: Some("cancelled".to_string()),
             })
         }
         Err(error) => {
             // Non-cancel failures keep any partial draft and already-finalized rows, but
             // the turn's technical rows must not survive as orphan tool exchanges.
             if let Some(ref cid) = conversation_id {
-                cleanup_turn_artifacts(&state, cid, &assistant_turn_id, None).await;
                 if is_newly_created_for_hidden {
-                    if let Err(e) = delete_empty_conversation_if_unused(&state, cid).await {
+                    if let Err(e) = delete_empty_conversation_if_unused(
+                        &state,
+                        cid,
+                        Some(&assistant_turn_id),
+                        None,
+                    )
+                    .await
+                    {
                         tracing::error!(
                             target: "chat",
-                            "[Chat] Failed to delete temporary empty conversation '{}' on unhandled error: {}",
+                            "[Chat] Failed to clean up temporary conversation '{}' on unhandled error: {}",
                             cid,
                             e
                         );
                     }
+                } else {
+                    cleanup_turn_artifacts(&state, cid, &assistant_turn_id, None).await;
                 }
             }
             Err(error)
@@ -3010,22 +3258,35 @@ mod tests {
     };
     use crate::hooks::HookPayload;
 
-    /// 验证 StreamChatResponse 序列化及向前兼容性（当缺少 assistant_message_id/client_request_id 时默认解析为 None）。
+    /// 验证 StreamChatResponse 序列化及向前兼容性（当缺少 assistant_message_id/client_request_id/status 时默认解析为 None）。
     #[test]
     fn test_stream_chat_response_serialization_and_backward_compatibility() {
-        // 包含 assistant_message_id 与 client_request_id 时的正向序列化与反序列化
+        // 包含 assistant_message_id 与 client_request_id 与 status 时的正向序列化与反序列化
         let res = StreamChatResponse {
             conversation_id: "conv-123".to_string(),
             user_message_id: Some(10),
             assistant_message_id: Some(11),
             client_request_id: Some("req-123".to_string()),
+            status: Some("completed".to_string()),
         };
         let json_str = serde_json::to_string(&res).expect("serialization succeeds");
         let deserialized: StreamChatResponse =
             serde_json::from_str(&json_str).expect("deserialization succeeds");
         assert_eq!(deserialized, res);
 
-        // 向前兼容验证：如果接收到没有 assistant_message_id / client_request_id 的旧版 JSON
+        let cancelled_res = StreamChatResponse {
+            conversation_id: "conv-123".to_string(),
+            user_message_id: Some(10),
+            assistant_message_id: None,
+            client_request_id: Some("req-123".to_string()),
+            status: Some("cancelled".to_string()),
+        };
+        let cancelled_json = serde_json::to_string(&cancelled_res).expect("cancelled serialization succeeds");
+        let deserialized_cancelled: StreamChatResponse =
+            serde_json::from_str(&cancelled_json).expect("cancelled deserialization succeeds");
+        assert_eq!(deserialized_cancelled, cancelled_res);
+
+        // 向前兼容验证：如果接收到没有 assistant_message_id / client_request_id / status 的旧版 JSON
         let legacy_json = r#"{"conversation_id":"conv-legacy","user_message_id":42}"#;
         let legacy_res: StreamChatResponse =
             serde_json::from_str(legacy_json).expect("legacy deserialization succeeds");
@@ -3033,6 +3294,7 @@ mod tests {
         assert_eq!(legacy_res.user_message_id, Some(42));
         assert_eq!(legacy_res.assistant_message_id, None);
         assert_eq!(legacy_res.client_request_id, None);
+        assert_eq!(legacy_res.status, None);
     }
 
     #[test]
@@ -4411,11 +4673,16 @@ mod tests {
         let mut conv_id: Option<String> = None;
         let mut is_newly_created = false;
 
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        let bound_generation = state.current_conversation_generation();
         let created_id = ensure_conversation_created_for_hidden_turn(
             &state,
             "test_char",
             &mut conv_id,
             &mut is_newly_created,
+            "turn-1",
+            bound_generation,
+            cancel_state.as_ref(),
         )
         .await
         .unwrap();
@@ -4434,6 +4701,9 @@ mod tests {
             "test_char",
             &mut conv_id,
             &mut second_newly_created,
+            "turn-1",
+            bound_generation,
+            cancel_state.as_ref(),
         )
         .await
         .unwrap();
@@ -4449,11 +4719,16 @@ mod tests {
         let mut conv_id: Option<String> = None;
         let mut is_newly_created = false;
 
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        let bound_generation = state.current_conversation_generation();
         let created_id = ensure_conversation_created_for_hidden_turn(
             &state,
             "test_char",
             &mut conv_id,
             &mut is_newly_created,
+            "turn-1",
+            bound_generation,
+            cancel_state.as_ref(),
         )
         .await
         .unwrap();
@@ -4467,9 +4742,10 @@ mod tests {
         assert_eq!(count, 1);
 
         // Delete empty conversation
-        delete_empty_conversation_if_unused(&state, &created_id)
+        let deleted = delete_empty_conversation_if_unused(&state, &created_id, None, None)
             .await
             .unwrap();
+        assert!(deleted);
 
         // Conversation is gone from DB
         let count_after: i64 =
@@ -4507,11 +4783,16 @@ mod tests {
         // The temporary empty conversation must be cleaned up cleanly.
         let mut tool_conv_id: Option<String> = None;
         let mut is_newly_created = false;
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        let bound_generation = state.current_conversation_generation();
         let cid = ensure_conversation_created_for_hidden_turn(
             &state,
             "test_char",
             &mut tool_conv_id,
             &mut is_newly_created,
+            "turn-1",
+            bound_generation,
+            cancel_state.as_ref(),
         )
         .await
         .unwrap();
@@ -4529,12 +4810,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Turn completes as no-op: cleanup_turn_artifacts then delete_empty_conversation_if_unused
-        cleanup_turn_artifacts(&state, &cid, "turn-1", None).await;
+        // Turn completes as no-op: delete_empty_conversation_if_unused cleans up artifacts and deletes empty conversation
         if is_newly_created {
-            delete_empty_conversation_if_unused(&state, &cid)
+            let deleted = delete_empty_conversation_if_unused(&state, &cid, Some("turn-1"), None)
                 .await
                 .unwrap();
+            assert!(deleted);
             tool_conv_id = None;
         }
 
@@ -4545,6 +4826,266 @@ mod tests {
             .unwrap();
         assert_eq!(convs_after, 0);
         assert!(state.current_conversation_id.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_conversation_created_for_hidden_turn_cancels_if_conversation_switched() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        assert!(state.current_conversation_id.lock().await.is_none());
+
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-hidden-1").await;
+        let bound_generation = state.current_conversation_generation();
+
+        // While hidden turn is waiting, user/system switches to or creates conversation B
+        *state.current_conversation_id.lock().await = Some("conv-B".to_string());
+        state.bump_conversation_generation();
+
+        let mut conv_id: Option<String> = None;
+        let mut is_newly_created = false;
+
+        // Hidden turn tries to lazily create a conversation
+        let res = ensure_conversation_created_for_hidden_turn(
+            &state,
+            "test_char",
+            &mut conv_id,
+            &mut is_newly_created,
+            "turn-hidden-1",
+            bound_generation,
+            cancel_state.as_ref(),
+        )
+        .await;
+
+        // Must return an Err and must NOT adopt conversation B
+        assert!(res.is_err());
+        assert_eq!(conv_id, None);
+        assert!(!is_newly_created);
+
+        // Turn must be marked cancelled in cancel_state
+        assert!(cancel_state.is_cancelled("turn-hidden-1").await);
+
+        // Global active conversation B must remain intact
+        assert_eq!(
+            state.current_conversation_id.lock().await.as_deref(),
+            Some("conv-B")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_conversation_created_for_hidden_turn_cancels_if_generation_changed_even_if_none() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        assert!(state.current_conversation_id.lock().await.is_none());
+
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-hidden-2").await;
+        let bound_generation = state.current_conversation_generation();
+
+        // While waiting, conversations were created and cleared so current_conversation_id is None again,
+        // but generation has advanced (ABA scenario).
+        state.bump_conversation_generation();
+        assert!(state.current_conversation_id.lock().await.is_none());
+
+        let mut conv_id: Option<String> = None;
+        let mut is_newly_created = false;
+
+        let res = ensure_conversation_created_for_hidden_turn(
+            &state,
+            "test_char",
+            &mut conv_id,
+            &mut is_newly_created,
+            "turn-hidden-2",
+            bound_generation,
+            cancel_state.as_ref(),
+        )
+        .await;
+
+        // Divergence detected: must be cancelled
+        assert!(res.is_err());
+        assert_eq!(conv_id, None);
+        assert!(!is_newly_created);
+        assert!(cancel_state.is_cancelled("turn-hidden-2").await);
+    }
+
+    #[tokio::test]
+    async fn test_delete_empty_conversation_if_unused_preserves_external_messages_and_cleans_technical_rows() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+
+        let mut tool_conv_id: Option<String> = None;
+        let mut is_newly_created = false;
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        let bound_generation = state.current_conversation_generation();
+        let cid = ensure_conversation_created_for_hidden_turn(
+            &state,
+            "test_char",
+            &mut tool_conv_id,
+            &mut is_newly_created,
+            "turn-1",
+            bound_generation,
+            cancel_state.as_ref(),
+        )
+        .await
+        .unwrap();
+
+        // 1. Technical tool messages added by turn-1
+        state
+            .add_message_with_metadata_for_conversation(
+                "assistant".to_string(),
+                "".to_string(),
+                Some(r#"{"type":"assistant_tool_calls","turn_id":"turn-1"}"#.to_string()),
+                "test_char",
+                Some(&cid),
+                None,
+            )
+            .await
+            .unwrap();
+
+        state
+            .add_message_with_metadata_for_conversation(
+                "tool".to_string(),
+                "tool output".to_string(),
+                Some(r#"{"type":"tool_result","turn_id":"turn-1","tool":"search"}"#.to_string()),
+                "test_char",
+                Some(&cid),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // 2. Real message arrives from background source (pet, telegram, or user)
+        let (_, real_msg_id) = state
+            .add_message_with_metadata_for_conversation(
+                "user".to_string(),
+                "Important message from Telegram".to_string(),
+                None,
+                "test_char",
+                Some(&cid),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // 3. Hidden turn completes as no-op or failure: call delete_empty_conversation_if_unused
+        let deleted = delete_empty_conversation_if_unused(&state, &cid, Some("turn-1"), None)
+            .await
+            .unwrap();
+
+        // Must NOT delete the conversation because it contains real messages!
+        assert!(!deleted, "Conversation must be preserved when other messages exist");
+
+        // Conversation still exists in DB
+        let conv_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = ?")
+            .bind(&cid)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(conv_count, 1);
+
+        // Current conversation pointer is still active
+        assert_eq!(
+            state.current_conversation_id.lock().await.as_deref(),
+            Some(cid.as_str())
+        );
+
+        // Technical rows were deleted, but the real message remains intact
+        let remaining_messages: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT id, role, content FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
+        )
+        .bind(&cid)
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+
+        assert_eq!(remaining_messages.len(), 1);
+        assert_eq!(remaining_messages[0].0, real_msg_id);
+        assert_eq!(remaining_messages[0].1, "user");
+        assert_eq!(remaining_messages[0].2, "Important message from Telegram");
+
+        // In-memory history was resynced and contains the real user message
+        let history = state.history.lock().await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[0].content, "Important message from Telegram");
+    }
+
+    #[tokio::test]
+    async fn test_delete_empty_conversation_if_unused_cleans_turn_draft_and_deletes_when_empty() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+
+        let mut tool_conv_id: Option<String> = None;
+        let mut is_newly_created = false;
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        let bound_generation = state.current_conversation_generation();
+        let cid = ensure_conversation_created_for_hidden_turn(
+            &state,
+            "test_char",
+            &mut tool_conv_id,
+            &mut is_newly_created,
+            "turn-2",
+            bound_generation,
+            cancel_state.as_ref(),
+        )
+        .await
+        .unwrap();
+
+        // Technical tool message
+        state
+            .add_message_with_metadata_for_conversation(
+                "assistant".to_string(),
+                "".to_string(),
+                Some(r#"{"type":"assistant_tool_calls","turn_id":"turn-2"}"#.to_string()),
+                "test_char",
+                Some(&cid),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Draft assistant message (metadata IS NULL)
+        let (_, draft_row_id) = state
+            .add_message_with_metadata_for_conversation(
+                "assistant".to_string(),
+                "partial streaming draft...".to_string(),
+                None,
+                "test_char",
+                Some(&cid),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Turn cancelled/failed: cleanup with draft_row_id
+        let deleted = delete_empty_conversation_if_unused(
+            &state,
+            &cid,
+            Some("turn-2"),
+            Some(draft_row_id),
+        )
+        .await
+        .unwrap();
+
+        // All rows belonged to turn-2, so conversation must be deleted!
+        assert!(deleted, "Conversation must be deleted when only turn artifacts exist");
+
+        // Conversation gone from DB
+        let conv_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = ?")
+            .bind(&cid)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(conv_count, 0);
+
+        // Messages gone from DB
+        let msg_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ?")
+                .bind(&cid)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(msg_count, 0);
+
+        // Current conversation pointer reset to None
+        assert!(state.current_conversation_id.lock().await.is_none());
+        assert!(state.history.lock().await.is_empty());
     }
 }
 

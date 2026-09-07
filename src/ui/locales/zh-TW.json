@@ -1186,7 +1186,9 @@
             "confirmDelete": "確定刪除這條對話記錄嗎？",
             "pinned": "已釘選",
             "pin": "釘選對話",
-            "unpin": "取消釘選"
+            "unpin": "取消釘選",
+            "creating": "正在建立新對話...",
+            "switching": "正在切換對話..."
         },
         "tools": {
             "header": "工具 ({{count}})",

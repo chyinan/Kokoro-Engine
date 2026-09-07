@@ -290,6 +290,7 @@ export interface StreamChatResponse {
     user_message_id?: number | null;
     assistant_message_id?: number | null;
     client_request_id?: string | null;
+    status?: "completed" | "cancelled" | string | null;
 }
 
 export async function streamChat(request: ChatRequest): Promise<StreamChatResponse> {
@@ -298,6 +299,15 @@ export async function streamChat(request: ChatRequest): Promise<StreamChatRespon
 
 export async function cancelChatTurn(turnId: string, reason?: string): Promise<void> {
     return invoke("cancel_chat_turn", { turnId, reason: reason ?? null });
+}
+
+export async function isChatBusy(): Promise<boolean> {
+    return invoke<boolean>("is_chat_busy");
+}
+
+export function isChatTurnBusyError(error: unknown): boolean {
+    const msg = getKokoroErrorMessage(error);
+    return typeof msg === "string" && msg.includes("chat_turn_busy");
 }
 
 export async function onChatError(callback: (error: string) => void): Promise<UnlistenFn> {

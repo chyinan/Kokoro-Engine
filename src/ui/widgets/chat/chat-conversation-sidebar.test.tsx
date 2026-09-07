@@ -247,4 +247,98 @@ describe("ConversationSidebar", () => {
             expect(listConversations).toHaveBeenCalledTimes(2); // Initial + refresh
         });
     });
+
+    describe("new chat creation", () => {
+        it("awaits onStartEmptyConversation and closes sidebar on success", async () => {
+            const onClose = vi.fn();
+            const onStartEmptyConversation = vi.fn(async () => true);
+
+            await act(async () => {
+                root.render(
+                    createElement(ConversationSidebar, {
+                        open: true,
+                        onClose,
+                        characterId: "char-1",
+                        activeConversationId: null,
+                        onStartEmptyConversation,
+                        onSelectConversation: vi.fn(),
+                    })
+                );
+            });
+
+            const newChatBtn = Array.from(container.querySelectorAll("button")).find(
+                b => b.textContent?.includes("chat.history.newChat")
+            );
+            expect(newChatBtn).toBeDefined();
+
+            await act(async () => {
+                newChatBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+                await new Promise(resolve => setTimeout(resolve, 0));
+            });
+
+            expect(onStartEmptyConversation).toHaveBeenCalledTimes(1);
+            expect(onClose).toHaveBeenCalledTimes(1);
+        });
+
+        it("does NOT call onClose if onStartEmptyConversation returns false", async () => {
+            const onClose = vi.fn();
+            const onStartEmptyConversation = vi.fn(async () => false);
+
+            await act(async () => {
+                root.render(
+                    createElement(ConversationSidebar, {
+                        open: true,
+                        onClose,
+                        characterId: "char-1",
+                        activeConversationId: null,
+                        onStartEmptyConversation,
+                        onSelectConversation: vi.fn(),
+                    })
+                );
+            });
+
+            const newChatBtn = Array.from(container.querySelectorAll("button")).find(
+                b => b.textContent?.includes("chat.history.newChat")
+            );
+            expect(newChatBtn).toBeDefined();
+
+            await act(async () => {
+                newChatBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+                await new Promise(resolve => setTimeout(resolve, 0));
+            });
+
+            expect(onStartEmptyConversation).toHaveBeenCalledTimes(1);
+            expect(onClose).not.toHaveBeenCalled();
+        });
+
+        it("disables new chat button when isSwitchingConversation is true", async () => {
+            const onStartEmptyConversation = vi.fn();
+
+            await act(async () => {
+                root.render(
+                    createElement(ConversationSidebar, {
+                        open: true,
+                        onClose: vi.fn(),
+                        characterId: "char-1",
+                        activeConversationId: null,
+                        isSwitchingConversation: true,
+                        onStartEmptyConversation,
+                        onSelectConversation: vi.fn(),
+                    })
+                );
+            });
+
+            const newChatBtn = Array.from(container.querySelectorAll("button")).find(
+                b => b.getAttribute("title") === "chat.history.creating"
+            );
+            expect(newChatBtn).toBeDefined();
+            expect(newChatBtn?.hasAttribute("disabled")).toBe(true);
+
+            await act(async () => {
+                newChatBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            });
+
+            expect(onStartEmptyConversation).not.toHaveBeenCalled();
+        });
+    });
 });

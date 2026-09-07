@@ -1187,7 +1187,9 @@
             "confirmDelete": "确定删除这条对话记录吗？",
             "pinned": "已固定",
             "pin": "固定会话",
-            "unpin": "取消固定"
+            "unpin": "取消固定",
+            "creating": "正在创建新对话...",
+            "switching": "正在切换对话..."
         },
         "tools": {
             "header": "工具 ({{count}})",

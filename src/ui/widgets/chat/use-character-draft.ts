@@ -92,17 +92,21 @@ export function useCharacterChatDraft(
 
     // Flushes pending changes for a given character to storage immediately
     const flushDraftFor = useCallback(
-        (targetCharId: string, text: string, images: string[]) => {
-            if (debounceTimerRef.current !== null) {
-                clearTimeout(debounceTimerRef.current);
-                debounceTimerRef.current = null;
+        (targetCharId: string, text: string, images: string[], force = false) => {
+            if (debounceTimerRef.current !== null || force) {
+                if (debounceTimerRef.current !== null) {
+                    clearTimeout(debounceTimerRef.current);
+                    debounceTimerRef.current = null;
+                }
+                saveCharacterDraft(targetCharId, text, storage);
             }
-            if (imageDebounceTimerRef.current !== null) {
-                clearTimeout(imageDebounceTimerRef.current);
-                imageDebounceTimerRef.current = null;
+            if (imageDebounceTimerRef.current !== null || force) {
+                if (imageDebounceTimerRef.current !== null) {
+                    clearTimeout(imageDebounceTimerRef.current);
+                    imageDebounceTimerRef.current = null;
+                }
+                saveCharacterDraftImages(targetCharId, images, imageStorage);
             }
-            saveCharacterDraft(targetCharId, text, storage);
-            saveCharacterDraftImages(targetCharId, images, imageStorage);
         },
         [imageStorage, storage]
     );
@@ -159,7 +163,7 @@ export function useCharacterChatDraft(
     }, [characterId, imageStorage, validateAndPruneImages]);
 
     const flushDraft = useCallback(() => {
-        flushDraftFor(activeCharacterIdRef.current, inputRef.current, pendingImagesRef.current);
+        flushDraftFor(activeCharacterIdRef.current, inputRef.current, pendingImagesRef.current, true);
     }, [flushDraftFor]);
 
     // Handle character switching

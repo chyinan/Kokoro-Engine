@@ -20,7 +20,8 @@ type ConversationSidebarProps = {
     onClose: () => void;
     characterId: string;
     activeConversationId: string | null;
-    onStartEmptyConversation: () => void | Promise<void>;
+    isSwitchingConversation?: boolean;
+    onStartEmptyConversation: () => void | boolean | Promise<void | boolean>;
     onSelectConversation: (conversationId: string | null) => Promise<void>;
 };
 
@@ -29,11 +30,14 @@ export default function ConversationSidebar({
     onClose,
     characterId,
     activeConversationId,
+    isSwitchingConversation = false,
     onStartEmptyConversation,
     onSelectConversation,
 }: ConversationSidebarProps) {
     const { t } = useTranslation();
     const [conversations, setConversations] = useState<Conversation[]>([]);
+    const [isCreating, setIsCreating] = useState(false);
+    const isActionBlocked = isCreating || isSwitchingConversation;
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editTitle, setEditTitle] = useState("");
     const editInputRef = useRef<HTMLInputElement>(null);
@@ -134,8 +138,18 @@ export default function ConversationSidebar({
     }, [editingId]);
 
     const handleCreate = async () => {
-        onClose();
-        await onStartEmptyConversation();
+        if (isActionBlocked) return;
+        setIsCreating(true);
+        try {
+            const result = await onStartEmptyConversation();
+            if (result !== false) {
+                onClose();
+            }
+        } catch (err) {
+            console.error("[ConversationSidebar] Failed to start empty conversation:", err);
+        } finally {
+            setIsCreating(false);
+        }
     };
 
     const handleDeleteClick = (e: React.MouseEvent, conv: Conversation) => {
@@ -186,7 +200,7 @@ export default function ConversationSidebar({
     };
 
     const handleLoad = async (id: string) => {
-        if (editingId) return;
+        if (editingId || isActionBlocked) return;
         if (id === activeConversationId) {
             onClose();
             return;
@@ -251,11 +265,23 @@ export default function ConversationSidebar({
                     {/* New chat button */}
                     <div className="p-2">
                         <button
+                            type="button"
                             onClick={handleCreate}
-                            className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 text-[var(--color-accent)] text-xs font-medium transition-colors border border-[var(--color-accent)]/20"
+                            disabled={isActionBlocked}
+                            title={isActionBlocked ? t("chat.history.creating", "正在创建新对话...") : undefined}
+                            className={clsx(
+                                "w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors border",
+                                isActionBlocked
+                                    ? "opacity-50 cursor-not-allowed bg-white/5 border-transparent text-[var(--color-text-muted)]"
+                                    : "bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 text-[var(--color-accent)] border-[var(--color-accent)]/20 cursor-pointer"
+                            )}
                         >
-                            <Plus size={14} strokeWidth={1.5} />
-                            {t("chat.history.newChat")}
+                            {isActionBlocked ? (
+                                <span className="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                            ) : (
+                                <Plus size={14} strokeWidth={1.5} />
+                            )}
+                            {isActionBlocked ? t("chat.history.creating", "正在创建新对话...") : t("chat.history.newChat")}
                         </button>
                     </div>
 
@@ -271,7 +297,8 @@ export default function ConversationSidebar({
                                     key={conv.id}
                                     onClick={() => handleLoad(conv.id)}
                                     className={clsx(
-                                        "group flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer transition-colors",
+                                        "group flex items-center gap-2 px-3 py-2.5 rounded-lg transition-colors",
+                                        isActionBlocked ? "cursor-not-allowed opacity-60" : "cursor-pointer",
                                         activeConversationId === conv.id
                                             ? "bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30"
                                             : "hover:bg-white/5 border border-transparent"
@@ -279,7 +306,7 @@ export default function ConversationSidebar({
                                 >
                                     <div className="flex-1 min-w-0">
                                         {editingId === conv.id ? (
-                                            <div className="flex items-center gap-1">
+                                             <div className="flex items-center gap-1">
                                                 <input
                                                     ref={editInputRef}
                                                     value={editTitle}
@@ -322,27 +349,37 @@ export default function ConversationSidebar({
                                     {editingId !== conv.id && (
                                         <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                                             <button
+                                                disabled={isActionBlocked}
                                                 onClick={(e) => handleTogglePin(e, conv)}
                                                 className={clsx(
                                                     "p-1 rounded transition-colors",
                                                     hasPinnedConversationState(conv.pinned_state)
                                                         ? "text-[var(--color-accent)] hover:text-[var(--color-text-muted)]"
-                                                        : "text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
+                                                        : "text-[var(--color-text-muted)] hover:text-[var(--color-accent)]",
+                                                    isActionBlocked && "cursor-not-allowed opacity-50"
                                                 )}
                                                 title={hasPinnedConversationState(conv.pinned_state) ? t("chat.history.unpin") : t("chat.history.pin")}
                                             >
                                                 <Pin size={12} strokeWidth={1.5} className={hasPinnedConversationState(conv.pinned_state) ? "fill-current" : ""} />
                                             </button>
                                             <button
+                                                disabled={isActionBlocked}
                                                 onClick={(e) => handleRenameStart(e, conv)}
-                                                className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
+                                                className={clsx(
+                                                    "p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors",
+                                                    isActionBlocked && "cursor-not-allowed opacity-50"
+                                                )}
                                                 title={t("chat.history.rename")}
                                             >
                                                 <Pencil size={12} strokeWidth={1.5} />
                                             </button>
                                             <button
+                                                disabled={isActionBlocked}
                                                 onClick={(e) => handleDeleteClick(e, conv)}
-                                                className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-error)] transition-colors"
+                                                className={clsx(
+                                                    "p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-error)] transition-colors",
+                                                    isActionBlocked && "cursor-not-allowed opacity-50"
+                                                )}
                                                 title={t("chat.history.delete")}
                                             >
                                                 <Trash2 size={12} strokeWidth={1.5} />

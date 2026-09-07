@@ -7,7 +7,7 @@ import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, Ima
 import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, editConversationMessage, listCharacters, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
 import type { CommittedCharacterRuntime, FailureEvent, ToolTraceItem, StreamChatResponse } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal, useWakeWord } from "../hooks";
 import { useTranslation } from "react-i18next";
 import { ImageLightbox } from "../components/ImageLightbox";
@@ -313,6 +313,7 @@ export default function ChatPanel({
     const inputRef = useRef(input);
     inputRef.current = input;
     const sttBaseDraftRef = useRef<string | null>(null);
+    const sttBaseCharacterIdRef = useRef<string | null>(null);
     const prevVoiceStateRef = useRef<VoiceState>(VoiceState.Idle);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [inputHeight, setInputHeight] = useState<number>(loadSavedChatInputHeight);
@@ -368,6 +369,8 @@ export default function ChatPanel({
     const isStreamingRef = useRef(false);
     const [isBusy, setIsBusy] = useState(false);
     const isBusyRef = useRef(false);
+    const [isSwitchingConversation, setIsSwitchingConversation] = useState(false);
+    const isSwitchingConversationRef = useRef(false);
     const ttsSpeakingRef = useRef(false);
     const [isStopping, setIsStopping] = useState(false);
     const cancelRequestedRef = useRef(false);
@@ -412,8 +415,10 @@ export default function ChatPanel({
         setIsStopping(false);
         isStreamingRef.current = false;
         setIsStreaming(false);
-        isBusyRef.current = false;
-        setIsBusy(false);
+        if (!isSwitchingConversationRef.current) {
+            isBusyRef.current = false;
+            setIsBusy(false);
+        }
     }, []);
 
     // Raw (unfiltered) full response text — accumulated from all deltas
@@ -581,7 +586,6 @@ export default function ChatPanel({
     }, [endTurnActivity]);
 
     const conversationSyncRef = useRef<ChatCharacterSynchronizer | null>(null);
-    const isSwitchingConversationRef = useRef(false);
     if (conversationSyncRef.current === null) {
         conversationSyncRef.current = createChatCharacterSynchronizer({
             listConversations,
@@ -705,27 +709,45 @@ export default function ChatPanel({
         preferredConversationId: string | null,
     ): Promise<void> => {
         if (isSwitchingConversationRef.current) return;
-        const activeTurnId = currentTurnRef.current?.turnId;
-        if (activeTurnId) {
-            cancelRequestedRef.current = true;
-            setIsStopping(true);
-            try {
-                await cancelChatTurn(activeTurnId, "conversation_switched");
-            } catch (err) {
-                console.error("[ChatPanel] Failed to cancel prior turn before switching conversation:", err);
+        isSwitchingConversationRef.current = true;
+        setIsSwitchingConversation(true);
+        setIsBusy(true);
+        isBusyRef.current = true;
+        try {
+            const activeTurnId = currentTurnRef.current?.turnId;
+            if (activeTurnId) {
+                cancelRequestedRef.current = true;
+                setIsStopping(true);
+                try {
+                    await cancelChatTurn(activeTurnId, "conversation_switched");
+                } catch (err) {
+                    console.error("[ChatPanel] Failed to cancel prior turn before switching conversation:", err);
+                }
+            } else if (pendingTurnRequestRef.current) {
+                cancelRequestedRef.current = true;
+                setIsStopping(true);
+                pendingTurnRequestRef.current = null;
             }
+            await conversationSyncRef.current?.synchronize({
+                characterId: activeCharacterId,
+                preferredConversationId,
+            });
+        } finally {
+            cancelRequestedRef.current = false;
+            setIsStopping(false);
+            isSwitchingConversationRef.current = false;
+            setIsSwitchingConversation(false);
+            isBusyRef.current = false;
+            setIsBusy(false);
         }
-        await conversationSyncRef.current?.synchronize({
-            characterId: activeCharacterId,
-            preferredConversationId,
-        });
     }, [activeCharacterId]);
 
-    const handleStartEmptyConversation = useCallback(async (): Promise<void> => {
-        if (isSwitchingConversationRef.current || isBusyRef.current) {
-            return;
+    const handleStartEmptyConversation = useCallback(async (): Promise<boolean> => {
+        if (isSwitchingConversationRef.current) {
+            return false;
         }
         isSwitchingConversationRef.current = true;
+        setIsSwitchingConversation(true);
         setIsBusy(true);
         isBusyRef.current = true;
 
@@ -746,6 +768,10 @@ export default function ChatPanel({
                 } catch (err) {
                     console.error("[ChatPanel] Failed to cancel prior turn before new conversation:", err);
                 }
+            } else if (pendingTurnRequestRef.current) {
+                cancelRequestedRef.current = true;
+                setIsStopping(true);
+                pendingTurnRequestRef.current = null;
             }
 
             // 先执行后端清空与重置，确保后端 current_conversation_id 与历史已置空
@@ -754,12 +780,17 @@ export default function ChatPanel({
             // 后端成功后才提交前端可视会话清空
             conversationSyncRef.current?.startEmptyConversation(activeCharacterId);
             setError(null);
+            return true;
         } catch (err) {
             console.error("[ChatPanel] Failed to clear backend history for empty conversation:", err);
             setError(t("chat.errors.new_conversation_failed", "新建会话失败，已保留当前会话"));
+            return false;
         } finally {
             clearTimeout(watchdogTimer);
+            cancelRequestedRef.current = false;
+            setIsStopping(false);
             isSwitchingConversationRef.current = false;
+            setIsSwitchingConversation(false);
             isBusyRef.current = false;
             setIsBusy(false);
         }
@@ -806,8 +837,10 @@ export default function ChatPanel({
             return;
         }
 
-        flushReveal();
-        setIsThinking(false);
+        const isExplicitlyCancelled = res?.status === "cancelled";
+        const isCancelRequested = cancelRequestedRef.current;
+        const hasCommittedAssistantMessage = Boolean(res?.assistant_message_id && res?.status === "completed");
+        const shouldTreatAsCancelled = isExplicitlyCancelled || (isCancelRequested && !hasCommittedAssistantMessage);
 
         const turn = currentTurnRef.current;
         const isMatchingTurn = Boolean(
@@ -816,6 +849,32 @@ export default function ChatPanel({
                 (!turn.clientRequestId && !clientRequestId)
             )
         );
+
+        if (shouldTreatAsCancelled) {
+            resetReveal();
+            setIsThinking(false);
+
+            if (isMatchingTurn && turn) {
+                setMessages(prev => removeTurnMessages(prev, turn));
+            }
+
+            if (
+                currentTurnRef.current?.clientRequestId === clientRequestId ||
+                (!currentTurnRef.current?.clientRequestId && !clientRequestId)
+            ) {
+                currentTurnRef.current = null;
+            }
+            if (pendingTurnRequestRef.current?.clientRequestId === clientRequestId) {
+                pendingTurnRequestRef.current = null;
+            }
+
+            endTurnActivity();
+            return;
+        }
+
+        flushReveal();
+        setIsThinking(false);
+
         if (isMatchingTurn && turn) {
             const fullText = turn.rawText;
             rawResponseRef.current = fullText;
@@ -877,7 +936,7 @@ export default function ChatPanel({
             });
 
             const playback = getTtsPlaybackSettings();
-            if (playback.enabled && cleanText.trim()) {
+            if (!isCancelRequested && res?.status !== "cancelled" && playback.enabled && cleanText.trim()) {
                 const { enabled: _enabled, ...ttsConfig } = playback;
                 synthesize(cleanText.trim(), ttsConfig).catch(err => console.error("[TTS] Auto-speak failed via fallback teardown:", err));
             }
@@ -894,7 +953,7 @@ export default function ChatPanel({
         }
 
         endTurnActivity();
-    }, [endTurnActivity, flushReveal]);
+    }, [endTurnActivity, flushReveal, resetReveal]);
 
     // 统一处理 streamChat 的响应解析、代次校验、消息 ID 对齐（补偿）与异常收敛
     const processTurnStreamResult = useCallback(async (options: {
@@ -919,6 +978,25 @@ export default function ChatPanel({
                     setActiveConversationId(streamResValidation.targetConversationId);
                     activeConversationIdRef.current = streamResValidation.targetConversationId;
                 }
+
+                const isExplicitlyCancelled = res?.status === "cancelled";
+                const isCancelRequested = cancelRequestedRef.current;
+                const hasCommittedAssistantMessage = Boolean(res?.assistant_message_id && res?.status === "completed");
+                const shouldTreatAsCancelled = isExplicitlyCancelled || (isCancelRequested && !hasCommittedAssistantMessage);
+
+                if (shouldTreatAsCancelled) {
+                    if (res?.user_message_id) {
+                        setMessages(prev => reconcileTurnMessageIds(
+                            prev,
+                            clientRequestId,
+                            res.user_message_id,
+                            null,
+                        ).messages);
+                    }
+                    finalizeActiveTurnIfCurrent(clientRequestId, res);
+                    return;
+                }
+
                 // 先按已提交的消息快照判定是否需要后端重同步；实际写入仍走 updater，
                 // 与其他排队更新正确组合。快照与 prev 的微小背离在严格匹配 + merge
                 // 式 resync 下无破坏性后果。
@@ -977,44 +1055,63 @@ export default function ChatPanel({
     }, [endTurnActivity, finalizeActiveTurnIfCurrent, resyncConversationMessages, setError]);
 
     const handleTranscription = useCallback((text: string) => {
+        // 记录发起识别时的会话三元组快照
+        const startGeneration = conversationGenerationRef.current;
+        const startConversationId = activeConversationIdRef.current;
+        const startCharacterId = sttBaseCharacterIdRef.current ?? activeCharacterIdRef.current;
+
+        // 若会话已不再是当前会话（角色切换、同一角色跨会话切换、或代次变更），
+        // 降级保存转录文本，绝不静默丢弃
+        const preserveSttDraft = (draftText: string, transcriptionText?: string) => {
+            if (activeCharacterIdRef.current !== startCharacterId) {
+                // 角色已切换：保存到原角色的草稿存储中，不污染当前角色的输入框
+                saveCharacterDraft(startCharacterId, draftText);
+            } else {
+                // 同一角色（如跨会话切换）：回填当前输入框，并同步保存到原角色草稿
+                // 防御性合并：若用户在切换期间在输入框键入了额外内容，保留键入内容与转录的组合
+                if (transcriptionText) {
+                    setInput(prev => {
+                        if (prev && prev !== (sttBaseDraftRef.current ?? "") && !prev.includes(transcriptionText)) {
+                            return combineDraftWithTranscription(prev, transcriptionText);
+                        }
+                        return draftText;
+                    });
+                } else {
+                    setInput(draftText);
+                }
+                saveCharacterDraft(startCharacterId, draftText);
+            }
+        };
+
         const trimmed = text.trim();
         if (!trimmed) {
             // 空文本或未识别：恢复原草稿并重置快照
             if (sttBaseDraftRef.current !== null) {
-                setInput(sttBaseDraftRef.current);
+                preserveSttDraft(sttBaseDraftRef.current);
                 sttBaseDraftRef.current = null;
+                sttBaseCharacterIdRef.current = null;
             }
             return;
         }
 
         const base = sttBaseDraftRef.current ?? "";
         sttBaseDraftRef.current = null; // 正常结算，解除锁定
+        sttBaseCharacterIdRef.current = null;
         const fullMessage = combineDraftWithTranscription(base, trimmed);
 
         if (sttAutoSend) {
             void (async () => {
-                // 第一次异步等待前立即捕获当前会话三元组快照
-                const startGeneration = conversationGenerationRef.current;
-                const startConversationId = activeConversationIdRef.current;
-                const startCharacterId = activeCharacterIdRef.current;
                 const isSessionCurrent = () =>
                     conversationGenerationRef.current === startGeneration &&
                     activeConversationIdRef.current === startConversationId &&
                     activeCharacterIdRef.current === startCharacterId;
-
-                // 若期间角色发生切换，将识别文本持久化到原角色的草稿存储中，避免内容丢失
-                const preserveSttDraftIfCharacterChanged = () => {
-                    if (activeCharacterIdRef.current !== startCharacterId) {
-                        saveCharacterDraft(startCharacterId, fullMessage);
-                    }
-                };
 
                 // 忙碌态/禁用态降级保护：转为填充输入框草稿，绝不并发冲撞
                 if (interactionDisabled || isBusyRef.current) {
                     if (isSessionCurrent()) {
                         setInput(fullMessage);
                     } else {
-                        preserveSttDraftIfCharacterChanged();
+                        preserveSttDraft(fullMessage, trimmed);
                     }
                     return;
                 }
@@ -1028,7 +1125,7 @@ export default function ChatPanel({
                 }
 
                 if (!isSessionCurrent()) {
-                    preserveSttDraftIfCharacterChanged();
+                    preserveSttDraft(fullMessage, trimmed);
                     return;
                 }
 
@@ -1041,14 +1138,14 @@ export default function ChatPanel({
                     if (isSessionCurrent()) {
                         setInput(fullMessage);
                     } else {
-                        preserveSttDraftIfCharacterChanged();
+                        preserveSttDraft(fullMessage, trimmed);
                     }
                     return;
                 }
 
                 // 校验模型检查异步排队期间会话是否已被切换
                 if (!isSessionCurrent()) {
-                    preserveSttDraftIfCharacterChanged();
+                    preserveSttDraft(fullMessage, trimmed);
                     return;
                 }
 
@@ -1091,13 +1188,17 @@ export default function ChatPanel({
                         allow_image_gen: allowImageGen,
                         character_id: getActiveCharacterIdForRequest(),
                         client_request_id: clientRequestId,
-                        conversation_id: activeConversationIdRef.current ?? undefined,
+                        conversation_id: startConversationId ?? undefined,
                     }),
                 });
             })();
         } else {
             // Fill input box with merged text for user review
-            setInput(fullMessage);
+            if (activeCharacterIdRef.current !== startCharacterId) {
+                saveCharacterDraft(startCharacterId, fullMessage);
+            } else {
+                setInput(fullMessage);
+            }
         }
     }, [clearDraft, ensureMemoryModelReady, interactionDisabled, processTurnStreamResult, resetReveal, setInput, startStreaming, sttAutoSend]);
 
@@ -1154,6 +1255,7 @@ export default function ChatPanel({
                 return;
             }
             sttBaseDraftRef.current = inputRef.current;
+            sttBaseCharacterIdRef.current = activeCharacterIdRef.current;
             startVoice({ autoStopOnSilence: true });
         }, [continuousListening, handleTranscription, startVoice]),
     });
@@ -1171,8 +1273,14 @@ export default function ChatPanel({
     useEffect(() => {
         if (prevVoiceStateRef.current === VoiceState.Listening && voiceState === VoiceState.Idle) {
             if (sttBaseDraftRef.current !== null) {
-                setInput(sttBaseDraftRef.current);
+                const targetCharId = sttBaseCharacterIdRef.current ?? activeCharacterIdRef.current;
+                if (activeCharacterIdRef.current === targetCharId) {
+                    setInput(sttBaseDraftRef.current);
+                } else {
+                    saveCharacterDraft(targetCharId, sttBaseDraftRef.current);
+                }
                 sttBaseDraftRef.current = null;
+                sttBaseCharacterIdRef.current = null;
             }
         }
         prevVoiceStateRef.current = voiceState;
@@ -1363,7 +1471,16 @@ export default function ChatPanel({
                 const unlistens = await Promise.all([
                     // Listen for pet window sending a message — start streaming in main window too
                     listen<{ message: string; client_request_id?: string }>("pet-chat-start", (event) => {
-                        if (aborted || isBusyRef.current) return;
+                        if (aborted) return;
+                        if (isBusyRef.current) {
+                            if (event.payload?.client_request_id) {
+                                emit("pet-chat-rejected", {
+                                    client_request_id: event.payload.client_request_id,
+                                    reason: "busy",
+                                }).catch(() => {});
+                            }
+                            return;
+                        }
                         const text = event.payload.message;
                         const clientRequestId = event.payload.client_request_id
                             || `pet_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1381,6 +1498,28 @@ export default function ChatPanel({
                         startStreaming();
                         setIsThinking(true);
                         userScrolledRef.current = false;
+                    }),
+
+                    listen<{ client_request_id?: string; error?: string }>("pet-chat-failed", (event) => {
+                        if (aborted) return;
+                        const reqId = event.payload?.client_request_id;
+                        if (!reqId) return;
+
+                        const isPending = pendingTurnRequestRef.current?.clientRequestId === reqId;
+                        const isActive = currentTurnRef.current?.clientRequestId === reqId;
+
+                        if (isPending || isActive) {
+                            setMessages(prev => prev.filter(m => m.clientRequestId !== reqId));
+                            pendingTurnRequestRef.current = null;
+                            currentTurnRef.current = null;
+                            rawResponseRef.current = "";
+                            resetReveal();
+                            setIsThinking(false);
+                            endTurnActivity();
+                            if (event.payload?.error) {
+                                setError(event.payload.error);
+                            }
+                        }
                     }),
 
                     onChatTurnStart(({ turn_id, client_request_id, conversation_id, user_message_id }) => {
@@ -1567,6 +1706,16 @@ export default function ChatPanel({
                         }
 
                         if (!turn) return;
+
+                        if (status === "cancelled") {
+                            resetReveal();
+                            endTurnActivity();
+                            setIsThinking(false);
+                            setMessages(prev => removeTurnMessages(prev, turn));
+                            currentTurnRef.current = null;
+                            pendingTurnRequestRef.current = null;
+                            return;
+                        }
 
                         flushReveal();
                         endTurnActivity();
@@ -1781,7 +1930,16 @@ export default function ChatPanel({
                     // Listen for interaction triggers (touch/click on Live2D model)
                     // interaction-service already calls streamChat, we just need to prepare ChatPanel for receiving deltas
                     listen<{ gesture?: string; hitArea?: string; client_request_id?: string }>("interaction-trigger", (event) => {
-                        if (aborted || isBusyRef.current) return;
+                        if (aborted) return;
+                        if (isBusyRef.current) {
+                            if (event.payload?.client_request_id) {
+                                emit("interaction-trigger-rejected", {
+                                    client_request_id: event.payload.client_request_id,
+                                    reason: "busy",
+                                }).catch(() => {});
+                            }
+                            return;
+                        }
 
                         const clientRequestId = event.payload?.client_request_id
                             || `interaction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1799,6 +1957,24 @@ export default function ChatPanel({
                         resetReveal();
                         rawResponseRef.current = "";
                         currentTurnRef.current = null;
+                    }),
+
+                    listen<{ client_request_id?: string; error?: string }>("interaction-trigger-failed", (event) => {
+                        if (aborted) return;
+                        const reqId = event.payload?.client_request_id;
+                        if (!reqId) return;
+
+                        const isPending = pendingTurnRequestRef.current?.clientRequestId === reqId;
+                        const isActive = currentTurnRef.current?.clientRequestId === reqId;
+
+                        if (isPending || isActive) {
+                            pendingTurnRequestRef.current = null;
+                            currentTurnRef.current = null;
+                            rawResponseRef.current = "";
+                            resetReveal();
+                            setIsThinking(false);
+                            endTurnActivity();
+                        }
                     }),
 
                     // Listen for voice-interrupt-stt: when TTS is interrupted by voice, auto-start STT
@@ -2061,6 +2237,7 @@ export default function ChatPanel({
     const handleMicToggle = useCallback(() => {
         if (voiceState === VoiceState.Idle) {
             sttBaseDraftRef.current = inputRef.current;
+            sttBaseCharacterIdRef.current = activeCharacterIdRef.current;
             startVoice({ autoStopOnSilence: true });
         } else {
             stopVoice();
@@ -2624,6 +2801,7 @@ export default function ChatPanel({
                 onClose={() => setSidebarOpen(false)}
                 characterId={activeCharacterId}
                 activeConversationId={activeConversationId}
+                isSwitchingConversation={isSwitchingConversation}
                 onStartEmptyConversation={handleStartEmptyConversation}
                 onSelectConversation={async (conversationId) => {
                     await handleConversationSelection(conversationId);

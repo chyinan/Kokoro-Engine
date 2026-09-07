@@ -266,6 +266,36 @@ impl std::fmt::Debug for ChatTurnGuard {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ActiveChatTurnContext {
+    pub client_request_id: String,
+    pub started_at: Instant,
+}
+
+pub struct ChatTurnExecutionGuard {
+    guard: tokio::sync::OwnedMutexGuard<Option<ActiveChatTurnContext>>,
+}
+
+impl ChatTurnExecutionGuard {
+    pub fn context(&self) -> Option<&ActiveChatTurnContext> {
+        self.guard.as_ref()
+    }
+}
+
+impl Drop for ChatTurnExecutionGuard {
+    fn drop(&mut self) {
+        *self.guard = None;
+    }
+}
+
+impl std::fmt::Debug for ChatTurnExecutionGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatTurnExecutionGuard")
+            .field("active", &*self.guard)
+            .finish()
+    }
+}
+
 struct ActivationReservation {
     activating: Arc<AtomicBool>,
     was_already_active: bool,
@@ -382,6 +412,9 @@ pub struct AIOrchestrator {
     pub proactive_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// 当前活跃对话 ID
     pub current_conversation_id: Arc<Mutex<Option<String>>>,
+    /// Monotonically increasing epoch counter for conversation mutations (switch/create/clear/delete/activate).
+    /// Used to detect conversation state divergence during in-flight turns.
+    pub conversation_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Serializes conversation history/pointer rewrites (delete/edit/clear/switch/activation)
     /// so a stale operation can never clobber the active conversation's in-memory context.
     /// Must be the OUTERMOST lock wherever it is taken.
@@ -399,6 +432,8 @@ pub struct AIOrchestrator {
     pub runtime_degraded: Arc<Mutex<Option<String>>>,
     /// Concurrency gate to block chat turns during character activation and recovery.
     pub activation_gate: Arc<ActivationGate>,
+    /// Global lock ensuring only one chat turn (stream_chat) executes on this orchestrator at a time.
+    pub chat_turn_lock: Arc<tokio::sync::Mutex<Option<ActiveChatTurnContext>>>,
 }
 
 impl AIOrchestrator {
@@ -461,6 +496,7 @@ impl AIOrchestrator {
             idle_behaviors: Arc::new(Mutex::new(IdleBehaviorSystem::new())),
             proactive_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             current_conversation_id: Arc::new(Mutex::new(None)),
+            conversation_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             conversation_switch_lock: Arc::new(Mutex::new(())),
             persist_conversation_selection: true,
             context_strategy: Arc::new(Mutex::new("window".to_string())),
@@ -468,6 +504,7 @@ impl AIOrchestrator {
             vision_context_history_mode: Arc::new(Mutex::new("latest".to_string())),
             runtime_degraded: Arc::new(Mutex::new(None)),
             activation_gate: Arc::new(ActivationGate::default()),
+            chat_turn_lock: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -497,6 +534,7 @@ impl AIOrchestrator {
             idle_behaviors: self.idle_behaviors.clone(),
             proactive_enabled: self.proactive_enabled.clone(),
             current_conversation_id: Arc::new(Mutex::new(None)),
+            conversation_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             conversation_switch_lock: Arc::new(Mutex::new(())),
             persist_conversation_selection: false,
             context_strategy: self.context_strategy.clone(),
@@ -504,6 +542,7 @@ impl AIOrchestrator {
             vision_context_history_mode: self.vision_context_history_mode.clone(),
             runtime_degraded: self.runtime_degraded.clone(),
             activation_gate: self.activation_gate.clone(),
+            chat_turn_lock: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -513,8 +552,41 @@ impl AIOrchestrator {
         guard
     }
 
+    pub fn bump_conversation_generation(&self) -> u64 {
+        self.conversation_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
+    }
+
+    pub fn current_conversation_generation(&self) -> u64 {
+        self.conversation_generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub fn enter_chat_turn(&self) -> Result<ChatTurnGuard, String> {
         self.activation_gate.enter_chat_turn()
+    }
+
+    pub fn try_acquire_chat_turn(
+        &self,
+        client_request_id: &str,
+    ) -> Result<ChatTurnExecutionGuard, String> {
+        let mut guard = self
+            .chat_turn_lock
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| {
+                "chat_turn_busy: A chat turn is already in progress".to_string()
+            })?;
+        *guard = Some(ActiveChatTurnContext {
+            client_request_id: client_request_id.to_string(),
+            started_at: Instant::now(),
+        });
+        Ok(ChatTurnExecutionGuard { guard })
+    }
+
+    pub fn is_chat_busy(&self) -> bool {
+        self.chat_turn_lock.try_lock().is_err()
     }
 
     pub fn is_activating(&self) -> bool {
@@ -878,6 +950,7 @@ impl AIOrchestrator {
                 .await?;
 
                 *conv_id_lock = Some(new_id.clone());
+                self.bump_conversation_generation();
                 // Persist conversation_id to disk for hot-reload recovery
                 if self.persist_conversation_selection {
                     Self::persist_conversation_id(Some(&new_id));
@@ -1711,6 +1784,7 @@ impl AIOrchestrator {
         // 清空当前对话 ID，下次发消息时会创建新对话
         let mut conv_id = self.current_conversation_id.lock().await;
         *conv_id = None;
+        self.bump_conversation_generation();
         if self.persist_conversation_selection {
             Self::persist_conversation_id(None);
         }
@@ -3345,6 +3419,40 @@ mod tests {
         let history = orchestrator.history.lock().await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].content, "test locked message");
+    }
+
+    #[tokio::test]
+    async fn test_chat_turn_lock_mutual_exclusion_and_auto_release() {
+        let orchestrator = setup_test_orchestrator().await;
+
+        assert!(!orchestrator.is_chat_busy());
+
+        // First turn acquires lock successfully
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req_1")
+            .expect("first turn should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+        assert_eq!(guard1.context().unwrap().client_request_id, "req_1");
+
+        // Concurrent turn while guard1 is held must be rejected immediately
+        let err = orchestrator
+            .try_acquire_chat_turn("req_2")
+            .expect_err("second turn must fail while first is active");
+        assert!(err.contains("chat_turn_busy"));
+
+        // Dropping guard1 must release the lock automatically
+        drop(guard1);
+        assert!(!orchestrator.is_chat_busy());
+
+        // Subsequent turn can now acquire cleanly
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req_3")
+            .expect("subsequent turn should acquire lock after release");
+        assert!(orchestrator.is_chat_busy());
+        assert_eq!(guard2.context().unwrap().client_request_id, "req_3");
+
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
     }
 }
 

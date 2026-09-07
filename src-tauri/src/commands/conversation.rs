@@ -120,6 +120,7 @@ pub(crate) async fn list_conversations_inner(
     Ok(list)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn load_conversation_inner(
     request: LoadConversationRequest,
     db: &sqlx::SqlitePool,
@@ -127,6 +128,7 @@ pub async fn load_conversation_inner(
     current_conversation_id: &tokio::sync::Mutex<Option<String>>,
     max_message_chars: usize,
     conversation_switch_lock: &tokio::sync::Mutex<()>,
+    conversation_generation: Option<&std::sync::atomic::AtomicU64>,
     persist_selection: bool,
 ) -> Result<LoadedConversation, KokoroError> {
     // 会话切换锁：覆盖整个数据库查询、内存历史装载与会话指针设置过程，
@@ -163,6 +165,9 @@ pub async fn load_conversation_inner(
     {
         let mut conv_id = current_conversation_id.lock().await;
         *conv_id = Some(request.id.clone());
+        if let Some(generation) = conversation_generation {
+            generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         if persist_selection {
             crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&request.id));
         }
@@ -216,6 +221,7 @@ pub async fn load_conversation(
         &state.current_conversation_id,
         max_chars,
         &state.conversation_switch_lock,
+        Some(&state.conversation_generation),
         true,
     )
     .await
@@ -230,6 +236,7 @@ pub async fn delete_conversation_inner(
     memory_history_boundary: Option<&tokio::sync::Mutex<usize>>,
     memory_trigger_count: Option<&tokio::sync::Mutex<u64>>,
     conversation_switch_lock: &tokio::sync::Mutex<()>,
+    conversation_generation: Option<&std::sync::atomic::AtomicU64>,
     persist_selection: bool,
 ) -> Result<(), KokoroError> {
     // 会话切换锁：覆盖整个数据库事务删除及活跃内存清理过程，
@@ -261,6 +268,9 @@ pub async fn delete_conversation_inner(
         let mut conv_id = current_conversation_id.lock().await;
         if conv_id.as_deref() == Some(&request.id) {
             *conv_id = None;
+            if let Some(generation) = conversation_generation {
+                generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             history.lock().await.clear();
             if let Some(boundary) = memory_history_boundary {
                 *boundary.lock().await = 0;
@@ -290,6 +300,7 @@ pub async fn delete_conversation(
         Some(&state.memory_history_boundary),
         Some(&state.memory_trigger_count),
         &state.conversation_switch_lock,
+        Some(&state.conversation_generation),
         true,
     )
     .await
@@ -1292,6 +1303,7 @@ mod tests {
                     &current_conv,
                     2000,
                     &lock,
+                    None,
                     false,
                 )
                 .await
@@ -1352,6 +1364,7 @@ mod tests {
             Some(&boundary),
             Some(&trigger_count),
             &lock,
+            None,
             false,
         )
         .await;
@@ -1407,6 +1420,7 @@ mod tests {
             Some(&boundary),
             Some(&trigger_count),
             &lock,
+            None,
             false,
         )
         .await;

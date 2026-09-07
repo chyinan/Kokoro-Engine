@@ -105,6 +105,7 @@ pub fn run() {
             commands::chat::approve_tool_approval,
             commands::chat::reject_tool_approval,
             commands::chat::cancel_chat_turn,
+            commands::chat::is_chat_busy,
             commands::context::set_persona,
             commands::context::set_character_name,
             commands::context::set_active_character_id,

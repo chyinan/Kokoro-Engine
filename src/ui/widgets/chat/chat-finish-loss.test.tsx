@@ -357,4 +357,81 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
         expect(textarea.disabled).toBe(false);
         expect(container.textContent).toContain("Response before late finish");
     });
+
+    it("removes partial assistant bubble, suppresses TTS, and unblocks UI when cancelled response arrives and chat-turn-finish is dropped", async () => {
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        const form = container.querySelector("form") as HTMLFormElement;
+
+        // 1. Submit user message
+        await act(async () => {
+            setTextareaValue(textarea, "Cancel test message");
+        });
+
+        await act(async () => {
+            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        const clientRequestId = streamChatMock.mock.calls[0][0].client_request_id;
+        expect(textarea.disabled).toBe(true);
+
+        // 2. Start turn and emit partial delta
+        await act(async () => {
+            turnStartCb?.({
+                turn_id: "turn-cancel-1",
+                client_request_id: clientRequestId,
+                conversation_id: "conv-1",
+                user_message_id: 401,
+            });
+            turnDeltaCb?.({
+                turn_id: "turn-cancel-1",
+                delta: "Partial stream content before user stopped",
+            });
+        });
+
+        expect(container.textContent).toContain("Partial stream content before user stopped");
+
+        // 3. Backend cancels turn: returns status: 'cancelled' and assistant_message_id: null.
+        // chat-turn-finish is LOST (never fired).
+        await act(async () => {
+            streamChatResolver?.({
+                conversation_id: "conv-1",
+                user_message_id: 401,
+                assistant_message_id: null,
+                client_request_id: clientRequestId,
+                status: "cancelled",
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // 4. Verify UI is unblocked
+        expect(textarea.disabled).toBe(false);
+
+        // 5. Verify partial assistant content is REMOVED from the message list
+        expect(container.textContent).not.toContain("Partial stream content before user stopped");
+
+        // 6. User message is still preserved
+        expect(container.textContent).toContain("Cancel test message");
+
+        // 7. Verify TTS was NEVER called for the cancelled turn
+        expect(bridge.synthesize).not.toHaveBeenCalled();
+
+        // 8. User can immediately send another message without deadlock
+        await act(async () => {
+            setTextareaValue(textarea, "Next message after cancel");
+        });
+
+        await act(async () => {
+            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(streamChatMock).toHaveBeenCalledTimes(2);
+        expect(streamChatMock.mock.calls[1][0].message).toBe("Next message after cancel");
+    });
 });
