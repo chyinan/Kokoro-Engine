@@ -5,6 +5,7 @@ import {
     validateTurnStart,
     validateTurnFinish,
     validateStreamChatResponse,
+    alignTurnStartUserMessage,
     reconcileTurnMessageIds,
     shouldResyncConversation,
     hasResidualActiveTurn,
@@ -192,6 +193,7 @@ describe("chat turn lifecycle validation", () => {
 
             const result = validateTurnStart(context, {
                 turn_id: "turn-external",
+                client_request_id: "req-ext-1",
                 conversation_id: "conv-1",
             });
 
@@ -199,7 +201,38 @@ describe("chat turn lifecycle validation", () => {
                 valid: true,
                 shouldUpdateConversation: true,
                 targetConversationId: "conv-1",
-                matchedClientRequestId: undefined,
+                matchedClientRequestId: "req-ext-1",
+            });
+        });
+
+        it("rejects turn start when client_request_id is missing or empty", () => {
+            const context: TurnStartValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: "conv-1",
+                activeCharacterId: "char-1",
+                pendingRequest: null,
+                isCancelRequested: false,
+            };
+
+            const result = validateTurnStart(context, {
+                turn_id: "turn-external",
+                conversation_id: "conv-1",
+            });
+
+            expect(result).toEqual({
+                valid: false,
+                reason: "missing_request_id",
+            });
+
+            const resultEmpty = validateTurnStart(context, {
+                turn_id: "turn-external",
+                client_request_id: "   ",
+                conversation_id: "conv-1",
+            });
+
+            expect(resultEmpty).toEqual({
+                valid: false,
+                reason: "missing_request_id",
             });
         });
 
@@ -214,6 +247,7 @@ describe("chat turn lifecycle validation", () => {
 
             const result = validateTurnStart(context, {
                 turn_id: "turn-external",
+                client_request_id: "req-ext-1",
                 conversation_id: "conv-other",
             });
 
@@ -532,6 +566,111 @@ describe("chat turn lifecycle validation", () => {
         });
     });
 
+    describe("alignTurnStartUserMessage", () => {
+        it("binds user_message_id when clientRequestId matches", () => {
+            const messages: ChatPanelMessage[] = [
+                {
+                    role: "user",
+                    text: "Hello",
+                    clientRequestId: "req-1",
+                },
+            ];
+
+            const result = alignTurnStartUserMessage(messages, "req-1", 101);
+
+            expect(result.matched).toBe(true);
+            expect(result.needsResync).toBe(false);
+            expect(result.messages[0].id).toBe(101);
+            expect(result.messages[0].clientRequestId).toBe("req-1");
+        });
+
+        it("accepts already aligned message with matching id without modifying (regenerate scenario)", () => {
+            const messages: ChatPanelMessage[] = [
+                {
+                    id: 101,
+                    role: "user",
+                    text: "Hello",
+                    clientRequestId: "req-original",
+                },
+            ];
+
+            // During regenerate, clientRequestId is req-regenerate, but message already has id 101
+            const result = alignTurnStartUserMessage(messages, "req-regenerate", 101);
+
+            expect(result.matched).toBe(true);
+            expect(result.needsResync).toBe(false);
+            expect(result.messages).toBe(messages); // reference intact
+            expect(result.messages[0].id).toBe(101);
+        });
+
+        it("returns needsResync without guessing when clientRequestId is missing or empty", () => {
+            const messages: ChatPanelMessage[] = [
+                {
+                    role: "user",
+                    text: "From Telegram",
+                },
+            ];
+
+            const result = alignTurnStartUserMessage(messages, null, 101);
+
+            expect(result.matched).toBe(false);
+            expect(result.needsResync).toBe(true);
+            expect(result.messages).toBe(messages);
+            expect(result.messages[0].id).toBeUndefined(); // Never guessed!
+        });
+
+        it("returns needsResync without guessing when clientRequestId cannot be found", () => {
+            const messages: ChatPanelMessage[] = [
+                {
+                    role: "user",
+                    text: "Unrelated message",
+                    clientRequestId: "req-other",
+                },
+            ];
+
+            const result = alignTurnStartUserMessage(messages, "req-nonexistent", 101);
+
+            expect(result.matched).toBe(false);
+            expect(result.needsResync).toBe(true);
+            expect(result.messages).toBe(messages);
+            expect(result.messages[0].id).toBeUndefined();
+        });
+
+        it("returns needsResync when matched message has a conflicting id", () => {
+            const messages: ChatPanelMessage[] = [
+                {
+                    id: 999,
+                    role: "user",
+                    text: "Hello",
+                    clientRequestId: "req-1",
+                },
+            ];
+
+            const result = alignTurnStartUserMessage(messages, "req-1", 101);
+
+            expect(result.matched).toBe(false);
+            expect(result.needsResync).toBe(true);
+            expect(result.messages).toBe(messages);
+            expect(result.messages[0].id).toBe(999);
+        });
+
+        it("returns matched without resync when userMessageId is null or undefined", () => {
+            const messages: ChatPanelMessage[] = [
+                {
+                    role: "user",
+                    text: "Hello",
+                    clientRequestId: "req-1",
+                },
+            ];
+
+            const result = alignTurnStartUserMessage(messages, "req-1", null);
+
+            expect(result.matched).toBe(true);
+            expect(result.needsResync).toBe(false);
+            expect(result.messages).toBe(messages);
+        });
+    });
+
     describe("reconcileTurnMessageIds", () => {
         it("reconciles user and assistant message ids matching clientRequestId when finish event was missed", () => {
             const initialMessages: ChatPanelMessage[] = [
@@ -633,7 +772,7 @@ describe("chat turn lifecycle validation", () => {
                 null,
             );
 
-            expect(reconciled.needsResync).toBe(false);
+            expect(reconciled.needsResync).toBe(true);
             expect(reconciled.messages).toBe(initialMessages);
             expect(reconciled.messages[0].id).toBeUndefined();
         });

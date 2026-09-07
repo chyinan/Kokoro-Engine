@@ -1147,7 +1147,9 @@
             "memory_model_required": "本機記憶模型還沒準備好。聊天仍可繼續，但暫時不會使用語意記憶。",
             "memory_model_check_failed": "暫時無法確認本機記憶模型狀態。聊天仍可繼續，方便時再檢查下載視窗。",
             "edit_failed": "儲存編輯訊息失敗",
-            "delete_failed": "刪除訊息失敗"
+            "delete_failed": "刪除訊息失敗",
+            "new_conversation_failed": "新建會話失敗，已保留目前會話",
+            "new_conversation_slow": "新建會話回應較慢，請稍候..."
         },
         "input": {
             "placeholder": "與你的同伴對話...",

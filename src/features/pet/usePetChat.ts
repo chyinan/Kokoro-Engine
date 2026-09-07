@@ -18,6 +18,7 @@ export function usePetChat(): PetChatState {
         const unlistenStart = listen<{ turn_id: string }>("chat-turn-start", async (event) => {
             activeTurnIdRef.current = event.payload.turn_id;
             accumulatedRef.current = "";
+            setIsStreaming(true);
         });
 
         const unlistenDelta = listen<{ turn_id: string; delta: string }>("chat-turn-delta", async (event) => {
@@ -63,7 +64,9 @@ export function usePetChat(): PetChatState {
     }, []);
 
     const sendMessage = async (text: string) => {
-        if (!text.trim()) return;
+        const trimmed = text.trim();
+        if (!trimmed || isStreaming || activeTurnIdRef.current !== null) return;
+        const clientRequestId = `pet_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         activeTurnIdRef.current = null;
         accumulatedRef.current = "";
         setIsStreaming(true);
@@ -72,11 +75,17 @@ export function usePetChat(): PetChatState {
         await invoke("show_bubble_window", { text: "..." }).catch(() => {});
 
         try {
-            await emit("pet-chat-start", { message: text });
-            await invoke("stream_chat", { request: { message: text } });
+            await emit("pet-chat-start", { message: trimmed, client_request_id: clientRequestId });
+            await invoke("stream_chat", {
+                request: {
+                    message: trimmed,
+                    client_request_id: clientRequestId,
+                },
+            });
         } catch (e) {
             console.error("[PetChat] stream_chat error:", e);
             setIsStreaming(false);
+            activeTurnIdRef.current = null;
             invoke("hide_bubble_window").catch(() => {});
         }
     };

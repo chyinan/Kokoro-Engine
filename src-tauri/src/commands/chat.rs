@@ -339,6 +339,63 @@ async fn cleanup_turn_artifacts(
     }
 }
 
+async fn ensure_conversation_created_for_hidden_turn(
+    state: &AIOrchestrator,
+    char_id: &str,
+    conversation_id: &mut Option<String>,
+    is_newly_created_for_hidden: &mut bool,
+) -> Result<String, KokoroError> {
+    if let Some(ref cid) = conversation_id {
+        return Ok(cid.clone());
+    }
+    let _switch_guard = state.conversation_switch_lock.lock().await;
+    let current_conv_id = state.current_conversation_id.lock().await.clone();
+    let id = if let Some(cid) = current_conv_id {
+        cid
+    } else {
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, '新对话', '', '{}', ?, ?)"
+        )
+        .bind(&new_id)
+        .bind(char_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&state.db)
+        .await
+        .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+        *state.current_conversation_id.lock().await = Some(new_id.clone());
+        if state.persist_conversation_selection {
+            crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
+        }
+        *is_newly_created_for_hidden = true;
+        new_id
+    };
+    *conversation_id = Some(id.clone());
+    Ok(id)
+}
+
+async fn delete_empty_conversation_if_unused(
+    state: &AIOrchestrator,
+    conversation_id: &str,
+) -> Result<(), KokoroError> {
+    crate::commands::conversation::delete_conversation_inner(
+        crate::commands::conversation::DeleteConversationRequest {
+            id: conversation_id.to_string(),
+        },
+        &state.db,
+        &state.history,
+        &state.current_conversation_id,
+        Some(&state.memory_history_boundary),
+        Some(&state.memory_trigger_count),
+        &state.conversation_switch_lock,
+        state.persist_conversation_selection,
+    )
+    .await
+}
+
 struct TurnCancellationGuard {
     state: Arc<TurnCancellationState>,
     turn_id: String,
@@ -1308,6 +1365,27 @@ pub(crate) async fn resolve_trailing_visible_user_message(
     Ok(None)
 }
 
+pub(crate) fn ensure_client_request_id(client_request_id: &mut Option<String>) {
+    if client_request_id
+        .as_ref()
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true)
+    {
+        *client_request_id = Some(format!("req_backend_{}", uuid::Uuid::new_v4()));
+    }
+}
+
+pub(crate) fn resolve_turn_user_message_id(
+    hidden: bool,
+    trailing_visible_user: Option<i64>,
+) -> Option<i64> {
+    if hidden {
+        None
+    } else {
+        trailing_visible_user
+    }
+}
+
 // ── Stream Chat Command ────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -1338,6 +1416,9 @@ pub async fn stream_chat(
     }
 
     let _chat_turn_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+
+    let mut request = request;
+    ensure_client_request_id(&mut request.client_request_id);
 
     // 0. Resolve character ID for this request (not stored in shared state)
     let char_id = request
@@ -1394,7 +1475,7 @@ pub async fn stream_chat(
     // 2. Update History with User Message under conversation_switch_lock
     let system_provider = llm_state.system_provider().await;
 
-    let (conversation_id, user_message_id) = {
+    let (mut conversation_id, user_message_id, history_snapshot) = {
         let _switch_guard = state.conversation_switch_lock.lock().await;
         let current_conv_id = state.current_conversation_id.lock().await.clone();
 
@@ -1427,19 +1508,20 @@ pub async fn stream_chat(
         }
 
         let resolved_conv_id = if let Some(cid) = current_conv_id {
-            cid
+            Some(cid)
+        } else if request.hidden {
+            // 当 request.hidden 为 true 且当前无活跃会话时：
+            // 延迟创建会话，暂不向 SQLite 插入 conversations 行，
+            // 避免在模型返回 PASS / no-op 时残留幽灵空会话或导致当前活跃会话被污染为幽灵空会话。
+            None
         } else {
-            // 请求和当前均为 None：原子创建新会话
+            // 原逻辑：非 hidden 请求且当前无会话：原子创建新会话
             let new_id = uuid::Uuid::new_v4().to_string();
-            let title = if request.hidden {
-                "新对话".to_string()
+            let chars: Vec<char> = request.message.chars().collect();
+            let title = if chars.len() > 20 {
+                format!("{}...", chars[..20].iter().collect::<String>())
             } else {
-                let chars: Vec<char> = request.message.chars().collect();
-                if chars.len() > 20 {
-                    format!("{}...", chars[..20].iter().collect::<String>())
-                } else {
-                    request.message.clone()
-                }
+                request.message.clone()
             };
             let now = chrono::Utc::now().to_rfc3339();
             sqlx::query(
@@ -1458,20 +1540,24 @@ pub async fn stream_chat(
             if state.persist_conversation_selection {
                 crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
             }
-            new_id
+            Some(new_id)
         };
 
         let trailing_visible_user = if request.regenerate {
-            match resolve_trailing_visible_user_message(&state.db, &resolved_conv_id).await {
-                Ok(res) => res,
-                Err(e) => {
-                    tracing::warn!(
-                        "[stream_chat] Failed to query trailing visible message for '{}': {}",
-                        resolved_conv_id,
-                        e
-                    );
-                    None
+            if let Some(ref cid) = resolved_conv_id {
+                match resolve_trailing_visible_user_message(&state.db, cid).await {
+                    Ok(res) => res,
+                    Err(e) => {
+                        tracing::warn!(
+                            "[stream_chat] Failed to query trailing visible message for '{}': {}",
+                            cid,
+                            e
+                        );
+                        None
+                    }
                 }
+            } else {
+                None
             }
         } else {
             None
@@ -1485,12 +1571,13 @@ pub async fn stream_chat(
         );
 
         let (cid, mid) = if should_insert {
+            let active_conv_id = resolved_conv_id.as_deref();
             if let Some(observation) = selected_vision_observation.as_ref() {
                 persist_vision_context_message_locked(
                     &state,
                     observation,
                     &char_id,
-                    Some(&resolved_conv_id),
+                    active_conv_id,
                     None,
                 )
                 .await;
@@ -1502,16 +1589,19 @@ pub async fn stream_chat(
                     request.message.clone(),
                     None,
                     &char_id,
-                    Some(&resolved_conv_id),
+                    active_conv_id,
                     Some(system_provider.clone()),
                 )
                 .await
                 .map_err(|e| KokoroError::Database(e.to_string()))?;
 
-            (cid, Some(mid))
+            (Some(cid), Some(mid))
         } else {
             let cid = resolved_conv_id.clone();
-            let mid = trailing_visible_user.map(|(id, _)| id);
+            let mid = resolve_turn_user_message_id(
+                request.hidden,
+                trailing_visible_user.map(|(id, _)| id),
+            );
 
             // 防御性对齐：若因长会话预算或回溯导致当前 history 尾部缺失该用户消息，在内存中补齐供当前 turn 组装 prompt
             if !request.hidden {
@@ -1533,15 +1623,21 @@ pub async fn stream_chat(
             (cid, mid)
         };
 
-        (cid, mid)
+        // 在释放会话切换锁前截取不可变历史快照，确保后续 prompt 组装使用与本次请求会话严格对齐的历史消息
+        let history_snapshot: Vec<crate::ai::context::Message> =
+            state.history.lock().await.iter().cloned().collect();
+
+        (cid, mid, history_snapshot)
     };
+
+    let mut is_newly_created_for_hidden = false;
 
     if let Some(hooks) = hook_runtime.as_ref() {
         hooks
             .emit_best_effort(
                 &HookEvent::AfterUserMessagePersisted,
                 &build_chat_hook_payload(
-                    Some(conversation_id.clone()),
+                    conversation_id.clone(),
                     &char_id,
                     None,
                     Some(request.message.clone()),
@@ -1611,14 +1707,16 @@ pub async fn stream_chat(
     };
     let memory_target_language = state.response_language.lock().await.clone();
 
-    // Compose Persona Prompt
+    // Compose Persona Prompt with immutable history snapshot and explicit conversation scoping
     let (prompt_messages, compose_warnings) = state
-        .compose_prompt_with_guard(
+        .compose_prompt_for_conversation_with_guard(
             &request.message,
             request.allow_image_gen.unwrap_or(false),
             tool_prompt,
             native_tools_enabled,
             &char_id,
+            conversation_id.as_deref(),
+            Some(history_snapshot),
             &_chat_turn_guard,
         )
         .await
@@ -1640,7 +1738,7 @@ pub async fn stream_chat(
 
     let stream_result: Result<Option<i64>, KokoroError> = async {
     let mut before_llm_request_payload = build_before_llm_request_payload(
-        Some(conversation_id.clone()),
+        conversation_id.clone(),
         &char_id,
         Some(assistant_turn_id.clone()),
         request.message.clone(),
@@ -1667,7 +1765,7 @@ pub async fn stream_chat(
             .emit_best_effort(
                 &HookEvent::BeforeLlmRequest,
                 &build_chat_hook_payload(
-                    Some(conversation_id.clone()),
+                    conversation_id.clone(),
                     &char_id,
                     Some(assistant_turn_id.clone()),
                     Some(effective_request_message.clone()),
@@ -1836,7 +1934,7 @@ pub async fn stream_chat(
                                     .map_err(|e| KokoroError::Chat(e.to_string()))?;
                             }
                         }
-                        LlmStreamEvent::ReasoningContent(content) => {
+        LlmStreamEvent::ReasoningContent(content) => {
                             round_reasoning_content.push_str(&content);
                         }
                         LlmStreamEvent::ToolCall(tool_call) => {
@@ -1854,15 +1952,14 @@ pub async fn stream_chat(
                 Err(e) => {
                     if round_response.is_empty() && emit_buffer.is_empty() {
                         stream_failed = true;
-                        let err_payload =
-                            build_chat_error_event("llm_stream", &e, &assistant_turn_id, true);
-                        let err_json =
-                            serde_json::to_string(&err_payload).unwrap_or_else(|_| e.clone());
-                        app.emit("chat-error", err_json)
-                            .map_err(|emit_error| KokoroError::Chat(emit_error.to_string()))?;
-
-                        let failure_event = err_payload.clone().into_failure_event(
-                            Some(conversation_id.clone()),
+                        let err_payload = build_chat_error_event(
+                            "stream_receive",
+                            &e.to_string(),
+                            &assistant_turn_id,
+                            true,
+                        );
+                        let failure_event = err_payload.into_failure_event(
+                            conversation_id.clone(),
                             Some(assistant_turn_id.clone()),
                             Some(char_id.clone()),
                             None,
@@ -1956,16 +2053,18 @@ pub async fn stream_chat(
                 match draft_row_id {
                     None => {
                         // First round: insert draft row
-                        match state
-                            .persist_streaming_draft(&conversation_id, &draft_content)
-                            .await
-                        {
-                            Ok(id) => {
-                                draft_row_id = Some(id);
-                                *draft_row_id_for_stream.lock().await = Some(id);
-                            }
-                            Err(e) => {
-                                tracing::error!(target: "chat", "[Chat] Failed to persist streaming draft: {}", e);
+                        if let Some(ref cid) = conversation_id {
+                            match state
+                                .persist_streaming_draft(cid, &draft_content)
+                                .await
+                            {
+                                Ok(id) => {
+                                    draft_row_id = Some(id);
+                                    *draft_row_id_for_stream.lock().await = Some(id);
+                                }
+                                Err(e) => {
+                                    tracing::error!(target: "chat", "[Chat] Failed to persist streaming draft: {}", e);
+                                }
                             }
                         }
                     }
@@ -2142,6 +2241,29 @@ pub async fn stream_chat(
                 assistant_tool_call_metadata_value["provider_data"] =
                     serde_json::Value::Array(round_provider_data.clone());
             }
+            let effective_conv_id = if request.hidden && conversation_id.is_none() {
+                match ensure_conversation_created_for_hidden_turn(
+                    &state,
+                    &char_id,
+                    &mut conversation_id,
+                    &mut is_newly_created_for_hidden,
+                )
+                .await
+                {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        tracing::error!(
+                            target: "chat::tools",
+                            "[Chat] Failed to ensure conversation for hidden tool turn: {}",
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                conversation_id.clone()
+            };
+
             let assistant_tool_call_metadata = assistant_tool_call_metadata_value.to_string();
             if let Err(e) = state
                 .add_message_with_metadata_for_conversation(
@@ -2149,7 +2271,7 @@ pub async fn stream_chat(
                     cleaned_text.clone(),
                     Some(assistant_tool_call_metadata),
                     &char_id,
-                    Some(&conversation_id),
+                    effective_conv_id.as_deref(),
                     None,
                 )
                 .await
@@ -2168,7 +2290,7 @@ pub async fn stream_chat(
                         tool_content,
                         Some(tool_metadata.to_string()),
                         &char_id,
-                        Some(&conversation_id),
+                        effective_conv_id.as_deref(),
                         None,
                     )
                     .await
@@ -2244,7 +2366,20 @@ pub async fn stream_chat(
         }
         // A hidden no-op turn may still have persisted assistant_tool_calls/tool rows
         // from earlier tool rounds; remove them so no orphan tool exchange survives.
-        cleanup_turn_artifacts(&state, &conversation_id, &assistant_turn_id, draft_row_id).await;
+        if let Some(ref cid) = conversation_id {
+            cleanup_turn_artifacts(&state, cid, &assistant_turn_id, draft_row_id).await;
+            if is_newly_created_for_hidden {
+                if let Err(e) = delete_empty_conversation_if_unused(&state, cid).await {
+                    tracing::error!(
+                        target: "chat",
+                        "[Chat] Failed to delete temporary empty conversation '{}' for hidden no-op turn: {}",
+                        cid,
+                        e
+                    );
+                }
+                conversation_id = None;
+            }
+        }
         app.emit(
             "chat-turn-text-complete",
             serde_json::json!({
@@ -2274,7 +2409,7 @@ pub async fn stream_chat(
             .emit_best_effort(
                 &HookEvent::AfterLlmResponse,
                 &build_chat_hook_payload(
-                    Some(conversation_id.clone()),
+                    conversation_id.clone(),
                     &char_id,
                     Some(assistant_turn_id.clone()),
                     Some(request.message.clone()),
@@ -2432,39 +2567,64 @@ pub async fn stream_chat(
         let metadata = Some(metadata_value.to_string());
 
         if request.hidden {
-            if let Some(observation) = selected_vision_observation.as_ref() {
-                persist_vision_context_message(
+            let effective_conv_id = if conversation_id.is_none() {
+                match ensure_conversation_created_for_hidden_turn(
                     &state,
-                    observation,
                     &char_id,
-                    Some(&conversation_id),
-                    Some(&assistant_turn_id),
-                )
-                .await;
-            }
-            let persisted_assistant_id = match state
-                .add_message_with_metadata_for_conversation(
-                    "assistant".to_string(),
-                    full_response.clone(),
-                    metadata,
-                    &char_id,
-                    Some(&conversation_id),
-                    None,
+                    &mut conversation_id,
+                    &mut is_newly_created_for_hidden,
                 )
                 .await
-            {
-                Ok((_, msg_id)) => Some(msg_id),
-                Err(error) => {
-                    tracing::error!(
-                        target: "chat",
-                        "[Chat] Failed to persist hidden assistant message: {}",
-                        error
-                    );
-                    None
+                {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        tracing::error!(
+                            target: "chat",
+                            "[Chat] Failed to ensure conversation for hidden assistant message: {}",
+                            e
+                        );
+                        None
+                    }
                 }
+            } else {
+                conversation_id.clone()
             };
-            draft_row_id = persisted_assistant_id;
-            *draft_row_id_for_stream.lock().await = persisted_assistant_id;
+
+            if let Some(ref cid) = effective_conv_id {
+                if let Some(observation) = selected_vision_observation.as_ref() {
+                    persist_vision_context_message(
+                        &state,
+                        observation,
+                        &char_id,
+                        Some(cid),
+                        Some(&assistant_turn_id),
+                    )
+                    .await;
+                }
+                let persisted_assistant_id = match state
+                    .add_message_with_metadata_for_conversation(
+                        "assistant".to_string(),
+                        full_response.clone(),
+                        metadata,
+                        &char_id,
+                        Some(cid),
+                        None,
+                    )
+                    .await
+                {
+                    Ok((_, msg_id)) => Some(msg_id),
+                    Err(error) => {
+                        tracing::error!(
+                            target: "chat",
+                            "[Chat] Failed to persist hidden assistant message: {}",
+                            error
+                        );
+                        None
+                    }
+                };
+                draft_row_id = persisted_assistant_id;
+                *draft_row_id_for_stream.lock().await = persisted_assistant_id;
+            }
         } else {
             // Update the draft row with final content + metadata (DB already has the row)
             if let Some(row_id) = draft_row_id {
@@ -2478,10 +2638,10 @@ pub async fn stream_chat(
 
             // Add to in-memory history only if this conversation is still the active one (DB already persisted).
             // push_history_message applies the context message length limit.
-            {
+            if let Some(ref cid) = conversation_id {
                 // 会话切换锁：校验与推送原子，防止切换窗口内把旧会话消息推入新会话历史
                 let _switch_guard = state.conversation_switch_lock.lock().await;
-                if state.current_conversation_id.lock().await.as_deref() == Some(conversation_id.as_str()) {
+                if state.current_conversation_id.lock().await.as_deref() == Some(cid.as_str()) {
                     state
                         .push_history_message(Message {
                             role: "assistant".to_string(),
@@ -2511,56 +2671,58 @@ pub async fn stream_chat(
     );
 
     if !request.hidden && state.is_memory_enabled() {
-        if let Some(decision) = select_memory_ingress_decision(&request.message, &ingress_options) {
-            let conversation_key = conversation_id.clone();
-            let cooldown_key =
-                build_cooldown_key(&char_id, &conversation_key, decision.event.event_type);
-            if state
-                .should_trigger_memory_event(&cooldown_key, decision.event.cooldown_secs)
-                .await
-            {
-                tracing::info!(
-                    target: "memory",
-                    "[Memory] Triggering event-driven extraction (trigger={}, count={})",
-                    decision.trigger_label,
-                    msg_count
-                );
+        if let Some(ref cid) = conversation_id {
+            if let Some(decision) = select_memory_ingress_decision(&request.message, &ingress_options) {
+                let conversation_key = cid.clone();
+                let cooldown_key =
+                    build_cooldown_key(&char_id, &conversation_key, decision.event.event_type);
+                if state
+                    .should_trigger_memory_event(&cooldown_key, decision.event.cooldown_secs)
+                    .await
+                {
+                    tracing::info!(
+                        target: "memory",
+                        "[Memory] Triggering event-driven extraction (trigger={}, count={})",
+                        decision.trigger_label,
+                        msg_count
+                    );
 
-                let history = state.get_recent_memory_history(10).await;
-                let memory_mgr = state.memory_manager.clone();
-                let char_id_for_mem = char_id.clone();
-                let provider_for_mem = system_provider.clone();
-                let memory_enabled = state.memory_enabled_flag();
-                let observation_started_at = std::time::Instant::now();
-                let trigger_for_observation = decision.trigger_label.to_string();
-                let extraction_options = memory_extractor::MemoryExtractionOptions {
-                    structured_memory_enabled: should_use_structured_extraction(
-                        upgrade_config.structured_memory_enabled,
-                        &ingress_options,
-                    ),
-                    target_language: Some(memory_target_language.clone()),
-                };
-                tauri::async_runtime::spawn(async move {
-                    if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                        return;
-                    }
-                    let _ = memory_mgr
-                        .record_periodic_write_if_enabled(
-                            &char_id_for_mem,
-                            "chat",
-                            &trigger_for_observation,
-                            observation_started_at,
+                    let history = state.get_recent_memory_history(10).await;
+                    let memory_mgr = state.memory_manager.clone();
+                    let char_id_for_mem = char_id.clone();
+                    let provider_for_mem = system_provider.clone();
+                    let memory_enabled = state.memory_enabled_flag();
+                    let observation_started_at = std::time::Instant::now();
+                    let trigger_for_observation = decision.trigger_label.to_string();
+                    let extraction_options = memory_extractor::MemoryExtractionOptions {
+                        structured_memory_enabled: should_use_structured_extraction(
+                            upgrade_config.structured_memory_enabled,
+                            &ingress_options,
+                        ),
+                        target_language: Some(memory_target_language.clone()),
+                    };
+                    tauri::async_runtime::spawn(async move {
+                        if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+                            return;
+                        }
+                        let _ = memory_mgr
+                            .record_periodic_write_if_enabled(
+                                &char_id_for_mem,
+                                "chat",
+                                &trigger_for_observation,
+                                observation_started_at,
+                            )
+                            .await;
+                        memory_extractor::extract_and_store_memories_with_options(
+                            &history,
+                            &memory_mgr,
+                            provider_for_mem,
+                            char_id_for_mem,
+                            extraction_options,
                         )
                         .await;
-                    memory_extractor::extract_and_store_memories_with_options(
-                        &history,
-                        &memory_mgr,
-                        provider_for_mem,
-                        char_id_for_mem,
-                        extraction_options,
-                    )
-                    .await;
-                });
+                    });
+                }
             }
         }
     }
@@ -2723,7 +2885,20 @@ pub async fn stream_chat(
     // earlier rounds; remove them so the failed turn leaves no orphan tool exchange.
     let mut finish_draft_row_id = draft_row_id;
     if stream_failed && full_response.is_empty() {
-        cleanup_turn_artifacts(&state, &conversation_id, &assistant_turn_id, draft_row_id).await;
+        if let Some(ref cid) = conversation_id {
+            cleanup_turn_artifacts(&state, cid, &assistant_turn_id, draft_row_id).await;
+            if is_newly_created_for_hidden {
+                if let Err(e) = delete_empty_conversation_if_unused(&state, cid).await {
+                    tracing::error!(
+                        target: "chat",
+                        "[Chat] Failed to delete temporary empty conversation '{}' on stream failure: {}",
+                        cid,
+                        e
+                    );
+                }
+                conversation_id = None;
+            }
+        }
         finish_draft_row_id = None;
     }
 
@@ -2750,7 +2925,7 @@ pub async fn stream_chat(
 
     match stream_result {
         Ok(assistant_message_id) => Ok(StreamChatResponse {
-            conversation_id,
+            conversation_id: conversation_id.unwrap_or_default(),
             user_message_id,
             assistant_message_id,
             client_request_id: request.client_request_id,
@@ -2765,8 +2940,21 @@ pub async fn stream_chat(
             // streaming draft, then emit the cancelled finish so the frontend reloads a
             // clean conversation.
             let draft_row_id = *draft_row_id_holder.lock().await;
-            cleanup_turn_artifacts(&state, &conversation_id, &assistant_turn_id, draft_row_id)
-                .await;
+            if let Some(ref cid) = conversation_id {
+                cleanup_turn_artifacts(&state, cid, &assistant_turn_id, draft_row_id)
+                    .await;
+                if is_newly_created_for_hidden {
+                    if let Err(e) = delete_empty_conversation_if_unused(&state, cid).await {
+                        tracing::error!(
+                            target: "chat",
+                            "[Chat] Failed to delete temporary empty conversation '{}' on turn cancel: {}",
+                            cid,
+                            e
+                        );
+                    }
+                    conversation_id = None;
+                }
+            }
             app.emit(
                 "chat-turn-finish",
                 serde_json::json!({
@@ -2779,7 +2967,7 @@ pub async fn stream_chat(
             )
             .map_err(|e| KokoroError::Chat(e.to_string()))?;
             Ok(StreamChatResponse {
-                conversation_id,
+                conversation_id: conversation_id.unwrap_or_default(),
                 user_message_id,
                 assistant_message_id: None,
                 client_request_id: request.client_request_id,
@@ -2788,7 +2976,19 @@ pub async fn stream_chat(
         Err(error) => {
             // Non-cancel failures keep any partial draft and already-finalized rows, but
             // the turn's technical rows must not survive as orphan tool exchanges.
-            cleanup_turn_artifacts(&state, &conversation_id, &assistant_turn_id, None).await;
+            if let Some(ref cid) = conversation_id {
+                cleanup_turn_artifacts(&state, cid, &assistant_turn_id, None).await;
+                if is_newly_created_for_hidden {
+                    if let Err(e) = delete_empty_conversation_if_unused(&state, cid).await {
+                        tracing::error!(
+                            target: "chat",
+                            "[Chat] Failed to delete temporary empty conversation '{}' on unhandled error: {}",
+                            cid,
+                            e
+                        );
+                    }
+                }
+            }
             Err(error)
         }
     }
@@ -4174,4 +4374,177 @@ mod tests {
         assert_eq!(content, "User question 25");
         assert!(!should_insert_user_message_for_request(false, true, true));
     }
+
+    #[test]
+    fn test_ensure_client_request_id_assigns_unique_id_when_missing_or_blank() {
+        let mut none_id: Option<String> = None;
+        ensure_client_request_id(&mut none_id);
+        assert!(none_id.is_some());
+        assert!(none_id.as_ref().unwrap().starts_with("req_backend_"));
+
+        let mut empty_id = Some("   ".to_string());
+        ensure_client_request_id(&mut empty_id);
+        assert!(empty_id.is_some());
+        assert!(empty_id.as_ref().unwrap().starts_with("req_backend_"));
+
+        let mut custom_id = Some("client-req-999".to_string());
+        ensure_client_request_id(&mut custom_id);
+        assert_eq!(custom_id.as_deref(), Some("client-req-999"));
+    }
+
+    #[test]
+    fn test_resolve_turn_user_message_id_omits_for_hidden_turns() {
+        // Hidden turns (pet poke, proactive, background) must never expose or align a user_message_id
+        assert_eq!(resolve_turn_user_message_id(true, Some(42)), None);
+        assert_eq!(resolve_turn_user_message_id(true, None), None);
+
+        // Non-hidden turns (e.g. regenerate) correctly reflect trailing user id
+        assert_eq!(resolve_turn_user_message_id(false, Some(42)), Some(42));
+        assert_eq!(resolve_turn_user_message_id(false, None), None);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_conversation_created_for_hidden_turn_creates_and_binds() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        assert!(state.current_conversation_id.lock().await.is_none());
+
+        let mut conv_id: Option<String> = None;
+        let mut is_newly_created = false;
+
+        let created_id = ensure_conversation_created_for_hidden_turn(
+            &state,
+            "test_char",
+            &mut conv_id,
+            &mut is_newly_created,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(conv_id.as_deref(), Some(created_id.as_str()));
+        assert!(is_newly_created);
+        assert_eq!(
+            state.current_conversation_id.lock().await.as_deref(),
+            Some(created_id.as_str())
+        );
+
+        // Subsequent call reuses existing conversation without re-creating
+        let mut second_newly_created = false;
+        let second_id = ensure_conversation_created_for_hidden_turn(
+            &state,
+            "test_char",
+            &mut conv_id,
+            &mut second_newly_created,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(second_id, created_id);
+        assert!(!second_newly_created);
+    }
+
+    #[tokio::test]
+    async fn test_delete_empty_conversation_if_unused_cleans_up() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+
+        let mut conv_id: Option<String> = None;
+        let mut is_newly_created = false;
+
+        let created_id = ensure_conversation_created_for_hidden_turn(
+            &state,
+            "test_char",
+            &mut conv_id,
+            &mut is_newly_created,
+        )
+        .await
+        .unwrap();
+
+        // Conversation exists in DB
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = ?")
+            .bind(&created_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Delete empty conversation
+        delete_empty_conversation_if_unused(&state, &created_id)
+            .await
+            .unwrap();
+
+        // Conversation is gone from DB
+        let count_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = ?")
+                .bind(&created_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(count_after, 0);
+
+        // state.current_conversation_id is reset to None
+        assert!(state.current_conversation_id.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_hidden_proactive_delayed_creation_and_noop_rollback() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        assert!(state.current_conversation_id.lock().await.is_none());
+
+        // Scenario 1: Hidden turn with no tool calls and model returns PASS (pure no-op)
+        // Delayed creation means conversation_id stays None throughout.
+        let full_response = "PASS";
+        assert!(is_proactive_noop_response(full_response));
+
+        // In pure no-op, conversation_id is None, so 0 DB rows are created.
+        let total_convs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(total_convs, 0);
+        assert!(state.current_conversation_id.lock().await.is_none());
+
+        // Scenario 2: Hidden turn invokes native tools, lazily creating a conversation,
+        // but final model reply is empty / PASS.
+        // The temporary empty conversation must be cleaned up cleanly.
+        let mut tool_conv_id: Option<String> = None;
+        let mut is_newly_created = false;
+        let cid = ensure_conversation_created_for_hidden_turn(
+            &state,
+            "test_char",
+            &mut tool_conv_id,
+            &mut is_newly_created,
+        )
+        .await
+        .unwrap();
+
+        // Tool messages were added
+        state
+            .add_message_with_metadata_for_conversation(
+                "assistant".to_string(),
+                "".to_string(),
+                Some(r#"{"type":"assistant_tool_calls","turn_id":"turn-1"}"#.to_string()),
+                "test_char",
+                Some(&cid),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Turn completes as no-op: cleanup_turn_artifacts then delete_empty_conversation_if_unused
+        cleanup_turn_artifacts(&state, &cid, "turn-1", None).await;
+        if is_newly_created {
+            delete_empty_conversation_if_unused(&state, &cid)
+                .await
+                .unwrap();
+            tool_conv_id = None;
+        }
+
+        assert!(tool_conv_id.is_none());
+        let convs_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(convs_after, 0);
+        assert!(state.current_conversation_id.lock().await.is_none());
+    }
 }
+

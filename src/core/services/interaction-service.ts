@@ -163,14 +163,20 @@ export class InteractionService {
 
         // Format message based on gesture type
         const message = this.formatGestureMessage(gesture);
+        const clientRequestId = `interaction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
         // Notify ChatPanel to start streaming (same pattern as proactive-trigger)
-        await emit("interaction-trigger", { gesture: gesture.gesture, hitArea: gesture.hitArea });
+        await emit("interaction-trigger", {
+            gesture: gesture.gesture,
+            hitArea: gesture.hitArea,
+            client_request_id: clientRequestId,
+        });
 
         try {
             await streamChat({
                 message,
                 character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
+                client_request_id: clientRequestId,
                 hidden: true,
             });
         } catch (err) {

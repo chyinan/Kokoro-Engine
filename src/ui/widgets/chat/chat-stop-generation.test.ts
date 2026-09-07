@@ -160,7 +160,7 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         expect(requestTurnCancellation).not.toHaveBeenCalled();
     });
 
-    it("cancels active turn and awaits cancellation before starting empty conversation and clearHistory with busy lock", async () => {
+    it("cancels active turn, clears backend history, and only then starts empty conversation under busy lock", async () => {
         const sequence: string[] = [];
         let isBusy = false;
         let isSwitchingConversation = false;
@@ -170,8 +170,6 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         });
         const startEmptyConversation = vi.fn((charId: string) => {
             sequence.push(`startEmpty:${charId}`);
-            // Simulates clearVisibleConversation calling endTurnActivity() which clears isBusy
-            isBusy = false;
         });
         const clearHistory = vi.fn(async () => {
             sequence.push("clearHistory");
@@ -197,14 +195,10 @@ describe("chat stop generation race condition and 4-layer defense", () => {
                         console.error(err);
                     }
                 }
+                // Two-phase commit: await backend clearHistory first
+                await clearHistory();
+                // Then commit visible empty conversation
                 startEmptyConversation(activeCharacterId);
-                // Re-assert busy state because clearVisibleConversation's endTurnActivity cleared it
-                isBusy = true;
-                try {
-                    await clearHistory();
-                } catch (err) {
-                    console.error(err);
-                }
             } finally {
                 isSwitchingConversation = false;
                 isBusy = false;
@@ -214,18 +208,121 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         await handleStartEmptyConversation("char-anya");
 
         expect(cancelChatTurn).toHaveBeenCalledWith("turn-running-123", "new_conversation_started");
-        expect(startEmptyConversation).toHaveBeenCalledWith("char-anya");
         expect(clearHistory).toHaveBeenCalled();
+        expect(startEmptyConversation).toHaveBeenCalledWith("char-anya");
         expect(isStopping).toBe(true);
         expect(cancelRequested).toBe(true);
         expect(busyStateDuringClearHistory).toBe(true);
         expect(isBusy).toBe(false);
-        // Verify strict temporal ordering: cancel -> startEmpty -> clearHistory
+        // Verify strict temporal ordering: cancel -> clearHistory -> startEmpty
         expect(sequence).toEqual([
             "cancel:turn-running-123:new_conversation_started",
-            "startEmpty:char-anya",
             "clearHistory",
+            "startEmpty:char-anya",
         ]);
+    });
+
+    it("does NOT clear visible conversation and preserves existing state when clearHistory fails", async () => {
+        let isBusy = false;
+        let isSwitchingConversation = false;
+        let errorMessage: string | null = null;
+        const clearHistory = vi.fn(async () => {
+            throw new Error("Backend IPC error");
+        });
+        const startEmptyConversation = vi.fn();
+        let visibleMessages = ["old message 1", "old message 2"];
+        let activeConversationId: string | null = "conv-old-123";
+
+        const handleStartEmptyConversation = async (activeCharacterId: string): Promise<void> => {
+            if (isSwitchingConversation || isBusy) return;
+            isSwitchingConversation = true;
+            isBusy = true;
+            try {
+                await clearHistory();
+                startEmptyConversation(activeCharacterId);
+                visibleMessages = [];
+                activeConversationId = null;
+            } catch (err) {
+                errorMessage = "新建会话失败，已保留当前会话";
+            } finally {
+                isSwitchingConversation = false;
+                isBusy = false;
+            }
+        };
+
+        await handleStartEmptyConversation("char-anya");
+
+        expect(clearHistory).toHaveBeenCalledTimes(1);
+        expect(startEmptyConversation).not.toHaveBeenCalled();
+        // Visible messages and active conversation ID remain intact
+        expect(visibleMessages).toEqual(["old message 1", "old message 2"]);
+        expect(activeConversationId).toBe("conv-old-123");
+        expect(errorMessage).toBe("新建会话失败，已保留当前会话");
+        expect(isBusy).toBe(false);
+        expect(isSwitchingConversation).toBe(false);
+    });
+
+    it("watchdog does NOT prematurely release busy lock while clearHistory is in-flight", async () => {
+        vi.useFakeTimers();
+        try {
+            let isBusy = false;
+            let isSwitchingConversation = false;
+            let warningMessage: string | null = null;
+            let resolveClearHistory: (() => void) | null = null;
+
+            const clearHistory = vi.fn(() => new Promise<void>((resolve) => {
+                resolveClearHistory = resolve;
+            }));
+            const startEmptyConversation = vi.fn();
+
+            const handleStartEmptyConversation = async (activeCharacterId: string): Promise<void> => {
+                if (isSwitchingConversation || isBusy) return;
+                isSwitchingConversation = true;
+                isBusy = true;
+
+                const watchdogTimer = setTimeout(() => {
+                    if (isSwitchingConversation) {
+                        warningMessage = "新建会话响应较慢，请稍候...";
+                        // MUST NOT release isBusy or isSwitchingConversation here!
+                    }
+                }, 5000);
+
+                try {
+                    await clearHistory();
+                    startEmptyConversation(activeCharacterId);
+                } finally {
+                    clearTimeout(watchdogTimer);
+                    isSwitchingConversation = false;
+                    isBusy = false;
+                }
+            };
+
+            const callPromise = handleStartEmptyConversation("char-anya");
+
+            expect(isBusy).toBe(true);
+            expect(isSwitchingConversation).toBe(true);
+
+            // Fast-forward 5000ms: watchdog fires
+            vi.advanceTimersByTime(5000);
+
+            // Verify watchdog warned but did NOT release protection!
+            expect(warningMessage).toBe("新建会话响应较慢，请稍候...");
+            expect(isBusy).toBe(true);
+            expect(isSwitchingConversation).toBe(true);
+            expect(startEmptyConversation).not.toHaveBeenCalled();
+
+            // Settle clearHistory at 6000ms
+            vi.advanceTimersByTime(1000);
+            resolveClearHistory!();
+            await callPromise;
+
+            // Now, and only now, protection is safely released
+            expect(startEmptyConversation).toHaveBeenCalledWith("char-anya");
+            expect(isBusy).toBe(false);
+            expect(isSwitchingConversation).toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 
     it("blocks concurrent or re-entrant start empty conversation calls while in-flight", async () => {
@@ -242,9 +339,8 @@ describe("chat stop generation race condition and 4-layer defense", () => {
             isSwitchingConversation = true;
             isBusy = true;
             try {
-                startEmptyConversation(activeCharacterId);
-                isBusy = true;
                 await clearHistory();
+                startEmptyConversation(activeCharacterId);
             } finally {
                 isSwitchingConversation = false;
                 isBusy = false;
@@ -256,12 +352,13 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         const secondCall = handleStartEmptyConversation("char-anya");
 
         await secondCall;
-        expect(startEmptyConversation).toHaveBeenCalledTimes(1);
         expect(clearHistory).toHaveBeenCalledTimes(1);
+        expect(startEmptyConversation).not.toHaveBeenCalled();
 
         const done = resolveClearHistory as unknown as (() => void);
         done();
         await firstCall;
+        expect(startEmptyConversation).toHaveBeenCalledTimes(1);
         expect(isBusy).toBe(false);
     });
 

@@ -1148,7 +1148,9 @@
             "memory_model_required": "The local memory model is not ready yet. Chat can continue without semantic memory.",
             "memory_model_check_failed": "Could not confirm the local memory model status. Chat remains available; check the download dialog when convenient.",
             "edit_failed": "Failed to save edited message",
-            "delete_failed": "Failed to delete messages"
+            "delete_failed": "Failed to delete messages",
+            "new_conversation_failed": "Failed to start new conversation. Current conversation preserved.",
+            "new_conversation_slow": "Creating new conversation is taking longer than expected..."
         },
         "input": {
             "placeholder": "Speak to your companion...",

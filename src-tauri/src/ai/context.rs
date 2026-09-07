@@ -1274,6 +1274,8 @@ impl AIOrchestrator {
             tool_prompt,
             native_tools_enabled,
             character_id,
+            None,
+            None,
         )
         .await
     }
@@ -1287,6 +1289,34 @@ impl AIOrchestrator {
         tool_prompt: Option<String>,
         native_tools_enabled: bool,
         character_id: &str,
+        guard: &ChatTurnGuard,
+    ) -> Result<(Vec<Message>, Vec<String>)> {
+        self.compose_prompt_for_conversation_with_guard(
+            query,
+            allow_image_gen,
+            tool_prompt,
+            native_tools_enabled,
+            character_id,
+            None,
+            None,
+            guard,
+        )
+        .await
+    }
+
+    /// Composes a prompt within an existing chat turn that already holds a [`ChatTurnGuard`],
+    /// scoped to an explicit target conversation and immutable history snapshot.
+    /// This prevents context pollution if the active conversation is switched while the request is preparing.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn compose_prompt_for_conversation_with_guard(
+        &self,
+        query: &str,
+        allow_image_gen: bool,
+        tool_prompt: Option<String>,
+        native_tools_enabled: bool,
+        character_id: &str,
+        target_conversation_id: Option<&str>,
+        history_snapshot: Option<Vec<Message>>,
         _guard: &ChatTurnGuard,
     ) -> Result<(Vec<Message>, Vec<String>)> {
         self.compose_prompt_inner(
@@ -1295,10 +1325,13 @@ impl AIOrchestrator {
             tool_prompt,
             native_tools_enabled,
             character_id,
+            target_conversation_id,
+            history_snapshot,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn compose_prompt_inner(
         &self,
         query: &str,
@@ -1306,6 +1339,8 @@ impl AIOrchestrator {
         tool_prompt: Option<String>,
         native_tools_enabled: bool,
         character_id: &str,
+        target_conversation_id: Option<&str>,
+        history_snapshot: Option<Vec<Message>>,
     ) -> Result<(Vec<Message>, Vec<String>)> {
         if let Some(reason) = self.get_runtime_degraded().await {
             anyhow::bail!(
@@ -1325,7 +1360,10 @@ impl AIOrchestrator {
         // Only if query looks like it needs context or every N turns
         // For now, always try to fetch relevant memories (scoped to current character)
         let cid = character_id;
-        let current_conversation_id = self.current_conversation_id.lock().await.clone();
+        let resolved_conversation_id = match target_conversation_id {
+            Some(id) => Some(id.to_string()),
+            None => self.current_conversation_id.lock().await.clone(),
+        };
         let mut warnings: Vec<String> = Vec::new();
         let memories = if self.is_memory_enabled() {
             match self
@@ -1349,7 +1387,7 @@ impl AIOrchestrator {
             None
         };
         let conversation_summary = if self.is_memory_enabled() {
-            if let Some(ref conversation_id) = current_conversation_id {
+            if let Some(ref conversation_id) = resolved_conversation_id {
                 self.memory_manager
                     .get_latest_conversation_summary(conversation_id)
                     .await
@@ -1361,7 +1399,7 @@ impl AIOrchestrator {
         } else {
             None
         };
-        let conversation_state = if let Some(ref conversation_id) = current_conversation_id {
+        let conversation_state = if let Some(ref conversation_id) = resolved_conversation_id {
             sqlx::query("SELECT topic, pinned_state FROM conversations WHERE id = ?")
                 .bind(conversation_id)
                 .fetch_optional(&self.db)
@@ -1382,7 +1420,10 @@ impl AIOrchestrator {
         // This prevents holding multiple mutexes across .await points.
         let sp = self.system_prompt.lock().await.clone();
         let vision_context_history_mode = self.vision_context_history_mode.lock().await.clone();
-        let history_snapshot: Vec<Message> = self.history.lock().await.iter().cloned().collect();
+        let history_snapshot: Vec<Message> = match history_snapshot {
+            Some(snapshot) => snapshot,
+            None => self.history.lock().await.iter().cloned().collect(),
+        };
         let latest_vision_index = latest_vision_context_index(&history_snapshot);
         let recent_history_snapshot: Vec<Message> = history_snapshot
             .iter()
@@ -2248,6 +2289,116 @@ mod tests {
         assert!(
             history_index > 1,
             "dynamic context should appear before recent history"
+        );
+    }
+
+    #[tokio::test]
+    async fn compose_prompt_for_conversation_uses_snapshot_and_target_conversation() {
+        let orchestrator = setup_test_orchestrator().await;
+        orchestrator.set_memory_enabled(false).await;
+        orchestrator.set_response_language("English".to_string()).await;
+
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // 1. Insert conversation A (request's target conversation)
+        let conv_a_id = "conv-a";
+        sqlx::query(
+            "INSERT INTO conversations \
+             (id, character_id, title, topic, pinned_state, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(conv_a_id)
+        .bind("char-test")
+        .bind("Conv A")
+        .bind("Topic A Special Context")
+        .bind(r#"{"pinned_a":"value_a"}"#)
+        .bind(&now)
+        .bind(&now)
+        .execute(&orchestrator.db)
+        .await
+        .expect("insert conv A should succeed");
+
+        // 2. Insert conversation B (user switches to conversation B)
+        let conv_b_id = "conv-b";
+        sqlx::query(
+            "INSERT INTO conversations \
+             (id, character_id, title, topic, pinned_state, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(conv_b_id)
+        .bind("char-test")
+        .bind("Conv B")
+        .bind("Topic B Other Context")
+        .bind(r#"{"pinned_b":"value_b"}"#)
+        .bind(&now)
+        .bind(&now)
+        .execute(&orchestrator.db)
+        .await
+        .expect("insert conv B should succeed");
+
+        // Global orchestrator state is switched to conversation B
+        *orchestrator.current_conversation_id.lock().await = Some(conv_b_id.to_string());
+        orchestrator.history.lock().await.push_back(Message {
+            role: "user".to_string(),
+            content: "Message strictly in Conversation B".to_string(),
+            metadata: None,
+        });
+
+        // Snapshot belonging strictly to conversation A
+        let snapshot_a = vec![Message {
+            role: "user".to_string(),
+            content: "Message strictly in Conversation A".to_string(),
+            metadata: None,
+        }];
+
+        let guard = orchestrator.enter_chat_turn().expect("chat turn");
+
+        // Compose prompt using target conversation A and snapshot A
+        let (messages, warnings) = orchestrator
+            .compose_prompt_for_conversation_with_guard(
+                "User query for A",
+                false,
+                None,
+                false,
+                "char-test",
+                Some(conv_a_id),
+                Some(snapshot_a),
+                &guard,
+            )
+            .await
+            .expect("compose prompt should succeed");
+
+        assert!(warnings.is_empty());
+
+        // Verify history messages contain Conv A and do NOT leak Conv B
+        let history_contents: Vec<String> = messages.iter().map(|m| m.content.clone()).collect();
+        let all_content = history_contents.join("\n");
+
+        assert!(
+            all_content.contains("Message strictly in Conversation A"),
+            "Prompt should contain conversation A history snapshot"
+        );
+        assert!(
+            !all_content.contains("Message strictly in Conversation B"),
+            "Prompt should NOT contain conversation B global history"
+        );
+
+        // Verify conversation state belongs to A, not B
+        assert!(
+            all_content.contains("Topic A Special Context"),
+            "Prompt should contain conversation A topic"
+        );
+        assert!(
+            !all_content.contains("Topic B Other Context"),
+            "Prompt should NOT contain conversation B topic"
+        );
+        assert!(
+            all_content.contains("pinned_a"),
+            "Prompt should contain conversation A pinned state"
+        );
+        assert!(
+            !all_content.contains("pinned_b"),
+            "Prompt should NOT contain conversation B pinned state"
         );
     }
 

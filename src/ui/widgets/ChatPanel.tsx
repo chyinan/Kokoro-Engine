@@ -41,6 +41,7 @@ import {
     validateTurnStart,
     validateTurnFinish,
     validateStreamChatResponse,
+    alignTurnStartUserMessage,
     reconcileTurnMessageIds,
     shouldResyncConversation,
     hasResidualActiveTurn,
@@ -730,10 +731,8 @@ export default function ChatPanel({
 
         const watchdogTimer = setTimeout(() => {
             if (isSwitchingConversationRef.current) {
-                console.warn("[ChatPanel] Empty conversation creation timed out, releasing busy lock");
-                isSwitchingConversationRef.current = false;
-                isBusyRef.current = false;
-                setIsBusy(false);
+                console.warn("[ChatPanel] Empty conversation creation is taking longer than expected, busy lock remains held");
+                setError(t("chat.errors.new_conversation_slow", "新建会话响应较慢，请稍候..."));
             }
         }, 5000);
 
@@ -748,22 +747,23 @@ export default function ChatPanel({
                     console.error("[ChatPanel] Failed to cancel prior turn before new conversation:", err);
                 }
             }
-            conversationSyncRef.current?.startEmptyConversation(activeCharacterId);
-            // clearVisibleConversation 内部调用了 endTurnActivity() 将 isBusy 置为 false，
-            // 此处在同一同步执行帧内立即重新确立 isBusy，确保在 await clearHistory 期间绝对禁止发送
-            isBusyRef.current = true;
-            setIsBusy(true);
 
+            // 先执行后端清空与重置，确保后端 current_conversation_id 与历史已置空
             await clearHistory();
+
+            // 后端成功后才提交前端可视会话清空
+            conversationSyncRef.current?.startEmptyConversation(activeCharacterId);
+            setError(null);
         } catch (err) {
             console.error("[ChatPanel] Failed to clear backend history for empty conversation:", err);
+            setError(t("chat.errors.new_conversation_failed", "新建会话失败，已保留当前会话"));
         } finally {
             clearTimeout(watchdogTimer);
             isSwitchingConversationRef.current = false;
             isBusyRef.current = false;
             setIsBusy(false);
         }
-    }, [activeCharacterId]);
+    }, [activeCharacterId, t]);
 
     // STT (Speech-to-Text) — Advanced VAD Mode
     const [sttEnabled, setSttEnabled] = useState(() =>
@@ -810,7 +810,13 @@ export default function ChatPanel({
         setIsThinking(false);
 
         const turn = currentTurnRef.current;
-        if (turn && (turn.clientRequestId === clientRequestId || !turn.clientRequestId)) {
+        const isMatchingTurn = Boolean(
+            turn && (
+                turn.clientRequestId === clientRequestId ||
+                (!turn.clientRequestId && !clientRequestId)
+            )
+        );
+        if (isMatchingTurn && turn) {
             const fullText = turn.rawText;
             rawResponseRef.current = fullText;
             const cleanText = stripStoredMarkup(fullText);
@@ -877,7 +883,10 @@ export default function ChatPanel({
             }
         }
 
-        if (currentTurnRef.current?.clientRequestId === clientRequestId || !currentTurnRef.current?.clientRequestId) {
+        if (
+            currentTurnRef.current?.clientRequestId === clientRequestId ||
+            (!currentTurnRef.current?.clientRequestId && !clientRequestId)
+        ) {
             currentTurnRef.current = null;
         }
         if (pendingTurnRequestRef.current?.clientRequestId === clientRequestId) {
@@ -919,7 +928,7 @@ export default function ChatPanel({
                     res?.user_message_id,
                     res?.assistant_message_id,
                 );
-                if (reconciliation.needsResync && streamResValidation.targetConversationId) {
+                if ((reconciliation.needsResync || currentTurnRef.current?.needsResync) && streamResValidation.targetConversationId) {
                     void resyncConversationMessages({
                         conversationId: streamResValidation.targetConversationId,
                         startGeneration: requestGeneration,
@@ -1353,11 +1362,14 @@ export default function ChatPanel({
             try {
                 const unlistens = await Promise.all([
                     // Listen for pet window sending a message — start streaming in main window too
-                    listen<{ message: string }>("pet-chat-start", (event) => {
-                        if (aborted) return;
+                    listen<{ message: string; client_request_id?: string }>("pet-chat-start", (event) => {
+                        if (aborted || isBusyRef.current) return;
                         const text = event.payload.message;
+                        const clientRequestId = event.payload.client_request_id
+                            || `pet_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                        latestClientRequestIdRef.current = clientRequestId;
                         pendingTurnRequestRef.current = {
-                            clientRequestId: null,
+                            clientRequestId,
                             generation: conversationGenerationRef.current,
                             conversationId: activeConversationIdRef.current,
                             characterId: activeCharacterIdRef.current,
@@ -1365,7 +1377,7 @@ export default function ChatPanel({
                         rawResponseRef.current = "";
                         currentTurnRef.current = null;
                         resetReveal();
-                        setMessages(prev => [...prev, { role: "user", text }]);
+                        setMessages(prev => [...prev, { role: "user", text, clientRequestId }]);
                         startStreaming();
                         setIsThinking(true);
                         userScrolledRef.current = false;
@@ -1397,21 +1409,27 @@ export default function ChatPanel({
                             activeConversationIdRef.current = validation.targetConversationId;
                         }
 
+                        let needsResync = false;
                         if (user_message_id) {
                             const matchedRequestId = validation.matchedClientRequestId;
+                            const initialAlignment = alignTurnStartUserMessage(
+                                messagesRef.current,
+                                matchedRequestId,
+                                user_message_id,
+                            );
+                            if (initialAlignment.needsResync) {
+                                needsResync = true;
+                            }
                             setMessages(prev => {
-                                let idx = matchedRequestId ? prev.findIndex(m => m.clientRequestId === matchedRequestId) : -1;
-                                if (idx === -1 && !matchedRequestId) {
-                                    // TODO: lastIndexOf("user") 兜底与"找不到明确匹配项时应放弃对齐"的原则相悖，
-                                    // 若 Telegram user 消息与之交错可能误绑 ID；收紧需配套 pet/proactive 路径改造
-                                    idx = prev.map(m => m.role).lastIndexOf("user");
+                                const alignment = alignTurnStartUserMessage(
+                                    prev,
+                                    matchedRequestId,
+                                    user_message_id,
+                                );
+                                if (alignment.needsResync && currentTurnRef.current) {
+                                    currentTurnRef.current.needsResync = true;
                                 }
-                                if (idx !== -1 && !prev[idx].id) {
-                                    const updated = [...prev];
-                                    updated[idx] = { ...updated[idx], id: user_message_id };
-                                    return updated;
-                                }
-                                return prev;
+                                return alignment.messages;
                             });
                         }
 
@@ -1427,6 +1445,7 @@ export default function ChatPanel({
                             translationPending: false,
                             tools: [],
                             pendingContext: pendingVisionContextRef.current ?? undefined,
+                            needsResync,
                         };
                         pendingVisionContextRef.current = null;
                         rawResponseRef.current = "";
@@ -1600,8 +1619,21 @@ export default function ChatPanel({
                             return prev;
                         });
 
+                        const turnNeedsResync = turn.needsResync;
+                        const turnTargetConvId = validation.targetConversationId;
+                        const turnReqId = turn.clientRequestId ?? `resync_turn_${turn.turnId}`;
+                        const turnGen = turn.generation ?? conversationGenerationRef.current;
+
                         currentTurnRef.current = null;
                         pendingTurnRequestRef.current = null;
+
+                        if (turnNeedsResync && turnTargetConvId) {
+                            void resyncConversationMessages({
+                                conversationId: turnTargetConvId,
+                                startGeneration: turnGen,
+                                clientRequestId: turnReqId,
+                            });
+                        }
 
                         const playback = getTtsPlaybackSettings();
                         if (status === "completed" && playback.enabled && cleanText.trim()) {
@@ -1695,14 +1727,23 @@ export default function ChatPanel({
                                 return;
                             }
 
+                            const stillBrowserSpeaking = typeof window !== "undefined"
+                                && Boolean(window.speechSynthesis?.speaking);
+                            if (aborted || isBusyRef.current || ttsSpeakingRef.current || audioPlayer.isPlaying || stillBrowserSpeaking) {
+                                return;
+                            }
+
                             console.log("[ChatPanel] Proactive trigger:", event.payload);
 
                             const { instruction } = event.payload;
+                            const requestGeneration = conversationGenerationRef.current;
+                            const clientRequestId = `proactive_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                            latestClientRequestIdRef.current = clientRequestId;
 
                             // Start streaming — compose_prompt() handles full context (system prompt, memory, emotion, history, language)
                             pendingTurnRequestRef.current = {
-                                clientRequestId: null,
-                                generation: conversationGenerationRef.current,
+                                clientRequestId,
+                                generation: requestGeneration,
                                 conversationId: activeConversationIdRef.current,
                                 characterId: activeCharacterIdRef.current,
                             };
@@ -1713,37 +1754,44 @@ export default function ChatPanel({
                             rawResponseRef.current = "";
                             currentTurnRef.current = null;
 
-                            streamChat({
-                                message: instruction,
-                                hidden: true,
-                                character_id: getActiveCharacterIdForRequest(),
-                                conversation_id: activeConversationIdRef.current ?? undefined,
-                            }).catch(err => {
-                                if (isTurnCancelledError(err) || cancelRequestedRef.current) {
-                                    endTurnActivity();
-                                    currentTurnRef.current = null;
-                                    return;
-                                }
-                                endTurnActivity();
-                                setIsThinking(false);
-                                setError(getAsyncErrorMessage(err));
-                                currentTurnRef.current = null;
-                                // Remove the empty placeholder if one was created by delta handler
-                                setMessages(prev => {
-                                    const last = prev[prev.length - 1];
-                                    if (last && last.role === "kokoro" && !last.text) {
-                                        return prev.slice(0, -1);
-                                    }
-                                    return prev;
-                                });
+                            void processTurnStreamResult({
+                                clientRequestId,
+                                requestGeneration,
+                                streamChatPromise: streamChat({
+                                    message: instruction,
+                                    hidden: true,
+                                    client_request_id: clientRequestId,
+                                    character_id: getActiveCharacterIdForRequest(),
+                                    conversation_id: activeConversationIdRef.current ?? undefined,
+                                }),
+                                onCatchError: () => {
+                                    // Remove the empty placeholder if one was created by delta handler
+                                    setMessages(prev => {
+                                        const last = prev[prev.length - 1];
+                                        if (last && last.role === "kokoro" && !last.text) {
+                                            return prev.slice(0, -1);
+                                        }
+                                        return prev;
+                                    });
+                                },
                             });
                         })();
                     }),
 
                     // Listen for interaction triggers (touch/click on Live2D model)
                     // interaction-service already calls streamChat, we just need to prepare ChatPanel for receiving deltas
-                    listen<any>("interaction-trigger", () => {
+                    listen<{ gesture?: string; hitArea?: string; client_request_id?: string }>("interaction-trigger", (event) => {
                         if (aborted || isBusyRef.current) return;
+
+                        const clientRequestId = event.payload?.client_request_id
+                            || `interaction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                        latestClientRequestIdRef.current = clientRequestId;
+                        pendingTurnRequestRef.current = {
+                            clientRequestId,
+                            generation: conversationGenerationRef.current,
+                            conversationId: activeConversationIdRef.current,
+                            characterId: activeCharacterIdRef.current,
+                        };
 
                         startStreaming();
                         setIsThinking(true);

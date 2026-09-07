@@ -26,7 +26,7 @@ export type TurnStartValidationResult =
           readonly valid: true;
           readonly shouldUpdateConversation: boolean;
           readonly targetConversationId: string | null;
-          readonly matchedClientRequestId?: string | null;
+          readonly matchedClientRequestId: string;
       }
     | {
           readonly valid: false;
@@ -34,12 +34,14 @@ export type TurnStartValidationResult =
               | "cancelled"
               | "generation_mismatch"
               | "request_mismatch"
-              | "conversation_mismatch";
+              | "conversation_mismatch"
+              | "missing_request_id";
       };
 
 /**
  * Validates whether an incoming chat-turn-start event belongs to the current
  * conversation session and the pending client request.
+ * All valid turns are required to carry an explicit non-empty client_request_id.
  */
 export function validateTurnStart(
     context: TurnStartValidationContext,
@@ -49,16 +51,17 @@ export function validateTurnStart(
         return { valid: false, reason: "cancelled" };
     }
 
+    const clientRequestId = payload.client_request_id?.trim();
+    if (!clientRequestId) {
+        return { valid: false, reason: "missing_request_id" };
+    }
+
     if (context.pendingRequest) {
         if (context.pendingRequest.generation !== context.currentGeneration) {
             return { valid: false, reason: "generation_mismatch" };
         }
 
-        if (
-            payload.client_request_id &&
-            context.pendingRequest.clientRequestId &&
-            payload.client_request_id !== context.pendingRequest.clientRequestId
-        ) {
+        if (clientRequestId !== context.pendingRequest.clientRequestId) {
             return { valid: false, reason: "request_mismatch" };
         }
 
@@ -75,11 +78,11 @@ export function validateTurnStart(
             valid: true,
             shouldUpdateConversation: Boolean(payload.conversation_id),
             targetConversationId: payload.conversation_id ?? context.activeConversationId,
-            matchedClientRequestId: payload.client_request_id ?? context.pendingRequest.clientRequestId,
+            matchedClientRequestId: clientRequestId,
         };
     }
 
-    // No pending request recorded (e.g. pet window or proactive trigger without tracking)
+    // No pending request recorded (e.g. external trigger or background turn)
     if (payload.conversation_id) {
         if (
             context.activeConversationId !== null &&
@@ -93,7 +96,7 @@ export function validateTurnStart(
         valid: true,
         shouldUpdateConversation: Boolean(payload.conversation_id),
         targetConversationId: payload.conversation_id ?? context.activeConversationId,
-        matchedClientRequestId: payload.client_request_id,
+        matchedClientRequestId: clientRequestId,
     };
 }
 
@@ -242,6 +245,60 @@ export type TurnMessageIdReconciliation = {
     readonly needsResync: boolean;
 };
 
+export type TurnStartUserMessageAlignment = {
+    readonly messages: Array<ChatPanelMessage>;
+    readonly matched: boolean;
+    readonly needsResync: boolean;
+};
+
+/**
+ * 在 chat-turn-start 到达且携带 user_message_id 时，协调并对齐本地消息中的用户消息 ID。
+ *
+ * 原则：
+ * 1. 若当前列表中已存在携带该 user_message_id 的消息（例如重新生成场景），视为已对齐，不触发重同步。
+ * 2. 按 clientRequestId 精确查找匹配项；若找到且无冲突 ID 则补齐 ID。
+ * 3. 若找不到明确匹配项，或已挂有冲突 ID，坚决取消位置猜测（绝不使用 lastIndexOf("user")），
+ *    放弃就地修改，并返回 needsResync = true，以便在 turn 结束时从权威数据库安全重同步。
+ */
+export function alignTurnStartUserMessage(
+    messages: ReadonlyArray<ChatPanelMessage>,
+    clientRequestId?: string | null,
+    userMessageId?: number | null,
+): TurnStartUserMessageAlignment {
+    if (!userMessageId) {
+        return { messages: messages as Array<ChatPanelMessage>, matched: true, needsResync: false };
+    }
+
+    if (messages.some(m => m.id === userMessageId)) {
+        return { messages: messages as Array<ChatPanelMessage>, matched: true, needsResync: false };
+    }
+
+    const trimmedRequestId = clientRequestId?.trim();
+    if (!trimmedRequestId) {
+        return { messages: messages as Array<ChatPanelMessage>, matched: false, needsResync: true };
+    }
+
+    const idx = messages.findIndex(m => m.clientRequestId === trimmedRequestId);
+    if (idx === -1) {
+        return { messages: messages as Array<ChatPanelMessage>, matched: false, needsResync: true };
+    }
+
+    if (messages[idx].id && messages[idx].id !== userMessageId) {
+        return { messages: messages as Array<ChatPanelMessage>, matched: false, needsResync: true };
+    }
+
+    if (!messages[idx].id) {
+        const next = [...messages];
+        next[idx] = {
+            ...next[idx],
+            id: userMessageId,
+        };
+        return { messages: next, matched: true, needsResync: false };
+    }
+
+    return { messages: messages as Array<ChatPanelMessage>, matched: true, needsResync: false };
+}
+
 /**
  * 协调并将 StreamChatResponse 返回的权威消息 ID（user_message_id 与 assistant_message_id）
  * 补偿填充到前端消息列表中。
@@ -274,15 +331,24 @@ export function reconcileTurnMessageIds(
     const nextMessages = [...messages];
 
     // 第一步：如果提供了 userMessageId，按 clientRequestId 精确补齐用户消息 ID；
-    // 未匹配时静默跳过（编辑时 onEdit 会安全失败，不会写错记录）
-    if (userMessageId && clientRequestId) {
-        const userIndex = nextMessages.findIndex(m => m.clientRequestId === clientRequestId);
-        if (userIndex !== -1 && !nextMessages[userIndex].id) {
-            nextMessages[userIndex] = {
-                ...nextMessages[userIndex],
-                id: userMessageId,
-            };
-            isModified = true;
+    // 找不到匹配项或存在冲突时标记 needsResync = true，由调用方从后端重新同步，避免把新消息 ID 绑定到错误消息
+    if (userMessageId) {
+        const hasExistingId = nextMessages.some(m => m.id === userMessageId);
+        if (!hasExistingId) {
+            const userIndex = clientRequestId
+                ? nextMessages.findIndex(m => m.clientRequestId === clientRequestId)
+                : -1;
+            if (userIndex === -1) {
+                needsResync = true;
+            } else if (!nextMessages[userIndex].id) {
+                nextMessages[userIndex] = {
+                    ...nextMessages[userIndex],
+                    id: userMessageId,
+                };
+                isModified = true;
+            } else if (nextMessages[userIndex].id !== userMessageId) {
+                needsResync = true;
+            }
         }
     }
 

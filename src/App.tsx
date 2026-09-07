@@ -1770,9 +1770,11 @@ function App() {
             await openMemoryModelDialog();
             return;
           }
+          const clientRequestId = `mod_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
           await streamChat({
             message,
             character_id: readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || undefined,
+            client_request_id: clientRequestId,
           });
         } catch (err) {
           console.error("[App] Mod send_message failed:", err);

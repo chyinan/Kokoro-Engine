@@ -32,6 +32,7 @@ export interface PendingTurnState {
     translationPending: boolean;
     tools: ToolTraceItem[];
     pendingContext?: ChatPanelMessage;
+    needsResync?: boolean;
 }
 
 export const stripStreamingMarkup = (text: string) =>
