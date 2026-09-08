@@ -77,6 +77,7 @@ describe("ChatPanel Pet & Proactive Turn Concurrency", () => {
     let root: ReturnType<typeof createRoot>;
 
     let turnStartCb: ((event: any) => void) | null = null;
+    let turnAckCb: ((event: any) => void) | null = null;
     let turnDeltaCb: ((event: any) => void) | null = null;
     let turnFinishCb: ((event: any) => void) | null = null;
     let turnToolCb: ((event: any) => void) | null = null;
@@ -89,6 +90,7 @@ describe("ChatPanel Pet & Proactive Turn Concurrency", () => {
         vi.clearAllMocks();
         listeners = {};
         turnStartCb = null;
+        turnAckCb = null;
         turnDeltaCb = null;
         turnFinishCb = null;
         turnToolCb = null;
@@ -124,7 +126,12 @@ describe("ChatPanel Pet & Proactive Turn Concurrency", () => {
         vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockImplementation(vi.fn(async () => ({ installed: true } as any)));
         vi.spyOn(bridge, "setVisionTextInputFocused").mockImplementation(vi.fn(async () => undefined));
         vi.spyOn(bridge, "synthesize").mockImplementation(vi.fn(async () => undefined));
+        vi.spyOn(bridge, "cancelChatTurn").mockImplementation(vi.fn(async () => undefined));
 
+        vi.spyOn(bridge, "onChatTurnAcknowledged").mockImplementation((cb: any) => {
+            turnAckCb = cb;
+            return Promise.resolve(() => { turnAckCb = null; });
+        });
         vi.spyOn(bridge, "onChatTurnStart").mockImplementation((cb: any) => {
             turnStartCb = cb;
             return Promise.resolve(() => { turnStartCb = null; });
@@ -597,6 +604,10 @@ describe("ChatPanel Pet & Proactive Turn Concurrency", () => {
             expect(container.textContent).not.toContain("Abandoned message");
             textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
             expect(textarea.disabled).toBe(false);
+            expect(bridge.cancelChatTurn).toHaveBeenCalledWith(
+                "pet_abandoned_456",
+                "external_pending_turn_watchdog_timeout",
+            );
         } finally {
             vi.useRealTimers();
         }
@@ -782,6 +793,10 @@ describe("ChatPanel Pet & Proactive Turn Concurrency", () => {
             // Watchdog properly cleaned up and released lock
             textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
             expect(textarea.disabled).toBe(false);
+            expect(bridge.cancelChatTurn).toHaveBeenCalledWith(
+                clientRequestId,
+                "external_pending_interaction_watchdog_timeout",
+            );
         } finally {
             vi.useRealTimers();
         }
@@ -994,6 +1009,304 @@ describe("ChatPanel Pet & Proactive Turn Concurrency", () => {
         });
         const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
         expect(textarea.disabled).toBe(false);
+    });
+
+    it("cancels backend turn on watchdog timeout when chat-turn-start is lost, allowing subsequent chat submission", async () => {
+        vi.useFakeTimers();
+        try {
+            await act(async () => {
+                root.render(createElement(ChatPanel));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const clientRequestId = "pet_abandoned_turn_999";
+            await act(async () => {
+                listeners["pet-chat-start"]?.({
+                    payload: { message: "Abandoned message before send", client_request_id: clientRequestId },
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            let textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+            expect(textarea.disabled).toBe(true);
+
+            // Advance time to full watchdog timeout
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS);
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Watchdog cancelled backend turn
+            expect(bridge.cancelChatTurn).toHaveBeenCalledWith(
+                clientRequestId,
+                "external_pending_turn_watchdog_timeout",
+            );
+            expect(container.textContent).not.toContain("Abandoned message before send");
+            textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+            expect(textarea.disabled).toBe(false);
+
+            // Subsequent user message can be sent normally
+            await act(async () => {
+                setTextareaValue(textarea, "Hello after watchdog recovery");
+            });
+
+            const form = container.querySelector("form");
+            await act(async () => {
+                form?.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            expect(streamChatMock).toHaveBeenCalledWith(expect.objectContaining({
+                message: "Hello after watchdog recovery",
+            }));
+            expect(container.textContent).toContain("Hello after watchdog recovery");
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("chat-turn-acknowledged clears watchdog, allowing slow backend initialization (>15s) without being abandoned", async () => {
+        vi.useFakeTimers();
+        try {
+            await act(async () => {
+                root.render(createElement(ChatPanel));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const clientRequestId = "pet_slow_init_turn_101";
+            await act(async () => {
+                listeners["pet-chat-start"]?.({
+                    payload: { message: "Heavy model loading message", client_request_id: clientRequestId },
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            expect(container.textContent).toContain("Heavy model loading message");
+
+            // Backend acquires turn lock and emits chat-turn-acknowledged
+            await act(async () => {
+                turnAckCb?.({
+                    turn_id: "backend_turn_101",
+                    client_request_id: clientRequestId,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Fast-forward past the default 15s watchdog duration (e.g. 25 seconds)
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(25_000);
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Crucial assertion: message is STILL present, NOT killed by watchdog!
+            expect(container.textContent).toContain("Heavy model loading message");
+            expect(bridge.cancelChatTurn).not.toHaveBeenCalledWith(
+                clientRequestId,
+                expect.stringContaining("watchdog"),
+            );
+
+            // Now backend finishes slow preparation (e.g. at 25s) and emits chat-turn-start
+            await act(async () => {
+                turnStartCb?.({
+                    turn_id: "backend_turn_101",
+                    client_request_id: clientRequestId,
+                    conversation_id: "conv-1",
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Turn starts normally, deltas stream
+            await act(async () => {
+                turnDeltaCb?.({
+                    turn_id: "backend_turn_101",
+                    delta: "Hello from slow model!",
+                    client_request_id: clientRequestId,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            expect(container.textContent).toContain("Hello from slow model!");
+
+            // Complete turn
+            await act(async () => {
+                turnFinishCb?.({
+                    turn_id: "backend_turn_101",
+                    status: "completed",
+                    client_request_id: clientRequestId,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+            expect(textarea.disabled).toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("unrelated chat-turn-acknowledged does not clear watchdog of another pending request", async () => {
+        vi.useFakeTimers();
+        try {
+            await act(async () => {
+                root.render(createElement(ChatPanel));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const clientRequestId = "pet_victim_req_202";
+            await act(async () => {
+                listeners["pet-chat-start"]?.({
+                    payload: { message: "Victim pending message", client_request_id: clientRequestId },
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // An unrelated chat-turn-acknowledged arrives
+            await act(async () => {
+                turnAckCb?.({
+                    turn_id: "other_turn_999",
+                    client_request_id: "completely_different_req",
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            expect(container.textContent).toContain("Victim pending message");
+
+            // Advance past 15s watchdog
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS);
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // The abandoned victim request WAS cleared because the ack did not match!
+            expect(container.textContent).not.toContain("Victim pending message");
+            expect(bridge.cancelChatTurn).toHaveBeenCalledWith(
+                clientRequestId,
+                "external_pending_turn_watchdog_timeout",
+            );
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("interaction-trigger watchdog is cleared by chat-turn-acknowledged for slow interaction turn", async () => {
+        vi.useFakeTimers();
+        try {
+            await act(async () => {
+                root.render(createElement(ChatPanel));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const clientRequestId = "interaction_slow_touch_303";
+            await act(async () => {
+                listeners["interaction-trigger"]?.({
+                    payload: {
+                        interaction_type: "touch_head",
+                        client_request_id: clientRequestId,
+                    },
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Backend acknowledges
+            await act(async () => {
+                turnAckCb?.({
+                    turn_id: "touch_turn_303",
+                    client_request_id: clientRequestId,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Fast-forward 20 seconds
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(20_000);
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Should NOT have triggered interaction watchdog
+            expect(bridge.cancelChatTurn).not.toHaveBeenCalledWith(
+                clientRequestId,
+                expect.stringContaining("watchdog"),
+            );
+
+            // Backend starts turn
+            await act(async () => {
+                turnStartCb?.({
+                    turn_id: "touch_turn_303",
+                    client_request_id: clientRequestId,
+                    conversation_id: "conv-1",
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Finish turn
+            await act(async () => {
+                turnFinishCb?.({
+                    turn_id: "touch_turn_303",
+                    status: "completed",
+                    client_request_id: clientRequestId,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+            expect(textarea.disabled).toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("stop generation during slow turn after ack cleanly cancels and recovers UI", async () => {
+        vi.useFakeTimers();
+        try {
+            await act(async () => {
+                root.render(createElement(ChatPanel));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const clientRequestId = "pet_slow_cancelled_404";
+            await act(async () => {
+                listeners["pet-chat-start"]?.({
+                    payload: { message: "Cancelled while loading", client_request_id: clientRequestId },
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Backend acknowledged
+            await act(async () => {
+                turnAckCb?.({
+                    turn_id: "turn_cancel_404",
+                    client_request_id: clientRequestId,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Advance 10s (still loading)
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(10_000);
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Stop button clicked while still waiting for turn start
+            const stopButton = container.querySelector('button[aria-label="chat.actions.stop"]') as HTMLButtonElement;
+            expect(stopButton).toBeTruthy();
+            await act(async () => {
+                stopButton.click();
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            expect(bridge.cancelChatTurn).toHaveBeenCalledWith(clientRequestId, "stopped_from_chat_panel");
+
+            // Advance past cancellation watchdog (5s) to ensure UI recovers
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(5000);
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+            expect(textarea.disabled).toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });
 

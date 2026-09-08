@@ -901,6 +901,206 @@ mod tests {
         let err = ToolCancellationError;
         assert_eq!(format!("{}", err), "tool execution cancelled");
     }
+
+    struct HangingAfterActionHook;
+
+    #[async_trait::async_trait]
+    impl crate::hooks::HookHandler for HangingAfterActionHook {
+        fn id(&self) -> &str {
+            "hanging-after-action-hook"
+        }
+
+        fn events(&self) -> &'static [HookEvent] {
+            &[HookEvent::AfterActionInvoke]
+        }
+
+        async fn handle(
+            &self,
+            _event: &HookEvent,
+            _payload: &HookPayload,
+        ) -> Result<HookOutcome, String> {
+            std::future::pending::<()>().await;
+            Ok(HookOutcome::Continue)
+        }
+    }
+
+    struct SuccessfulAfterActionHook {
+        called: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::hooks::HookHandler for SuccessfulAfterActionHook {
+        fn id(&self) -> &str {
+            "successful-after-action-hook"
+        }
+
+        fn events(&self) -> &'static [HookEvent] {
+            &[HookEvent::AfterActionInvoke]
+        }
+
+        async fn handle(
+            &self,
+            _event: &HookEvent,
+            _payload: &HookPayload,
+        ) -> Result<HookOutcome, String> {
+            self.called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(HookOutcome::Continue)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_emit_after_action_invoke_cancelled_while_hanging() {
+        let runtime = HookRuntime::new();
+        runtime.register(Arc::new(HangingAfterActionHook));
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let mut cancel_rx = Some(rx);
+
+        let cancel_handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            let _ = tx.send(true);
+        });
+
+        let invocation = ToolInvocation {
+            tool_call_id: Some("call_1".to_string()),
+            name: "test_tool".to_string(),
+            args: HashMap::new(),
+        };
+        let payload = build_action_hook_payload(
+            None,
+            "char_1",
+            Some("chat".to_string()),
+            &invocation,
+            None,
+            Some(true),
+            Some("ok".to_string()),
+        );
+
+        let timeout = Some(std::time::Duration::from_secs(10));
+        let res = emit_after_action_invoke_with_protection(
+            &runtime,
+            &payload,
+            &mut cancel_rx,
+            timeout,
+            "test_tool",
+        )
+        .await;
+
+        cancel_handle.await.unwrap();
+        assert_eq!(res, Err(ToolCancellationError));
+    }
+
+    #[tokio::test]
+    async fn test_emit_after_action_invoke_times_out_and_recovers() {
+        let runtime = HookRuntime::new();
+        runtime.register(Arc::new(HangingAfterActionHook));
+
+        let mut cancel_rx: Option<tokio::sync::watch::Receiver<bool>> = None;
+        let invocation = ToolInvocation {
+            tool_call_id: Some("call_1".to_string()),
+            name: "test_tool".to_string(),
+            args: HashMap::new(),
+        };
+        let payload = build_action_hook_payload(
+            None,
+            "char_1",
+            Some("chat".to_string()),
+            &invocation,
+            None,
+            Some(true),
+            Some("ok".to_string()),
+        );
+
+        let short_timeout = Some(std::time::Duration::from_millis(25));
+        let start = std::time::Instant::now();
+        let res = emit_after_action_invoke_with_protection(
+            &runtime,
+            &payload,
+            &mut cancel_rx,
+            short_timeout,
+            "test_tool",
+        )
+        .await;
+
+        assert_eq!(res, Ok(()));
+        assert!(start.elapsed() >= std::time::Duration::from_millis(20));
+    }
+
+    #[tokio::test]
+    async fn test_emit_after_action_invoke_pre_cancelled_aborts_immediately() {
+        let runtime = HookRuntime::new();
+        runtime.register(Arc::new(HangingAfterActionHook));
+
+        let (tx, rx) = tokio::sync::watch::channel(true);
+        drop(tx);
+        let mut cancel_rx = Some(rx);
+
+        let invocation = ToolInvocation {
+            tool_call_id: Some("call_1".to_string()),
+            name: "test_tool".to_string(),
+            args: HashMap::new(),
+        };
+        let payload = build_action_hook_payload(
+            None,
+            "char_1",
+            Some("chat".to_string()),
+            &invocation,
+            None,
+            Some(true),
+            Some("ok".to_string()),
+        );
+
+        let timeout = Some(std::time::Duration::from_secs(10));
+        let res = emit_after_action_invoke_with_protection(
+            &runtime,
+            &payload,
+            &mut cancel_rx,
+            timeout,
+            "test_tool",
+        )
+        .await;
+
+        assert_eq!(res, Err(ToolCancellationError));
+    }
+
+    #[tokio::test]
+    async fn test_emit_after_action_invoke_succeeds_normally() {
+        let runtime = HookRuntime::new();
+        let hook = Arc::new(SuccessfulAfterActionHook {
+            called: std::sync::atomic::AtomicBool::new(false),
+        });
+        runtime.register(hook.clone());
+
+        let mut cancel_rx: Option<tokio::sync::watch::Receiver<bool>> = None;
+        let invocation = ToolInvocation {
+            tool_call_id: Some("call_1".to_string()),
+            name: "test_tool".to_string(),
+            args: HashMap::new(),
+        };
+        let payload = build_action_hook_payload(
+            None,
+            "char_1",
+            Some("chat".to_string()),
+            &invocation,
+            None,
+            Some(true),
+            Some("ok".to_string()),
+        );
+
+        let timeout = Some(std::time::Duration::from_secs(5));
+        let res = emit_after_action_invoke_with_protection(
+            &runtime,
+            &payload,
+            &mut cancel_rx,
+            timeout,
+            "test_tool",
+        )
+        .await;
+
+        assert_eq!(res, Ok(()));
+        assert!(hook.called.load(std::sync::atomic::Ordering::SeqCst));
+    }
 }
 
 impl ToolExecutionOutcome {
@@ -1017,6 +1217,41 @@ pub(crate) fn assistant_tool_call_metadata_value_for_test(
     tool_call_id: &str,
 ) -> serde_json::Value {
     assistant_tool_call_metadata_value(outcome, tool_call_id)
+}
+
+pub(crate) async fn emit_after_action_invoke_with_protection(
+    hooks: &HookRuntime,
+    payload: &HookPayload,
+    cancel_rx: &mut Option<tokio::sync::watch::Receiver<bool>>,
+    tool_timeout: Option<std::time::Duration>,
+    tool_name: &str,
+) -> Result<(), ToolCancellationError> {
+    tokio::select! {
+        biased;
+        _ = wait_for_cancel_event(cancel_rx) => {
+            Err(ToolCancellationError)
+        }
+        _ = async {
+            if let Some(timeout) = tool_timeout {
+                if tokio::time::timeout(
+                    timeout,
+                    hooks.emit_best_effort(&HookEvent::AfterActionInvoke, payload),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::warn!(
+                        target: "actions",
+                        "[Hook] AfterActionInvoke hook execution timed out after {}s for tool '{}'",
+                        timeout.as_secs(),
+                        tool_name
+                    );
+                }
+            } else {
+                hooks.emit_best_effort(&HookEvent::AfterActionInvoke, payload).await;
+            }
+        } => Ok(()),
+    }
 }
 
 pub async fn execute_tool_calls_with_cancellation(
@@ -1227,20 +1462,23 @@ pub async fn execute_tool_calls_with_cancellation(
                 Ok(value) => Some(value.message.clone()),
                 Err(error) => Some(error.clone()),
             };
-            hooks
-                .emit_best_effort(
-                    &HookEvent::AfterActionInvoke,
-                    &build_action_hook_payload(
-                        None,
-                        character_id,
-                        Some("chat".to_string()),
-                        tool_call,
-                        action.as_ref(),
-                        Some(result.is_ok()),
-                        result_message,
-                    ),
-                )
-                .await;
+            let payload = build_action_hook_payload(
+                None,
+                character_id,
+                Some("chat".to_string()),
+                tool_call,
+                action.as_ref(),
+                Some(result.is_ok()),
+                result_message,
+            );
+            emit_after_action_invoke_with_protection(
+                hooks,
+                &payload,
+                &mut cancel_rx,
+                tool_timeout,
+                &tool_call.name,
+            )
+            .await?;
         }
 
         outcomes.push(ToolExecutionOutcome {

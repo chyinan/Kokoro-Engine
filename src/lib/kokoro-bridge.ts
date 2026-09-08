@@ -449,6 +449,11 @@ export function parseLegacyChatError(payload: unknown): string {
     return stringifyUnknown(payload);
 }
 
+export interface ChatTurnAcknowledgedEvent {
+    turn_id?: string;
+    client_request_id?: string | null;
+}
+
 export interface ChatTurnStartEvent {
     turn_id: string;
     client_request_id?: string | null;
@@ -515,6 +520,10 @@ export interface ChatTurnToolEvent {
     deny_kind?: ToolTraceItem["denyKind"];
     approval_request_id?: string;
     approval_status?: ToolTraceItem["approvalStatus"];
+}
+
+export async function onChatTurnAcknowledged(callback: (event: ChatTurnAcknowledgedEvent) => void): Promise<UnlistenFn> {
+    return listen<ChatTurnAcknowledgedEvent>("chat-turn-acknowledged", (event) => callback(event.payload));
 }
 
 export async function onChatTurnStart(callback: (event: ChatTurnStartEvent) => void): Promise<UnlistenFn> {

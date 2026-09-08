@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback, useDeferredV
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
-import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, editConversationMessage, listCharacters, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
+import { streamChat, cancelChatTurn, onChatTurnAcknowledged, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, editConversationMessage, listCharacters, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
 import type { CommittedCharacterRuntime, FailureEvent, ToolTraceItem, StreamChatResponse } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -416,13 +416,13 @@ export default function ChatPanel({
 
     const startPendingExternalWatchdog = useCallback((
         clientRequestId: string,
-        onExpired: () => void,
+        onExpired: () => void | Promise<void>,
         timeoutMs: number = DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS,
     ) => {
         clearPendingExternalWatchdog(clientRequestId);
         const timer = setTimeout(() => {
             pendingExternalWatchdogTimersRef.current.delete(clientRequestId);
-            onExpired();
+            void onExpired();
         }, timeoutMs);
         pendingExternalWatchdogTimersRef.current.set(clientRequestId, timer);
     }, [clearPendingExternalWatchdog]);
@@ -1579,6 +1579,38 @@ export default function ChatPanel({
         });
 
         const setup = async () => {
+            const handleExternalPendingWatchdogExpired = async (
+                clientRequestId: string,
+                reason: string,
+                cleanOptimisticMessage?: boolean,
+            ) => {
+                if (
+                    pendingTurnRequestRef.current?.clientRequestId === clientRequestId &&
+                    currentTurnRef.current === null
+                ) {
+                    console.warn(`[ChatPanel] External pending turn watchdog expired for: ${clientRequestId}, reason: ${reason}`);
+                    registerCancelledExternalId(clientRequestId);
+                    if (cleanOptimisticMessage) {
+                        setMessages(prev => prev.filter(m => m.clientRequestId !== clientRequestId));
+                    }
+                    pendingTurnRequestRef.current = null;
+                    currentTurnRef.current = null;
+                    rawResponseRef.current = "";
+                    resetReveal();
+                    setIsThinking(false);
+
+                    try {
+                        await cancelChatTurn(clientRequestId, reason);
+                    } catch (error) {
+                        console.warn("[ChatPanel] Failed to cancel pending external turn on watchdog expiry:", error);
+                    } finally {
+                        if (!aborted) {
+                            endTurnActivity();
+                        }
+                    }
+                }
+            };
+
             try {
                 const unlistens = await Promise.all([
                     // Listen for pet window sending a message — start streaming in main window too
@@ -1619,16 +1651,11 @@ export default function ChatPanel({
                         userScrolledRef.current = false;
 
                         startPendingExternalWatchdog(clientRequestId, () => {
-                            if (pendingTurnRequestRef.current?.clientRequestId === clientRequestId) {
-                                console.warn("[ChatPanel] External pending turn watchdog expired for:", clientRequestId);
-                                setMessages(prev => prev.filter(m => m.clientRequestId !== clientRequestId));
-                                pendingTurnRequestRef.current = null;
-                                currentTurnRef.current = null;
-                                rawResponseRef.current = "";
-                                resetReveal();
-                                setIsThinking(false);
-                                endTurnActivity();
-                            }
+                            void handleExternalPendingWatchdogExpired(
+                                clientRequestId,
+                                "external_pending_turn_watchdog_timeout",
+                                true,
+                            );
                         });
 
                         emit("pet-chat-accepted", {
@@ -1659,6 +1686,14 @@ export default function ChatPanel({
                             if (event.payload?.error && event.payload.error !== "handshake_timeout") {
                                 setError(event.payload.error);
                             }
+                        }
+                    }),
+
+                    onChatTurnAcknowledged(({ client_request_id }) => {
+                        if (aborted) return;
+                        if (!client_request_id) return;
+                        if (pendingTurnRequestRef.current?.clientRequestId === client_request_id) {
+                            clearPendingExternalWatchdog(client_request_id);
                         }
                     }),
 
@@ -2115,15 +2150,11 @@ export default function ChatPanel({
                         currentTurnRef.current = null;
 
                         startPendingExternalWatchdog(clientRequestId, () => {
-                            if (pendingTurnRequestRef.current?.clientRequestId === clientRequestId) {
-                                console.warn("[ChatPanel] External pending interaction watchdog expired for:", clientRequestId);
-                                pendingTurnRequestRef.current = null;
-                                currentTurnRef.current = null;
-                                rawResponseRef.current = "";
-                                resetReveal();
-                                setIsThinking(false);
-                                endTurnActivity();
-                            }
+                            void handleExternalPendingWatchdogExpired(
+                                clientRequestId,
+                                "external_pending_interaction_watchdog_timeout",
+                                false,
+                            );
                         });
 
                         emit("interaction-trigger-accepted", {

@@ -2044,6 +2044,21 @@ pub async fn stream_chat(
         return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
     }
 
+    app.emit(
+        "chat-turn-acknowledged",
+        serde_json::json!({
+            "turn_id": assistant_turn_id,
+            "client_request_id": client_request_id,
+        }),
+    )
+    .unwrap_or_else(|e| {
+        tracing::warn!(
+            target: "chat",
+            "[stream_chat] Failed to emit chat-turn-acknowledged: {}",
+            e
+        );
+    });
+
     // 0. Resolve character ID for this request (not stored in shared state)
     let char_id = request
         .character_id
@@ -6718,6 +6733,73 @@ mod tests {
             guard2.context().unwrap().client_request_id,
             "req-tool-cancel-2"
         );
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
+    }
+
+    #[tokio::test]
+    async fn test_hung_after_action_hook_cancelled_and_releases_turn_lock() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-after-action-cancel-1").await;
+        let mut cancel_rx = cancel_state
+            .subscribe_cancellation("turn-after-action-cancel-1")
+            .await;
+
+        assert!(!orchestrator.is_chat_busy());
+
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-after-action-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        let cancel_state_clone = cancel_state.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _turn_guard = TurnCancellationGuard::new(
+                cancel_state_clone.clone(),
+                "turn-after-action-cancel-1".to_string(),
+            );
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            let hook_fut = async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok::<(), String>(())
+            };
+
+            let outcome: Result<(), KokoroError> = tokio::select! {
+                biased;
+                _ = wait_for_cancel_event(&mut cancel_rx) => {
+                    Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()))
+                }
+                res = hook_fut => {
+                    res.map_err(|e| KokoroError::Chat(e))
+                }
+            };
+
+            assert!(matches!(outcome, Err(KokoroError::Chat(ref msg)) if msg == TURN_CANCELLED_BY_USER_MESSAGE));
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        let cancel_res = cancel_chat_turn_inner(
+            "turn-after-action-cancel-1".to_string(),
+            Some("user_stop".to_string()),
+            cancel_state.clone(),
+        )
+        .await;
+        assert!(cancel_res.is_ok());
+
+        handle.await.expect("task finished");
+
+        assert!(!orchestrator.is_chat_busy(), "lock must be released after after-action hook cancellation");
+
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-after-action-2")
+            .expect("turn 2 must succeed after after-action hook was cancelled");
+        assert_eq!(guard2.context().unwrap().client_request_id, "req-after-action-2");
         drop(guard2);
         assert!(!orchestrator.is_chat_busy());
     }
