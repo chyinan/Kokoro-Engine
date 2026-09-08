@@ -13,6 +13,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -226,6 +227,7 @@ export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
   const { t } = useTranslation();
   const [isOpen, setIsOpen] = useState(false);
   const [previewEntry, setPreviewEntry] = useState<CharacterCatalogEntry | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const previewDialogRef = useRef<HTMLElement | null>(null);
   const previewCloseButtonRef = useRef<HTMLButtonElement | null>(null);
   const previewTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -242,6 +244,27 @@ export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
     setPreviewEntry(null);
     previewTriggerRef.current?.focus();
   }
+
+  useEffect(() => {
+    if (!isOpen || previewEntry !== null) return;
+
+    const handlePointerDown = (event: MouseEvent | TouchEvent): void => {
+      if (
+        containerRef.current !== null &&
+        event.target instanceof Node &&
+        !containerRef.current.contains(event.target)
+      ) {
+        setIsOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+    };
+  }, [isOpen, previewEntry]);
 
   useEffect(() => {
     if (previewEntry === null) return;
@@ -332,7 +355,7 @@ export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
   }
 
   return (
-    <div className="pointer-events-auto relative w-[min(360px,calc(100vw-32px))]">
+    <div ref={containerRef} className="pointer-events-auto relative w-[min(360px,calc(100vw-32px))]">
       <button
         type="button"
         aria-expanded={isOpen}
@@ -351,14 +374,32 @@ export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
           </span>
           <span className="block truncate text-xs font-semibold text-[var(--color-text-primary)]">{active?.name}</span>
         </span>
-        <ChevronDown size={14} className={`shrink-0 text-[var(--color-text-muted)] transition ${isOpen ? "rotate-180" : ""}`} aria-hidden="true" />
+        <ChevronDown size={14} className={`shrink-0 text-[var(--color-text-muted)] transition-transform duration-250 ease-out ${isOpen ? "rotate-180" : ""}`} aria-hidden="true" />
       </button>
 
       {!isOpen && props.catalogError && <CatalogErrorNotice message={props.catalogError} isRetrying={props.isRetrying ?? false} onRetry={props.onRetry} t={t} />}
       {!isOpen && props.actionError && <CatalogErrorNotice message={props.actionError} isRetrying={false} t={t} />}
 
-      {isOpen && (
-        <section className="absolute right-0 top-12 max-h-[min(480px,calc(100vh-120px))] w-full overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)]/95 shadow-[0_22px_70px_rgba(0,0,0,0.5)] backdrop-blur-2xl">
+      <AnimatePresence>
+        {isOpen && (
+          <motion.section
+            initial={{ opacity: 0, scale: 0.95, y: -8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{
+              opacity: 0,
+              scale: 0.95,
+              y: -8,
+              transition: { duration: 0.15, ease: [0.32, 0, 0.67, 0] },
+            }}
+            transition={{
+              type: "spring",
+              stiffness: 420,
+              damping: 28,
+              mass: 0.6,
+            }}
+            style={{ transformOrigin: "top right" }}
+            className="absolute right-0 top-12 max-h-[min(480px,calc(100vh-120px))] w-full overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)]/95 shadow-[0_22px_70px_rgba(0,0,0,0.5)] backdrop-blur-2xl"
+          >
           <header className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
             <div>
               <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-[var(--color-accent)]">{t("characterCatalog.eyebrow")}</p>
@@ -432,8 +473,9 @@ export function CharacterCatalog(props: Readonly<CharacterCatalogProps>) {
           {props.catalogError && <CatalogErrorNotice message={props.catalogError} isRetrying={props.isRetrying ?? false} onRetry={props.onRetry} t={t} />}
           {props.actionError && <CatalogErrorNotice message={props.actionError} isRetrying={false} t={t} />}
           {error !== null && <p role="alert" className="border-t border-red-400/20 bg-red-500/10 px-4 py-2 text-[10px] text-red-200">{error}</p>}
-        </section>
+        </motion.section>
       )}
+    </AnimatePresence>
 
       {previewEntry !== null && (
         <div

@@ -67,3 +67,14 @@ export function shouldSynchronizeOnRuntimeChanged(
   }
   return false;
 }
+
+/**
+ * Normalizes the character display name to show in the chat header,
+ * returning an empty string when nullish or blank.
+ */
+export function getCharacterHeaderDisplayName(
+  characterName: string | null | undefined,
+): string {
+  return characterName?.trim() || "";
+}
+

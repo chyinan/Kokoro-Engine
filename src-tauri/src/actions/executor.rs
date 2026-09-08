@@ -30,6 +30,31 @@ pub struct ToolExecutionOutcome {
     pub permission_decision: Option<PermissionDecision>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolCancellationError;
+
+impl std::fmt::Display for ToolCancellationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tool execution cancelled")
+    }
+}
+
+impl std::error::Error for ToolCancellationError {}
+
+pub(crate) async fn wait_for_cancel_event(rx: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    if let Some(rx) = rx.as_mut() {
+        if *rx.borrow() {
+            return;
+        }
+        let is_ok = rx.wait_for(|&c| c).await.is_ok();
+        if !is_ok && !*rx.borrow() {
+            std::future::pending::<()>().await;
+        }
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
 pub(crate) fn denied_by_hook_message(reason: &str) -> String {
     format!("Denied by hook: {}", reason)
 }
@@ -817,7 +842,6 @@ mod tests {
             &sample_fail_closed_sensitive_settings(),
         )
         .expect("fail-closed should deny sensitive action");
-
         assert!(reason.starts_with("Denied by fail-closed policy:"));
     }
 
@@ -828,6 +852,254 @@ mod tests {
                 .expect("policy should deny blocked read tag");
 
         assert!(reason.starts_with("Denied by policy:"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_cancel_event_when_none_does_not_fire() {
+        let mut rx: Option<tokio::sync::watch::Receiver<bool>> = None;
+        let res = tokio::select! {
+            _ = wait_for_cancel_event(&mut rx) => "cancelled",
+            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => "timeout",
+        };
+        assert_eq!(res, "timeout");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_cancel_event_when_pre_cancelled_fires_immediately() {
+        let (tx, rx) = tokio::sync::watch::channel(true);
+        drop(tx);
+        let mut rx = Some(rx);
+        let res = tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut rx) => "cancelled",
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => "timeout",
+        };
+        assert_eq!(res, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_cancel_event_when_cancelled_concurrently() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let mut rx = Some(rx);
+
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            let _ = tx.send(true);
+        });
+
+        let res = tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut rx) => "cancelled",
+            _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => "timeout",
+        };
+        handle.await.unwrap();
+        assert_eq!(res, "cancelled");
+    }
+
+    #[test]
+    fn test_tool_cancellation_error_display() {
+        let err = ToolCancellationError;
+        assert_eq!(format!("{}", err), "tool execution cancelled");
+    }
+
+    struct HangingAfterActionHook;
+
+    #[async_trait::async_trait]
+    impl crate::hooks::HookHandler for HangingAfterActionHook {
+        fn id(&self) -> &str {
+            "hanging-after-action-hook"
+        }
+
+        fn events(&self) -> &'static [HookEvent] {
+            &[HookEvent::AfterActionInvoke]
+        }
+
+        async fn handle(
+            &self,
+            _event: &HookEvent,
+            _payload: &HookPayload,
+        ) -> Result<HookOutcome, String> {
+            std::future::pending::<()>().await;
+            Ok(HookOutcome::Continue)
+        }
+    }
+
+    struct SuccessfulAfterActionHook {
+        called: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::hooks::HookHandler for SuccessfulAfterActionHook {
+        fn id(&self) -> &str {
+            "successful-after-action-hook"
+        }
+
+        fn events(&self) -> &'static [HookEvent] {
+            &[HookEvent::AfterActionInvoke]
+        }
+
+        async fn handle(
+            &self,
+            _event: &HookEvent,
+            _payload: &HookPayload,
+        ) -> Result<HookOutcome, String> {
+            self.called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(HookOutcome::Continue)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_emit_after_action_invoke_cancelled_while_hanging() {
+        let runtime = HookRuntime::new();
+        runtime.register(Arc::new(HangingAfterActionHook));
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let mut cancel_rx = Some(rx);
+
+        let cancel_handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            let _ = tx.send(true);
+        });
+
+        let invocation = ToolInvocation {
+            tool_call_id: Some("call_1".to_string()),
+            name: "test_tool".to_string(),
+            args: HashMap::new(),
+        };
+        let payload = build_action_hook_payload(
+            None,
+            "char_1",
+            Some("chat".to_string()),
+            &invocation,
+            None,
+            Some(true),
+            Some("ok".to_string()),
+        );
+
+        let timeout = Some(std::time::Duration::from_secs(10));
+        let res = emit_after_action_invoke_with_protection(
+            &runtime,
+            &payload,
+            &mut cancel_rx,
+            timeout,
+            "test_tool",
+        )
+        .await;
+
+        cancel_handle.await.unwrap();
+        assert_eq!(res, Err(ToolCancellationError));
+    }
+
+    #[tokio::test]
+    async fn test_emit_after_action_invoke_times_out_and_recovers() {
+        let runtime = HookRuntime::new();
+        runtime.register(Arc::new(HangingAfterActionHook));
+
+        let mut cancel_rx: Option<tokio::sync::watch::Receiver<bool>> = None;
+        let invocation = ToolInvocation {
+            tool_call_id: Some("call_1".to_string()),
+            name: "test_tool".to_string(),
+            args: HashMap::new(),
+        };
+        let payload = build_action_hook_payload(
+            None,
+            "char_1",
+            Some("chat".to_string()),
+            &invocation,
+            None,
+            Some(true),
+            Some("ok".to_string()),
+        );
+
+        let short_timeout = Some(std::time::Duration::from_millis(25));
+        let start = std::time::Instant::now();
+        let res = emit_after_action_invoke_with_protection(
+            &runtime,
+            &payload,
+            &mut cancel_rx,
+            short_timeout,
+            "test_tool",
+        )
+        .await;
+
+        assert_eq!(res, Ok(()));
+        assert!(start.elapsed() >= std::time::Duration::from_millis(20));
+    }
+
+    #[tokio::test]
+    async fn test_emit_after_action_invoke_pre_cancelled_aborts_immediately() {
+        let runtime = HookRuntime::new();
+        runtime.register(Arc::new(HangingAfterActionHook));
+
+        let (tx, rx) = tokio::sync::watch::channel(true);
+        drop(tx);
+        let mut cancel_rx = Some(rx);
+
+        let invocation = ToolInvocation {
+            tool_call_id: Some("call_1".to_string()),
+            name: "test_tool".to_string(),
+            args: HashMap::new(),
+        };
+        let payload = build_action_hook_payload(
+            None,
+            "char_1",
+            Some("chat".to_string()),
+            &invocation,
+            None,
+            Some(true),
+            Some("ok".to_string()),
+        );
+
+        let timeout = Some(std::time::Duration::from_secs(10));
+        let res = emit_after_action_invoke_with_protection(
+            &runtime,
+            &payload,
+            &mut cancel_rx,
+            timeout,
+            "test_tool",
+        )
+        .await;
+
+        assert_eq!(res, Err(ToolCancellationError));
+    }
+
+    #[tokio::test]
+    async fn test_emit_after_action_invoke_succeeds_normally() {
+        let runtime = HookRuntime::new();
+        let hook = Arc::new(SuccessfulAfterActionHook {
+            called: std::sync::atomic::AtomicBool::new(false),
+        });
+        runtime.register(hook.clone());
+
+        let mut cancel_rx: Option<tokio::sync::watch::Receiver<bool>> = None;
+        let invocation = ToolInvocation {
+            tool_call_id: Some("call_1".to_string()),
+            name: "test_tool".to_string(),
+            args: HashMap::new(),
+        };
+        let payload = build_action_hook_payload(
+            None,
+            "char_1",
+            Some("chat".to_string()),
+            &invocation,
+            None,
+            Some(true),
+            Some("ok".to_string()),
+        );
+
+        let timeout = Some(std::time::Duration::from_secs(5));
+        let res = emit_after_action_invoke_with_protection(
+            &runtime,
+            &payload,
+            &mut cancel_rx,
+            timeout,
+            "test_tool",
+        )
+        .await;
+
+        assert_eq!(res, Ok(()));
+        assert!(hook.called.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
 
@@ -947,32 +1219,110 @@ pub(crate) fn assistant_tool_call_metadata_value_for_test(
     assistant_tool_call_metadata_value(outcome, tool_call_id)
 }
 
-pub async fn execute_tool_calls(
+pub(crate) async fn emit_after_action_invoke_with_protection(
+    hooks: &HookRuntime,
+    payload: &HookPayload,
+    cancel_rx: &mut Option<tokio::sync::watch::Receiver<bool>>,
+    tool_timeout: Option<std::time::Duration>,
+    tool_name: &str,
+) -> Result<(), ToolCancellationError> {
+    tokio::select! {
+        biased;
+        _ = wait_for_cancel_event(cancel_rx) => {
+            Err(ToolCancellationError)
+        }
+        _ = async {
+            if let Some(timeout) = tool_timeout {
+                if tokio::time::timeout(
+                    timeout,
+                    hooks.emit_best_effort(&HookEvent::AfterActionInvoke, payload),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::warn!(
+                        target: "actions",
+                        "[Hook] AfterActionInvoke hook execution timed out after {}s for tool '{}'",
+                        timeout.as_secs(),
+                        tool_name
+                    );
+                }
+            } else {
+                hooks.emit_best_effort(&HookEvent::AfterActionInvoke, payload).await;
+            }
+        } => Ok(()),
+    }
+}
+
+pub async fn execute_tool_calls_with_cancellation(
     app: &tauri::AppHandle,
     registry_state: &Arc<RwLock<ActionRegistry>>,
     tool_settings_state: &Arc<RwLock<ToolSettings>>,
     character_id: &str,
     tool_calls: &[ToolInvocation],
-) -> Vec<ToolExecutionOutcome> {
+    mut cancel_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    tool_timeout: Option<std::time::Duration>,
+) -> Result<Vec<ToolExecutionOutcome>, ToolCancellationError> {
     let mut outcomes = Vec::with_capacity(tool_calls.len());
     let hook_runtime = app.try_state::<HookRuntime>();
 
     for tool_call in tool_calls {
+        if let Some(rx) = cancel_rx.as_ref() {
+            if *rx.borrow() {
+                return Err(ToolCancellationError);
+            }
+        }
+
         let gate = if let Some(hooks) = hook_runtime.as_ref() {
-            hooks
-                .emit_action_gate(
-                    &HookEvent::BeforeActionInvoke,
-                    &build_action_hook_payload(
-                        None,
-                        character_id,
-                        Some("chat".to_string()),
-                        tool_call,
-                        None,
-                        None,
-                        None,
-                    ),
-                )
-                .await
+            tokio::select! {
+                biased;
+                _ = wait_for_cancel_event(&mut cancel_rx) => {
+                    return Err(ToolCancellationError);
+                }
+                res = async {
+                    if let Some(timeout) = tool_timeout {
+                        tokio::time::timeout(
+                            timeout,
+                            hooks.emit_action_gate(
+                                &HookEvent::BeforeActionInvoke,
+                                &build_action_hook_payload(
+                                    None,
+                                    character_id,
+                                    Some("chat".to_string()),
+                                    tool_call,
+                                    None,
+                                    None,
+                                    None,
+                                ),
+                            ),
+                        )
+                        .await
+                        .map_err(|_| "Hook execution timed out".to_string())
+                    } else {
+                        Ok(hooks
+                            .emit_action_gate(
+                                &HookEvent::BeforeActionInvoke,
+                                &build_action_hook_payload(
+                                    None,
+                                    character_id,
+                                    Some("chat".to_string()),
+                                    tool_call,
+                                    None,
+                                    None,
+                                    None,
+                                ),
+                            )
+                            .await)
+                    }
+                } => {
+                    match res {
+                        Ok(outcome) => outcome,
+                        Err(err) => HookOutcome::Deny {
+                            reason: err,
+                        },
+                    }
+                }
+            }
         } else {
             HookOutcome::Continue
         };
@@ -1014,16 +1364,39 @@ pub async fn execute_tool_calls(
                                         tool_call,
                                         action,
                                     );
-                                    if let Some(hooks) = hook_runtime.as_ref() {
-                                        if let Err(error) = hooks
-                                            .emit_before_action_args_modify(
-                                                &mut args_payload,
-                                                HookModifyPolicy::Strict,
-                                            )
-                                            .await
-                                        {
-                                            (Some(permission_decision), Err(error))
-                                        } else {
+                                    let modify_outcome = if let Some(hooks) = hook_runtime.as_ref() {
+                                        tokio::select! {
+                                            biased;
+                                            _ = wait_for_cancel_event(&mut cancel_rx) => {
+                                                return Err(ToolCancellationError);
+                                            }
+                                            res = async {
+                                                if let Some(timeout) = tool_timeout {
+                                                    tokio::time::timeout(
+                                                        timeout,
+                                                        hooks.emit_before_action_args_modify(
+                                                            &mut args_payload,
+                                                            HookModifyPolicy::Strict,
+                                                        ),
+                                                    )
+                                                    .await
+                                                    .map_err(|_| "Hook modify execution timed out".to_string())
+                                                } else {
+                                                    Ok(hooks
+                                                        .emit_before_action_args_modify(
+                                                            &mut args_payload,
+                                                            HookModifyPolicy::Strict,
+                                                        )
+                                                        .await)
+                                                }
+                                            } => res,
+                                        }
+                                    } else {
+                                        Ok(Ok(()))
+                                    };
+
+                                    match modify_outcome {
+                                        Ok(Ok(())) => {
                                             let effective_args =
                                                 apply_before_action_args_payload(args_payload);
                                             let ctx = ActionContext {
@@ -1032,30 +1405,35 @@ pub async fn execute_tool_calls(
                                                 conversation_id: None,
                                                 source: Some("chat".to_string()),
                                             };
-                                            (
-                                                Some(permission_decision),
-                                                handler
-                                                    .execute(effective_args, ctx)
-                                                    .await
-                                                    .map_err(|e| e.0),
-                                            )
+                                            let exec_res = tokio::select! {
+                                                biased;
+                                                _ = wait_for_cancel_event(&mut cancel_rx) => {
+                                                    return Err(ToolCancellationError);
+                                                }
+                                                res = async {
+                                                    if let Some(timeout) = tool_timeout {
+                                                        tokio::time::timeout(timeout, handler.execute(effective_args, ctx))
+                                                            .await
+                                                            .map_err(|_| {
+                                                                format!(
+                                                                    "Tool '{}' execution timed out after {}s",
+                                                                    tool_call.name,
+                                                                    timeout.as_secs()
+                                                                )
+                                                            })
+                                                    } else {
+                                                        Ok(handler.execute(effective_args, ctx).await)
+                                                    }
+                                                } => res,
+                                            };
+                                            match exec_res {
+                                                Ok(Ok(res)) => (Some(permission_decision), Ok(res)),
+                                                Ok(Err(err)) => (Some(permission_decision), Err(err.0)),
+                                                Err(timeout_err) => (Some(permission_decision), Err(timeout_err)),
+                                            }
                                         }
-                                    } else {
-                                        let effective_args =
-                                            apply_before_action_args_payload(args_payload);
-                                        let ctx = ActionContext {
-                                            app: app.clone(),
-                                            character_id: character_id.to_string(),
-                                            conversation_id: None,
-                                            source: Some("chat".to_string()),
-                                        };
-                                        (
-                                            Some(permission_decision),
-                                            handler
-                                                .execute(effective_args, ctx)
-                                                .await
-                                                .map_err(|e| e.0),
-                                        )
+                                        Ok(Err(error)) => (Some(permission_decision), Err(error)),
+                                        Err(timeout_err) => (Some(permission_decision), Err(timeout_err)),
                                     }
                                 }
                                 PermissionDecision::DenyPolicy { reason }
@@ -1073,25 +1451,34 @@ pub async fn execute_tool_calls(
             }
         };
 
+        if let Some(rx) = cancel_rx.as_ref() {
+            if *rx.borrow() {
+                return Err(ToolCancellationError);
+            }
+        }
+
         if let Some(hooks) = hook_runtime.as_ref() {
             let result_message = match &result {
                 Ok(value) => Some(value.message.clone()),
                 Err(error) => Some(error.clone()),
             };
-            hooks
-                .emit_best_effort(
-                    &HookEvent::AfterActionInvoke,
-                    &build_action_hook_payload(
-                        None,
-                        character_id,
-                        Some("chat".to_string()),
-                        tool_call,
-                        action.as_ref(),
-                        Some(result.is_ok()),
-                        result_message,
-                    ),
-                )
-                .await;
+            let payload = build_action_hook_payload(
+                None,
+                character_id,
+                Some("chat".to_string()),
+                tool_call,
+                action.as_ref(),
+                Some(result.is_ok()),
+                result_message,
+            );
+            emit_after_action_invoke_with_protection(
+                hooks,
+                &payload,
+                &mut cancel_rx,
+                tool_timeout,
+                &tool_call.name,
+            )
+            .await?;
         }
 
         outcomes.push(ToolExecutionOutcome {
@@ -1101,8 +1488,27 @@ pub async fn execute_tool_calls(
             needs_feedback,
             permission_decision,
         });
-        continue;
     }
 
-    outcomes
+    Ok(outcomes)
+}
+
+pub async fn execute_tool_calls(
+    app: &tauri::AppHandle,
+    registry_state: &Arc<RwLock<ActionRegistry>>,
+    tool_settings_state: &Arc<RwLock<ToolSettings>>,
+    character_id: &str,
+    tool_calls: &[ToolInvocation],
+) -> Vec<ToolExecutionOutcome> {
+    execute_tool_calls_with_cancellation(
+        app,
+        registry_state,
+        tool_settings_state,
+        character_id,
+        tool_calls,
+        None,
+        None,
+    )
+    .await
+    .unwrap_or_default()
 }

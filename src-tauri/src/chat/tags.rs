@@ -146,7 +146,7 @@ pub(crate) fn extract_translate_tags(text: &str) -> (String, Option<String>) {
 }
 
 /// Parsed tool call from `[TOOL_CALL:name|key=val|key=val]`
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub(crate) struct ToolCall {
     pub(crate) tool_call_id: Option<String>,
     pub(crate) name: String,

@@ -183,6 +183,13 @@ body,
   background: transparent;
 }
 
+/* ── Global Scrollbar Stepper Reset ─────────────────────── */
+::-webkit-scrollbar-button {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
 /* ── Hidden Scrollbar ──────────────────────────────────── */
 .scrollbar-hide {
   scrollbar-width: none;

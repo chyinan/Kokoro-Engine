@@ -169,8 +169,8 @@ export async function setContextSettings(settings: ContextSettings): Promise<voi
     return invoke("set_context_settings", { settings });
 }
 
-export async function deleteLastMessages(count: number): Promise<void> {
-    return invoke("delete_last_messages", { count });
+export async function deleteLastMessages(count: number, expectedConversationId?: string | null): Promise<void> {
+    return invoke("delete_last_messages", { count, expectedConversationId: expectedConversationId ?? null });
 }
 
 // ── LLM Config Management ──────────────────────────
@@ -279,14 +279,35 @@ export interface ChatRequest {
     hidden?: boolean;
     /** Optional caller correlation echoed on turn lifecycle events. */
     client_request_id?: string;
+    /** If true, this turn is regenerating an assistant reply for the last user message. */
+    regenerate?: boolean;
+    /** Optional target conversation ID. If specified, backend binds strictly to this conversation. */
+    conversation_id?: string | null;
 }
 
-export async function streamChat(request: ChatRequest): Promise<void> {
-    return invoke("stream_chat", { request });
+export interface StreamChatResponse {
+    conversation_id: string;
+    user_message_id?: number | null;
+    assistant_message_id?: number | null;
+    client_request_id?: string | null;
+    status?: "completed" | "cancelled" | string | null;
+}
+
+export async function streamChat(request: ChatRequest): Promise<StreamChatResponse> {
+    return invoke<StreamChatResponse>("stream_chat", { request });
 }
 
 export async function cancelChatTurn(turnId: string, reason?: string): Promise<void> {
     return invoke("cancel_chat_turn", { turnId, reason: reason ?? null });
+}
+
+export async function isChatBusy(): Promise<boolean> {
+    return invoke<boolean>("is_chat_busy");
+}
+
+export function isChatTurnBusyError(error: unknown): boolean {
+    const msg = getKokoroErrorMessage(error);
+    return typeof msg === "string" && msg.includes("chat_turn_busy");
 }
 
 export async function onChatError(callback: (error: string) => void): Promise<UnlistenFn> {
@@ -428,9 +449,16 @@ export function parseLegacyChatError(payload: unknown): string {
     return stringifyUnknown(payload);
 }
 
+export interface ChatTurnAcknowledgedEvent {
+    turn_id?: string;
+    client_request_id?: string | null;
+}
+
 export interface ChatTurnStartEvent {
     turn_id: string;
     client_request_id?: string | null;
+    conversation_id?: string | null;
+    user_message_id?: number | null;
 }
 
 export interface ChatTurnDeltaEvent {
@@ -443,6 +471,8 @@ export interface ChatTurnFinishEvent {
     turn_id: string;
     status: "completed" | "error" | "cancelled";
     client_request_id?: string | null;
+    conversation_id?: string | null;
+    assistant_message_id?: number | null;
 }
 
 export interface ChatTurnTranslationEvent {
@@ -490,6 +520,10 @@ export interface ChatTurnToolEvent {
     deny_kind?: ToolTraceItem["denyKind"];
     approval_request_id?: string;
     approval_status?: ToolTraceItem["approvalStatus"];
+}
+
+export async function onChatTurnAcknowledged(callback: (event: ChatTurnAcknowledgedEvent) => void): Promise<UnlistenFn> {
+    return listen<ChatTurnAcknowledgedEvent>("chat-turn-acknowledged", (event) => callback(event.payload));
 }
 
 export async function onChatTurnStart(callback: (event: ChatTurnStartEvent) => void): Promise<UnlistenFn> {
@@ -1344,6 +1378,7 @@ export interface Conversation {
 }
 
 export interface ConversationMessage {
+    id?: number;
     role: string;
     content: string;
     metadata?: string;
@@ -1354,6 +1389,24 @@ export interface LoadedConversation {
     topic: string;
     pinned_state: string;
     messages: ConversationMessage[];
+}
+
+export interface EditConversationMessageRequest {
+    conversation_id?: string;
+    message_id?: number;
+    visible_index?: number;
+    new_content: string;
+}
+
+export interface EditConversationMessageResponse {
+    message_id: number;
+    updated_content: string;
+}
+
+export async function editConversationMessage(
+    request: EditConversationMessageRequest,
+): Promise<EditConversationMessageResponse> {
+    return invoke<EditConversationMessageResponse>("edit_conversation_message", { request });
 }
 
 export async function listConversations(characterId: string): Promise<Conversation[]> {
@@ -1379,7 +1432,19 @@ export async function updateConversationState(
 
 export function hasPinnedConversationState(pinnedState: string): boolean {
     const normalized = pinnedState.trim();
-    return normalized !== "" && normalized !== "{}";
+    if (!normalized || normalized === "{}") return false;
+    try {
+        const parsed = JSON.parse(normalized);
+        if (typeof parsed === "object" && parsed !== null) {
+            if ("pinned" in parsed) {
+                return Boolean(parsed.pinned);
+            }
+            return false;
+        }
+        return false;
+    } catch {
+        return false;
+    }
 }
 
 export function getConversationDisplayTitle(conversation: Conversation): string {

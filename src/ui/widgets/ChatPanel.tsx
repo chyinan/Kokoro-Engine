@@ -1,19 +1,21 @@
 // pattern: Imperative Shell
 
-import { useState, useRef, useEffect, useCallback, useDeferredValue, memo, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useDeferredValue, memo, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ImagePlus, X, Mic, MicOff, History, Maximize2, Minimize2 } from "lucide-react";
-import { streamChat, cancelChatTurn, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
-import type { CommittedCharacterRuntime, FailureEvent, ToolTraceItem } from "../../lib/kokoro-bridge";
+import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
+import { streamChat, cancelChatTurn, onChatTurnAcknowledged, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, editConversationMessage, listCharacters, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
+import type { CommittedCharacterRuntime, FailureEvent, ToolTraceItem, StreamChatResponse } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import { useVoiceInput, VoiceState, useTypingReveal, useWakeWord } from "../hooks";
 import { useTranslation } from "react-i18next";
+import { ImageLightbox } from "../components/ImageLightbox";
 import ConversationSidebar from "./ConversationSidebar";
 import { ChatMessage } from "./ChatMessage";
 import { createChatCharacterSynchronizer, type ChatCharacterSynchronizer } from "./chat-character-sync";
 import {
+    getCharacterHeaderDisplayName,
     getInitialCharacterConversationTarget,
     isFailureForActiveChat,
     shouldIgnoreLegacyChatError,
@@ -35,6 +37,36 @@ import {
     type ChatPanelMessage,
     type PendingTurnState,
 } from "./chat/turn-state";
+import {
+    validateTurnAcknowledged,
+    validateTurnStart,
+    validateTurnFinish,
+    validateStreamChatResponse,
+    alignTurnStartUserMessage,
+    reconcileTurnMessageIds,
+    shouldResyncConversation,
+    hasResidualActiveTurn,
+    mergeResyncedConversationMessages,
+    isChatSessionCurrent,
+    isAuthorizedExternalTurn,
+    DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS,
+    DEFAULT_BACKEND_PREPARATION_WATCHDOG_TIMEOUT_MS,
+} from "./chat/chat-turn-lifecycle";
+import { buildChatMessagesFromConversation } from "./chat-history";
+import {
+    computeTargetScrollTop,
+    isScrollAtBottom,
+    computeAnchoredScrollTop,
+    type ChatScrollSnapshot,
+} from "./chat/chat-scroll-state";
+import {
+    computeResizedInputHeight,
+    loadSavedChatInputHeight,
+    saveChatInputHeight,
+    toggleChatInputResetHeight,
+} from "./chat/chat-input-layout";
+import { combineDraftWithTranscription, saveCharacterDraft } from "./chat/chat-draft-layout";
+import { useCharacterChatDraft } from "./chat/use-character-draft";
 import { requestMemoryModelDialog } from "../../lib/memory-model-gate";
 import { getChatPanelInteractionProps } from "../layout/layout-interaction";
 import { audioPlayer } from "../../core/services";
@@ -186,6 +218,7 @@ interface MemoizedChatMessageProps {
     onContinueFrom: (index: number) => Promise<void>;
     onApproveTool: (index: number, tool: ToolTraceItem) => Promise<void>;
     onRejectTool: (index: number, tool: ToolTraceItem) => Promise<void>;
+    onPreviewImage?: (url: string) => void;
 }
 
 function createToolActionHandler<TArgs extends Array<unknown>>(
@@ -198,6 +231,7 @@ function createToolActionHandler<TArgs extends Array<unknown>>(
 const MemoizedChatMessage = memo(function MemoizedChatMessage({
     message, globalIndex, isStreaming, isTranslationExpanded,
     onToggleTranslation, onEdit, onRegenerate, onContinueFrom, onApproveTool, onRejectTool,
+    onPreviewImage,
 }: MemoizedChatMessageProps) {
     return (
         <ChatMessage
@@ -211,6 +245,7 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
             onContinueFrom={() => onContinueFrom(globalIndex)}
             onApproveTool={createToolActionHandler(globalIndex, onApproveTool)}
             onRejectTool={createToolActionHandler(globalIndex, onRejectTool)}
+            onPreviewImage={onPreviewImage}
         />
     );
 });
@@ -238,27 +273,201 @@ export default function ChatPanel({
         getActiveCharacterIdForConversationRestore,
     );
     const activeCharacterIdRef = useRef(activeCharacterId);
+    const [characterName, setCharacterName] = useState<string>(() => {
+        const committed = readJsonSetting<CommittedCharacterRuntime | null>(
+            APP_SETTING_KEYS.characterRuntimeCache,
+            null,
+        );
+        return getCharacterHeaderDisplayName(committed?.runtime?.character_name);
+    });
+
+    useEffect(() => {
+        let active = true;
+        if (!characterName || activeCharacterId) {
+            void listCharacters().then(chars => {
+                if (!active) return;
+                const match = chars.find(c => c.id === activeCharacterId);
+                if (match?.name) {
+                    setCharacterName(getCharacterHeaderDisplayName(match.name));
+                }
+            }).catch(() => {});
+        }
+        return () => { active = false; };
+    }, [activeCharacterId, characterName]);
+
     const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
     const activeConversationIdRef = useRef(activeConversationId);
     activeConversationIdRef.current = activeConversationId;
+    const conversationGenerationRef = useRef(1);
+    const pendingTurnRequestRef = useRef<{
+        clientRequestId?: string | null;
+        generation: number;
+        conversationId: string | null;
+        characterId: string;
+    } | null>(null);
+    const latestClientRequestIdRef = useRef<string | null>(null);
     const deferredMessages = useDeferredValue(messages);
     const [visibleCount, setVisibleCount] = useState(20);
-    const [input, setInput] = useState("");
-    const [expandedInput, setExpandedInput] = useState(false);
-    const compactInputRef = useRef<HTMLInputElement>(null);
-    const expandedTextareaRef = useRef<HTMLTextAreaElement>(null);
+    const [showScrollBottom, setShowScrollBottom] = useState(false);
+    const [hasNewMessagesBelow, setHasNewMessagesBelow] = useState(false);
+    const isPrependingRef = useRef(false);
+    const prevScrollHeightRef = useRef(0);
+    const prevScrollTopRef = useRef(0);
+    const { input, setInput, pendingImages, setPendingImages, clearDraft, clearDraftImages, getImageDraftContext, appendPendingImage } = useCharacterChatDraft(activeCharacterId);
+    const inputRef = useRef(input);
+    inputRef.current = input;
+    const sttBaseDraftRef = useRef<string | null>(null);
+    const sttBaseCharacterIdRef = useRef<string | null>(null);
+    const sttBaseConversationIdRef = useRef<string | null>(null);
+    const sttBaseGenerationRef = useRef<number | null>(null);
+    const prevVoiceStateRef = useRef<VoiceState>(VoiceState.Idle);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const [inputHeight, setInputHeight] = useState<number>(loadSavedChatInputHeight);
+    const inputHeightRef = useRef(inputHeight);
+    useEffect(() => {
+        inputHeightRef.current = inputHeight;
+    }, [inputHeight]);
+    const isDraggingInputResizeRef = useRef(false);
+    const inputResizeStartYRef = useRef(0);
+    const inputResizeStartHeightRef = useRef(0);
+
+    const handleInputResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+        e.preventDefault();
+        isDraggingInputResizeRef.current = true;
+        inputResizeStartYRef.current = e.clientY;
+        inputResizeStartHeightRef.current = inputHeightRef.current;
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    }, []);
+
+    const handleInputResizeMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+        if (!isDraggingInputResizeRef.current) return;
+        const nextHeight = computeResizedInputHeight(
+            inputResizeStartHeightRef.current,
+            inputResizeStartYRef.current,
+            e.clientY,
+        );
+        setInputHeight(nextHeight);
+    }, []);
+
+    const handleInputResizeEnd = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+        if (!isDraggingInputResizeRef.current) return;
+        isDraggingInputResizeRef.current = false;
+        try {
+            (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+        } catch {
+            // pointer capture already released
+        }
+        saveChatInputHeight(inputHeightRef.current);
+    }, []);
+
+    const handleInputResizeReset = useCallback(() => {
+        setInputHeight(prev => {
+            const next = toggleChatInputResetHeight(prev);
+            saveChatInputHeight(next);
+            return next;
+        });
+    }, []);
+
+    const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+    const [isDraggingOver, setIsDraggingOver] = useState(false);
+    const dragCounterRef = useRef(0);
     const [isStreaming, setIsStreaming] = useState(false);
     const isStreamingRef = useRef(false);
     const [isBusy, setIsBusy] = useState(false);
     const isBusyRef = useRef(false);
+    const [isSwitchingConversation, setIsSwitchingConversation] = useState(false);
+    const isSwitchingConversationRef = useRef(false);
     const ttsSpeakingRef = useRef(false);
     const [isStopping, setIsStopping] = useState(false);
     const cancelRequestedRef = useRef(false);
+    const cancellationWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    interface PendingExternalWatchdogEntry {
+        timer: ReturnType<typeof setTimeout>;
+        onExpired: (reason?: string) => void | Promise<void>;
+    }
+    const pendingExternalWatchdogTimersRef = useRef<Map<string, PendingExternalWatchdogEntry>>(new Map());
+    const cancelledExternalTurnIdsRef = useRef<Map<string, number>>(new Map());
     const messagesRef = useRef<ChatMessage[]>([]);
     const [isThinking, setIsThinking] = useState(false);
+    const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+    useEffect(() => {
+        if (!showClearConfirm) return;
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === "Escape") {
+                setShowClearConfirm(false);
+            }
+        };
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [showClearConfirm]);
 
     // Per-message translation expand state (set of message indices)
     const [expandedTranslations, setExpandedTranslations] = useState<Set<number>>(new Set());
+
+    const clearPendingExternalWatchdog = useCallback((clientRequestId: string) => {
+        const entry = pendingExternalWatchdogTimersRef.current.get(clientRequestId);
+        if (entry !== undefined) {
+            clearTimeout(entry.timer);
+            pendingExternalWatchdogTimersRef.current.delete(clientRequestId);
+        }
+    }, []);
+
+    const clearAllPendingExternalWatchdogs = useCallback(() => {
+        for (const entry of pendingExternalWatchdogTimersRef.current.values()) {
+            clearTimeout(entry.timer);
+        }
+        pendingExternalWatchdogTimersRef.current.clear();
+    }, []);
+
+    const startPendingExternalWatchdog = useCallback((
+        clientRequestId: string,
+        onExpired: (reason?: string) => void | Promise<void>,
+        timeoutMs: number = DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS,
+    ) => {
+        clearPendingExternalWatchdog(clientRequestId);
+        const timer = setTimeout(() => {
+            pendingExternalWatchdogTimersRef.current.delete(clientRequestId);
+            void onExpired();
+        }, timeoutMs);
+        pendingExternalWatchdogTimersRef.current.set(clientRequestId, { timer, onExpired });
+    }, [clearPendingExternalWatchdog]);
+
+    const transitionPendingExternalWatchdogToPreparation = useCallback((
+        clientRequestId: string,
+        timeoutMs: number = DEFAULT_BACKEND_PREPARATION_WATCHDOG_TIMEOUT_MS,
+    ) => {
+        const entry = pendingExternalWatchdogTimersRef.current.get(clientRequestId);
+        if (!entry) return;
+        clearTimeout(entry.timer);
+        const timer = setTimeout(() => {
+            pendingExternalWatchdogTimersRef.current.delete(clientRequestId);
+            void entry.onExpired("external_turn_preparation_watchdog_timeout");
+        }, timeoutMs);
+        pendingExternalWatchdogTimersRef.current.set(clientRequestId, {
+            timer,
+            onExpired: entry.onExpired,
+        });
+    }, []);
+
+    const registerCancelledExternalId = useCallback((id: string) => {
+        const now = Date.now();
+        for (const [k, exp] of cancelledExternalTurnIdsRef.current.entries()) {
+            if (exp <= now) cancelledExternalTurnIdsRef.current.delete(k);
+        }
+        cancelledExternalTurnIdsRef.current.set(id, now + 5000);
+    }, []);
+
+    const isCancelledExternalId = useCallback((id?: string | null) => {
+        if (!id) return false;
+        const exp = cancelledExternalTurnIdsRef.current.get(id);
+        if (!exp) return false;
+        if (exp <= Date.now()) {
+            cancelledExternalTurnIdsRef.current.delete(id);
+            return false;
+        }
+        return true;
+    }, []);
 
     const startStreaming = useCallback(() => {
         cancelRequestedRef.current = false;
@@ -274,18 +483,105 @@ export default function ChatPanel({
         setIsStreaming(false);
     }, []);
     const endTurnActivity = useCallback(() => {
+        if (cancellationWatchdogTimerRef.current !== null) {
+            clearTimeout(cancellationWatchdogTimerRef.current);
+            cancellationWatchdogTimerRef.current = null;
+        }
         cancelRequestedRef.current = false;
         setIsStopping(false);
         isStreamingRef.current = false;
         setIsStreaming(false);
-        isBusyRef.current = false;
-        setIsBusy(false);
+        if (!isSwitchingConversationRef.current) {
+            isBusyRef.current = false;
+            setIsBusy(false);
+        }
     }, []);
 
     // Raw (unfiltered) full response text — accumulated from all deltas
     const rawResponseRef = useRef("");
     const currentTurnRef = useRef<PendingTurnState | null>(null);
     const pendingVisionContextRef = useRef<ChatMessage | null>(null);
+
+    // reconcile 无法可靠对齐权威消息 ID 时，从后端重新加载会话消息。
+    // 仅允许覆盖"空闲或仍属本次请求残留"的状态，避免抹掉并发新 turn 的乐观消息。
+    const resyncConversationMessages = useCallback(async (request: {
+        conversationId: string;
+        startGeneration: number;
+        clientRequestId: string;
+    }) => {
+        const { conversationId, startGeneration, clientRequestId } = request;
+
+        // 入口归属判定：当前活动若不属于本次请求，立即放弃（新 turn 会自行对齐）
+        if (!shouldResyncConversation(
+            clientRequestId,
+            currentTurnRef.current?.clientRequestId,
+            isBusyRef.current,
+            pendingTurnRequestRef.current?.clientRequestId,
+        )) {
+            console.warn("[ChatPanel] Skipping conversation resync: another turn is active");
+            return;
+        }
+
+        let loaded: Awaited<ReturnType<typeof loadConversation>>;
+        try {
+            loaded = await loadConversation(conversationId);
+        } catch (err) {
+            // 补救性重同步失败不影响主流程，绝不向上抛，
+            // 避免误入 handleSend 的 catch 产生错误气泡并污染 lastFailedRequestRef
+            console.warn("[ChatPanel] Failed to load conversation for resync:", err);
+            if (shouldResyncConversation(
+                clientRequestId,
+                currentTurnRef.current?.clientRequestId,
+                isBusyRef.current,
+                pendingTurnRequestRef.current?.clientRequestId,
+            )) {
+                if (currentTurnRef.current || isBusyRef.current) {
+                    currentTurnRef.current = null;
+                    pendingTurnRequestRef.current = null;
+                    setIsThinking(false);
+                    endTurnActivity();
+                }
+            }
+            return;
+        }
+
+        // 加载期间会话可能切换：双守卫（代次 + 会话 ID）
+        if (!isChatSessionCurrent(
+            startGeneration,
+            conversationId,
+            conversationGenerationRef.current,
+            activeConversationIdRef.current,
+        )) {
+            return;
+        }
+
+        // 加载期间不得出现新活动：活动仍归属本次请求才算安全，否则放弃覆盖
+        if (!shouldResyncConversation(
+            clientRequestId,
+            currentTurnRef.current?.clientRequestId,
+            isBusyRef.current,
+            pendingTurnRequestRef.current?.clientRequestId,
+        )) {
+            return;
+        }
+
+        // 本次请求的残留活动（turn-start/finish 事件丢失未收尾）：清理，避免 UI 卡在忙碌态
+        if (currentTurnRef.current || isBusyRef.current) {
+            currentTurnRef.current = null;
+            pendingTurnRequestRef.current = null;
+            setIsThinking(false);
+            endTurnActivity();
+        }
+
+        // merge 式应用：保留尾部未绑定消息（Telegram/错误气泡），避免整体替换丢消息；
+        // onEdit 期间的乐观文本可能被瞬时回滚，随后编辑响应到达会按 id 回填自愈
+        setMessages(prev => mergeResyncedConversationMessages(
+            prev,
+            buildChatMessagesFromConversation(loaded.messages),
+        ));
+        // 替换可能改变消息条数与索引，重置翻译展开状态防止错位
+        setExpandedTranslations(new Set());
+    }, [endTurnActivity]);
 
     // Typing reveal: per-character animation
     const { pushDelta, flush: flushReveal, reset: resetReveal } = useTypingReveal({
@@ -308,11 +604,14 @@ export default function ChatPanel({
     const messagesContainerRef = useRef<HTMLDivElement>(null);
     const userScrolledRef = useRef(false);
     const isProgrammaticScrollRef = useRef(false);
+    const savedScrollSnapshotRef = useRef<ChatScrollSnapshot | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const resizeCleanupRef = useRef<(() => void) | null>(null);
     const latestResizeWidthRef = useRef(width);
     // Store last failed request for retry
     const lastFailedRequestRef = useRef<{ message: string; images?: string[]; allowImageGen?: boolean } | null>(null);
+    // Guard against sending before asynchronous event listeners are fully registered
+    const listenersReadyPromiseRef = useRef<Promise<void> | null>(null);
 
     const ensureMemoryModelReady = useCallback((options?: { silent?: boolean }): boolean => {
         // Semantic memory is an optional enhancement. Never hold a base LLM turn
@@ -343,7 +642,7 @@ export default function ChatPanel({
             {},
         ).camera_enabled === true
     );
-    const [pendingImages, setPendingImages] = useState<string[]>([]);
+    // pendingImages is managed by useCharacterChatDraft with character-scoped persistence
     const [isUploading, setIsUploading] = useState(false);
 
     // 对话历史侧边栏
@@ -355,7 +654,9 @@ export default function ChatPanel({
         } catch (error) {
             if (!isTurnCancelledError(error)) {
                 endTurnActivity();
+                cancelRequestedRef.current = true;
                 currentTurnRef.current = null;
+                pendingTurnRequestRef.current = null;
                 setIsThinking(false);
                 setError(getAsyncErrorMessage(error));
             }
@@ -368,12 +669,19 @@ export default function ChatPanel({
             listConversations,
             loadConversation,
             clearVisibleConversation: (characterId) => {
+                conversationGenerationRef.current += 1;
                 const turnId = currentTurnRef.current?.turnId;
+                const pendingClientRequestId = pendingTurnRequestRef.current?.clientRequestId;
+                pendingTurnRequestRef.current = null;
+                latestClientRequestIdRef.current = null;
                 endTurnActivity();
                 cancelRequestedRef.current = true;
                 if (turnId) {
                     void cancelChatTurn(turnId, "character_switched")
                         .catch(error => console.error("[ChatPanel] Failed to cancel prior character turn:", error));
+                } else if (pendingClientRequestId) {
+                    void cancelChatTurn(pendingClientRequestId, "character_switched")
+                        .catch(error => console.error("[ChatPanel] Failed to cancel prior pending request:", error));
                 }
                 currentTurnRef.current = null;
                 pendingVisionContextRef.current = null;
@@ -388,6 +696,22 @@ export default function ChatPanel({
                 setExpandedTranslations(new Set());
             },
             applyVisibleConversation: (conversation) => {
+                conversationGenerationRef.current += 1;
+                const turnId = currentTurnRef.current?.turnId;
+                const pendingClientRequestId = pendingTurnRequestRef.current?.clientRequestId;
+                pendingTurnRequestRef.current = null;
+                latestClientRequestIdRef.current = null;
+                endTurnActivity();
+                cancelRequestedRef.current = true;
+                if (turnId) {
+                    void cancelChatTurn(turnId, "conversation_switched")
+                        .catch(error => console.error("[ChatPanel] Failed to cancel prior turn on conversation switch:", error));
+                } else if (pendingClientRequestId) {
+                    void cancelChatTurn(pendingClientRequestId, "conversation_switched")
+                        .catch(error => console.error("[ChatPanel] Failed to cancel prior pending request on conversation switch:", error));
+                }
+                currentTurnRef.current = null;
+                cancelRequestedRef.current = false;
                 setActiveCharacterId(conversation.characterId);
                 activeCharacterIdRef.current = conversation.characterId;
                 setActiveConversationId(conversation.conversationId);
@@ -407,11 +731,31 @@ export default function ChatPanel({
         setIsStopping(true);
         setIsThinking(false);
 
+        // 启动安全看门狗：如果 5 秒内后端由于异常未能正常结束 turn，强制复位 UI 状态
+        if (cancellationWatchdogTimerRef.current !== null) {
+            clearTimeout(cancellationWatchdogTimerRef.current);
+        }
+        cancellationWatchdogTimerRef.current = setTimeout(() => {
+            console.warn("[ChatPanel] Cancellation watchdog triggered - forcing UI reset");
+            clearAllPendingExternalWatchdogs();
+            endTurnActivity();
+            cancelRequestedRef.current = true;
+            currentTurnRef.current = null;
+            pendingTurnRequestRef.current = null;
+            setIsThinking(false);
+        }, 5000);
+
         const activeTurnId = currentTurnRef.current?.turnId;
+        const pendingClientRequestId = pendingTurnRequestRef.current?.clientRequestId;
         if (activeTurnId) {
             void requestTurnCancellation(activeTurnId);
         }
-    }, [isStopping, requestTurnCancellation]);
+        if (pendingClientRequestId && pendingClientRequestId !== activeTurnId) {
+            clearPendingExternalWatchdog(pendingClientRequestId);
+            pendingTurnRequestRef.current = null;
+            void requestTurnCancellation(pendingClientRequestId);
+        }
+    }, [isStopping, requestTurnCancellation, endTurnActivity, clearAllPendingExternalWatchdogs, clearPendingExternalWatchdog]);
 
     // 自动恢复最近对话
     useEffect(() => {
@@ -434,6 +778,10 @@ export default function ChatPanel({
         const handleRuntimeChanged = (event: Event): void => {
             const detail = (event as CustomEvent<CommittedCharacterRuntime>).detail;
             const eventCharacterId = detail?.runtime?.character_id;
+            const eventCharacterName = detail?.runtime?.character_name;
+            if (eventCharacterName) {
+                setCharacterName(getCharacterHeaderDisplayName(eventCharacterName));
+            }
             const targetConversationId = detail?.target_conversation_id ?? null;
             if (!shouldSynchronizeOnRuntimeChanged(
                 activeCharacterIdRef.current,
@@ -455,15 +803,108 @@ export default function ChatPanel({
     const handleConversationSelection = useCallback(async (
         preferredConversationId: string | null,
     ): Promise<void> => {
-        await conversationSyncRef.current?.synchronize({
-            characterId: activeCharacterId,
-            preferredConversationId,
-        });
-    }, [activeCharacterId]);
+        if (isSwitchingConversationRef.current) return;
+        isSwitchingConversationRef.current = true;
+        setIsSwitchingConversation(true);
+        setIsBusy(true);
+        isBusyRef.current = true;
+        try {
+            const activeTurnId = currentTurnRef.current?.turnId;
+            const pendingClientRequestId = pendingTurnRequestRef.current?.clientRequestId;
+            if (activeTurnId) {
+                cancelRequestedRef.current = true;
+                setIsStopping(true);
+                try {
+                    await cancelChatTurn(activeTurnId, "conversation_switched");
+                } catch (err) {
+                    console.error("[ChatPanel] Failed to cancel prior turn before switching conversation:", err);
+                }
+            } else if (pendingClientRequestId) {
+                cancelRequestedRef.current = true;
+                setIsStopping(true);
+                clearPendingExternalWatchdog(pendingClientRequestId);
+                pendingTurnRequestRef.current = null;
+                try {
+                    await cancelChatTurn(pendingClientRequestId, "conversation_switched");
+                } catch (err) {
+                    console.error("[ChatPanel] Failed to cancel prior pending request before switching conversation:", err);
+                }
+            }
+            await conversationSyncRef.current?.synchronize({
+                characterId: activeCharacterId,
+                preferredConversationId,
+            });
+        } finally {
+            cancelRequestedRef.current = false;
+            setIsStopping(false);
+            isSwitchingConversationRef.current = false;
+            setIsSwitchingConversation(false);
+            isBusyRef.current = false;
+            setIsBusy(false);
+        }
+    }, [activeCharacterId, clearPendingExternalWatchdog]);
 
-    const handleStartEmptyConversation = useCallback((): void => {
-        conversationSyncRef.current?.startEmptyConversation(activeCharacterId);
-    }, [activeCharacterId]);
+    const handleStartEmptyConversation = useCallback(async (): Promise<boolean> => {
+        if (isSwitchingConversationRef.current) {
+            return false;
+        }
+        isSwitchingConversationRef.current = true;
+        setIsSwitchingConversation(true);
+        setIsBusy(true);
+        isBusyRef.current = true;
+
+        const watchdogTimer = setTimeout(() => {
+            if (isSwitchingConversationRef.current) {
+                console.warn("[ChatPanel] Empty conversation creation is taking longer than expected, busy lock remains held");
+                setError(t("chat.errors.new_conversation_slow", "新建会话响应较慢，请稍候..."));
+            }
+        }, 5000);
+
+        try {
+            const activeTurnId = currentTurnRef.current?.turnId;
+            const pendingClientRequestId = pendingTurnRequestRef.current?.clientRequestId;
+            if (activeTurnId) {
+                cancelRequestedRef.current = true;
+                setIsStopping(true);
+                try {
+                    await cancelChatTurn(activeTurnId, "new_conversation_started");
+                } catch (err) {
+                    console.error("[ChatPanel] Failed to cancel prior turn before new conversation:", err);
+                }
+            } else if (pendingClientRequestId) {
+                cancelRequestedRef.current = true;
+                setIsStopping(true);
+                clearPendingExternalWatchdog(pendingClientRequestId);
+                pendingTurnRequestRef.current = null;
+                try {
+                    await cancelChatTurn(pendingClientRequestId, "new_conversation_started");
+                } catch (err) {
+                    console.error("[ChatPanel] Failed to cancel prior pending request before new conversation:", err);
+                }
+            }
+            clearAllPendingExternalWatchdogs();
+
+            // 先执行后端清空与重置，确保后端 current_conversation_id 与历史已置空
+            await clearHistory();
+
+            // 后端成功后才提交前端可视会话清空
+            conversationSyncRef.current?.startEmptyConversation(activeCharacterId);
+            setError(null);
+            return true;
+        } catch (err) {
+            console.error("[ChatPanel] Failed to clear backend history for empty conversation:", err);
+            setError(t("chat.errors.new_conversation_failed", "新建会话失败，已保留当前会话"));
+            return false;
+        } finally {
+            clearTimeout(watchdogTimer);
+            cancelRequestedRef.current = false;
+            setIsStopping(false);
+            isSwitchingConversationRef.current = false;
+            setIsSwitchingConversation(false);
+            isBusyRef.current = false;
+            setIsBusy(false);
+        }
+    }, [activeCharacterId, t]);
 
     // STT (Speech-to-Text) — Advanced VAD Mode
     const [sttEnabled, setSttEnabled] = useState(() =>
@@ -494,48 +935,398 @@ export default function ChatPanel({
         };
     }, []);
 
+    // 弥补 chat-turn-finish 事件丢失/迟到/监听器未就绪导致的状态卡死，
+    // 仅在当前活动仍确属本次 clientRequestId 时执行兜底收尾
+    const finalizeActiveTurnIfCurrent = useCallback((clientRequestId: string, res?: StreamChatResponse | null) => {
+        clearPendingExternalWatchdog(clientRequestId);
+
+        if (!hasResidualActiveTurn({
+            clientRequestId,
+            isBusy: isBusyRef.current,
+            activeTurnClientRequestId: currentTurnRef.current?.clientRequestId,
+            pendingClientRequestId: pendingTurnRequestRef.current?.clientRequestId,
+        })) {
+            return;
+        }
+
+        const isExplicitlyCancelled = res?.status === "cancelled";
+        const isCancelRequested = cancelRequestedRef.current;
+        const hasCommittedAssistantMessage = Boolean(res?.assistant_message_id && res?.status === "completed");
+        const shouldTreatAsCancelled = isExplicitlyCancelled || (isCancelRequested && !hasCommittedAssistantMessage);
+
+        const turn = currentTurnRef.current;
+        const isMatchingTurn = Boolean(
+            turn && (
+                turn.clientRequestId === clientRequestId ||
+                (!turn.clientRequestId && !clientRequestId)
+            )
+        );
+
+        if (shouldTreatAsCancelled) {
+            resetReveal();
+            setIsThinking(false);
+
+            if (isMatchingTurn && turn) {
+                setMessages(prev => removeTurnMessages(prev, turn));
+            }
+
+            if (
+                currentTurnRef.current?.clientRequestId === clientRequestId ||
+                (!currentTurnRef.current?.clientRequestId && !clientRequestId)
+            ) {
+                currentTurnRef.current = null;
+            }
+            if (pendingTurnRequestRef.current?.clientRequestId === clientRequestId) {
+                pendingTurnRequestRef.current = null;
+            }
+
+            endTurnActivity();
+            return;
+        }
+
+        flushReveal();
+        setIsThinking(false);
+
+        if (isMatchingTurn && turn) {
+            const fullText = turn.rawText;
+            rawResponseRef.current = fullText;
+            const cleanText = stripStoredMarkup(fullText);
+
+            setMessages(prev => {
+                const hasContent = hasRenderableTurnContent(turn, cleanText);
+                let bubbleIndex = (turn.messageIndex !== null && turn.messageIndex !== undefined && hasActiveKokoroBubble(prev, turn.messageIndex))
+                    ? turn.messageIndex
+                    : -1;
+                if (bubbleIndex === -1) {
+                    for (let i = prev.length - 1; i >= 0; i--) {
+                        if (prev[i].role === "kokoro" && prev[i].clientRequestId === clientRequestId) {
+                            bubbleIndex = i;
+                            break;
+                        }
+                    }
+                }
+
+                if (bubbleIndex !== -1) {
+                    if (!hasContent) {
+                        return removeTurnMessages(prev, turn);
+                    }
+                    const next = [...prev];
+                    next[bubbleIndex] = {
+                        ...next[bubbleIndex],
+                        id: res?.assistant_message_id ?? next[bubbleIndex].id,
+                        clientRequestId: next[bubbleIndex].clientRequestId ?? turn.clientRequestId ?? undefined,
+                        text: cleanText,
+                        translation: turn.translation ?? next[bubbleIndex].translation,
+                        translationPending: false,
+                        tools: turn.tools.length > 0 ? [...turn.tools] : next[bubbleIndex].tools,
+                    };
+                    return next;
+                }
+
+                if (hasContent) {
+                    const next = [...prev];
+                    if (turn.pendingContext && !next.some(m => m.role === "context" && m.turnId === turn.turnId)) {
+                        next.push({
+                            ...turn.pendingContext,
+                            turnId: turn.turnId,
+                        });
+                    }
+                    next.push({
+                        id: res?.assistant_message_id ?? undefined,
+                        role: "kokoro",
+                        text: cleanText,
+                        turnId: turn.turnId,
+                        clientRequestId: turn.clientRequestId ?? undefined,
+                        translation: turn.translation,
+                        translationPending: false,
+                        tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
+                    });
+                    return next;
+                }
+
+                return prev;
+            });
+
+            const playback = getTtsPlaybackSettings();
+            if (!isCancelRequested && res?.status !== "cancelled" && playback.enabled && cleanText.trim()) {
+                const { enabled: _enabled, ...ttsConfig } = playback;
+                synthesize(cleanText.trim(), ttsConfig).catch(err => console.error("[TTS] Auto-speak failed via fallback teardown:", err));
+            }
+        }
+
+        if (
+            currentTurnRef.current?.clientRequestId === clientRequestId ||
+            (!currentTurnRef.current?.clientRequestId && !clientRequestId)
+        ) {
+            currentTurnRef.current = null;
+        }
+        if (pendingTurnRequestRef.current?.clientRequestId === clientRequestId) {
+            pendingTurnRequestRef.current = null;
+        }
+
+        endTurnActivity();
+    }, [clearPendingExternalWatchdog, endTurnActivity, flushReveal, resetReveal]);
+
+    // 统一处理 streamChat 的响应解析、代次校验、消息 ID 对齐（补偿）与异常收敛
+    const processTurnStreamResult = useCallback(async (options: {
+        clientRequestId: string;
+        requestGeneration: number;
+        streamChatPromise: Promise<StreamChatResponse | undefined | null>;
+        onCatchError?: (err: unknown) => void;
+    }) => {
+        const { clientRequestId, requestGeneration, streamChatPromise, onCatchError } = options;
+        try {
+            const res = await streamChatPromise;
+            if (res?.status === "error") {
+                throw new Error(t("chat.errors.connection_error"));
+            }
+            const streamResValidation = validateStreamChatResponse({
+                requestGeneration,
+                currentGeneration: conversationGenerationRef.current,
+                clientRequestId,
+                activeConversationId: activeConversationIdRef.current,
+                expectedClientRequestId: latestClientRequestIdRef.current,
+            }, res);
+
+            if (streamResValidation.valid) {
+                if (streamResValidation.shouldUpdateConversation && streamResValidation.targetConversationId) {
+                    setActiveConversationId(streamResValidation.targetConversationId);
+                    activeConversationIdRef.current = streamResValidation.targetConversationId;
+                }
+
+                const isExplicitlyCancelled = res?.status === "cancelled";
+                const isCancelRequested = cancelRequestedRef.current;
+                const hasCommittedAssistantMessage = Boolean(res?.assistant_message_id && res?.status === "completed");
+                const shouldTreatAsCancelled = isExplicitlyCancelled || (isCancelRequested && !hasCommittedAssistantMessage);
+
+                if (shouldTreatAsCancelled) {
+                    if (res?.user_message_id) {
+                        setMessages(prev => reconcileTurnMessageIds(
+                            prev,
+                            clientRequestId,
+                            res.user_message_id,
+                            null,
+                        ).messages);
+                    }
+                    finalizeActiveTurnIfCurrent(clientRequestId, res);
+                    return;
+                }
+
+                // 先按已提交的消息快照判定是否需要后端重同步；实际写入仍走 updater，
+                // 与其他排队更新正确组合。快照与 prev 的微小背离在严格匹配 + merge
+                // 式 resync 下无破坏性后果。
+                const reconciliation = reconcileTurnMessageIds(
+                    messagesRef.current,
+                    clientRequestId,
+                    res?.user_message_id,
+                    res?.assistant_message_id,
+                );
+                if ((reconciliation.needsResync || currentTurnRef.current?.needsResync) && streamResValidation.targetConversationId) {
+                    void resyncConversationMessages({
+                        conversationId: streamResValidation.targetConversationId,
+                        startGeneration: requestGeneration,
+                        clientRequestId,
+                    });
+                } else {
+                    setMessages(prev => reconcileTurnMessageIds(
+                        prev,
+                        clientRequestId,
+                        res?.user_message_id,
+                        res?.assistant_message_id,
+                    ).messages);
+                }
+
+                // 确认仍属于当前请求后完成 turn 收尾（弥补 chat-turn-finish 事件丢失/迟到/监听器未就绪）
+                finalizeActiveTurnIfCurrent(clientRequestId, res);
+            }
+        } catch (err) {
+            if (conversationGenerationRef.current !== requestGeneration) {
+                return;
+            }
+            if (latestClientRequestIdRef.current !== clientRequestId) {
+                return;
+            }
+            clearPendingExternalWatchdog(clientRequestId);
+            if (isTurnCancelledError(err) || cancelRequestedRef.current) {
+                endTurnActivity();
+                currentTurnRef.current = null;
+                if (pendingTurnRequestRef.current?.clientRequestId === clientRequestId) {
+                    pendingTurnRequestRef.current = null;
+                }
+                setIsThinking(false);
+                return;
+            }
+            endTurnActivity();
+            currentTurnRef.current = null;
+            if (pendingTurnRequestRef.current?.clientRequestId === clientRequestId) {
+                pendingTurnRequestRef.current = null;
+            }
+            setIsThinking(false);
+            setError(getAsyncErrorMessage(err));
+
+            if (onCatchError) {
+                onCatchError(err);
+            }
+        }
+    }, [clearPendingExternalWatchdog, endTurnActivity, finalizeActiveTurnIfCurrent, resyncConversationMessages, setError, t]);
+
     const handleTranscription = useCallback((text: string) => {
+        // 读取发起录音时捕获的会话快照（若无则回退到当前快照，如 continuousListening 场景）
+        const startGeneration = sttBaseGenerationRef.current ?? conversationGenerationRef.current;
+        const startConversationId = sttBaseConversationIdRef.current ?? activeConversationIdRef.current;
+        const startCharacterId = sttBaseCharacterIdRef.current ?? activeCharacterIdRef.current;
+        const base = sttBaseDraftRef.current ?? "";
+
+        const resetSttSessionSnapshot = () => {
+            sttBaseDraftRef.current = null;
+            sttBaseCharacterIdRef.current = null;
+            sttBaseConversationIdRef.current = null;
+            sttBaseGenerationRef.current = null;
+        };
+
+        // 若会话已不再是当前会话（角色切换、同一角色跨会话切换、或代次变更），
+        // 降级保存转录文本，绝不静默丢弃
+        const preserveSttDraft = (draftText: string, transcriptionText?: string) => {
+            if (activeCharacterIdRef.current !== startCharacterId) {
+                // 角色已切换：保存到原角色的草稿存储中，不污染当前角色的输入框
+                saveCharacterDraft(startCharacterId, draftText);
+            } else {
+                // 同一角色（如跨会话切换）：回填当前输入框，并同步保存到原角色草稿
+                // 防御性合并：若用户在切换期间在输入框键入了额外内容，保留键入内容与转录的组合
+                if (transcriptionText) {
+                    setInput(prev => {
+                        if (prev && prev !== base && !prev.includes(transcriptionText)) {
+                            return combineDraftWithTranscription(prev, transcriptionText);
+                        }
+                        return draftText;
+                    });
+                } else {
+                    setInput(draftText);
+                }
+                saveCharacterDraft(startCharacterId, draftText);
+            }
+        };
+
         const trimmed = text.trim();
-        if (!trimmed) return;
+        if (!trimmed) {
+            // 空文本或未识别：恢复原草稿并重置快照
+            if (sttBaseDraftRef.current !== null) {
+                preserveSttDraft(sttBaseDraftRef.current);
+            }
+            resetSttSessionSnapshot();
+            return;
+        }
+
+        resetSttSessionSnapshot(); // 正常结算，解除锁定
+        const fullMessage = combineDraftWithTranscription(base, trimmed);
 
         if (sttAutoSend) {
             void (async () => {
+                const isSessionCurrent = () =>
+                    conversationGenerationRef.current === startGeneration &&
+                    activeConversationIdRef.current === startConversationId &&
+                    activeCharacterIdRef.current === startCharacterId;
+
+                // 忙碌态/禁用态降级保护：转为填充输入框草稿，绝不并发冲撞
+                if (interactionDisabled || isBusyRef.current) {
+                    if (isSessionCurrent()) {
+                        setInput(fullMessage);
+                    } else {
+                        preserveSttDraft(fullMessage, trimmed);
+                    }
+                    return;
+                }
+
+                // 确保所有事件监听器已就绪，避免因初始化时序差错过 chat-turn-start / finish 事件
+                if (listenersReadyPromiseRef.current) {
+                    await Promise.race([
+                        listenersReadyPromiseRef.current,
+                        new Promise(resolve => setTimeout(resolve, 1500)),
+                    ]);
+                }
+
+                if (!isSessionCurrent()) {
+                    preserveSttDraft(fullMessage, trimmed);
+                    return;
+                }
+
+                if (interactionDisabled || isBusyRef.current) {
+                    setInput(fullMessage);
+                    return;
+                }
+
                 if (!await ensureMemoryModelReady()) {
-                    setInput(trimmed);
+                    if (isSessionCurrent()) {
+                        setInput(fullMessage);
+                    } else {
+                        preserveSttDraft(fullMessage, trimmed);
+                    }
+                    return;
+                }
+
+                // 校验模型检查异步排队期间会话是否已被切换
+                if (!isSessionCurrent()) {
+                    preserveSttDraft(fullMessage, trimmed);
+                    return;
+                }
+
+                if (interactionDisabled || isBusyRef.current) {
+                    setInput(fullMessage);
                     return;
                 }
 
                 // Auto-send: inject directly into chat
-                setInput("");
-                setMessages(prev => [...prev, { role: "user", text: trimmed }]);
+                const requestGeneration = startGeneration;
+                const clientRequestId = `stt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                latestClientRequestIdRef.current = clientRequestId;
+                pendingTurnRequestRef.current = {
+                    clientRequestId,
+                    generation: requestGeneration,
+                    conversationId: startConversationId,
+                    characterId: startCharacterId,
+                };
+
+                clearDraft();
+                setMessages(prev => [...prev, { role: "user", text: fullMessage, clientRequestId }]);
                 startStreaming();
                 setIsThinking(true);
                 userScrolledRef.current = false;
+                savedScrollSnapshotRef.current = null;
+                // Lock out handleScroll until deferredMessages DOM update settles (~200ms)
+                isProgrammaticScrollRef.current = true;
+                setTimeout(() => { isProgrammaticScrollRef.current = false; }, 200);
+                resetReveal();
+                rawResponseRef.current = "";
+                currentTurnRef.current = null;
 
                 const allowImageGen = isGeneratedBackgroundMode();
 
-                streamChat({
-                    message: trimmed,
-                    allow_image_gen: allowImageGen,
-                    character_id: getActiveCharacterIdForRequest(),
-                }).catch(err => {
-                    if (isTurnCancelledError(err) || cancelRequestedRef.current) {
-                        endTurnActivity();
-                        currentTurnRef.current = null;
-                        setIsThinking(false);
-                        return;
-                    }
-                    endTurnActivity();
-                    currentTurnRef.current = null;
-                    setIsThinking(false);
-                    setError(getAsyncErrorMessage(err));
+                await processTurnStreamResult({
+                    clientRequestId,
+                    requestGeneration,
+                    streamChatPromise: streamChat({
+                        message: fullMessage,
+                        allow_image_gen: allowImageGen,
+                        character_id: getActiveCharacterIdForRequest(),
+                        client_request_id: clientRequestId,
+                        conversation_id: startConversationId ?? undefined,
+                    }),
                 });
             })();
         } else {
-            // Fill input box for user review
-            setInput(trimmed);
+            // Fill input box with merged text for user review
+            const isSessionCurrent = () =>
+                conversationGenerationRef.current === startGeneration &&
+                activeConversationIdRef.current === startConversationId &&
+                activeCharacterIdRef.current === startCharacterId;
+
+            if (isSessionCurrent()) {
+                setInput(fullMessage);
+            } else {
+                preserveSttDraft(fullMessage, trimmed);
+            }
         }
-    }, [endTurnActivity, ensureMemoryModelReady, sttAutoSend, startStreaming]);
+    }, [clearDraft, ensureMemoryModelReady, interactionDisabled, processTurnStreamResult, resetReveal, setInput, startStreaming, sttAutoSend]);
 
     const { state: voiceState, volume: micVolume, partialText: sttPartialText, start: startVoice, stop: stopVoice } = useVoiceInput(handleTranscription);
 
@@ -550,7 +1341,7 @@ export default function ChatPanel({
     useEffect(() => {
         const syncTextInputFocus = () => {
             const active = document.activeElement;
-            const focused = active === compactInputRef.current || active === expandedTextareaRef.current;
+            const focused = active === textareaRef.current;
             setVisionTextInputFocused(focused).catch(error => {
                 console.error("[ChatPanel] Failed to sync text input focus:", error);
             });
@@ -589,6 +1380,10 @@ export default function ChatPanel({
                 }
                 return;
             }
+            sttBaseDraftRef.current = inputRef.current;
+            sttBaseCharacterIdRef.current = activeCharacterIdRef.current;
+            sttBaseConversationIdRef.current = activeConversationIdRef.current;
+            sttBaseGenerationRef.current = conversationGenerationRef.current;
             startVoice({ autoStopOnSilence: true });
         }, [continuousListening, handleTranscription, startVoice]),
     });
@@ -596,28 +1391,46 @@ export default function ChatPanel({
     // Effect: Sync partial STT text to input box for real-time feedback
     useEffect(() => {
         if (voiceState === VoiceState.Listening && sttPartialText) {
-            // If auto-send is OFF, we just show the text in the box so user can edit later
-            if (!sttAutoSend) {
-                setInput(sttPartialText);
+            const targetCharId = sttBaseCharacterIdRef.current ?? activeCharacterIdRef.current;
+            const targetGen = sttBaseGenerationRef.current ?? conversationGenerationRef.current;
+            const targetConvId = sttBaseConversationIdRef.current ?? activeConversationIdRef.current;
+            if (
+                activeCharacterIdRef.current === targetCharId &&
+                conversationGenerationRef.current === targetGen &&
+                activeConversationIdRef.current === targetConvId
+            ) {
+                const base = sttBaseDraftRef.current ?? "";
+                const combined = combineDraftWithTranscription(base, sttPartialText);
+                setInput(combined);
             }
-            // If auto-send is ON, we usually wait for finalization to send.
-            // But we could show a preview? For now, let's keep it simple:
-            // Only fill input if NOT auto-sending. 
-            // (If auto-sending, the text appears in chat history immediately upon finish).
-            // Actually, showing it in input box is good feedback even for auto-send (it enters chat on stop).
-            // But valid auto-send logic often clears input.
-            // Let's stick to: Always show in input box while speaking.
-            // When "Final" fires, if AutoSend -> Clear Input & Send. If Not -> Leave in Input.
-            setInput(sttPartialText);
         }
-    }, [sttPartialText, voiceState, sttAutoSend]);
+    }, [sttPartialText, voiceState, setInput]);
+
+    // 听音生命周期退出兜底：若未完成识别退出且存在基准草稿，自动无损回滚
+    useEffect(() => {
+        if (prevVoiceStateRef.current === VoiceState.Listening && voiceState === VoiceState.Idle) {
+            if (sttBaseDraftRef.current !== null) {
+                const targetCharId = sttBaseCharacterIdRef.current ?? activeCharacterIdRef.current;
+                if (activeCharacterIdRef.current === targetCharId) {
+                    setInput(sttBaseDraftRef.current);
+                } else {
+                    saveCharacterDraft(targetCharId, sttBaseDraftRef.current);
+                }
+            }
+            sttBaseDraftRef.current = null;
+            sttBaseCharacterIdRef.current = null;
+            sttBaseConversationIdRef.current = null;
+            sttBaseGenerationRef.current = null;
+        }
+        prevVoiceStateRef.current = voiceState;
+    }, [voiceState, setInput]);
 
     // Sync vision state when localStorage changes (from Settings panel)
     useEffect(() => {
         const checkVision = () => {
             const nextVisionEnabled = readBooleanSetting(APP_SETTING_KEYS.visionEnabled, false);
             setVisionEnabled(nextVisionEnabled);
-            if (!nextVisionEnabled) setPendingImages([]);
+            if (!nextVisionEnabled) clearDraftImages();
             const cfg = readJsonSetting<{ camera_enabled?: boolean }>(
                 APP_SETTING_KEYS.visionConfig,
                 {},
@@ -650,17 +1463,119 @@ export default function ChatPanel({
     // Firing on `messages` scrolls to the old DOM height (before new bubble renders).
     useEffect(scrollToBottom, [deferredMessages, scrollToBottom]);
 
+    // ── Restore scroll display position on expand ───────────
+    useLayoutEffect(() => {
+        if (collapsed) return;
+        const container = messagesContainerRef.current;
+        if (!container) return;
+
+        isProgrammaticScrollRef.current = true;
+        const restoreScroll = () => {
+            const el = messagesContainerRef.current;
+            if (!el) return;
+            const target = computeTargetScrollTop(
+                savedScrollSnapshotRef.current,
+                el.scrollHeight,
+                el.clientHeight
+            );
+            el.scrollTop = target.scrollTop;
+            userScrolledRef.current = target.userScrolled;
+        };
+
+        restoreScroll();
+
+        const rafId = requestAnimationFrame(() => {
+            restoreScroll();
+            requestAnimationFrame(restoreScroll);
+        });
+
+        const timer = setTimeout(() => {
+            isProgrammaticScrollRef.current = false;
+        }, 120);
+
+        return () => {
+            cancelAnimationFrame(rafId);
+            clearTimeout(timer);
+        };
+    }, [collapsed]);
+
     const handleScroll = useCallback(() => {
-        // Ignore scroll events triggered by our own scrollToBottom
+        // Ignore scroll events triggered by our own scrollToBottom or restore
         if (isProgrammaticScrollRef.current) return;
         const container = messagesContainerRef.current;
         if (!container) return;
-        const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 40;
+        const atBottom = isScrollAtBottom(
+            container.scrollTop,
+            container.scrollHeight,
+            container.clientHeight,
+            120
+        );
         userScrolledRef.current = !atBottom;
-        // Load more messages when scrolled near top
-        if (container.scrollTop < 100) {
+        setShowScrollBottom(!atBottom);
+        if (atBottom) {
+            setHasNewMessagesBelow(false);
+        }
+
+        savedScrollSnapshotRef.current = {
+            scrollTop: container.scrollTop,
+            scrollHeight: container.scrollHeight,
+            clientHeight: container.clientHeight,
+            isAtBottom: atBottom,
+        };
+
+        // 向上滚动加载分页：增加边界与防抖检查，记录基准高度
+        const hasMore = visibleCount < deferredMessages.length;
+        if (container.scrollTop < 100 && hasMore && !isPrependingRef.current) {
+            isPrependingRef.current = true;
+            prevScrollHeightRef.current = container.scrollHeight;
+            prevScrollTopRef.current = container.scrollTop;
             setVisibleCount(prev => prev + 20);
         }
+    }, [deferredMessages.length, visibleCount]);
+
+    // 滚动锚定：在前置插入旧消息后，在浏览器绘制前补偿 scrollTop，杜绝视口抖动
+    useLayoutEffect(() => {
+        if (!isPrependingRef.current) return;
+        isPrependingRef.current = false;
+        const container = messagesContainerRef.current;
+        if (!container) return;
+
+        const targetScrollTop = computeAnchoredScrollTop(
+            prevScrollTopRef.current,
+            prevScrollHeightRef.current,
+            container.scrollHeight
+        );
+
+        if (targetScrollTop !== container.scrollTop) {
+            isProgrammaticScrollRef.current = true;
+            container.scrollTop = targetScrollTop;
+            requestAnimationFrame(() => {
+                isProgrammaticScrollRef.current = false;
+            });
+        }
+    }, [visibleCount]);
+
+    // 离开底部时侦测新到达消息以点亮悬浮指示灯
+    useEffect(() => {
+        if (userScrolledRef.current && messages.length > 0) {
+            setHasNewMessagesBelow(true);
+        }
+    }, [messages.length]);
+
+    const scrollToBottomSmooth = useCallback(() => {
+        const container = messagesContainerRef.current;
+        if (!container) return;
+        userScrolledRef.current = false;
+        setShowScrollBottom(false);
+        setHasNewMessagesBelow(false);
+        isProgrammaticScrollRef.current = true;
+        container.scrollTo({
+            top: container.scrollHeight,
+            behavior: "smooth",
+        });
+        setTimeout(() => {
+            isProgrammaticScrollRef.current = false;
+        }, 300);
     }, []);
 
     // Track unread messages while collapsed
@@ -685,354 +1600,726 @@ export default function ChatPanel({
         let aborted = false;
         const cleanups: (() => void)[] = [];
 
+        let resolveReady: () => void = () => {};
+        listenersReadyPromiseRef.current = new Promise<void>((resolve) => {
+            resolveReady = resolve;
+        });
+
         const setup = async () => {
-            // Listen for pet window sending a message — start streaming in main window too
-            const unPetChat = await listen<{ message: string }>("pet-chat-start", (event) => {
-                if (aborted) return;
-                const text = event.payload.message;
-                rawResponseRef.current = "";
-                currentTurnRef.current = null;
-                resetReveal();
-                setMessages(prev => [...prev, { role: "user", text }]);
-                startStreaming();
-                setIsThinking(true);
-                userScrolledRef.current = false;
-            });
-            if (aborted) { unPetChat(); return; }
-            cleanups.push(unPetChat);
-
-            const unTurnStart = await onChatTurnStart(({ turn_id }) => {
-                if (aborted) return;
-                if (cancelRequestedRef.current) {
-                    void requestTurnCancellation(turn_id);
-                    return;
-                }
-                currentTurnRef.current = {
-                    turnId: turn_id,
-                    messageIndex: null,
-                    rawText: "",
-                    visibleTextStarted: false,
-                    translation: undefined,
-                    translationPending: false,
-                    tools: [],
-                    pendingContext: pendingVisionContextRef.current ?? undefined,
-                };
-                pendingVisionContextRef.current = null;
-                rawResponseRef.current = "";
-            });
-            if (aborted) { unTurnStart(); return; }
-            cleanups.push(unTurnStart);
-
-            const unDelta = await onChatTurnDelta(({ turn_id, delta: rawDelta }) => {
-                if (aborted || !isStreamingRef.current || cancelRequestedRef.current) return;
-                const turn = currentTurnRef.current;
-                if (!turn || turn.turnId !== turn_id) return;
-
-                const delta = stripStreamingMarkup(rawDelta);
-                if (!delta) return;
-
-                turn.rawText += delta;
-                rawResponseRef.current = turn.rawText;
-
-                const revealText = getStreamingRevealText({
-                    accumulatedText: turn.rawText,
-                    delta,
-                    hasVisibleTextStarted: turn.visibleTextStarted,
-                });
-                if (!revealText) return;
-
-                setIsThinking(false);
-                if (!turn.visibleTextStarted) {
-                    turn.visibleTextStarted = true;
-                    setMessages(prev => ensureTurnMessage(prev, turn));
-                }
-
-                pushDelta(revealText);
-            });
-            if (aborted) { unDelta(); return; }
-            cleanups.push(unDelta);
-
-            const unTextComplete = await onChatTurnTextComplete(({ turn_id, text, translation_pending, translation }) => {
-                if (aborted || cancelRequestedRef.current) return;
-                const turn = currentTurnRef.current;
-                if (!turn || turn.turnId !== turn_id) return;
-
-                turn.rawText = text;
-                if (translation) {
-                    turn.translation = translation;
-                }
-                turn.translationPending = translation_pending;
-                rawResponseRef.current = text;
-
-                flushReveal();
-                stopStreaming();
-                setIsThinking(false);
-                userScrolledRef.current = false;
-
-                const cleanText = stripStoredMarkup(text);
-                const hasContent = hasRenderableTurnContent(turn, cleanText);
-                if (!hasContent) {
-                    setMessages(prev => removeTurnMessages(prev, turn));
-                    return;
-                }
-
-                setMessages(prev => {
-                    const ensured = ensureTurnMessage(prev, turn);
-                    return updateTurnMessage(ensured, turn, (current) => ({
-                        ...current,
-                        text: cleanText,
-                        translation: turn.translation,
-                        translationPending: translation_pending,
-                        tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
-                    }));
-                });
-            });
-            if (aborted) { unTextComplete(); return; }
-            cleanups.push(unTextComplete);
-
-            const unTranslation = await onChatTurnTranslation(({ turn_id, translation }) => {
-                if (aborted || cancelRequestedRef.current) return;
-                const turn = currentTurnRef.current;
-                if (!turn || turn.turnId !== turn_id) return;
-                turn.translation = translation;
-                turn.translationPending = false;
-                setMessages(prev => updateTurnMessage(prev, turn, (current) => ({
-                    ...current,
-                    translation,
-                    translationPending: false,
-                })));
-            });
-            if (aborted) { unTranslation(); return; }
-            cleanups.push(unTranslation);
-
-            const unDone = await onChatTurnFinish(({ turn_id, status }) => {
-                if (aborted) return;
-                const turn = currentTurnRef.current;
-                if (!turn || turn.turnId !== turn_id) return;
-
-                flushReveal();
-                endTurnActivity();
-                setIsThinking(false);
-                userScrolledRef.current = false;
-
-                const fullText = turn.rawText;
-                rawResponseRef.current = fullText;
-                const cleanText = stripStoredMarkup(fullText);
-
-                setMessages(prev => {
-                    const hasContent = hasRenderableTurnContent(turn, cleanText);
-
-                    if (hasActiveKokoroBubble(prev, turn.messageIndex)) {
-                        if (!hasContent) {
-                            return removeTurnMessages(prev, turn);
-                        }
-
-                        return updateTurnMessage(prev, turn, (current) => ({
-                            ...current,
-                            text: cleanText,
-                            translation: turn.translation,
-                            translationPending: false,
-                            tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
-                        }));
+            const handleExternalPendingWatchdogExpired = async (
+                clientRequestId: string,
+                reason: string,
+                cleanOptimisticMessage?: boolean,
+            ) => {
+                const isPending = pendingTurnRequestRef.current?.clientRequestId === clientRequestId;
+                const isMatchingTurn = currentTurnRef.current?.clientRequestId === clientRequestId;
+                if (isPending || isMatchingTurn) {
+                    console.warn(`[ChatPanel] External pending turn watchdog expired for: ${clientRequestId}, reason: ${reason}`);
+                    registerCancelledExternalId(clientRequestId);
+                    if (cleanOptimisticMessage) {
+                        setMessages(prev => prev.filter(m => m.clientRequestId !== clientRequestId));
                     }
-
-                    if (hasContent) {
-                        const next = [...prev];
-                        if (turn.pendingContext && !next.some(message => message.role === "context" && message.turnId === turn.turnId)) {
-                            next.push({
-                                ...turn.pendingContext,
-                                turnId: turn.turnId,
-                            });
-                        }
-                        next.push({
-                            role: "kokoro",
-                            text: cleanText,
-                            translation: turn.translation,
-                            translationPending: false,
-                            tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
-                        });
-                        return next;
-                    }
-
-                    return prev;
-                });
-
-                currentTurnRef.current = null;
-
-                const playback = getTtsPlaybackSettings();
-                if (status === "completed" && playback.enabled && cleanText.trim()) {
-                    console.log("[TTS] Auto-speak triggered, text length:", cleanText.length);
-                    const { enabled: _enabled, ...ttsConfig } = playback;
-                    synthesize(cleanText.trim(), ttsConfig).catch(err => console.error("[TTS] Auto-speak failed:", err));
-                }
-            });
-            if (aborted) { unDone(); return; }
-            cleanups.push(unDone);
-
-            const unFailure = await onChatFailure((failure: FailureEvent) => {
-                if (aborted) return;
-                if (!isFailureForActiveChat(
-                    failure,
-                    activeCharacterIdRef.current,
-                    currentTurnRef.current?.turnId ?? null,
-                )) return;
-                endTurnActivity();
-                setIsThinking(false);
-                const suffix = failure.stage ? ` (${failure.stage})` : "";
-                setError(`${failure.message}${suffix}`);
-                currentTurnRef.current = null;
-            });
-            if (aborted) { unFailure(); return; }
-            cleanups.push(unFailure);
-
-            const unError = await onChatError((err: string) => {
-                if (aborted) return;
-                if (shouldIgnoreLegacyChatError(currentTurnRef.current?.turnId ?? null)) return;
-                endTurnActivity();
-                setIsThinking(false);
-                setError(err);
-                currentTurnRef.current = null;
-            });
-            if (aborted) { unError(); return; }
-            cleanups.push(unError);
-
-            const unWarning = await onChatWarning((warning: string) => {
-                if (aborted) return;
-                setError(warning);
-            });
-            if (aborted) { unWarning(); return; }
-            cleanups.push(unWarning);
-
-            const unToolResult = await onChatTurnTool((event) => {
-                if (aborted || cancelRequestedRef.current) return;
-                logToolEvent(event);
-                const turn = currentTurnRef.current;
-                setMessages(prev => getToolEventStateUpdate(event, turn, event.turn_id)(prev));
-            });
-            if (aborted) { unToolResult(); return; }
-            cleanups.push(unToolResult);
-
-            const unVisionObservation = await onVisionObservation((observation) => {
-                if (aborted) return;
-                const summary = observation.summary.trim();
-                if (!summary) return;
-                pendingVisionContextRef.current = {
-                    role: "context",
-                    text: summary,
-                    capturedAt: observation.captured_at,
-                    source: observation.source,
-                };
-            });
-            if (aborted) { unVisionObservation(); return; }
-            cleanups.push(unVisionObservation);
-
-            const unTtsStart = await listen("tts:start", () => {
-                if (aborted) return;
-                ttsSpeakingRef.current = true;
-            });
-            if (aborted) { unTtsStart(); return; }
-            cleanups.push(unTtsStart);
-
-            const unTtsEnd = await listen("tts:end", () => {
-                if (aborted) return;
-                ttsSpeakingRef.current = false;
-            });
-            if (aborted) { unTtsEnd(); return; }
-            cleanups.push(unTtsEnd);
-
-            // Telegram chat sync — show messages from Telegram bot in desktop UI
-            const unTelegramSync = await onTelegramChatSync((data) => {
-                if (aborted) return;
-                if (data.role === "user") {
-                    setMessages(prev => [...prev, { role: "user", text: data.text }]);
-                } else {
-                    setMessages(prev => [...prev, { role: "kokoro", text: data.text, translation: data.translation }]);
-                }
-            });
-            if (aborted) { unTelegramSync(); return; }
-            cleanups.push(unTelegramSync);
-
-            // Interaction reactions (touch/click on Live2D model) handled via auto-generated LLM prompt in interaction-service.ts
-            // We no longer listen here to avoid double-handling or showing hardcoded lines.
-
-            // Listen for proactive triggers from backend (heartbeat)
-            const unProactive = await listen<any>("proactive-trigger", (event) => {
-                const browserSpeaking = typeof window !== "undefined"
-                    && Boolean(window.speechSynthesis?.speaking);
-                if (aborted || isBusyRef.current || ttsSpeakingRef.current || audioPlayer.isPlaying || browserSpeaking) return;
-                void (async () => {
-                    if (!await ensureMemoryModelReady({ silent: true })) {
-                        return;
-                    }
-
-                    console.log("[ChatPanel] Proactive trigger:", event.payload);
-
-                    const { instruction } = event.payload;
-
-                    // Start streaming — compose_prompt() handles full context (system prompt, memory, emotion, history, language)
-                    startStreaming();
-                    setIsThinking(true);
-                    userScrolledRef.current = false;
-                    resetReveal();
-                    rawResponseRef.current = "";
+                    pendingTurnRequestRef.current = null;
                     currentTurnRef.current = null;
+                    rawResponseRef.current = "";
+                    resetReveal();
+                    setIsThinking(false);
 
-                    streamChat({
-                        message: instruction,
-                        hidden: true,
-                        character_id: getActiveCharacterIdForRequest(),
-                    }).catch(err => {
-                        if (isTurnCancelledError(err) || cancelRequestedRef.current) {
+                    try {
+                        await cancelChatTurn(clientRequestId, reason);
+                    } catch (error) {
+                        console.warn("[ChatPanel] Failed to cancel pending external turn on watchdog expiry:", error);
+                    } finally {
+                        if (!aborted) {
                             endTurnActivity();
-                            currentTurnRef.current = null;
+                        }
+                    }
+                }
+            };
+
+            try {
+                const unlistens = await Promise.all([
+                    // Listen for pet window sending a message — start streaming in main window too
+                    listen<{ message: string; client_request_id?: string }>("pet-chat-start", (event) => {
+                        if (aborted) return;
+                        if (event.payload?.client_request_id && isCancelledExternalId(event.payload.client_request_id)) {
+                            emit("pet-chat-rejected", {
+                                client_request_id: event.payload.client_request_id,
+                                reason: "cancelled",
+                            }).catch(() => {});
                             return;
                         }
+                        if (isBusyRef.current) {
+                            if (event.payload?.client_request_id) {
+                                emit("pet-chat-rejected", {
+                                    client_request_id: event.payload.client_request_id,
+                                    reason: "busy",
+                                }).catch(() => {});
+                            }
+                            return;
+                        }
+                        const text = event.payload.message;
+                        const clientRequestId = event.payload.client_request_id
+                            || `pet_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                        latestClientRequestIdRef.current = clientRequestId;
+                        pendingTurnRequestRef.current = {
+                            clientRequestId,
+                            generation: conversationGenerationRef.current,
+                            conversationId: activeConversationIdRef.current,
+                            characterId: activeCharacterIdRef.current,
+                        };
+                        rawResponseRef.current = "";
+                        currentTurnRef.current = null;
+                        resetReveal();
+                        setMessages(prev => [...prev, { role: "user", text, clientRequestId }]);
+                        startStreaming();
+                        setIsThinking(true);
+                        userScrolledRef.current = false;
+
+                        startPendingExternalWatchdog(clientRequestId, (customReason) => {
+                            void handleExternalPendingWatchdogExpired(
+                                clientRequestId,
+                                customReason || "external_pending_turn_watchdog_timeout",
+                                true,
+                            );
+                        });
+
+                        emit("pet-chat-accepted", {
+                            client_request_id: clientRequestId,
+                            conversation_id: activeConversationIdRef.current ?? undefined,
+                        }).catch(() => {});
+                    }),
+
+                    listen<{ client_request_id?: string; error?: string }>("pet-chat-failed", (event) => {
+                        if (aborted) return;
+                        const reqId = event.payload?.client_request_id;
+                        if (!reqId) return;
+
+                        clearPendingExternalWatchdog(reqId);
+                        registerCancelledExternalId(reqId);
+
+                        const isPending = pendingTurnRequestRef.current?.clientRequestId === reqId;
+                        const isActive = currentTurnRef.current?.clientRequestId === reqId;
+
+                        if (isPending || isActive) {
+                            setMessages(prev => prev.filter(m => m.clientRequestId !== reqId));
+                            pendingTurnRequestRef.current = null;
+                            currentTurnRef.current = null;
+                            rawResponseRef.current = "";
+                            resetReveal();
+                            setIsThinking(false);
+                            endTurnActivity();
+                            if (event.payload?.error && event.payload.error !== "handshake_timeout") {
+                                setError(event.payload.error);
+                            }
+                        }
+                    }),
+
+                    onChatTurnAcknowledged(({ turn_id, client_request_id }) => {
+                        if (aborted) return;
+                        const isCancelReq = cancelRequestedRef.current || (client_request_id ? isCancelledExternalId(client_request_id) : false);
+                        const validation = validateTurnAcknowledged({
+                            currentGeneration: conversationGenerationRef.current,
+                            activeConversationId: activeConversationIdRef.current,
+                            pendingRequest: pendingTurnRequestRef.current,
+                            isCancelRequested: isCancelReq,
+                            currentTurn: currentTurnRef.current
+                                ? {
+                                      turnId: currentTurnRef.current.turnId,
+                                      generation: currentTurnRef.current.generation ?? conversationGenerationRef.current,
+                                      conversationId: currentTurnRef.current.conversationId ?? activeConversationIdRef.current,
+                                  }
+                                : null,
+                        }, {
+                            turn_id,
+                            client_request_id,
+                        });
+
+                        if (!validation.valid) {
+                            if (validation.reason === "cancelled" && turn_id) {
+                                void cancelChatTurn(turn_id, "cancelled_by_user").catch(err =>
+                                    console.warn("[ChatPanel] Failed to cancel acknowledged turn after user cancel:", err)
+                                );
+                            }
+                            return;
+                        }
+
+                        const matchedReqId = validation.matchedClientRequestId;
+                        transitionPendingExternalWatchdogToPreparation(matchedReqId);
+
+                        if (validation.shouldInitializeTurn && validation.turnId) {
+                            currentTurnRef.current = {
+                                turnId: validation.turnId,
+                                generation: pendingTurnRequestRef.current?.generation ?? conversationGenerationRef.current,
+                                conversationId: pendingTurnRequestRef.current?.conversationId ?? activeConversationIdRef.current,
+                                clientRequestId: matchedReqId,
+                                messageIndex: null,
+                                rawText: "",
+                                visibleTextStarted: false,
+                                translation: undefined,
+                                translationPending: false,
+                                tools: [],
+                                pendingContext: pendingVisionContextRef.current ?? undefined,
+                                needsResync: true,
+                            };
+                        } else if (validation.turnId && currentTurnRef.current && !currentTurnRef.current.turnId) {
+                            currentTurnRef.current.turnId = validation.turnId;
+                        }
+                    }),
+
+                    onChatTurnStart(({ turn_id, client_request_id, conversation_id, user_message_id }) => {
+                        if (aborted) return;
+                        if (interactionDisabled) {
+                            // ChatPanel is disabled (e.g. onboarding overlay active); ignore rather than cancel external turns
+                            return;
+                        }
+                        const validation = validateTurnStart({
+                            currentGeneration: conversationGenerationRef.current,
+                            activeConversationId: activeConversationIdRef.current,
+                            activeCharacterId: activeCharacterIdRef.current,
+                            pendingRequest: pendingTurnRequestRef.current,
+                            isCancelRequested: cancelRequestedRef.current,
+                            isExternalAuthorized: isAuthorizedExternalTurn,
+                        }, {
+                            turn_id,
+                            client_request_id,
+                            conversation_id,
+                            user_message_id,
+                        });
+
+                        if (!validation.valid) {
+                            if (validation.reason !== "external_authorized") {
+                                void cancelChatTurn(turn_id, `stale_turn_${validation.reason}`)
+                                    .catch(err => console.warn("[ChatPanel] Failed to cancel stale turn start:", err));
+                            }
+                            return;
+                        }
+
+                        clearPendingExternalWatchdog(validation.matchedClientRequestId);
+
+                        if (validation.shouldUpdateConversation && validation.targetConversationId) {
+                            setActiveConversationId(validation.targetConversationId);
+                            activeConversationIdRef.current = validation.targetConversationId;
+                        }
+
+                        let needsResync = false;
+                        if (user_message_id) {
+                            const matchedRequestId = validation.matchedClientRequestId;
+                            const initialAlignment = alignTurnStartUserMessage(
+                                messagesRef.current,
+                                matchedRequestId,
+                                user_message_id,
+                            );
+                            needsResync = initialAlignment.needsResync;
+                            setMessages(prev => {
+                                const alignment = alignTurnStartUserMessage(
+                                    prev,
+                                    matchedRequestId,
+                                    user_message_id,
+                                );
+                                return alignment.messages;
+                            });
+                        }
+
+                        const prevTurn = currentTurnRef.current;
+                        currentTurnRef.current = {
+                            turnId: turn_id,
+                            generation: conversationGenerationRef.current,
+                            conversationId: validation.targetConversationId ?? activeConversationIdRef.current,
+                            clientRequestId: validation.matchedClientRequestId,
+                            messageIndex: prevTurn?.messageIndex ?? null,
+                            rawText: prevTurn?.rawText ?? "",
+                            visibleTextStarted: prevTurn?.visibleTextStarted ?? false,
+                            translation: prevTurn?.translation,
+                            translationPending: prevTurn?.translationPending ?? false,
+                            tools: prevTurn?.tools ?? [],
+                            pendingContext: prevTurn?.pendingContext ?? (pendingVisionContextRef.current ?? undefined),
+                            needsResync,
+                        };
+                        pendingVisionContextRef.current = null;
+                        rawResponseRef.current = currentTurnRef.current.rawText;
+                    }),
+
+                    onChatTurnDelta(({ turn_id, delta: rawDelta }) => {
+                        if (aborted || !isStreamingRef.current || cancelRequestedRef.current) return;
+                        const turn = currentTurnRef.current;
+                        if (!turn || turn.turnId !== turn_id || turn.generation !== conversationGenerationRef.current) return;
+
+                        const delta = stripStreamingMarkup(rawDelta);
+                        if (!delta) return;
+
+                        turn.rawText += delta;
+                        rawResponseRef.current = turn.rawText;
+
+                        const revealText = getStreamingRevealText({
+                            accumulatedText: turn.rawText,
+                            delta,
+                            hasVisibleTextStarted: turn.visibleTextStarted,
+                        });
+                        if (!revealText) return;
+
+                        setIsThinking(false);
+                        if (!turn.visibleTextStarted) {
+                            turn.visibleTextStarted = true;
+                            setMessages(prev => ensureTurnMessage(prev, turn));
+                        }
+
+                        pushDelta(revealText);
+                        if (userScrolledRef.current) {
+                            setHasNewMessagesBelow(true);
+                        }
+                    }),
+
+                    onChatTurnTextComplete(({ turn_id, text, translation_pending, translation }) => {
+                        if (aborted || cancelRequestedRef.current) return;
+                        const turn = currentTurnRef.current;
+                        if (!turn || turn.turnId !== turn_id || turn.generation !== conversationGenerationRef.current) return;
+
+                        turn.rawText = text;
+                        if (translation) {
+                            turn.translation = translation;
+                        }
+                        turn.translationPending = translation_pending;
+                        rawResponseRef.current = text;
+
+                        flushReveal();
+                        stopStreaming();
+                        setIsThinking(false);
+
+                        const cleanText = stripStoredMarkup(text);
+                        const hasContent = hasRenderableTurnContent(turn, cleanText);
+                        if (!hasContent) {
+                            setMessages(prev => removeTurnMessages(prev, turn));
+                            return;
+                        }
+
+                        setMessages(prev => {
+                            const ensured = ensureTurnMessage(prev, turn);
+                            return updateTurnMessage(ensured, turn, (current) => ({
+                                ...current,
+                                clientRequestId: current.clientRequestId ?? turn.clientRequestId ?? undefined,
+                                text: cleanText,
+                                translation: turn.translation,
+                                translationPending: translation_pending,
+                                tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
+                            }));
+                        });
+                    }),
+
+                    onChatTurnTranslation(({ turn_id, translation }) => {
+                        if (aborted || cancelRequestedRef.current) return;
+                        const turn = currentTurnRef.current;
+                        if (!turn || turn.turnId !== turn_id || turn.generation !== conversationGenerationRef.current) return;
+                        turn.translation = translation;
+                        turn.translationPending = false;
+                        setMessages(prev => updateTurnMessage(prev, turn, (current) => ({
+                            ...current,
+                            translation,
+                            translationPending: false,
+                        })));
+                    }),
+
+                    onChatTurnFinish(({ turn_id, status, conversation_id, assistant_message_id, client_request_id }) => {
+                        if (aborted) return;
+                        const turn = currentTurnRef.current;
+                        const validation = validateTurnFinish({
+                            currentGeneration: conversationGenerationRef.current,
+                            activeConversationId: activeConversationIdRef.current,
+                            currentTurn: turn
+                                ? {
+                                      turnId: turn.turnId,
+                                      generation: turn.generation ?? conversationGenerationRef.current,
+                                      conversationId: turn.conversationId ?? activeConversationIdRef.current,
+                                  }
+                                : null,
+                            pendingRequest: pendingTurnRequestRef.current,
+                        }, {
+                            turn_id,
+                            status,
+                            conversation_id,
+                            assistant_message_id,
+                            client_request_id,
+                        });
+
+                        if (!validation.valid) {
+                            if (cancelRequestedRef.current) {
+                                endTurnActivity();
+                                currentTurnRef.current = null;
+                                pendingTurnRequestRef.current = null;
+                                setIsThinking(false);
+                            }
+                            return;
+                        }
+
+                        const reqIdToClear = turn?.clientRequestId ?? client_request_id ?? pendingTurnRequestRef.current?.clientRequestId;
+                        if (reqIdToClear) {
+                            clearPendingExternalWatchdog(reqIdToClear);
+                        }
+
+                        if (validation.shouldUpdateConversation && validation.targetConversationId) {
+                            setActiveConversationId(validation.targetConversationId);
+                            activeConversationIdRef.current = validation.targetConversationId;
+                        }
+
+                        if (!turn) {
+                            if (status === "cancelled") {
+                                resetReveal();
+                                endTurnActivity();
+                                setIsThinking(false);
+                                currentTurnRef.current = null;
+                                pendingTurnRequestRef.current = null;
+                                return;
+                            }
+
+                            flushReveal();
+                            endTurnActivity();
+                            setIsThinking(false);
+
+                            const targetConvId = validation.targetConversationId;
+                            const reqId = client_request_id ?? pendingTurnRequestRef.current?.clientRequestId ?? `finish_${turn_id}`;
+                            const reqGen = pendingTurnRequestRef.current?.generation ?? conversationGenerationRef.current;
+
+                            currentTurnRef.current = null;
+                            pendingTurnRequestRef.current = null;
+
+                            if (targetConvId) {
+                                void resyncConversationMessages({
+                                    conversationId: targetConvId,
+                                    startGeneration: reqGen,
+                                    clientRequestId: reqId,
+                                });
+                            }
+                            return;
+                        }
+
+                        if (status === "cancelled") {
+                            resetReveal();
+                            endTurnActivity();
+                            setIsThinking(false);
+                            setMessages(prev => removeTurnMessages(prev, turn));
+                            currentTurnRef.current = null;
+                            pendingTurnRequestRef.current = null;
+                            return;
+                        }
+
+                        flushReveal();
                         endTurnActivity();
                         setIsThinking(false);
-                        setError(getAsyncErrorMessage(err));
-                        currentTurnRef.current = null;
-                        // Remove the empty placeholder if one was created by delta handler
+
+                        const fullText = turn.rawText;
+                        rawResponseRef.current = fullText;
+                        const cleanText = stripStoredMarkup(fullText);
+
                         setMessages(prev => {
-                            const last = prev[prev.length - 1];
-                            if (last && last.role === "kokoro" && !last.text) {
-                                return prev.slice(0, -1);
+                            const hasContent = hasRenderableTurnContent(turn, cleanText);
+
+                            if (hasActiveKokoroBubble(prev, turn.messageIndex)) {
+                                if (!hasContent) {
+                                    return removeTurnMessages(prev, turn);
+                                }
+
+                                return updateTurnMessage(prev, turn, (current) => ({
+                                    ...current,
+                                    id: assistant_message_id ?? current.id,
+                                    clientRequestId: current.clientRequestId ?? turn.clientRequestId ?? undefined,
+                                    text: cleanText,
+                                    translation: turn.translation,
+                                    translationPending: false,
+                                    tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
+                                }));
                             }
+
+                            if (hasContent) {
+                                const next = [...prev];
+                                if (turn.pendingContext && !next.some(message => message.role === "context" && message.turnId === turn.turnId)) {
+                                    next.push({
+                                        ...turn.pendingContext,
+                                        turnId: turn.turnId,
+                                    });
+                                }
+                                next.push({
+                                    id: assistant_message_id ?? undefined,
+                                    role: "kokoro",
+                                    text: cleanText,
+                                    turnId: turn.turnId,
+                                    clientRequestId: turn.clientRequestId ?? undefined,
+                                    translation: turn.translation,
+                                    translationPending: false,
+                                    tools: turn.tools.length > 0 ? [...turn.tools] : undefined,
+                                });
+                                return next;
+                            }
+
                             return prev;
                         });
-                    });
-                })();
-            });
-            cleanups.push(() => unProactive());
 
-            // Listen for interaction triggers (touch/click on Live2D model)
-            // interaction-service already calls streamChat, we just need to prepare ChatPanel for receiving deltas
-            const unInteraction = await listen<any>("interaction-trigger", () => {
-                if (aborted || isBusyRef.current) return;
+                        const turnNeedsResync = turn.needsResync;
+                        const turnTargetConvId = validation.targetConversationId;
+                        const turnReqId = turn.clientRequestId ?? `resync_turn_${turn.turnId}`;
+                        const turnGen = turn.generation ?? conversationGenerationRef.current;
 
-                startStreaming();
-                setIsThinking(true);
-                userScrolledRef.current = false;
-                resetReveal();
-                rawResponseRef.current = "";
-                currentTurnRef.current = null;
-            });
-            cleanups.push(() => unInteraction());
+                        currentTurnRef.current = null;
+                        pendingTurnRequestRef.current = null;
 
-            // Listen for voice-interrupt-stt: when TTS is interrupted by voice, auto-start STT
-            const unVoiceInterruptStt = await listen<any>("voice-interrupt-stt", () => {
-                if (aborted || isBusyRef.current) return;
-                if (!sttEnabledRef.current || !sttAutoSendRef.current) return;
-                console.log("[ChatPanel] Voice interrupt → starting STT");
-                startVoiceRef.current({ autoStopOnSilence: true });
-            });
-            if (aborted) { unVoiceInterruptStt(); return; }
-            cleanups.push(() => unVoiceInterruptStt());
+                        if (turnNeedsResync && turnTargetConvId) {
+                            void resyncConversationMessages({
+                                conversationId: turnTargetConvId,
+                                startGeneration: turnGen,
+                                clientRequestId: turnReqId,
+                            });
+                        }
+
+                        const playback = getTtsPlaybackSettings();
+                        if (status === "completed" && playback.enabled && cleanText.trim()) {
+                            console.log("[TTS] Auto-speak triggered, text length:", cleanText.length);
+                            const { enabled: _enabled, ...ttsConfig } = playback;
+                            synthesize(cleanText.trim(), ttsConfig).catch(err => console.error("[TTS] Auto-speak failed:", err));
+                        }
+                    }),
+
+                    onChatFailure((failure: FailureEvent) => {
+                        if (aborted) return;
+                        const turn = currentTurnRef.current;
+                        if (turn && turn.generation !== conversationGenerationRef.current) return;
+                        if (!isFailureForActiveChat(
+                            failure,
+                            activeCharacterIdRef.current,
+                            turn?.turnId ?? null,
+                        )) return;
+                        endTurnActivity();
+                        setIsThinking(false);
+                        const suffix = failure.stage ? ` (${failure.stage})` : "";
+                        setError(`${failure.message}${suffix}`);
+                        currentTurnRef.current = null;
+                        pendingTurnRequestRef.current = null;
+                    }),
+
+                    onChatError((err: string) => {
+                        if (aborted) return;
+                        const turn = currentTurnRef.current;
+                        if (turn && turn.generation !== conversationGenerationRef.current) return;
+                        if (shouldIgnoreLegacyChatError(turn?.turnId ?? null)) return;
+                        endTurnActivity();
+                        setIsThinking(false);
+                        setError(err);
+                        currentTurnRef.current = null;
+                        pendingTurnRequestRef.current = null;
+                    }),
+
+                    onChatWarning((warning: string) => {
+                        if (aborted) return;
+                        setError(warning);
+                    }),
+
+                    onChatTurnTool((event) => {
+                        if (aborted || cancelRequestedRef.current) return;
+                        logToolEvent(event);
+                        const turn = currentTurnRef.current;
+                        if (!turn || turn.turnId !== event.turn_id || turn.generation !== conversationGenerationRef.current) return;
+                        setMessages(prev => getToolEventStateUpdate(event, turn, event.turn_id)(prev));
+                    }),
+
+                    onVisionObservation((observation) => {
+                        if (aborted) return;
+                        const summary = observation.summary.trim();
+                        if (!summary) return;
+                        pendingVisionContextRef.current = {
+                            role: "context",
+                            text: summary,
+                            capturedAt: observation.captured_at,
+                            source: observation.source,
+                        };
+                    }),
+
+                    listen("tts:start", () => {
+                        if (aborted) return;
+                        ttsSpeakingRef.current = true;
+                    }),
+
+                    listen("tts:end", () => {
+                        if (aborted) return;
+                        ttsSpeakingRef.current = false;
+                    }),
+
+                    // Telegram chat sync — show messages from Telegram bot in desktop UI
+                    onTelegramChatSync((data) => {
+                        if (aborted) return;
+                        if (data.role === "user") {
+                            setMessages(prev => [...prev, { role: "user", text: data.text }]);
+                        } else {
+                            setMessages(prev => [...prev, { role: "kokoro", text: data.text, translation: data.translation }]);
+                        }
+                    }),
+
+                    // Listen for proactive triggers from backend (heartbeat)
+                    listen<any>("proactive-trigger", (event) => {
+                        const browserSpeaking = typeof window !== "undefined"
+                            && Boolean(window.speechSynthesis?.speaking);
+                        if (aborted || isBusyRef.current || ttsSpeakingRef.current || audioPlayer.isPlaying || browserSpeaking) return;
+                        void (async () => {
+                            if (!await ensureMemoryModelReady({ silent: true })) {
+                                return;
+                            }
+
+                            const stillBrowserSpeaking = typeof window !== "undefined"
+                                && Boolean(window.speechSynthesis?.speaking);
+                            if (aborted || isBusyRef.current || ttsSpeakingRef.current || audioPlayer.isPlaying || stillBrowserSpeaking) {
+                                return;
+                            }
+
+                            console.log("[ChatPanel] Proactive trigger:", event.payload);
+
+                            const { instruction } = event.payload;
+                            const requestGeneration = conversationGenerationRef.current;
+                            const clientRequestId = `proactive_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                            latestClientRequestIdRef.current = clientRequestId;
+
+                            // Start streaming — compose_prompt() handles full context (system prompt, memory, emotion, history, language)
+                            pendingTurnRequestRef.current = {
+                                clientRequestId,
+                                generation: requestGeneration,
+                                conversationId: activeConversationIdRef.current,
+                                characterId: activeCharacterIdRef.current,
+                            };
+                            startStreaming();
+                            setIsThinking(true);
+                            userScrolledRef.current = false;
+                            resetReveal();
+                            rawResponseRef.current = "";
+                            currentTurnRef.current = null;
+
+                            void processTurnStreamResult({
+                                clientRequestId,
+                                requestGeneration,
+                                streamChatPromise: streamChat({
+                                    message: instruction,
+                                    hidden: true,
+                                    client_request_id: clientRequestId,
+                                    character_id: getActiveCharacterIdForRequest(),
+                                    conversation_id: activeConversationIdRef.current ?? undefined,
+                                }),
+                                onCatchError: () => {
+                                    // Remove the empty placeholder if one was created by delta handler
+                                    setMessages(prev => {
+                                        const last = prev[prev.length - 1];
+                                        if (last && last.role === "kokoro" && !last.text) {
+                                            return prev.slice(0, -1);
+                                        }
+                                        return prev;
+                                    });
+                                },
+                            });
+                        })();
+                    }),
+
+                    // Listen for interaction triggers (touch/click on Live2D model)
+                    // interaction-service already calls streamChat, we just need to prepare ChatPanel for receiving deltas
+                    listen<{ gesture?: string; hitArea?: string; client_request_id?: string }>("interaction-trigger", (event) => {
+                        if (aborted) return;
+                        if (event.payload?.client_request_id && isCancelledExternalId(event.payload.client_request_id)) {
+                            emit("interaction-trigger-rejected", {
+                                client_request_id: event.payload.client_request_id,
+                                reason: "cancelled",
+                            }).catch(() => {});
+                            return;
+                        }
+                        if (isBusyRef.current) {
+                            if (event.payload?.client_request_id) {
+                                emit("interaction-trigger-rejected", {
+                                    client_request_id: event.payload.client_request_id,
+                                    reason: "busy",
+                                }).catch(() => {});
+                            }
+                            return;
+                        }
+
+                        const clientRequestId = event.payload?.client_request_id
+                            || `interaction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                        latestClientRequestIdRef.current = clientRequestId;
+                        pendingTurnRequestRef.current = {
+                            clientRequestId,
+                            generation: conversationGenerationRef.current,
+                            conversationId: activeConversationIdRef.current,
+                            characterId: activeCharacterIdRef.current,
+                        };
+
+                        startStreaming();
+                        setIsThinking(true);
+                        userScrolledRef.current = false;
+                        resetReveal();
+                        rawResponseRef.current = "";
+                        currentTurnRef.current = null;
+
+                        startPendingExternalWatchdog(clientRequestId, (customReason) => {
+                            void handleExternalPendingWatchdogExpired(
+                                clientRequestId,
+                                customReason || "external_pending_interaction_watchdog_timeout",
+                                false,
+                            );
+                        });
+
+                        emit("interaction-trigger-accepted", {
+                            client_request_id: clientRequestId,
+                            conversation_id: activeConversationIdRef.current ?? undefined,
+                        }).catch(() => {});
+                    }),
+
+                    listen<{ client_request_id?: string; error?: string }>("interaction-trigger-failed", (event) => {
+                        if (aborted) return;
+                        const reqId = event.payload?.client_request_id;
+                        if (!reqId) return;
+
+                        clearPendingExternalWatchdog(reqId);
+                        registerCancelledExternalId(reqId);
+
+                        const isPending = pendingTurnRequestRef.current?.clientRequestId === reqId;
+                        const isActive = currentTurnRef.current?.clientRequestId === reqId;
+
+                        if (isPending || isActive) {
+                            pendingTurnRequestRef.current = null;
+                            currentTurnRef.current = null;
+                            rawResponseRef.current = "";
+                            resetReveal();
+                            setIsThinking(false);
+                            endTurnActivity();
+                        }
+                    }),
+
+                    // Listen for voice-interrupt-stt: when TTS is interrupted by voice, auto-start STT
+                    listen<any>("voice-interrupt-stt", () => {
+                        if (aborted || isBusyRef.current) return;
+                        if (!sttEnabledRef.current || !sttAutoSendRef.current) return;
+                        console.log("[ChatPanel] Voice interrupt → starting STT");
+                        sttBaseDraftRef.current = inputRef.current;
+                        sttBaseCharacterIdRef.current = activeCharacterIdRef.current;
+                        sttBaseConversationIdRef.current = activeConversationIdRef.current;
+                        sttBaseGenerationRef.current = conversationGenerationRef.current;
+                        startVoiceRef.current({ autoStopOnSilence: true });
+                    }),
+                ]);
+
+                if (aborted) {
+                    unlistens.forEach(fn => fn());
+                    return;
+                }
+                cleanups.push(...unlistens);
+            } catch (err) {
+                console.error("[ChatPanel] Failed to setup chat event listeners:", err);
+            } finally {
+                resolveReady();
+            }
         };
 
-        setup();
+        void setup();
         return () => {
             aborted = true;
+            clearAllPendingExternalWatchdogs();
+            if (cancellationWatchdogTimerRef.current !== null) {
+                clearTimeout(cancellationWatchdogTimerRef.current);
+                cancellationWatchdogTimerRef.current = null;
+            }
             cleanups.forEach(fn => fn());
+            listenersReadyPromiseRef.current = null;
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
@@ -1041,19 +2328,42 @@ export default function ChatPanel({
     const handleSend = async (e?: React.FormEvent) => {
         e?.preventDefault();
         if (interactionDisabled) return;
+
+        // 确保所有事件监听器已就绪，避免因初始化时序差错过 chat-turn-start / finish 事件
+        if (listenersReadyPromiseRef.current) {
+            await Promise.race([
+                listenersReadyPromiseRef.current,
+                new Promise(resolve => setTimeout(resolve, 1500)),
+            ]);
+        }
+
         const trimmed = input.trim();
         const messageImages = visionEnabled ? [...pendingImages] : [];
-        if ((!trimmed && messageImages.length === 0) || isBusy) return;
+        if ((!trimmed && messageImages.length === 0) || isBusy || isBusyRef.current) return;
         if (!await ensureMemoryModelReady()) return;
 
-        setMessages(prev => [...prev, { role: "user", text: trimmed, images: messageImages.length > 0 ? messageImages : undefined }]);
+        const requestGeneration = conversationGenerationRef.current;
+        const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        latestClientRequestIdRef.current = clientRequestId;
+        pendingTurnRequestRef.current = {
+            clientRequestId,
+            generation: requestGeneration,
+            conversationId: activeConversationIdRef.current,
+            characterId: activeCharacterIdRef.current,
+        };
+        setMessages(prev => [...prev, {
+            role: "user",
+            text: trimmed,
+            images: messageImages.length > 0 ? messageImages : undefined,
+            clientRequestId,
+        }]);
         const cameraFrame = visionEnabled ? getLatestCameraFrame() : null;
         const imagesToSend = cameraFrame ? [...messageImages, cameraFrame] : messageImages;
-        setInput("");
-        setPendingImages([]);
+        clearDraft();
         startStreaming();
         setIsThinking(true);
         userScrolledRef.current = false;
+        savedScrollSnapshotRef.current = null;
         // Lock out handleScroll until deferredMessages DOM update settles (~200ms)
         isProgrammaticScrollRef.current = true;
         setTimeout(() => { isProgrammaticScrollRef.current = false; }, 200);
@@ -1063,36 +2373,30 @@ export default function ChatPanel({
 
         const allowImageGen = isGeneratedBackgroundMode();
 
-        try {
-            await streamChat({
+        await processTurnStreamResult({
+            clientRequestId,
+            requestGeneration,
+            streamChatPromise: streamChat({
                 message: trimmed || "(image attached)",
                 allow_image_gen: allowImageGen,
                 images: imagesToSend.length > 0 ? imagesToSend : undefined,
                 character_id: getActiveCharacterIdForRequest(),
-            });
-        } catch (err) {
-            if (isTurnCancelledError(err) || cancelRequestedRef.current) {
-                endTurnActivity();
-                currentTurnRef.current = null;
-                setIsThinking(false);
-                return;
-            }
-            endTurnActivity();
-            currentTurnRef.current = null;
-            setIsThinking(false);
-            setError(getAsyncErrorMessage(err));
+                client_request_id: clientRequestId,
+                conversation_id: activeConversationIdRef.current ?? undefined,
+            }),
+            onCatchError: () => {
+                // Save failed request for retry
+                lastFailedRequestRef.current = { message: trimmed || "(image attached)", images: imagesToSend.length > 0 ? imagesToSend : undefined, allowImageGen };
 
-            // Save failed request for retry
-            lastFailedRequestRef.current = { message: trimmed || "(image attached)", images: imagesToSend.length > 0 ? imagesToSend : undefined, allowImageGen };
-
-            setTimeout(() => {
-                setMessages(prev => [...prev, {
-                    role: "kokoro",
-                    text: t("chat.errors.connection_error"),
-                    isError: true,
-                }]);
-            }, 500);
-        }
+                setTimeout(() => {
+                    setMessages(prev => [...prev, {
+                        role: "kokoro",
+                        text: t("chat.errors.connection_error"),
+                        isError: true,
+                    }]);
+                }, 500);
+            },
+        });
     };
 
     // ── Image upload ───────────────────────────────────────
@@ -1113,12 +2417,16 @@ export default function ChatPanel({
             return;
         }
 
+        // 在首个 await 之前捕获草稿上下文:上传期间切换角色时,图片仍归发起角色
+        const draftContext = getImageDraftContext();
         setIsUploading(true);
         try {
             const buffer = await file.arrayBuffer();
             const bytes = Array.from(new Uint8Array(buffer));
             const url = await uploadVisionImage(bytes, file.name);
-            setPendingImages(prev => [...prev, url]);
+            if (!appendPendingImage(draftContext, url)) {
+                setError(t("chat.errors.image_upload_cancelled", "图片上传已取消"));
+            }
         } catch (err) {
             setError(err instanceof Error ? err.message : t("chat.errors.upload_failed"));
         } finally {
@@ -1148,13 +2456,17 @@ export default function ChatPanel({
             return;
         }
 
+        // 在首个 await 之前捕获草稿上下文:上传期间切换角色时,图片仍归发起角色
+        const draftContext = getImageDraftContext();
         setIsUploading(true);
         try {
             const buffer = await file.arrayBuffer();
             const bytes = Array.from(new Uint8Array(buffer));
             const filename = `paste_${Date.now()}.png`;
             const url = await uploadVisionImage(bytes, filename);
-            setPendingImages(prev => [...prev, url]);
+            if (!appendPendingImage(draftContext, url)) {
+                setError(t("chat.errors.image_upload_cancelled", "图片上传已取消"));
+            }
         } catch (err) {
             setError(err instanceof Error ? err.message : t("chat.errors.upload_failed"));
         } finally {
@@ -1162,9 +2474,85 @@ export default function ChatPanel({
         }
     };
 
+    // ── Drag and Drop image upload ──────────────────────────
+    const handleDragEnter = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounterRef.current += 1;
+        if (e.dataTransfer.types.includes("Files")) {
+            setIsDraggingOver(true);
+        }
+    }, []);
+
+    const handleDragLeave = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounterRef.current -= 1;
+        if (dragCounterRef.current <= 0) {
+            dragCounterRef.current = 0;
+            setIsDraggingOver(false);
+        }
+    }, []);
+
+    const handleDragOver = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "copy";
+    }, []);
+
+    const handleDrop = useCallback(async (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounterRef.current = 0;
+        setIsDraggingOver(false);
+
+        if (!visionEnabled) {
+            setError(t("chat.errors.vision_disabled") ?? "Vision is not enabled");
+            return;
+        }
+
+        const rawFiles = Array.from(e.dataTransfer.files);
+        const files = rawFiles.filter(f => f.type.startsWith("image/"));
+        if (files.length === 0) {
+            if (rawFiles.length > 0) {
+                setError(t("chat.errors.only_images"));
+            }
+            return;
+        }
+
+        // 一次拖放 = 一个手势 = 一个发起角色:循环前捕获一次,中途切换后剩余文件仍归发起角色
+        const draftContext = getImageDraftContext();
+        setIsUploading(true);
+        try {
+            for (const file of files) {
+                if (file.size > 5 * 1024 * 1024) {
+                    setError(t("chat.errors.image_too_large"));
+                    continue;
+                }
+
+                try {
+                    const buffer = await file.arrayBuffer();
+                    const bytes = Array.from(new Uint8Array(buffer));
+                    const url = await uploadVisionImage(bytes, file.name);
+                    if (!appendPendingImage(draftContext, url)) {
+                        setError(t("chat.errors.image_upload_cancelled", "图片上传已取消"));
+                    }
+                } catch (err) {
+                    setError(err instanceof Error ? err.message : t("chat.errors.upload_failed"));
+                }
+            }
+        } finally {
+            setIsUploading(false);
+        }
+    }, [visionEnabled, t, getImageDraftContext, appendPendingImage]);
+
     // ── STT: Advanced VAD Microphone toggle ─────────────────
     const handleMicToggle = useCallback(() => {
         if (voiceState === VoiceState.Idle) {
+            sttBaseDraftRef.current = inputRef.current;
+            sttBaseCharacterIdRef.current = activeCharacterIdRef.current;
+            sttBaseConversationIdRef.current = activeConversationIdRef.current;
+            sttBaseGenerationRef.current = conversationGenerationRef.current;
             startVoice({ autoStopOnSilence: true });
         } else {
             stopVoice();
@@ -1172,13 +2560,54 @@ export default function ChatPanel({
     }, [voiceState, startVoice, stopVoice]);
 
     // ── Clear history ──────────────────────────────────────
-    const handleClear = async () => {
+    const handleClearClick = () => {
+        if (messages.length === 0 || isBusy || isStreaming) return;
+        setShowClearConfirm(true);
+    };
+
+    const executeClear = async () => {
+        setShowClearConfirm(false);
+        if (isBusyRef.current) return;
+        setIsBusy(true);
+        isBusyRef.current = true;
         try {
-            await clearHistory();
-        } catch {
-            // Backend might not be ready
+            const activeTurnId = currentTurnRef.current?.turnId;
+            const pendingClientRequestId = pendingTurnRequestRef.current?.clientRequestId;
+            if (activeTurnId) {
+                cancelRequestedRef.current = true;
+                setIsStopping(true);
+                try {
+                    await cancelChatTurn(activeTurnId, "clear_history");
+                } catch (err) {
+                    console.error("[ChatPanel] Failed to cancel prior turn before clear history:", err);
+                }
+            } else if (pendingClientRequestId) {
+                cancelRequestedRef.current = true;
+                setIsStopping(true);
+                try {
+                    await cancelChatTurn(pendingClientRequestId, "clear_history");
+                } catch (err) {
+                    console.error("[ChatPanel] Failed to cancel prior pending request before clear history:", err);
+                }
+            }
+            conversationGenerationRef.current += 1;
+            pendingTurnRequestRef.current = null;
+            latestClientRequestIdRef.current = null;
+            currentTurnRef.current = null;
+            try {
+                await clearHistory();
+            } catch {
+                // Backend might not be ready
+            }
+            setMessages([]);
+            setShowScrollBottom(false);
+            setHasNewMessagesBelow(false);
+            savedScrollSnapshotRef.current = null;
+            userScrolledRef.current = false;
+        } finally {
+            isBusyRef.current = false;
+            setIsBusy(false);
         }
-        setMessages([]);
     };
 
     // ── Stable message action callbacks ───────────────────
@@ -1191,15 +2620,116 @@ export default function ChatPanel({
         });
     }, []);
 
-    const onEdit = useCallback((globalIndex: number, newText: string) => {
+    const onEdit = useCallback(async (globalIndex: number, newText: string) => {
+        const trimmed = newText.trim();
+        if (!trimmed) return;
+
+        const targetMsg = messagesRef.current[globalIndex];
+        if (!targetMsg) return;
+
+        const previousText = targetMsg.text;
+        const targetId = targetMsg.id;
+        const targetClientRequestId = targetMsg.clientRequestId;
+
+        // 1. 本地乐观更新 UI
         setMessages(prev => {
             const updated = [...prev];
-            updated[globalIndex] = { ...updated[globalIndex], text: newText };
+            if (updated[globalIndex]) {
+                updated[globalIndex] = { ...updated[globalIndex], text: trimmed };
+            }
             return updated;
         });
-    }, []);
+
+        // 2. 异步持久化到 SQLite 并同步后端 LLM 上下文
+        try {
+            let messageId = targetMsg.id;
+            const convId = activeConversationIdRef.current ?? undefined;
+            if (!messageId) {
+                // 若刚发送未完成握手，等待极短时间（最多 600ms）确保 ID 到达
+                for (let i = 0; i < 12; i++) {
+                    await new Promise(r => setTimeout(r, 50));
+                    const latest = messagesRef.current[globalIndex];
+                    if (latest?.id) {
+                        messageId = latest.id;
+                        break;
+                    }
+                }
+            }
+
+            if (!messageId) {
+                // 坚决禁止在无数据库 message_id 的情况下盲改数据库
+                throw new Error("Message ID not yet synchronized, cannot edit");
+            }
+
+            const res = await editConversationMessage({
+                conversation_id: convId,
+                message_id: messageId,
+                new_content: trimmed,
+            });
+            // 3. 回填生成的新 message_id 并同步后端截断后的内容
+            if (res?.message_id) {
+                setMessages(prev => {
+                    const targetIdx = prev.findIndex(m => m.id === res.message_id);
+                    const idx = targetIdx !== -1 ? targetIdx : globalIndex;
+                    if (prev[idx]) {
+                        const updated = [...prev];
+                        updated[idx] = {
+                            ...updated[idx],
+                            id: res.message_id,
+                            text: res.updated_content ?? updated[idx].text,
+                        };
+                        return updated;
+                    }
+                    return prev;
+                });
+            }
+        } catch (e) {
+            console.error("[ChatPanel] Failed to persist message edit:", e);
+            // 1. 回滚恢复旧消息文本，避免乐观更新在持久化失败后残留脏数据
+            setMessages(prev => {
+                let targetIdx = targetId ? prev.findIndex(m => m.id === targetId) : -1;
+                if (targetIdx === -1 && targetClientRequestId) {
+                    targetIdx = prev.findIndex(m => m.clientRequestId === targetClientRequestId);
+                }
+                if (targetIdx === -1 && prev[globalIndex] && prev[globalIndex].text === trimmed) {
+                    targetIdx = globalIndex;
+                }
+                if (targetIdx !== -1 && prev[targetIdx].text === trimmed) {
+                    const updated = [...prev];
+                    updated[targetIdx] = { ...updated[targetIdx], text: previousText };
+                    return updated;
+                }
+                return prev;
+            });
+
+            setError(t("chat.errors.edit_failed") ?? "Failed to save edited message");
+
+            // 2. 若当前不在流式生成中，尝试重新同步会话以确保与数据库绝对对齐
+            if (!isStreamingRef.current && activeConversationIdRef.current) {
+                void conversationSyncRef.current?.synchronize({
+                    characterId: activeCharacterId,
+                    preferredConversationId: activeConversationIdRef.current,
+                }).catch(err => {
+                    console.warn("[ChatPanel] Background re-synchronization after edit failure failed:", err);
+                });
+            }
+        }
+    }, [activeCharacterId, t]);
 
     const onRegenerate = useCallback(async (globalIndex: number) => {
+        if (isBusyRef.current || isStreamingRef.current) return;
+
+        // 第一次异步操作前捕获会话代次与会话 ID：等待监听器/删除期间若用户切换会话，
+        // 后续校验将立即中止，防止删除与重新生成请求作用到新会话上
+        const startGeneration = conversationGenerationRef.current;
+        const startConversationId = activeConversationIdRef.current;
+        const isSessionCurrent = () => isChatSessionCurrent(
+            startGeneration,
+            startConversationId,
+            conversationGenerationRef.current,
+            activeConversationIdRef.current,
+        );
+
         const msgs = messagesRef.current;
         const lastUserIndex = msgs.slice(0, globalIndex).reverse().findIndex(m => m.role === "user");
         if (lastUserIndex === -1) return;
@@ -1207,15 +2737,49 @@ export default function ChatPanel({
         const userMsg = msgs[userMsgIndex];
         if (!await ensureMemoryModelReady()) return;
 
+        // 确保所有事件监听器已就绪
+        if (listenersReadyPromiseRef.current) {
+            await Promise.race([
+                listenersReadyPromiseRef.current,
+                new Promise(resolve => setTimeout(resolve, 1500)),
+            ]);
+        }
+        // 等待监听器期间会话可能已切换：立即中止，不删除、不发起请求
+        if (!isSessionCurrent()) return;
+
         const messagesToDelete = msgs.length - globalIndex;
 
         try {
             // 先删除数据库，再更新 UI，避免竞态条件
-            await deleteLastMessages(messagesToDelete);
+            await deleteLastMessages(messagesToDelete, startConversationId);
         } catch (e) {
             console.error("[ChatPanel] Failed to delete messages:", e);
+            if (!isSessionCurrent()) return;
+            setError(t("chat.errors.delete_failed") ?? "Failed to delete messages");
+            if (startConversationId) {
+                void resyncConversationMessages({
+                    conversationId: startConversationId,
+                    startGeneration,
+                    clientRequestId: `resync_del_fail_${Date.now()}`,
+                });
+            }
+            return;
         }
+        // 删除期间会话可能已切换：立即中止，不截断新会话 UI、不发起请求
+        if (!isSessionCurrent()) return;
+
         setMessages(prev => prev.slice(0, globalIndex));
+
+        // 使用入口捕获的会话代次（上方校验已保证与当前一致），恢复下游 stale-turn 防护的效力
+        const requestGeneration = startGeneration;
+        const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        latestClientRequestIdRef.current = clientRequestId;
+        pendingTurnRequestRef.current = {
+            clientRequestId,
+            generation: requestGeneration,
+            conversationId: startConversationId,
+            characterId: activeCharacterIdRef.current,
+        };
 
         startStreaming();
         setIsThinking(true);
@@ -1226,38 +2790,65 @@ export default function ChatPanel({
 
         const allowImageGen = isGeneratedBackgroundMode();
 
-        streamChat({
-            message: userMsg.text,
-            images: userMsg.images,
-            allow_image_gen: allowImageGen,
-            character_id: getActiveCharacterIdForRequest(),
-        }).catch(err => {
-            if (isTurnCancelledError(err) || cancelRequestedRef.current) {
-                endTurnActivity();
-                currentTurnRef.current = null;
-                setIsThinking(false);
-                return;
-            }
-            endTurnActivity();
-            currentTurnRef.current = null;
-            setIsThinking(false);
-            setError(getAsyncErrorMessage(err));
+        void processTurnStreamResult({
+            clientRequestId,
+            requestGeneration,
+            streamChatPromise: streamChat({
+                message: userMsg.text,
+                images: userMsg.images,
+                allow_image_gen: allowImageGen,
+                character_id: getActiveCharacterIdForRequest(),
+                client_request_id: clientRequestId,
+                regenerate: true,
+                conversation_id: activeConversationIdRef.current ?? undefined,
+            }),
         });
-    }, [endTurnActivity, ensureMemoryModelReady, startStreaming, resetReveal, setError]);
+    }, [ensureMemoryModelReady, processTurnStreamResult, resetReveal, startStreaming, t]);
 
     const onContinueFrom = useCallback(async (globalIndex: number) => {
+        if (isBusyRef.current || isStreamingRef.current) return;
+
+        // 第一次异步操作前捕获会话代次与会话 ID，防止删除期间会话切换导致截断作用到新会话
+        const startGeneration = conversationGenerationRef.current;
+        const startConversationId = activeConversationIdRef.current;
+
         const msgs = messagesRef.current;
         const messagesToDelete = msgs.length - globalIndex - 1;
         if (messagesToDelete > 0) {
             try {
                 // 先删除数据库，再更新 UI，避免竞态条件
-                await deleteLastMessages(messagesToDelete);
+                await deleteLastMessages(messagesToDelete, startConversationId);
+                // 删除期间会话已切换：立即中止，不截断新会话 UI
+                if (!isChatSessionCurrent(
+                    startGeneration,
+                    startConversationId,
+                    conversationGenerationRef.current,
+                    activeConversationIdRef.current,
+                )) {
+                    return;
+                }
                 setMessages(prev => prev.slice(0, globalIndex + 1));
             } catch (e) {
                 console.error("[ChatPanel] Failed to delete messages:", e);
+                if (!isChatSessionCurrent(
+                    startGeneration,
+                    startConversationId,
+                    conversationGenerationRef.current,
+                    activeConversationIdRef.current,
+                )) {
+                    return;
+                }
+                setError(t("chat.errors.delete_failed") ?? "Failed to delete messages");
+                if (startConversationId) {
+                    void resyncConversationMessages({
+                        conversationId: startConversationId,
+                        startGeneration,
+                        clientRequestId: `resync_continue_fail_${Date.now()}`,
+                    });
+                }
             }
         }
-    }, []);
+    }, [resyncConversationMessages, setError, t]);
 
     const onApproveTool = useCallback(async (globalIndex: number, tool: ToolTraceItem) => {
         if (!canSubmitApproval(tool)) {
@@ -1373,11 +2964,30 @@ export default function ChatPanel({
         };
     }, []);
 
-    // ── Expand handler ─────────────────────────────────────
-    const handleExpand = () => {
+    // ── Collapse / Expand handlers ─────────────────────────
+    const handleCollapse = useCallback(() => {
+        const container = messagesContainerRef.current;
+        if (container) {
+            const atBottom = isScrollAtBottom(
+                container.scrollTop,
+                container.scrollHeight,
+                container.clientHeight
+            );
+            userScrolledRef.current = !atBottom;
+            savedScrollSnapshotRef.current = {
+                scrollTop: container.scrollTop,
+                scrollHeight: container.scrollHeight,
+                clientHeight: container.clientHeight,
+                isAtBottom: atBottom,
+            };
+        }
+        setCollapsed(true);
+    }, []);
+
+    const handleExpand = useCallback(() => {
         setCollapsed(false);
         setUnreadCount(0);
-    };
+    }, []);
 
     // ════════════════════════════════════════════════════════�?
     // Collapsed state �?small floating chat bubble
@@ -1438,6 +3048,10 @@ export default function ChatPanel({
             onPointerDownCapture={blockDisabledInteraction}
             onKeyDownCapture={blockDisabledInteraction}
             onFocusCapture={blockDisabledInteraction}
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ type: "spring", stiffness: 300, damping: 30 }}
@@ -1470,6 +3084,36 @@ export default function ChatPanel({
                 />
             )}
 
+            {/* 拖拽放置指示遮罩 */}
+            <AnimatePresence>
+                {isDraggingOver && (
+                    <motion.div
+                        key="chat-dropzone-overlay"
+                        data-testid="chat-dropzone-overlay"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="absolute inset-0 z-40 bg-black/70 backdrop-blur-sm border-2 border-dashed border-[var(--color-accent)] rounded-xl flex flex-col items-center justify-center p-6 text-center pointer-events-none"
+                    >
+                        <div className="p-4 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)] mb-3">
+                            <ImagePlus size={36} strokeWidth={1.5} className="animate-pulse" />
+                        </div>
+                        <p className="text-sm font-semibold text-white">
+                            {t("chat.input.drop_image_title", "松开鼠标上传图片")}
+                        </p>
+                        <p className="text-xs text-[var(--color-text-muted)] mt-1">
+                            {t("chat.input.drop_image_hint", "支持 PNG, JPG, WebP 格式 (单张最大 5MB)")}
+                        </p>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* 大图预览 Lightbox */}
+            <ImageLightbox
+                imageUrl={previewImageUrl}
+                onClose={() => setPreviewImageUrl(null)}
+            />
+
             {/* Error toast */}
             <AnimatePresence>
                 {error && <ErrorToast message={error} onDismiss={() => setError(null)} />}
@@ -1481,6 +3125,7 @@ export default function ChatPanel({
                 onClose={() => setSidebarOpen(false)}
                 characterId={activeCharacterId}
                 activeConversationId={activeConversationId}
+                isSwitchingConversation={isSwitchingConversation}
                 onStartEmptyConversation={handleStartEmptyConversation}
                 onSelectConversation={async (conversationId) => {
                     await handleConversationSelection(conversationId);
@@ -1488,21 +3133,78 @@ export default function ChatPanel({
                 }}
             />
 
+            {/* 清空会话二次确认模态窗 */}
+            <AnimatePresence>
+                {showClearConfirm && (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="absolute inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+                        onClick={() => setShowClearConfirm(false)}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.9, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={{ scale: 0.9, opacity: 0 }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="w-full max-w-[280px] bg-[var(--color-bg-secondary,#1e293b)] border border-[var(--color-border)] rounded-xl p-4 shadow-2xl space-y-3"
+                        >
+                            <div className="flex items-center gap-2 text-[var(--color-error,#ef4444)]">
+                                <Trash2 size={18} />
+                                <span className="font-semibold text-sm">
+                                    {t("chat.actions.confirm_clear_title")}
+                                </span>
+                            </div>
+                            <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+                                {t("chat.actions.confirm_clear")}
+                            </p>
+                            <div className="flex items-center justify-end gap-2 pt-1">
+                                <button
+                                    onClick={() => setShowClearConfirm(false)}
+                                    className="px-3 py-1.5 rounded-lg text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-slate-700/50 transition-colors"
+                                >
+                                    {t("chat.actions.cancel")}
+                                </button>
+                                <button
+                                    onClick={executeClear}
+                                    className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 transition-colors"
+                                >
+                                    {t("chat.actions.confirm_clear_button")}
+                                </button>
+                            </div>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
             {/* Header �?clean and minimal */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 min-w-0">
                     <div className={clsx(
-                        "w-2 h-2 rounded-full",
+                        "w-2 h-2 rounded-full flex-shrink-0",
                         isStreaming
                             ? "bg-amber-500 animate-pulse"
                             : "bg-[var(--color-accent)] shadow-[var(--glow-success)]"
                     )} />
-                    <span className="font-heading text-sm font-semibold tracking-wider uppercase text-[var(--color-text-secondary)]">
+                    <span className="font-heading text-sm font-semibold tracking-wider uppercase text-[var(--color-text-secondary)] flex-shrink-0">
                         {isStreaming ? t("chat.status.streaming") : t("chat.status.chat")}
                     </span>
+                    {characterName && (
+                        <span className="flex items-center gap-1.5 min-w-0">
+                            <span className="text-[var(--color-text-muted)] opacity-30 text-xs select-none">/</span>
+                            <span
+                                className="text-xs font-medium text-[var(--color-text-primary)] truncate max-w-[130px]"
+                                title={characterName}
+                            >
+                                {characterName}
+                            </span>
+                        </span>
+                    )}
                 </div>
                 <div className="flex items-center gap-1">
                     <motion.button
+                        data-chat-history-toggle="true"
                         whileHover={{ scale: 1.1 }}
                         whileTap={{ scale: 0.95 }}
                         onClick={() => setSidebarOpen(prev => !prev)}
@@ -1518,10 +3220,16 @@ export default function ChatPanel({
                         <History size={14} strokeWidth={1.5} />
                     </motion.button>
                     <motion.button
-                        whileHover={{ scale: 1.1 }}
-                        whileTap={{ scale: 0.95 }}
-                        onClick={handleClear}
-                        className="p-2 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-error)] transition-colors"
+                        whileHover={messages.length > 0 && !isBusy && !isStreaming ? { scale: 1.1 } : undefined}
+                        whileTap={messages.length > 0 && !isBusy && !isStreaming ? { scale: 0.95 } : undefined}
+                        onClick={handleClearClick}
+                        disabled={messages.length === 0 || isBusy || isStreaming}
+                        className={clsx(
+                            "p-2 rounded-md transition-colors",
+                            messages.length === 0 || isBusy || isStreaming
+                                ? "text-[var(--color-text-muted)]/30 cursor-not-allowed"
+                                : "text-[var(--color-text-muted)] hover:text-[var(--color-error)]"
+                        )}
                         aria-label={t("chat.actions.clear")}
                         title={t("chat.actions.clear")}
                     >
@@ -1530,7 +3238,7 @@ export default function ChatPanel({
                     <motion.button
                         whileHover={{ scale: 1.1 }}
                         whileTap={{ scale: 0.95 }}
-                        onClick={() => setCollapsed(true)}
+                        onClick={handleCollapse}
                         className="p-2 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
                         aria-label={t("chat.actions.collapse")}
                         title={t("chat.actions.collapse")}
@@ -1544,6 +3252,11 @@ export default function ChatPanel({
             <div
                 ref={messagesContainerRef}
                 onScroll={handleScroll}
+                onPointerDown={(e) => {
+                    if (e.target === e.currentTarget) {
+                        textareaRef.current?.blur();
+                    }
+                }}
                 className="flex-1 overflow-y-auto p-4 space-y-3 scrollable"
             >
                 <AnimatePresence initial={false}>
@@ -1562,6 +3275,7 @@ export default function ChatPanel({
                                 onContinueFrom={onContinueFrom}
                                 onApproveTool={onApproveTool}
                                 onRejectTool={onRejectTool}
+                                onPreviewImage={setPreviewImageUrl}
                             />
                         );
                     })}
@@ -1572,7 +3286,49 @@ export default function ChatPanel({
             </div>
 
             {/* Input */}
-            <form onSubmit={handleSend} className="border-t border-[var(--color-border)] bg-black/20">
+            <form onSubmit={handleSend} className="relative border-t border-[var(--color-border)] bg-black/20 pt-1">
+                {/* Messages 区域上方悬浮的回到底部 / 新消息胶囊 */}
+                <AnimatePresence>
+                    {showScrollBottom && (
+                        <div className="relative w-full">
+                            <motion.button
+                                type="button"
+                                initial={{ opacity: 0, y: 10, scale: 0.9 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: 10, scale: 0.9 }}
+                                whileHover={{ scale: 1.05 }}
+                                whileTap={{ scale: 0.95 }}
+                                onClick={scrollToBottomSmooth}
+                                className={clsx(
+                                    "absolute right-5 -top-12 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-full shadow-xl backdrop-blur-md transition-colors",
+                                    hasNewMessagesBelow
+                                        ? "bg-[var(--color-accent,#6366f1)] text-white font-medium border border-white/20 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
+                                        : "bg-slate-900/80 border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent)]"
+                                )}
+                                title={hasNewMessagesBelow ? t("chat.actions.new_messages") : t("chat.actions.to_bottom")}
+                            >
+                                <ChevronDown size={14} className={hasNewMessagesBelow ? "animate-bounce" : ""} />
+                                <span className="text-xs">
+                                    {hasNewMessagesBelow ? t("chat.actions.new_messages") : t("chat.actions.to_bottom")}
+                                </span>
+                            </motion.button>
+                        </div>
+                    )}
+                </AnimatePresence>
+
+                {/* Drag handle on top edge */}
+                <div
+                    onPointerDown={handleInputResizeStart}
+                    onPointerMove={handleInputResizeMove}
+                    onPointerUp={handleInputResizeEnd}
+                    onPointerCancel={handleInputResizeEnd}
+                    onDoubleClick={handleInputResizeReset}
+                    className="w-full h-3 cursor-ns-resize flex items-center justify-center group select-none -mt-1 touch-none"
+                    title={t("chat.input.resize_hint", "拖拽调整高度 · 双击切换/复位")}
+                >
+                    <div className="w-10 h-1 rounded-full bg-white/10 group-hover:bg-[var(--color-accent)]/60 transition-colors" />
+                </div>
+
                 {/* Pending images preview */}
                 <AnimatePresence>
                     {hasSendableImages && (
@@ -1580,14 +3336,18 @@ export default function ChatPanel({
                             initial={{ height: 0, opacity: 0 }}
                             animate={{ height: "auto", opacity: 1 }}
                             exit={{ height: 0, opacity: 0 }}
-                            className="flex gap-2 px-3 pt-2 overflow-x-auto"
+                            className="flex gap-2 px-3 pb-2 overflow-x-auto"
                         >
                             {pendingImages.map((url, idx) => (
                                 <div key={idx} className="relative group flex-shrink-0">
                                     <img
                                         src={url}
                                         alt="pending"
-                                        className="w-16 h-16 rounded-md object-cover border border-[var(--color-border)]"
+                                        className="w-14 h-14 rounded-md object-cover border border-[var(--color-border)]"
+                                        onError={() => {
+                                            console.warn("[ChatPanel] Draft image failed to render, removing:", url);
+                                            removePendingImage(idx);
+                                        }}
                                     />
                                     <button
                                         type="button"
@@ -1602,268 +3362,181 @@ export default function ChatPanel({
                     )}
                 </AnimatePresence>
 
-                <div className="relative flex items-center gap-2 p-3">
-                    {/* Hidden file input */}
-                    <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept="image/*"
-                        className="hidden"
-                        onChange={handleImageSelect}
+                <div
+                    style={{ height: `${inputHeight}px` }}
+                    className={clsx(
+                        "relative mx-3 mb-3 p-2.5 bg-black/40 border border-[var(--color-border)] rounded-2xl flex flex-col",
+                        "hover:border-white/20",
+                        "focus-within:!border-[var(--color-accent)] focus-within:shadow-[0_0_10px_rgba(0,240,255,0.25)]",
+                        "transition-colors",
+                        isBusy && "opacity-50 cursor-not-allowed"
+                    )}
+                >
+                    <textarea
+                        ref={textareaRef}
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onPaste={handlePaste}
+                        onKeyDown={(e) => {
+                            if ((e.key === "Enter" && !e.shiftKey) || (e.key === "Enter" && (e.ctrlKey || e.metaKey))) {
+                                if (e.nativeEvent.isComposing) return;
+                                e.preventDefault();
+                                handleSend();
+                            }
+                        }}
+                        data-onboarding-id="chat-input"
+                        placeholder={t("chat.input.placeholder")}
+                        disabled={isBusy}
+                        style={{ outline: "none", boxShadow: "none" }}
+                        className={clsx(
+                            "w-full flex-1 bg-transparent border-none text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)]",
+                            "text-sm font-body resize-none p-0 pr-1 leading-normal",
+                            "!outline-none focus:!outline-none focus-visible:!outline-none focus:ring-0 focus-visible:ring-0",
+                            "scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent",
+                            "[&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-button]:hidden"
+                        )}
                     />
 
-                    {/* Image upload button �?only visible when Vision Mode is ON */}
-                    {visionEnabled && (
+                    <div className="flex items-center justify-between pt-1.5 mt-auto">
+                        <div className="flex items-center gap-1.5">
+                            {/* Hidden file input */}
+                            <input
+                                ref={fileInputRef}
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={handleImageSelect}
+                            />
+
+                            {/* Image upload button — only visible when Vision Mode is ON */}
+                            {visionEnabled && (
+                                <motion.button
+                                    type="button"
+                                    whileHover={{ scale: 1.1 }}
+                                    whileTap={{ scale: 0.9 }}
+                                    onClick={() => fileInputRef.current?.click()}
+                                    disabled={isBusy || isUploading}
+                                    className={clsx(
+                                        "p-1.5 rounded-lg transition-colors text-[var(--color-text-muted)] hover:text-[var(--color-accent)]",
+                                        (isBusy || isUploading) && "opacity-50 cursor-not-allowed"
+                                    )}
+                                    aria-label={t("chat.input.attach_image")}
+                                    title={t("chat.input.attach_image")}
+                                >
+                                    {isUploading ? (
+                                        <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                                    ) : (
+                                        <ImagePlus size={16} strokeWidth={1.5} />
+                                    )}
+                                </motion.button>
+                            )}
+
+                            {/* Camera frame indicator */}
+                            {visionEnabled && cameraEnabled && (
+                                <div
+                                    className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] text-[var(--color-accent)] opacity-70 select-none"
+                                    title={t("chat.input.camera_frame_attached")}
+                                >
+                                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
+                                    CAM
+                                </div>
+                            )}
+
+                            {/* Microphone button — Advanced VAD Mode */}
+                            {sttEnabled && (
+                                <div className="relative flex items-center justify-center">
+                                    {/* Volume ring */}
+                                    {voiceState !== VoiceState.Idle && voiceState !== VoiceState.Processing && (
+                                        <motion.div
+                                            className="absolute inset-0 rounded-lg border-2 border-[var(--color-accent)]"
+                                            animate={{
+                                                opacity: voiceState === VoiceState.Speaking ? [0.3, 0.8, 0.3] : 0.2,
+                                                scale: voiceState === VoiceState.Speaking
+                                                    ? [1, 1 + Math.min(micVolume / 100, 0.5), 1]
+                                                    : 1,
+                                            }}
+                                            transition={{ duration: 0.3, repeat: voiceState === VoiceState.Speaking ? Infinity : 0 }}
+                                            style={{ pointerEvents: "none" }}
+                                        />
+                                    )}
+                                    <motion.button
+                                        type="button"
+                                        whileHover={{ scale: 1.1 }}
+                                        whileTap={{ scale: 0.9 }}
+                                        onClick={handleMicToggle}
+                                        disabled={isBusy}
+                                        className={clsx(
+                                            "relative p-1.5 rounded-lg transition-all z-10",
+                                            voiceState === VoiceState.Idle
+                                                ? "text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
+                                                : voiceState === VoiceState.Listening
+                                                    ? "text-[var(--color-accent)] bg-[var(--color-accent)]/15 border border-[var(--color-accent)]/30"
+                                                    : voiceState === VoiceState.Speaking
+                                                        ? "text-red-400 bg-red-500/20 border border-red-500/40 shadow-[0_0_12px_rgba(239,68,68,0.3)]"
+                                                        : "text-amber-400 bg-amber-500/15 border border-amber-500/30",
+                                            isBusy && voiceState === VoiceState.Idle && "opacity-50 cursor-not-allowed"
+                                        )}
+                                        aria-label={
+                                            voiceState === VoiceState.Idle ? t("chat.input.mic.title.idle") :
+                                                voiceState === VoiceState.Listening ? t("chat.input.mic.title.listening") :
+                                                    voiceState === VoiceState.Speaking ? t("chat.input.mic.title.speaking") :
+                                                        t("chat.input.mic.title.transcribing")
+                                        }
+                                        title={
+                                            voiceState === VoiceState.Idle ? t("chat.input.mic.title.idle") :
+                                                voiceState === VoiceState.Listening ? t("chat.input.mic.title.listening") :
+                                                    voiceState === VoiceState.Speaking ? t("chat.input.mic.title.speaking") :
+                                                        t("chat.input.mic.title.transcribing")
+                                        }
+                                    >
+                                        {voiceState === VoiceState.Processing ? (
+                                            <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                                        ) : voiceState === VoiceState.Speaking ? (
+                                            <motion.div
+                                                animate={{ scale: [1, 1.15, 1] }}
+                                                transition={{ duration: 0.6, repeat: Infinity }}
+                                            >
+                                                <Mic size={16} strokeWidth={1.5} />
+                                            </motion.div>
+                                        ) : voiceState !== VoiceState.Idle ? (
+                                            <MicOff size={16} strokeWidth={1.5} />
+                                        ) : (
+                                            <Mic size={16} strokeWidth={1.5} />
+                                        )}
+                                    </motion.button>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Send / Stop button */}
                         <motion.button
-                            type="button"
                             whileHover={{ scale: 1.1 }}
                             whileTap={{ scale: 0.9 }}
-                            onClick={() => fileInputRef.current?.click()}
-                            disabled={isBusy || isUploading}
+                            type="submit"
+                            onClick={isStreaming ? (e) => {
+                                e.preventDefault();
+                                handleStopGeneration();
+                            } : undefined}
+                            disabled={isStreaming ? isStopping : (isBusy || (!input.trim() && !hasSendableImages))}
                             className={clsx(
-                                "p-2.5 rounded-lg transition-colors",
-                                "text-[var(--color-text-muted)] hover:text-[var(--color-accent)]",
-                                (isBusy || isUploading) && "opacity-50 cursor-not-allowed"
+                                "p-2 rounded-xl transition-colors",
+                                isStreaming
+                                    ? "bg-red-500 text-white hover:bg-red-400"
+                                    : "bg-[var(--color-accent)] text-black hover:bg-white",
+                                (isStreaming ? isStopping : (isBusy || (!input.trim() && !hasSendableImages))) && "opacity-50 cursor-not-allowed"
                             )}
-                            aria-label={t("chat.input.attach_image")}
-                            title={t("chat.input.attach_image")}
+                            aria-label={isStreaming ? t("chat.actions.stop") : "Send message"}
+                            title={isStreaming ? (isStopping ? t("chat.actions.stopping") : t("chat.actions.stop")) : undefined}
                         >
-                            {isUploading ? (
-                                <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                            {isStreaming ? (
+                                <X size={15} strokeWidth={1.8} />
                             ) : (
-                                <ImagePlus size={16} strokeWidth={1.5} />
+                                <Send size={15} strokeWidth={1.5} />
                             )}
                         </motion.button>
-                    )}
-
-                    {/* Camera frame indicator — visible when vision + camera both enabled */}
-                    {visionEnabled && cameraEnabled && (
-                        <div
-                            className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[10px] text-[var(--color-accent)] opacity-70 select-none"
-                            title={t("chat.input.camera_frame_attached")}
-                        >
-                            <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                            CAM
-                        </div>
-                    )}
-
-                    {/* Microphone button�?Advanced VAD Mode */}
-                    {sttEnabled && (
-                        <div className="relative flex items-center justify-center">
-                            {/* Volume ring �?visible when listening/speaking */}
-                            {voiceState !== VoiceState.Idle && voiceState !== VoiceState.Processing && (
-                                <motion.div
-                                    className="absolute inset-0 rounded-lg border-2 border-[var(--color-accent)]"
-                                    animate={{
-                                        opacity: voiceState === VoiceState.Speaking ? [0.3, 0.8, 0.3] : 0.2,
-                                        scale: voiceState === VoiceState.Speaking
-                                            ? [1, 1 + Math.min(micVolume / 100, 0.5), 1]
-                                            : 1,
-                                    }}
-                                    transition={{ duration: 0.3, repeat: voiceState === VoiceState.Speaking ? Infinity : 0 }}
-                                    style={{ pointerEvents: "none" }}
-                                />
-                            )}
-                            <motion.button
-                                type="button"
-                                whileHover={{ scale: 1.1 }}
-                                whileTap={{ scale: 0.9 }}
-                                onClick={handleMicToggle}
-                                disabled={isBusy}
-                                className={clsx(
-                                    "relative p-2.5 rounded-lg transition-all z-10",
-                                    voiceState === VoiceState.Idle
-                                        ? "text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
-                                        : voiceState === VoiceState.Listening
-                                            ? "text-[var(--color-accent)] bg-[var(--color-accent)]/15 border border-[var(--color-accent)]/30"
-                                            : voiceState === VoiceState.Speaking
-                                            ? "text-red-400 bg-red-500/20 border border-red-500/40 shadow-[0_0_12px_rgba(239,68,68,0.3)]"
-                                            : "text-amber-400 bg-amber-500/15 border border-amber-500/30",
-                                    isBusy && voiceState === VoiceState.Idle && "opacity-50 cursor-not-allowed"
-                                )}
-                                aria-label={
-                                    voiceState === VoiceState.Idle ? t("chat.input.mic.title.idle") :
-                                        voiceState === VoiceState.Listening ? t("chat.input.mic.title.listening") :
-                                            voiceState === VoiceState.Speaking ? t("chat.input.mic.title.speaking") :
-                                                t("chat.input.mic.title.transcribing")
-                                }
-                                title={
-                                    voiceState === VoiceState.Idle ? t("chat.input.mic.title.idle") :
-                                        voiceState === VoiceState.Listening ? t("chat.input.mic.title.listening") :
-                                            voiceState === VoiceState.Speaking ? t("chat.input.mic.title.speaking") :
-                                                t("chat.input.mic.title.transcribing")
-                                }
-                            >
-                                {voiceState === VoiceState.Processing ? (
-                                    <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                                ) : voiceState === VoiceState.Speaking ? (
-                                    <motion.div
-                                        animate={{ scale: [1, 1.15, 1] }}
-                                        transition={{ duration: 0.6, repeat: Infinity }}
-                                    >
-                                        <Mic size={16} strokeWidth={1.5} />
-                                    </motion.div>
-                                ) : voiceState !== VoiceState.Idle ? (
-                                    <MicOff size={16} strokeWidth={1.5} />
-                                ) : (
-                                    <Mic size={16} strokeWidth={1.5} />
-                                )}
-                            </motion.button>
-                        </div>
-                    )}
-
-                    <div className="relative flex-1">
-                        <input
-                            ref={compactInputRef}
-                            type="text"
-                            value={input}
-                            onChange={(e) => setInput(e.target.value)}
-                            onPaste={handlePaste}
-                            data-onboarding-id="chat-input"
-                            placeholder={t("chat.input.placeholder")}
-                            disabled={isBusy}
-                            className={clsx(
-                                "w-full bg-black/40 border border-[var(--color-border)]",
-                                "text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)]",
-                                "text-sm rounded-lg pl-4 pr-8 py-2.5 font-body",
-                                "focus:outline-none focus:border-[var(--color-accent)] focus:shadow-[var(--glow-accent)]",
-                                "transition-all",
-                                isBusy && "opacity-50 cursor-not-allowed"
-                            )}
-                        />
-                        <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() => {
-                                setExpandedInput(true);
-                                setTimeout(() => {
-                                    const ta = expandedTextareaRef.current;
-                                    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
-                                }, 50);
-                            }}
-                            className={clsx(
-                                "absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors",
-                                isBusy && "opacity-50 cursor-not-allowed"
-                            )}
-                            aria-label={t("chat.input.expand")}
-                            title={t("chat.input.expand")}
-                        >
-                            <Maximize2 size={13} strokeWidth={1.5} />
-                        </button>
                     </div>
-                    <motion.button
-                        whileHover={{ scale: 1.1 }}
-                        whileTap={{ scale: 0.9 }}
-                        type="submit"
-                        onClick={isStreaming ? (e) => {
-                            e.preventDefault();
-                            handleStopGeneration();
-                        } : undefined}
-                        disabled={isStreaming ? isStopping : (isBusy || (!input.trim() && !hasSendableImages))}
-                        className={clsx(
-                            "p-2.5 rounded-lg transition-colors",
-                            isStreaming
-                                ? "bg-red-500 text-white hover:bg-red-400"
-                                : "bg-[var(--color-accent)] text-black hover:bg-white",
-                            (isStreaming ? isStopping : (isBusy || (!input.trim() && !hasSendableImages))) && "opacity-50 cursor-not-allowed"
-                        )}
-                        aria-label={isStreaming ? t("chat.actions.stop") : "Send message"}
-                        title={isStreaming ? (isStopping ? t("chat.actions.stopping") : t("chat.actions.stop")) : undefined}
-                    >
-                        {isStreaming ? (
-                            <X size={16} strokeWidth={1.8} />
-                        ) : (
-                            <Send size={16} strokeWidth={1.5} />
-                        )}
-                    </motion.button>
                 </div>
             </form>
-
-            {/* Expanded input overlay */}
-            <AnimatePresence>
-                {expandedInput && (
-                    <motion.div
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: 10 }}
-                        className="absolute inset-x-0 bottom-0 z-20 p-3 bg-[var(--color-bg-surface)] border-t border-[var(--color-border)] backdrop-blur-[var(--glass-blur)]"
-                    >
-                        <textarea
-                            ref={expandedTextareaRef}
-                            value={input}
-                            onChange={(e) => setInput(e.target.value)}
-                            onPaste={handlePaste}
-                            onKeyDown={(e) => {
-                                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                                    e.preventDefault();
-                                    setExpandedInput(false);
-                                    handleSend();
-                                }
-                                if (e.key === "Escape") setExpandedInput(false);
-                            }}
-                            placeholder={t("chat.input.placeholder")}
-                            disabled={isBusy}
-                            rows={6}
-                            className={clsx(
-                                "w-full bg-black/40 border border-[var(--color-border)] rounded-lg",
-                                "text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)]",
-                                "text-sm px-4 py-3 font-body resize-none",
-                                "focus:outline-none focus:border-[var(--color-accent)] focus:shadow-[var(--glow-accent)]",
-                                "transition-all",
-                                isBusy && "opacity-50 cursor-not-allowed"
-                            )}
-                        />
-                        <div className="flex items-center justify-between mt-2">
-                            <span className="text-xs text-[var(--color-text-muted)]">Ctrl+Enter 发送 · Esc 收起</span>
-                            <div className="flex gap-2">
-                                <motion.button
-                                    type="button"
-                                    whileHover={{ scale: 1.05 }}
-                                    whileTap={{ scale: 0.95 }}
-                                    onClick={() => setExpandedInput(false)}
-                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)] transition-colors"
-                                >
-                                    <Minimize2 size={12} strokeWidth={1.5} />
-                                    收起
-                                </motion.button>
-                                <motion.button
-                                    type="button"
-                                    whileHover={{ scale: 1.05 }}
-                                    whileTap={{ scale: 0.95 }}
-                                    onClick={() => {
-                                        if (isStreaming) {
-                                            handleStopGeneration();
-                                            return;
-                                        }
-                                        setExpandedInput(false);
-                                        handleSend();
-                                    }}
-                                    disabled={isStreaming ? isStopping : (isBusy || !input.trim())}
-                                    className={clsx(
-                                        "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
-                                        isStreaming
-                                            ? "bg-red-500 text-white hover:bg-red-400"
-                                            : "bg-[var(--color-accent)] text-black hover:bg-white",
-                                        (isStreaming ? isStopping : (isBusy || !input.trim())) && "opacity-50 cursor-not-allowed"
-                                    )}
-                                >
-                                    {isStreaming ? (
-                                        <>
-                                            <X size={12} strokeWidth={1.8} />
-                                            {isStopping ? t("chat.actions.stopping") : t("chat.actions.stop")}
-                                        </>
-                                    ) : (
-                                        <>
-                                            <Send size={12} strokeWidth={1.5} />
-                                            发送
-                                        </>
-                                    )}
-                                </motion.button>
-                            </div>
-                        </div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
         </motion.div >
     );
 }

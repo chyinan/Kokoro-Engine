@@ -11,6 +11,7 @@ import {
 } from "./chat-history";
 
 export {
+  getCharacterHeaderDisplayName,
   getInitialCharacterConversationTarget,
   isFailureForActiveChat,
   shouldIgnoreLegacyChatError,

@@ -1,10 +1,17 @@
 // pattern: Imperative Shell
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Plus, Trash2, History, X, Check, Pencil, Pin } from "lucide-react";
-import { listConversations, deleteConversation, createConversation, renameConversation, getConversationDisplayTitle, hasPinnedConversationState } from "../../lib/kokoro-bridge";
+import { 
+    listConversations, 
+    deleteConversation, 
+    renameConversation, 
+    updateConversationState,
+    getConversationDisplayTitle, 
+    hasPinnedConversationState 
+} from "../../lib/kokoro-bridge";
 import type { Conversation } from "../../lib/kokoro-bridge";
 import { useTranslation } from "react-i18next";
 
@@ -13,7 +20,8 @@ type ConversationSidebarProps = {
     onClose: () => void;
     characterId: string;
     activeConversationId: string | null;
-    onStartEmptyConversation: () => void;
+    isSwitchingConversation?: boolean;
+    onStartEmptyConversation: () => void | boolean | Promise<void | boolean>;
     onSelectConversation: (conversationId: string | null) => Promise<void>;
 };
 
@@ -22,14 +30,58 @@ export default function ConversationSidebar({
     onClose,
     characterId,
     activeConversationId,
+    isSwitchingConversation = false,
     onStartEmptyConversation,
     onSelectConversation,
 }: ConversationSidebarProps) {
     const { t } = useTranslation();
     const [conversations, setConversations] = useState<Conversation[]>([]);
+    const [isCreating, setIsCreating] = useState(false);
+    const isActionBlocked = isCreating || isSwitchingConversation;
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editTitle, setEditTitle] = useState("");
     const editInputRef = useRef<HTMLInputElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [deletingConv, setDeletingConv] = useState<Conversation | null>(null);
+    const deletingConvRef = useRef<Conversation | null>(null);
+    deletingConvRef.current = deletingConv;
+
+    // 点击外部或按 Esc 键关闭侧边栏
+    useEffect(() => {
+        if (!open) return;
+
+        const handlePointerDown = (event: MouseEvent | TouchEvent) => {
+            if (
+                containerRef.current !== null &&
+                event.target instanceof Node &&
+                !containerRef.current.contains(event.target)
+            ) {
+                const toggleBtn = (event.target as HTMLElement).closest?.("[data-chat-history-toggle]");
+                if (toggleBtn) return;
+                onClose();
+            }
+        };
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape") {
+                event.preventDefault();
+                if (deletingConvRef.current !== null) {
+                    setDeletingConv(null);
+                    return;
+                }
+                onClose();
+            }
+        };
+
+        document.addEventListener("mousedown", handlePointerDown);
+        document.addEventListener("touchstart", handlePointerDown);
+        window.addEventListener("keydown", handleKeyDown);
+        return () => {
+            document.removeEventListener("mousedown", handlePointerDown);
+            document.removeEventListener("touchstart", handlePointerDown);
+            window.removeEventListener("keydown", handleKeyDown);
+        };
+    }, [open, onClose]);
 
     const refresh = useCallback(async () => {
         try {
@@ -39,6 +91,39 @@ export default function ConversationSidebar({
             console.error("[ConversationSidebar] Failed to list conversations:", err);
         }
     }, [characterId]);
+
+    // 置顶优先排序：已固定的会话始终排在最前面，同级别按更新时间倒序
+    const sortedConversations = useMemo(() => {
+        return [...conversations].sort((a, b) => {
+            const aPinned = hasPinnedConversationState(a.pinned_state) ? 1 : 0;
+            const bPinned = hasPinnedConversationState(b.pinned_state) ? 1 : 0;
+            if (aPinned !== bPinned) {
+                return bPinned - aPinned;
+            }
+            return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+        });
+    }, [conversations]);
+
+    const handleTogglePin = async (e: React.MouseEvent, conv: Conversation) => {
+        e.stopPropagation();
+        const isCurrentlyPinned = hasPinnedConversationState(conv.pinned_state);
+        const nextPinnedState = isCurrentlyPinned
+            ? "{}"
+            : JSON.stringify({ pinned: true, pinned_at: new Date().toISOString() });
+
+        // 乐观更新
+        setConversations(prev =>
+            prev.map(c => (c.id === conv.id ? { ...c, pinned_state: nextPinnedState } : c))
+        );
+
+        try {
+            await updateConversationState(conv.id, { pinned_state: nextPinnedState });
+            await refresh();
+        } catch (err) {
+            console.error("[ConversationSidebar] Failed to toggle pin:", err);
+            await refresh();
+        }
+    };
 
     useEffect(() => {
         setConversations([]);
@@ -52,18 +137,30 @@ export default function ConversationSidebar({
         }
     }, [editingId]);
 
-    const handleLoad = async (id: string) => {
-        if (id === activeConversationId) return;
+    const handleCreate = async () => {
+        if (isActionBlocked) return;
+        setIsCreating(true);
         try {
-            await onSelectConversation(id);
+            const result = await onStartEmptyConversation();
+            if (result !== false) {
+                onClose();
+            }
         } catch (err) {
-            console.error("[ConversationSidebar] Failed to load conversation:", err);
+            console.error("[ConversationSidebar] Failed to start empty conversation:", err);
+        } finally {
+            setIsCreating(false);
         }
     };
 
-    const handleDelete = async (e: React.MouseEvent, id: string) => {
+    const handleDeleteClick = (e: React.MouseEvent, conv: Conversation) => {
         e.stopPropagation();
-        if (!confirm(t("chat.history.confirmDelete"))) return;
+        setDeletingConv(conv);
+    };
+
+    const executeDelete = async () => {
+        if (!deletingConv) return;
+        const id = deletingConv.id;
+        setDeletingConv(null);
         try {
             await deleteConversation(id);
             if (activeConversationId === id) {
@@ -71,17 +168,7 @@ export default function ConversationSidebar({
             }
             await refresh();
         } catch (err) {
-            console.error("[ConversationSidebar] Failed to delete:", err);
-        }
-    };
-
-    const handleNew = async () => {
-        try {
-            await createConversation();
-            onStartEmptyConversation();
-            await refresh();
-        } catch (err) {
-            console.error("[ConversationSidebar] Failed to create:", err);
+            console.error("[ConversationSidebar] Failed to delete conversation:", err);
         }
     };
 
@@ -92,37 +179,47 @@ export default function ConversationSidebar({
     };
 
     const handleRenameConfirm = async (id: string) => {
+        if (!editingId) return;
         const trimmed = editTitle.trim();
-        if (trimmed) {
-            try {
-                await renameConversation(id, trimmed);
-                refresh();
-            } catch (err) {
-                console.error("[ConversationSidebar] Failed to rename:", err);
-            }
-        }
         setEditingId(null);
+        if (!trimmed) return;
+        try {
+            await renameConversation(id, trimmed);
+            await refresh();
+        } catch (err) {
+            console.error("[ConversationSidebar] Failed to rename conversation:", err);
+        }
     };
 
     const handleRenameKeyDown = (e: React.KeyboardEvent, id: string) => {
-        if (e.key === "Enter") handleRenameConfirm(id);
-        if (e.key === "Escape") setEditingId(null);
+        if (e.key === "Enter") {
+            void handleRenameConfirm(id);
+        } else if (e.key === "Escape") {
+            setEditingId(null);
+        }
+    };
+
+    const handleLoad = async (id: string) => {
+        if (editingId || isActionBlocked) return;
+        if (id === activeConversationId) {
+            onClose();
+            return;
+        }
+        await onSelectConversation(id);
+        onClose();
     };
 
     const formatTime = (iso: string) => {
         try {
             const d = new Date(iso);
             const now = new Date();
-            const diff = now.getTime() - d.getTime();
-            const mins = Math.floor(diff / 60000);
-            if (mins < 1) return t("settings.memory.time.just_now");
-            if (mins < 60) return t("settings.memory.time.minutes_ago", { count: mins });
-            const hours = Math.floor(mins / 60);
-            if (hours < 24) return t("settings.memory.time.hours_ago", { count: hours });
-            const days = Math.floor(hours / 24);
-            return t("settings.memory.time.days_ago", { count: days });
+            const isToday = d.toDateString() === now.toDateString();
+            if (isToday) {
+                return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+            }
+            return d.toLocaleDateString([], { month: "numeric", day: "numeric" });
         } catch {
-            return iso;
+            return "";
         }
     };
 
@@ -130,62 +227,78 @@ export default function ConversationSidebar({
         <AnimatePresence>
             {open && (
                 <motion.div
-                    initial={{ x: -280, opacity: 0 }}
-                    animate={{ x: 0, opacity: 1 }}
-                    exit={{ x: -280, opacity: 0 }}
-                    transition={{ type: "spring", stiffness: 300, damping: 30 }}
-                    className={clsx(
-                        "absolute inset-y-0 left-0 z-[100] w-[260px]",
-                        "bg-[var(--color-bg-surface)] backdrop-blur-[var(--glass-blur)]",
-                        "border-r border-[var(--color-border)]",
-                        "flex flex-col shadow-xl"
-                    )}
+                    key="conversation-sidebar-backdrop"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.15 }}
+                    onClick={onClose}
+                    className="absolute inset-0 bg-black/20 backdrop-blur-[0.5px] z-20 cursor-pointer"
+                    data-testid="conversation-sidebar-backdrop"
+                    aria-hidden="true"
+                />
+            )}
+            {open && (
+                <motion.div
+                    key="conversation-sidebar-drawer"
+                    ref={containerRef}
+                    initial={{ x: "100%" }}
+                    animate={{ x: 0 }}
+                    exit={{ x: "100%" }}
+                    transition={{ type: "spring", damping: 28, stiffness: 300 }}
+                    className="absolute inset-y-0 right-0 w-72 bg-[var(--color-bg-secondary)] border-l border-[var(--color-border)] shadow-2xl z-30 flex flex-col backdrop-blur-md"
                 >
                     {/* Header */}
-                    <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--color-border)]">
-                        <div className="flex items-center gap-2">
-                            <History size={14} strokeWidth={1.5} className="text-[var(--color-text-muted)]" />
-                            <span className="text-xs font-semibold tracking-wider uppercase text-[var(--color-text-secondary)]">
-                                {t("chat.history.title")}
-                            </span>
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
+                        <div className="flex items-center gap-2 text-sm font-medium text-[var(--color-text-primary)]">
+                            <History size={16} strokeWidth={1.5} />
+                            <span>{t("chat.history.title")}</span>
                         </div>
                         <button
                             onClick={onClose}
-                            className="p-1.5 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
+                            className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/5 transition-colors"
                         >
-                            <X size={14} strokeWidth={1.5} />
+                            <X size={16} strokeWidth={1.5} />
                         </button>
                     </div>
 
                     {/* New chat button */}
-                    <div className="px-3 py-2">
+                    <div className="p-2">
                         <button
-                            onClick={handleNew}
+                            type="button"
+                            onClick={handleCreate}
+                            disabled={isActionBlocked}
+                            title={isActionBlocked ? t("chat.history.creating", "正在创建新对话...") : undefined}
                             className={clsx(
-                                "w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs",
-                                "border border-dashed border-[var(--color-border)]",
-                                "text-[var(--color-text-muted)] hover:text-[var(--color-accent)] hover:border-[var(--color-accent)]/50",
-                                "transition-colors"
+                                "w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors border",
+                                isActionBlocked
+                                    ? "opacity-50 cursor-not-allowed bg-white/5 border-transparent text-[var(--color-text-muted)]"
+                                    : "bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 text-[var(--color-accent)] border-[var(--color-accent)]/20 cursor-pointer"
                             )}
                         >
-                            <Plus size={14} strokeWidth={1.5} />
-                            {t("chat.history.newChat")}
+                            {isActionBlocked ? (
+                                <span className="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                            ) : (
+                                <Plus size={14} strokeWidth={1.5} />
+                            )}
+                            {isActionBlocked ? t("chat.history.creating", "正在创建新对话...") : t("chat.history.newChat")}
                         </button>
                     </div>
 
                     {/* Conversation list */}
                     <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1 scrollable">
-                        {conversations.length === 0 ? (
+                        {sortedConversations.length === 0 ? (
                             <div className="text-center text-xs text-[var(--color-text-muted)] py-8">
                                 {t("chat.history.empty")}
                             </div>
                         ) : (
-                            conversations.map(conv => (
+                            sortedConversations.map(conv => (
                                 <div
                                     key={conv.id}
                                     onClick={() => handleLoad(conv.id)}
                                     className={clsx(
-                                        "group flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer transition-colors",
+                                        "group flex items-center gap-2 px-3 py-2.5 rounded-lg transition-colors",
+                                        isActionBlocked ? "cursor-not-allowed opacity-60" : "cursor-pointer",
                                         activeConversationId === conv.id
                                             ? "bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30"
                                             : "hover:bg-white/5 border border-transparent"
@@ -193,7 +306,7 @@ export default function ConversationSidebar({
                                 >
                                     <div className="flex-1 min-w-0">
                                         {editingId === conv.id ? (
-                                            <div className="flex items-center gap-1">
+                                             <div className="flex items-center gap-1">
                                                 <input
                                                     ref={editInputRef}
                                                     value={editTitle}
@@ -204,8 +317,11 @@ export default function ConversationSidebar({
                                                     onClick={e => e.stopPropagation()}
                                                 />
                                                 <button
-                                                    onClick={(e) => { e.stopPropagation(); handleRenameConfirm(conv.id); }}
-                                                    className="p-0.5 text-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        void handleRenameConfirm(conv.id);
+                                                    }}
+                                                    className="p-1 text-[var(--color-accent)] hover:opacity-80"
                                                 >
                                                     <Check size={12} strokeWidth={2} />
                                                 </button>
@@ -221,9 +337,9 @@ export default function ConversationSidebar({
                                                         <span className="truncate max-w-[110px]">· {conv.topic}</span>
                                                     )}
                                                     {hasPinnedConversationState(conv.pinned_state) && (
-                                                        <span className="inline-flex items-center gap-0.5 text-[var(--color-accent)]">
-                                                            <Pin size={9} strokeWidth={1.5} />
-                                                            已固定
+                                                        <span className="inline-flex items-center gap-0.5 text-[var(--color-accent)] font-medium">
+                                                            <Pin size={9} strokeWidth={1.5} className="fill-current" />
+                                                            {t("chat.history.pinned")}
                                                         </span>
                                                     )}
                                                 </div>
@@ -233,15 +349,37 @@ export default function ConversationSidebar({
                                     {editingId !== conv.id && (
                                         <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                                             <button
+                                                disabled={isActionBlocked}
+                                                onClick={(e) => handleTogglePin(e, conv)}
+                                                className={clsx(
+                                                    "p-1 rounded transition-colors",
+                                                    hasPinnedConversationState(conv.pinned_state)
+                                                        ? "text-[var(--color-accent)] hover:text-[var(--color-text-muted)]"
+                                                        : "text-[var(--color-text-muted)] hover:text-[var(--color-accent)]",
+                                                    isActionBlocked && "cursor-not-allowed opacity-50"
+                                                )}
+                                                title={hasPinnedConversationState(conv.pinned_state) ? t("chat.history.unpin") : t("chat.history.pin")}
+                                            >
+                                                <Pin size={12} strokeWidth={1.5} className={hasPinnedConversationState(conv.pinned_state) ? "fill-current" : ""} />
+                                            </button>
+                                            <button
+                                                disabled={isActionBlocked}
                                                 onClick={(e) => handleRenameStart(e, conv)}
-                                                className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
+                                                className={clsx(
+                                                    "p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors",
+                                                    isActionBlocked && "cursor-not-allowed opacity-50"
+                                                )}
                                                 title={t("chat.history.rename")}
                                             >
                                                 <Pencil size={12} strokeWidth={1.5} />
                                             </button>
                                             <button
-                                                onClick={(e) => handleDelete(e, conv.id)}
-                                                className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-error)] transition-colors"
+                                                disabled={isActionBlocked}
+                                                onClick={(e) => handleDeleteClick(e, conv)}
+                                                className={clsx(
+                                                    "p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-error)] transition-colors",
+                                                    isActionBlocked && "cursor-not-allowed opacity-50"
+                                                )}
                                                 title={t("chat.history.delete")}
                                             >
                                                 <Trash2 size={12} strokeWidth={1.5} />
@@ -252,6 +390,69 @@ export default function ConversationSidebar({
                             ))
                         )}
                     </div>
+
+                    {/* 删除会话二次确认模态窗 */}
+                    <AnimatePresence>
+                        {deletingConv && (
+                            <motion.div
+                                key="conversation-delete-confirm-modal"
+                                data-testid="conversation-delete-confirm-modal"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="absolute inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-3"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDeletingConv(null);
+                                }}
+                            >
+                                <motion.div
+                                    initial={{ scale: 0.9, opacity: 0 }}
+                                    animate={{ scale: 1, opacity: 1 }}
+                                    exit={{ scale: 0.9, opacity: 0 }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="w-full max-w-[260px] bg-[var(--color-bg-secondary,#1e293b)] border border-[var(--color-border)] rounded-xl p-4 shadow-2xl space-y-3"
+                                >
+                                    <div className="flex items-center gap-2 text-[var(--color-error,#ef4444)]">
+                                        <Trash2 size={16} strokeWidth={2} />
+                                        <span className="font-semibold text-sm">
+                                            {t("chat.history.delete")}
+                                        </span>
+                                    </div>
+                                    <div className="space-y-1">
+                                        <p className="text-xs text-[var(--color-text-primary)] font-medium truncate" title={getConversationDisplayTitle(deletingConv)}>
+                                            {getConversationDisplayTitle(deletingConv)}
+                                        </p>
+                                        <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+                                            {t("chat.history.confirmDelete")}
+                                        </p>
+                                    </div>
+                                    <div className="flex items-center justify-end gap-2 pt-1">
+                                        <button
+                                            type="button"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setDeletingConv(null);
+                                            }}
+                                            className="px-3 py-1.5 rounded-lg text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-slate-700/50 transition-colors"
+                                        >
+                                            {t("chat.actions.cancel")}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                void executeDelete();
+                                            }}
+                                            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 transition-colors"
+                                        >
+                                            {t("chat.history.delete")}
+                                        </button>
+                                    </div>
+                                </motion.div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
                 </motion.div>
             )}
         </AnimatePresence>
