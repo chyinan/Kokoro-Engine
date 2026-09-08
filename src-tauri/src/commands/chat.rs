@@ -6,8 +6,9 @@ use crate::actions::executor::{
 };
 use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{
-    build_tool_audit_event, builtin_tool_id, execute_tool_calls, ActionContext, ActionRegistry,
-    ActionResult, PermissionDecision, ToolAuditInput, ToolInvocation,
+    build_tool_audit_event, builtin_tool_id, execute_tool_calls_with_cancellation, ActionContext,
+    ActionRegistry, ActionResult, PermissionDecision, ToolAuditInput, ToolCancellationError,
+    ToolInvocation,
 };
 use crate::ai::context::AIOrchestrator;
 use crate::ai::context::Message;
@@ -444,6 +445,14 @@ fn stream_first_chunk_timeout() -> std::time::Duration {
 
 fn stream_chunk_idle_timeout() -> std::time::Duration {
     std::env::var("KOKORO_LLM_CHUNK_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(60))
+}
+
+fn tool_execution_timeout() -> std::time::Duration {
+    std::env::var("KOKORO_TOOL_EXECUTION_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map(std::time::Duration::from_secs)
@@ -1735,13 +1744,35 @@ async fn wait_for_tool_approval_and_execute(
                 .await
                 .map_err(KokoroError::Chat)?;
 
-            let result = execute_single_tool_after_approval(
-                ctx.app,
-                ctx.registry_state,
-                ctx.character_id,
-                &outcome.invocation,
-            )
-            .await;
+            let mut tool_cancel_rx = ctx.cancel_state.subscribe_cancellation(ctx.turn_id).await;
+            let timeout_duration = tool_execution_timeout();
+
+            let result = tokio::select! {
+                biased;
+                _ = wait_for_cancel_event(&mut tool_cancel_rx) => {
+                    tracing::info!(
+                        target: "chat::tools",
+                        "[ToolApproval] Approved tool execution interrupted by cancellation for turn {}",
+                        ctx.turn_id
+                    );
+                    return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+                }
+                res = tokio::time::timeout(timeout_duration, execute_single_tool_after_approval(
+                    ctx.app,
+                    ctx.registry_state,
+                    ctx.character_id,
+                    &outcome.invocation,
+                )) => {
+                    match res {
+                        Ok(exec_res) => exec_res,
+                        Err(_) => Err(format!(
+                            "Tool '{}' execution timed out after {}s",
+                            outcome.tool_name(),
+                            timeout_duration.as_secs()
+                        )),
+                    }
+                }
+            };
 
             // Guard: turn MUST NOT be cancelled after tool execution
             ensure_turn_not_cancelled(ctx.cancel_state, ctx.turn_id)
@@ -2904,14 +2935,27 @@ pub async fn stream_chat(
         ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
             .await
             .map_err(KokoroError::Chat)?;
-        let execution_outcomes = execute_tool_calls(
+        let execution_outcomes = match execute_tool_calls_with_cancellation(
             window.app_handle(),
             &_action_registry.inner().clone(),
             &tool_settings_state.inner().clone(),
             &char_id,
             &tool_invocations,
+            cancel_rx.clone(),
+            Some(tool_execution_timeout()),
         )
-        .await;
+        .await
+        {
+            Ok(outcomes) => outcomes,
+            Err(ToolCancellationError) => {
+                tracing::info!(
+                    target: "chat::tools",
+                    "[ToolCall] Tool execution cancelled by user for turn {}",
+                    assistant_turn_id
+                );
+                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+            }
+        };
         ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
             .await
             .map_err(KokoroError::Chat)?;
@@ -6591,6 +6635,223 @@ mod tests {
             "Partial text in round 2 before timeout..."
         );
     }
+
+    #[tokio::test]
+    async fn test_hung_tool_execution_cancelled_and_releases_turn_lock() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-tool-cancel-1").await;
+
+        assert!(!orchestrator.is_chat_busy());
+
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-tool-cancel-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        // Concurrent Turn 2 is rejected
+        let busy_err = orchestrator
+            .try_acquire_chat_turn("req-tool-cancel-2")
+            .expect_err("must be rejected while busy");
+        assert!(busy_err.contains("chat_turn_busy"));
+
+        // Simulate hung tool execution guarded by cancellation listener
+        let cancel_state_clone = Arc::clone(&cancel_state);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let mut cancel_rx = cancel_state_clone
+                .subscribe_cancellation("turn-tool-cancel-1")
+                .await;
+            let _turn_guard = TurnCancellationGuard::new(
+                cancel_state_clone.clone(),
+                "turn-tool-cancel-1".to_string(),
+            );
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            // Hanging tool execution simulated as long async work
+            let tool_execution_fut = async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                "tool_done"
+            };
+
+            let outcome = tokio::select! {
+                biased;
+                _ = wait_for_cancel_event(&mut cancel_rx) => {
+                    Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()))
+                }
+                res = tool_execution_fut => {
+                    Ok(res)
+                }
+            };
+
+            assert!(matches!(outcome, Err(KokoroError::Chat(ref msg)) if msg == TURN_CANCELLED_BY_USER_MESSAGE));
+            // _execution_guard and _turn_guard dropped upon task exit
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        // Simulate user clicking Stop
+        let cancel_res = cancel_chat_turn_inner(
+            "turn-tool-cancel-1".to_string(),
+            Some("user_stop".to_string()),
+            cancel_state.clone(),
+        )
+        .await;
+        assert!(cancel_res.is_ok(), "cancellation should succeed");
+
+        // The background tool execution task exits promptly
+        handle.await.expect("background task finished");
+
+        // Global turn lock must be released!
+        assert!(
+            !orchestrator.is_chat_busy(),
+            "chat turn lock must be released after tool cancellation"
+        );
+
+        // Subsequent chat request succeeds immediately without chat_turn_busy!
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-tool-cancel-2")
+            .expect("turn 2 must succeed after tool execution was cancelled");
+        assert_eq!(
+            guard2.context().unwrap().client_request_id,
+            "req-tool-cancel-2"
+        );
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
+    }
+
+    #[tokio::test]
+    async fn test_hung_tool_execution_times_out_and_releases_turn_lock() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-tool-timeout-1").await;
+
+        assert!(!orchestrator.is_chat_busy());
+
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-tool-timeout-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        // Concurrent Turn 2 is rejected
+        let busy_err = orchestrator
+            .try_acquire_chat_turn("req-tool-timeout-2")
+            .expect_err("must be rejected while busy");
+        assert!(busy_err.contains("chat_turn_busy"));
+
+        // Simulate hung tool execution that hits timeout
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            let timeout_duration = std::time::Duration::from_millis(50);
+            let hanging_tool = async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                "ok"
+            };
+
+            let res = tokio::time::timeout(timeout_duration, hanging_tool).await;
+            assert!(res.is_err(), "tool execution must hit timeout");
+            // _execution_guard dropped upon task exit
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        handle.await.expect("task finished");
+
+        // Lock released automatically after timeout
+        assert!(
+            !orchestrator.is_chat_busy(),
+            "chat turn lock must be released after tool timeout"
+        );
+
+        // Subsequent request succeeds
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-tool-timeout-2")
+            .expect("subsequent request must acquire lock after tool timeout");
+        assert_eq!(
+            guard2.context().unwrap().client_request_id,
+            "req-tool-timeout-2"
+        );
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
+    }
+
+    #[tokio::test]
+    async fn test_approved_tool_execution_timeout_returns_error() {
+        let timeout_duration = std::time::Duration::from_millis(50);
+        let hanging_tool = async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok::<crate::actions::ActionResult, String>(sample_action_result("done"))
+        };
+
+        let result = match tokio::time::timeout(timeout_duration, hanging_tool).await {
+            Ok(exec_res) => exec_res,
+            Err(_) => Err(format!(
+                "Tool 'custom_script' execution timed out after {}s",
+                timeout_duration.as_secs()
+            )),
+        };
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("Tool 'custom_script' execution timed out"));
+    }
+
+    #[tokio::test]
+    async fn test_approved_tool_execution_cancelled_while_running() {
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-approved-cancel").await;
+        let mut tool_cancel_rx = cancel_state
+            .subscribe_cancellation("turn-approved-cancel")
+            .await;
+
+        let cancel_state_clone = Arc::clone(&cancel_state);
+        let cancel_handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_state_clone
+                .cancel_turn("turn-approved-cancel", Some("stop".into()))
+                .await
+        });
+
+        let timeout_duration = std::time::Duration::from_secs(10);
+        let hanging_tool = async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok::<crate::actions::ActionResult, String>(sample_action_result("done"))
+        };
+
+        let outcome: Result<Result<crate::actions::ActionResult, String>, KokoroError> = tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut tool_cancel_rx) => {
+                Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()))
+            }
+            res = tokio::time::timeout(timeout_duration, hanging_tool) => {
+                match res {
+                    Ok(exec_res) => Ok(exec_res),
+                    Err(_) => Err(KokoroError::Chat("timeout".to_string())),
+                }
+            }
+        };
+
+        cancel_handle.await.unwrap().unwrap();
+        match outcome {
+            Err(KokoroError::Chat(msg)) => assert_eq!(msg, TURN_CANCELLED_BY_USER_MESSAGE),
+            other => panic!("expected cancelled chat error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_tool_execution_timeout_default_and_env() {
+        // Without env var, defaults to 60s
+        let default_timeout = tool_execution_timeout();
+        assert!(default_timeout.as_secs() >= 60);
+    }
 }
+
 
 

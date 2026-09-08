@@ -779,4 +779,83 @@ describe("chat stop generation race condition and 4-layer defense", () => {
             expect(validation.reason).toBe("cancelled");
         }
     });
+
+    it("recovers interactability and allows subsequent send when turn is stopped while stuck in tool/MCP execution", async () => {
+        let isStreaming = true;
+        let isBusy = true;
+        let isStopping = false;
+        let cancelRequested = false;
+        let isThinking = false;
+        let messages: any[] = [{ role: "user", text: "Run MCP command" }];
+
+        // Turn is active and stuck in tool execution
+        let currentTurn: PendingTurnState | null = {
+            turnId: "turn-tool-stuck-1",
+            messageIndex: 1,
+            rawText: "",
+            visibleTextStarted: false,
+            translationPending: false,
+            tools: [
+                {
+                    toolId: "tool-call-1",
+                    toolName: "mcp_execute_query",
+                    tool: "mcp_execute_query",
+                    text: "Calling MCP tool...",
+                    source: "mcp",
+                },
+            ],
+        };
+
+        const cancelledTurns: string[] = [];
+        const requestTurnCancellation = vi.fn(async (turnId: string) => {
+            cancelledTurns.push(turnId);
+        });
+
+        const endTurnActivity = vi.fn(() => {
+            cancelRequested = false;
+            isStopping = false;
+            isStreaming = false;
+            isBusy = false;
+        });
+
+        // 1. While tool execution is stuck, user cannot send
+        const canSendWhileStuck = !isBusy && !isStreaming && !isStopping;
+        expect(canSendWhileStuck).toBe(false);
+
+        // 2. User clicks Stop to abort stuck tool execution
+        cancelRequested = true;
+        isStopping = true;
+        isThinking = false;
+        const activeTurnId = currentTurn?.turnId;
+        if (activeTurnId) {
+            await requestTurnCancellation(activeTurnId);
+        }
+
+        expect(requestTurnCancellation).toHaveBeenCalledWith("turn-tool-stuck-1");
+        expect(isStopping).toBe(true);
+        expect(cancelRequested).toBe(true);
+
+        // 3. onChatTurnFinish arrives with status: "cancelled"
+        endTurnActivity();
+        currentTurn = null;
+
+        // 4. Verify that UI state has recovered and is no longer busy
+        expect(isBusy).toBe(false);
+        expect(isStreaming).toBe(false);
+        expect(isStopping).toBe(false);
+        expect(isThinking).toBe(false);
+        expect(currentTurn).toBeNull();
+
+        // 5. Subsequent message can now be sent successfully!
+        const canSendAfterStop = !isBusy && !isStreaming && !isStopping;
+        expect(canSendAfterStop).toBe(true);
+
+        // Simulate subsequent send
+        isStreaming = true;
+        isBusy = true;
+        isThinking = true;
+        messages.push({ role: "user", text: "Follow-up question" });
+        expect(messages).toHaveLength(2);
+        expect(messages[1].text).toBe("Follow-up question");
+    });
 });

@@ -1,7 +1,8 @@
 // pattern: Functional Core
 import type { ChatPanelMessage } from "./turn-state";
 
-const DEFAULT_EXTERNAL_TURN_TTL_MS = 120_000;
+export const DEFAULT_EXTERNAL_TURN_TTL_MS = 120_000;
+export const DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS = 15_000;
 const registeredExternalTurns = new Map<string, number>();
 
 function pruneExpiredExternalTurns(now: number = Date.now()): void {

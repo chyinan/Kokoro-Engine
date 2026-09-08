@@ -48,6 +48,7 @@ import {
     mergeResyncedConversationMessages,
     isChatSessionCurrent,
     isAuthorizedExternalTurn,
+    DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS,
 } from "./chat/chat-turn-lifecycle";
 import { buildChatMessagesFromConversation } from "./chat-history";
 import {
@@ -378,7 +379,7 @@ export default function ChatPanel({
     const [isStopping, setIsStopping] = useState(false);
     const cancelRequestedRef = useRef(false);
     const cancellationWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const pendingExternalWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pendingExternalWatchdogTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
     const cancelledExternalTurnIdsRef = useRef<Map<string, number>>(new Map());
     const messagesRef = useRef<ChatMessage[]>([]);
     const [isThinking, setIsThinking] = useState(false);
@@ -398,12 +399,33 @@ export default function ChatPanel({
     // Per-message translation expand state (set of message indices)
     const [expandedTranslations, setExpandedTranslations] = useState<Set<number>>(new Set());
 
-    const clearPendingExternalWatchdog = useCallback(() => {
-        if (pendingExternalWatchdogTimerRef.current !== null) {
-            clearTimeout(pendingExternalWatchdogTimerRef.current);
-            pendingExternalWatchdogTimerRef.current = null;
+    const clearPendingExternalWatchdog = useCallback((clientRequestId: string) => {
+        const timer = pendingExternalWatchdogTimersRef.current.get(clientRequestId);
+        if (timer !== undefined) {
+            clearTimeout(timer);
+            pendingExternalWatchdogTimersRef.current.delete(clientRequestId);
         }
     }, []);
+
+    const clearAllPendingExternalWatchdogs = useCallback(() => {
+        for (const timer of pendingExternalWatchdogTimersRef.current.values()) {
+            clearTimeout(timer);
+        }
+        pendingExternalWatchdogTimersRef.current.clear();
+    }, []);
+
+    const startPendingExternalWatchdog = useCallback((
+        clientRequestId: string,
+        onExpired: () => void,
+        timeoutMs: number = DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS,
+    ) => {
+        clearPendingExternalWatchdog(clientRequestId);
+        const timer = setTimeout(() => {
+            pendingExternalWatchdogTimersRef.current.delete(clientRequestId);
+            onExpired();
+        }, timeoutMs);
+        pendingExternalWatchdogTimersRef.current.set(clientRequestId, timer);
+    }, [clearPendingExternalWatchdog]);
 
     const registerCancelledExternalId = useCallback((id: string) => {
         const now = Date.now();
@@ -442,7 +464,6 @@ export default function ChatPanel({
             clearTimeout(cancellationWatchdogTimerRef.current);
             cancellationWatchdogTimerRef.current = null;
         }
-        clearPendingExternalWatchdog();
         cancelRequestedRef.current = false;
         setIsStopping(false);
         isStreamingRef.current = false;
@@ -451,7 +472,7 @@ export default function ChatPanel({
             isBusyRef.current = false;
             setIsBusy(false);
         }
-    }, [clearPendingExternalWatchdog]);
+    }, []);
 
     // Raw (unfiltered) full response text — accumulated from all deltas
     const rawResponseRef = useRef("");
@@ -693,6 +714,7 @@ export default function ChatPanel({
         }
         cancellationWatchdogTimerRef.current = setTimeout(() => {
             console.warn("[ChatPanel] Cancellation watchdog triggered - forcing UI reset");
+            clearAllPendingExternalWatchdogs();
             endTurnActivity();
             cancelRequestedRef.current = true;
             currentTurnRef.current = null;
@@ -705,10 +727,11 @@ export default function ChatPanel({
         if (activeTurnId) {
             void requestTurnCancellation(activeTurnId);
         } else if (pendingClientRequestId) {
+            clearPendingExternalWatchdog(pendingClientRequestId);
             pendingTurnRequestRef.current = null;
             void requestTurnCancellation(pendingClientRequestId);
         }
-    }, [isStopping, requestTurnCancellation, endTurnActivity]);
+    }, [isStopping, requestTurnCancellation, endTurnActivity, clearAllPendingExternalWatchdogs, clearPendingExternalWatchdog]);
 
     // 自动恢复最近对话
     useEffect(() => {
@@ -775,6 +798,7 @@ export default function ChatPanel({
             } else if (pendingClientRequestId) {
                 cancelRequestedRef.current = true;
                 setIsStopping(true);
+                clearPendingExternalWatchdog(pendingClientRequestId);
                 pendingTurnRequestRef.current = null;
                 try {
                     await cancelChatTurn(pendingClientRequestId, "conversation_switched");
@@ -794,7 +818,7 @@ export default function ChatPanel({
             isBusyRef.current = false;
             setIsBusy(false);
         }
-    }, [activeCharacterId]);
+    }, [activeCharacterId, clearPendingExternalWatchdog]);
 
     const handleStartEmptyConversation = useCallback(async (): Promise<boolean> => {
         if (isSwitchingConversationRef.current) {
@@ -826,6 +850,7 @@ export default function ChatPanel({
             } else if (pendingClientRequestId) {
                 cancelRequestedRef.current = true;
                 setIsStopping(true);
+                clearPendingExternalWatchdog(pendingClientRequestId);
                 pendingTurnRequestRef.current = null;
                 try {
                     await cancelChatTurn(pendingClientRequestId, "new_conversation_started");
@@ -833,6 +858,7 @@ export default function ChatPanel({
                     console.error("[ChatPanel] Failed to cancel prior pending request before new conversation:", err);
                 }
             }
+            clearAllPendingExternalWatchdogs();
 
             // 先执行后端清空与重置，确保后端 current_conversation_id 与历史已置空
             await clearHistory();
@@ -1592,8 +1618,7 @@ export default function ChatPanel({
                         setIsThinking(true);
                         userScrolledRef.current = false;
 
-                        clearPendingExternalWatchdog();
-                        pendingExternalWatchdogTimerRef.current = setTimeout(() => {
+                        startPendingExternalWatchdog(clientRequestId, () => {
                             if (pendingTurnRequestRef.current?.clientRequestId === clientRequestId) {
                                 console.warn("[ChatPanel] External pending turn watchdog expired for:", clientRequestId);
                                 setMessages(prev => prev.filter(m => m.clientRequestId !== clientRequestId));
@@ -1604,7 +1629,7 @@ export default function ChatPanel({
                                 setIsThinking(false);
                                 endTurnActivity();
                             }
-                        }, 2500);
+                        });
 
                         emit("pet-chat-accepted", {
                             client_request_id: clientRequestId,
@@ -1617,7 +1642,7 @@ export default function ChatPanel({
                         const reqId = event.payload?.client_request_id;
                         if (!reqId) return;
 
-                        clearPendingExternalWatchdog();
+                        clearPendingExternalWatchdog(reqId);
                         registerCancelledExternalId(reqId);
 
                         const isPending = pendingTurnRequestRef.current?.clientRequestId === reqId;
@@ -1639,7 +1664,6 @@ export default function ChatPanel({
 
                     onChatTurnStart(({ turn_id, client_request_id, conversation_id, user_message_id }) => {
                         if (aborted) return;
-                        clearPendingExternalWatchdog();
                         if (interactionDisabled) {
                             // ChatPanel is disabled (e.g. onboarding overlay active); ignore rather than cancel external turns
                             return;
@@ -1665,6 +1689,8 @@ export default function ChatPanel({
                             }
                             return;
                         }
+
+                        clearPendingExternalWatchdog(validation.matchedClientRequestId);
 
                         if (validation.shouldUpdateConversation && validation.targetConversationId) {
                             setActiveConversationId(validation.targetConversationId);
@@ -2088,8 +2114,7 @@ export default function ChatPanel({
                         rawResponseRef.current = "";
                         currentTurnRef.current = null;
 
-                        clearPendingExternalWatchdog();
-                        pendingExternalWatchdogTimerRef.current = setTimeout(() => {
+                        startPendingExternalWatchdog(clientRequestId, () => {
                             if (pendingTurnRequestRef.current?.clientRequestId === clientRequestId) {
                                 console.warn("[ChatPanel] External pending interaction watchdog expired for:", clientRequestId);
                                 pendingTurnRequestRef.current = null;
@@ -2099,7 +2124,7 @@ export default function ChatPanel({
                                 setIsThinking(false);
                                 endTurnActivity();
                             }
-                        }, 2500);
+                        });
 
                         emit("interaction-trigger-accepted", {
                             client_request_id: clientRequestId,
@@ -2112,7 +2137,7 @@ export default function ChatPanel({
                         const reqId = event.payload?.client_request_id;
                         if (!reqId) return;
 
-                        clearPendingExternalWatchdog();
+                        clearPendingExternalWatchdog(reqId);
                         registerCancelledExternalId(reqId);
 
                         const isPending = pendingTurnRequestRef.current?.clientRequestId === reqId;
@@ -2156,7 +2181,7 @@ export default function ChatPanel({
         void setup();
         return () => {
             aborted = true;
-            clearPendingExternalWatchdog();
+            clearAllPendingExternalWatchdogs();
             if (cancellationWatchdogTimerRef.current !== null) {
                 clearTimeout(cancellationWatchdogTimerRef.current);
                 cancellationWatchdogTimerRef.current = null;
