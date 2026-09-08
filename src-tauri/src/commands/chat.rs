@@ -2015,6 +2015,22 @@ pub(crate) fn resolve_turn_user_message_id(
 
 // ── Stream Chat Command ────────────────────────────────────
 
+struct PreparedChatTurn {
+    char_id: String,
+    conversation_id: Option<String>,
+    user_message_id: Option<i64>,
+    bound_generation: u64,
+    selected_vision_observation: Option<crate::vision::context::VisionObservation>,
+    prompt_messages: Vec<crate::ai::context::Message>,
+    llm_config: crate::llm::llm_config::LlmConfig,
+    chat_provider: std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
+    effective_provider_id: String,
+    native_tools_enabled: bool,
+    native_tools: Vec<crate::llm::provider::LlmToolDefinition>,
+    system_provider: std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
+    memory_target_language: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn stream_chat(
@@ -2089,391 +2105,443 @@ pub async fn stream_chat(
         );
     });
 
-    // 0. Resolve character ID for this request (not stored in shared state)
-    let char_id = request
-        .character_id
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
-    let requested_conversation_id = request.conversation_id.clone();
-    let (initial_conversation_id, initial_generation) =
-        state.conversation_state_snapshot().await;
+    let active_conversation_id_holder = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let active_conv_id_for_prep = std::sync::Arc::clone(&active_conversation_id_holder);
     let hook_runtime = app.try_state::<HookRuntime>();
-    // Keep shared character_id in sync for modules that still read it (heartbeat)
-    state.set_character_id(char_id.clone()).await;
 
-    if let Some(hooks) = hook_runtime.as_ref() {
-        let hook_payload = build_chat_hook_payload(
-            requested_conversation_id
-                .clone()
-                .or_else(|| initial_conversation_id.clone()),
-            &char_id,
-            None,
-            Some(request.message.clone()),
-            None,
-            None,
-            request.hidden,
-        );
-        let hook_fut = hooks.emit_best_effort(&HookEvent::BeforeUserMessage, &hook_payload);
-        tokio::select! {
-            biased;
-            _ = wait_for_cancel_event(&mut cancel_rx) => {
-                tracing::info!(
-                    target: "chat",
-                    "[stream_chat] Turn {} (request {}) cancelled during BeforeUserMessage hook",
-                    assistant_turn_id,
-                    client_request_id
-                );
-                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+    let prep_fut = async {
+        // 0. Resolve character ID for this request (not stored in shared state)
+        let char_id = request
+            .character_id
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        let requested_conversation_id = request.conversation_id.clone();
+        let (initial_conversation_id, initial_generation) =
+            state.conversation_state_snapshot().await;
+        // Keep shared character_id in sync for modules that still read it (heartbeat)
+        state.set_character_id(char_id.clone()).await;
+
+        if let Some(hooks) = hook_runtime.as_ref() {
+            let hook_payload = build_chat_hook_payload(
+                requested_conversation_id
+                    .clone()
+                    .or_else(|| initial_conversation_id.clone()),
+                &char_id,
+                None,
+                Some(request.message.clone()),
+                None,
+                None,
+                request.hidden,
+            );
+            let hook_fut = hooks.emit_best_effort(&HookEvent::BeforeUserMessage, &hook_payload);
+            tokio::select! {
+                _ = tokio::time::sleep(chat_hook_execution_timeout()) => {
+                    tracing::warn!(
+                        target: "chat",
+                        "[stream_chat] BeforeUserMessage hook timed out after {}s",
+                        chat_hook_execution_timeout().as_secs()
+                    );
+                }
+                _ = hook_fut => {}
             }
-            _ = tokio::time::sleep(chat_hook_execution_timeout()) => {
+        }
+
+        // Record user activity
+        state.touch_activity().await;
+
+        // Typing simulation
+        {
+            let is_question = request.message.contains('?') || request.message.contains('？');
+            let typing_params = crate::ai::typing_sim::calculate_typing_delay(
+                "neutral",
+                0.5,
+                0.6,
+                request.message.chars().count(),
+                is_question,
+            );
+            let _ = app.emit("chat-typing", &typing_params);
+        }
+
+        // 1. Select current-turn vision context before any user-message persistence.
+        let selected_vision_observation = _vision_watcher
+            .context
+            .latest_completed_observation(chrono::Utc::now())
+            .await;
+
+        // 2. Update History with User Message under conversation_switch_lock
+        let system_provider = llm_state.system_provider().await;
+
+        let (conversation_id, user_message_id, history_snapshot, bound_generation) = {
+            let _switch_guard = state.conversation_switch_lock.lock().await;
+            let current_conv_id = state.current_conversation_id.lock().await.clone();
+            let current_generation = state.current_conversation_generation();
+
+            // 校验目标会话一致性与世代一致性，防止跨会话串写、清空后复活幽灵会话、或 A -> B -> A 绕过校验
+            let generation_valid = current_generation == initial_generation;
+            let conversation_valid = match (
+                &requested_conversation_id,
+                &initial_conversation_id,
+                &current_conv_id,
+            ) {
+                // 请求显式指定了目标会话：当前锁内会话必须严格匹配
+                (Some(req_cid), _, Some(curr)) => req_cid == curr,
+                (Some(_), _, None) => false, // 指定了会话，但当前已被清空（如 clear_history）
+                // 请求未指定会话：
+                (None, Some(init), Some(curr)) => init == curr, // 进入时有会话，锁内未变
+                (None, None, None) => true,                     // 进入时无会话，锁内仍无会话（合法新建会话）
+                _ => false,                                     // 其他情况均为排队期间会话已变化
+            };
+            let is_valid = generation_valid && conversation_valid;
+
+            if !is_valid {
                 tracing::warn!(
                     target: "chat",
-                    "[stream_chat] BeforeUserMessage hook timed out after {}s",
-                    chat_hook_execution_timeout().as_secs()
+                    "[stream_chat] Aborting chat turn: target conversation changed while request was queued. requested={:?}, initial={:?}, current={:?}, initial_gen={}, current_gen={}",
+                    requested_conversation_id,
+                    initial_conversation_id,
+                    current_conv_id,
+                    initial_generation,
+                    current_generation
                 );
+                return Err(KokoroError::Chat(
+                    "Conversation changed while request was in-flight".to_string(),
+                ));
             }
-            _ = hook_fut => {}
-        }
-    }
 
-    // Record user activity
-    state.touch_activity().await;
+            let bound_generation = initial_generation;
 
-    // Typing simulation
-    {
-        let is_question = request.message.contains('?') || request.message.contains('？');
-        let typing_params = crate::ai::typing_sim::calculate_typing_delay(
-            "neutral",
-            0.5,
-            0.6,
-            request.message.chars().count(),
-            is_question,
-        );
-        let _ = app.emit("chat-typing", &typing_params);
-    }
-
-    // 1. Select current-turn vision context before any user-message persistence.
-    let selected_vision_observation = _vision_watcher
-        .context
-        .latest_completed_observation(chrono::Utc::now())
-        .await;
-
-    // 2. Update History with User Message under conversation_switch_lock
-    let system_provider = llm_state.system_provider().await;
-
-    let (mut conversation_id, user_message_id, history_snapshot, bound_generation) = {
-        let _switch_guard = state.conversation_switch_lock.lock().await;
-        let current_conv_id = state.current_conversation_id.lock().await.clone();
-        let current_generation = state.current_conversation_generation();
-
-        // 校验目标会话一致性与世代一致性，防止跨会话串写、清空后复活幽灵会话、或 A -> B -> A 绕过校验
-        let generation_valid = current_generation == initial_generation;
-        let conversation_valid = match (
-            &requested_conversation_id,
-            &initial_conversation_id,
-            &current_conv_id,
-        ) {
-            // 请求显式指定了目标会话：当前锁内会话必须严格匹配
-            (Some(req_cid), _, Some(curr)) => req_cid == curr,
-            (Some(_), _, None) => false, // 指定了会话，但当前已被清空（如 clear_history）
-            // 请求未指定会话：
-            (None, Some(init), Some(curr)) => init == curr, // 进入时有会话，锁内未变
-            (None, None, None) => true,                     // 进入时无会话，锁内仍无会话（合法新建会话）
-            _ => false,                                     // 其他情况均为排队期间会话已变化
-        };
-        let is_valid = generation_valid && conversation_valid;
-
-        if !is_valid {
-            tracing::warn!(
-                target: "chat",
-                "[stream_chat] Aborting chat turn: target conversation changed while request was queued. requested={:?}, initial={:?}, current={:?}, initial_gen={}, current_gen={}",
-                requested_conversation_id,
-                initial_conversation_id,
-                current_conv_id,
-                initial_generation,
-                current_generation
-            );
-            return Err(KokoroError::Chat(
-                "Conversation changed while request was in-flight".to_string(),
-            ));
-        }
-
-        let bound_generation = initial_generation;
-
-        let resolved_conv_id = if let Some(cid) = current_conv_id {
-            Some(cid)
-        } else if request.hidden {
-            // 当 request.hidden 为 true 且当前无活跃会话时：
-            // 延迟创建会话，暂不向 SQLite 插入 conversations 行，
-            // 避免在模型返回 PASS / no-op 时残留幽灵空会话或导致当前活跃会话被污染为幽灵空会话。
-            None
-        } else {
-            // 原逻辑：非 hidden 请求且当前无会话：原子创建新会话
-            let new_id = uuid::Uuid::new_v4().to_string();
-            let chars: Vec<char> = request.message.chars().collect();
-            let title = if chars.len() > 20 {
-                format!("{}...", chars[..20].iter().collect::<String>())
-            } else {
-                request.message.clone()
-            };
-            let now = chrono::Utc::now().to_rfc3339();
-            sqlx::query(
-                "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, ?, '', '{}', ?, ?)"
-            )
-            .bind(&new_id)
-            .bind(&char_id)
-            .bind(&title)
-            .bind(&now)
-            .bind(&now)
-            .execute(&state.db)
-            .await
-            .map_err(|e| KokoroError::Database(e.to_string()))?;
-
-            *state.current_conversation_id.lock().await = Some(new_id.clone());
-            state.bump_conversation_generation();
-            if state.persist_conversation_selection {
-                crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
-            }
-            Some(new_id)
-        };
-
-        let trailing_visible_user = if request.regenerate {
-            if let Some(ref cid) = resolved_conv_id {
-                match resolve_trailing_visible_user_message(&state.db, cid).await {
-                    Ok(res) => res,
-                    Err(e) => {
-                        tracing::warn!(
-                            "[stream_chat] Failed to query trailing visible message for '{}': {}",
-                            cid,
-                            e
-                        );
-                        None
-                    }
-                }
-            } else {
+            let resolved_conv_id = if let Some(cid) = current_conv_id {
+                Some(cid)
+            } else if request.hidden {
+                // 当 request.hidden 为 true 且当前无活跃会话时：
+                // 延迟创建会话，暂不向 SQLite 插入 conversations 行，
+                // 避免在模型返回 PASS / no-op 时残留幽灵空会话或导致当前活跃会话被污染为幽灵空会话。
                 None
-            }
-        } else {
-            None
-        };
-
-        let has_trailing_user = trailing_visible_user.is_some();
-        let should_insert = should_insert_user_message_for_request(
-            request.hidden,
-            request.regenerate,
-            has_trailing_user,
-        );
-
-        let (cid, mid) = if should_insert {
-            let active_conv_id = resolved_conv_id.as_deref();
-            if let Some(observation) = selected_vision_observation.as_ref() {
-                persist_vision_context_message_locked(
-                    &state,
-                    observation,
-                    &char_id,
-                    active_conv_id,
-                    None,
+            } else {
+                // 原逻辑：非 hidden 请求且当前无会话：原子创建新会话
+                let new_id = uuid::Uuid::new_v4().to_string();
+                let chars: Vec<char> = request.message.chars().collect();
+                let title = if chars.len() > 20 {
+                    format!("{}...", chars[..20].iter().collect::<String>())
+                } else {
+                    request.message.clone()
+                };
+                let now = chrono::Utc::now().to_rfc3339();
+                sqlx::query(
+                    "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, ?, '', '{}', ?, ?)"
                 )
-                .await;
-            }
-
-            let (cid, mid) = state
-                .add_message_with_metadata_for_conversation_locked(
-                    "user".to_string(),
-                    request.message.clone(),
-                    None,
-                    &char_id,
-                    active_conv_id,
-                    Some(system_provider.clone()),
-                )
+                .bind(&new_id)
+                .bind(&char_id)
+                .bind(&title)
+                .bind(&now)
+                .bind(&now)
+                .execute(&state.db)
                 .await
                 .map_err(|e| KokoroError::Database(e.to_string()))?;
 
-            (Some(cid), Some(mid))
-        } else {
-            let cid = resolved_conv_id.clone();
-            let mid = resolve_turn_user_message_id(
+                *state.current_conversation_id.lock().await = Some(new_id.clone());
+                state.bump_conversation_generation();
+                if state.persist_conversation_selection {
+                    crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
+                }
+                Some(new_id)
+            };
+
+            let trailing_visible_user = if request.regenerate {
+                if let Some(ref cid) = resolved_conv_id {
+                    match resolve_trailing_visible_user_message(&state.db, cid).await {
+                        Ok(res) => res,
+                        Err(e) => {
+                            tracing::warn!(
+                                "[stream_chat] Failed to query trailing visible message for '{}': {}",
+                                cid,
+                                e
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let has_trailing_user = trailing_visible_user.is_some();
+            let should_insert = should_insert_user_message_for_request(
                 request.hidden,
-                trailing_visible_user.map(|(id, _)| id),
+                request.regenerate,
+                has_trailing_user,
             );
 
-            // 防御性对齐：若因长会话预算或回溯导致当前 history 尾部缺失该用户消息，在内存中补齐供当前 turn 组装 prompt
-            if !request.hidden {
-                let mut history = state.history.lock().await;
-                let trailing_matches = history.back().is_some_and(|m| m.role == "user");
-                if !trailing_matches {
-                    history.push_back(crate::ai::context::Message {
-                        role: "user".to_string(),
-                        content: request.message.clone(),
-                        metadata: None,
-                    });
-                    // Enforce rolling window limit even on defensive path
-                    while history.len() > crate::ai::context::MAX_IN_MEMORY_HISTORY_MESSAGES {
-                        history.pop_front();
+            let (cid, mid) = if should_insert {
+                let active_conv_id = resolved_conv_id.as_deref();
+                if let Some(observation) = selected_vision_observation.as_ref() {
+                    persist_vision_context_message_locked(
+                        &state,
+                        observation,
+                        &char_id,
+                        active_conv_id,
+                        None,
+                    )
+                    .await;
+                }
+
+                let (cid, mid) = state
+                    .add_message_with_metadata_for_conversation_locked(
+                        "user".to_string(),
+                        request.message.clone(),
+                        None,
+                        &char_id,
+                        active_conv_id,
+                        Some(system_provider.clone()),
+                    )
+                    .await
+                    .map_err(|e| KokoroError::Database(e.to_string()))?;
+
+                (Some(cid), Some(mid))
+            } else {
+                let cid = resolved_conv_id.clone();
+                let mid = resolve_turn_user_message_id(
+                    request.hidden,
+                    trailing_visible_user.map(|(id, _)| id),
+                );
+
+                // 防御性对齐：若因长会话预算或回溯导致当前 history 尾部缺失该用户消息，在内存中补齐供当前 turn 组装 prompt
+                if !request.hidden {
+                    let mut history = state.history.lock().await;
+                    let trailing_matches = history.back().is_some_and(|m| m.role == "user");
+                    if !trailing_matches {
+                        history.push_back(crate::ai::context::Message {
+                            role: "user".to_string(),
+                            content: request.message.clone(),
+                            metadata: None,
+                        });
+                        // Enforce rolling window limit even on defensive path
+                        while history.len() > crate::ai::context::MAX_IN_MEMORY_HISTORY_MESSAGES {
+                            history.pop_front();
+                        }
                     }
                 }
-            }
 
-            (cid, mid)
+                (cid, mid)
+            };
+
+            // 在释放会话切换锁前截取不可变历史快照，确保后续 prompt 组装使用与本次请求会话严格对齐的历史消息
+            let history_snapshot: Vec<crate::ai::context::Message> =
+                state.history.lock().await.iter().cloned().collect();
+
+            (cid, mid, history_snapshot, bound_generation)
         };
 
-        // 在释放会话切换锁前截取不可变历史快照，确保后续 prompt 组装使用与本次请求会话严格对齐的历史消息
-        let history_snapshot: Vec<crate::ai::context::Message> =
-            state.history.lock().await.iter().cloned().collect();
-
-        (cid, mid, history_snapshot, bound_generation)
-    };
-
-    let mut is_newly_created_for_hidden = false;
-
-    if let Some(hooks) = hook_runtime.as_ref() {
-        let hook_payload = build_chat_hook_payload(
-            conversation_id.clone(),
-            &char_id,
-            None,
-            Some(request.message.clone()),
-            None,
-            None,
-            request.hidden,
-        );
-        let hook_fut = hooks.emit_best_effort(&HookEvent::AfterUserMessagePersisted, &hook_payload);
-        tokio::select! {
-            biased;
-            _ = wait_for_cancel_event(&mut cancel_rx) => {
-                tracing::info!(
-                    target: "chat",
-                    "[stream_chat] Turn {} (request {}) cancelled during AfterUserMessagePersisted hook",
-                    assistant_turn_id,
-                    client_request_id
-                );
-                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
-            }
-            _ = tokio::time::sleep(chat_hook_execution_timeout()) => {
-                tracing::warn!(
-                    target: "chat",
-                    "[stream_chat] AfterUserMessagePersisted hook timed out after {}s",
-                    chat_hook_execution_timeout().as_secs()
-                );
-            }
-            _ = hook_fut => {}
+        if let Ok(mut guard) = active_conv_id_for_prep.lock() {
+            *guard = conversation_id.clone();
         }
-    }
 
-    // ── LAYER 1 & 2: SYSTEM SETUP ───────────────────────────────
+        if let Some(hooks) = hook_runtime.as_ref() {
+            let hook_payload = build_chat_hook_payload(
+                conversation_id.clone(),
+                &char_id,
+                None,
+                Some(request.message.clone()),
+                None,
+                None,
+                request.hidden,
+            );
+            let hook_fut = hooks.emit_best_effort(&HookEvent::AfterUserMessagePersisted, &hook_payload);
+            tokio::select! {
+                _ = tokio::time::sleep(chat_hook_execution_timeout()) => {
+                    tracing::warn!(
+                        target: "chat",
+                        "[stream_chat] AfterUserMessagePersisted hook timed out after {}s",
+                        chat_hook_execution_timeout().as_secs()
+                    );
+                }
+                _ = hook_fut => {}
+            }
+        }
 
-    // ── EXECUTION & STATE UPDATE ────────────────────────────────
+        // ── LAYER 1 & 2: SYSTEM SETUP ───────────────────────────────
 
-    // ── LAYER 3: PERSONA GENERATION ─────────────────────────────
+        // ── EXECUTION & STATE UPDATE ────────────────────────────────
 
-    let llm_config = llm_state.config().await;
-    let chat_provider = llm_state.provider().await;
-    let effective_provider_id = chat_provider.id().to_string();
-    let native_tools_enabled = llm_config
-        .providers
-        .iter()
-        .find(|provider| provider.id == effective_provider_id)
-        .map(|provider| provider.supports_native_tools)
-        .unwrap_or_else(|| chat_provider.supports_native_tools());
-    tracing::info!(
-        target: "chat",
-        "[Chat] configured_active_provider={}, effective_active_provider={}, native_tools_enabled={}",
-        llm_config.active_provider, effective_provider_id, native_tools_enabled
-    );
-    let vision_config = _vision_watcher.config.read().await.clone();
-    state
-        .set_vision_context_history_mode(vision_config.vision_context_history_mode.clone())
-        .await;
-    let vision_enabled = vision_config.vlm_enabled;
+        // ── LAYER 3: PERSONA GENERATION ─────────────────────────────
 
-    // Native tool-calling requests already carry structured tool definitions,
-    // so avoid duplicating a long textual tool prompt there.
-    let tool_prompt = {
-        let registry = _action_registry.read().await;
-        let tool_settings = tool_settings_state.read().await;
-        let prompt = if native_tools_enabled {
-            String::new()
-        } else {
-            registry.generate_tool_prompt_for_prompt_with_settings_and_availability(
+        let llm_config = llm_state.config().await;
+        let chat_provider = llm_state.provider().await;
+        let effective_provider_id = chat_provider.id().to_string();
+        let native_tools_enabled = llm_config
+            .providers
+            .iter()
+            .find(|provider| provider.id == effective_provider_id)
+            .map(|provider| provider.supports_native_tools)
+            .unwrap_or_else(|| chat_provider.supports_native_tools());
+        tracing::info!(
+            target: "chat",
+            "[Chat] configured_active_provider={}, effective_active_provider={}, native_tools_enabled={}",
+            llm_config.active_provider, effective_provider_id, native_tools_enabled
+        );
+        let vision_config = _vision_watcher.config.read().await.clone();
+        state
+            .set_vision_context_history_mode(vision_config.vision_context_history_mode.clone())
+            .await;
+        let vision_enabled = vision_config.vlm_enabled;
+
+        // Native tool-calling requests already carry structured tool definitions,
+        // so avoid duplicating a long textual tool prompt there.
+        let tool_prompt = {
+            let registry = _action_registry.read().await;
+            let tool_settings = tool_settings_state.read().await;
+            let prompt = if native_tools_enabled {
+                String::new()
+            } else {
+                registry.generate_tool_prompt_for_prompt_with_settings_and_availability(
+                    state.is_memory_enabled(),
+                    vision_enabled,
+                    &tool_settings,
+                )
+            };
+            if prompt.is_empty() {
+                None
+            } else {
+                Some(prompt)
+            }
+        };
+
+        let native_tools = {
+            let registry = _action_registry.read().await;
+            let tool_settings = tool_settings_state.read().await;
+            registry.list_tools_for_llm_with_settings_and_availability(
                 state.is_memory_enabled(),
                 vision_enabled,
                 &tool_settings,
             )
         };
-        if prompt.is_empty() {
-            None
-        } else {
-            Some(prompt)
+        let memory_target_language = state.response_language.lock().await.clone();
+
+        if cancel_state.is_cancelled(&assistant_turn_id).await {
+            tracing::info!(
+                target: "chat",
+                "[stream_chat] Turn {} (request {}) cancelled before prompt composition",
+                assistant_turn_id,
+                client_request_id
+            );
+            return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
         }
-    };
 
-    let native_tools = {
-        let registry = _action_registry.read().await;
-        let tool_settings = tool_settings_state.read().await;
-        registry.list_tools_for_llm_with_settings_and_availability(
-            state.is_memory_enabled(),
-            vision_enabled,
-            &tool_settings,
-        )
-    };
-    let memory_target_language = state.response_language.lock().await.clone();
-
-    if cancel_state.is_cancelled(&assistant_turn_id).await {
-        tracing::info!(
-            target: "chat",
-            "[stream_chat] Turn {} (request {}) cancelled before prompt composition",
-            assistant_turn_id,
-            client_request_id
+        // Compose Persona Prompt with immutable history snapshot and explicit conversation scoping
+        let compose_prompt_fut = state.compose_prompt_for_conversation_with_guard(
+            &request.message,
+            request.allow_image_gen.unwrap_or(false),
+            tool_prompt,
+            native_tools_enabled,
+            &char_id,
+            conversation_id.as_deref(),
+            Some(history_snapshot),
+            &_chat_turn_guard,
         );
-        return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
-    }
 
-    // Compose Persona Prompt with immutable history snapshot and explicit conversation scoping
-    let compose_prompt_fut = state.compose_prompt_for_conversation_with_guard(
-        &request.message,
-        request.allow_image_gen.unwrap_or(false),
-        tool_prompt,
-        native_tools_enabled,
-        &char_id,
-        conversation_id.as_deref(),
-        Some(history_snapshot),
-        &_chat_turn_guard,
-    );
+        let (prompt_messages, compose_warnings) = compose_prompt_fut
+            .await
+            .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
-    let (prompt_messages, compose_warnings) = tokio::select! {
+        // 将构建过程中产生的非致命警告（如记忆检索失败）通知前端
+        for warning in compose_warnings {
+            tracing::warn!("[compose_prompt] {}", warning);
+            let _ = app.emit("chat-warning", &warning);
+        }
+
+        Ok(PreparedChatTurn {
+            char_id,
+            conversation_id,
+            user_message_id,
+            bound_generation,
+            selected_vision_observation,
+            prompt_messages,
+            llm_config,
+            chat_provider,
+            effective_provider_id,
+            native_tools_enabled,
+            native_tools,
+            system_provider,
+            memory_target_language,
+        })
+    };
+
+    let prepared_turn = tokio::select! {
         biased;
         _ = wait_for_cancel_event(&mut cancel_rx) => {
             tracing::info!(
                 target: "chat",
-                "[stream_chat] Turn {} (request {}) cancelled during prompt composition",
+                "[stream_chat] Turn {} (request {}) cancelled during preparation phase",
                 assistant_turn_id,
                 client_request_id
+            );
+            let recorded_conv_id = active_conversation_id_holder
+                .lock()
+                .ok()
+                .and_then(|g| g.clone());
+            let _ = app.emit(
+                "chat-turn-finish",
+                serde_json::json!({
+                    "turn_id": assistant_turn_id,
+                    "status": "cancelled",
+                    "client_request_id": client_request_id,
+                    "conversation_id": recorded_conv_id,
+                    "assistant_message_id": serde_json::Value::Null,
+                }),
             );
             return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
         }
         _ = tokio::time::sleep(chat_turn_preparation_timeout()) => {
             tracing::error!(
                 target: "chat",
-                "[stream_chat] Turn {} (request {}) timed out during prompt composition after {}s",
+                "[stream_chat] Turn {} (request {}) timed out during preparation phase after {}s",
                 assistant_turn_id,
                 client_request_id,
                 chat_turn_preparation_timeout().as_secs()
             );
+            let recorded_conv_id = active_conversation_id_holder
+                .lock()
+                .ok()
+                .and_then(|g| g.clone());
+            let _ = app.emit(
+                "chat-turn-finish",
+                serde_json::json!({
+                    "turn_id": assistant_turn_id,
+                    "status": "error",
+                    "client_request_id": client_request_id,
+                    "conversation_id": recorded_conv_id,
+                    "assistant_message_id": serde_json::Value::Null,
+                }),
+            );
             return Err(KokoroError::Chat(format!(
-                "Prompt composition timed out after {}s",
+                "Turn preparation timed out after {}s",
                 chat_turn_preparation_timeout().as_secs()
             )));
         }
-        res = compose_prompt_fut => {
-            res.map_err(|e| KokoroError::Chat(e.to_string()))?
+        res = prep_fut => {
+            res?
         }
     };
 
-    // 将构建过程中产生的非致命警告（如记忆检索失败）通知前端
-    for warning in compose_warnings {
-        tracing::warn!("[compose_prompt] {}", warning);
-        let _ = app.emit("chat-warning", &warning);
-    }
+    let PreparedChatTurn {
+        char_id,
+        mut conversation_id,
+        user_message_id,
+        bound_generation,
+        selected_vision_observation,
+        prompt_messages,
+        llm_config,
+        chat_provider,
+        effective_provider_id,
+        native_tools_enabled,
+        native_tools,
+        system_provider,
+        memory_target_language,
+    } = prepared_turn;
 
+    let mut is_newly_created_for_hidden = false;
     let draft_row_id_holder = std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let draft_row_id_for_stream = std::sync::Arc::clone(&draft_row_id_holder);
 
@@ -7518,6 +7586,214 @@ mod tests {
             guard2.context().unwrap().client_request_id,
             "req-fallback-cancel-2"
         );
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
+    }
+
+    #[tokio::test]
+    async fn test_hung_system_provider_in_preparation_cancelled_and_releases_turn_lock() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-prep-sysprov-cancel-1").await;
+        let mut cancel_rx = cancel_state
+            .subscribe_cancellation("turn-prep-sysprov-cancel-1")
+            .await;
+
+        assert!(!orchestrator.is_chat_busy());
+
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-prep-sysprov-cancel-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        let cancel_state_clone = cancel_state.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _turn_guard = TurnCancellationGuard::new(
+                cancel_state_clone.clone(),
+                "turn-prep-sysprov-cancel-1".to_string(),
+            );
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            // Simulate hung system_provider() during preparation
+            let prep_fut = async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok::<(), KokoroError>(())
+            };
+            let timeout_duration = std::time::Duration::from_secs(15);
+
+            let outcome: Result<(), KokoroError> = tokio::select! {
+                biased;
+                _ = wait_for_cancel_event(&mut cancel_rx) => {
+                    Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()))
+                }
+                _ = tokio::time::sleep(timeout_duration) => {
+                    Err(KokoroError::Chat("Turn preparation timed out after 15s".to_string()))
+                }
+                res = prep_fut => res,
+            };
+
+            assert!(matches!(outcome, Err(KokoroError::Chat(ref msg)) if msg == TURN_CANCELLED_BY_USER_MESSAGE));
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        // Cancel the turn while stuck in preparation
+        let cancel_res = cancel_chat_turn_inner(
+            "turn-prep-sysprov-cancel-1".to_string(),
+            Some("user_stop".to_string()),
+            cancel_state.clone(),
+        )
+        .await;
+        assert!(cancel_res.is_ok());
+
+        handle.await.expect("task finished");
+
+        // Turn lock must be immediately released!
+        assert!(
+            !orchestrator.is_chat_busy(),
+            "chat turn lock must be released after preparation cancellation"
+        );
+
+        // Turn 2 succeeds immediately without chat_turn_busy
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-prep-sysprov-cancel-2")
+            .expect("turn 2 must succeed after preparation was cancelled");
+        assert_eq!(
+            guard2.context().unwrap().client_request_id,
+            "req-prep-sysprov-cancel-2"
+        );
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
+    }
+
+    #[tokio::test]
+    async fn test_hung_system_provider_in_preparation_times_out_and_releases_turn_lock() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+
+        assert!(!orchestrator.is_chat_busy());
+
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-prep-timeout-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            // Simulate hung system_provider() during preparation
+            let prep_fut = async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok::<(), KokoroError>(())
+            };
+            let timeout_duration = std::time::Duration::from_millis(50);
+
+            let outcome: Result<(), KokoroError> = tokio::select! {
+                _ = tokio::time::sleep(timeout_duration) => {
+                    Err(KokoroError::Chat("Turn preparation timed out after 50ms".to_string()))
+                }
+                res = prep_fut => res,
+            };
+
+            assert!(outcome.is_err());
+            assert!(outcome.unwrap_err().to_string().contains("Turn preparation timed out"));
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        handle.await.expect("task finished");
+
+        // Lock must be released when guard drops on timeout
+        assert!(
+            !orchestrator.is_chat_busy(),
+            "chat turn lock must be released after preparation timeout"
+        );
+
+        // Turn 2 succeeds immediately
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-prep-timeout-2")
+            .expect("turn 2 must succeed after preparation timed out");
+        assert_eq!(
+            guard2.context().unwrap().client_request_id,
+            "req-prep-timeout-2"
+        );
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
+    }
+
+    #[tokio::test]
+    async fn test_hung_conversation_lock_in_preparation_cancelled_and_releases_turn_lock() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-prep-convlock-cancel-1").await;
+        let mut cancel_rx = cancel_state
+            .subscribe_cancellation("turn-prep-convlock-cancel-1")
+            .await;
+
+        assert!(!orchestrator.is_chat_busy());
+
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-prep-convlock-cancel-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        let cancel_state_clone = cancel_state.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _turn_guard = TurnCancellationGuard::new(
+                cancel_state_clone.clone(),
+                "turn-prep-convlock-cancel-1".to_string(),
+            );
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            // Simulate hung conversation_switch_lock.lock()
+            let prep_fut = async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok::<(), KokoroError>(())
+            };
+            let timeout_duration = std::time::Duration::from_secs(15);
+
+            let outcome: Result<(), KokoroError> = tokio::select! {
+                biased;
+                _ = wait_for_cancel_event(&mut cancel_rx) => {
+                    Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()))
+                }
+                _ = tokio::time::sleep(timeout_duration) => {
+                    Err(KokoroError::Chat("Turn preparation timed out after 15s".to_string()))
+                }
+                res = prep_fut => res,
+            };
+
+            assert!(matches!(outcome, Err(KokoroError::Chat(ref msg)) if msg == TURN_CANCELLED_BY_USER_MESSAGE));
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        let cancel_res = cancel_chat_turn_inner(
+            "turn-prep-convlock-cancel-1".to_string(),
+            Some("new_chat".to_string()),
+            cancel_state.clone(),
+        )
+        .await;
+        assert!(cancel_res.is_ok());
+
+        handle.await.expect("task finished");
+
+        assert!(
+            !orchestrator.is_chat_busy(),
+            "chat turn lock must be released after conversation lock hang is cancelled"
+        );
+
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-prep-convlock-cancel-2")
+            .expect("turn 2 must succeed after turn 1 cancelled");
         drop(guard2);
         assert!(!orchestrator.is_chat_busy());
     }
