@@ -790,7 +790,7 @@ mod tests {
         assert_eq!(inputs.history[1]["content"][0]["type"], "input_text");
         assert_eq!(inputs.history[1]["type"], "message");
         assert_eq!(inputs.history[2]["content"][0]["text"], "answer");
-        assert_eq!(inputs.history[2]["content"][0]["type"], "input_text");
+        assert_eq!(inputs.history[2]["content"][0]["type"], "output_text");
         assert_eq!(inputs.history[2]["type"], "message");
         assert_eq!(
             inputs.turn_input,
