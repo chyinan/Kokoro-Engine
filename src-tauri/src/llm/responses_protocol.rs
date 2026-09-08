@@ -296,6 +296,25 @@ mod tests {
     }
 
     #[test]
+    fn keeps_assistant_text_in_the_shared_responses_request_shape() {
+        let request = build_responses_request(
+            "gpt-4o",
+            vec![
+                user_text_message("hello").into(),
+                crate::llm::messages::assistant_text_message("hi").into(),
+            ],
+            None,
+            vec![],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(request["input"][0]["content"], "hello");
+        assert_eq!(request["input"][1]["role"], "assistant");
+        assert_eq!(request["input"][1]["content"], "hi");
+    }
+
+    #[test]
     fn maps_images_and_native_tool_continuation_items() {
         let mut assistant = LlmChatMessage::from(assistant_tool_calls_message(
             None,

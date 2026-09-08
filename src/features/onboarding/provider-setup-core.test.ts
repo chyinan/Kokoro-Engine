@@ -47,4 +47,86 @@ describe("provider setup functional core", () => {
     expect(runtime).not.toHaveProperty("api_key");
     expect(runtime).not.toHaveProperty("base_url");
   });
+
+  test("does not reuse a stale Codex runtime ID for Ollama", () => {
+    const staleCodexId = {
+      ...createProvider("ollama", []),
+      id: "codex-runtime",
+    };
+    const config: LlmConfig = {
+      active_provider: "codex-runtime",
+      providers: [staleCodexId, createProvider("ollama", [staleCodexId])],
+      presets: [],
+    };
+
+    const updated = applyProviderSetupToConfig(config, {
+      providerType: "ollama",
+      presetId: null,
+      endpoint: "http://localhost:11434",
+      apiKey: null,
+      model: "llama3",
+    });
+
+    expect(updated.active_provider).toBe("ollama");
+    expect(updated.providers.find((provider) => provider.id === "codex-runtime")?.provider_type)
+      .toBe("ollama");
+  });
+
+  test("creates a canonical Ollama provider when the only provider has a stale Codex ID", () => {
+    const staleProvider: LlmProviderConfig = {
+      ...createProvider("ollama", []),
+      id: "codex-runtime",
+    };
+    const config: LlmConfig = {
+      active_provider: "codex-runtime",
+      providers: [staleProvider],
+      presets: [],
+    };
+
+    const updated = applyProviderSetupToConfig(config, {
+      providerType: "ollama",
+      presetId: null,
+      endpoint: "http://localhost:11434",
+      apiKey: null,
+      model: "llama3",
+    });
+
+    expect(updated.active_provider).toBe("ollama");
+    expect(updated.providers).toContainEqual(expect.objectContaining({
+      id: "ollama",
+      provider_type: "ollama",
+      base_url: "http://localhost:11434",
+      model: "llama3",
+    }));
+  });
+
+  test("repairs a stale Codex runtime provider when selected again", () => {
+    const staleProvider: LlmProviderConfig = {
+      ...createProvider("ollama", []),
+      id: "codex-runtime",
+    };
+    const config: LlmConfig = {
+      active_provider: "codex-runtime",
+      providers: [staleProvider],
+      presets: [],
+    };
+
+    const updated = applyProviderSetupToConfig(config, {
+      providerType: "codex_runtime",
+      presetId: null,
+      endpoint: "",
+      apiKey: null,
+      model: "",
+    });
+    const runtime = updated.providers.find((provider) => provider.id === "codex-runtime");
+
+    expect(updated.active_provider).toBe("codex-runtime");
+    expect(runtime).toMatchObject({
+      id: "codex-runtime",
+      provider_type: "codex_runtime",
+      supports_native_tools: true,
+    });
+    expect(runtime?.base_url).toBeUndefined();
+    expect(runtime?.model).toBeUndefined();
+  });
 });

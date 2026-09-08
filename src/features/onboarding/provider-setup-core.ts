@@ -149,19 +149,80 @@ function isSupportedProviderType(value: string): value is SupportedProviderType 
         || value === "codex_runtime";
 }
 
-function buildProviderId(providerType: SupportedProviderType, providers: ReadonlyArray<LlmProviderConfig>): string {
-    const baseId = providerType === "llama_cpp"
+function getBaseProviderId(providerType: SupportedProviderType): string {
+    return providerType === "llama_cpp"
             ? "llama-cpp"
         : providerType === "openai_responses"
             ? "openai-responses"
             : providerType === "codex_runtime"
                 ? "codex-runtime"
                 : providerType;
+}
+
+function getCanonicalProviderType(providerId: string): SupportedProviderType | null {
+    switch (providerId) {
+        case "openai":
+            return "openai";
+        case "openai-responses":
+            return "openai_responses";
+        case "anthropic":
+            return "anthropic";
+        case "ollama":
+            return "ollama";
+        case "llama-cpp":
+            return "llama_cpp";
+        case "codex-runtime":
+            return "codex_runtime";
+        default:
+            return null;
+    }
+}
+
+function buildProviderId(providerType: SupportedProviderType, providers: ReadonlyArray<LlmProviderConfig>): string {
+    const baseId = getBaseProviderId(providerType);
     if (!providers.some((provider) => provider.id === baseId)) return baseId;
 
     let suffix = 2;
     while (providers.some((provider) => provider.id === `${baseId}-${suffix}`)) suffix += 1;
     return `${baseId}-${suffix}`;
+}
+
+function findProviderIndexForSetup(
+    config: Readonly<LlmConfig>,
+    providerType: SupportedProviderType,
+): number {
+    const activeIndex = config.providers.findIndex((provider) => provider.id === config.active_provider);
+    const active = activeIndex >= 0 ? config.providers[activeIndex] : undefined;
+    const activeCanonicalType = active ? getCanonicalProviderType(active.id) : null;
+
+    // Keep custom provider IDs stable when the selected type already matches.
+    // A canonical ID with a different type is treated as stale instead of being
+    // silently reused for the wrong provider (e.g. codex-runtime as Ollama).
+    if (
+        active
+        && active.provider_type === providerType
+        && (activeCanonicalType === null || activeCanonicalType === providerType)
+    ) {
+        return activeIndex;
+    }
+
+    const canonicalId = getBaseProviderId(providerType);
+    const canonicalIndex = config.providers.findIndex(
+        (provider) => provider.id === canonicalId && provider.provider_type === providerType,
+    );
+    if (canonicalIndex >= 0) return canonicalIndex;
+
+    const matchingTypeIndex = config.providers.findIndex(
+        (provider) => provider.provider_type === providerType && getCanonicalProviderType(provider.id) === null,
+    );
+    if (matchingTypeIndex >= 0) return matchingTypeIndex;
+
+    // Repair a stale built-in provider in place when the user selects its
+    // canonical type again, preserving the provider ID and all references.
+    const staleCanonicalIndex = config.providers.findIndex((provider) => provider.id === canonicalId);
+    if (staleCanonicalIndex >= 0) return staleCanonicalIndex;
+
+    return -1;
 }
 
 /** Creates a provider with focused-setup defaults. */
@@ -218,9 +279,8 @@ export function applyProviderSetupToConfig(
     setup: Readonly<ProviderSetup>,
 ): LlmConfig {
     const normalized = normalizeProviderSetup(setup);
-    const activeIndex = config.providers.findIndex((provider) => provider.id === config.active_provider);
-    const providerIndex = activeIndex >= 0 ? activeIndex : 0;
-    const existing = config.providers[providerIndex];
+    const providerIndex = findProviderIndexForSetup(config, normalized.providerType);
+    const existing = providerIndex >= 0 ? config.providers[providerIndex] : undefined;
     const fallback = existing ?? createProvider(normalized.providerType, config.providers);
     const provider: LlmProviderConfig = {
         ...fallback,
@@ -237,7 +297,9 @@ export function applyProviderSetupToConfig(
     };
     const providers = config.providers.length === 0
         ? [provider]
-        : config.providers.map((candidate, index) => index === providerIndex ? provider : candidate);
+        : providerIndex >= 0
+            ? config.providers.map((candidate, index) => index === providerIndex ? provider : candidate)
+            : [...config.providers, provider];
     return {
         ...config,
         active_provider: provider.id,
