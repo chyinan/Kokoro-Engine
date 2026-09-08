@@ -118,12 +118,10 @@ export function usePetChat(): PetChatState {
                 });
                 pendingHandshakesRef.current.delete(reqId);
             }
-            if (activeClientRequestIdRef.current && reqId && activeClientRequestIdRef.current !== reqId) {
+            if (!reqId || activeClientRequestIdRef.current !== reqId) {
                 return;
             }
-            if (reqId) {
-                invoke("cancel_chat_turn", { turnId: reqId, reason: "pet_chat_rejected" }).catch(() => {});
-            }
+            invoke("cancel_chat_turn", { turnId: reqId, reason: "pet_chat_rejected" }).catch(() => {});
             setIsStreaming(false);
             activeTurnIdRef.current = null;
             activeClientRequestIdRef.current = null;

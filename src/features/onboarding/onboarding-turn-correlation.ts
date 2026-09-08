@@ -8,6 +8,19 @@ export function isOnboardingTurnEvent(
   return requestId.length > 0 && eventRequestId === requestId;
 }
 
+/** Accepts a correlated delta before start, or after start for the same turn. */
+export function canAccumulateOnboardingTurn(
+  requestId: string,
+  pendingTurnId: string | null,
+  eventRequestId: string | null | undefined,
+  eventTurnId: string,
+): boolean {
+  if (!isOnboardingTurnEvent(requestId, eventRequestId) || eventTurnId.trim().length === 0) {
+    return false;
+  }
+  return pendingTurnId === null || pendingTurnId === eventTurnId;
+}
+
 /**
  * Accepts either a matching terminal lifecycle event or a stream response
  * fallback. Stream responses do not carry the backend turn id, so request

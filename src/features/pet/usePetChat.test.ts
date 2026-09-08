@@ -176,6 +176,40 @@ describe("usePetChat", () => {
         expect(hookState?.isStreaming).toBe(false);
     });
 
+    it("ignores a late rejection after the pet turn has finished", async () => {
+        await act(async () => {
+            await hookState?.sendMessage("Finished pet request");
+        });
+
+        const startCall = (eventApi.emit as any).mock.calls.find((call: any[]) => call[0] === "pet-chat-start");
+        const ownClientRequestId = startCall[1].client_request_id;
+
+        await act(async () => {
+            listeners["chat-turn-start"]?.({
+                payload: { turn_id: "finished-turn", client_request_id: ownClientRequestId },
+            });
+            listeners["chat-turn-finish"]?.({
+                payload: {
+                    turn_id: "finished-turn",
+                    client_request_id: ownClientRequestId,
+                    status: "completed",
+                },
+            });
+        });
+
+        const hideCallsBefore = (eventApi as any).emit.mock.calls.length;
+        await act(async () => {
+            listeners["pet-chat-rejected"]?.({
+                payload: { client_request_id: ownClientRequestId, reason: "late" },
+            });
+        });
+
+        expect(hookState?.isStreaming).toBe(false);
+        expect(coreApi.invoke).not.toHaveBeenCalledWith("cancel_chat_turn", expect.anything());
+        expect((eventApi as any).emit.mock.calls.length).toBe(hideCallsBefore);
+        expect(coreApi.invoke).not.toHaveBeenCalledWith("hide_bubble_window");
+    });
+
     it("ignores empty or whitespace-only messages", async () => {
         expect(hookState).not.toBeNull();
 

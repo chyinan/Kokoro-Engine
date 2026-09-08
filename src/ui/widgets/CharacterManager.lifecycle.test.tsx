@@ -5,6 +5,7 @@ import { act, createElement, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { characterDb } from "@/lib/db";
 import type { CharacterRecord } from "@/lib/kokoro-bridge";
 import CharacterManager, { type CharacterManagerRef } from "./CharacterManager";
 
@@ -31,6 +32,7 @@ vi.mock("@/lib/db", () => ({
 
 const mockUpdateCharacter = vi.fn();
 const mockCreateCharacter = vi.fn();
+const mockCreateCharacterWithAvatar = vi.fn();
 const mockDeleteCharacter = vi.fn(async (_id?: string) => undefined);
 
 vi.mock("@/lib/kokoro-bridge", async (importOriginal) => {
@@ -40,6 +42,7 @@ vi.mock("@/lib/kokoro-bridge", async (importOriginal) => {
     listCharacters: vi.fn(async () => [char1, char2, char3]),
     updateCharacter: (c: CharacterRecord) => mockUpdateCharacter(c),
     createCharacter: (c: CharacterRecord) => mockCreateCharacter(c),
+    createCharacterWithAvatar: (c: CharacterRecord, bytes: Uint8Array) => mockCreateCharacterWithAvatar(c, bytes),
     deleteCharacter: (id: string) => mockDeleteCharacter(id),
     getProactiveEnabled: vi.fn(async () => true),
     setUserName: vi.fn(async () => undefined),
@@ -89,6 +92,11 @@ describe("CharacterManager lifecycle and draft management", () => {
     root = createRoot(container);
     localStorage.clear();
     mockUpdateCharacter.mockReset();
+    mockUpdateCharacter.mockResolvedValue(undefined);
+    mockCreateCharacter.mockReset();
+    mockCreateCharacter.mockResolvedValue(undefined);
+    mockCreateCharacterWithAvatar.mockReset();
+    mockCreateCharacterWithAvatar.mockResolvedValue(undefined);
     mockDeleteCharacter.mockReset();
   });
 
@@ -96,6 +104,68 @@ describe("CharacterManager lifecycle and draft management", () => {
     act(() => root.unmount());
     document.body.replaceChildren();
     vi.clearAllMocks();
+  });
+
+  it("keeps the IndexedDB source record when SQLite migration cannot persist it", async () => {
+    vi.mocked(characterDb.getAll).mockResolvedValueOnce([{
+      id: 17,
+      stableId: "legacy-character",
+      name: "Legacy Character",
+      persona: "Legacy persona",
+      userNickname: "User",
+      sourceFormat: "manual",
+      createdAt: 1,
+      updatedAt: 1,
+    }]);
+    mockCreateCharacter.mockRejectedValueOnce(new Error("SQLite unavailable"));
+    mockUpdateCharacter.mockRejectedValueOnce(new Error("SQLite unavailable"));
+
+    await act(async () => {
+      root.render(createElement(CharacterManager as any, {
+        characters: [char1],
+        activeCharacterId: "char-1",
+        onActivateCharacter: vi.fn(async () => undefined),
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    });
+
+    expect(characterDb.remove).not.toHaveBeenCalledWith(17);
+  });
+
+  it("migrates a legacy PNG avatar through the managed SQLite avatar path", async () => {
+    const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0]);
+    vi.mocked(characterDb.getAll).mockResolvedValueOnce([{
+      id: 18,
+      stableId: "legacy-avatar-character",
+      name: "Legacy Avatar",
+      persona: "Legacy persona",
+      userNickname: "User",
+      avatarBlob: {
+        arrayBuffer: vi.fn(async () => pngBytes.buffer),
+      } as unknown as Blob,
+      sourceFormat: "manual",
+      createdAt: 1,
+      updatedAt: 1,
+    }]);
+    mockCreateCharacterWithAvatar.mockResolvedValueOnce(undefined);
+
+    await act(async () => {
+      root.render(createElement(CharacterManager as any, {
+        characters: [char1],
+        activeCharacterId: "char-1",
+        onActivateCharacter: vi.fn(async () => undefined),
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    });
+
+    expect(mockCreateCharacterWithAvatar).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "legacy-avatar-character",
+        avatar_path: "character-instance-resource://legacy-avatar-character/avatar.png",
+      }),
+      expect.any(Uint8Array),
+    );
+    expect(characterDb.remove).toHaveBeenCalledWith(18);
   });
 
   it("retains failed draft when one write fails in multi-character edits and allows retry", async () => {
