@@ -151,12 +151,6 @@ fn convert_content(role: &str, content: Option<&Value>) -> Result<Value, String>
     };
 
     if let Some(text) = content.as_str() {
-        if role == "assistant" && !text.is_empty() {
-            return Ok(json!([{
-                "type": "output_text",
-                "text": text,
-            }]));
-        }
         return Ok(Value::String(text.to_string()));
     }
 
@@ -172,12 +166,7 @@ fn convert_content(role: &str, content: Option<&Value>) -> Result<Value, String>
         match object.get("type").and_then(Value::as_str) {
             Some("text") => {
                 if let Some(text) = object.get("text").and_then(Value::as_str) {
-                    let content_type = if role == "assistant" {
-                        "output_text"
-                    } else {
-                        "input_text"
-                    };
-                    converted.push(json!({ "type": content_type, "text": text }));
+                    converted.push(json!({ "type": "input_text", "text": text }));
                 }
             }
             Some("image_url") => {
@@ -307,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn encodes_assistant_text_as_output_text_for_responses_history() {
+    fn keeps_assistant_text_in_the_shared_responses_request_shape() {
         let request = build_responses_request(
             "gpt-4o",
             vec![
@@ -322,8 +311,7 @@ mod tests {
 
         assert_eq!(request["input"][0]["content"], "hello");
         assert_eq!(request["input"][1]["role"], "assistant");
-        assert_eq!(request["input"][1]["content"][0]["type"], "output_text");
-        assert_eq!(request["input"][1]["content"][0]["text"], "hi");
+        assert_eq!(request["input"][1]["content"], "hi");
     }
 
     #[test]

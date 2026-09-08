@@ -213,7 +213,7 @@ function findProviderIndexForSetup(
     if (canonicalIndex >= 0) return canonicalIndex;
 
     const matchingTypeIndex = config.providers.findIndex(
-        (provider) => provider.provider_type === providerType && getCanonicalProviderType(provider.id) !== providerType,
+        (provider) => provider.provider_type === providerType && getCanonicalProviderType(provider.id) === null,
     );
     if (matchingTypeIndex >= 0) return matchingTypeIndex;
 

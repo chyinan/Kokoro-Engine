@@ -281,12 +281,30 @@ fn normalize_history_item(mut item: Value, tools: &[LlmToolDefinition]) -> Resul
         return Ok(item);
     }
     if item.get("role").and_then(Value::as_str).is_some() {
+        let role = item
+            .get("role")
+            .and_then(Value::as_str)
+            .expect("role was checked above")
+            .to_string();
         item["type"] = Value::String("message".to_string());
         if let Some(Value::String(text)) = item.get("content").cloned() {
+            let content_type = if role == "assistant" {
+                "output_text"
+            } else {
+                "input_text"
+            };
             item["content"] = json!([{
-                "type": "input_text",
+                "type": content_type,
                 "text": text,
             }]);
+        } else if role == "assistant" {
+            if let Some(Value::Array(parts)) = item.get_mut("content") {
+                for part in parts {
+                    if part.get("type").and_then(Value::as_str) == Some("input_text") {
+                        part["type"] = Value::String("output_text".to_string());
+                    }
+                }
+            }
         }
         return Ok(item);
     }

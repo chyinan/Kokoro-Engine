@@ -72,6 +72,34 @@ describe("provider setup functional core", () => {
       .toBe("ollama");
   });
 
+  test("creates a canonical Ollama provider when the only provider has a stale Codex ID", () => {
+    const staleProvider: LlmProviderConfig = {
+      ...createProvider("ollama", []),
+      id: "codex-runtime",
+    };
+    const config: LlmConfig = {
+      active_provider: "codex-runtime",
+      providers: [staleProvider],
+      presets: [],
+    };
+
+    const updated = applyProviderSetupToConfig(config, {
+      providerType: "ollama",
+      presetId: null,
+      endpoint: "http://localhost:11434",
+      apiKey: null,
+      model: "llama3",
+    });
+
+    expect(updated.active_provider).toBe("ollama");
+    expect(updated.providers).toContainEqual(expect.objectContaining({
+      id: "ollama",
+      provider_type: "ollama",
+      base_url: "http://localhost:11434",
+      model: "llama3",
+    }));
+  });
+
   test("repairs a stale Codex runtime provider when selected again", () => {
     const staleProvider: LlmProviderConfig = {
       ...createProvider("ollama", []),
