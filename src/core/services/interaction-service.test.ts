@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// pattern: Imperative Shell
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { InteractionService, type GestureEvent } from "./interaction-service";
@@ -90,6 +91,22 @@ describe("InteractionService", () => {
         }));
     });
 
+    it("releases busy when streamChat resolves without chat-turn-finish", async () => {
+        const gesture: GestureEvent = {
+            hitArea: "head",
+            gesture: "tap",
+            consecutiveTaps: 1,
+        };
+
+        await service.triggerInteraction(gesture, mockController as any);
+
+        // The finish event is intentionally lost. A later gesture must still be allowed through.
+        await new Promise(resolve => setTimeout(resolve, 550));
+        await service.triggerInteraction({ ...gesture, hitArea: "body" }, mockController as any);
+
+        expect(bridge.streamChat).toHaveBeenCalledTimes(2);
+    });
+
     it("queues gesture and skips streamChat if backend is busy", async () => {
         vi.mocked(bridge.isChatBusy).mockResolvedValueOnce(true);
 
@@ -166,8 +183,12 @@ describe("InteractionService", () => {
 
     it("ignores unrelated chat-turn-finish while own interaction turn is active, and only unlocks on matching client_request_id", async () => {
         let capturedRequestId: string | undefined;
+        let resolveFirstStream = () => {};
         vi.mocked(bridge.streamChat).mockImplementationOnce(async (req: any) => {
             capturedRequestId = req.client_request_id;
+            await new Promise<void>(resolve => {
+                resolveFirstStream = resolve;
+            });
             return { status: "completed" } as any;
         });
 
@@ -177,7 +198,8 @@ describe("InteractionService", () => {
             consecutiveTaps: 1,
         };
 
-        await service.triggerInteraction(gesture1, mockController as any);
+        const firstTrigger = service.triggerInteraction(gesture1, mockController as any);
+        await vi.waitFor(() => expect(bridge.streamChat).toHaveBeenCalledTimes(1));
         expect(capturedRequestId).toBeDefined();
         expect(bridge.streamChat).toHaveBeenCalledTimes(1);
 
@@ -223,6 +245,9 @@ describe("InteractionService", () => {
 
         // Turn lock is released and the queued gesture2 is now processed!
         expect(bridge.streamChat).toHaveBeenCalledTimes(2);
+
+        resolveFirstStream();
+        await firstTrigger;
     });
 
     it("ignores interaction-trigger-rejected for different client_request_id", async () => {

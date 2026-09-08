@@ -2015,6 +2015,26 @@ pub(crate) fn resolve_turn_user_message_id(
 
 // ── Stream Chat Command ────────────────────────────────────
 
+async fn validate_conversation_character_id(
+    db: &sqlx::SqlitePool,
+    conversation_id: &str,
+    character_id: &str,
+) -> Result<(), KokoroError> {
+    let owner = sqlx::query_scalar::<_, String>("SELECT character_id FROM conversations WHERE id = ?")
+        .bind(conversation_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|error| KokoroError::Database(error.to_string()))?;
+
+    if owner.as_deref() != Some(character_id) {
+        return Err(KokoroError::Validation(
+            "Conversation is not available for this character".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 struct PreparedChatTurn {
     char_id: String,
     conversation_id: Option<String>,
@@ -2206,6 +2226,10 @@ pub async fn stream_chat(
                 return Err(KokoroError::Chat(
                     "Conversation changed while request was in-flight".to_string(),
                 ));
+            }
+
+            if let Some(conversation_id) = current_conv_id.as_deref() {
+                validate_conversation_character_id(&state.db, conversation_id, &char_id).await?;
             }
 
             let bound_generation = initial_generation;
@@ -5955,6 +5979,36 @@ mod tests {
         .unwrap();
 
         pool
+    }
+
+    #[tokio::test]
+    async fn test_validate_conversation_character_id_rejects_mismatch_without_identifiers() {
+        let pool = setup_test_chat_db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, title, created_at, updated_at) \
+             VALUES ('conv-foreign', 'char-owner', 'Test', ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = validate_conversation_character_id(&pool, "conv-foreign", "char-request")
+            .await
+            .expect_err("a conversation owned by another character must be rejected");
+
+        match error {
+            KokoroError::Validation(message) => {
+                assert_eq!(message, "Conversation is not available for this character");
+                assert!(!message.contains("conv-foreign"));
+                assert!(!message.contains("char-owner"));
+                assert!(!message.contains("char-request"));
+            }
+            other => panic!("expected a validation error, got {other:?}"),
+        }
     }
 
     #[tokio::test]

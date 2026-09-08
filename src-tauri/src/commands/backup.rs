@@ -1751,6 +1751,50 @@ async fn detach_import_database_best_effort(connection: &mut SqliteConnection) -
     }
 }
 
+async fn remap_imported_character_ids(
+    connection: &mut SqliteConnection,
+    target_id: &str,
+) -> Result<Vec<(String, u64)>, KokoroError> {
+    let target_id = target_id.trim();
+    if target_id.is_empty() {
+        return Err(KokoroError::Validation(
+            "target character id cannot be empty".to_string(),
+        ));
+    }
+
+    let mut remapped = Vec::new();
+    for table in [
+        "memories",
+        "conversations",
+        "memory_candidates",
+        "memory_evidence",
+        "memory_dream_jobs",
+        "memory_dream_proposals",
+        "memory_operations",
+    ] {
+        let exists: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM import_db.sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .bind(table)
+        .fetch_optional(&mut *connection)
+        .await?;
+        if exists.is_none() {
+            continue;
+        }
+
+        let result = sqlx::query(&format!(
+            "UPDATE import_db.{table} SET character_id = ? WHERE character_id != ?"
+        ))
+        .bind(target_id)
+        .bind(target_id)
+        .execute(&mut *connection)
+        .await?;
+        remapped.push((table.to_string(), result.rows_affected()));
+    }
+
+    Ok(remapped)
+}
+
 /// Open a read-only sqlx pool to a given DB file.
 async fn open_readonly_pool(path: &Path) -> Result<SqlitePool, KokoroError> {
     if open_regular_non_redirected_file(path, "database")?.is_none() {
@@ -2519,6 +2563,23 @@ pub async fn import_data(
         // and trigger state before the connection is released.
         let mut transaction = conn.begin().await?;
 
+        if let Some(ref target_id) = options.target_character_id {
+            tracing::info!(target: "backup", "[Backup] Remapping imported character_ids to '{}'", target_id);
+            result.debug_log.push(format!(
+                "remapping imported character_ids to: {}",
+                target_id
+            ));
+            for (table, count) in remap_imported_character_ids(&mut transaction, target_id).await? {
+                result
+                    .debug_log
+                    .push(format!("imported {table} remapped: {count}"));
+            }
+        } else {
+            result
+                .debug_log
+                .push("no target_character_id — remap skipped".to_string());
+        }
+
         if options.conflict_strategy == ConflictStrategy::Overwrite {
             // 先删除 FTS 触发器，避免批量操作时触发器访问损坏的 FTS 索引
             sqlx::query("DROP TRIGGER IF EXISTS memories_ai")
@@ -2678,46 +2739,6 @@ pub async fn import_data(
                 .await?;
         }
 
-        // 如果指定了目标 character_id，把所有导入的记忆和对话重映射过去
-        if let Some(ref target_id) = options.target_character_id {
-            tracing::info!(target: "backup", "[Backup] Remapping character_id to '{}'", target_id);
-            result
-                .debug_log
-                .push(format!("remapping all character_ids to: {}", target_id));
-            let r = sqlx::query("UPDATE memories SET character_id = ? WHERE character_id != ?")
-                .bind(target_id)
-                .bind(target_id)
-                .execute(&mut *transaction)
-                .await?;
-            result
-                .debug_log
-                .push(format!("memories remapped: {}", r.rows_affected()));
-            sqlx::query("UPDATE conversations SET character_id = ? WHERE character_id != ?")
-                .bind(target_id)
-                .bind(target_id)
-                .execute(&mut *transaction)
-                .await?;
-            for table in [
-                "memory_candidates",
-                "memory_evidence",
-                "memory_dream_jobs",
-                "memory_dream_proposals",
-                "memory_operations",
-            ] {
-                sqlx::query(&format!(
-                    "UPDATE {table} SET character_id = ? WHERE character_id != ?"
-                ))
-                .bind(target_id)
-                .bind(target_id)
-                .execute(&mut *transaction)
-                .await?;
-            }
-        } else {
-            result
-                .debug_log
-                .push("no target_character_id — remap skipped".to_string());
-        }
-
         result.imported_characters = apply_character_rows(
             &mut transaction,
             prepared_characters,
@@ -2784,6 +2805,59 @@ mod tests {
         assert_eq!(table_exists.as_deref(), Some("memories"));
 
         pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn target_character_remap_changes_import_rows_without_touching_live_rows() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+
+        sqlx::query("CREATE TABLE memories (id INTEGER PRIMARY KEY, character_id TEXT NOT NULL)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memories (id, character_id) VALUES (1, 'live-character')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE import_db.memories (id INTEGER PRIMARY KEY, character_id TEXT NOT NULL)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO import_db.memories (id, character_id) VALUES (2, 'import-character')",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+        remap_imported_character_ids(&mut connection, "target-character")
+            .await
+            .unwrap();
+
+        let live_character: String =
+            sqlx::query_scalar("SELECT character_id FROM memories WHERE id = 1")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+        let imported_character: String =
+            sqlx::query_scalar("SELECT character_id FROM import_db.memories WHERE id = 2")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+
+        assert_eq!(live_character, "live-character");
+        assert_eq!(imported_character, "target-character");
     }
 
     #[tokio::test]

@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 /**
  * InteractionService — LLM-driven touch reaction system.
  *
@@ -69,6 +71,7 @@ export class InteractionService {
     private unlistenChatStart: (() => void) | null = null;
     private unlistenChatAccepted: (() => void) | null = null;
     private unlistenChatRejected: (() => void) | null = null;
+    private lastCompletedClientRequestId: string | null = null;
     private pendingHandshakes = new Map<string, (val: { accepted: true; conversation_id?: string } | { accepted: false; reason?: string; timeout?: boolean }) => void>();
 
     constructor() {
@@ -120,7 +123,12 @@ export class InteractionService {
                 if (event.client_request_id !== this.activeClientRequestId) {
                     return;
                 }
-                this.activeClientRequestId = null;
+                this.completeInteractionTurn(event.client_request_id);
+                return;
+            }
+            if (event.client_request_id !== null && event.client_request_id !== undefined
+                && event.client_request_id === this.lastCompletedClientRequestId) {
+                return;
             }
             this.isChatBusy = false;
             this.processPendingGesture();
@@ -269,26 +277,33 @@ export class InteractionService {
         }
 
         try {
-            await streamChat({
+            const response = await streamChat({
                 message,
                 character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
                 client_request_id: clientRequestId,
                 conversation_id: handshake.conversation_id,
                 hidden: true,
             });
+            if (response?.status && response.status !== "completed" && response.status !== "cancelled") {
+                throw new Error(`chat turn ${response.status}`);
+            }
+            // The backend response is the authoritative fallback when the
+            // terminal event was dropped by the event bridge.
+            this.completeInteractionTurn(clientRequestId);
         } catch (err) {
             console.error("[InteractionService] Failed to trigger LLM:", err);
             this.pendingHandshakes.delete(clientRequestId);
             if (timeoutId) clearTimeout(timeoutId);
-            if (this.activeClientRequestId === clientRequestId) {
+            const ownsActiveTurn = this.activeClientRequestId === clientRequestId;
+            if (ownsActiveTurn) {
                 this.activeClientRequestId = null;
-            }
-            if (isChatTurnBusyError(err)) {
-                // If rejected because chat turn is busy, queue this gesture for later
-                this.isChatBusy = true;
-                this.pendingGesture = { gesture, controller: _controller };
-            } else {
-                this.isChatBusy = false;
+                if (isChatTurnBusyError(err)) {
+                    // If rejected because chat turn is busy, queue this gesture for later
+                    this.isChatBusy = true;
+                    this.pendingGesture = { gesture, controller: _controller };
+                } else {
+                    this.isChatBusy = false;
+                }
             }
             emit("interaction-trigger-failed", {
                 client_request_id: clientRequestId,
@@ -304,6 +319,14 @@ export class InteractionService {
 
         this.broadcast(event);
         return event;
+    }
+
+    private completeInteractionTurn(clientRequestId: string): void {
+        if (this.activeClientRequestId !== clientRequestId) return;
+        this.activeClientRequestId = null;
+        this.lastCompletedClientRequestId = clientRequestId;
+        this.isChatBusy = false;
+        this.processPendingGesture();
     }
 
     private formatGestureMessage(gesture: GestureEvent): string {

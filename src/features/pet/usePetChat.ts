@@ -3,6 +3,43 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 
+// pattern: Imperative Shell
+
+type PetChatTurnEvent = {
+    turn_id: string;
+    client_request_id?: string | null;
+};
+
+type PetChatErrorEvent = Omit<PetChatTurnEvent, "turn_id"> & {
+    turn_id?: string;
+    trace_id?: string;
+};
+
+function isOwnPetChatTurnEvent(
+    activeClientRequestId: string | null,
+    activeTurnId: string | null,
+    event: PetChatTurnEvent,
+): boolean {
+    if (activeClientRequestId === null) return false;
+    if (event.client_request_id !== null && event.client_request_id !== undefined) {
+        return event.client_request_id === activeClientRequestId;
+    }
+    return event.turn_id === activeTurnId;
+}
+
+function isOwnPetChatErrorEvent(
+    activeClientRequestId: string | null,
+    activeTurnId: string | null,
+    event: PetChatErrorEvent,
+): boolean {
+    if (activeClientRequestId === null) return false;
+    if (event.client_request_id !== null && event.client_request_id !== undefined) {
+        return event.client_request_id === activeClientRequestId;
+    }
+    const eventTurnId = event.turn_id ?? event.trace_id;
+    return eventTurnId === activeTurnId;
+}
+
 export interface PetChatState {
     isStreaming: boolean;
     sendMessage: (text: string) => Promise<void>;
@@ -17,14 +54,16 @@ export function usePetChat(): PetChatState {
     const pendingHandshakesRef = useRef<Map<string, (val: { accepted: true; conversation_id?: string } | { accepted: false; reason?: string; timeout?: boolean }) => void>>(new Map());
 
     useEffect(() => {
-        const unlistenStart = listen<{ turn_id: string }>("chat-turn-start", async (event) => {
+        const unlistenStart = listen<PetChatTurnEvent>("chat-turn-start", async (event) => {
+            if (!isOwnPetChatTurnEvent(activeClientRequestIdRef.current, activeTurnIdRef.current, event.payload)) return;
+            if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
             activeTurnIdRef.current = event.payload.turn_id;
             accumulatedRef.current = "";
             setIsStreaming(true);
         });
 
-        const unlistenDelta = listen<{ turn_id: string; delta: string }>("chat-turn-delta", async (event) => {
-            if (activeTurnIdRef.current !== event.payload.turn_id) return;
+        const unlistenDelta = listen<PetChatTurnEvent & { delta: string }>("chat-turn-delta", async (event) => {
+            if (!isOwnPetChatTurnEvent(activeClientRequestIdRef.current, activeTurnIdRef.current, event.payload)) return;
             accumulatedRef.current += event.payload.delta;
             setIsStreaming(true);
             if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
@@ -38,8 +77,8 @@ export function usePetChat(): PetChatState {
             }
         });
 
-        const unlistenDone = listen<{ turn_id: string; status: "completed" | "error" | "cancelled" }>("chat-turn-finish", (event) => {
-            if (activeTurnIdRef.current !== event.payload.turn_id) return;
+        const unlistenDone = listen<PetChatTurnEvent & { turn_id: string; status: "completed" | "error" | "cancelled" }>("chat-turn-finish", (event) => {
+            if (!isOwnPetChatTurnEvent(activeClientRequestIdRef.current, activeTurnIdRef.current, event.payload)) return;
             setIsStreaming(false);
             activeClientRequestIdRef.current = null;
             if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
@@ -50,7 +89,8 @@ export function usePetChat(): PetChatState {
             }, 5000);
         });
 
-        const unlistenError = listen("chat-error", () => {
+        const unlistenError = listen<PetChatErrorEvent>("chat-error", (event) => {
+            if (!isOwnPetChatErrorEvent(activeClientRequestIdRef.current, activeTurnIdRef.current, event.payload)) return;
             setIsStreaming(false);
             activeTurnIdRef.current = null;
             activeClientRequestIdRef.current = null;
@@ -78,12 +118,10 @@ export function usePetChat(): PetChatState {
                 });
                 pendingHandshakesRef.current.delete(reqId);
             }
-            if (activeClientRequestIdRef.current && reqId && activeClientRequestIdRef.current !== reqId) {
+            if (!reqId || activeClientRequestIdRef.current !== reqId) {
                 return;
             }
-            if (reqId) {
-                invoke("cancel_chat_turn", { turnId: reqId, reason: "pet_chat_rejected" }).catch(() => {});
-            }
+            invoke("cancel_chat_turn", { turnId: reqId, reason: "pet_chat_rejected" }).catch(() => {});
             setIsStreaming(false);
             activeTurnIdRef.current = null;
             activeClientRequestIdRef.current = null;
@@ -158,6 +196,7 @@ export function usePetChat(): PetChatState {
             await invoke("stream_chat", {
                 request: {
                     message: trimmed,
+                    character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
                     client_request_id: clientRequestId,
                     conversation_id: handshake.conversation_id,
                 },
