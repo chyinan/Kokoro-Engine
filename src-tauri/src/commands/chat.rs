@@ -475,6 +475,19 @@ fn chat_hook_execution_timeout() -> std::time::Duration {
         .unwrap_or(std::time::Duration::from_secs(15))
 }
 
+fn chat_fallback_execution_timeout() -> std::time::Duration {
+    if let Ok(ms) = std::env::var("KOKORO_CHAT_FALLBACK_TIMEOUT_MS") {
+        if let Ok(val) = ms.parse::<u64>() {
+            return std::time::Duration::from_millis(val);
+        }
+    }
+    std::env::var("KOKORO_CHAT_FALLBACK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(15))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum StreamPollResult<T> {
     Item(T),
@@ -3488,20 +3501,36 @@ pub async fn stream_chat(
     }
 
     if let Some(hooks) = hook_runtime.as_ref() {
-        hooks
-            .emit_best_effort(
-                &HookEvent::AfterLlmResponse,
-                &build_chat_hook_payload(
-                    conversation_id.clone(),
-                    &char_id,
-                    Some(assistant_turn_id.clone()),
-                    Some(request.message.clone()),
-                    Some(full_response.clone()),
-                    None,
-                    request.hidden,
-                ),
-            )
-            .await;
+        let hook_payload = build_chat_hook_payload(
+            conversation_id.clone(),
+            &char_id,
+            Some(assistant_turn_id.clone()),
+            Some(request.message.clone()),
+            Some(full_response.clone()),
+            None,
+            request.hidden,
+        );
+        let hook_fut = hooks.emit_best_effort(&HookEvent::AfterLlmResponse, &hook_payload);
+        tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut cancel_rx) => {
+                tracing::info!(
+                    target: "chat",
+                    "[stream_chat] Turn {} (request {}) cancelled during AfterLlmResponse hook",
+                    assistant_turn_id,
+                    client_request_id
+                );
+                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+            }
+            _ = tokio::time::sleep(chat_hook_execution_timeout()) => {
+                tracing::warn!(
+                    target: "chat",
+                    "[stream_chat] AfterLlmResponse hook timed out after {}s",
+                    chat_hook_execution_timeout().as_secs()
+                );
+            }
+            _ = hook_fut => {}
+        }
     }
 
     let user_lang = state.user_language.lock().await.clone();
@@ -3546,16 +3575,42 @@ pub async fn stream_chat(
             )),
             user_text_message(full_response.clone()),
         ];
-        match system_provider.chat(fallback_messages, None).await {
-            Ok(translation) => {
-                let t = translation.trim().to_string();
-                if !t.is_empty() {
-                    tracing::info!(target: "chat", "[Chat] Fallback translation succeeded ({} chars)", t.len());
-                    all_translations.push(t);
-                }
+        let fallback_fut = system_provider.chat(fallback_messages, None);
+        let fallback_timeout = chat_fallback_execution_timeout();
+        let fallback_res = tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut cancel_rx) => {
+                tracing::info!(
+                    target: "chat",
+                    "[stream_chat] Turn {} (request {}) cancelled during fallback translation",
+                    assistant_turn_id,
+                    client_request_id
+                );
+                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
             }
-            Err(e) => {
-                tracing::error!(target: "chat", "[Chat] Fallback translation failed: {}", e);
+            _ = tokio::time::sleep(fallback_timeout) => {
+                tracing::warn!(
+                    target: "chat",
+                    "[stream_chat] Turn {} fallback translation timed out after {}s",
+                    assistant_turn_id,
+                    fallback_timeout.as_secs()
+                );
+                None
+            }
+            res = fallback_fut => Some(res),
+        };
+        if let Some(res) = fallback_res {
+            match res {
+                Ok(translation) => {
+                    let t = translation.trim().to_string();
+                    if !t.is_empty() {
+                        tracing::info!(target: "chat", "[Chat] Fallback translation succeeded ({} chars)", t.len());
+                        all_translations.push(t);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(target: "chat", "[Chat] Fallback translation failed: {}", e);
+                }
             }
         }
     }
@@ -3587,34 +3642,60 @@ pub async fn stream_chat(
                     .cloned()
                     .collect::<std::collections::HashSet<_>>()
             });
-        match system_provider.chat(emotion_messages, None).await {
-            Ok(json_str) => {
-                let clean = json_str
-                    .trim()
-                    .trim_start_matches("```json")
-                    .trim_start_matches("```")
-                    .trim_end_matches("```");
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(clean) {
-                    if let Some(cue) = val.get("cue").and_then(|v| v.as_str()) {
-                        let trimmed = cue.trim();
-                        let is_valid = valid_fallback_cues
-                            .as_ref()
-                            .map(|cues| cues.contains(trimmed))
-                            .unwrap_or(false);
-                        if is_valid {
-                            tracing::info!(target: "chat", "[Chat] Fallback cue: {}", trimmed);
-                            let _ = app.emit(
-                                "chat-cue",
-                                serde_json::json!({ "cue": trimmed, "source": "fallback-cue" }),
-                            );
-                        } else {
-                            tracing::info!(target: "chat", "[Chat] Ignoring invalid fallback cue: {}", trimmed);
+        let cue_fut = system_provider.chat(emotion_messages, None);
+        let cue_timeout = chat_fallback_execution_timeout();
+        let cue_res = tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut cancel_rx) => {
+                tracing::info!(
+                    target: "chat",
+                    "[stream_chat] Turn {} (request {}) cancelled during fallback cue analysis",
+                    assistant_turn_id,
+                    client_request_id
+                );
+                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+            }
+            _ = tokio::time::sleep(cue_timeout) => {
+                tracing::warn!(
+                    target: "chat",
+                    "[stream_chat] Turn {} fallback cue analysis timed out after {}s",
+                    assistant_turn_id,
+                    cue_timeout.as_secs()
+                );
+                None
+            }
+            res = cue_fut => Some(res),
+        };
+        if let Some(res) = cue_res {
+            match res {
+                Ok(json_str) => {
+                    let clean = json_str
+                        .trim()
+                        .trim_start_matches("```json")
+                        .trim_start_matches("```")
+                        .trim_end_matches("```");
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(clean) {
+                        if let Some(cue) = val.get("cue").and_then(|v| v.as_str()) {
+                            let trimmed = cue.trim();
+                            let is_valid = valid_fallback_cues
+                                .as_ref()
+                                .map(|cues| cues.contains(trimmed))
+                                .unwrap_or(false);
+                            if is_valid {
+                                tracing::info!(target: "chat", "[Chat] Fallback cue: {}", trimmed);
+                                let _ = app.emit(
+                                    "chat-cue",
+                                    serde_json::json!({ "cue": trimmed, "source": "fallback-cue" }),
+                                );
+                            } else {
+                                tracing::info!(target: "chat", "[Chat] Ignoring invalid fallback cue: {}", trimmed);
+                            }
                         }
                     }
                 }
-            }
-            Err(e) => {
-                tracing::error!(target: "chat", "[Chat] Fallback cue analysis failed: {}", e);
+                Err(e) => {
+                    tracing::error!(target: "chat", "[Chat] Fallback cue analysis failed: {}", e);
+                }
             }
         }
     }
@@ -7286,6 +7367,156 @@ mod tests {
         assert_eq!(
             guard2.context().unwrap().client_request_id,
             "req-best-effort-2"
+        );
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
+    }
+
+    #[tokio::test]
+    async fn test_hung_fallback_translation_times_out_and_allows_subsequent_chat_turn() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-fallback-timeout-1").await;
+
+        assert!(!orchestrator.is_chat_busy());
+
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-fallback-timeout-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        // Concurrent Turn 2 while turn 1 is active must fail with chat_turn_busy
+        let busy_err = orchestrator
+            .try_acquire_chat_turn("req-fallback-timeout-2")
+            .expect_err("turn 2 must be rejected while turn 1 is active");
+        assert!(busy_err.contains("chat_turn_busy"));
+
+        // Simulate turn 1 in post-text fallback stage where fallback translation provider hangs
+        let cancel_state_clone = Arc::clone(&cancel_state);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let mut cancel_rx = cancel_state_clone
+                .subscribe_cancellation("turn-fallback-timeout-1")
+                .await;
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            // Simulate hung fallback translation provider
+            let fallback_fut = async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok::<String, String>("fake translation".to_string())
+            };
+            let timeout_duration = std::time::Duration::from_millis(50);
+
+            let fallback_res = tokio::select! {
+                biased;
+                _ = wait_for_cancel_event(&mut cancel_rx) => {
+                    None
+                }
+                _ = tokio::time::sleep(timeout_duration) => {
+                    None
+                }
+                res = fallback_fut => Some(res),
+            };
+
+            // Fallback timed out, translation is None, but turn execution continues and completes normally!
+            assert!(fallback_res.is_none());
+            // _execution_guard drops when turn completes upon return
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        handle.await.expect("task finished");
+
+        // Global chat turn lock must be released when turn finishes despite fallback hang!
+        assert!(
+            !orchestrator.is_chat_busy(),
+            "chat turn lock must be released after hung fallback times out"
+        );
+
+        // Subsequent chat request can now acquire lock and proceed without chat_turn_busy!
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-fallback-timeout-2")
+            .expect("turn 2 must succeed after turn 1 fallback timeout");
+        assert_eq!(
+            guard2.context().unwrap().client_request_id,
+            "req-fallback-timeout-2"
+        );
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
+    }
+
+    #[tokio::test]
+    async fn test_hung_fallback_translation_cancelled_releases_lock() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-fallback-cancel-1").await;
+
+        assert!(!orchestrator.is_chat_busy());
+
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-fallback-cancel-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        // Simulate turn 1 hanging in fallback translation and then user/external cancel is issued
+        let cancel_state_clone = Arc::clone(&cancel_state);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let mut cancel_rx = cancel_state_clone
+                .subscribe_cancellation("turn-fallback-cancel-1")
+                .await;
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            let fallback_fut = async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok::<String, String>("delayed translation".to_string())
+            };
+            let timeout_duration = std::time::Duration::from_secs(15);
+
+            let outcome: Result<Option<Result<String, String>>, KokoroError> = tokio::select! {
+                biased;
+                _ = wait_for_cancel_event(&mut cancel_rx) => {
+                    Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()))
+                }
+                _ = tokio::time::sleep(timeout_duration) => {
+                    Ok(None)
+                }
+                res = fallback_fut => Ok(Some(res)),
+            };
+
+            assert!(matches!(outcome, Err(KokoroError::Chat(ref msg)) if msg == TURN_CANCELLED_BY_USER_MESSAGE));
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        // User or external system requests cancellation (e.g. New Chat or Stop)
+        let cancel_res = cancel_chat_turn_inner(
+            "turn-fallback-cancel-1".to_string(),
+            Some("new_chat_or_user_stop".to_string()),
+            cancel_state.clone(),
+        )
+        .await;
+        assert!(cancel_res.is_ok(), "cancellation should succeed");
+
+        handle.await.expect("task finished");
+
+        // Lock must be released promptly!
+        assert!(
+            !orchestrator.is_chat_busy(),
+            "chat turn lock must be released after cancellation during fallback"
+        );
+
+        // Subsequent request succeeds immediately!
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-fallback-cancel-2")
+            .expect("subsequent turn must acquire lock after fallback cancellation");
+        assert_eq!(
+            guard2.context().unwrap().client_request_id,
+            "req-fallback-cancel-2"
         );
         drop(guard2);
         assert!(!orchestrator.is_chat_busy());
