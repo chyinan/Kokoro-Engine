@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "check:ipc": "node scripts/check-ipc-contract.mjs",
+    "clean:target": "cargo clean --manifest-path src-tauri/Cargo.toml",
     "tauri": "tauri"
   },
   "dependencies": {
