@@ -2596,8 +2596,10 @@ export default function ChatPanel({
             currentTurnRef.current = null;
             try {
                 await clearHistory();
-            } catch {
-                // Backend might not be ready
+            } catch (err) {
+                console.error("[ChatPanel] Failed to clear history:", err);
+                setError(getAsyncErrorMessage(err));
+                return;
             }
             setMessages([]);
             setShowScrollBottom(false);

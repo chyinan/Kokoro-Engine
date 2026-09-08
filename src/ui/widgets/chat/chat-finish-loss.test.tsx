@@ -120,6 +120,7 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
         vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockImplementation(vi.fn(async () => ({ installed: true } as any)));
         vi.spyOn(bridge, "setVisionTextInputFocused").mockImplementation(vi.fn(async () => undefined));
         vi.spyOn(bridge, "synthesize").mockImplementation(vi.fn(async () => undefined));
+        vi.spyOn(bridge, "clearHistory").mockImplementation(vi.fn(async () => undefined));
 
         vi.spyOn(bridge, "onChatTurnAcknowledged").mockImplementation((cb: any) => {
             turnAcknowledgedCb = cb;
@@ -246,6 +247,72 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
         // Second streamChat must have been triggered!
         expect(streamChatMock).toHaveBeenCalledTimes(2);
         expect(streamChatMock.mock.calls[1][0].message).toBe("How is the weather?");
+    });
+
+    it("preserves visible messages and reports an error when clearing history fails", async () => {
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        const form = container.querySelector("form") as HTMLFormElement;
+
+        await act(async () => {
+            setTextareaValue(textarea, "Keep this message");
+        });
+        await act(async () => {
+            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(streamChatMock).toHaveBeenCalledTimes(1);
+
+        const clientRequestId = streamChatMock.mock.calls[0][0].client_request_id;
+        await act(async () => {
+            turnStartCb?.({
+                turn_id: "turn-clear-test",
+                client_request_id: clientRequestId,
+                conversation_id: "conv-1",
+                user_message_id: 101,
+            });
+        });
+        await act(async () => {
+            turnDeltaCb?.({
+                turn_id: "turn-clear-test",
+                delta: "Keep this reply",
+            });
+        });
+        await act(async () => {
+            streamChatResolver?.({
+                conversation_id: "conv-1",
+                user_message_id: 101,
+                assistant_message_id: 102,
+                client_request_id: clientRequestId,
+                status: "completed",
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(container.textContent).toContain("Keep this reply");
+        vi.mocked(bridge.clearHistory).mockRejectedValueOnce(new Error("database unavailable"));
+
+        await act(async () => {
+            (container.querySelector('button[aria-label="chat.actions.clear"]') as HTMLButtonElement).click();
+        });
+        const confirmButton = Array.from(container.querySelectorAll("button"))
+            .find(button => button.textContent === "chat.actions.confirm_clear_button") as HTMLButtonElement;
+        expect(confirmButton).not.toBeUndefined();
+
+        await act(async () => {
+            confirmButton.click();
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(bridge.clearHistory).toHaveBeenCalledTimes(1);
+        expect(container.textContent).toContain("Keep this reply");
+        expect(container.textContent).toContain("database unavailable");
+        expect(textarea.disabled).toBe(false);
     });
 
     it("triggers resync to recover assistant message and clears busy state when all streaming events are lost", async () => {

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// pattern: Imperative Shell
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -93,9 +94,8 @@ describe("usePetChat", () => {
     it("prevents sending another message while streaming", async () => {
         expect(hookState).not.toBeNull();
 
-        // Simulate turn started
         await act(async () => {
-            listeners["chat-turn-start"]?.({ payload: { turn_id: "turn-1" } });
+            await hookState?.sendMessage("First pet message");
         });
 
         expect(hookState?.isStreaming).toBe(true);
@@ -105,7 +105,75 @@ describe("usePetChat", () => {
             await hookState?.sendMessage("Duplicate pet message");
         });
 
-        expect(eventApi.emit).not.toHaveBeenCalled();
+        expect(eventApi.emit).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores chat turn lifecycle events from other client requests", async () => {
+        await act(async () => {
+            await hookState?.sendMessage("Own pet request");
+        });
+
+        const startCall = (eventApi.emit as any).mock.calls.find((call: any[]) => call[0] === "pet-chat-start");
+        const ownClientRequestId = startCall[1].client_request_id;
+
+        await act(async () => {
+            listeners["chat-turn-start"]?.({
+                payload: { turn_id: "foreign-turn", client_request_id: "foreign-request" },
+            });
+            listeners["chat-turn-finish"]?.({
+                payload: {
+                    turn_id: "foreign-turn",
+                    client_request_id: "foreign-request",
+                    status: "completed",
+                },
+            });
+        });
+
+        expect(hookState?.isStreaming).toBe(true);
+
+        await act(async () => {
+            listeners["chat-turn-start"]?.({
+                payload: { turn_id: "own-turn", client_request_id: ownClientRequestId },
+            });
+            listeners["chat-turn-finish"]?.({
+                payload: {
+                    turn_id: "own-turn",
+                    status: "completed",
+                },
+            });
+        });
+
+        expect(hookState?.isStreaming).toBe(false);
+    });
+
+    it("ignores chat errors from other turns while the own turn is active", async () => {
+        await act(async () => {
+            await hookState?.sendMessage("Own pet request with error");
+        });
+
+        const startCall = (eventApi.emit as any).mock.calls.find((call: any[]) => call[0] === "pet-chat-start");
+        const ownClientRequestId = startCall[1].client_request_id;
+        await act(async () => {
+            listeners["chat-turn-start"]?.({
+                payload: { turn_id: "own-turn", client_request_id: ownClientRequestId },
+            });
+            listeners["chat-error"]?.({
+                payload: { trace_id: "foreign-turn", message: "foreign error" },
+            });
+        });
+
+        expect(hookState?.isStreaming).toBe(true);
+
+        await act(async () => {
+            listeners["chat-error"]?.({
+                payload: {
+                    trace_id: "own-turn",
+                    message: "own error",
+                },
+            });
+        });
+
+        expect(hookState?.isStreaming).toBe(false);
     });
 
     it("ignores empty or whitespace-only messages", async () => {

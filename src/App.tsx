@@ -370,7 +370,7 @@ import { modMessageBus } from "./ui/mods/ModMessageBus";
 import { CameraWatcher } from "./features/camera/CameraWatcher";
 import { mapCharacterAvatarUrl } from "./ui/widgets/character-avatar-url";
 import { shouldEnableChatPanel } from "./ui/layout/layout-interaction";
-import { isOnboardingTurnEvent } from "./features/onboarding/onboarding-turn-correlation";
+import { canSettleOnboardingTurn, isOnboardingTurnEvent } from "./features/onboarding/onboarding-turn-correlation";
 import {
   cancelDeferredOnboardingChat,
   cancelOnboardingChat as cancelPendingOnboardingChat,
@@ -1014,6 +1014,37 @@ function App() {
     }
   };
 
+  const settleOnboardingChat = (
+    clientRequestId: string,
+    eventTurnId: string | undefined,
+    status: "completed" | "error" | "cancelled",
+    error?: unknown,
+  ): boolean => {
+    const pending = onboardingChatPendingRef.current;
+    if (!pending || !canSettleOnboardingTurn(
+      pending.clientRequestId,
+      pending.turnId,
+      clientRequestId,
+      eventTurnId,
+    )) {
+      return false;
+    }
+
+    onboardingChatPendingRef.current = null;
+    releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
+    unregisterExternalTurn(clientRequestId);
+    setOnboardingSubmittingChat(false);
+    if (status === "completed") {
+      pending.resolve(pending.reply);
+    } else {
+      const message = error === undefined
+        ? `chat turn ${status}`
+        : getKokoroErrorMessage(error);
+      pending.reject(new Error(message));
+    }
+    return true;
+  };
+
   const handleOnboardingChatSubmit = async (message: string): Promise<string> => {
     if (onboardingChatPendingRef.current) throw new Error("a chat turn is already in progress");
     dispatchOnboardingEvent({ type: "chat-started" });
@@ -1026,18 +1057,39 @@ function App() {
         message,
         character_id: readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || undefined,
         client_request_id: clientRequestId,
-      }).catch((error) => {
-        const pending = onboardingChatPendingRef.current;
-        if (pending?.clientRequestId !== clientRequestId) {
-          releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
-          unregisterExternal();
+      }).then((response) => {
+        const responseRequestId = response?.client_request_id;
+        if (responseRequestId && responseRequestId !== clientRequestId) {
+          if (!settleOnboardingChat(
+            clientRequestId,
+            undefined,
+            "error",
+            new Error("chat response request id mismatch"),
+          )) {
+            releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
+            unregisterExternal();
+          }
           return;
         }
-        onboardingChatPendingRef.current = null;
-        releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
-        unregisterExternal();
-        setOnboardingSubmittingChat(false);
-        pending?.reject(error instanceof Error ? error : new Error(getKokoroErrorMessage(error)));
+
+        const responseStatus = response?.status;
+        const status = responseStatus === undefined || responseStatus === null || responseStatus === "completed"
+          ? "completed"
+          : "error";
+        if (!settleOnboardingChat(
+          clientRequestId,
+          undefined,
+          status,
+          responseStatus ? new Error(`chat turn ${responseStatus}`) : undefined,
+        )) {
+          releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
+          unregisterExternal();
+        }
+      }).catch((error) => {
+        if (!settleOnboardingChat(clientRequestId, undefined, "error", error)) {
+          releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
+          unregisterExternal();
+        }
       });
     });
   };
@@ -1454,19 +1506,12 @@ function App() {
     });
 
     const unlistenModChatDone = onChatTurnFinish(({ turn_id, status, client_request_id }) => {
-      const onboardingPending = onboardingChatPendingRef.current;
-      if (onboardingPending
-        && isOnboardingTurnEvent(onboardingPending.clientRequestId, client_request_id)
-        && onboardingPending.turnId === turn_id) {
-        unregisterExternalTurn(onboardingPending.clientRequestId);
-        onboardingChatPendingRef.current = null;
-        setOnboardingSubmittingChat(false);
-        if (status === "completed") {
-          onboardingPending.resolve(onboardingPending.reply);
-        } else {
-          onboardingPending.reject(new Error(`chat turn ${status}`));
-        }
-      }
+      settleOnboardingChat(
+        client_request_id ?? "",
+        turn_id,
+        status,
+        status === "completed" ? undefined : new Error(`chat turn ${status}`),
+      );
       modMessageBus.broadcast({
         type: 'event',
         payload: { name: 'chat-done', turn_id, status },
