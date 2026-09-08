@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+    validateTurnAcknowledged,
     validateTurnStart,
     validateTurnFinish,
     validateStreamChatResponse,
@@ -15,6 +16,7 @@ import {
     unregisterExternalTurn,
     isAuthorizedExternalTurn,
     clearRegisteredExternalTurns,
+    type TurnAcknowledgedValidationContext,
     type TurnStartValidationContext,
     type TurnFinishValidationContext,
     type StreamChatResponseValidationContext,
@@ -22,6 +24,152 @@ import {
 import type { ChatPanelMessage } from "./turn-state";
 
 describe("chat turn lifecycle validation", () => {
+    describe("validateTurnAcknowledged", () => {
+        it("accepts acknowledged event matching pending request and flags shouldInitializeTurn when no active turn", () => {
+            const context: TurnAcknowledgedValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: "conv-1",
+                pendingRequest: {
+                    clientRequestId: "req-1",
+                    generation: 1,
+                    conversationId: "conv-1",
+                    characterId: "char-1",
+                },
+                isCancelRequested: false,
+                currentTurn: null,
+            };
+
+            const result = validateTurnAcknowledged(context, {
+                turn_id: "backend_turn_101",
+                client_request_id: "req-1",
+            });
+
+            expect(result).toEqual({
+                valid: true,
+                turnId: "backend_turn_101",
+                matchedClientRequestId: "req-1",
+                shouldInitializeTurn: true,
+            });
+        });
+
+        it("does not flag shouldInitializeTurn if active turn already exists (idempotency / start arrived first)", () => {
+            const context: TurnAcknowledgedValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: "conv-1",
+                pendingRequest: {
+                    clientRequestId: "req-1",
+                    generation: 1,
+                    conversationId: "conv-1",
+                    characterId: "char-1",
+                },
+                isCancelRequested: false,
+                currentTurn: {
+                    turnId: "backend_turn_101",
+                    generation: 1,
+                    conversationId: "conv-1",
+                },
+            };
+
+            const result = validateTurnAcknowledged(context, {
+                turn_id: "backend_turn_101",
+                client_request_id: "req-1",
+            });
+
+            expect(result).toEqual({
+                valid: true,
+                turnId: "backend_turn_101",
+                matchedClientRequestId: "req-1",
+                shouldInitializeTurn: false,
+            });
+        });
+
+        it("rejects acknowledged event when isCancelRequested is true", () => {
+            const context: TurnAcknowledgedValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: "conv-1",
+                pendingRequest: {
+                    clientRequestId: "req-1",
+                    generation: 1,
+                    conversationId: "conv-1",
+                },
+                isCancelRequested: true,
+                currentTurn: null,
+            };
+
+            const result = validateTurnAcknowledged(context, {
+                turn_id: "backend_turn_101",
+                client_request_id: "req-1",
+            });
+
+            expect(result).toEqual({
+                valid: false,
+                reason: "cancelled",
+            });
+        });
+
+        it("rejects acknowledged event when client_request_id is missing or whitespace", () => {
+            const context: TurnAcknowledgedValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: "conv-1",
+                pendingRequest: {
+                    clientRequestId: "req-1",
+                    generation: 1,
+                    conversationId: "conv-1",
+                },
+                isCancelRequested: false,
+                currentTurn: null,
+            };
+
+            expect(validateTurnAcknowledged(context, { turn_id: "turn-1" })).toEqual({
+                valid: false,
+                reason: "missing_request_id",
+            });
+            expect(validateTurnAcknowledged(context, { turn_id: "turn-1", client_request_id: "  " })).toEqual({
+                valid: false,
+                reason: "missing_request_id",
+            });
+        });
+
+        it("rejects acknowledged event when generation changed or request mismatches", () => {
+            const context: TurnAcknowledgedValidationContext = {
+                currentGeneration: 2,
+                activeConversationId: "conv-2",
+                pendingRequest: {
+                    clientRequestId: "req-1",
+                    generation: 1,
+                    conversationId: "conv-1",
+                },
+                isCancelRequested: false,
+                currentTurn: null,
+            };
+
+            expect(validateTurnAcknowledged(context, { turn_id: "turn-1", client_request_id: "req-2" })).toEqual({
+                valid: false,
+                reason: "request_mismatch",
+            });
+
+            expect(validateTurnAcknowledged(context, { turn_id: "turn-1", client_request_id: "req-1" })).toEqual({
+                valid: false,
+                reason: "generation_mismatch",
+            });
+        });
+
+        it("rejects acknowledged event when no pending request is recorded", () => {
+            const context: TurnAcknowledgedValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: "conv-1",
+                pendingRequest: null,
+                isCancelRequested: false,
+                currentTurn: null,
+            };
+
+            expect(validateTurnAcknowledged(context, { turn_id: "turn-1", client_request_id: "req-1" })).toEqual({
+                valid: false,
+                reason: "no_pending_request",
+            });
+        });
+    });
+
     describe("validateTurnStart", () => {
         it("accepts turn start matching current generation and client request id", () => {
             const context: TurnStartValidationContext = {
@@ -562,6 +710,83 @@ describe("chat turn lifecycle validation", () => {
                 turn_id: "turn-1",
                 status: "completed",
                 conversation_id: "conv-tampered",
+            });
+
+            expect(result).toEqual({
+                valid: false,
+                reason: "conversation_mismatch",
+            });
+        });
+
+        it("accepts finish event when currentTurn is null but pendingRequest matches client_request_id (start loss recovery)", () => {
+            const context: TurnFinishValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: "conv-1",
+                currentTurn: null,
+                pendingRequest: {
+                    clientRequestId: "req-pending-1",
+                    generation: 1,
+                    conversationId: "conv-1",
+                    characterId: "char-1",
+                },
+            };
+
+            const result = validateTurnFinish(context, {
+                turn_id: "backend_turn_999",
+                status: "completed",
+                conversation_id: "conv-1",
+                client_request_id: "req-pending-1",
+            });
+
+            expect(result).toEqual({
+                valid: true,
+                shouldUpdateConversation: true,
+                targetConversationId: "conv-1",
+            });
+        });
+
+        it("rejects finish event when currentTurn is null and pendingRequest generation changed", () => {
+            const context: TurnFinishValidationContext = {
+                currentGeneration: 2,
+                activeConversationId: "conv-2",
+                currentTurn: null,
+                pendingRequest: {
+                    clientRequestId: "req-pending-1",
+                    generation: 1,
+                    conversationId: "conv-1",
+                },
+            };
+
+            const result = validateTurnFinish(context, {
+                turn_id: "backend_turn_999",
+                status: "completed",
+                conversation_id: "conv-1",
+                client_request_id: "req-pending-1",
+            });
+
+            expect(result).toEqual({
+                valid: false,
+                reason: "generation_mismatch",
+            });
+        });
+
+        it("rejects finish event when currentTurn is null and pendingRequest conversation conflicts", () => {
+            const context: TurnFinishValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: "conv-1",
+                currentTurn: null,
+                pendingRequest: {
+                    clientRequestId: "req-pending-1",
+                    generation: 1,
+                    conversationId: "conv-1",
+                },
+            };
+
+            const result = validateTurnFinish(context, {
+                turn_id: "backend_turn_999",
+                status: "completed",
+                conversation_id: "conv-other",
+                client_request_id: "req-pending-1",
             });
 
             expect(result).toEqual({

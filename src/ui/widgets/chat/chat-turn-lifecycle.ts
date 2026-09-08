@@ -3,6 +3,7 @@ import type { ChatPanelMessage } from "./turn-state";
 
 export const DEFAULT_EXTERNAL_TURN_TTL_MS = 120_000;
 export const DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS = 15_000;
+export const DEFAULT_BACKEND_PREPARATION_WATCHDOG_TIMEOUT_MS = 60_000;
 const registeredExternalTurns = new Map<string, number>();
 
 function pruneExpiredExternalTurns(now: number = Date.now()): void {
@@ -56,6 +57,83 @@ export function isAuthorizedExternalTurn(
 
 export function clearRegisteredExternalTurns(): void {
     registeredExternalTurns.clear();
+}
+
+export type TurnAcknowledgedValidationContext = {
+    readonly currentGeneration: number;
+    readonly activeConversationId: string | null;
+    readonly pendingRequest: {
+        readonly clientRequestId?: string | null;
+        readonly generation: number;
+        readonly conversationId: string | null;
+        readonly characterId?: string;
+    } | null;
+    readonly isCancelRequested: boolean;
+    readonly currentTurn: {
+        readonly turnId: string;
+        readonly generation: number;
+        readonly conversationId: string | null;
+    } | null;
+};
+
+export type TurnAcknowledgedEventPayload = {
+    readonly turn_id?: string | null;
+    readonly client_request_id?: string | null;
+};
+
+export type TurnAcknowledgedValidationResult =
+    | {
+          readonly valid: true;
+          readonly turnId?: string;
+          readonly matchedClientRequestId: string;
+          readonly shouldInitializeTurn: boolean;
+      }
+    | {
+          readonly valid: false;
+          readonly reason:
+              | "cancelled"
+              | "missing_request_id"
+              | "no_pending_request"
+              | "generation_mismatch"
+              | "request_mismatch";
+      };
+
+/**
+ * Validates whether an incoming chat-turn-acknowledged event belongs to the
+ * pending client request and active conversation generation.
+ */
+export function validateTurnAcknowledged(
+    context: TurnAcknowledgedValidationContext,
+    payload: TurnAcknowledgedEventPayload,
+): TurnAcknowledgedValidationResult {
+    const clientRequestId = payload.client_request_id?.trim();
+    if (!clientRequestId) {
+        return { valid: false, reason: "missing_request_id" };
+    }
+
+    if (context.isCancelRequested) {
+        return { valid: false, reason: "cancelled" };
+    }
+
+    if (!context.pendingRequest) {
+        return { valid: false, reason: "no_pending_request" };
+    }
+
+    if (context.pendingRequest.clientRequestId !== clientRequestId) {
+        return { valid: false, reason: "request_mismatch" };
+    }
+
+    if (context.pendingRequest.generation !== context.currentGeneration) {
+        return { valid: false, reason: "generation_mismatch" };
+    }
+
+    const turnId = payload.turn_id?.trim();
+    return {
+        valid: true,
+        turnId: turnId || undefined,
+        matchedClientRequestId: clientRequestId,
+        shouldInitializeTurn: context.currentTurn === null && Boolean(turnId),
+    };
 }
 
 export type TurnStartValidationContext = {
@@ -192,6 +270,12 @@ export type TurnFinishValidationContext = {
         readonly generation: number;
         readonly conversationId: string | null;
     } | null;
+    readonly pendingRequest?: {
+        readonly clientRequestId?: string | null;
+        readonly generation: number;
+        readonly conversationId: string | null;
+        readonly characterId?: string;
+    } | null;
 };
 
 export type TurnFinishEventPayload = {
@@ -220,12 +304,37 @@ export type TurnFinishValidationResult =
 /**
  * Validates whether an incoming chat-turn-finish event belongs to the currently active turn
  * and conversation session before allowing conversation ID or message mutations.
+ * If currentTurn is null, allows fallback validation against pendingRequest if client_request_id matches.
  */
 export function validateTurnFinish(
     context: TurnFinishValidationContext,
     payload: TurnFinishEventPayload,
 ): TurnFinishValidationResult {
     if (!context.currentTurn) {
+        if (
+            context.pendingRequest &&
+            payload.client_request_id &&
+            context.pendingRequest.clientRequestId === payload.client_request_id.trim()
+        ) {
+            if (context.pendingRequest.generation !== context.currentGeneration) {
+                return { valid: false, reason: "generation_mismatch" };
+            }
+            if (
+                payload.conversation_id &&
+                context.pendingRequest.conversationId &&
+                payload.conversation_id !== context.pendingRequest.conversationId
+            ) {
+                return { valid: false, reason: "conversation_mismatch" };
+            }
+            return {
+                valid: true,
+                shouldUpdateConversation: Boolean(payload.conversation_id),
+                targetConversationId:
+                    payload.conversation_id ??
+                    context.pendingRequest.conversationId ??
+                    context.activeConversationId,
+            };
+        }
         return { valid: false, reason: "no_active_turn" };
     }
 

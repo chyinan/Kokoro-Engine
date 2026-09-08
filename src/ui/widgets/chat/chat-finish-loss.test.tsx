@@ -73,6 +73,7 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
     let turnStartCb: ((event: any) => void) | null = null;
     let turnDeltaCb: ((event: any) => void) | null = null;
     let turnFinishCb: ((event: any) => void) | null = null;
+    let turnAcknowledgedCb: ((event: any) => void) | null = null;
 
     let streamChatResolver: ((res: any) => void) | null = null;
     let streamChatRejecter: ((err: any) => void) | null = null;
@@ -84,6 +85,7 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
         turnStartCb = null;
         turnDeltaCb = null;
         turnFinishCb = null;
+        turnAcknowledgedCb = null;
         streamChatResolver = null;
         streamChatRejecter = null;
 
@@ -119,6 +121,10 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
         vi.spyOn(bridge, "setVisionTextInputFocused").mockImplementation(vi.fn(async () => undefined));
         vi.spyOn(bridge, "synthesize").mockImplementation(vi.fn(async () => undefined));
 
+        vi.spyOn(bridge, "onChatTurnAcknowledged").mockImplementation((cb: any) => {
+            turnAcknowledgedCb = cb;
+            return Promise.resolve(() => { turnAcknowledgedCb = null; });
+        });
         vi.spyOn(bridge, "onChatTurnStart").mockImplementation((cb: any) => {
             turnStartCb = cb;
             return Promise.resolve(() => { turnStartCb = null; });
@@ -569,5 +575,87 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
 
         expect(streamChatMock).toHaveBeenCalledTimes(2);
         expect(streamChatMock.mock.calls[1][0].message).toBe("Retry message after defensive error");
+    });
+
+    it("clears busy state and triggers resync when chat-turn-acknowledged arrives, chat-turn-start is lost, and chat-turn-finish arrives", async () => {
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        const form = container.querySelector("form") as HTMLFormElement;
+
+        await act(async () => {
+            setTextareaValue(textarea, "ACK received but start lost message");
+        });
+
+        await act(async () => {
+            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(streamChatMock).toHaveBeenCalledTimes(1);
+        const requestPayload = streamChatMock.mock.calls[0][0];
+        const clientRequestId = requestPayload.client_request_id;
+
+        // UI is busy
+        expect(textarea.disabled).toBe(true);
+
+        // 1. Backend acknowledges turn
+        await act(async () => {
+            turnAcknowledgedCb?.({
+                turn_id: "turn-ack-lost-start-1",
+                client_request_id: clientRequestId,
+            });
+        });
+
+        // 2. chat-turn-start is LOST (never sent/received)
+
+        // 3. chat-turn-finish arrives
+        await act(async () => {
+            turnFinishCb?.({
+                turn_id: "turn-ack-lost-start-1",
+                status: "completed",
+                client_request_id: clientRequestId,
+                conversation_id: "conv-1",
+                assistant_message_id: 301,
+            });
+        });
+
+        // 4. streamChat also resolves
+        await act(async () => {
+            streamChatResolver?.({
+                conversation_id: "conv-1",
+                user_message_id: 201,
+                assistant_message_id: 301,
+                client_request_id: clientRequestId,
+                status: "completed",
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        await act(async () => {
+            await new Promise((r) => setTimeout(r, 100));
+        });
+
+        // UI is completely unblocked
+        expect(textarea.disabled).toBe(false);
+
+        // Because chat-turn-start was lost, needsResync triggered loadConversation
+        expect(loadConversationMock).toHaveBeenCalledWith("conv-1");
+
+        // User can send another message immediately
+        await act(async () => {
+            setTextareaValue(textarea, "Follow up after lost start");
+        });
+
+        await act(async () => {
+            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(streamChatMock).toHaveBeenCalledTimes(2);
+        expect(streamChatMock.mock.calls[1][0].message).toBe("Follow up after lost start");
     });
 });

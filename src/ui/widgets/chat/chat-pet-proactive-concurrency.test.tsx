@@ -7,7 +7,10 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import ChatPanel from "../ChatPanel";
 import * as bridge from "../../../lib/kokoro-bridge";
 import * as eventApi from "@tauri-apps/api/event";
-import { DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS } from "./chat-turn-lifecycle";
+import {
+    DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS,
+    DEFAULT_BACKEND_PREPARATION_WATCHDOG_TIMEOUT_MS,
+} from "./chat-turn-lifecycle";
 
 // Event listener capture for @tauri-apps/api/event
 let listeners: Record<string, (event: any) => void> = {};
@@ -1065,7 +1068,7 @@ describe("ChatPanel Pet & Proactive Turn Concurrency", () => {
         }
     });
 
-    it("chat-turn-acknowledged clears watchdog, allowing slow backend initialization (>15s) without being abandoned", async () => {
+    it("chat-turn-acknowledged transitions watchdog to preparation budget, allowing slow backend initialization (>15s) without being abandoned", async () => {
         vi.useFakeTimers();
         try {
             await act(async () => {
@@ -1304,6 +1307,352 @@ describe("ChatPanel Pet & Proactive Turn Concurrency", () => {
 
             const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
             expect(textarea.disabled).toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("chat-turn-acknowledged transitions to preparation watchdog, which cancels turn if preparation exceeds budget (60s)", async () => {
+        vi.useFakeTimers();
+        try {
+            await act(async () => {
+                root.render(createElement(ChatPanel));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const clientRequestId = "pet_stuck_prep_505";
+            await act(async () => {
+                listeners["pet-chat-start"]?.({
+                    payload: { message: "Stuck in prompt preparation", client_request_id: clientRequestId },
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            expect(container.textContent).toContain("Stuck in prompt preparation");
+
+            // Backend acknowledges turn registration
+            await act(async () => {
+                turnAckCb?.({
+                    turn_id: "backend_turn_505",
+                    client_request_id: clientRequestId,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Advance 25s (beyond external pending 15s budget, but within 60s preparation budget)
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(25_000);
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Turn is still waiting for preparation, not cancelled yet
+            expect(bridge.cancelChatTurn).not.toHaveBeenCalledWith(
+                clientRequestId,
+                expect.stringContaining("watchdog"),
+            );
+
+            // Now advance to 60s total from ACK (remaining preparation budget)
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(DEFAULT_BACKEND_PREPARATION_WATCHDOG_TIMEOUT_MS - 25_000);
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Preparation watchdog MUST have fired!
+            expect(bridge.cancelChatTurn).toHaveBeenCalledWith(
+                clientRequestId,
+                "external_turn_preparation_watchdog_timeout",
+            );
+
+            // Message is cleaned up and UI input recovered
+            expect(container.textContent).not.toContain("Stuck in prompt preparation");
+            const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+            expect(textarea.disabled).toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("late chat-turn-acknowledged after chat-turn-start does not re-arm a watchdog", async () => {
+        vi.useFakeTimers();
+        try {
+            await act(async () => {
+                root.render(createElement(ChatPanel));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const clientRequestId = "pet_late_ack_606";
+            await act(async () => {
+                listeners["pet-chat-start"]?.({
+                    payload: { message: "Fast turn message", client_request_id: clientRequestId },
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // chat-turn-start arrives before ack
+            await act(async () => {
+                turnStartCb?.({
+                    turn_id: "backend_turn_606",
+                    client_request_id: clientRequestId,
+                    conversation_id: "conv-1",
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Now late ack arrives
+            await act(async () => {
+                turnAckCb?.({
+                    turn_id: "backend_turn_606",
+                    client_request_id: clientRequestId,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Advance 65s (past the 60s preparation budget)
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(65_000);
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // cancelChatTurn must NOT have been called for watchdog
+            expect(bridge.cancelChatTurn).not.toHaveBeenCalledWith(
+                clientRequestId,
+                expect.stringContaining("watchdog"),
+            );
+
+            // Complete turn normally
+            await act(async () => {
+                turnFinishCb?.({
+                    turn_id: "backend_turn_606",
+                    status: "completed",
+                    client_request_id: clientRequestId,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+            expect(textarea.disabled).toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("chat-turn-acknowledged followed by lost chat-turn-start safely recovers when chat-turn-finish arrives", async () => {
+        vi.useFakeTimers();
+        try {
+            await act(async () => {
+                root.render(createElement(ChatPanel));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const clientRequestId = "pet_lost_start_701";
+            await act(async () => {
+                listeners["pet-chat-start"]?.({
+                    payload: { message: "Lost start message", client_request_id: clientRequestId },
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            expect(container.textContent).toContain("Lost start message");
+
+            // Backend acknowledges turn registration
+            await act(async () => {
+                turnAckCb?.({
+                    turn_id: "backend_turn_lost_start_701",
+                    client_request_id: clientRequestId,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // chat-turn-start is LOST (never sent/received)
+
+            // Backend finishes and emits chat-turn-finish
+            await act(async () => {
+                turnFinishCb?.({
+                    turn_id: "backend_turn_lost_start_701",
+                    status: "completed",
+                    client_request_id: clientRequestId,
+                    conversation_id: "conv-1",
+                    assistant_message_id: 555,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // UI must have recovered (not stuck in busy)
+            const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+            expect(textarea.disabled).toBe(false);
+
+            // Because start was lost, needsResync was true and loadConversation must have been invoked to sync DB
+            expect(loadConversationMock).toHaveBeenCalledWith("conv-1");
+
+            // Fast-forward 65s (past the 60s preparation budget)
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(65_000);
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Preparation watchdog must have been cleared on finish and must NOT fire
+            expect(bridge.cancelChatTurn).not.toHaveBeenCalledWith(
+                clientRequestId,
+                expect.stringContaining("watchdog"),
+            );
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("both acknowledged and start lost safely recovers when chat-turn-finish arrives with client_request_id", async () => {
+        vi.useFakeTimers();
+        try {
+            await act(async () => {
+                root.render(createElement(ChatPanel));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const clientRequestId = "pet_both_lost_702";
+            await act(async () => {
+                listeners["pet-chat-start"]?.({
+                    payload: { message: "Both ack and start lost", client_request_id: clientRequestId },
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            expect(container.textContent).toContain("Both ack and start lost");
+
+            // Neither ack nor start arrives.
+            // Backend completes and emits chat-turn-finish with client_request_id
+            await act(async () => {
+                turnFinishCb?.({
+                    turn_id: "backend_turn_both_lost_702",
+                    status: "completed",
+                    client_request_id: clientRequestId,
+                    conversation_id: "conv-1",
+                    assistant_message_id: 777,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // UI recovers via pendingRequest fallback validation
+            const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+            expect(textarea.disabled).toBe(false);
+
+            // Resync triggered
+            expect(loadConversationMock).toHaveBeenCalledWith("conv-1");
+
+            // Watchdog must be cleared
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(65_000);
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            expect(bridge.cancelChatTurn).not.toHaveBeenCalledWith(
+                clientRequestId,
+                expect.stringContaining("watchdog"),
+            );
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("chat-turn-acknowledged arriving after cancel immediately cancels backend turn_id", async () => {
+        vi.useFakeTimers();
+        try {
+            await act(async () => {
+                root.render(createElement(ChatPanel));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const clientRequestId = "pet_pre_cancel_703";
+            await act(async () => {
+                listeners["pet-chat-start"]?.({
+                    payload: { message: "Cancel immediately", client_request_id: clientRequestId },
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // User cancels immediately
+            const stopButton = container.querySelector('button[aria-label="chat.actions.stop"]') as HTMLButtonElement;
+            expect(stopButton).toBeTruthy();
+            await act(async () => {
+                stopButton.click();
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Delayed ACK arrives with turn_id
+            await act(async () => {
+                turnAckCb?.({
+                    turn_id: "backend_turn_cancelled_703",
+                    client_request_id: clientRequestId,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // cancelChatTurn must be called with backend turn_id
+            expect(bridge.cancelChatTurn).toHaveBeenCalledWith("backend_turn_cancelled_703", "cancelled_by_user");
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("chat-turn-acknowledged followed by lost start and finish safely recovers when streamChat resolves", async () => {
+        vi.useFakeTimers();
+        try {
+            await act(async () => {
+                root.render(createElement(ChatPanel));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Trigger proactive action which calls streamChat
+            await act(async () => {
+                listeners["proactive-trigger"]?.({
+                    payload: { instruction: "Stream recovery instruction" },
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            expect(streamChatMock).toHaveBeenCalled();
+            const calledReqId = streamChatMock.mock.calls[0][0].client_request_id;
+            expect(calledReqId).toBeTruthy();
+
+            // ACK arrives
+            await act(async () => {
+                turnAckCb?.({
+                    turn_id: "backend_turn_stream_704",
+                    client_request_id: calledReqId,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Both start and finish are lost
+
+            // streamChat resolves
+            await act(async () => {
+                const resolver = streamChatResolvers[0];
+                resolver?.({
+                    conversation_id: "conv-1",
+                    assistant_message_id: 999,
+                    status: "completed",
+                    client_request_id: calledReqId,
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // UI recovers
+            const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+            expect(textarea.disabled).toBe(false);
+
+            // DB resync triggered because assistant bubble was missing
+            expect(loadConversationMock).toHaveBeenCalledWith("conv-1");
+
+            // Advance 65s -> watchdog does not fire
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(65_000);
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            expect(bridge.cancelChatTurn).not.toHaveBeenCalledWith(
+                calledReqId,
+                expect.stringContaining("watchdog"),
+            );
         } finally {
             vi.useRealTimers();
         }

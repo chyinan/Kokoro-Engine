@@ -38,6 +38,7 @@ import {
     type PendingTurnState,
 } from "./chat/turn-state";
 import {
+    validateTurnAcknowledged,
     validateTurnStart,
     validateTurnFinish,
     validateStreamChatResponse,
@@ -49,6 +50,7 @@ import {
     isChatSessionCurrent,
     isAuthorizedExternalTurn,
     DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS,
+    DEFAULT_BACKEND_PREPARATION_WATCHDOG_TIMEOUT_MS,
 } from "./chat/chat-turn-lifecycle";
 import { buildChatMessagesFromConversation } from "./chat-history";
 import {
@@ -379,7 +381,11 @@ export default function ChatPanel({
     const [isStopping, setIsStopping] = useState(false);
     const cancelRequestedRef = useRef(false);
     const cancellationWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const pendingExternalWatchdogTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+    interface PendingExternalWatchdogEntry {
+        timer: ReturnType<typeof setTimeout>;
+        onExpired: (reason?: string) => void | Promise<void>;
+    }
+    const pendingExternalWatchdogTimersRef = useRef<Map<string, PendingExternalWatchdogEntry>>(new Map());
     const cancelledExternalTurnIdsRef = useRef<Map<string, number>>(new Map());
     const messagesRef = useRef<ChatMessage[]>([]);
     const [isThinking, setIsThinking] = useState(false);
@@ -400,23 +406,23 @@ export default function ChatPanel({
     const [expandedTranslations, setExpandedTranslations] = useState<Set<number>>(new Set());
 
     const clearPendingExternalWatchdog = useCallback((clientRequestId: string) => {
-        const timer = pendingExternalWatchdogTimersRef.current.get(clientRequestId);
-        if (timer !== undefined) {
-            clearTimeout(timer);
+        const entry = pendingExternalWatchdogTimersRef.current.get(clientRequestId);
+        if (entry !== undefined) {
+            clearTimeout(entry.timer);
             pendingExternalWatchdogTimersRef.current.delete(clientRequestId);
         }
     }, []);
 
     const clearAllPendingExternalWatchdogs = useCallback(() => {
-        for (const timer of pendingExternalWatchdogTimersRef.current.values()) {
-            clearTimeout(timer);
+        for (const entry of pendingExternalWatchdogTimersRef.current.values()) {
+            clearTimeout(entry.timer);
         }
         pendingExternalWatchdogTimersRef.current.clear();
     }, []);
 
     const startPendingExternalWatchdog = useCallback((
         clientRequestId: string,
-        onExpired: () => void | Promise<void>,
+        onExpired: (reason?: string) => void | Promise<void>,
         timeoutMs: number = DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS,
     ) => {
         clearPendingExternalWatchdog(clientRequestId);
@@ -424,8 +430,25 @@ export default function ChatPanel({
             pendingExternalWatchdogTimersRef.current.delete(clientRequestId);
             void onExpired();
         }, timeoutMs);
-        pendingExternalWatchdogTimersRef.current.set(clientRequestId, timer);
+        pendingExternalWatchdogTimersRef.current.set(clientRequestId, { timer, onExpired });
     }, [clearPendingExternalWatchdog]);
+
+    const transitionPendingExternalWatchdogToPreparation = useCallback((
+        clientRequestId: string,
+        timeoutMs: number = DEFAULT_BACKEND_PREPARATION_WATCHDOG_TIMEOUT_MS,
+    ) => {
+        const entry = pendingExternalWatchdogTimersRef.current.get(clientRequestId);
+        if (!entry) return;
+        clearTimeout(entry.timer);
+        const timer = setTimeout(() => {
+            pendingExternalWatchdogTimersRef.current.delete(clientRequestId);
+            void entry.onExpired("external_turn_preparation_watchdog_timeout");
+        }, timeoutMs);
+        pendingExternalWatchdogTimersRef.current.set(clientRequestId, {
+            timer,
+            onExpired: entry.onExpired,
+        });
+    }, []);
 
     const registerCancelledExternalId = useCallback((id: string) => {
         const now = Date.now();
@@ -726,7 +749,8 @@ export default function ChatPanel({
         const pendingClientRequestId = pendingTurnRequestRef.current?.clientRequestId;
         if (activeTurnId) {
             void requestTurnCancellation(activeTurnId);
-        } else if (pendingClientRequestId) {
+        }
+        if (pendingClientRequestId && pendingClientRequestId !== activeTurnId) {
             clearPendingExternalWatchdog(pendingClientRequestId);
             pendingTurnRequestRef.current = null;
             void requestTurnCancellation(pendingClientRequestId);
@@ -914,6 +938,8 @@ export default function ChatPanel({
     // 弥补 chat-turn-finish 事件丢失/迟到/监听器未就绪导致的状态卡死，
     // 仅在当前活动仍确属本次 clientRequestId 时执行兜底收尾
     const finalizeActiveTurnIfCurrent = useCallback((clientRequestId: string, res?: StreamChatResponse | null) => {
+        clearPendingExternalWatchdog(clientRequestId);
+
         if (!hasResidualActiveTurn({
             clientRequestId,
             isBusy: isBusyRef.current,
@@ -1039,7 +1065,7 @@ export default function ChatPanel({
         }
 
         endTurnActivity();
-    }, [endTurnActivity, flushReveal, resetReveal]);
+    }, [clearPendingExternalWatchdog, endTurnActivity, flushReveal, resetReveal]);
 
     // 统一处理 streamChat 的响应解析、代次校验、消息 ID 对齐（补偿）与异常收敛
     const processTurnStreamResult = useCallback(async (options: {
@@ -1120,6 +1146,7 @@ export default function ChatPanel({
             if (latestClientRequestIdRef.current !== clientRequestId) {
                 return;
             }
+            clearPendingExternalWatchdog(clientRequestId);
             if (isTurnCancelledError(err) || cancelRequestedRef.current) {
                 endTurnActivity();
                 currentTurnRef.current = null;
@@ -1141,7 +1168,7 @@ export default function ChatPanel({
                 onCatchError(err);
             }
         }
-    }, [endTurnActivity, finalizeActiveTurnIfCurrent, resyncConversationMessages, setError, t]);
+    }, [clearPendingExternalWatchdog, endTurnActivity, finalizeActiveTurnIfCurrent, resyncConversationMessages, setError, t]);
 
     const handleTranscription = useCallback((text: string) => {
         // 读取发起录音时捕获的会话快照（若无则回退到当前快照，如 continuousListening 场景）
@@ -1584,10 +1611,9 @@ export default function ChatPanel({
                 reason: string,
                 cleanOptimisticMessage?: boolean,
             ) => {
-                if (
-                    pendingTurnRequestRef.current?.clientRequestId === clientRequestId &&
-                    currentTurnRef.current === null
-                ) {
+                const isPending = pendingTurnRequestRef.current?.clientRequestId === clientRequestId;
+                const isMatchingTurn = currentTurnRef.current?.clientRequestId === clientRequestId;
+                if (isPending || isMatchingTurn) {
                     console.warn(`[ChatPanel] External pending turn watchdog expired for: ${clientRequestId}, reason: ${reason}`);
                     registerCancelledExternalId(clientRequestId);
                     if (cleanOptimisticMessage) {
@@ -1650,10 +1676,10 @@ export default function ChatPanel({
                         setIsThinking(true);
                         userScrolledRef.current = false;
 
-                        startPendingExternalWatchdog(clientRequestId, () => {
+                        startPendingExternalWatchdog(clientRequestId, (customReason) => {
                             void handleExternalPendingWatchdogExpired(
                                 clientRequestId,
-                                "external_pending_turn_watchdog_timeout",
+                                customReason || "external_pending_turn_watchdog_timeout",
                                 true,
                             );
                         });
@@ -1689,11 +1715,55 @@ export default function ChatPanel({
                         }
                     }),
 
-                    onChatTurnAcknowledged(({ client_request_id }) => {
+                    onChatTurnAcknowledged(({ turn_id, client_request_id }) => {
                         if (aborted) return;
-                        if (!client_request_id) return;
-                        if (pendingTurnRequestRef.current?.clientRequestId === client_request_id) {
-                            clearPendingExternalWatchdog(client_request_id);
+                        const isCancelReq = cancelRequestedRef.current || (client_request_id ? isCancelledExternalId(client_request_id) : false);
+                        const validation = validateTurnAcknowledged({
+                            currentGeneration: conversationGenerationRef.current,
+                            activeConversationId: activeConversationIdRef.current,
+                            pendingRequest: pendingTurnRequestRef.current,
+                            isCancelRequested: isCancelReq,
+                            currentTurn: currentTurnRef.current
+                                ? {
+                                      turnId: currentTurnRef.current.turnId,
+                                      generation: currentTurnRef.current.generation ?? conversationGenerationRef.current,
+                                      conversationId: currentTurnRef.current.conversationId ?? activeConversationIdRef.current,
+                                  }
+                                : null,
+                        }, {
+                            turn_id,
+                            client_request_id,
+                        });
+
+                        if (!validation.valid) {
+                            if (validation.reason === "cancelled" && turn_id) {
+                                void cancelChatTurn(turn_id, "cancelled_by_user").catch(err =>
+                                    console.warn("[ChatPanel] Failed to cancel acknowledged turn after user cancel:", err)
+                                );
+                            }
+                            return;
+                        }
+
+                        const matchedReqId = validation.matchedClientRequestId;
+                        transitionPendingExternalWatchdogToPreparation(matchedReqId);
+
+                        if (validation.shouldInitializeTurn && validation.turnId) {
+                            currentTurnRef.current = {
+                                turnId: validation.turnId,
+                                generation: pendingTurnRequestRef.current?.generation ?? conversationGenerationRef.current,
+                                conversationId: pendingTurnRequestRef.current?.conversationId ?? activeConversationIdRef.current,
+                                clientRequestId: matchedReqId,
+                                messageIndex: null,
+                                rawText: "",
+                                visibleTextStarted: false,
+                                translation: undefined,
+                                translationPending: false,
+                                tools: [],
+                                pendingContext: pendingVisionContextRef.current ?? undefined,
+                                needsResync: true,
+                            };
+                        } else if (validation.turnId && currentTurnRef.current && !currentTurnRef.current.turnId) {
+                            currentTurnRef.current.turnId = validation.turnId;
                         }
                     }),
 
@@ -1740,38 +1810,34 @@ export default function ChatPanel({
                                 matchedRequestId,
                                 user_message_id,
                             );
-                            if (initialAlignment.needsResync) {
-                                needsResync = true;
-                            }
+                            needsResync = initialAlignment.needsResync;
                             setMessages(prev => {
                                 const alignment = alignTurnStartUserMessage(
                                     prev,
                                     matchedRequestId,
                                     user_message_id,
                                 );
-                                if (alignment.needsResync && currentTurnRef.current) {
-                                    currentTurnRef.current.needsResync = true;
-                                }
                                 return alignment.messages;
                             });
                         }
 
+                        const prevTurn = currentTurnRef.current;
                         currentTurnRef.current = {
                             turnId: turn_id,
                             generation: conversationGenerationRef.current,
                             conversationId: validation.targetConversationId ?? activeConversationIdRef.current,
                             clientRequestId: validation.matchedClientRequestId,
-                            messageIndex: null,
-                            rawText: "",
-                            visibleTextStarted: false,
-                            translation: undefined,
-                            translationPending: false,
-                            tools: [],
-                            pendingContext: pendingVisionContextRef.current ?? undefined,
+                            messageIndex: prevTurn?.messageIndex ?? null,
+                            rawText: prevTurn?.rawText ?? "",
+                            visibleTextStarted: prevTurn?.visibleTextStarted ?? false,
+                            translation: prevTurn?.translation,
+                            translationPending: prevTurn?.translationPending ?? false,
+                            tools: prevTurn?.tools ?? [],
+                            pendingContext: prevTurn?.pendingContext ?? (pendingVisionContextRef.current ?? undefined),
                             needsResync,
                         };
                         pendingVisionContextRef.current = null;
-                        rawResponseRef.current = "";
+                        rawResponseRef.current = currentTurnRef.current.rawText;
                     }),
 
                     onChatTurnDelta(({ turn_id, delta: rawDelta }) => {
@@ -1866,6 +1932,7 @@ export default function ChatPanel({
                                       conversationId: turn.conversationId ?? activeConversationIdRef.current,
                                   }
                                 : null,
+                            pendingRequest: pendingTurnRequestRef.current,
                         }, {
                             turn_id,
                             status,
@@ -1884,12 +1951,46 @@ export default function ChatPanel({
                             return;
                         }
 
+                        const reqIdToClear = turn?.clientRequestId ?? client_request_id ?? pendingTurnRequestRef.current?.clientRequestId;
+                        if (reqIdToClear) {
+                            clearPendingExternalWatchdog(reqIdToClear);
+                        }
+
                         if (validation.shouldUpdateConversation && validation.targetConversationId) {
                             setActiveConversationId(validation.targetConversationId);
                             activeConversationIdRef.current = validation.targetConversationId;
                         }
 
-                        if (!turn) return;
+                        if (!turn) {
+                            if (status === "cancelled") {
+                                resetReveal();
+                                endTurnActivity();
+                                setIsThinking(false);
+                                currentTurnRef.current = null;
+                                pendingTurnRequestRef.current = null;
+                                return;
+                            }
+
+                            flushReveal();
+                            endTurnActivity();
+                            setIsThinking(false);
+
+                            const targetConvId = validation.targetConversationId;
+                            const reqId = client_request_id ?? pendingTurnRequestRef.current?.clientRequestId ?? `finish_${turn_id}`;
+                            const reqGen = pendingTurnRequestRef.current?.generation ?? conversationGenerationRef.current;
+
+                            currentTurnRef.current = null;
+                            pendingTurnRequestRef.current = null;
+
+                            if (targetConvId) {
+                                void resyncConversationMessages({
+                                    conversationId: targetConvId,
+                                    startGeneration: reqGen,
+                                    clientRequestId: reqId,
+                                });
+                            }
+                            return;
+                        }
 
                         if (status === "cancelled") {
                             resetReveal();
@@ -2149,10 +2250,10 @@ export default function ChatPanel({
                         rawResponseRef.current = "";
                         currentTurnRef.current = null;
 
-                        startPendingExternalWatchdog(clientRequestId, () => {
+                        startPendingExternalWatchdog(clientRequestId, (customReason) => {
                             void handleExternalPendingWatchdogExpired(
                                 clientRequestId,
-                                "external_pending_interaction_watchdog_timeout",
+                                customReason || "external_pending_interaction_watchdog_timeout",
                                 false,
                             );
                         });

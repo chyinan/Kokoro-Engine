@@ -459,6 +459,22 @@ fn tool_execution_timeout() -> std::time::Duration {
         .unwrap_or(std::time::Duration::from_secs(60))
 }
 
+fn chat_turn_preparation_timeout() -> std::time::Duration {
+    std::env::var("KOKORO_CHAT_PREPARATION_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(60))
+}
+
+fn chat_hook_execution_timeout() -> std::time::Duration {
+    std::env::var("KOKORO_CHAT_HOOK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(15))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum StreamPollResult<T> {
     Item(T),
@@ -2033,6 +2049,7 @@ pub async fn stream_chat(
         .await;
     let _turn_guard =
         TurnCancellationGuard::new(cancel_state.inner().clone(), assistant_turn_id.clone());
+    let mut cancel_rx = cancel_state.subscribe_cancellation(&assistant_turn_id).await;
 
     if cancel_state.is_cancelled(&assistant_turn_id).await {
         tracing::info!(
@@ -2072,22 +2089,38 @@ pub async fn stream_chat(
     state.set_character_id(char_id.clone()).await;
 
     if let Some(hooks) = hook_runtime.as_ref() {
-        hooks
-            .emit_best_effort(
-                &HookEvent::BeforeUserMessage,
-                &build_chat_hook_payload(
-                    requested_conversation_id
-                        .clone()
-                        .or_else(|| initial_conversation_id.clone()),
-                    &char_id,
-                    None,
-                    Some(request.message.clone()),
-                    None,
-                    None,
-                    request.hidden,
-                ),
-            )
-            .await;
+        let hook_payload = build_chat_hook_payload(
+            requested_conversation_id
+                .clone()
+                .or_else(|| initial_conversation_id.clone()),
+            &char_id,
+            None,
+            Some(request.message.clone()),
+            None,
+            None,
+            request.hidden,
+        );
+        let hook_fut = hooks.emit_best_effort(&HookEvent::BeforeUserMessage, &hook_payload);
+        tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut cancel_rx) => {
+                tracing::info!(
+                    target: "chat",
+                    "[stream_chat] Turn {} (request {}) cancelled during BeforeUserMessage hook",
+                    assistant_turn_id,
+                    client_request_id
+                );
+                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+            }
+            _ = tokio::time::sleep(chat_hook_execution_timeout()) => {
+                tracing::warn!(
+                    target: "chat",
+                    "[stream_chat] BeforeUserMessage hook timed out after {}s",
+                    chat_hook_execution_timeout().as_secs()
+                );
+            }
+            _ = hook_fut => {}
+        }
     }
 
     // Record user activity
@@ -2281,20 +2314,36 @@ pub async fn stream_chat(
     let mut is_newly_created_for_hidden = false;
 
     if let Some(hooks) = hook_runtime.as_ref() {
-        hooks
-            .emit_best_effort(
-                &HookEvent::AfterUserMessagePersisted,
-                &build_chat_hook_payload(
-                    conversation_id.clone(),
-                    &char_id,
-                    None,
-                    Some(request.message.clone()),
-                    None,
-                    None,
-                    request.hidden,
-                ),
-            )
-            .await;
+        let hook_payload = build_chat_hook_payload(
+            conversation_id.clone(),
+            &char_id,
+            None,
+            Some(request.message.clone()),
+            None,
+            None,
+            request.hidden,
+        );
+        let hook_fut = hooks.emit_best_effort(&HookEvent::AfterUserMessagePersisted, &hook_payload);
+        tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut cancel_rx) => {
+                tracing::info!(
+                    target: "chat",
+                    "[stream_chat] Turn {} (request {}) cancelled during AfterUserMessagePersisted hook",
+                    assistant_turn_id,
+                    client_request_id
+                );
+                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+            }
+            _ = tokio::time::sleep(chat_hook_execution_timeout()) => {
+                tracing::warn!(
+                    target: "chat",
+                    "[stream_chat] AfterUserMessagePersisted hook timed out after {}s",
+                    chat_hook_execution_timeout().as_secs()
+                );
+            }
+            _ = hook_fut => {}
+        }
     }
 
     // ── LAYER 1 & 2: SYSTEM SETUP ───────────────────────────────
@@ -2366,19 +2415,45 @@ pub async fn stream_chat(
     }
 
     // Compose Persona Prompt with immutable history snapshot and explicit conversation scoping
-    let (prompt_messages, compose_warnings) = state
-        .compose_prompt_for_conversation_with_guard(
-            &request.message,
-            request.allow_image_gen.unwrap_or(false),
-            tool_prompt,
-            native_tools_enabled,
-            &char_id,
-            conversation_id.as_deref(),
-            Some(history_snapshot),
-            &_chat_turn_guard,
-        )
-        .await
-        .map_err(|e| KokoroError::Chat(e.to_string()))?;
+    let compose_prompt_fut = state.compose_prompt_for_conversation_with_guard(
+        &request.message,
+        request.allow_image_gen.unwrap_or(false),
+        tool_prompt,
+        native_tools_enabled,
+        &char_id,
+        conversation_id.as_deref(),
+        Some(history_snapshot),
+        &_chat_turn_guard,
+    );
+
+    let (prompt_messages, compose_warnings) = tokio::select! {
+        biased;
+        _ = wait_for_cancel_event(&mut cancel_rx) => {
+            tracing::info!(
+                target: "chat",
+                "[stream_chat] Turn {} (request {}) cancelled during prompt composition",
+                assistant_turn_id,
+                client_request_id
+            );
+            return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+        }
+        _ = tokio::time::sleep(chat_turn_preparation_timeout()) => {
+            tracing::error!(
+                target: "chat",
+                "[stream_chat] Turn {} (request {}) timed out during prompt composition after {}s",
+                assistant_turn_id,
+                client_request_id,
+                chat_turn_preparation_timeout().as_secs()
+            );
+            return Err(KokoroError::Chat(format!(
+                "Prompt composition timed out after {}s",
+                chat_turn_preparation_timeout().as_secs()
+            )));
+        }
+        res = compose_prompt_fut => {
+            res.map_err(|e| KokoroError::Chat(e.to_string()))?
+        }
+    };
 
     // 将构建过程中产生的非致命警告（如记忆检索失败）通知前端
     for warning in compose_warnings {
@@ -2400,13 +2475,36 @@ pub async fn stream_chat(
     );
 
     if let Some(hooks) = hook_runtime.as_ref() {
-        hooks
-            .emit_before_llm_request_modify(
-                &mut before_llm_request_payload,
-                HookModifyPolicy::Strict,
-            )
-            .await
-            .map_err(KokoroError::Chat)?;
+        let hook_fut = hooks.emit_before_llm_request_modify(
+            &mut before_llm_request_payload,
+            HookModifyPolicy::Strict,
+        );
+        tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut cancel_rx) => {
+                tracing::info!(
+                    target: "chat",
+                    "[stream_chat] Turn {} (request {}) cancelled during BeforeLlmRequest modify hook",
+                    assistant_turn_id,
+                    client_request_id
+                );
+                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+            }
+            _ = tokio::time::sleep(chat_hook_execution_timeout()) => {
+                tracing::error!(
+                    target: "chat",
+                    "[stream_chat] BeforeLlmRequest modify hook timed out after {}s",
+                    chat_hook_execution_timeout().as_secs()
+                );
+                return Err(KokoroError::Chat(format!(
+                    "BeforeLlmRequest hook timed out after {}s",
+                    chat_hook_execution_timeout().as_secs()
+                )));
+            }
+            res = hook_fut => {
+                res.map_err(KokoroError::Chat)?;
+            }
+        }
     }
 
     let (effective_request_message, mut client_messages) =
@@ -2414,20 +2512,36 @@ pub async fn stream_chat(
             .map_err(KokoroError::Chat)?;
 
     if let Some(hooks) = hook_runtime.as_ref() {
-        hooks
-            .emit_best_effort(
-                &HookEvent::BeforeLlmRequest,
-                &build_chat_hook_payload(
-                    conversation_id.clone(),
-                    &char_id,
-                    Some(assistant_turn_id.clone()),
-                    Some(effective_request_message.clone()),
-                    None,
-                    None,
-                    request.hidden,
-                ),
-            )
-            .await;
+        let hook_payload = build_chat_hook_payload(
+            conversation_id.clone(),
+            &char_id,
+            Some(assistant_turn_id.clone()),
+            Some(effective_request_message.clone()),
+            None,
+            None,
+            request.hidden,
+        );
+        let hook_fut = hooks.emit_best_effort(&HookEvent::BeforeLlmRequest, &hook_payload);
+        tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut cancel_rx) => {
+                tracing::info!(
+                    target: "chat",
+                    "[stream_chat] Turn {} (request {}) cancelled during BeforeLlmRequest best-effort hook",
+                    assistant_turn_id,
+                    client_request_id
+                );
+                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+            }
+            _ = tokio::time::sleep(chat_hook_execution_timeout()) => {
+                tracing::warn!(
+                    target: "chat",
+                    "[stream_chat] BeforeLlmRequest best-effort hook timed out after {}s",
+                    chat_hook_execution_timeout().as_secs()
+                );
+            }
+            _ = hook_fut => {}
+        }
     }
 
     if cancel_state.is_cancelled(&assistant_turn_id).await {
@@ -6932,6 +7046,249 @@ mod tests {
         // Without env var, defaults to 60s
         let default_timeout = tool_execution_timeout();
         assert!(default_timeout.as_secs() >= 60);
+    }
+
+    #[tokio::test]
+    async fn test_hung_prompt_composition_times_out_and_releases_turn_lock() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-prompt-timeout-1").await;
+
+        assert!(!orchestrator.is_chat_busy());
+
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-prompt-timeout-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        // Concurrent request rejected while turn 1 is active
+        let busy_err = orchestrator
+            .try_acquire_chat_turn("req-prompt-timeout-2")
+            .expect_err("must be rejected while busy");
+        assert!(busy_err.contains("chat_turn_busy"));
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            let compose_prompt_fut = async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok::<(), String>(())
+            };
+            let timeout_duration = std::time::Duration::from_millis(50);
+
+            let outcome: Result<(), KokoroError> = tokio::select! {
+                _ = tokio::time::sleep(timeout_duration) => {
+                    Err(KokoroError::Chat("Prompt composition timed out after 50ms".to_string()))
+                }
+                res = compose_prompt_fut => {
+                    res.map_err(KokoroError::Chat)
+                }
+            };
+
+            assert!(outcome.is_err());
+            assert!(outcome.unwrap_err().to_string().contains("Prompt composition timed out"));
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        handle.await.expect("task finished");
+
+        // Lock released automatically when guard dropped on error/timeout
+        assert!(
+            !orchestrator.is_chat_busy(),
+            "chat turn lock must be released after prompt composition timeout"
+        );
+
+        // Turn 2 succeeds immediately
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-prompt-timeout-2")
+            .expect("turn 2 must succeed after prompt composition timed out");
+        assert_eq!(
+            guard2.context().unwrap().client_request_id,
+            "req-prompt-timeout-2"
+        );
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
+    }
+
+    #[tokio::test]
+    async fn test_hung_prompt_composition_cancelled_and_releases_turn_lock() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-prompt-cancel-1").await;
+        let mut cancel_rx = cancel_state
+            .subscribe_cancellation("turn-prompt-cancel-1")
+            .await;
+
+        assert!(!orchestrator.is_chat_busy());
+
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-prompt-cancel-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        let cancel_state_clone = cancel_state.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _turn_guard = TurnCancellationGuard::new(
+                cancel_state_clone.clone(),
+                "turn-prompt-cancel-1".to_string(),
+            );
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            let compose_prompt_fut = async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok::<(), String>(())
+            };
+
+            let outcome: Result<(), KokoroError> = tokio::select! {
+                biased;
+                _ = wait_for_cancel_event(&mut cancel_rx) => {
+                    Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()))
+                }
+                res = compose_prompt_fut => {
+                    res.map_err(KokoroError::Chat)
+                }
+            };
+
+            assert!(matches!(outcome, Err(KokoroError::Chat(ref msg)) if msg == TURN_CANCELLED_BY_USER_MESSAGE));
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        let cancel_res = cancel_chat_turn_inner(
+            "turn-prompt-cancel-1".to_string(),
+            Some("user_stop".to_string()),
+            cancel_state.clone(),
+        )
+        .await;
+        assert!(cancel_res.is_ok());
+
+        handle.await.expect("task finished");
+
+        assert!(
+            !orchestrator.is_chat_busy(),
+            "chat turn lock must be released after prompt composition cancellation"
+        );
+
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-prompt-cancel-2")
+            .expect("turn 2 must succeed after prompt composition was cancelled");
+        assert_eq!(
+            guard2.context().unwrap().client_request_id,
+            "req-prompt-cancel-2"
+        );
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
+    }
+
+    #[tokio::test]
+    async fn test_hung_before_llm_modify_hook_times_out_and_releases_turn_lock() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+
+        assert!(!orchestrator.is_chat_busy());
+
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-hook-timeout-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            let hook_fut = async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok::<(), String>(())
+            };
+            let timeout_duration = std::time::Duration::from_millis(50);
+
+            let outcome: Result<(), KokoroError> = tokio::select! {
+                _ = tokio::time::sleep(timeout_duration) => {
+                    Err(KokoroError::Chat("BeforeLlmRequest hook timed out after 50ms".to_string()))
+                }
+                res = hook_fut => {
+                    res.map_err(KokoroError::Chat)
+                }
+            };
+
+            assert!(outcome.is_err());
+            assert!(outcome.unwrap_err().to_string().contains("BeforeLlmRequest hook timed out"));
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        handle.await.expect("task finished");
+
+        assert!(
+            !orchestrator.is_chat_busy(),
+            "chat turn lock must be released after hook timeout"
+        );
+
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-hook-timeout-2")
+            .expect("turn 2 must acquire lock after hook timeout");
+        assert_eq!(
+            guard2.context().unwrap().client_request_id,
+            "req-hook-timeout-2"
+        );
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
+    }
+
+    #[tokio::test]
+    async fn test_hung_best_effort_hook_times_out_and_releases_turn_lock() {
+        let orchestrator = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+
+        assert!(!orchestrator.is_chat_busy());
+
+        let guard1 = orchestrator
+            .try_acquire_chat_turn("req-best-effort-1")
+            .expect("turn 1 should acquire lock");
+        assert!(orchestrator.is_chat_busy());
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _execution_guard = guard1;
+            let _ = started_tx.send(());
+
+            let hook_fut = async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            };
+            let timeout_duration = std::time::Duration::from_millis(50);
+
+            tokio::select! {
+                _ = tokio::time::sleep(timeout_duration) => {}
+                _ = hook_fut => {}
+            }
+        });
+
+        started_rx.await.expect("task started");
+        assert!(orchestrator.is_chat_busy());
+
+        handle.await.expect("task finished");
+
+        assert!(
+            !orchestrator.is_chat_busy(),
+            "chat turn lock must be released when turn finishes despite best-effort hook timeout"
+        );
+
+        let guard2 = orchestrator
+            .try_acquire_chat_turn("req-best-effort-2")
+            .expect("turn 2 must acquire lock after previous turn completed");
+        assert_eq!(
+            guard2.context().unwrap().client_request_id,
+            "req-best-effort-2"
+        );
+        drop(guard2);
+        assert!(!orchestrator.is_chat_busy());
     }
 }
 
