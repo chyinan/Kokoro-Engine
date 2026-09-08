@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PendingTurnState } from "./turn-state";
+import { validateTurnStart } from "./chat-turn-lifecycle";
 
 describe("chat stop generation race condition and 4-layer defense", () => {
     it("preserves turnId initialization when cancellation is requested before turn start (Layer 1)", () => {
@@ -658,5 +659,124 @@ describe("chat stop generation race condition and 4-layer defense", () => {
         expect(synchronize).toHaveBeenCalled();
         expect(cancelRequested).toBe(false);
         expect(isStopping).toBe(false);
+    });
+
+    it("clears pendingTurnRequest immediately and calls requestTurnCancellation when stopping pending request", () => {
+        let isStreaming = true;
+        let isStopping = false;
+        let cancelRequested = false;
+        let isThinking = true;
+        let currentTurn: any = null;
+        let pendingTurnRequest: any = {
+            clientRequestId: "req-pending-stop-test",
+            generation: 1,
+            conversationId: "conv-1",
+            characterId: "char-anya",
+        };
+
+        const requestTurnCancellation = vi.fn(async (_id: string) => {});
+
+        const handleStopGeneration = () => {
+            if (!isStreaming || isStopping) return;
+            cancelRequested = true;
+            isStopping = true;
+            isThinking = false;
+
+            const activeTurnId = currentTurn?.turnId;
+            const pendingClientRequestId = pendingTurnRequest?.clientRequestId;
+            if (activeTurnId) {
+                void requestTurnCancellation(activeTurnId);
+            } else if (pendingClientRequestId) {
+                pendingTurnRequest = null;
+                void requestTurnCancellation(pendingClientRequestId);
+            }
+        };
+
+        handleStopGeneration();
+
+        expect(cancelRequested).toBe(true);
+        expect(isStopping).toBe(true);
+        expect(isThinking).toBe(false);
+        expect(pendingTurnRequest).toBeNull();
+        expect(requestTurnCancellation).toHaveBeenCalledWith("req-pending-stop-test");
+    });
+
+    it("preserves cancelRequested=true and clears pendingTurnRequest on requestTurnCancellation error", async () => {
+        let isStreaming = true;
+        let isBusy = true;
+        let isStopping = true;
+        let cancelRequested = true;
+        let isThinking = true;
+        let errorMessage: string | null = null;
+        let currentTurn: any = null;
+        let pendingTurnRequest: any = {
+            clientRequestId: "req-pending-error-test",
+            generation: 1,
+            conversationId: "conv-1",
+            characterId: "char-anya",
+        };
+
+        const cancelChatTurn = vi.fn(async (_id: string, _reason: string) => {
+            throw new Error("unknown turn_id: req-pending-error-test");
+        });
+
+        const isTurnCancelledError = (err: unknown) => {
+            const msg = String(err).toLowerCase();
+            return msg.includes("turn cancelled by user") || msg.includes("turn canceled by user");
+        };
+
+        const endTurnActivity = () => {
+            cancelRequested = false;
+            isStopping = false;
+            isStreaming = false;
+            isBusy = false;
+        };
+
+        const requestTurnCancellation = async (turnId: string) => {
+            try {
+                await cancelChatTurn(turnId, "stopped_from_chat_panel");
+            } catch (error) {
+                if (!isTurnCancelledError(error)) {
+                    endTurnActivity();
+                    cancelRequested = true; // Defense: explicitly maintain cancellation intent!
+                    currentTurn = null;
+                    pendingTurnRequest = null; // Defense: clear pending request!
+                    isThinking = false;
+                    errorMessage = String(error);
+                }
+            }
+        };
+
+        await requestTurnCancellation("req-pending-error-test");
+
+        // Verify defensive invariants
+        expect(cancelRequested).toBe(true);
+        expect(pendingTurnRequest).toBeNull();
+        expect(currentTurn).toBeNull();
+        expect(isThinking).toBe(false);
+        expect(isBusy).toBe(false);
+        expect(isStreaming).toBe(false);
+        expect(isStopping).toBe(false);
+        expect(errorMessage).toContain("unknown turn_id");
+
+        // Now verify that late-arriving chat-turn-start is strictly REJECTED
+        const latePayload = {
+            turn_id: "turn-late-arrival",
+            client_request_id: "req-pending-error-test",
+            conversation_id: "conv-1",
+        };
+
+        const validation = validateTurnStart({
+            currentGeneration: 1,
+            activeConversationId: "conv-1",
+            activeCharacterId: "char-anya",
+            pendingRequest: pendingTurnRequest, // null
+            isCancelRequested: cancelRequested, // true
+        }, latePayload);
+
+        expect(validation.valid).toBe(false);
+        if (!validation.valid) {
+            expect(validation.reason).toBe("cancelled");
+        }
     });
 });

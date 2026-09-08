@@ -11,6 +11,10 @@ import {
     hasResidualActiveTurn,
     mergeResyncedConversationMessages,
     isChatSessionCurrent,
+    registerExternalTurn,
+    unregisterExternalTurn,
+    isAuthorizedExternalTurn,
+    clearRegisteredExternalTurns,
     type TurnStartValidationContext,
     type TurnFinishValidationContext,
     type StreamChatResponseValidationContext,
@@ -279,6 +283,175 @@ describe("chat turn lifecycle validation", () => {
                 valid: false,
                 reason: "conversation_mismatch",
             });
+        });
+
+        it("returns external_authorized when turn has no pendingRequest but has mod_ prefix", () => {
+            const context: TurnStartValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: "conv-1",
+                activeCharacterId: "char-1",
+                pendingRequest: null,
+                isCancelRequested: false,
+            };
+
+            const result = validateTurnStart(context, {
+                turn_id: "turn-mod-1",
+                client_request_id: "mod_1725700000_abc123",
+                conversation_id: "conv-1",
+            });
+
+            expect(result).toEqual({
+                valid: false,
+                reason: "external_authorized",
+            });
+        });
+
+        it("returns external_authorized when turn has no pendingRequest but has onboarding_ prefix", () => {
+            const context: TurnStartValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: null,
+                activeCharacterId: "char-1",
+                pendingRequest: null,
+                isCancelRequested: false,
+            };
+
+            const result = validateTurnStart(context, {
+                turn_id: "turn-onboarding-1",
+                client_request_id: "onboarding_4f1b51e0-7df0-47fa-8025-5e6080512f45",
+                conversation_id: null,
+            });
+
+            expect(result).toEqual({
+                valid: false,
+                reason: "external_authorized",
+            });
+        });
+
+        it("returns external_authorized when turn is explicitly registered in external registry", () => {
+            clearRegisteredExternalTurns();
+            const unregister = registerExternalTurn("custom_external_req_99");
+
+            const context: TurnStartValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: "conv-1",
+                activeCharacterId: "char-1",
+                pendingRequest: null,
+                isCancelRequested: false,
+            };
+
+            const result = validateTurnStart(context, {
+                turn_id: "turn-ext-99",
+                client_request_id: "custom_external_req_99",
+                conversation_id: "conv-1",
+            });
+
+            expect(result).toEqual({
+                valid: false,
+                reason: "external_authorized",
+            });
+
+            unregister();
+
+            const resultAfterUnregister = validateTurnStart(context, {
+                turn_id: "turn-ext-99",
+                client_request_id: "custom_external_req_99",
+                conversation_id: "conv-1",
+            });
+
+            expect(resultAfterUnregister).toEqual({
+                valid: false,
+                reason: "no_pending_request",
+            });
+        });
+
+        it("returns external_authorized when incoming turn conflicts with pendingRequest clientRequestId but is an authorized external turn", () => {
+            const context: TurnStartValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: "conv-1",
+                activeCharacterId: "char-1",
+                pendingRequest: {
+                    clientRequestId: "chat-panel-req-1",
+                    generation: 1,
+                    conversationId: "conv-1",
+                    characterId: "char-1",
+                },
+                isCancelRequested: false,
+            };
+
+            const result = validateTurnStart(context, {
+                turn_id: "turn-mod-2",
+                client_request_id: "mod_1725700000_xyz789",
+                conversation_id: "conv-1",
+            });
+
+            expect(result).toEqual({
+                valid: false,
+                reason: "external_authorized",
+            });
+        });
+
+        it("returns request_mismatch when incoming turn conflicts with pendingRequest and is NOT an external authorized turn", () => {
+            const context: TurnStartValidationContext = {
+                currentGeneration: 1,
+                activeConversationId: "conv-1",
+                activeCharacterId: "char-1",
+                pendingRequest: {
+                    clientRequestId: "chat-panel-req-1",
+                    generation: 1,
+                    conversationId: "conv-1",
+                    characterId: "char-1",
+                },
+                isCancelRequested: false,
+            };
+
+            const result = validateTurnStart(context, {
+                turn_id: "turn-old-chat",
+                client_request_id: "chat-panel-req-older",
+                conversation_id: "conv-1",
+            });
+
+            expect(result).toEqual({
+                valid: false,
+                reason: "request_mismatch",
+            });
+        });
+    });
+
+    describe("external turn registry", () => {
+        it("identifies mod_ and onboarding_ as authorized external turns", () => {
+            expect(isAuthorizedExternalTurn("mod_12345")).toBe(true);
+            expect(isAuthorizedExternalTurn("onboarding_uuid-here")).toBe(true);
+            expect(isAuthorizedExternalTurn("normal_chat_req")).toBe(false);
+            expect(isAuthorizedExternalTurn("")).toBe(false);
+            expect(isAuthorizedExternalTurn(null)).toBe(false);
+            expect(isAuthorizedExternalTurn(undefined)).toBe(false);
+        });
+
+        it("registers, checks, and unregisters arbitrary client request IDs", () => {
+            clearRegisteredExternalTurns();
+            expect(isAuthorizedExternalTurn("arbitrary-id-1")).toBe(false);
+
+            const unregister = registerExternalTurn("arbitrary-id-1");
+            expect(isAuthorizedExternalTurn("arbitrary-id-1")).toBe(true);
+
+            unregister();
+            expect(isAuthorizedExternalTurn("arbitrary-id-1")).toBe(false);
+
+            registerExternalTurn("arbitrary-id-2");
+            expect(isAuthorizedExternalTurn("arbitrary-id-2")).toBe(true);
+            unregisterExternalTurn("arbitrary-id-2");
+            expect(isAuthorizedExternalTurn("arbitrary-id-2")).toBe(false);
+        });
+
+        it("handles expired registrations based on TTL", () => {
+            clearRegisteredExternalTurns();
+            const now = 1000000;
+            registerExternalTurn("expiring-req", 5000, now);
+
+            // Within TTL
+            expect(isAuthorizedExternalTurn("expiring-req", now + 1000)).toBe(true);
+            // Expired
+            expect(isAuthorizedExternalTurn("expiring-req", now + 6000)).toBe(false);
         });
     });
 

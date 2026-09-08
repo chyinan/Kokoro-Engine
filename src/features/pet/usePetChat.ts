@@ -146,6 +146,12 @@ export function usePetChat(): PetChatState {
                 accumulatedRef.current = "";
                 if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
                 invoke("hide_bubble_window").catch(() => {});
+                if ("timeout" in handshake && handshake.timeout) {
+                    emit("pet-chat-failed", {
+                        client_request_id: clientRequestId,
+                        error: "handshake_timeout",
+                    }).catch(() => {});
+                }
                 return;
             }
 

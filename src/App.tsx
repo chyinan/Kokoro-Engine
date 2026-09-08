@@ -376,6 +376,10 @@ import {
   cancelOnboardingChat as cancelPendingOnboardingChat,
   releaseOnboardingChatRequest,
 } from "./features/onboarding/onboarding-chat-cancellation";
+import {
+  registerExternalTurn,
+  unregisterExternalTurn,
+} from "./ui/widgets/chat/chat-turn-lifecycle";
 
 let _regSnap = 0;
 const _subscribeFn = (cb: () => void) => {
@@ -1015,7 +1019,8 @@ function App() {
     dispatchOnboardingEvent({ type: "chat-started" });
     setOnboardingSubmittingChat(true);
     return new Promise<string>((resolve, reject) => {
-      const clientRequestId = crypto.randomUUID();
+      const clientRequestId = `onboarding_${crypto.randomUUID()}`;
+      const unregisterExternal = registerExternalTurn(clientRequestId);
       onboardingChatPendingRef.current = { clientRequestId, turnId: null, reply: "", resolve, reject };
       void streamChat({
         message,
@@ -1025,10 +1030,12 @@ function App() {
         const pending = onboardingChatPendingRef.current;
         if (pending?.clientRequestId !== clientRequestId) {
           releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
+          unregisterExternal();
           return;
         }
         onboardingChatPendingRef.current = null;
         releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
+        unregisterExternal();
         setOnboardingSubmittingChat(false);
         pending?.reject(error instanceof Error ? error : new Error(getKokoroErrorMessage(error)));
       });
@@ -1043,6 +1050,9 @@ function App() {
 
   const cancelOnboardingChat = (): void => {
     const pending = onboardingChatPendingRef.current;
+    if (pending) {
+      unregisterExternalTurn(pending.clientRequestId);
+    }
     onboardingChatPendingRef.current = null;
     setOnboardingSubmittingChat(false);
     cancelPendingOnboardingChat(
@@ -1448,6 +1458,7 @@ function App() {
       if (onboardingPending
         && isOnboardingTurnEvent(onboardingPending.clientRequestId, client_request_id)
         && onboardingPending.turnId === turn_id) {
+        unregisterExternalTurn(onboardingPending.clientRequestId);
         onboardingChatPendingRef.current = null;
         setOnboardingSubmittingChat(false);
         if (status === "completed") {
@@ -1771,11 +1782,16 @@ function App() {
             return;
           }
           const clientRequestId = `mod_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-          await streamChat({
-            message,
-            character_id: readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || undefined,
-            client_request_id: clientRequestId,
-          });
+          const unregister = registerExternalTurn(clientRequestId);
+          try {
+            await streamChat({
+              message,
+              character_id: readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || undefined,
+              client_request_id: clientRequestId,
+            });
+          } finally {
+            unregister();
+          }
         } catch (err) {
           console.error("[App] Mod send_message failed:", err);
         }

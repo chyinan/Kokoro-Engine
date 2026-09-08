@@ -197,4 +197,71 @@ describe("usePetChat", () => {
         });
         expect(coreApi.invoke).toHaveBeenCalledWith("hide_bubble_window");
     });
+
+    it("emits pet-chat-failed and resets state when handshake times out after 1000ms", async () => {
+        vi.useFakeTimers();
+        try {
+            vi.spyOn(eventApi, "emit").mockImplementation(async () => {});
+
+            let sendPromise: Promise<void> | null = null;
+            await act(async () => {
+                sendPromise = hookState!.sendMessage("Pet chat timeout message");
+            });
+
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(1000);
+            });
+
+            await act(async () => {
+                await sendPromise!;
+            });
+
+            expect(eventApi.emit).toHaveBeenCalledWith("pet-chat-failed", expect.objectContaining({
+                client_request_id: expect.stringMatching(/^pet_\d+_[a-z0-9]+$/),
+                error: "handshake_timeout",
+            }));
+            expect(hookState?.isStreaming).toBe(false);
+            expect(coreApi.invoke).toHaveBeenCalledWith("hide_bubble_window");
+            expect(coreApi.invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything());
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("ignores late pet-chat-accepted arriving after handshake timeout", async () => {
+        vi.useFakeTimers();
+        try {
+            let capturedReqId: string | undefined;
+            vi.spyOn(eventApi, "emit").mockImplementation(async (event: string, payload: any) => {
+                if (event === "pet-chat-start") {
+                    capturedReqId = payload?.client_request_id;
+                }
+            });
+
+            let sendPromise: Promise<void>;
+            act(() => {
+                sendPromise = hookState!.sendMessage("Pet late acceptance");
+            });
+
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(1000);
+            });
+            await act(async () => {
+                await sendPromise!;
+            });
+
+            expect(hookState?.isStreaming).toBe(false);
+
+            await act(async () => {
+                listeners["pet-chat-accepted"]?.({
+                    payload: { client_request_id: capturedReqId, conversation_id: "conv-mock" },
+                });
+            });
+
+            expect(coreApi.invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything());
+            expect(hookState?.isStreaming).toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
 });

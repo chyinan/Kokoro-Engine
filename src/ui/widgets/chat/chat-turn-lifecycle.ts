@@ -1,6 +1,62 @@
 // pattern: Functional Core
 import type { ChatPanelMessage } from "./turn-state";
 
+const DEFAULT_EXTERNAL_TURN_TTL_MS = 120_000;
+const registeredExternalTurns = new Map<string, number>();
+
+function pruneExpiredExternalTurns(now: number = Date.now()): void {
+    for (const [reqId, expiresAt] of registeredExternalTurns.entries()) {
+        if (expiresAt <= now) {
+            registeredExternalTurns.delete(reqId);
+        }
+    }
+}
+
+/**
+ * Registers an authorized external chat turn request (e.g. from Onboarding or Mod).
+ * Returns an unregister function.
+ */
+export function registerExternalTurn(
+    clientRequestId: string,
+    ttlMs: number = DEFAULT_EXTERNAL_TURN_TTL_MS,
+    now: number = Date.now(),
+): () => void {
+    const trimmed = clientRequestId.trim();
+    if (!trimmed) return () => {};
+    pruneExpiredExternalTurns(now);
+    registeredExternalTurns.set(trimmed, now + ttlMs);
+    return () => {
+        registeredExternalTurns.delete(trimmed);
+    };
+}
+
+export function unregisterExternalTurn(clientRequestId: string): void {
+    registeredExternalTurns.delete(clientRequestId.trim());
+}
+
+export function isAuthorizedExternalTurn(
+    clientRequestId?: string | null,
+    now: number = Date.now(),
+): boolean {
+    if (!clientRequestId) return false;
+    const trimmed = clientRequestId.trim();
+    if (!trimmed) return false;
+    if (trimmed.startsWith("mod_") || trimmed.startsWith("onboarding_")) {
+        return true;
+    }
+    const expiresAt = registeredExternalTurns.get(trimmed);
+    if (expiresAt === undefined) return false;
+    if (expiresAt <= now) {
+        registeredExternalTurns.delete(trimmed);
+        return false;
+    }
+    return true;
+}
+
+export function clearRegisteredExternalTurns(): void {
+    registeredExternalTurns.clear();
+}
+
 export type TurnStartValidationContext = {
     readonly currentGeneration: number;
     readonly activeConversationId: string | null;
@@ -13,6 +69,7 @@ export type TurnStartValidationContext = {
     } | null;
     readonly isCancelRequested: boolean;
     readonly allowUntracked?: boolean;
+    readonly isExternalAuthorized?: (clientRequestId: string) => boolean;
 };
 
 export type TurnStartEventPayload = {
@@ -37,7 +94,8 @@ export type TurnStartValidationResult =
               | "request_mismatch"
               | "conversation_mismatch"
               | "missing_request_id"
-              | "no_pending_request";
+              | "no_pending_request"
+              | "external_authorized";
       };
 
 /**
@@ -49,22 +107,21 @@ export function validateTurnStart(
     context: TurnStartValidationContext,
     payload: TurnStartEventPayload,
 ): TurnStartValidationResult {
-    if (context.isCancelRequested) {
-        return { valid: false, reason: "cancelled" };
-    }
-
     const clientRequestId = payload.client_request_id?.trim();
     if (!clientRequestId) {
         return { valid: false, reason: "missing_request_id" };
     }
 
-    if (context.pendingRequest) {
-        if (context.pendingRequest.generation !== context.currentGeneration) {
-            return { valid: false, reason: "generation_mismatch" };
+    const isExternal = (context.isExternalAuthorized ?? isAuthorizedExternalTurn)(clientRequestId);
+
+    // If this turn matches ChatPanel's expected pending request, validate against session state:
+    if (context.pendingRequest && clientRequestId === context.pendingRequest.clientRequestId) {
+        if (context.isCancelRequested) {
+            return { valid: false, reason: "cancelled" };
         }
 
-        if (clientRequestId !== context.pendingRequest.clientRequestId) {
-            return { valid: false, reason: "request_mismatch" };
+        if (context.pendingRequest.generation !== context.currentGeneration) {
+            return { valid: false, reason: "generation_mismatch" };
         }
 
         if (payload.conversation_id) {
@@ -82,6 +139,25 @@ export function validateTurnStart(
             targetConversationId: payload.conversation_id ?? context.activeConversationId,
             matchedClientRequestId: clientRequestId,
         };
+    }
+
+    // Turn is not ChatPanel's matching pending request.
+    // If it is an authorized external turn (e.g. onboarding, mod), mark as external_authorized
+    // so ChatPanel ignores it without cancelling the legitimate external turn.
+    if (isExternal) {
+        return { valid: false, reason: "external_authorized" };
+    }
+
+    if (context.isCancelRequested) {
+        return { valid: false, reason: "cancelled" };
+    }
+
+    if (context.pendingRequest) {
+        if (context.pendingRequest.generation !== context.currentGeneration) {
+            return { valid: false, reason: "generation_mismatch" };
+        }
+
+        return { valid: false, reason: "request_mismatch" };
     }
 
     // No pending request recorded: default to rejection for safe convergence

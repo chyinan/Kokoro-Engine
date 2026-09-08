@@ -249,8 +249,16 @@ export class InteractionService {
             if (this.activeClientRequestId === clientRequestId) {
                 this.activeClientRequestId = null;
             }
-            this.isChatBusy = true;
-            this.pendingGesture = { gesture, controller: _controller };
+            if ("timeout" in handshake && handshake.timeout) {
+                this.isChatBusy = false;
+                emit("interaction-trigger-failed", {
+                    client_request_id: clientRequestId,
+                    error: "handshake_timeout",
+                }).catch(() => {});
+            } else {
+                this.isChatBusy = true;
+                this.pendingGesture = { gesture, controller: _controller };
+            }
             const event: InteractionEvent = {
                 hitArea: gesture.hitArea,
                 gesture: gesture.gesture,

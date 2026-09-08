@@ -262,4 +262,79 @@ describe("InteractionService", () => {
         expect(result).not.toBeNull();
         expect(bridge.streamChat).not.toHaveBeenCalled();
     });
+
+    it("emits interaction-trigger-failed and resets busy state when handshake times out after 1000ms", async () => {
+        vi.useFakeTimers();
+        try {
+            vi.spyOn(eventApi, "emit").mockImplementation(async () => {});
+
+            const gesture: GestureEvent = {
+                hitArea: "head",
+                gesture: "tap",
+                consecutiveTaps: 1,
+            };
+
+            const triggerPromise = service.triggerInteraction(gesture, mockController as any);
+
+            await vi.advanceTimersByTimeAsync(1000);
+            await triggerPromise;
+
+            expect(eventApi.emit).toHaveBeenCalledWith("interaction-trigger-failed", expect.objectContaining({
+                client_request_id: expect.stringMatching(/^interaction_\d+_[a-z0-9]+$/),
+                error: "handshake_timeout",
+            }));
+            expect(bridge.streamChat).not.toHaveBeenCalled();
+
+            // Next gesture should NOT be blocked by isChatBusy!
+            vi.spyOn(eventApi, "emit").mockImplementation(async (event: string, payload: any) => {
+                if (event === "interaction-trigger") {
+                    const reqId = (payload as any)?.client_request_id;
+                    listeners["interaction-trigger-accepted"]?.({
+                        payload: { client_request_id: reqId, conversation_id: "conv-mock" },
+                    });
+                }
+            });
+
+            // Fast forward past cooldown
+            await vi.advanceTimersByTimeAsync(600);
+
+            await service.triggerInteraction(gesture, mockController as any);
+            expect(bridge.streamChat).toHaveBeenCalledTimes(1);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("ignores late interaction-trigger-accepted arriving after handshake timeout", async () => {
+        vi.useFakeTimers();
+        try {
+            let capturedReqId: string | undefined;
+            vi.spyOn(eventApi, "emit").mockImplementation(async (event: string, payload: any) => {
+                if (event === "interaction-trigger") {
+                    capturedReqId = (payload as any)?.client_request_id;
+                }
+            });
+
+            const gesture: GestureEvent = {
+                hitArea: "head",
+                gesture: "tap",
+                consecutiveTaps: 1,
+            };
+
+            const triggerPromise = service.triggerInteraction(gesture, mockController as any);
+            await vi.advanceTimersByTimeAsync(1000);
+            await triggerPromise;
+
+            expect(bridge.streamChat).not.toHaveBeenCalled();
+
+            // Late interaction-trigger-accepted arrives
+            listeners["interaction-trigger-accepted"]?.({
+                payload: { client_request_id: capturedReqId, conversation_id: "conv-mock" },
+            });
+
+            expect(bridge.streamChat).not.toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
 });

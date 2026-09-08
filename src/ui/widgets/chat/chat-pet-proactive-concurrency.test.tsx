@@ -524,5 +524,133 @@ describe("ChatPanel Pet & Proactive Turn Concurrency", () => {
 
         expect(textarea.disabled).toBe(false);
     });
+
+    it("rolls back optimistic message on handshake_timeout without showing error toast", async () => {
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        await act(async () => {
+            listeners["pet-chat-start"]?.({
+                payload: { message: "Timeout message", client_request_id: "pet_timeout_123" }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(container.textContent).toContain("Timeout message");
+
+        await act(async () => {
+            listeners["pet-chat-failed"]?.({
+                payload: { client_request_id: "pet_timeout_123", error: "handshake_timeout" }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(container.textContent).not.toContain("Timeout message");
+        expect(container.textContent).not.toContain("handshake_timeout");
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        expect(textarea.disabled).toBe(false);
+    });
+
+    it("resets busy state via external pending watchdog if sender fails to reverse-notify", async () => {
+        vi.useFakeTimers();
+        try {
+            await act(async () => {
+                root.render(createElement(ChatPanel));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            await act(async () => {
+                listeners["pet-chat-start"]?.({
+                    payload: { message: "Abandoned message", client_request_id: "pet_abandoned_456" }
+                });
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            expect(container.textContent).toContain("Abandoned message");
+            let textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+            expect(textarea.disabled).toBe(true);
+
+            // Fast-forward past the 2500ms watchdog
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(2500);
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            // Watchdog should have cleaned up the abandoned turn
+            expect(container.textContent).not.toContain("Abandoned message");
+            textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+            expect(textarea.disabled).toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("rejects pet-chat-start if pet-chat-failed arrived earlier out-of-order (tombstone)", async () => {
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Failed arrives BEFORE start (out-of-order)
+        await act(async () => {
+            listeners["pet-chat-failed"]?.({
+                payload: { client_request_id: "pet_out_of_order", error: "handshake_timeout" }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Now start arrives
+        await act(async () => {
+            listeners["pet-chat-start"]?.({
+                payload: { message: "Out of order message", client_request_id: "pet_out_of_order" }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Should be rejected with cancelled, not accepted
+        expect(eventApi.emit).toHaveBeenCalledWith("pet-chat-rejected", {
+            client_request_id: "pet_out_of_order",
+            reason: "cancelled",
+        });
+        expect(container.textContent).not.toContain("Out of order message");
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        expect(textarea.disabled).toBe(false);
+    });
+
+    it("rejects interaction-trigger if interaction-trigger-failed arrived earlier out-of-order (tombstone)", async () => {
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Failed arrives BEFORE trigger
+        await act(async () => {
+            listeners["interaction-trigger-failed"]?.({
+                payload: { client_request_id: "interaction_out_of_order", error: "handshake_timeout" }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        // Trigger arrives
+        await act(async () => {
+            listeners["interaction-trigger"]?.({
+                payload: {
+                    gesture: "tap",
+                    hitArea: "head",
+                    client_request_id: "interaction_out_of_order",
+                }
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(eventApi.emit).toHaveBeenCalledWith("interaction-trigger-rejected", {
+            client_request_id: "interaction_out_of_order",
+            reason: "cancelled",
+        });
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        expect(textarea.disabled).toBe(false);
+    });
 });
 

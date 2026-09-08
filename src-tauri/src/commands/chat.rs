@@ -182,6 +182,29 @@ struct TurnCancellationRecord {
 struct TurnCancellationInner {
     cancelled: HashMap<String, TurnCancellationRecord>,
     request_to_turn: HashMap<String, String>,
+    tombstones: HashMap<String, (Option<String>, std::time::Instant, u64)>,
+    tombstone_counter: u64,
+}
+
+const TOMBSTONE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const MAX_TOMBSTONES: usize = 256;
+
+fn prune_tombstones(
+    tombstones: &mut HashMap<String, (Option<String>, std::time::Instant, u64)>,
+) {
+    let now = std::time::Instant::now();
+    tombstones.retain(|_, (_, created, _)| now.duration_since(*created) < TOMBSTONE_TTL);
+    if tombstones.len() > MAX_TOMBSTONES {
+        let mut entries: Vec<(String, std::time::Instant, u64)> = tombstones
+            .iter()
+            .map(|(k, (_, created, seq))| (k.clone(), *created, *seq))
+            .collect();
+        entries.sort_by(|(_, t1, s1), (_, t2, s2)| t1.cmp(t2).then_with(|| s1.cmp(s2)));
+        let remove_count = entries.len() - MAX_TOMBSTONES;
+        for (k, _, _) in entries.into_iter().take(remove_count) {
+            tombstones.remove(&k);
+        }
+    }
 }
 
 pub struct TurnCancellationState {
@@ -212,13 +235,36 @@ impl TurnCancellationState {
 
     pub async fn register_turn_with_request(&self, turn_id: &str, client_request_id: Option<&str>) {
         let mut inner = self.inner.write().await;
+        prune_tombstones(&mut inner.tombstones);
+
+        let tombstone = inner
+            .tombstones
+            .remove(turn_id)
+            .or_else(|| client_request_id.and_then(|req| inner.tombstones.remove(req)));
+
         if let std::collections::hash_map::Entry::Vacant(e) = inner.cancelled.entry(turn_id.to_string()) {
-            let (tx, _) = tokio::sync::watch::channel(false);
-            e.insert(TurnCancellationRecord {
-                reason: None,
-                cancel_tx: tx,
-            });
+            if let Some((reason, _, _)) = tombstone {
+                let (tx, _) = tokio::sync::watch::channel(true);
+                e.insert(TurnCancellationRecord {
+                    reason: reason.or_else(|| Some(TURN_CANCELLED_BY_USER_MESSAGE.to_string())),
+                    cancel_tx: tx,
+                });
+            } else {
+                let (tx, _) = tokio::sync::watch::channel(false);
+                e.insert(TurnCancellationRecord {
+                    reason: None,
+                    cancel_tx: tx,
+                });
+            }
+        } else if let Some((reason, _, _)) = tombstone {
+            if let Some(entry) = inner.cancelled.get_mut(turn_id) {
+                if entry.reason.is_none() {
+                    entry.reason = reason.or_else(|| Some(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+                }
+                let _ = entry.cancel_tx.send(true);
+            }
         }
+
         if let Some(req_id) = client_request_id {
             inner.request_to_turn.insert(req_id.to_string(), turn_id.to_string());
         }
@@ -244,8 +290,13 @@ impl TurnCancellationState {
     }
 
     async fn cancel_turn(&self, target_id: &str, reason: Option<String>) -> Result<(), String> {
+        let target_trimmed = target_id.trim();
+        if target_trimmed.is_empty() {
+            return Err("target_id cannot be empty".to_string());
+        }
+
         let mut inner = self.inner.write().await;
-        if let Some(entry) = inner.cancelled.get_mut(target_id) {
+        if let Some(entry) = inner.cancelled.get_mut(target_trimmed) {
             if entry.reason.is_none() {
                 entry.reason = reason;
             }
@@ -253,7 +304,7 @@ impl TurnCancellationState {
             return Ok(());
         }
 
-        if let Some(turn_id) = inner.request_to_turn.get(target_id).cloned() {
+        if let Some(turn_id) = inner.request_to_turn.get(target_trimmed).cloned() {
             if let Some(entry) = inner.cancelled.get_mut(&turn_id) {
                 if entry.reason.is_none() {
                     entry.reason = reason;
@@ -263,7 +314,15 @@ impl TurnCancellationState {
             }
         }
 
-        Err(format!("unknown turn_id: {}", target_id))
+        // Target not yet registered: record cancellation tombstone so subsequent
+        // registration inherits the cancelled state.
+        inner.tombstone_counter = inner.tombstone_counter.wrapping_add(1);
+        let seq = inner.tombstone_counter;
+        inner
+            .tombstones
+            .insert(target_trimmed.to_string(), (reason, std::time::Instant::now(), seq));
+        prune_tombstones(&mut inner.tombstones);
+        Ok(())
     }
 
     async fn is_cancelled(&self, turn_id: &str) -> bool {
@@ -276,6 +335,9 @@ impl TurnCancellationState {
                 return v.reason.is_some();
             }
         }
+        if inner.tombstones.contains_key(turn_id) {
+            return true;
+        }
         false
     }
 
@@ -283,6 +345,7 @@ impl TurnCancellationState {
         let inner = self.inner.read().await;
         inner.cancelled.contains_key(turn_id)
             || inner.request_to_turn.get(turn_id).is_some_and(|tid| inner.cancelled.contains_key(tid))
+            || inner.tombstones.contains_key(turn_id)
     }
 
     pub async fn subscribe_cancellation(
@@ -301,11 +364,21 @@ impl TurnCancellationState {
         None
     }
 
+    pub async fn resolve_turn_id(&self, target_id: &str) -> Option<String> {
+        let inner = self.inner.read().await;
+        if inner.cancelled.contains_key(target_id) {
+            Some(target_id.to_string())
+        } else {
+            inner.request_to_turn.get(target_id).cloned()
+        }
+    }
+
     async fn clear_turn(&self, turn_id: &str) {
         {
             let mut inner = self.inner.write().await;
             inner.cancelled.remove(turn_id);
             inner.request_to_turn.retain(|_, v| v != turn_id);
+            inner.tombstones.remove(turn_id);
         }
         let _ = self.finished_tx.send(turn_id.to_string());
     }
@@ -319,14 +392,7 @@ impl TurnCancellationState {
         let mut rx = self.finished_tx.subscribe();
         self.cancel_turn(target_id, reason).await?;
 
-        let resolved_turn_id = {
-            let inner = self.inner.read().await;
-            if inner.cancelled.contains_key(target_id) {
-                Some(target_id.to_string())
-            } else {
-                inner.request_to_turn.get(target_id).cloned()
-            }
-        };
+        let resolved_turn_id = self.resolve_turn_id(target_id).await;
 
         let Some(resolved_turn_id) = resolved_turn_id else {
             return Ok(());
@@ -390,6 +456,82 @@ pub enum StreamPollResult<T> {
     Cancelled,
     TimedOut(String),
     StreamEnded,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RoundStreamTermination {
+    Completed,
+    Cancelled,
+    TimedOut(String),
+    Failed(String),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RoundExecutionDecision {
+    ExecuteTools {
+        tool_calls: Vec<ToolCall>,
+        cleaned_text: String,
+    },
+    FinalizeCompleted {
+        cleaned_text: String,
+    },
+    TerminateTimedOut {
+        err_msg: String,
+        partial_text: String,
+    },
+    TerminateFailed {
+        err_msg: String,
+        partial_text: String,
+    },
+}
+
+#[allow(dead_code)]
+pub(crate) fn evaluate_round_stream_outcome(
+    termination: RoundStreamTermination,
+    round_response: &str,
+    native_tool_calls: Vec<ToolCall>,
+) -> RoundExecutionDecision {
+    match termination {
+        RoundStreamTermination::TimedOut(err_msg) => {
+            let (cleaned_text, _) = parse_tool_call_tags(round_response);
+            let (cleaned_text, _) = extract_translate_tags(&cleaned_text);
+            let partial_text = strip_leaked_tags(&cleaned_text);
+            RoundExecutionDecision::TerminateTimedOut {
+                err_msg,
+                partial_text,
+            }
+        }
+        RoundStreamTermination::Failed(err_msg) => {
+            let (cleaned_text, _) = parse_tool_call_tags(round_response);
+            let (cleaned_text, _) = extract_translate_tags(&cleaned_text);
+            let partial_text = strip_leaked_tags(&cleaned_text);
+            RoundExecutionDecision::TerminateFailed {
+                err_msg,
+                partial_text,
+            }
+        }
+        RoundStreamTermination::Cancelled => {
+            RoundExecutionDecision::TerminateFailed {
+                err_msg: TURN_CANCELLED_BY_USER_MESSAGE.to_string(),
+                partial_text: String::new(),
+            }
+        }
+        RoundStreamTermination::Completed => {
+            let (cleaned_text, parsed_tool_calls) = parse_tool_call_tags(round_response);
+            let (cleaned_text, _) = extract_translate_tags(&cleaned_text);
+            let (tool_calls, _) = merge_round_tool_calls(parsed_tool_calls, native_tool_calls);
+            if tool_calls.is_empty() {
+                RoundExecutionDecision::FinalizeCompleted { cleaned_text }
+            } else {
+                RoundExecutionDecision::ExecuteTools {
+                    tool_calls,
+                    cleaned_text,
+                }
+            }
+        }
+    }
 }
 
 pub async fn poll_stream_with_cancellation_and_timeout<S, T>(
@@ -819,6 +961,36 @@ impl PendingToolApprovalState {
             .insert(approval_request_id.to_string());
         Ok(())
     }
+
+    pub async fn cancel_approval(&self, approval_request_id: &str) {
+        let mut pending = self.pending.lock().await;
+        if let Some(entry) = pending.remove(approval_request_id) {
+            drop(entry);
+        }
+        self.resolved
+            .lock()
+            .await
+            .insert(approval_request_id.to_string());
+    }
+
+    pub async fn cancel_turn(&self, turn_id: &str) {
+        let mut pending = self.pending.lock().await;
+        let mut resolved = self.resolved.lock().await;
+        let ids: Vec<String> = pending
+            .iter()
+            .filter(|(_, entry)| entry.turn_id == turn_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            pending.remove(&id);
+            resolved.insert(id);
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn is_pending(&self, approval_request_id: &str) -> bool {
+        self.pending.lock().await.contains_key(approval_request_id)
+    }
 }
 
 async fn approve_tool_approval_inner(
@@ -875,7 +1047,12 @@ pub async fn cancel_chat_turn(
     turn_id: String,
     reason: Option<String>,
     cancel_state: State<'_, Arc<TurnCancellationState>>,
+    approval_state: State<'_, Arc<PendingToolApprovalState>>,
 ) -> Result<(), String> {
+    if let Some(resolved_turn_id) = cancel_state.resolve_turn_id(&turn_id).await {
+        approval_state.cancel_turn(&resolved_turn_id).await;
+    }
+    approval_state.cancel_turn(&turn_id).await;
     cancel_chat_turn_inner(turn_id, reason, cancel_state.inner().clone()).await
 }
 
@@ -1447,66 +1624,149 @@ fn approved_tool_error_payload(
     payload
 }
 
-async fn wait_for_tool_approval_and_execute(
-    app: &tauri::AppHandle,
+async fn wait_for_tool_approval_decision(
     approval_state: &PendingToolApprovalState,
-    registry_state: &std::sync::Arc<RwLock<ActionRegistry>>,
-    character_id: &str,
+    cancel_state: &TurnCancellationState,
     turn_id: &str,
+    approval_request_id: &str,
+    receiver: oneshot::Receiver<ToolApprovalDecision>,
+) -> Result<ToolApprovalDecision, KokoroError> {
+    ensure_turn_not_cancelled(cancel_state, turn_id)
+        .await
+        .map_err(KokoroError::Chat)?;
+
+    let mut cancel_rx = cancel_state.subscribe_cancellation(turn_id).await;
+
+    let decision = tokio::select! {
+        biased;
+        _ = wait_for_cancel_event(&mut cancel_rx) => {
+            tracing::info!(
+                target: "chat::tools",
+                "[ToolApproval] Approval waiting cancelled for turn {} and request {}",
+                turn_id,
+                approval_request_id
+            );
+            approval_state.cancel_approval(approval_request_id).await;
+            return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+        }
+        res = receiver => {
+            match res {
+                Ok(decision) => decision,
+                Err(_) => {
+                    if cancel_state.is_cancelled(turn_id).await {
+                        approval_state.cancel_approval(approval_request_id).await;
+                        return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+                    }
+                    return Err(KokoroError::Validation(format!(
+                        "Approval request '{}' was dropped",
+                        approval_request_id
+                    )));
+                }
+            }
+        }
+    };
+
+    ensure_turn_not_cancelled(cancel_state, turn_id)
+        .await
+        .map_err(KokoroError::Chat)?;
+
+    Ok(decision)
+}
+
+struct ToolApprovalExecutionContext<'a> {
+    app: &'a tauri::AppHandle,
+    approval_state: &'a PendingToolApprovalState,
+    registry_state: &'a std::sync::Arc<RwLock<ActionRegistry>>,
+    character_id: &'a str,
+    turn_id: &'a str,
+    cancel_state: &'a TurnCancellationState,
+}
+
+async fn wait_for_tool_approval_and_execute(
+    ctx: &ToolApprovalExecutionContext<'_>,
     outcome: &crate::actions::ToolExecutionOutcome,
     pending_error: &str,
 ) -> Result<(Result<ActionResult, String>, serde_json::Value), KokoroError> {
-    let approval_request_id = approval_state
+    ensure_turn_not_cancelled(ctx.cancel_state, ctx.turn_id)
+        .await
+        .map_err(KokoroError::Chat)?;
+
+    let approval_request_id = ctx
+        .approval_state
         .register(
-            turn_id.to_string(),
+            ctx.turn_id.to_string(),
             outcome.tool_id().to_string(),
             outcome.tool_name().to_string(),
             outcome.invocation.args.clone(),
         )
         .await;
     let requested_payload =
-        pending_tool_trace_payload(outcome, turn_id, pending_error, &approval_request_id);
-    let receiver = approval_state
+        pending_tool_trace_payload(outcome, ctx.turn_id, pending_error, &approval_request_id);
+    let receiver = ctx
+        .approval_state
         .take_receiver(&approval_request_id)
         .await
         .ok_or_else(|| {
             KokoroError::Internal("Missing approval receiver after registration".to_string())
         })?;
 
-    app.emit("chat-turn-tool", requested_payload.clone())
+    if let Err(e) = ensure_turn_not_cancelled(ctx.cancel_state, ctx.turn_id).await {
+        ctx.approval_state.cancel_approval(&approval_request_id).await;
+        return Err(KokoroError::Chat(e));
+    }
+
+    ctx.app
+        .emit("chat-turn-tool", requested_payload.clone())
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
-    let decision = receiver.await.map_err(|_| {
-        KokoroError::Validation(format!(
-            "Approval request '{}' was dropped",
-            approval_request_id
-        ))
-    })?;
+    let decision = wait_for_tool_approval_decision(
+        ctx.approval_state,
+        ctx.cancel_state,
+        ctx.turn_id,
+        &approval_request_id,
+        receiver,
+    )
+    .await?;
 
     match decision {
         ToolApprovalDecision::Approved => {
+            // Guard: turn MUST NOT be cancelled before executing approved tool
+            ensure_turn_not_cancelled(ctx.cancel_state, ctx.turn_id)
+                .await
+                .map_err(KokoroError::Chat)?;
+
             let result = execute_single_tool_after_approval(
-                app,
-                registry_state,
-                character_id,
+                ctx.app,
+                ctx.registry_state,
+                ctx.character_id,
                 &outcome.invocation,
             )
             .await;
+
+            // Guard: turn MUST NOT be cancelled after tool execution
+            ensure_turn_not_cancelled(ctx.cancel_state, ctx.turn_id)
+                .await
+                .map_err(KokoroError::Chat)?;
+
             let payload = match &result {
                 Ok(value) => {
-                    approved_tool_trace_payload(outcome, turn_id, value, &approval_request_id)
+                    approved_tool_trace_payload(outcome, ctx.turn_id, value, &approval_request_id)
                 }
                 Err(error) => {
-                    approved_tool_error_payload(outcome, turn_id, error, &approval_request_id)
+                    approved_tool_error_payload(outcome, ctx.turn_id, error, &approval_request_id)
                 }
             };
             Ok((result, payload))
         }
         ToolApprovalDecision::Rejected { reason } => {
+            ensure_turn_not_cancelled(ctx.cancel_state, ctx.turn_id)
+                .await
+                .map_err(KokoroError::Chat)?;
+
             let rejected_message = rejected_pending_approval_message(reason);
             let payload = rejected_tool_trace_payload(
                 outcome,
-                turn_id,
+                ctx.turn_id,
                 &rejected_message,
                 &approval_request_id,
             );
@@ -2238,6 +2498,7 @@ pub async fn stream_chat(
     let mut cue_set_by_tool = false;
     let mut draft_row_id: Option<i64> = None;
     let mut stream_failed = false;
+    let mut stream_timed_out = false;
     let mut stream_failure_message: Option<String> = None;
     let mut all_reasoning_content = String::new();
     let mut final_provider_data = Vec::new();
@@ -2350,7 +2611,7 @@ pub async fn stream_chat(
             )
             .await;
 
-            let result = match poll_result {
+            let event = match poll_result {
                 StreamPollResult::Cancelled => {
                     tracing::info!(
                         target: "chat",
@@ -2377,57 +2638,31 @@ pub async fn stream_chat(
                         assistant_turn_id,
                         err_msg
                     );
-                    Err(err_msg)
+                    stream_timed_out = true;
+                    stream_failed = true;
+                    stream_failure_message = Some(err_msg.clone());
+                    let err_payload = build_chat_error_event(
+                        "stream_timeout",
+                        &err_msg,
+                        &assistant_turn_id,
+                        true,
+                    );
+                    let failure_event = err_payload.into_failure_event(
+                        conversation_id.clone(),
+                        Some(assistant_turn_id.clone()),
+                        Some(char_id.clone()),
+                        None,
+                    );
+                    emit_and_persist_failure_event(&app, &state, failure_event).await?;
+                    break;
                 }
                 StreamPollResult::StreamEnded => {
                     break;
                 }
-                StreamPollResult::Item(item) => item,
-            };
-            received_any_chunk = true;
-
-            match result {
-                Ok(event) => {
-                    match event {
-                        LlmStreamEvent::Text(content) => {
-                            round_response.push_str(&content);
-                            emit_buffer.push_str(&content);
-
-                            // Only emit text up to the safe boundary (before any potential tag)
-                            let safe = find_safe_emit_boundary(&emit_buffer);
-                            if safe > 0 {
-                                let to_emit = emit_buffer[..safe].to_string();
-                                emit_buffer = emit_buffer[safe..].to_string();
-                                let payload = build_turn_delta_payload_if_not_cancelled(
-                                    cancel_state.inner().as_ref(),
-                                    &assistant_turn_id,
-                                    to_emit,
-                                    request.client_request_id.as_deref(),
-                                )
-                                .await
-                                .map_err(KokoroError::Chat)?;
-                                app.emit("chat-turn-delta", payload)
-                                    .map_err(|e| KokoroError::Chat(e.to_string()))?;
-                            }
-                        }
-                        LlmStreamEvent::ReasoningContent(content) => {
-                            round_reasoning_content.push_str(&content);
-                        }
-                        LlmStreamEvent::ToolCall(tool_call) => {
-                            native_tool_calls.push(ToolCall {
-                                tool_call_id: Some(tool_call.id),
-                                name: tool_call.name,
-                                args: tool_call.args,
-                            });
-                        }
-                        LlmStreamEvent::ProviderData(value) => {
-                            round_provider_data.push(value);
-                        }
-                    }
-                }
-                Err(e) => {
+                StreamPollResult::Item(Ok(ev)) => ev,
+                StreamPollResult::Item(Err(e)) => {
+                    let err_msg = e.to_string();
                     if round_response.is_empty() && emit_buffer.is_empty() {
-                        let err_msg = e.to_string();
                         stream_failure_message = Some(err_msg.clone());
                         stream_failed = true;
                         let err_payload = build_chat_error_event(
@@ -2452,7 +2687,94 @@ pub async fn stream_chat(
                     }
                     break;
                 }
+            };
+            received_any_chunk = true;
+
+            match event {
+                LlmStreamEvent::Text(content) => {
+                    round_response.push_str(&content);
+                    emit_buffer.push_str(&content);
+
+                    // Only emit text up to the safe boundary (before any potential tag)
+                    let safe = find_safe_emit_boundary(&emit_buffer);
+                    if safe > 0 {
+                        let to_emit = emit_buffer[..safe].to_string();
+                        emit_buffer = emit_buffer[safe..].to_string();
+                        let payload = build_turn_delta_payload_if_not_cancelled(
+                            cancel_state.inner().as_ref(),
+                            &assistant_turn_id,
+                            to_emit,
+                            request.client_request_id.as_deref(),
+                        )
+                        .await
+                        .map_err(KokoroError::Chat)?;
+                        app.emit("chat-turn-delta", payload)
+                            .map_err(|e| KokoroError::Chat(e.to_string()))?;
+                    }
+                }
+                LlmStreamEvent::ReasoningContent(content) => {
+                    round_reasoning_content.push_str(&content);
+                }
+                LlmStreamEvent::ToolCall(tool_call) => {
+                    native_tool_calls.push(ToolCall {
+                        tool_call_id: Some(tool_call.id),
+                        name: tool_call.name,
+                        args: tool_call.args,
+                    });
+                }
+                LlmStreamEvent::ProviderData(value) => {
+                    round_provider_data.push(value);
+                }
             }
+        }
+
+        // If stream failed or timed out, terminate round and outer loop immediately.
+        // Never execute any tool calls that arrived before or during the failure.
+        if stream_failed || stream_timed_out {
+            tracing::warn!(
+                target: "chat",
+                "[Chat] Terminating round {} and turn {} due to stream failure/timeout (timed_out={}); suppressing {} native tool calls",
+                round + 1,
+                assistant_turn_id,
+                stream_timed_out,
+                native_tool_calls.len()
+            );
+            native_tool_calls.clear();
+
+            if !round_response.is_empty() {
+                let (cleaned_text, _) = parse_tool_call_tags(&round_response);
+                let (cleaned_text, _) = extract_translate_tags(&cleaned_text);
+                merge_continuation_text(&mut all_cleaned_text, &cleaned_text);
+                if !request.hidden && !all_cleaned_text.is_empty() && !cancel_state.is_cancelled(&assistant_turn_id).await {
+                    let draft_content = strip_leaked_tags(&all_cleaned_text);
+                    if !draft_content.is_empty() {
+                        match draft_row_id {
+                            None => {
+                                if let Some(ref cid) = conversation_id {
+                                    match state
+                                        .persist_streaming_draft(cid, &draft_content)
+                                        .await
+                                    {
+                                        Ok(id) => {
+                                            draft_row_id = Some(id);
+                                            *draft_row_id_for_stream.lock().await = Some(id);
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(target: "chat", "[Chat] Failed to persist streaming draft: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            Some(id) => {
+                                if let Err(e) = state.update_streaming_draft(id, &draft_content, None).await {
+                                    tracing::error!(target: "chat", "[Chat] Failed to update streaming draft: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            break;
         }
 
         // Flush remaining buffer — strip any complete tags before emitting
@@ -2607,6 +2929,9 @@ pub async fn stream_chat(
         let has_native_tool_calls = tool_calls.iter().any(|tc| tc.tool_call_id.is_some());
 
         for outcome in execution_outcomes {
+            ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
+                .await
+                .map_err(KokoroError::Chat)?;
             tracing::info!(
                 target: "tools",
                 "[ToolCall] Executing: {} with args {:?}",
@@ -2642,12 +2967,16 @@ pub async fn stream_chat(
                     outcome.permission_decision,
                     Some(PermissionDecision::DenyPendingApproval { .. })
                 ) {
+                    let approval_ctx = ToolApprovalExecutionContext {
+                        app: &app,
+                        approval_state: approval_state.inner().as_ref(),
+                        registry_state: &_action_registry.inner().clone(),
+                        character_id: &char_id,
+                        turn_id: &assistant_turn_id,
+                        cancel_state: cancel_state.inner().as_ref(),
+                    };
                     let (resolved_result, resolved_payload) = wait_for_tool_approval_and_execute(
-                        &app,
-                        approval_state.inner().as_ref(),
-                        &_action_registry.inner().clone(),
-                        &char_id,
-                        &assistant_turn_id,
+                        &approval_ctx,
                         &outcome,
                         error,
                     )
@@ -2660,8 +2989,14 @@ pub async fn stream_chat(
                             tracing::error!(target: "tools", "[ToolCall] {} rejected/failed after approval flow: {}", outcome.tool_name(), error);
                         }
                     }
+                    ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
+                        .await
+                        .map_err(KokoroError::Chat)?;
                     app.emit("chat-turn-tool", resolved_payload)
                         .map_err(|e| KokoroError::Chat(e.to_string()))?;
+                    ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
+                        .await
+                        .map_err(KokoroError::Chat)?;
                     resolved_result
                 } else {
                     tracing::error!(target: "tools", "[ToolCall] {} failed: {}", outcome.tool_name(), error);
@@ -2675,6 +3010,10 @@ pub async fn stream_chat(
                 emit_tool_trace_event(&app, &assistant_turn_id, &outcome);
                 outcome.result.clone()
             };
+
+            ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
+                .await
+                .map_err(KokoroError::Chat)?;
 
             tool_results.push(match &result {
                 Ok(value) => format!("- {}: {}", outcome.tool_id(), value.message),
@@ -2832,6 +3171,77 @@ pub async fn stream_chat(
     }
 
     let full_response = strip_leaked_tags(&all_cleaned_text);
+
+    if stream_failed {
+        let mut finish_draft_row_id = draft_row_id;
+        if full_response.is_empty() {
+            if let Some(ref cid) = conversation_id {
+                if is_newly_created_for_hidden {
+                    match delete_empty_conversation_if_unused(
+                        &state,
+                        cid,
+                        Some(&assistant_turn_id),
+                        draft_row_id,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            conversation_id = None;
+                        }
+                        Ok(false) => {
+                            tracing::info!(
+                                target: "chat",
+                                "[Chat] Preserved temporary conversation '{}' on stream failure because it contains other messages",
+                                cid
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                target: "chat",
+                                "[Chat] Failed to clean up temporary conversation '{}' on stream failure: {}",
+                                cid,
+                                e
+                            );
+                        }
+                    }
+                } else {
+                    cleanup_turn_artifacts(&state, cid, &assistant_turn_id, draft_row_id).await;
+                }
+            }
+            finish_draft_row_id = None;
+        } else {
+            // Partial response exists: clean up any technical tool rows from earlier rounds
+            if let Some(ref cid) = conversation_id {
+                cleanup_turn_artifacts(&state, cid, &assistant_turn_id, None).await;
+            }
+            // Flush typewriter/reveal buffer in frontend
+            let _ = app.emit(
+                "chat-turn-text-complete",
+                serde_json::json!({
+                    "turn_id": assistant_turn_id,
+                    "text": full_response.clone(),
+                    "translation_pending": false,
+                    "translation": serde_json::Value::Null,
+                }),
+            );
+        }
+
+        app.emit(
+            "chat-turn-finish",
+            serde_json::json!({
+                "turn_id": assistant_turn_id,
+                "status": "error",
+                "client_request_id": request.client_request_id,
+                "conversation_id": conversation_id,
+                "assistant_message_id": finish_draft_row_id,
+            }),
+        )
+        .map_err(|e| KokoroError::Chat(e.to_string()))?;
+
+        let err_msg = stream_failure_message
+            .unwrap_or_else(|| "Chat stream failed or timed out".to_string());
+        return Err(KokoroError::Chat(err_msg));
+    }
 
     if request.hidden && is_proactive_noop_response(&full_response) {
         if let Some(row_id) = draft_row_id {
@@ -3384,70 +3794,19 @@ pub async fn stream_chat(
         });
     }
 
-    // A failed turn with no visible text may still have persisted tool rows from
-    // earlier rounds; remove them so the failed turn leaves no orphan tool exchange.
-    let mut finish_draft_row_id = draft_row_id;
-    if stream_failed && full_response.is_empty() {
-        if let Some(ref cid) = conversation_id {
-            if is_newly_created_for_hidden {
-                match delete_empty_conversation_if_unused(
-                    &state,
-                    cid,
-                    Some(&assistant_turn_id),
-                    draft_row_id,
-                )
-                .await
-                {
-                    Ok(true) => {
-                        conversation_id = None;
-                    }
-                    Ok(false) => {
-                        tracing::info!(
-                            target: "chat",
-                            "[Chat] Preserved temporary conversation '{}' on stream failure because it contains other messages",
-                            cid
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            target: "chat",
-                            "[Chat] Failed to clean up temporary conversation '{}' on stream failure: {}",
-                            cid,
-                            e
-                        );
-                    }
-                }
-            } else {
-                cleanup_turn_artifacts(&state, cid, &assistant_turn_id, draft_row_id).await;
-            }
-        }
-        finish_draft_row_id = None;
-    }
+        app.emit(
+            "chat-turn-finish",
+            serde_json::json!({
+                "turn_id": assistant_turn_id,
+                "status": "completed",
+                "client_request_id": request.client_request_id,
+                "conversation_id": conversation_id,
+                "assistant_message_id": draft_row_id,
+            }),
+        )
+        .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
-    let finish_status = if stream_failed && full_response.is_empty() {
-        "error"
-    } else {
-        "completed"
-    };
-    app.emit(
-        "chat-turn-finish",
-        serde_json::json!({
-            "turn_id": assistant_turn_id,
-            "status": finish_status,
-            "client_request_id": request.client_request_id,
-            "conversation_id": conversation_id,
-            "assistant_message_id": finish_draft_row_id,
-        }),
-    )
-    .map_err(|e| KokoroError::Chat(e.to_string()))?;
-
-    if stream_failed && full_response.is_empty() {
-        let err_msg = stream_failure_message
-            .unwrap_or_else(|| "Chat stream failed before producing any response".to_string());
-        return Err(KokoroError::Chat(err_msg));
-    }
-
-    Ok(finish_draft_row_id)
+        Ok(draft_row_id)
     }
     .await;
 
@@ -4643,6 +5002,297 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_pending_tool_approval_cancel_approval_marks_resolved_and_rejects_late_approval() {
+        let state = PendingToolApprovalState::new();
+        let request_id = state
+            .register(
+                "turn-c1".to_string(),
+                "builtin__test".to_string(),
+                "test".to_string(),
+                HashMap::new(),
+            )
+            .await;
+
+        assert!(state.is_pending(&request_id).await);
+        state.cancel_approval(&request_id).await;
+        assert!(!state.is_pending(&request_id).await);
+
+        let late_approve = approve_tool_approval_inner(&state, request_id.clone()).await;
+        match late_approve {
+            Err(KokoroError::Validation(msg)) => assert!(msg.contains("already resolved")),
+            other => panic!("expected already-resolved error, got {other:?}"),
+        }
+
+        let late_reject = reject_tool_approval_inner(&state, request_id, None).await;
+        match late_reject {
+            Err(KokoroError::Validation(msg)) => assert!(msg.contains("already resolved")),
+            other => panic!("expected already-resolved error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pending_tool_approval_cancel_turn_cleans_up_all_turn_requests() {
+        let state = PendingToolApprovalState::new();
+        let req1 = state
+            .register("turn-multi".into(), "tool1".into(), "tool1".into(), HashMap::new())
+            .await;
+        let req2 = state
+            .register("turn-multi".into(), "tool2".into(), "tool2".into(), HashMap::new())
+            .await;
+        let req_other = state
+            .register("turn-other".into(), "tool3".into(), "tool3".into(), HashMap::new())
+            .await;
+
+        assert!(state.is_pending(&req1).await);
+        assert!(state.is_pending(&req2).await);
+        assert!(state.is_pending(&req_other).await);
+
+        state.cancel_turn("turn-multi").await;
+
+        assert!(!state.is_pending(&req1).await);
+        assert!(!state.is_pending(&req2).await);
+        assert!(state.is_pending(&req_other).await);
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_tool_approval_decision_cancelled_while_waiting() {
+        let cancel_state = TurnCancellationState::new();
+        cancel_state.register_turn("turn-wait-cancel").await;
+        let approval_state = PendingToolApprovalState::new();
+
+        let req_id = approval_state
+            .register(
+                "turn-wait-cancel".into(),
+                "tool".into(),
+                "tool".into(),
+                HashMap::new(),
+            )
+            .await;
+        let receiver = approval_state
+            .take_receiver(&req_id)
+            .await
+            .expect("receiver should exist");
+
+        let cancel_state_clone = Arc::new(cancel_state);
+        let cancel_state_task = cancel_state_clone.clone();
+
+        let cancel_handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_state_task
+                .cancel_turn("turn-wait-cancel", Some("user_stop".into()))
+                .await
+        });
+
+        let wait_res = wait_for_tool_approval_decision(
+            &approval_state,
+            &cancel_state_clone,
+            "turn-wait-cancel",
+            &req_id,
+            receiver,
+        )
+        .await;
+
+        cancel_handle.await.unwrap().unwrap();
+
+        match wait_res {
+            Err(KokoroError::Chat(msg)) => {
+                assert_eq!(msg, TURN_CANCELLED_BY_USER_MESSAGE);
+            }
+            other => panic!("expected cancelled chat error, got {other:?}"),
+        }
+
+        // Approval request must have been cleaned up and marked resolved
+        assert!(!approval_state.is_pending(&req_id).await);
+        let late_approve = approve_tool_approval_inner(&approval_state, req_id).await;
+        assert!(late_approve.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_tool_approval_decision_pre_cancelled() {
+        let cancel_state = TurnCancellationState::new();
+        cancel_state.register_turn("turn-precancel").await;
+        cancel_state
+            .cancel_turn("turn-precancel", Some("already_stopped".into()))
+            .await
+            .unwrap();
+
+        let approval_state = PendingToolApprovalState::new();
+        let req_id = approval_state
+            .register(
+                "turn-precancel".into(),
+                "tool".into(),
+                "tool".into(),
+                HashMap::new(),
+            )
+            .await;
+        let receiver = approval_state
+            .take_receiver(&req_id)
+            .await
+            .expect("receiver should exist");
+
+        let wait_res = wait_for_tool_approval_decision(
+            &approval_state,
+            &cancel_state,
+            "turn-precancel",
+            &req_id,
+            receiver,
+        )
+        .await;
+
+        match wait_res {
+            Err(KokoroError::Chat(msg)) => {
+                assert_eq!(msg, TURN_CANCELLED_BY_USER_MESSAGE);
+            }
+            other => panic!("expected cancelled chat error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_tool_approval_decision_approved_normally() {
+        let cancel_state = TurnCancellationState::new();
+        cancel_state.register_turn("turn-normal-approve").await;
+        let approval_state = PendingToolApprovalState::new();
+
+        let req_id = approval_state
+            .register(
+                "turn-normal-approve".into(),
+                "tool".into(),
+                "tool".into(),
+                HashMap::new(),
+            )
+            .await;
+        let receiver = approval_state
+            .take_receiver(&req_id)
+            .await
+            .expect("receiver should exist");
+
+        let approve_handle = {
+            let req_id = req_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                req_id
+            })
+        };
+
+        let req_id_for_approve = approve_handle.await.unwrap();
+        approve_tool_approval_inner(&approval_state, req_id_for_approve)
+            .await
+            .unwrap();
+
+        let wait_res = wait_for_tool_approval_decision(
+            &approval_state,
+            &cancel_state,
+            "turn-normal-approve",
+            &req_id,
+            receiver,
+        )
+        .await;
+
+        match wait_res {
+            Ok(ToolApprovalDecision::Approved) => {}
+            other => panic!("expected approved decision, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_tool_approval_decision_race_approved_but_cancelled_before_return() {
+        let cancel_state = TurnCancellationState::new();
+        cancel_state.register_turn("turn-race").await;
+        let approval_state = PendingToolApprovalState::new();
+
+        let req_id = approval_state
+            .register("turn-race".into(), "tool".into(), "tool".into(), HashMap::new())
+            .await;
+        let receiver = approval_state
+            .take_receiver(&req_id)
+            .await
+            .expect("receiver should exist");
+
+        // First approve the tool
+        approve_tool_approval_inner(&approval_state, req_id.clone())
+            .await
+            .unwrap();
+
+        // But immediately cancel the turn before waiting decision evaluates
+        cancel_state
+            .cancel_turn("turn-race", Some("racing_stop".into()))
+            .await
+            .unwrap();
+
+        let wait_res = wait_for_tool_approval_decision(
+            &approval_state,
+            &cancel_state,
+            "turn-race",
+            &req_id,
+            receiver,
+        )
+        .await;
+
+        // Must reject execution with cancellation error despite receiving Approved!
+        match wait_res {
+            Err(KokoroError::Chat(msg)) => {
+                assert_eq!(msg, TURN_CANCELLED_BY_USER_MESSAGE);
+            }
+            other => panic!("expected cancelled chat error on race, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_chat_turn_unblocks_tool_approval_wait() {
+        let cancel_state = Arc::new(TurnCancellationState::new());
+        cancel_state.register_turn("turn-unblock-test").await;
+        let approval_state = Arc::new(PendingToolApprovalState::new());
+
+        let req_id = approval_state
+            .register(
+                "turn-unblock-test".into(),
+                "tool".into(),
+                "tool".into(),
+                HashMap::new(),
+            )
+            .await;
+        let receiver = approval_state
+            .take_receiver(&req_id)
+            .await
+            .expect("receiver should exist");
+
+        let cancel_state_task = cancel_state.clone();
+        let approval_state_task = approval_state.clone();
+
+        let cancel_handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            approval_state_task.cancel_turn("turn-unblock-test").await;
+            cancel_chat_turn_inner(
+                "turn-unblock-test".to_string(),
+                Some("stopped_by_user".into()),
+                cancel_state_task,
+            )
+            .await
+        });
+
+        let start = std::time::Instant::now();
+        let wait_res = wait_for_tool_approval_decision(
+            &approval_state,
+            &cancel_state,
+            "turn-unblock-test",
+            &req_id,
+            receiver,
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        assert!(elapsed < std::time::Duration::from_millis(500), "Waiting must unblock promptly, took {elapsed:?}");
+        cancel_handle.await.unwrap().unwrap();
+
+        match wait_res {
+            Err(KokoroError::Chat(msg)) => {
+                assert_eq!(msg, TURN_CANCELLED_BY_USER_MESSAGE);
+            }
+            other => panic!("expected cancelled error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn turn_cancellation_state_register_cancel_and_idempotent() {
         let state = TurnCancellationState::new();
 
@@ -4696,12 +5346,119 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_chat_turn_returns_error_for_unknown_turn_id() {
+    async fn cancel_chat_turn_returns_error_for_empty_target_id() {
         let state = Arc::new(TurnCancellationState::new());
-        let result =
-            cancel_chat_turn_inner("not-exists".to_string(), Some("user".into()), state).await;
+        let result = cancel_chat_turn_inner("   ".to_string(), Some("user".into()), state).await;
         assert!(result.is_err());
-        assert!(result.err().unwrap().contains("unknown turn_id"));
+        assert!(result.err().unwrap().contains("cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn cancel_chat_turn_places_tombstone_and_inherits_on_registration() {
+        let state = Arc::new(TurnCancellationState::new());
+
+        // Cancel before registration via client_request_id
+        let res = cancel_chat_turn_inner(
+            "req-unborn-1".to_string(),
+            Some("cancelled_before_registration".into()),
+            state.clone(),
+        )
+        .await;
+        assert!(res.is_ok(), "Cancellation before registration must succeed via tombstone");
+
+        assert!(state.is_cancelled("req-unborn-1").await);
+        assert!(state.has_turn("req-unborn-1").await);
+
+        // Later, stream_chat reaches registration:
+        state
+            .register_turn_with_request("turn-born-1", Some("req-unborn-1"))
+            .await;
+
+        // Turn must immediately inherit cancelled state!
+        assert!(state.is_cancelled("turn-born-1").await);
+        assert!(state.is_cancelled("req-unborn-1").await);
+
+        // Cleanup
+        state.clear_turn("turn-born-1").await;
+        assert!(!state.has_turn("turn-born-1").await);
+        assert!(!state.has_turn("req-unborn-1").await);
+    }
+
+    #[tokio::test]
+    async fn cancel_chat_turn_places_tombstone_by_turn_id_and_inherits() {
+        let state = Arc::new(TurnCancellationState::new());
+
+        // Cancel before registration via turn_id directly
+        let res = cancel_chat_turn_inner(
+            "turn-unborn-2".to_string(),
+            Some("cancelled_early".into()),
+            state.clone(),
+        )
+        .await;
+        assert!(res.is_ok());
+
+        assert!(state.is_cancelled("turn-unborn-2").await);
+
+        state.register_turn("turn-unborn-2").await;
+        assert!(state.is_cancelled("turn-unborn-2").await);
+
+        state.clear_turn("turn-unborn-2").await;
+        assert!(!state.has_turn("turn-unborn-2").await);
+    }
+
+    #[tokio::test]
+    async fn turn_cancellation_real_timing_concurrency() {
+        let state = Arc::new(TurnCancellationState::new());
+        let cancel_state = state.clone();
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let barrier_cancel = barrier.clone();
+
+        let cancel_handle = tokio::spawn(async move {
+            barrier_cancel.wait().await;
+            cancel_chat_turn_inner(
+                "req-concurrent-timing".to_string(),
+                Some("stopped_by_user".into()),
+                cancel_state,
+            )
+            .await
+        });
+
+        let register_state = state.clone();
+        let register_handle = tokio::spawn(async move {
+            barrier.wait().await;
+            // Introduce a small timing delay to let cancellation land first or concurrently
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            register_state
+                .register_turn_with_request("turn-concurrent-timing", Some("req-concurrent-timing"))
+                .await;
+            register_state.is_cancelled("turn-concurrent-timing").await
+        });
+
+        let (cancel_res, was_cancelled) = tokio::join!(cancel_handle, register_handle);
+        assert!(cancel_res.unwrap().is_ok());
+        assert!(was_cancelled.unwrap(), "Turn must be cancelled upon registration");
+    }
+
+    #[tokio::test]
+    async fn turn_cancellation_tombstone_capacity_pruning() {
+        let state = TurnCancellationState::new();
+        // Insert 300 tombstones (exceeding MAX_TOMBSTONES = 256)
+        for i in 0..300 {
+            let _ = state
+                .cancel_turn(&format!("req-overflow-{i}"), Some("prune".into()))
+                .await;
+        }
+
+        let inner = state.inner.read().await;
+        assert!(
+            inner.tombstones.len() <= 256,
+            "Tombstones map must be bounded to MAX_TOMBSTONES"
+        );
+        // Oldest entries (e.g. req-overflow-0) should have been evicted
+        assert!(!inner.tombstones.contains_key("req-overflow-0"));
+        // Newest entry must exist
+        assert!(inner.tombstones.contains_key("req-overflow-299"));
     }
 
     #[tokio::test]
@@ -5658,5 +6415,182 @@ mod tests {
         drop(guard2);
         assert!(!orchestrator.is_chat_busy());
     }
+
+    #[test]
+    fn test_evaluate_round_stream_outcome_timeout_after_partial_output() {
+        let termination = RoundStreamTermination::TimedOut("chunk idle timeout".to_string());
+        let round_response = "Here is some partial answer before network stalled...";
+        let native_tool_calls = vec![];
+
+        let decision = evaluate_round_stream_outcome(termination, round_response, native_tool_calls);
+        match decision {
+            RoundExecutionDecision::TerminateTimedOut {
+                err_msg,
+                partial_text,
+            } => {
+                assert_eq!(err_msg, "chunk idle timeout");
+                assert_eq!(
+                    partial_text,
+                    "Here is some partial answer before network stalled..."
+                );
+            }
+            other => panic!("expected TerminateTimedOut, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_evaluate_round_stream_outcome_timeout_after_tool_call_suppresses_tools() {
+        // Even if native tool calls were received before timeout occurred, tool execution MUST be suppressed
+        let termination = RoundStreamTermination::TimedOut("timeout after 30s".to_string());
+        let round_response = "";
+        let native_tool_calls = vec![ToolCall {
+            tool_call_id: Some("call_1".to_string()),
+            name: "execute_dangerous_action".to_string(),
+            args: HashMap::from([("action".to_string(), "delete".to_string())]),
+        }];
+
+        let decision = evaluate_round_stream_outcome(termination, round_response, native_tool_calls);
+        match decision {
+            RoundExecutionDecision::TerminateTimedOut {
+                err_msg,
+                partial_text,
+            } => {
+                assert_eq!(err_msg, "timeout after 30s");
+                assert!(partial_text.is_empty());
+            }
+            other => panic!("expected TerminateTimedOut, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_evaluate_round_stream_outcome_timeout_after_textual_tool_call_tag_suppresses_tools() {
+        // If the model produced a prompt-mode tool call tag, timeout must suppress tool execution
+        let termination = RoundStreamTermination::TimedOut("timeout after 15s".to_string());
+        let round_response = "Checking... [TOOL_CALL:execute_dangerous_action|action=delete]";
+        let native_tool_calls = vec![];
+
+        let decision = evaluate_round_stream_outcome(termination, round_response, native_tool_calls);
+        match decision {
+            RoundExecutionDecision::TerminateTimedOut {
+                err_msg,
+                partial_text,
+            } => {
+                assert_eq!(err_msg, "timeout after 15s");
+                // Leaked tag should be stripped from partial text
+                assert_eq!(partial_text, "Checking...");
+            }
+            other => panic!("expected TerminateTimedOut, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_evaluate_round_stream_outcome_completed_with_tools_executes() {
+        let termination = RoundStreamTermination::Completed;
+        let round_response = "I will check";
+        let native_tool_calls = vec![ToolCall {
+            tool_call_id: Some("call_2".to_string()),
+            name: "get_weather".to_string(),
+            args: HashMap::new(),
+        }];
+
+        let decision = evaluate_round_stream_outcome(termination, round_response, native_tool_calls);
+        match decision {
+            RoundExecutionDecision::ExecuteTools {
+                tool_calls,
+                cleaned_text,
+            } => {
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].name, "get_weather");
+                assert_eq!(cleaned_text, "I will check");
+            }
+            other => panic!("expected ExecuteTools, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_turn_artifacts_cleanup_on_timeout_with_prior_round_tool_messages() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+
+        // Setup a conversation
+        let cid = "conv-timeout-cleanup-test";
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, created_at, updated_at) VALUES (?, ?, datetime('now'), datetime('now'))"
+        )
+        .bind(cid)
+        .bind("test_char")
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let turn_id = "turn-timeout-prior-tools";
+
+        // Simulate Round 1: persisted an assistant_tool_calls row and a tool_result row
+        let tool_meta = serde_json::json!({
+            "type": "assistant_tool_calls",
+            "turn_id": turn_id,
+        })
+        .to_string();
+        state
+            .add_message_with_metadata_for_conversation(
+                "assistant".to_string(),
+                "Let me run a tool".to_string(),
+                Some(tool_meta),
+                "test_char",
+                Some(cid),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let result_meta = serde_json::json!({
+            "type": "tool_result",
+            "turn_id": turn_id,
+        })
+        .to_string();
+        state
+            .add_message_with_metadata_for_conversation(
+                "tool".to_string(),
+                "tool output".to_string(),
+                Some(result_meta),
+                "test_char",
+                Some(cid),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // And a draft row representing Round 2's partial text before timeout
+        let draft_id = state
+            .persist_streaming_draft(cid, "Partial text in round 2 before timeout...")
+            .await
+            .unwrap();
+
+        let rows_before: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, content FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC"
+        )
+        .bind(cid)
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(rows_before.len(), 3);
+
+        // When Round 2 times out, cleanup_turn_artifacts cleans technical rows but keeps partial draft
+        cleanup_turn_artifacts(&state, cid, turn_id, None).await;
+
+        let rows_after: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, content FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC"
+        )
+        .bind(cid)
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(rows_after.len(), 1);
+        assert_eq!(rows_after[0].0, draft_id);
+        assert_eq!(
+            rows_after[0].1,
+            "Partial text in round 2 before timeout..."
+        );
+    }
 }
+
 
