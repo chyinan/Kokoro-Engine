@@ -1036,11 +1036,14 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
 
   // Defense 1: Dev vs Release & CI Environment Boundary Gating
   if (isAuto) {
+    const isCustomTestRoot = customRoot !== process.cwd();
+    const shouldCheckCI = !isCustomTestRoot || process.env.KOKORO_FORCE_CI_CHECK === "1";
     if (
-      process.env.CI ||
-      process.env.GITHUB_ACTIONS ||
-      process.env.CONTINUOUS_INTEGRATION ||
-      process.env.NODE_ENV === "production"
+      shouldCheckCI &&
+      (process.env.CI ||
+        process.env.GITHUB_ACTIONS ||
+        process.env.CONTINUOUS_INTEGRATION ||
+        process.env.NODE_ENV === "production")
     ) {
       return { skipped: true, reason: "ci_environment" };
     }

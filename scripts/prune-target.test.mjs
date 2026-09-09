@@ -34,12 +34,36 @@ import {
 
 describe("scripts/prune-target.mjs security & canonical containment", () => {
   let tempRoot;
+  let savedEnv = {};
 
   beforeEach(() => {
+    savedEnv = {
+      CI: process.env.CI,
+      GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
+      CONTINUOUS_INTEGRATION: process.env.CONTINUOUS_INTEGRATION,
+      NODE_ENV: process.env.NODE_ENV,
+      KOKORO_SKIP_HOOKS: process.env.KOKORO_SKIP_HOOKS,
+      KOKORO_FORCE_CI_CHECK: process.env.KOKORO_FORCE_CI_CHECK,
+    };
+    delete process.env.CI;
+    delete process.env.GITHUB_ACTIONS;
+    delete process.env.CONTINUOUS_INTEGRATION;
+    delete process.env.NODE_ENV;
+    delete process.env.KOKORO_SKIP_HOOKS;
+    delete process.env.KOKORO_FORCE_CI_CHECK;
+
     tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kokoro-prune-test-"));
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
+    for (const [key, val] of Object.entries(savedEnv)) {
+      if (val === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = val;
+      }
+    }
     if (tempRoot && fs.existsSync(tempRoot)) {
       try {
         fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -405,10 +429,14 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       expect(isLockFileActive(lockFile, tempRoot)).toBe(false);
 
       // When openSync throws EBUSY / EPERM (simulating exclusive lock from rustc)
-      const openSpy = vi.spyOn(fs, "openSync").mockImplementationOnce(() => {
-        const err = new Error("resource busy or locked");
-        err.code = "EBUSY";
-        throw err;
+      const origOpen = fs.openSync.bind(fs);
+      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p, flags, mode) => {
+        if (typeof p === "string" && p.includes("s-idle.lock")) {
+          const err = new Error("resource busy or locked");
+          err.code = "EBUSY";
+          throw err;
+        }
+        return origOpen(p, flags, mode);
       });
 
       expect(isLockFileActive(lockFile, tempRoot)).toBe(true);
@@ -427,10 +455,14 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       expect(isSessionDirectoryLocked(crateDir, debugDir)).toBe(false);
 
       // When lock file is actively locked
-      const openSpy = vi.spyOn(fs, "openSync").mockImplementation(() => {
-        const err = new Error("operation not permitted");
-        err.code = "EPERM";
-        throw err;
+      const origOpen = fs.openSync.bind(fs);
+      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p, flags, mode) => {
+        if (typeof p === "string" && p.includes("s-hm4irhwvbk-0uwx0fv.lock")) {
+          const err = new Error("operation not permitted");
+          err.code = "EPERM";
+          throw err;
+        }
+        return origOpen(p, flags, mode);
       });
 
       expect(isSessionDirectoryLocked(crateDir, debugDir)).toBe(true);
@@ -449,15 +481,15 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       fs.writeFileSync(path.join(crateDir2, "s-session2.lock"), "");
 
       // Simulate lock on crateDir2
-      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p) => {
+      const origOpen = fs.openSync.bind(fs);
+      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p, flags, mode) => {
         if (typeof p === "string" && p.includes("s-session2.lock")) {
           const err = new Error("busy");
           err.code = "EBUSY";
           throw err;
         }
-        return 999;
+        return origOpen(p, flags, mode);
       });
-      const closeSpy = vi.spyOn(fs, "closeSync").mockImplementation(() => {});
 
       const res = pruneIncremental(incDir, 1, debugDir, false, false, true, false);
       expect(res.hasActiveLock).toBe(true);
@@ -469,7 +501,6 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       expect(fs.existsSync(crateDir2)).toBe(true);
 
       openSpy.mockRestore();
-      closeSpy.mockRestore();
     });
   });
 
@@ -490,15 +521,15 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       const cooldownFile = path.join(targetDir, ".prune-cooldown");
 
       // Simulate active compiler lock on s-active.lock
-      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p) => {
+      const origOpen = fs.openSync.bind(fs);
+      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p, flags, mode) => {
         if (typeof p === "string" && p.endsWith(".lock")) {
           const err = new Error("locked");
           err.code = "EBUSY";
           throw err;
         }
-        return 999;
+        return origOpen(p, flags, mode);
       });
-      const closeSpy = vi.spyOn(fs, "closeSync").mockImplementation(() => {});
 
       const result = runPruneTarget(["--auto"], tempRoot);
 
@@ -512,7 +543,6 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       expect(fs.existsSync(cooldownFile)).toBe(false);
 
       openSpy.mockRestore();
-      closeSpy.mockRestore();
     });
 
     it("consumes .branch-switched and updates cooldown when cleanup completes safely", () => {
@@ -630,6 +660,25 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
 
       // Must not mutate cooldown file in dry run
       expect(fs.existsSync(cooldownFile)).toBe(false);
+    });
+
+    it("in auto mode: handles CI environment gating correctly", () => {
+      // 1. When running on custom test root and CI=true, does not skip by default
+      process.env.CI = "true";
+      const resNormalTest = runPruneTarget(["--auto"], tempRoot);
+      expect(resNormalTest.reason).not.toBe("ci_environment");
+
+      // 2. When KOKORO_FORCE_CI_CHECK=1 is set, auto mode yields with ci_environment even on customRoot
+      process.env.KOKORO_FORCE_CI_CHECK = "1";
+      const resForced = runPruneTarget(["--auto"], tempRoot);
+      expect(resForced.skipped).toBe(true);
+      expect(resForced.reason).toBe("ci_environment");
+
+      // 3. When customRoot is process.cwd() and CI=true, auto mode yields with ci_environment
+      delete process.env.KOKORO_FORCE_CI_CHECK;
+      const resCwd = runPruneTarget(["--auto"], process.cwd());
+      expect(resCwd.skipped).toBe(true);
+      expect(resCwd.reason).toBe("ci_environment");
     });
 
     it("ensures updateCooldown, writeCooldown, and consumeBranchSwitchMarker respect isDryRun guard", () => {
@@ -1473,13 +1522,14 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       expect(isSessionDirectoryLocked(crateDir, debugDir)).toBe(false);
 
       // Actively held nested lock
-      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p) => {
+      const origOpen = fs.openSync.bind(fs);
+      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p, flags, mode) => {
         if (typeof p === "string" && p.includes("nested.lock")) {
           const err = new Error("locked");
           err.code = "EBUSY";
           throw err;
         }
-        return 999;
+        return origOpen(p, flags, mode);
       });
 
       try {
@@ -1503,13 +1553,14 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       fs.writeFileSync(branchMarker, Date.now().toString());
 
       // Mock cargo-lock actively locked by running cargo
-      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p) => {
+      const origOpen = fs.openSync.bind(fs);
+      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p, flags, mode) => {
         if (typeof p === "string" && p.includes(".cargo-lock")) {
           const err = new Error("cargo build in progress");
           err.code = "EBUSY";
           throw err;
         }
-        return 999;
+        return origOpen(p, flags, mode);
       });
 
       try {
@@ -1549,15 +1600,15 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       fs.writeFileSync(branchMarker, Date.now().toString());
 
       // Mock lock on Crate A
-      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p) => {
+      const origOpen = fs.openSync.bind(fs);
+      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p, flags, mode) => {
         if (typeof p === "string" && p.includes("crate_locked")) {
           const err = new Error("busy");
           err.code = "EBUSY";
           throw err;
         }
-        return 999;
+        return origOpen(p, flags, mode);
       });
-      const closeSpy = vi.spyOn(fs, "closeSync").mockImplementation(() => {});
 
       try {
         // 1. Auto mode: must yield completely
@@ -1577,7 +1628,6 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
         expect(fs.existsSync(branchMarker)).toBe(true);
       } finally {
         openSpy.mockRestore();
-        closeSpy.mockRestore();
       }
     });
 
@@ -1598,15 +1648,15 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       fs.writeFileSync(branchMarker, Date.now().toString());
 
       let isLocked = true;
-      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p) => {
+      const origOpen = fs.openSync.bind(fs);
+      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p, flags, mode) => {
         if (isLocked && typeof p === "string" && p.includes("s-test.lock")) {
           const err = new Error("locked");
           err.code = "EBUSY";
           throw err;
         }
-        return 999;
+        return origOpen(p, flags, mode);
       });
-      const closeSpy = vi.spyOn(fs, "closeSync").mockImplementation(() => {});
 
       try {
         // Step 1: Locked -> yields, marker preserved
@@ -1623,7 +1673,6 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
         expect(fs.existsSync(branchMarker)).toBe(false);
       } finally {
         openSpy.mockRestore();
-        closeSpy.mockRestore();
       }
     });
   });
