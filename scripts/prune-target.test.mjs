@@ -847,14 +847,46 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       }
     });
 
-    it("--setup-hooks --safe skips in CI environments", () => {
-      const originalCI = process.env.CI;
-      process.env.CI = "true";
+    it("--setup-hooks skips when npm_config_kokoro_skip_hooks=1", () => {
+      const original = process.env.npm_config_kokoro_skip_hooks;
+      process.env.npm_config_kokoro_skip_hooks = "1";
       try {
         const result = runPruneTarget(["--setup-hooks", "--safe"], tempRoot);
         expect(result.skipped).toBe(true);
-        expect(result.reason).toBe("ci_environment");
+        expect(result.reason).toBe("kokoro_skip_hooks");
       } finally {
+        if (original === undefined) {
+          delete process.env.npm_config_kokoro_skip_hooks;
+        } else {
+          process.env.npm_config_kokoro_skip_hooks = original;
+        }
+      }
+    });
+
+    it("--setup-hooks --safe runs in CI environments unless KOKORO_SKIP_HOOKS=1", () => {
+      const originalCI = process.env.CI;
+      process.env.CI = "true";
+      const fakeGitDir = path.join(tempRoot, ".git");
+      const fakeGithooks = path.join(tempRoot, ".githooks");
+      fs.mkdirSync(fakeGitDir, { recursive: true });
+      fs.mkdirSync(fakeGithooks, { recursive: true });
+      fs.writeFileSync(path.join(fakeGithooks, "post-checkout"), "#!/bin/sh\nexit 0\n");
+
+      let configured = false;
+      setGitExecutorForTesting((cmd) => {
+        if (typeof cmd === "string" && cmd.includes("git config core.hooksPath .githooks")) {
+          configured = true;
+          return "";
+        }
+        return "";
+      });
+
+      try {
+        const result = runPruneTarget(["--setup-hooks", "--safe"], tempRoot);
+        expect(result.success).toBe(true);
+        expect(configured).toBe(true);
+      } finally {
+        setGitExecutorForTesting(null);
         if (originalCI === undefined) {
           delete process.env.CI;
         } else {

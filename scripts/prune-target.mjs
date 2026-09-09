@@ -899,15 +899,9 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
     const isSafe = args.includes("--safe");
     const isForce = args.includes("--force");
 
-    // Skip in CI or if explicitly opted out
+    // Skip if explicitly opted out via KOKORO_SKIP_HOOKS
     if (process.env.KOKORO_SKIP_HOOKS === "1" || process.env.npm_config_kokoro_skip_hooks === "1") {
       return { skipped: true, reason: "kokoro_skip_hooks", mode: "setup-hooks" };
-    }
-    if (
-      (isAuto || isSafe) &&
-      (process.env.CI || process.env.GITHUB_ACTIONS || process.env.CONTINUOUS_INTEGRATION)
-    ) {
-      return { skipped: true, reason: "ci_environment", mode: "setup-hooks" };
     }
 
     try {
