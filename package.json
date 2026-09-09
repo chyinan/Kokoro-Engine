@@ -4,11 +4,18 @@
   "version": "0.4.0",
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/prune-target.mjs --setup-hooks",
+    "predev": "node scripts/prune-target.mjs --auto",
     "dev": "vite",
+    "tauri:dev": "node scripts/prune-target.mjs --auto && tauri dev",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "check:ipc": "node scripts/check-ipc-contract.mjs",
+    "storage:doctor": "node scripts/prune-target.mjs --doctor",
+    "storage:setup-hooks": "node scripts/prune-target.mjs --setup-hooks",
+    "prune:target": "node scripts/prune-target.mjs",
+    "prune:target:dry": "node scripts/prune-target.mjs --dry-run",
     "clean:target": "cargo clean --manifest-path src-tauri/Cargo.toml",
     "tauri": "tauri"
   },

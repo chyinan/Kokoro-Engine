@@ -1,0 +1,9 @@
+#!/bin/sh
+# .githooks/post-merge
+# Kokoro Storage Sentinel - Lightweight Branch Merge Marker
+# Execution time: < 1ms. Never blocks or fails git operations.
+
+mkdir -p src-tauri/target 2>/dev/null || true
+date +%s > src-tauri/target/.branch-switched 2>/dev/null || true
+
+exit 0

@@ -1,0 +1,11 @@
+#!/bin/sh
+# .githooks/post-checkout
+# Kokoro Storage Sentinel - Lightweight Branch Switch Marker
+# Execution time: < 1ms. Never blocks or fails git operations.
+
+if [ "$3" = "1" ]; then
+  mkdir -p src-tauri/target 2>/dev/null || true
+  date +%s > src-tauri/target/.branch-switched 2>/dev/null || true
+fi
+
+exit 0
