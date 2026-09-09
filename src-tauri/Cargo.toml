@@ -11,8 +11,10 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+# Desktop only requires rlib. staticlib bundles all transitive dependencies into a 4GB archive on Windows MSVC.
+# Re-add "cdylib" (Android) / "staticlib" (iOS) if building for mobile.
 name = "tauri_appkokoro_engine_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -80,3 +82,10 @@ tempfile = "3"
 proptest = "1"
 wiremock = "0.6"
 tokio-test = "0.4"
+
+# Reduces disk usage from third-party dependencies by emitting line-level debuginfo only.
+# Retains panic backtraces while dramatically shrinking PDB files.
+# Main crate retains full debug = 2 for rich IDE variable inspection.
+[profile.dev.package."*"]
+debug = 1
+

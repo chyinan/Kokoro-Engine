@@ -348,25 +348,44 @@ impl ActivationCoordinator {
 
         let mut _activation_lock = backend.lock_activation().await?;
 
+        ensure_committed_runtime_table(pool).await?;
+
         let mut transaction = pool.begin().await?;
         let live_updated_at =
-            sqlx::query_scalar::<_, i64>("SELECT updated_at FROM characters WHERE id = ?")
+            match sqlx::query_scalar::<_, i64>("SELECT updated_at FROM characters WHERE id = ?")
                 .bind(&token.resolved_runtime.character_id)
                 .fetch_optional(&mut *transaction)
-                .await?
-                .ok_or_else(|| {
-                    KokoroError::NotFound(format!(
+                .await
+            {
+                Ok(Some(ts)) => ts,
+                Ok(None) => {
+                    let _ = transaction.rollback().await;
+                    return Err(KokoroError::NotFound(format!(
                         "character '{}' not found",
                         token.resolved_runtime.character_id
-                    ))
-                })?;
+                    )));
+                }
+                Err(err) => {
+                    let _ = transaction.rollback().await;
+                    return Err(err.into());
+                }
+            };
         if live_updated_at != token.character_updated_at {
+            let _ = transaction.rollback().await;
             return Err(stale_token_error());
         }
 
-        let conversation_id = ensure_owned_conversation(&mut transaction, &token).await?;
-        stage_greeting(&mut transaction, &token, &conversation_id).await?;
-        ensure_committed_runtime_table(&mut transaction).await?;
+        let conversation_id = match ensure_owned_conversation(&mut transaction, &token).await {
+            Ok(id) => id,
+            Err(err) => {
+                let _ = transaction.rollback().await;
+                return Err(err);
+            }
+        };
+        if let Err(err) = stage_greeting(&mut transaction, &token, &conversation_id).await {
+            let _ = transaction.rollback().await;
+            return Err(err);
+        }
         let mut applied_runtime = token.resolved_runtime.clone();
         applied_runtime.current_conversation_id = Some(conversation_id.clone());
         let committed = CommittedCharacterRuntime {
@@ -374,27 +393,43 @@ impl ActivationCoordinator {
             runtime: applied_runtime.clone(),
             target_conversation_id: conversation_id,
         };
-        let committed_json = serde_json::to_string(&committed).map_err(|error| {
-            KokoroError::Internal(format!(
-                "failed to serialize committed character runtime: {error}"
-            ))
-        })?;
-        sqlx::query(
+        let committed_json = match serde_json::to_string(&committed) {
+            Ok(json) => json,
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                return Err(KokoroError::Internal(format!(
+                    "failed to serialize committed character runtime: {error}"
+                )));
+            }
+        };
+        let revision_i64 = match i64::try_from(token.revision) {
+            Ok(rev) => rev,
+            Err(_) => {
+                let _ = transaction.rollback().await;
+                return Err(KokoroError::Internal(
+                    "character activation revision exceeds SQLite range".into(),
+                ));
+            }
+        };
+        if let Err(err) = sqlx::query(
             "INSERT INTO character_activation_runtime (singleton, revision, runtime_json) \
              VALUES (1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET revision = excluded.revision, runtime_json = excluded.runtime_json",
         )
-        .bind(i64::try_from(token.revision).map_err(|_| {
-            KokoroError::Internal("character activation revision exceeds SQLite range".into())
-        })?)
+        .bind(revision_i64)
         .bind(committed_json)
         .execute(&mut *transaction)
-        .await?;
+        .await
+        {
+            let _ = transaction.rollback().await;
+            return Err(err.into());
+        }
 
         // Arm the mutation barrier: from this point onward, backend runtime mutation begins.
         // If an in-flight abort occurs after this barrier, the gate fails closed to prevent torn state.
         backend.arm_activation_mutation(&mut *_activation_lock);
 
         if let Err(error) = backend.apply(&applied_runtime).await {
+            let _ = transaction.rollback().await;
             if let Err(restore_error) = backend.restore(&token.previous_committed).await {
                 let recover_res = self.recover_committed_backend(pool, backend).await;
                 if let Err(recover_error) = recover_res {
@@ -1228,7 +1263,7 @@ async fn revert_staged_greeting_in_tx(
 }
 
 async fn ensure_committed_runtime_table(
-    transaction: &mut Transaction<'_, Sqlite>,
+    pool: &SqlitePool,
 ) -> Result<(), KokoroError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS character_activation_runtime (\
@@ -1237,7 +1272,7 @@ async fn ensure_committed_runtime_table(
             runtime_json TEXT NOT NULL\
          )",
     )
-    .execute(&mut **transaction)
+    .execute(pool)
     .await?;
     Ok(())
 }
