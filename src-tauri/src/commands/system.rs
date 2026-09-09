@@ -25,8 +25,8 @@ impl Default for WindowSizeState {
 impl WindowSizeState {
     pub fn new() -> Self {
         Self {
-            width: Arc::new(RwLock::new(800)),
-            height: Arc::new(RwLock::new(600)),
+            width: Arc::new(RwLock::new(1200)),
+            height: Arc::new(RwLock::new(800)),
         }
     }
     pub async fn get(&self) -> (u32, u32) {
