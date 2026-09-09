@@ -14,6 +14,9 @@ import {
   isLockFileActive,
   isSessionDirectoryLocked,
   hasActiveIncrementalLocks,
+  hasActiveBuildLock,
+  hasActiveCompilerProcesses,
+  setCompilerProcessCheckerForTesting,
   consumeBranchSwitchMarker,
   writeCooldown,
   updateCooldown,
@@ -22,6 +25,7 @@ import {
   runPruneTarget,
   getGitEnvironment,
   getActiveHooks,
+  writeHookAtomic,
   isPosixShellScript,
   injectSentinelBlockIntoShellScript,
   getSentinelSnippet,
@@ -57,6 +61,7 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    setCompilerProcessCheckerForTesting(null);
     for (const [key, val] of Object.entries(savedEnv)) {
       if (val === undefined) {
         delete process.env[key];
@@ -1002,6 +1007,189 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
         setGitExecutorForTesting(null);
       }
     });
+
+    it("--setup-hooks safely chains into supported custom hooks directory (e.g. .husky) with existing shell hooks", () => {
+      const fakeGitDir = path.join(tempRoot, ".git");
+      fs.mkdirSync(fakeGitDir, { recursive: true });
+
+      const huskyDir = path.join(tempRoot, ".husky");
+      fs.mkdirSync(huskyDir, { recursive: true });
+
+      fs.writeFileSync(path.join(huskyDir, "pre-commit"), "#!/bin/sh\nnpm test\nexit 0\n");
+      fs.writeFileSync(path.join(huskyDir, "post-checkout"), "#!/usr/bin/env sh\n# user checkout logic\nexit 0\n");
+
+      setGitExecutorForTesting((cmd) => {
+        if (typeof cmd === "string" && cmd.includes("git config --get core.hooksPath")) {
+          return ".husky\n";
+        }
+        if (typeof cmd === "string" && cmd.includes("git rev-parse --git-path hooks")) {
+          return ".git/hooks\n";
+        }
+        return "";
+      });
+
+      try {
+        const result = runPruneTarget(["--setup-hooks"], tempRoot);
+        expect(result.success).toBe(true);
+        expect(result.status).toBe("chained_custom_hooks");
+        expect(result.sentinelActive).toBe(true);
+        expect(result.hooksPath).toBe(".husky");
+
+        // Pre-commit must remain untouched
+        const preCommitContent = fs.readFileSync(path.join(huskyDir, "pre-commit"), "utf8");
+        expect(preCommitContent).toBe("#!/bin/sh\nnpm test\nexit 0\n");
+
+        // Post-checkout must have Sentinel injected after shebang before user body
+        const postCheckoutContent = fs.readFileSync(path.join(huskyDir, "post-checkout"), "utf8");
+        expect(postCheckoutContent.includes(SENTINEL_BLOCK_START)).toBe(true);
+        expect(postCheckoutContent.includes("# user checkout logic")).toBe(true);
+        expect(postCheckoutContent.startsWith("#!/usr/bin/env sh\n")).toBe(true);
+
+        // Post-merge must be created
+        const postMergeContent = fs.readFileSync(path.join(huskyDir, "post-merge"), "utf8");
+        expect(postMergeContent.includes(SENTINEL_BLOCK_START)).toBe(true);
+
+        // Idempotency check: running again does not duplicate block
+        const secondResult = runPruneTarget(["--setup-hooks"], tempRoot);
+        expect(secondResult.success).toBe(true);
+        expect(secondResult.status).toBe("chained_custom_hooks");
+        const secondContent = fs.readFileSync(path.join(huskyDir, "post-checkout"), "utf8");
+        const occurrences = secondContent.split(SENTINEL_BLOCK_START).length - 1;
+        expect(occurrences).toBe(1);
+      } finally {
+        setGitExecutorForTesting(null);
+      }
+    });
+
+    it("--setup-hooks creates post-checkout and post-merge in existing custom hooks directory if they do not exist", () => {
+      const fakeGitDir = path.join(tempRoot, ".git");
+      fs.mkdirSync(fakeGitDir, { recursive: true });
+
+      const customDir = path.join(tempRoot, "my-hooks");
+      fs.mkdirSync(customDir, { recursive: true });
+      fs.writeFileSync(path.join(customDir, "pre-commit"), "#!/bin/sh\nexit 0\n");
+
+      setGitExecutorForTesting((cmd) => {
+        if (typeof cmd === "string" && cmd.includes("git config --get core.hooksPath")) {
+          return "my-hooks\n";
+        }
+        if (typeof cmd === "string" && cmd.includes("git rev-parse --git-path hooks")) {
+          return ".git/hooks\n";
+        }
+        return "";
+      });
+
+      try {
+        const result = runPruneTarget(["--setup-hooks"], tempRoot);
+        expect(result.success).toBe(true);
+        expect(result.status).toBe("chained_custom_hooks");
+        expect(result.sentinelActive).toBe(true);
+
+        const checkout = fs.readFileSync(path.join(customDir, "post-checkout"), "utf8");
+        expect(checkout.includes(SENTINEL_BLOCK_START)).toBe(true);
+        const merge = fs.readFileSync(path.join(customDir, "post-merge"), "utf8");
+        expect(merge.includes(SENTINEL_BLOCK_START)).toBe(true);
+      } finally {
+        setGitExecutorForTesting(null);
+      }
+    });
+
+    it("--setup-hooks refuses to modify non-shell existing hook in custom hooks directory and reports status", () => {
+      const fakeGitDir = path.join(tempRoot, ".git");
+      fs.mkdirSync(fakeGitDir, { recursive: true });
+
+      const customDir = path.join(tempRoot, ".husky");
+      fs.mkdirSync(customDir, { recursive: true });
+
+      const pythonHook = "#!/usr/bin/env python3\nimport sys\nprint('python')\nsys.exit(0)\n";
+      fs.writeFileSync(path.join(customDir, "post-checkout"), pythonHook);
+      fs.writeFileSync(path.join(customDir, "post-merge"), pythonHook);
+
+      setGitExecutorForTesting((cmd) => {
+        if (typeof cmd === "string" && cmd.includes("git config --get core.hooksPath")) {
+          return ".husky\n";
+        }
+        if (typeof cmd === "string" && cmd.includes("git rev-parse --git-path hooks")) {
+          return ".git/hooks\n";
+        }
+        return "";
+      });
+
+      try {
+        const result = runPruneTarget(["--setup-hooks"], tempRoot);
+        expect(result.success).toBe(true);
+        expect(result.status).toBe("preserved_custom_hooks");
+        expect(result.sentinelActive).toBe(false);
+        expect(result.reason).toBe("non_shell_hooks");
+
+        expect(fs.readFileSync(path.join(customDir, "post-checkout"), "utf8")).toBe(pythonHook);
+        expect(fs.readFileSync(path.join(customDir, "post-merge"), "utf8")).toBe(pythonHook);
+      } finally {
+        setGitExecutorForTesting(null);
+      }
+    });
+
+    it("--setup-hooks blocks external core.hooksPath outside repository and explicitly reports Sentinel disabled", () => {
+      const fakeGitDir = path.join(tempRoot, ".git");
+      fs.mkdirSync(fakeGitDir, { recursive: true });
+
+      setGitExecutorForTesting((cmd) => {
+        if (typeof cmd === "string" && cmd.includes("git config --get core.hooksPath")) {
+          return "../external-hooks\n";
+        }
+        if (typeof cmd === "string" && cmd.includes("git rev-parse --git-path hooks")) {
+          return ".git/hooks\n";
+        }
+        return "";
+      });
+
+      try {
+        const result = runPruneTarget(["--setup-hooks"], tempRoot);
+        expect(result.success).toBe(true);
+        expect(result.status).toBe("preserved_custom_hooks");
+        expect(result.sentinelActive).toBe(false);
+        expect(result.sentinelDisabled).toBe(true);
+        expect(result.reason).toBe("external_hooks_path");
+      } finally {
+        setGitExecutorForTesting(null);
+      }
+    });
+
+    it("--setup-hooks refuses to chain into a symlinked custom hooks directory", () => {
+      const fakeGitDir = path.join(tempRoot, ".git");
+      fs.mkdirSync(fakeGitDir, { recursive: true });
+
+      const realHooksDir = path.join(tempRoot, "real-hooks");
+      fs.mkdirSync(realHooksDir, { recursive: true });
+
+      const symlinkHooks = path.join(tempRoot, ".husky");
+      createDirLink(realHooksDir, symlinkHooks);
+      expect(fs.lstatSync(symlinkHooks).isSymbolicLink()).toBe(true);
+
+      setGitExecutorForTesting((cmd) => {
+        if (typeof cmd === "string" && cmd.includes("git config --get core.hooksPath")) {
+          return ".husky\n";
+        }
+        if (typeof cmd === "string" && cmd.includes("git rev-parse --git-path hooks")) {
+          return ".git/hooks\n";
+        }
+        return "";
+      });
+
+      try {
+        const result = runPruneTarget(["--setup-hooks"], tempRoot);
+        expect(result.success).toBe(true);
+        expect(result.status).toBe("preserved_symlink_hooks_dir");
+        expect(result.sentinelActive).toBe(false);
+        expect(result.sentinelDisabled).toBe(true);
+        expect(result.reason).toBe("symlinked_hooks_dir");
+
+        // Target real hooks directory must remain empty
+        expect(fs.readdirSync(realHooksDir)).toHaveLength(0);
+      } finally {
+        setGitExecutorForTesting(null);
+      }
+    });
   });
 
   describe("Target pruner deps/ test harness matching and retention rules", () => {
@@ -1227,7 +1415,7 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
   });
 
   describe("Whole-target watermark coverage & safe deletion scoping", () => {
-    it("triggers pruning when total target footprint exceeds threshold even if debug alone is below threshold", () => {
+    it("triggers pruning when total target footprint exceeds threshold even if debug alone is below threshold (collaborative target threshold)", () => {
       const srcTauri = path.join(tempRoot, "src-tauri");
       const targetDir = path.join(srcTauri, "target");
       const releaseDir = path.join(targetDir, "release");
@@ -1239,7 +1427,67 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       fs.mkdirSync(sherpaDir, { recursive: true });
       fs.mkdirSync(incDir, { recursive: true });
 
-      // Non-debug contents: 40,000 bytes each
+      // Non-debug contents: 15,000 bytes each (30,000 bytes total)
+      const releaseBin = path.join(releaseDir, "kokoro.exe");
+      const sherpaLib = path.join(sherpaDir, "libsherpa.dll");
+      fs.writeFileSync(releaseBin, Buffer.alloc(15000, 1));
+      fs.writeFileSync(sherpaLib, Buffer.alloc(15000, 2));
+
+      // Debug contents: 3 sessions of 10,000 bytes each (30,000 bytes total)
+      const sess1 = path.join(incDir, "kokoro_lib-1111111111111111");
+      const sess2 = path.join(incDir, "kokoro_lib-2222222222222222");
+      const sess3 = path.join(incDir, "kokoro_lib-3333333333333333");
+      fs.mkdirSync(sess1, { recursive: true });
+      fs.mkdirSync(sess2, { recursive: true });
+      fs.mkdirSync(sess3, { recursive: true });
+      fs.writeFileSync(path.join(sess1, "data.bin"), Buffer.alloc(10000, 3));
+      fs.writeFileSync(path.join(sess2, "data.bin"), Buffer.alloc(10000, 4));
+      fs.writeFileSync(path.join(sess3, "data.bin"), Buffer.alloc(10000, 5));
+
+      const now = Date.now();
+      fs.utimesSync(sess1, new Date(now - 300000), new Date(now - 300000));
+      fs.utimesSync(sess2, new Date(now - 200000), new Date(now - 200000));
+      fs.utimesSync(sess3, new Date(now - 100000), new Date(now - 100000));
+
+      // Total target size = 15,000 + 15,000 + 30,000 = 60,000 bytes.
+      // Non-debug size = 30,000 bytes.
+      // Debug size = 30,000 bytes.
+      // Set threshold to 50,000 bytes:
+      // Non-debug alone (30 KB) < threshold (50 KB).
+      // Debug alone (30 KB) < threshold (50 KB).
+      // Total target (60 KB) > threshold (50 KB).
+      const thresholdGb = (50000 / (1024 * 1024 * 1024)).toFixed(8);
+
+      const res = runPruneTarget([`--threshold-gb=${thresholdGb}`], tempRoot);
+
+      // Oldest session (sess1) was pruned because default keep for kokoro is 2
+      expect(res.count).toBe(1);
+      expect(res.bytesFreed).toBe(10000);
+      expect(fs.existsSync(sess1)).toBe(false);
+      expect(fs.existsSync(sess2)).toBe(true);
+      expect(fs.existsSync(sess3)).toBe(true);
+
+      // CRITICAL: Non-debug files MUST remain 100% intact!
+      expect(fs.existsSync(releaseBin)).toBe(true);
+      expect(fs.readFileSync(releaseBin).length).toBe(15000);
+      expect(fs.existsSync(sherpaLib)).toBe(true);
+      expect(fs.readFileSync(sherpaLib).length).toBe(15000);
+    });
+
+    it("preserves debug cache and skips pruning when non-debug artifacts alone saturate the threshold and debug is healthy", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const releaseDir = path.join(targetDir, "release");
+      const sherpaDir = path.join(targetDir, "sherpa-onnx-prebuilt");
+      const debugDir = path.join(targetDir, "debug");
+      const incDir = path.join(debugDir, "incremental");
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+
+      fs.mkdirSync(releaseDir, { recursive: true });
+      fs.mkdirSync(sherpaDir, { recursive: true });
+      fs.mkdirSync(incDir, { recursive: true });
+
+      // Non-debug contents: 40,000 bytes each (80,000 bytes total)
       const releaseBin = path.join(releaseDir, "kokoro.exe");
       const sherpaLib = path.join(sherpaDir, "libsherpa.dll");
       fs.writeFileSync(releaseBin, Buffer.alloc(40000, 1));
@@ -1256,32 +1504,74 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       fs.writeFileSync(path.join(sess2, "data.bin"), Buffer.alloc(5000, 4));
       fs.writeFileSync(path.join(sess3, "data.bin"), Buffer.alloc(5000, 5));
 
+      // Non-debug (80 KB) >= threshold (42.95 KB)
+      // Debug (15 KB) < threshold (42.95 KB)
+      const thresholdGb = (42950 / (1024 * 1024 * 1024)).toFixed(8);
+
+      // Manual mode: skips pruning to protect valuable debug cache
+      const manualRes = runPruneTarget([`--threshold-gb=${thresholdGb}`], tempRoot);
+      expect(manualRes.skipped).toBe(true);
+      expect(manualRes.reason).toBe("non_debug_exceeds_threshold");
+      expect(manualRes.count).toBe(0);
+      expect(manualRes.bytesFreed).toBe(0);
+
+      // Active debug sessions remain 100% intact
+      expect(fs.existsSync(sess1)).toBe(true);
+      expect(fs.existsSync(sess2)).toBe(true);
+      expect(fs.existsSync(sess3)).toBe(true);
+      expect(fs.existsSync(releaseBin)).toBe(true);
+      expect(fs.existsSync(sherpaLib)).toBe(true);
+
+      // Auto mode: skips with reason and writes cooldown to prevent spinning
+      const autoRes = runPruneTarget(["--auto", `--threshold-gb=${thresholdGb}`], tempRoot);
+      expect(autoRes.skipped).toBe(true);
+      expect(autoRes.reason).toBe("non_debug_exceeds_threshold");
+      expect(fs.existsSync(cooldownFile)).toBe(true);
+    });
+
+    it("prunes debug cache when debug alone exceeds threshold even if non-debug is also large", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const releaseDir = path.join(targetDir, "release");
+      const debugDir = path.join(targetDir, "debug");
+      const incDir = path.join(debugDir, "incremental");
+
+      fs.mkdirSync(releaseDir, { recursive: true });
+      fs.mkdirSync(incDir, { recursive: true });
+
+      // Non-debug contents: 50,000 bytes
+      const releaseBin = path.join(releaseDir, "kokoro.exe");
+      fs.writeFileSync(releaseBin, Buffer.alloc(50000, 1));
+
+      // Debug contents: 3 sessions of 20,000 bytes each (60,000 bytes total)
+      const sess1 = path.join(incDir, "kokoro_lib-1111111111111111");
+      const sess2 = path.join(incDir, "kokoro_lib-2222222222222222");
+      const sess3 = path.join(incDir, "kokoro_lib-3333333333333333");
+      fs.mkdirSync(sess1, { recursive: true });
+      fs.mkdirSync(sess2, { recursive: true });
+      fs.mkdirSync(sess3, { recursive: true });
+      fs.writeFileSync(path.join(sess1, "data.bin"), Buffer.alloc(20000, 3));
+      fs.writeFileSync(path.join(sess2, "data.bin"), Buffer.alloc(20000, 4));
+      fs.writeFileSync(path.join(sess3, "data.bin"), Buffer.alloc(20000, 5));
+
       const now = Date.now();
       fs.utimesSync(sess1, new Date(now - 300000), new Date(now - 300000));
       fs.utimesSync(sess2, new Date(now - 200000), new Date(now - 200000));
       fs.utimesSync(sess3, new Date(now - 100000), new Date(now - 100000));
 
-      // Total target size = 40,000 + 40,000 + 15,000 = ~95,000 bytes (~0.000088 GB).
-      // Debug size = 15,000 bytes (~0.000014 GB).
-      // If we set threshold to ~0.00004 GB (approx 42,950 bytes):
-      // Debug ALONE (15 KB) is BELOW threshold (42.9 KB).
-      // Total target (95 KB) is ABOVE threshold (42.9 KB).
-      const thresholdGb = (42950 / (1024 * 1024 * 1024)).toFixed(8);
+      // Threshold: 40,000 bytes (~0.00003725 GB)
+      // Non-debug alone (50 KB) >= threshold (40 KB)
+      // Debug alone (60 KB) >= threshold (40 KB)
+      const thresholdGb = (40000 / (1024 * 1024 * 1024)).toFixed(8);
 
       const res = runPruneTarget([`--threshold-gb=${thresholdGb}`], tempRoot);
-
-      // Oldest session (sess1) was pruned because default keep for kokoro is 2
+      // Because debug itself is bloated, pruning proceeds on debug!
       expect(res.count).toBe(1);
-      expect(res.bytesFreed).toBe(5000);
+      expect(res.bytesFreed).toBe(20000);
       expect(fs.existsSync(sess1)).toBe(false);
       expect(fs.existsSync(sess2)).toBe(true);
       expect(fs.existsSync(sess3)).toBe(true);
-
-      // CRITICAL: Non-debug files MUST remain 100% intact!
       expect(fs.existsSync(releaseBin)).toBe(true);
-      expect(fs.readFileSync(releaseBin).length).toBe(40000);
-      expect(fs.existsSync(sherpaLib)).toBe(true);
-      expect(fs.readFileSync(sherpaLib).length).toBe(40000);
     });
 
     it("strictly scopes deletion to debugDir: never deletes release or vendor directories", () => {
@@ -1707,6 +1997,182 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
         openSpy.mockRestore();
       }
     });
+
+    it("full-pipeline: active compiler detection skips all pruning (both incremental and deps) under --auto, leaving .rlib/.pdb/.d intact", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const debugDir = path.join(targetDir, "debug");
+      const incDir = path.join(debugDir, "incremental");
+      const depsDir = path.join(debugDir, "deps");
+
+      fs.mkdirSync(incDir, { recursive: true });
+      fs.mkdirSync(depsDir, { recursive: true });
+
+      // 1. Populate incremental with older and newer sessions (would normally be pruned)
+      const crateOld = path.join(incDir, "crate_inc-1111111111111111");
+      const crateNew = path.join(incDir, "crate_inc-2222222222222222");
+      fs.mkdirSync(crateOld, { recursive: true });
+      fs.mkdirSync(crateNew, { recursive: true });
+      fs.writeFileSync(path.join(crateOld, "data.bin"), "old-incremental");
+      fs.writeFileSync(path.join(crateNew, "data.bin"), "new-incremental");
+      fs.utimesSync(crateOld, new Date(Date.now() - 200000), new Date(Date.now() - 200000));
+
+      // 2. Populate deps with older and newer workspace artifacts (.rlib, .exe, .pdb, .d) that would normally be pruned
+      const now = Date.now();
+      const staleTime = new Date(now - 3600 * 1000); // 1 hour old (outside 30m shield)
+      const freshTime = new Date(now);
+
+      // Core library rlib (keeps latest 1)
+      const libOld = path.join(depsDir, "libkokoro_engine_lib-1111111111111111.rlib");
+      const libNew = path.join(depsDir, "libkokoro_engine_lib-2222222222222222.rlib");
+      fs.writeFileSync(libOld, "old-rlib");
+      fs.writeFileSync(libNew, "new-rlib");
+      fs.utimesSync(libOld, staleTime, staleTime);
+      fs.utimesSync(libNew, freshTime, freshTime);
+
+      // Main app exe & pdb (keep latest 2 in dev mode, create 3 to force pruning)
+      const appOld = path.join(depsDir, "tauri_appkokoro_engine-1111111111111111.exe");
+      const appMid = path.join(depsDir, "tauri_appkokoro_engine-2222222222222222.exe");
+      const appNew = path.join(depsDir, "tauri_appkokoro_engine-3333333333333333.exe");
+      fs.writeFileSync(appOld, "old-exe");
+      fs.writeFileSync(appMid, "mid-exe");
+      fs.writeFileSync(appNew, "new-exe");
+      fs.utimesSync(appOld, new Date(now - 300000), new Date(now - 300000));
+      fs.utimesSync(appMid, new Date(now - 200000), new Date(now - 200000));
+      fs.utimesSync(appNew, freshTime, freshTime);
+
+      // Test harness .d dependency file
+      const dOld = path.join(depsDir, "kokoro_test_runner-1111111111111111.d");
+      const dNew = path.join(depsDir, "kokoro_test_runner-2222222222222222.d");
+      fs.writeFileSync(dOld, "old-d");
+      fs.writeFileSync(dNew, "new-d");
+      fs.utimesSync(dOld, staleTime, staleTime);
+      fs.utimesSync(dNew, freshTime, freshTime);
+
+      const branchMarker = path.join(targetDir, ".branch-switched");
+      fs.writeFileSync(branchMarker, Date.now().toString());
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+
+      // 3. Simulate active compiler process (cargo/rustc active on POSIX or simulated)
+      setCompilerProcessCheckerForTesting(() => true);
+
+      try {
+        const res = runPruneTarget(["--auto"], tempRoot);
+
+        // Verification 1: Full-pipeline pruning yielded entirely
+        expect(res.count).toBe(0);
+        expect(res.bytesFreed).toBe(0);
+        expect(res.hasActiveLock).toBe(true);
+
+        // Verification 2: Incremental sessions remain untouched
+        expect(fs.existsSync(crateOld)).toBe(true);
+        expect(fs.existsSync(crateNew)).toBe(true);
+
+        // Verification 3: CRITICAL - Deps artifacts (.rlib, .exe, .d) are 100% intact!
+        expect(fs.existsSync(libOld)).toBe(true);
+        expect(fs.existsSync(libNew)).toBe(true);
+        expect(fs.existsSync(appOld)).toBe(true);
+        expect(fs.existsSync(appMid)).toBe(true);
+        expect(fs.existsSync(appNew)).toBe(true);
+        expect(fs.existsSync(dOld)).toBe(true);
+        expect(fs.existsSync(dNew)).toBe(true);
+
+        // Verification 4: Branch switch marker retained, cooldown not written
+        expect(fs.existsSync(branchMarker)).toBe(true);
+        expect(fs.existsSync(cooldownFile)).toBe(false);
+      } finally {
+        setCompilerProcessCheckerForTesting(null);
+      }
+    });
+
+    it("full-pipeline: skips deps pruning when target/.cargo-lock is held even if incremental directory is completely absent", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const debugDir = path.join(targetDir, "debug");
+      const depsDir = path.join(debugDir, "deps");
+
+      // Notice: NO incremental directory created!
+      fs.mkdirSync(depsDir, { recursive: true });
+
+      const cargoLock = path.join(targetDir, ".cargo-lock");
+      fs.writeFileSync(cargoLock, "");
+
+      const now = Date.now();
+      const staleTime = new Date(now - 3600 * 1000);
+      const freshTime = new Date(now);
+
+      const libOld = path.join(depsDir, "libkokoro_engine_lib-1111111111111111.rlib");
+      const libNew = path.join(depsDir, "libkokoro_engine_lib-2222222222222222.rlib");
+      fs.writeFileSync(libOld, "old-rlib");
+      fs.writeFileSync(libNew, "new-rlib");
+      fs.utimesSync(libOld, staleTime, staleTime);
+      fs.utimesSync(libNew, freshTime, freshTime);
+
+      const branchMarker = path.join(targetDir, ".branch-switched");
+      fs.writeFileSync(branchMarker, Date.now().toString());
+
+      // Simulate lock on .cargo-lock
+      const origOpen = fs.openSync.bind(fs);
+      const openSpy = vi.spyOn(fs, "openSync").mockImplementation((p, flags, mode) => {
+        if (typeof p === "string" && p.includes(".cargo-lock")) {
+          const err = new Error("cargo lock active");
+          err.code = "EBUSY";
+          throw err;
+        }
+        return origOpen(p, flags, mode);
+      });
+
+      try {
+        const res = runPruneTarget(["--auto"], tempRoot);
+
+        expect(res.count).toBe(0);
+        expect(res.bytesFreed).toBe(0);
+        expect(res.hasActiveLock).toBe(true);
+
+        // All deps artifacts remain untouched despite missing incremental directory
+        expect(fs.existsSync(libOld)).toBe(true);
+        expect(fs.existsSync(libNew)).toBe(true);
+        expect(fs.existsSync(branchMarker)).toBe(true);
+      } finally {
+        openSpy.mockRestore();
+      }
+    });
+
+    it("pruneDeps standalone guard: directly invoking pruneDeps with isAuto yields when compiler or build lock is active", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const debugDir = path.join(targetDir, "debug");
+      const depsDir = path.join(debugDir, "deps");
+      fs.mkdirSync(depsDir, { recursive: true });
+
+      const now = Date.now();
+      const staleTime = new Date(now - 3600 * 1000);
+      const freshTime = new Date(now);
+
+      const libOld = path.join(depsDir, "libkokoro_engine_lib-1111111111111111.rlib");
+      const libNew = path.join(depsDir, "libkokoro_engine_lib-2222222222222222.rlib");
+      fs.writeFileSync(libOld, "old-rlib");
+      fs.writeFileSync(libNew, "new-rlib");
+      fs.utimesSync(libOld, staleTime, staleTime);
+      fs.utimesSync(libNew, freshTime, freshTime);
+
+      setCompilerProcessCheckerForTesting(() => true);
+
+      try {
+        // Calling pruneDeps directly with isAuto = true
+        const res = pruneDeps(depsDir, false, debugDir, false, false, false, true);
+
+        expect(res.count).toBe(0);
+        expect(res.bytesFreed).toBe(0);
+        expect(res.hasActiveLock).toBe(true);
+
+        // Verification: File in deps was NOT pruned
+        expect(fs.existsSync(libOld)).toBe(true);
+        expect(fs.existsSync(libNew)).toBe(true);
+      } finally {
+        setCompilerProcessCheckerForTesting(null);
+      }
+    });
   });
 
   describe("Targeted Fixture: Reparse Points, Directory Junctions & Symlink Escape Defense", () => {
@@ -1999,6 +2465,339 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       const res = runPruneTarget([], tempRoot);
       expect(res.count).toBeGreaterThan(0);
       expect(fs.existsSync(path.join(fixture.releaseDir, "kokoro.exe"))).toBe(true);
+    });
+  });
+
+  describe("Targeted Fixture: .prune-cooldown Symlink, Reparse Point & Atomic Write Security", () => {
+    it("rejects writeCooldown when cooldownFile is a symlink to an external file, preserving external content", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+      const externalFile = path.join(tempRoot, "external-secret.txt");
+
+      fs.mkdirSync(targetDir, { recursive: true });
+      fs.writeFileSync(externalFile, "CONFIDENTIAL_PAYLOAD_KEEP_INTACT", "utf8");
+
+      const linkCreated = tryCreateFileLink(externalFile, cooldownFile);
+      if (linkCreated) {
+        const res = writeCooldown(targetDir, cooldownFile, tempRoot, false);
+        expect(res).toBe(false);
+
+        // External file must remain intact and not truncated/overwritten with timestamp
+        const externalContent = fs.readFileSync(externalFile, "utf8");
+        expect(externalContent).toBe("CONFIDENTIAL_PAYLOAD_KEEP_INTACT");
+
+        // Symlink itself must still be recognized as symlink
+        expect(fs.lstatSync(cooldownFile).isSymbolicLink()).toBe(true);
+      }
+    });
+
+    it("rejects writeCooldown when cooldownFile is a dangling / broken symlink", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+      const nonExistentTarget = path.join(tempRoot, "does-not-exist.txt");
+
+      fs.mkdirSync(targetDir, { recursive: true });
+
+      const linkCreated = tryCreateFileLink(nonExistentTarget, cooldownFile);
+      if (linkCreated) {
+        const res = writeCooldown(targetDir, cooldownFile, tempRoot, false);
+        expect(res).toBe(false);
+      }
+    });
+
+    it("rejects writeCooldown when cooldownFile is a directory junction or symlinked directory", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+      const externalDir = path.join(tempRoot, "external-dir");
+
+      fs.mkdirSync(targetDir, { recursive: true });
+      fs.mkdirSync(externalDir, { recursive: true });
+
+      createDirLink(externalDir, cooldownFile);
+      expect(fs.lstatSync(cooldownFile).isSymbolicLink()).toBe(true);
+
+      const res = writeCooldown(targetDir, cooldownFile, tempRoot, false);
+      expect(res).toBe(false);
+    });
+
+    it("rejects writeCooldown when cooldownFile path escapes targetDir or canonicalRoot", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      fs.mkdirSync(targetDir, { recursive: true });
+
+      // Path traversal escaping targetDir
+      const escapingCooldown = path.join(targetDir, "..", "escaped-cooldown.txt");
+      const res1 = writeCooldown(targetDir, escapingCooldown, tempRoot, false);
+      expect(res1).toBe(false);
+
+      // Path outside canonicalRoot entirely
+      const outsideCooldown = path.join(path.dirname(tempRoot), "outside-cooldown.txt");
+      const res2 = writeCooldown(targetDir, outsideCooldown, tempRoot, false);
+      expect(res2).toBe(false);
+    });
+
+    it("preserves external file content when cooldownFile is a hard link (atomic replacement)", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+      const hardlinkSource = path.join(targetDir, "hardlink-target.txt");
+
+      fs.mkdirSync(targetDir, { recursive: true });
+      fs.writeFileSync(hardlinkSource, "ORIGINAL_HARDLINK_SOURCE_CONTENT", "utf8");
+
+      try {
+        fs.linkSync(hardlinkSource, cooldownFile);
+      } catch (err) {
+        if (err?.code === "EPERM" || err?.code === "EACCES") return;
+        throw err;
+      }
+
+      // Write cooldown
+      const res = writeCooldown(targetDir, cooldownFile, tempRoot, false);
+      expect(res).toBe(true);
+
+      // Verify hardlinkSource was NOT overwritten
+      expect(fs.readFileSync(hardlinkSource, "utf8")).toBe("ORIGINAL_HARDLINK_SOURCE_CONTENT");
+
+      // Verify cooldownFile now has the new timestamp
+      const cooldownContent = fs.readFileSync(cooldownFile, "utf8");
+      expect(cooldownContent).not.toBe("ORIGINAL_HARDLINK_SOURCE_CONTENT");
+      expect(!isNaN(parseInt(cooldownContent, 10))).toBe(true);
+    });
+
+    it("performs atomic write and clean updates without leaving temporary staging files", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+
+      fs.mkdirSync(targetDir, { recursive: true });
+
+      // First write
+      const res1 = writeCooldown(targetDir, cooldownFile, tempRoot, false);
+      expect(res1).toBe(true);
+      expect(fs.existsSync(cooldownFile)).toBe(true);
+
+      const ts1 = fs.readFileSync(cooldownFile, "utf8");
+      expect(!isNaN(parseInt(ts1, 10))).toBe(true);
+
+      // Check no temp files leaked
+      const tempFiles1 = fs.readdirSync(targetDir).filter((f) => f.startsWith(".prune-cooldown.") && f.endsWith(".tmp"));
+      expect(tempFiles1).toHaveLength(0);
+
+      // Second write (atomic update of existing regular file)
+      const res2 = writeCooldown(targetDir, cooldownFile, tempRoot, false);
+      expect(res2).toBe(true);
+
+      // Check no temp files leaked
+      const tempFiles2 = fs.readdirSync(targetDir).filter((f) => f.startsWith(".prune-cooldown.") && f.endsWith(".tmp"));
+      expect(tempFiles2).toHaveLength(0);
+    });
+
+    it("ensures runPruneTarget in auto mode ignores symlinked .prune-cooldown", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const debugDir = path.join(targetDir, "debug");
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+      const externalFile = path.join(tempRoot, "fake-timestamp.txt");
+
+      fs.mkdirSync(debugDir, { recursive: true });
+      // Write timestamp within cooldown window into external file
+      fs.writeFileSync(externalFile, Date.now().toString(), "utf8");
+
+      const linkCreated = tryCreateFileLink(externalFile, cooldownFile);
+      if (linkCreated) {
+        // Run with auto mode below threshold: should NOT skip with cooldown_active because cooldownFile is a symlink!
+        const res = runPruneTarget(["--auto"], tempRoot);
+        expect(res.reason).not.toBe("cooldown_active");
+        expect(res.reason).toBe("below_threshold");
+      }
+    });
+  });
+
+  describe("Targeted Fixture: Git Hook Symlink, Reparse Point & External Target Protection", () => {
+    it("preserves external file content and refuses to mutate when hook is a symlink", () => {
+      const fakeGit = path.join(tempRoot, ".git");
+      const fakeHooks = path.join(fakeGit, "hooks");
+      fs.mkdirSync(fakeHooks, { recursive: true });
+
+      // User has existing pre-commit hook to trigger Case 3
+      fs.writeFileSync(path.join(fakeHooks, "pre-commit"), "#!/bin/sh\nexit 0\n");
+
+      // External file outside the repository
+      const externalDir = path.join(tempRoot, "external-store");
+      fs.mkdirSync(externalDir, { recursive: true });
+      const externalScript = path.join(externalDir, "global-post-checkout.sh");
+      const originalExternalContent = "#!/bin/sh\n# External user custom script\necho 'external hook running'\nexit 0\n";
+      fs.writeFileSync(externalScript, originalExternalContent, "utf8");
+
+      const hookPath = path.join(fakeHooks, "post-checkout");
+      const linkCreated = tryCreateFileLink(externalScript, hookPath);
+
+      if (linkCreated) {
+        setGitExecutorForTesting((cmd) => {
+          if (typeof cmd === "string" && cmd.includes("git config --get core.hooksPath")) {
+            throw new Error("not set");
+          }
+          if (typeof cmd === "string" && cmd.includes("git rev-parse --git-path hooks")) {
+            return fakeHooks + "\n";
+          }
+          return "";
+        });
+
+        try {
+          const res = runPruneTarget(["--setup-hooks"], tempRoot);
+          expect(res.success).toBe(true);
+          expect(res.status).toBe("chained_git_hooks");
+
+          // CRITICAL: External script must NOT be modified (zero Sentinel injection)
+          const currentExternalContent = fs.readFileSync(externalScript, "utf8");
+          expect(currentExternalContent).toBe(originalExternalContent);
+          expect(currentExternalContent.includes(SENTINEL_BLOCK_START)).toBe(false);
+
+          // Hook file in .git/hooks must remain a symlink
+          expect(fs.lstatSync(hookPath).isSymbolicLink()).toBe(true);
+
+          // Meanwhile, post-merge (which was not symlinked) was safely created with Sentinel
+          const postMerge = path.join(fakeHooks, "post-merge");
+          expect(fs.existsSync(postMerge)).toBe(true);
+          const postMergeContent = fs.readFileSync(postMerge, "utf8");
+          expect(postMergeContent.includes(SENTINEL_BLOCK_START)).toBe(true);
+        } finally {
+          setGitExecutorForTesting(null);
+        }
+      }
+    });
+
+    it("handles dangling / broken symlink hooks safely without writing through or crashing", () => {
+      const fakeGit = path.join(tempRoot, ".git");
+      const fakeHooks = path.join(fakeGit, "hooks");
+      fs.mkdirSync(fakeHooks, { recursive: true });
+
+      fs.writeFileSync(path.join(fakeHooks, "pre-commit"), "#!/bin/sh\nexit 0\n");
+
+      const hookPath = path.join(fakeHooks, "post-checkout");
+      const nonExistentTarget = path.join(tempRoot, "non-existent-target.sh");
+      const linkCreated = tryCreateFileLink(nonExistentTarget, hookPath);
+
+      if (linkCreated) {
+        setGitExecutorForTesting((cmd) => {
+          if (typeof cmd === "string" && cmd.includes("git config --get core.hooksPath")) {
+            throw new Error("not set");
+          }
+          if (typeof cmd === "string" && cmd.includes("git rev-parse --git-path hooks")) {
+            return fakeHooks + "\n";
+          }
+          return "";
+        });
+
+        try {
+          const res = runPruneTarget(["--setup-hooks"], tempRoot);
+          expect(res.success).toBe(true);
+
+          // Target file was NOT created
+          expect(fs.existsSync(nonExistentTarget)).toBe(false);
+
+          // Dangling symlink is preserved as a symlink
+          expect(fs.lstatSync(hookPath).isSymbolicLink()).toBe(true);
+        } finally {
+          setGitExecutorForTesting(null);
+        }
+      }
+    });
+
+    it("refuses to inject into a symlinked/junction .git/hooks directory", () => {
+      const fakeGit = path.join(tempRoot, ".git");
+      fs.mkdirSync(fakeGit, { recursive: true });
+
+      const externalHooksDir = path.join(tempRoot, "external-hooks-dir");
+      fs.mkdirSync(externalHooksDir, { recursive: true });
+
+      const fakeHooksLink = path.join(fakeGit, "hooks");
+      createDirLink(externalHooksDir, fakeHooksLink);
+      expect(fs.lstatSync(fakeHooksLink).isSymbolicLink()).toBe(true);
+
+      setGitExecutorForTesting((cmd) => {
+        if (typeof cmd === "string" && cmd.includes("git config --get core.hooksPath")) {
+          throw new Error("not set");
+        }
+        if (typeof cmd === "string" && cmd.includes("git rev-parse --git-path hooks")) {
+          return fakeHooksLink + "\n";
+        }
+        return "";
+      });
+
+      try {
+        const res = runPruneTarget(["--setup-hooks"], tempRoot);
+        expect(res.success).toBe(true);
+        expect(res.status).toBe("preserved_symlink_hooks_dir");
+
+        // External hooks directory must remain completely empty
+        const entries = fs.readdirSync(externalHooksDir);
+        expect(entries).toHaveLength(0);
+      } finally {
+        setGitExecutorForTesting(null);
+      }
+    });
+
+    it("getActiveHooks accurately identifies symlinked hooks while ignoring .sample files", () => {
+      const hooksDir = path.join(tempRoot, "test-active-hooks");
+      fs.mkdirSync(hooksDir, { recursive: true });
+
+      const targetFile = path.join(tempRoot, "real-script.sh");
+      fs.writeFileSync(targetFile, "#!/bin/sh\nexit 0\n");
+
+      fs.writeFileSync(path.join(hooksDir, "pre-commit.sample"), "#!/bin/sh\n");
+      fs.writeFileSync(path.join(hooksDir, "commit-msg"), "#!/bin/sh\n");
+
+      const linkCreated = tryCreateFileLink(targetFile, path.join(hooksDir, "post-checkout"));
+      const brokenLinkCreated = tryCreateFileLink(path.join(tempRoot, "missing.sh"), path.join(hooksDir, "post-merge"));
+
+      const active = getActiveHooks(hooksDir);
+      expect(active.includes("commit-msg")).toBe(true);
+      expect(active.includes("pre-commit.sample")).toBe(false);
+
+      if (linkCreated) {
+        expect(active.includes("post-checkout")).toBe(true);
+      }
+      if (brokenLinkCreated) {
+        expect(active.includes("post-merge")).toBe(true);
+      }
+    });
+
+    it("writeHookAtomic rejects writing into symlink hooks directory or onto symlink destination", () => {
+      const normalDir = path.join(tempRoot, "normal-dir");
+      const extDir = path.join(tempRoot, "ext-dir");
+      fs.mkdirSync(normalDir, { recursive: true });
+      fs.mkdirSync(extDir, { recursive: true });
+
+      const symlinkDir = path.join(tempRoot, "symlink-dir");
+      createDirLink(extDir, symlinkDir);
+
+      // Rejects writing into symlink directory
+      const res1 = writeHookAtomic(symlinkDir, "post-checkout", "#!/bin/sh\n");
+      expect(res1).toBe(false);
+
+      // Rejects writing if target hook is a symlink
+      const externalTarget = path.join(tempRoot, "external-target.txt");
+      fs.writeFileSync(externalTarget, "UNTOUCHED");
+      const targetHook = path.join(normalDir, "post-checkout");
+      const linkCreated = tryCreateFileLink(externalTarget, targetHook);
+
+      if (linkCreated) {
+        const res2 = writeHookAtomic(normalDir, "post-checkout", "#!/bin/sh\n");
+        expect(res2).toBe(false);
+        expect(fs.readFileSync(externalTarget, "utf8")).toBe("UNTOUCHED");
+      }
+
+      // Successfully writes regular hook atomically with no leftover tmp files
+      const res3 = writeHookAtomic(normalDir, "post-merge", "#!/bin/sh\nexit 0\n");
+      expect(res3).toBe(true);
+      expect(fs.existsSync(path.join(normalDir, "post-merge"))).toBe(true);
+      const tmpFiles = fs.readdirSync(normalDir).filter((f) => f.startsWith(".sentinel-") && f.endsWith(".tmp"));
+      expect(tmpFiles).toHaveLength(0);
     });
   });
 });

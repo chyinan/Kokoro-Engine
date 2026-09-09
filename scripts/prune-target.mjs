@@ -336,7 +336,9 @@ function isSessionDirectoryLocked(sessionPath, canonicalBoundary = null, maxDept
   return false;
 }
 
-function hasActiveCompilerProcesses() {
+let compilerProcessChecker = defaultCompilerProcessChecker;
+
+function defaultCompilerProcessChecker() {
   try {
     if (process.platform === "win32") {
       // On Windows, isLockFileActive catches LockFileEx kernel-level locks directly.
@@ -354,24 +356,67 @@ function hasActiveCompilerProcesses() {
   }
 }
 
+function hasActiveCompilerProcesses() {
+  return compilerProcessChecker();
+}
+
+function setCompilerProcessCheckerForTesting(fn) {
+  compilerProcessChecker = fn || defaultCompilerProcessChecker;
+}
+
 function hasActiveIncrementalLocks(incrementalDir, canonicalDebugDir) {
   try {
     if (hasActiveCompilerProcesses()) {
       return true;
     }
     // Check for target/.cargo-lock if target directory is parent of debug
-    const targetDir = path.dirname(path.resolve(incrementalDir, ".."));
-    const cargoLock = path.join(targetDir, ".cargo-lock");
-    if (fs.existsSync(cargoLock) && isLockFileActive(cargoLock, canonicalDebugDir ? path.dirname(canonicalDebugDir) : null)) {
-      return true;
+    const targetDir = incrementalDir ? path.dirname(path.resolve(incrementalDir, "..")) : null;
+    if (targetDir) {
+      const cargoLock = path.join(targetDir, ".cargo-lock");
+      if (fs.existsSync(cargoLock) && isLockFileActive(cargoLock, canonicalDebugDir ? path.dirname(canonicalDebugDir) : null)) {
+        return true;
+      }
     }
 
-    const entries = fs.readdirSync(incrementalDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
-      const crateDir = path.join(incrementalDir, entry.name);
-      if (isSessionDirectoryLocked(crateDir, canonicalDebugDir)) {
+    if (incrementalDir && fs.existsSync(incrementalDir)) {
+      const entries = fs.readdirSync(incrementalDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
+        const crateDir = path.join(incrementalDir, entry.name);
+        if (isSessionDirectoryLocked(crateDir, canonicalDebugDir)) {
+          return true;
+        }
+      }
+    }
+  } catch (_) {}
+  return false;
+}
+
+function hasActiveBuildLock(targetDir, debugDir) {
+  try {
+    if (hasActiveCompilerProcesses()) {
+      return true;
+    }
+    if (targetDir) {
+      const cargoLock = path.join(targetDir, ".cargo-lock");
+      const canonicalDebug = debugDir ? getSafeRealPath(debugDir) : null;
+      const canonicalTarget = canonicalDebug ? path.dirname(canonicalDebug) : getSafeRealPath(targetDir);
+      if (fs.existsSync(cargoLock) && isLockFileActive(cargoLock, canonicalTarget)) {
         return true;
+      }
+    }
+    if (debugDir) {
+      const incrementalDir = path.join(debugDir, "incremental");
+      if (fs.existsSync(incrementalDir)) {
+        const canonicalDebug = getSafeRealPath(debugDir);
+        const entries = fs.readdirSync(incrementalDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
+          const crateDir = path.join(incrementalDir, entry.name);
+          if (isSessionDirectoryLocked(crateDir, canonicalDebug)) {
+            return true;
+          }
+        }
       }
     }
   } catch (_) {}
@@ -552,29 +597,46 @@ function pruneDeps(
   canonicalDebugDir,
   isDryRun = false,
   isVerbose = false,
-  hasBranchSwitched = false
+  hasBranchSwitched = false,
+  isAuto = false
 ) {
-  if (!fs.existsSync(depsDir)) return { count: 0, bytesFreed: 0, incomplete: false };
+  if (!fs.existsSync(depsDir)) return { count: 0, bytesFreed: 0, incomplete: false, hasActiveLock: false };
 
   try {
     const depsLstat = fs.lstatSync(depsDir);
     if (depsLstat.isSymbolicLink() || !depsLstat.isDirectory()) {
       if (isVerbose) console.warn("[WARN] deps directory is a link or non-directory; skipping.");
-      return { count: 0, bytesFreed: 0, incomplete: false };
+      return { count: 0, bytesFreed: 0, incomplete: false, hasActiveLock: false };
     }
   } catch (_) {
-    return { count: 0, bytesFreed: 0, incomplete: false };
+    return { count: 0, bytesFreed: 0, incomplete: false, hasActiveLock: false };
   }
 
   const realDeps = getSafeRealPath(depsDir);
   if (!realDeps || (canonicalDebugDir && !isCanonicallyContained(realDeps, canonicalDebugDir))) {
     if (isVerbose) console.warn("[WARN] deps directory escapes debug directory; skipping.");
-    return { count: 0, bytesFreed: 0, incomplete: false };
+    return { count: 0, bytesFreed: 0, incomplete: false, hasActiveLock: false };
   }
 
   let count = 0;
   let bytesFreed = 0;
   let incomplete = false;
+  let hasActiveLock = false;
+
+  const debugDir = path.resolve(depsDir, "..");
+  const targetDir = path.dirname(debugDir);
+  if (hasActiveBuildLock(targetDir, debugDir)) {
+    hasActiveLock = true;
+    if (isAuto && !isEmergencyMode) {
+      if (isVerbose) {
+        console.log("[INFO] Detected active compilation or build lock; yielding auto deps prune.");
+      }
+      return { count: 0, bytesFreed: 0, incomplete: false, hasActiveLock: true };
+    }
+    if (isVerbose) {
+      console.log("[INFO] Detected active lock while evaluating deps; exercising extra caution.");
+    }
+  }
 
   let entries = [];
   try {
@@ -690,7 +752,7 @@ function pruneDeps(
     }
   }
 
-  return { count, bytesFreed, incomplete };
+  return { count, bytesFreed, incomplete, hasActiveLock };
 }
 
 function consumeBranchSwitchMarker(targetDir, branchSwitchFile, canonicalRoot, isDryRun = false) {
@@ -718,30 +780,108 @@ function writeCooldown(targetDir, cooldownFile, canonicalRoot, isDryRun = false)
     let exists = false;
     try {
       const lstat = fs.lstatSync(targetDir);
-      if (lstat.isSymbolicLink() || !lstat.isDirectory()) return;
+      if (lstat.isSymbolicLink() || !lstat.isDirectory()) return false;
       exists = true;
     } catch (err) {
-      if (err?.code !== "ENOENT") return;
+      if (err?.code !== "ENOENT") return false;
     }
 
     if (!exists) {
       const parentDir = path.dirname(targetDir);
       try {
         const pLstat = fs.lstatSync(parentDir);
-        if (pLstat.isSymbolicLink() || !pLstat.isDirectory()) return;
+        if (pLstat.isSymbolicLink() || !pLstat.isDirectory()) return false;
       } catch (_) {
-        return;
+        return false;
       }
       fs.mkdirSync(targetDir, { recursive: true });
     }
 
     const realTarget = getSafeRealPath(targetDir);
     if (!realTarget || (canonicalRoot && !isCanonicallyContained(realTarget, canonicalRoot))) {
-      return;
+      return false;
     }
 
-    fs.writeFileSync(cooldownFile, Date.now().toString(), "utf8");
-    return true;
+    // Path verification: cooldownFile must reside directly in realTarget
+    const resolvedCooldown = path.resolve(cooldownFile);
+    if (
+      normalizeCanonicalPath(path.dirname(resolvedCooldown)) !== normalizeCanonicalPath(realTarget) ||
+      !isCanonicallyContained(resolvedCooldown, realTarget) ||
+      (canonicalRoot && !isCanonicallyContained(resolvedCooldown, canonicalRoot))
+    ) {
+      return false;
+    }
+
+    // Direct lstat verification on cooldownFile: reject links and non-regular files
+    let cLstat = null;
+    try {
+      cLstat = fs.lstatSync(cooldownFile);
+    } catch (err) {
+      if (err?.code !== "ENOENT") return false;
+    }
+
+    if (cLstat) {
+      if (cLstat.isSymbolicLink() || !cLstat.isFile()) {
+        return false;
+      }
+      const realCooldown = getSafeRealPath(cooldownFile);
+      if (!realCooldown) return false;
+      const expectedCanonical = path.join(realTarget, path.basename(cooldownFile));
+      if (
+        normalizeCanonicalPath(realCooldown) !== normalizeCanonicalPath(expectedCanonical) ||
+        !isCanonicallyContained(realCooldown, realTarget) ||
+        (canonicalRoot && !isCanonicallyContained(realCooldown, canonicalRoot))
+      ) {
+        return false;
+      }
+    }
+
+    // Atomic write via no-follow temporary file in realTarget
+    const randSuffix = Math.random().toString(36).slice(2, 10);
+    const tempFileName = `.prune-cooldown.${process.pid}.${Date.now()}.${randSuffix}.tmp`;
+    const tempFilePath = path.join(realTarget, tempFileName);
+
+    let tempCreated = false;
+    try {
+      const openFlags =
+        fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        fs.constants.O_WRONLY |
+        (fs.constants.O_NOFOLLOW || 0);
+      const fd = fs.openSync(tempFilePath, openFlags, 0o600);
+      try {
+        fs.writeSync(fd, Date.now().toString(), 0, "utf8");
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      tempCreated = true;
+
+      const tLstat = fs.lstatSync(tempFilePath);
+      if (tLstat.isSymbolicLink() || !tLstat.isFile()) {
+        return false;
+      }
+
+      // Re-verify destination immediately before swap to mitigate TOCTOU
+      try {
+        const destLstat = fs.lstatSync(cooldownFile);
+        if (destLstat.isSymbolicLink() || !destLstat.isFile()) {
+          return false;
+        }
+      } catch (err) {
+        if (err?.code !== "ENOENT") return false;
+      }
+
+      fs.renameSync(tempFilePath, cooldownFile);
+      tempCreated = false;
+      return true;
+    } finally {
+      if (tempCreated) {
+        try {
+          fs.unlinkSync(tempFilePath);
+        } catch (_) {}
+      }
+    }
   } catch (_) {
     return false;
   }
@@ -818,21 +958,19 @@ function getGitEnvironment(root) {
     // Fallback if git rev-parse failed (e.g. test environment or mocked .git)
     if (!hooksDir) {
       const gitPath = path.join(root, ".git");
-      if (fs.existsSync(gitPath)) {
-        try {
-          const stat = fs.statSync(gitPath);
-          if (stat.isDirectory()) {
-            hooksDir = path.join(gitPath, "hooks");
-          } else if (stat.isFile()) {
-            const content = fs.readFileSync(gitPath, "utf8").trim();
-            const match = content.match(/^gitdir:\s*(.+)$/m);
-            if (match) {
-              const gitdir = path.resolve(root, match[1]);
-              hooksDir = path.join(gitdir, "hooks");
-            }
+      try {
+        const stat = fs.lstatSync(gitPath);
+        if (stat.isDirectory()) {
+          hooksDir = path.join(gitPath, "hooks");
+        } else if (stat.isFile()) {
+          const content = fs.readFileSync(gitPath, "utf8").trim();
+          const match = content.match(/^gitdir:\s*(.+)$/m);
+          if (match) {
+            const gitdir = path.resolve(root, match[1]);
+            hooksDir = path.join(gitdir, "hooks");
           }
-        } catch (_) {}
-      }
+        }
+      } catch (_) {}
     }
 
     let currentHooksPath = null;
@@ -859,21 +997,85 @@ function getGitEnvironment(root) {
 }
 
 function getActiveHooks(hooksDir) {
-  if (!hooksDir || !fs.existsSync(hooksDir)) return [];
+  if (!hooksDir) return [];
   try {
     const entries = fs.readdirSync(hooksDir);
     return entries.filter((e) => {
       if (e.endsWith(".sample")) return false;
       try {
         const p = path.join(hooksDir, e);
-        const st = fs.statSync(p);
-        return st.isFile();
+        const st = fs.lstatSync(p);
+        return st.isFile() || st.isSymbolicLink();
       } catch (_) {
         return false;
       }
     });
   } catch (_) {
     return [];
+  }
+}
+
+function writeHookAtomic(hooksDir, hookName, content) {
+  try {
+    const dLstat = fs.lstatSync(hooksDir);
+    if (dLstat.isSymbolicLink() || !dLstat.isDirectory()) {
+      return false;
+    }
+
+    const hookPath = path.join(hooksDir, hookName);
+    const randSuffix = Math.random().toString(36).slice(2, 10);
+    const tempFileName = `.sentinel-${hookName}.${process.pid}.${Date.now()}.${randSuffix}.tmp`;
+    const tempFilePath = path.join(hooksDir, tempFileName);
+
+    let tempCreated = false;
+    try {
+      const openFlags =
+        fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        fs.constants.O_WRONLY |
+        (fs.constants.O_NOFOLLOW || 0);
+      const fd = fs.openSync(tempFilePath, openFlags, 0o755);
+      try {
+        fs.writeSync(fd, content, 0, "utf8");
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      tempCreated = true;
+
+      if (process.platform !== "win32") {
+        try {
+          fs.chmodSync(tempFilePath, 0o755);
+        } catch (_) {}
+      }
+
+      const tLstat = fs.lstatSync(tempFilePath);
+      if (tLstat.isSymbolicLink() || !tLstat.isFile()) {
+        return false;
+      }
+
+      // Re-verify destination immediately before swap to mitigate TOCTOU
+      try {
+        const destLstat = fs.lstatSync(hookPath);
+        if (destLstat.isSymbolicLink() || !destLstat.isFile()) {
+          return false;
+        }
+      } catch (err) {
+        if (err?.code !== "ENOENT") return false;
+      }
+
+      fs.renameSync(tempFilePath, hookPath);
+      tempCreated = false;
+      return true;
+    } finally {
+      if (tempCreated) {
+        try {
+          fs.unlinkSync(tempFilePath);
+        } catch (_) {}
+      }
+    }
+  } catch (_) {
+    return false;
   }
 }
 
@@ -915,17 +1117,172 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
       // Case 1: Custom core.hooksPath already configured (e.g. .husky, enterprise hooks)
       if (gitEnv.currentHooksPath && gitEnv.currentHooksPath !== ".githooks") {
         if (!isForce) {
-          if (!isAuto && !isSafe) {
-            console.log(
-              `ℹ️ [Kokoro Storage Sentinel] Existing core.hooksPath detected ('${gitEnv.currentHooksPath}'). Preserving existing hooks configuration.`
-            );
+          const customHooksPathRaw = gitEnv.currentHooksPath;
+          const customHooksDir = path.isAbsolute(customHooksPathRaw)
+            ? path.normalize(customHooksPathRaw)
+            : path.resolve(root, customHooksPathRaw);
+
+          // 1. Canonical containment check: prevent escaping repository root
+          const canonicalRepoRoot = getSafeRealPath(root);
+          const canonicalCustomHooks = getSafeRealPath(customHooksDir);
+          const isInsideRepo = isCanonicallyContained(customHooksDir, root);
+
+          if (
+            !isInsideRepo ||
+            !canonicalRepoRoot ||
+            (canonicalCustomHooks && !isCanonicallyContained(canonicalCustomHooks, canonicalRepoRoot))
+          ) {
+            if (!isAuto && !isSafe) {
+              console.log(
+                `⚠️ [Kokoro Storage Sentinel] Custom core.hooksPath ('${customHooksPathRaw}') points outside repository. Branch-switch sensing Sentinel is disabled.`
+              );
+            }
+            return {
+              success: true,
+              mode: "setup-hooks",
+              status: "preserved_custom_hooks",
+              hooksPath: customHooksPathRaw,
+              sentinelActive: false,
+              sentinelDisabled: true,
+              reason: "external_hooks_path",
+            };
           }
-          return {
-            success: true,
-            mode: "setup-hooks",
-            status: "preserved_custom_hooks",
-            hooksPath: gitEnv.currentHooksPath,
-          };
+
+          // 2. Symlink & Directory Validation
+          let customHooksLstat = null;
+          try {
+            customHooksLstat = fs.lstatSync(customHooksDir);
+          } catch (_) {}
+
+          if (!customHooksLstat) {
+            if (!isAuto && !isSafe) {
+              console.log(
+                `⚠️ [Kokoro Storage Sentinel] Custom core.hooksPath directory ('${customHooksPathRaw}') not found on disk. Branch-switch sensing Sentinel is disabled.`
+              );
+            }
+            return {
+              success: true,
+              mode: "setup-hooks",
+              status: "preserved_custom_hooks",
+              hooksPath: customHooksPathRaw,
+              sentinelActive: false,
+              sentinelDisabled: true,
+              reason: "hooks_dir_not_found",
+            };
+          }
+
+          if (customHooksLstat.isSymbolicLink()) {
+            if (!isAuto && !isSafe) {
+              console.log(
+                `⚠️ [Kokoro Storage Sentinel] Custom core.hooksPath directory ('${customHooksPathRaw}') is a symbolic link. Preserving existing hooks without modification (Sentinel disabled).`
+              );
+            }
+            return {
+              success: true,
+              mode: "setup-hooks",
+              status: "preserved_symlink_hooks_dir",
+              hooksPath: customHooksPathRaw,
+              sentinelActive: false,
+              sentinelDisabled: true,
+              reason: "symlinked_hooks_dir",
+            };
+          }
+
+          if (!customHooksLstat.isDirectory()) {
+            if (!isAuto && !isSafe) {
+              console.log(
+                `⚠️ [Kokoro Storage Sentinel] Custom core.hooksPath ('${customHooksPathRaw}') is not a directory. Branch-switch sensing Sentinel is disabled.`
+              );
+            }
+            return {
+              success: true,
+              mode: "setup-hooks",
+              status: "preserved_custom_hooks",
+              hooksPath: customHooksPathRaw,
+              sentinelActive: false,
+              sentinelDisabled: true,
+              reason: "hooks_path_not_a_directory",
+            };
+          }
+
+          // 3. Supported custom hook layout: safe chaining into post-checkout and post-merge
+          let anyChained = false;
+          let anySkippedNonShell = false;
+
+          for (const hookName of ["post-checkout", "post-merge"]) {
+            const hookPath = path.join(customHooksDir, hookName);
+            let hookLstat = null;
+            try {
+              hookLstat = fs.lstatSync(hookPath);
+            } catch (err) {
+              if (err?.code !== "ENOENT") continue;
+            }
+
+            if (hookLstat) {
+              if (hookLstat.isSymbolicLink()) {
+                if (!isAuto && !isSafe) {
+                  console.log(
+                    `ℹ️ [Kokoro Storage Sentinel] Skipped modifying symlinked custom hook '${hookName}' to prevent external modification.`
+                  );
+                }
+                continue;
+              }
+              if (!hookLstat.isFile()) {
+                continue;
+              }
+              try {
+                const content = fs.readFileSync(hookPath, "utf8");
+                if (content.includes(SENTINEL_BLOCK_START)) {
+                  anyChained = true;
+                } else if (isPosixShellScript(content)) {
+                  const injected = injectSentinelBlockIntoShellScript(content, hookName);
+                  if (writeHookAtomic(customHooksDir, hookName, injected)) {
+                    anyChained = true;
+                  }
+                } else {
+                  anySkippedNonShell = true;
+                }
+              } catch (_) {}
+            } else {
+              try {
+                const newHook = `#!/bin/sh\n\n${getSentinelSnippet(hookName)}exit 0\n`;
+                if (writeHookAtomic(customHooksDir, hookName, newHook)) {
+                  anyChained = true;
+                }
+              } catch (_) {}
+            }
+          }
+
+          if (anyChained) {
+            if (!isAuto && !isSafe) {
+              console.log(
+                `✅ [Kokoro Storage Sentinel] Git hooks safely chained in '${customHooksPathRaw}' (preserving existing hooks).`
+              );
+            }
+            return {
+              success: true,
+              mode: "setup-hooks",
+              status: "chained_custom_hooks",
+              hooksPath: customHooksPathRaw,
+              sentinelActive: true,
+              ...(anySkippedNonShell ? { partial: true, skippedNonShell: true } : {}),
+            };
+          } else {
+            if (!isAuto && !isSafe) {
+              console.log(
+                `ℹ️ [Kokoro Storage Sentinel] Custom hooks in '${customHooksPathRaw}' preserved without Sentinel modification.`
+              );
+            }
+            return {
+              success: true,
+              mode: "setup-hooks",
+              status: "preserved_custom_hooks",
+              hooksPath: customHooksPathRaw,
+              sentinelActive: false,
+              sentinelDisabled: true,
+              reason: anySkippedNonShell ? "non_shell_hooks" : "hooks_not_modified",
+            };
+          }
         }
       }
 
@@ -938,11 +1295,12 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
         if (fs.existsSync(bundledHooksDir) && process.platform !== "win32") {
           for (const hookName of ["post-checkout", "post-merge"]) {
             const hookPath = path.join(bundledHooksDir, hookName);
-            if (fs.existsSync(hookPath)) {
-              try {
+            try {
+              const st = fs.lstatSync(hookPath);
+              if (st.isFile() && !st.isSymbolicLink()) {
                 fs.chmodSync(hookPath, 0o755);
-              } catch (_) {}
-            }
+              }
+            } catch (_) {}
           }
         }
         if (!isAuto && !isSafe) {
@@ -952,6 +1310,26 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
       }
 
       // Case 3: core.hooksPath is NOT set -> check if active hooks exist in hooksDir
+      let hooksDirLstat = null;
+      if (gitEnv.hooksDir) {
+        try {
+          hooksDirLstat = fs.lstatSync(gitEnv.hooksDir);
+        } catch (_) {}
+      }
+
+      if (hooksDirLstat && hooksDirLstat.isSymbolicLink()) {
+        if (!isAuto && !isSafe) {
+          console.log(
+            `ℹ️ [Kokoro Storage Sentinel] Hooks directory is a symbolic link ('${gitEnv.hooksDir}'). Preserving existing hooks configuration.`
+          );
+        }
+        return {
+          success: true,
+          mode: "setup-hooks",
+          status: "preserved_symlink_hooks_dir",
+        };
+      }
+
       const activeHooks = getActiveHooks(gitEnv.hooksDir);
       if (activeHooks.length > 0 && gitEnv.hooksDir) {
         // Active hooks exist (e.g. pre-commit, custom post-checkout). DO NOT hijack core.hooksPath!
@@ -962,24 +1340,36 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
 
         for (const hookName of ["post-checkout", "post-merge"]) {
           const hookPath = path.join(gitEnv.hooksDir, hookName);
-          if (fs.existsSync(hookPath)) {
+          let hookLstat = null;
+          try {
+            hookLstat = fs.lstatSync(hookPath);
+          } catch (err) {
+            if (err?.code !== "ENOENT") continue;
+          }
+
+          if (hookLstat) {
+            if (hookLstat.isSymbolicLink()) {
+              if (!isAuto && !isSafe) {
+                console.log(
+                  `ℹ️ [Kokoro Storage Sentinel] Skipped modifying symlinked hook '${hookName}' to prevent external modification.`
+                );
+              }
+              continue;
+            }
+            if (!hookLstat.isFile()) {
+              continue;
+            }
             try {
               const content = fs.readFileSync(hookPath, "utf8");
               if (!content.includes(SENTINEL_BLOCK_START) && isPosixShellScript(content)) {
                 const injected = injectSentinelBlockIntoShellScript(content, hookName);
-                fs.writeFileSync(hookPath, injected, "utf8");
-                if (process.platform !== "win32") {
-                  fs.chmodSync(hookPath, 0o755);
-                }
+                writeHookAtomic(gitEnv.hooksDir, hookName, injected);
               }
             } catch (_) {}
           } else {
             try {
               const newHook = `#!/bin/sh\n\n${getSentinelSnippet(hookName)}exit 0\n`;
-              fs.writeFileSync(hookPath, newHook, "utf8");
-              if (process.platform !== "win32") {
-                fs.chmodSync(hookPath, 0o755);
-              }
+              writeHookAtomic(gitEnv.hooksDir, hookName, newHook);
             } catch (_) {}
           }
         }
@@ -988,11 +1378,12 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
         if (fs.existsSync(bundledHooksDir) && process.platform !== "win32") {
           for (const hookName of ["post-checkout", "post-merge"]) {
             const hookPath = path.join(bundledHooksDir, hookName);
-            if (fs.existsSync(hookPath)) {
-              try {
+            try {
+              const st = fs.lstatSync(hookPath);
+              if (st.isFile() && !st.isSymbolicLink()) {
                 fs.chmodSync(hookPath, 0o755);
-              } catch (_) {}
-            }
+              }
+            } catch (_) {}
           }
         }
 
@@ -1012,11 +1403,12 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
         if (process.platform !== "win32") {
           for (const hookName of ["post-checkout", "post-merge"]) {
             const hookPath = path.join(bundledHooksDir, hookName);
-            if (fs.existsSync(hookPath)) {
-              try {
+            try {
+              const st = fs.lstatSync(hookPath);
+              if (st.isFile() && !st.isSymbolicLink()) {
                 fs.chmodSync(hookPath, 0o755);
-              } catch (_) {}
-            }
+              }
+            } catch (_) {}
           }
         }
         if (!isAuto && !isSafe) {
@@ -1081,9 +1473,13 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
       console.log(`[Drive Storage]   Available: ${drive.freeGb.toFixed(2)} GB / ${drive.totalGb.toFixed(2)} GB (${usedPercent}% used) [${healthTag}]`);
     }
 
+    let doctorNonDebugGb = 0;
     if (fs.existsSync(targetDir)) {
       const totalTarget = getDirSize(targetDir, canonicalTarget);
       console.log(`[Target Footprint] Total size: ${formatBytes(totalTarget)} (${(totalTarget / 1024 / 1024 / 1024).toFixed(2)} GB)`);
+      const debugSub = path.join(targetDir, "debug");
+      const debugTotal = fs.existsSync(debugSub) ? getDirSize(debugSub, canonicalTarget) : 0;
+      doctorNonDebugGb = Math.max(0, totalTarget - debugTotal) / (1024 * 1024 * 1024);
 
       const subdirs = ["debug", "release", "sherpa-onnx-prebuilt", "package"];
       for (const sub of subdirs) {
@@ -1146,7 +1542,12 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
     if (!sccacheStatus.includes("✅")) {
       console.log("  - [SPEEDUP] Enable sccache for instant branch switches and clean builds.");
     }
-    console.log("  - [DAILY]  Watchdog automatically maintains target under 12 GB during 'npm run dev'.");
+    if (doctorNonDebugGb >= 12) {
+      console.log(`  - [STORAGE] Non-debug artifacts (${doctorNonDebugGb.toFixed(2)} GB in release/vendor) exceed the 12 GB watermark.`);
+      console.log("             Debug cache is protected from futile eviction. Run 'npm run clean:target' to clean release builds if needed.");
+    } else {
+      console.log("  - [DAILY]  Watchdog automatically maintains target under 12 GB during 'npm run dev'.");
+    }
     console.log("================================================================================\n");
     return { success: true, mode: "doctor" };
   }
@@ -1180,12 +1581,18 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
   const drive = getDriveFreeSpace(targetDir, root);
   const isEmergency = drive ? drive.freeGb < emergencyFreeGbThreshold : false;
 
-  if (isAuto && !isEmergency && !hasBranchSwitched && fs.existsSync(cooldownFile)) {
+  if (isAuto && !isEmergency && !hasBranchSwitched) {
     try {
-      const lastCheck = parseInt(fs.readFileSync(cooldownFile, "utf8").trim(), 10);
-      const now = Date.now();
-      if (!isNaN(lastCheck) && now - lastCheck < cooldownMinutes * 60 * 1000) {
-        return { skipped: true, reason: "cooldown_active" };
+      const cLstat = fs.lstatSync(cooldownFile);
+      if (!cLstat.isSymbolicLink() && cLstat.isFile()) {
+        const realCooldown = getSafeRealPath(cooldownFile);
+        if (realCooldown && (!canonicalRoot || isCanonicallyContained(realCooldown, canonicalRoot))) {
+          const lastCheck = parseInt(fs.readFileSync(cooldownFile, "utf8").trim(), 10);
+          const now = Date.now();
+          if (!isNaN(lastCheck) && now - lastCheck < cooldownMinutes * 60 * 1000) {
+            return { skipped: true, reason: "cooldown_active" };
+          }
+        }
       }
     } catch (_) {}
   }
@@ -1207,6 +1614,9 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
   const initialTargetGb = initialTargetSize / (1024 * 1024 * 1024);
   const hasDebugDir = fs.existsSync(debugDir);
   const initialDebugSize = hasDebugDir ? getDirSize(debugDir, canonicalDebug) : 0;
+  const initialDebugGb = initialDebugSize / (1024 * 1024 * 1024);
+  const nonDebugSize = Math.max(0, initialTargetSize - initialDebugSize);
+  const nonDebugGb = nonDebugSize / (1024 * 1024 * 1024);
 
   if (!isEmergency && !hasBranchSwitched && effectiveThresholdGb > 0 && initialTargetGb < effectiveThresholdGb) {
     if (isAuto) {
@@ -1234,6 +1644,44 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
     }
   }
 
+  if (!isEmergency && !hasBranchSwitched && effectiveThresholdGb > 0) {
+    if (nonDebugGb >= effectiveThresholdGb && initialDebugGb < effectiveThresholdGb) {
+      if (isAuto) {
+        if (!isDryRun) {
+          writeCooldown(targetDir, cooldownFile, canonicalRoot, isDryRun);
+        }
+        return {
+          count: 0,
+          bytesFreed: 0,
+          skipped: true,
+          reason: "non_debug_exceeds_threshold",
+          nonDebugSize,
+          initialDebugSize,
+          initialTargetSize,
+        };
+      } else {
+        console.log(
+          `Target footprint (${initialTargetGb.toFixed(2)} GB) exceeds threshold (${effectiveThresholdGb} GB), but non-debug artifacts (${nonDebugGb.toFixed(2)} GB) alone saturate the watermark.`
+        );
+        console.log(
+          `Debug cache (${initialDebugGb.toFixed(2)} GB) is within healthy bounds (< ${effectiveThresholdGb} GB) and cannot reduce target below ${effectiveThresholdGb} GB.`
+        );
+        console.log(
+          "Skipping debug cache eviction to preserve compiler cache. Run 'npm run storage:doctor' for diagnostics or 'npm run clean:target' if a full reset is needed."
+        );
+        return {
+          count: 0,
+          bytesFreed: 0,
+          skipped: true,
+          reason: "non_debug_exceeds_threshold",
+          nonDebugSize,
+          initialDebugSize,
+          initialTargetSize,
+        };
+      }
+    }
+  }
+
   // NOTE: We deliberately do NOT consume the branch switch marker here.
   // It is only consumed after pruning has completed without active lock conflicts.
 
@@ -1254,6 +1702,29 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
     console.log("Pruning obsolete incremental sessions, test binaries, and duplicate artifacts...");
   }
 
+  // Active build lock detection: if cargo/rustc compiler is active or .cargo-lock / s-*.lock is held
+  const hasBuildLock = hasActiveBuildLock(targetDir, debugDir);
+  if (hasBuildLock && isAuto && !isEmergency) {
+    if (isVerbose) {
+      console.log("[INFO] Detected active compilation or build lock; yielding auto prune for all targets.");
+    }
+    if (hasBranchSwitched && isVerbose) {
+      console.warn("[WARN] Active compiler locks detected; branch switch marker retained.");
+    }
+    return {
+      count: 0,
+      bytesFreed: 0,
+      initialSize: initialTargetSize,
+      finalSize: initialTargetSize,
+      initialTargetSize,
+      finalTargetSize: initialTargetSize,
+      initialDebugSize,
+      hasActiveLock: true,
+      skipped: true,
+      reason: "active_build_lock",
+    };
+  }
+
   const incKeepSessions = (hasBranchSwitched || isEmergency) ? 1 : 2;
   const incResult = pruneIncremental(
     path.join(debugDir, "incremental"),
@@ -1270,7 +1741,8 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
     canonicalDebug,
     isDryRun,
     isVerbose,
-    hasBranchSwitched
+    hasBranchSwitched,
+    isAuto
   );
 
   const totalCount = incResult.count + depsResult.count;
@@ -1279,7 +1751,7 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
 
   // Safe Marker Consumption & Cooldown Lifecycle:
   // Only consume .branch-switched and set full cooldown when cleanup was safe (no active locks and not incomplete)
-  const isCleanupSafe = !incResult.hasActiveLock && !incResult.incomplete && !depsResult.incomplete;
+  const isCleanupSafe = !incResult.hasActiveLock && !depsResult.hasActiveLock && !incResult.incomplete && !depsResult.incomplete;
 
   if (!isDryRun) {
     if (isCleanupSafe) {
@@ -1317,6 +1789,8 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
     initialTargetSize,
     finalTargetSize,
     initialDebugSize,
+    nonDebugSize,
+    hasActiveLock: incResult.hasActiveLock || depsResult.hasActiveLock,
   };
 }
 
@@ -1336,6 +1810,9 @@ export {
   isLockFileActive,
   isSessionDirectoryLocked,
   hasActiveIncrementalLocks,
+  hasActiveBuildLock,
+  hasActiveCompilerProcesses,
+  setCompilerProcessCheckerForTesting,
   consumeBranchSwitchMarker,
   writeCooldown,
   pruneIncremental,
@@ -1343,6 +1820,7 @@ export {
   updateCooldown,
   getGitEnvironment,
   getActiveHooks,
+  writeHookAtomic,
   isPosixShellScript,
   injectSentinelBlockIntoShellScript,
   getSentinelSnippet,

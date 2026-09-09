@@ -89,7 +89,7 @@ npm run tauri dev
 ```
 
 > 💡 **Developer-Friendly Note (Automated Storage Management & Diagnostics)**:
-> Frequent Rust dev cycles often cause build caches to swell beyond dozens of gigabytes. Kokoro Engine includes an **automated, closed-loop storage watchdog** (maintains target under 12 GB during development, cleans orphan caches on Git branch switches, purges stale test binaries, and triggers emergency relief if free drive space drops below 5 GB) with zero manual intervention required.
+> Frequent Rust dev cycles often cause build caches to swell beyond dozens of gigabytes. Kokoro Engine includes an **automated, closed-loop storage watchdog** (dynamically regulates target dev cache within a 12 GB watermark, cleans orphan caches on Git branch switches, purges stale test binaries, and triggers emergency relief if free drive space drops below 5 GB) with zero manual intervention required.
 > Run `npm run storage:doctor` anytime for an instant health dashboard. See [Developer Storage & Fast Build Guide](docs/developer-storage-guide.md) for details.
 
 #### Build release
