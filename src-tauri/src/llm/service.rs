@@ -260,6 +260,9 @@ fn try_provider_by_id(
 }
 
 fn normalize_config(mut config: LlmConfig) -> LlmConfig {
+    for provider in &mut config.providers {
+        normalize_provider_identity(provider);
+    }
     normalize_provider_selection(
         &mut config.active_provider,
         &mut config.system_provider,
@@ -267,6 +270,9 @@ fn normalize_config(mut config: LlmConfig) -> LlmConfig {
     );
 
     for preset in &mut config.presets {
+        for provider in &mut preset.providers {
+            normalize_provider_identity(provider);
+        }
         normalize_preset(preset);
     }
 
@@ -309,6 +315,21 @@ fn normalize_provider_selection(
         } else {
             *system_provider = None;
         }
+    }
+}
+
+fn normalize_provider_identity(provider: &mut LlmProviderConfig) {
+    if provider.id == "codex-runtime" && provider.provider_type != "codex_runtime" {
+        tracing::warn!(
+            target: "llm",
+            "Repairing stale Codex Runtime provider identity (stored type: {})",
+            provider.provider_type
+        );
+        provider.provider_type = "codex_runtime".to_string();
+        provider.api_key = None;
+        provider.api_key_env = None;
+        provider.base_url = None;
+        provider.model = None;
     }
 }
 
@@ -914,6 +935,53 @@ mod tests {
                 .unwrap()
                 .enabled
         );
+
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn from_config_repairs_stale_codex_runtime_provider_identity() {
+        let config_path = temp_config_path("llm_config_repairs_stale_codex_runtime");
+        let config = LlmConfig {
+            active_provider: "codex-runtime".to_string(),
+            system_provider: None,
+            system_model: None,
+            providers: vec![LlmProviderConfig {
+                id: "codex-runtime".to_string(),
+                provider_type: "ollama".to_string(),
+                enabled: true,
+                supports_native_tools: true,
+                api_key: None,
+                api_key_env: None,
+                base_url: Some("http://localhost:11434".to_string()),
+                model: Some("llama3".to_string()),
+                extra: std::collections::HashMap::new(),
+            }],
+            presets: vec![],
+        };
+
+        let service = LlmService::from_config(config, config_path.clone());
+        let normalized = service.config().await;
+        let provider = normalized
+            .providers
+            .iter()
+            .find(|provider| provider.id == "codex-runtime")
+            .expect("Codex Runtime provider should remain configured");
+
+        assert_eq!(provider.provider_type, "codex_runtime");
+        assert!(provider.base_url.is_none());
+        assert!(provider.model.is_none());
+        assert_eq!(service.provider().await.id(), "codex-runtime");
+
+        let persisted = crate::llm::llm_config::load_config(&config_path);
+        let persisted_provider = persisted
+            .providers
+            .iter()
+            .find(|provider| provider.id == "codex-runtime")
+            .expect("repaired provider should be persisted");
+        assert_eq!(persisted_provider.provider_type, "codex_runtime");
+        assert!(persisted_provider.base_url.is_none());
+        assert!(persisted_provider.model.is_none());
 
         let _ = std::fs::remove_file(config_path);
     }

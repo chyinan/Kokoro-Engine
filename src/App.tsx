@@ -370,7 +370,11 @@ import { modMessageBus } from "./ui/mods/ModMessageBus";
 import { CameraWatcher } from "./features/camera/CameraWatcher";
 import { mapCharacterAvatarUrl } from "./ui/widgets/character-avatar-url";
 import { shouldEnableChatPanel } from "./ui/layout/layout-interaction";
-import { canSettleOnboardingTurn, isOnboardingTurnEvent } from "./features/onboarding/onboarding-turn-correlation";
+import {
+  canAccumulateOnboardingTurn,
+  canSettleOnboardingTurn,
+  isOnboardingTurnEvent,
+} from "./features/onboarding/onboarding-turn-correlation";
 import {
   cancelDeferredOnboardingChat,
   cancelOnboardingChat as cancelPendingOnboardingChat,
@@ -1485,8 +1489,13 @@ function App() {
     const unlistenModChatDelta = onChatTurnDelta(({ turn_id, delta, client_request_id }) => {
       const onboardingPending = onboardingChatPendingRef.current;
       if (onboardingPending
-        && isOnboardingTurnEvent(onboardingPending.clientRequestId, client_request_id)
-        && onboardingPending.turnId === turn_id) {
+        && canAccumulateOnboardingTurn(
+          onboardingPending.clientRequestId,
+          onboardingPending.turnId,
+          client_request_id,
+          turn_id,
+        )) {
+        if (onboardingPending.turnId === null) onboardingPending.turnId = turn_id;
         onboardingPending.reply += delta;
       }
       modMessageBus.broadcast({

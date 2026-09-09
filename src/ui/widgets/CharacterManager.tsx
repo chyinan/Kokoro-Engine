@@ -284,11 +284,52 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                     created_at: c.createdAt ?? 0,
                     updated_at: c.updatedAt ?? 0,
                 };
-                await createCharacter(record).catch(() => {});
-                // Always update to ensure backup-restored data overwrites stale SQLite records
-                await updateCharacter(record).catch(() => {});
-                if (c.id != null) {
-                    await characterDb.remove(c.id).catch(() => {});
+
+                let avatarBytes: Uint8Array | null = null;
+                if (c.avatarBlob) {
+                    try {
+                        avatarBytes = new Uint8Array(await c.avatarBlob.arrayBuffer());
+                    } catch (error) {
+                        console.warn("[CharacterManager] Failed to read legacy avatar during migration:", error);
+                    }
+                }
+
+                let persisted = false;
+                if (avatarBytes !== null) {
+                    try {
+                        await createCharacterWithAvatar({
+                            ...record,
+                            avatar_path: `character-instance-resource://${c.stableId}/avatar.png`,
+                        }, avatarBytes);
+                        persisted = true;
+                    } catch (error) {
+                        console.warn("[CharacterManager] Failed to migrate legacy avatar, retrying without avatar:", error);
+                    }
+                }
+
+                if (!persisted) {
+                    try {
+                        await createCharacter(record);
+                        persisted = true;
+                    } catch (createError) {
+                        try {
+                            // Always update to ensure backup-restored data overwrites stale SQLite records.
+                            await updateCharacter(record);
+                            persisted = true;
+                        } catch (updateError) {
+                            console.error("[CharacterManager] Failed to migrate legacy character:", {
+                                characterId: c.stableId,
+                                createError,
+                                updateError,
+                            });
+                        }
+                    }
+                }
+
+                if (persisted && c.id != null) {
+                    await characterDb.remove(c.id).catch((error) => {
+                        console.warn("[CharacterManager] Failed to remove migrated IndexedDB character:", error);
+                    });
                 }
             }
 
