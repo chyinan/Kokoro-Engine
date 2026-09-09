@@ -4,7 +4,7 @@
   "version": "0.4.0",
   "type": "module",
   "scripts": {
-    "postinstall": "node scripts/prune-target.mjs --setup-hooks",
+    "postinstall": "node scripts/prune-target.mjs --setup-hooks --safe",
     "predev": "node scripts/prune-target.mjs --auto",
     "dev": "vite",
     "tauri:dev": "node scripts/prune-target.mjs --auto && tauri dev",

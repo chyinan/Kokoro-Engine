@@ -39,8 +39,10 @@
 
 ### 阶段一：首次开发环境自愈（First-time Setup & Onboarding）
 
-1. **Git Hooks 自动就绪**：
-   - 开发者运行 `npm install` 时，`postinstall` 自动执行零依赖原生绑定：`git config core.hooksPath .githooks`，分支感知钩子克隆即生效。
+1. **Git Hooks 安全就绪与兼容链式保障**：
+   - 开发者运行 `npm install` 时，`postinstall` 自动进入安全就绪探测模式（`--safe`）；
+   - 若检测到开发者已配置 Husky (`.husky`)、Lefthook 或企业自定义 Hooks，坚决**予以保留，绝不覆写**；若检测到 `.git/hooks` 下存在已有钩子（如 `pre-commit`），采用**安全前置注入/链式机制**，确保既有代码审查与安全检查不受任何影响；
+   - 在纯净开发环境中自动将分支感知钩子绑定至 `.githooks`，克隆即生效。
 2. **Profile 符号级瘦身保障**：
    - 在 `src-tauri/Cargo.toml` 中配置了 `[profile.dev.package."*"] debug = 1` 与 `[profile.test.package."*"] debug = 1`；
    - 第三方依赖在开发与测试中仅保留行号回溯，使 Windows 下 PDB 体积缩减 90%，而项目核心模块依然保留完整单步断点调试体验。
@@ -56,21 +58,25 @@
 
 ### 阶段三：测试执行链路收敛（Test Ephemeral Retention）
 
-1. **测试可执行文件精准识别**：
-   - 看门狗精准区分主程序 `tauri_appkokoro_engine` 与集成测试套件二进制（如 `characters-*.exe`、`vision-*.exe` 等）。
+1. **测试可执行文件精准识别与双层安全边界**：
+   - 看门狗精准区分主程序 `tauri_appkokoro_engine`（开发期保留最新 2 代）与测试套件产物（如单元测试 `tauri_appkokoro_engine_lib-*.exe`，集成测试 `characters-*.exe`、`vision-*.exe` 等，仅保留最新 1 代）；
+   - **双层安全白名单**：结合模块白名单（如 `characters`、`vision` 等已知模块）与 `deps/` 内部可执行目标动态反查机制。对非 Kokoro 命名的第三方依赖坚决不触碰其 `.rlib` 与 `.dll`，从根源确保第三方依赖库绝对安全。
 2. **30 分钟保护窗 + 历史版本消解**：
-   - 测试产物仅保留最近 1 个活跃代际；对 30 分钟内新生成的测试文件提供豁免保护；超过时限的历史淘汰测试二进制与 PDB 自动回收。
+   - 测试二进制及其配套的 PDB 符号文件仅保留最近 1 个活跃代际；
+   - 对 30 分钟内新生成的测试产物（`.exe` 与 `.pdb`）提供时间窗口豁免保护，确保处于交互断点或测试中的产物不受干扰；
+   - 超过时限的历史淘汰测试二进制与庞大 PDB 符号自动回收；在分支切换或驱动器空间紧急熔断时优先强制收敛。
 
 ### 阶段四：日常看门狗、低盘熔断与体检看板
 
 1. **时间戳冷却保护（Cooldown = 120 分钟）**：
    - 在正常开发周期中，每次检查后进入 120 分钟冷却期。在冷却期内前置耗时 **< 2 毫秒**，重启服务零延迟。
 2. **安全警戒水位（默认 12 GB）**：
-   - target 突破 12 GB 时静默修剪并回落至 9~10 GB。未超标或冷却期内 **100% 保持静音**；超标清理后仅输出单行高雅日志。
+   - 水位计算覆盖整个 `target` 目录总空间占用（含 debug、release、sherpa-onnx-prebuilt 等）；
+   - 当 `target` 总足迹突破 12 GB 时触发自动修剪，安全回收 `target/debug` 下过时的增量编译代际与临时测试二进制，使目录健康回落至 9~10 GB。未超标或冷却期内 **100% 保持静音**；超标清理后仅输出单行高雅日志。
 3. **宿主驱动器低空间紧急熔断（Drive-level Low-Disk Shield）**：
    - 自动检测所在驱动器（如 `D:` 盘）剩余可用空间。当可用空间 **< 5 GB** 时，自动**打破 120 分钟冷却限制**，立即强制修剪，并向终端发出显著警报，防止因磁盘写满引发系统或编译器崩溃。
-4. **发行版与 CI 绝对隔离**：
-   - 物理路径锁定为 `src-tauri/target/debug`，绝不触碰 `target/release`。
+4. **发行版与第三方模型资产绝对隔离**：
+   - 自动物理删除操作严格限定于 `src-tauri/target/debug`，绝不触碰 `target/release`、`target/sherpa-onnx-prebuilt` 或打包安装包。
    - 检测到 `build`、`--release` 参数或 `CI=true` 时，0 毫秒瞬间退出。
 
 ---
@@ -130,6 +136,7 @@ Recommendations:
 - `KOKORO_PRUNE_THRESHOLD_GB`：修改触发清理的警戒水位（默认为 `12`，单位 GB）。
 - `KOKORO_PRUNE_COOLDOWN_MINUTES`：修改两次检查之间的最小冷却间隔（默认为 `120`，单位分钟）。
 - `KOKORO_EMERGENCY_FREE_GB`：修改驱动器低可用空间紧急熔断阈值（默认为 `5.0`，单位 GB）。
+- `KOKORO_SKIP_HOOKS`：设为 `1` 时完全跳过 Git Hooks 的探测与配置（适合特定的 CI 管道或自定义构建容器）。
 
 ---
 
