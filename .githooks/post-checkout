@@ -1,11 +1,12 @@
 #!/bin/sh
 # .githooks/post-checkout
 # Kokoro Storage Sentinel - Lightweight Branch Switch Marker
-# Execution time: < 1ms. Never blocks or fails git operations.
+# Execution time: < 50ms. Never blocks or fails git operations.
 
 if [ "$3" = "1" ]; then
-  mkdir -p src-tauri/target 2>/dev/null || true
-  date +%s > src-tauri/target/.branch-switched 2>/dev/null || true
+  if command -v node >/dev/null 2>&1 && [ -f scripts/prune-target.mjs ]; then
+    node scripts/prune-target.mjs --mark-branch-switch 2>/dev/null || true
+  fi
 fi
 
 exit 0

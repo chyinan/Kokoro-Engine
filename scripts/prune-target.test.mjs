@@ -34,6 +34,7 @@ import {
   KNOWN_TEST_HARNESSES,
   isEligibleDepsArtifact,
   setGitExecutorForTesting,
+  markBranchSwitch,
 } from "./prune-target.mjs";
 
 describe("scripts/prune-target.mjs security & canonical containment", () => {
@@ -48,6 +49,7 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       NODE_ENV: process.env.NODE_ENV,
       KOKORO_SKIP_HOOKS: process.env.KOKORO_SKIP_HOOKS,
       KOKORO_FORCE_CI_CHECK: process.env.KOKORO_FORCE_CI_CHECK,
+      KOKORO_EMERGENCY_FREE_GB: process.env.KOKORO_EMERGENCY_FREE_GB,
     };
     delete process.env.CI;
     delete process.env.GITHUB_ACTIONS;
@@ -55,6 +57,7 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
     delete process.env.NODE_ENV;
     delete process.env.KOKORO_SKIP_HOOKS;
     delete process.env.KOKORO_FORCE_CI_CHECK;
+    delete process.env.KOKORO_EMERGENCY_FREE_GB;
 
     tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kokoro-prune-test-"));
   });
@@ -2085,6 +2088,99 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       }
     });
 
+    it("full-pipeline: emergency mode with an active compiler prunes eligible artifacts to relieve disk pressure but retains branch marker and skips cooldown", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const debugDir = path.join(targetDir, "debug");
+      const incDir = path.join(debugDir, "incremental");
+      const depsDir = path.join(debugDir, "deps");
+
+      fs.mkdirSync(incDir, { recursive: true });
+      fs.mkdirSync(depsDir, { recursive: true });
+
+      // 1. Populate incremental with older and newer sessions
+      const crateOld = path.join(incDir, "crate_inc-1111111111111111");
+      const crateNew = path.join(incDir, "crate_inc-2222222222222222");
+      fs.mkdirSync(crateOld, { recursive: true });
+      fs.mkdirSync(crateNew, { recursive: true });
+      fs.writeFileSync(path.join(crateOld, "data.bin"), "old-incremental");
+      fs.writeFileSync(path.join(crateNew, "data.bin"), "new-incremental");
+      fs.utimesSync(crateOld, new Date(Date.now() - 200000), new Date(Date.now() - 200000));
+      fs.utimesSync(crateNew, new Date(), new Date());
+
+      // 2. Populate deps with test harnesses (< 30 min old) and main apps (2 generations)
+      const now = Date.now();
+      const past5m = new Date(now - 5 * 60 * 1000);
+      const past1m = new Date(now - 1 * 60 * 1000);
+
+      // Known test harness (under normal mode, 30m shield protects it; under emergency mode, shield bypassed!)
+      const testHarnessOld = path.join(depsDir, "characters-1111111111111111.exe");
+      const testHarnessNew = path.join(depsDir, "characters-2222222222222222.exe");
+      fs.writeFileSync(testHarnessOld, "old-test-harness-binary");
+      fs.writeFileSync(testHarnessNew, "new-test-harness-binary");
+      fs.utimesSync(testHarnessOld, past5m, past5m);
+      fs.utimesSync(testHarnessNew, past1m, past1m);
+
+      // Main app executables (under emergency mode, keep count tightens to 1)
+      const appOld = path.join(depsDir, "tauri_appkokoro_engine-1111111111111111.exe");
+      const appNew = path.join(depsDir, "tauri_appkokoro_engine-2222222222222222.exe");
+      fs.writeFileSync(appOld, "old-app-exe");
+      fs.writeFileSync(appNew, "new-app-exe");
+      fs.utimesSync(appOld, past5m, past5m);
+      fs.utimesSync(appNew, past1m, past1m);
+
+      // Third-party library artifacts that must NEVER be pruned
+      const synSo = path.join(depsDir, "libsyn-1111111111111111.so");
+      const serdeRlib = path.join(depsDir, "libserde-1111111111111111.rlib");
+      fs.writeFileSync(synSo, "macro-so");
+      fs.writeFileSync(serdeRlib, "serde-rlib");
+      fs.utimesSync(synSo, past5m, past5m);
+      fs.utimesSync(serdeRlib, past5m, past5m);
+
+      const branchMarker = path.join(targetDir, ".branch-switched");
+      fs.writeFileSync(branchMarker, Date.now().toString());
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+
+      // 3. Set emergency mode and active compiler process
+      process.env.KOKORO_EMERGENCY_FREE_GB = "999999";
+      setCompilerProcessCheckerForTesting(() => true);
+
+      try {
+        const res = runPruneTarget(["--auto"], tempRoot);
+
+        // Emergency mode does NOT yield early, so it frees storage:
+        expect(res.count).toBeGreaterThan(0);
+        expect(res.bytesFreed).toBeGreaterThan(0);
+        expect(res.hasActiveLock).toBe(true);
+
+        // Incremental old session pruned (incKeepSessions = 1 in emergency)
+        expect(fs.existsSync(crateOld)).toBe(false);
+        expect(fs.existsSync(crateNew)).toBe(true);
+
+        // Older test harness was pruned (30m shield bypassed in emergency)
+        expect(fs.existsSync(testHarnessOld)).toBe(false);
+        expect(fs.existsSync(testHarnessNew)).toBe(true);
+
+        // Older main app was pruned (tightened to 1 in emergency)
+        expect(fs.existsSync(appOld)).toBe(false);
+        expect(fs.existsSync(appNew)).toBe(true);
+
+        // Third-party libraries are 100% untouched
+        expect(fs.existsSync(synSo)).toBe(true);
+        expect(fs.existsSync(serdeRlib)).toBe(true);
+
+        // CRITICAL INVARIANT: Because compiler process is active, cleanup was NOT completely safe:
+        // .branch-switched marker is retained, and cooldown is NOT written!
+        expect(res.branchMarkerRetained).toBe(true);
+        expect(res.cooldownUpdated).toBe(false);
+        expect(fs.existsSync(branchMarker)).toBe(true);
+        expect(fs.existsSync(cooldownFile)).toBe(false);
+      } finally {
+        setCompilerProcessCheckerForTesting(null);
+        delete process.env.KOKORO_EMERGENCY_FREE_GB;
+      }
+    });
+
     it("full-pipeline: skips deps pruning when target/.cargo-lock is held even if incremental directory is completely absent", () => {
       const srcTauri = path.join(tempRoot, "src-tauri");
       const targetDir = path.join(srcTauri, "target");
@@ -2615,6 +2711,166 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
         expect(res.reason).toBe("below_threshold");
       }
     });
+
+    it("ensures updateCooldown retains .branch-switched when writeCooldown fails on symlinked .prune-cooldown", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+      const branchMarker = path.join(targetDir, ".branch-switched");
+      const externalFile = path.join(tempRoot, "external-cooldown.txt");
+
+      fs.mkdirSync(targetDir, { recursive: true });
+      fs.writeFileSync(externalFile, "EXTERNAL_ORIGINAL", "utf8");
+      fs.writeFileSync(branchMarker, Date.now().toString(), "utf8");
+
+      const linkCreated = tryCreateFileLink(externalFile, cooldownFile);
+      if (linkCreated) {
+        const updateRes = updateCooldown(targetDir, cooldownFile, branchMarker, true, tempRoot, false);
+        // writeCooldown must fail due to symlink, returning false
+        expect(updateRes).toBe(false);
+
+        // Crucial security invariant: .branch-switched MUST be retained, not consumed
+        expect(fs.existsSync(branchMarker)).toBe(true);
+
+        // External file must remain intact
+        expect(fs.readFileSync(externalFile, "utf8")).toBe("EXTERNAL_ORIGINAL");
+      }
+    });
+
+    it("ensures updateCooldown consumes .branch-switched after writeCooldown succeeds", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+      const branchMarker = path.join(targetDir, ".branch-switched");
+
+      fs.mkdirSync(targetDir, { recursive: true });
+      fs.writeFileSync(branchMarker, Date.now().toString(), "utf8");
+
+      const updateRes = updateCooldown(targetDir, cooldownFile, branchMarker, true, tempRoot, false);
+      expect(updateRes).toBe(true);
+      expect(fs.existsSync(cooldownFile)).toBe(true);
+      expect(fs.existsSync(branchMarker)).toBe(false);
+    });
+
+    it("ensures runPruneTarget preserves .branch-switched and emits [WARN] when cooldown persistence fails on unsafe cooldown path", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const debugDir = path.join(targetDir, "debug");
+      const depsDir = path.join(debugDir, "deps");
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+      const branchMarker = path.join(targetDir, ".branch-switched");
+      const externalFile = path.join(tempRoot, "external-cooldown-run.txt");
+
+      fs.mkdirSync(depsDir, { recursive: true });
+      fs.writeFileSync(externalFile, "SECRET_RUN_PRUNE", "utf8");
+      fs.writeFileSync(branchMarker, Date.now().toString(), "utf8");
+
+      const linkCreated = tryCreateFileLink(externalFile, cooldownFile);
+      if (linkCreated) {
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          const res = runPruneTarget([], tempRoot);
+          expect(res.cooldownUpdated).toBe(false);
+          expect(res.branchMarkerRetained).toBe(true);
+
+          // .branch-switched must NOT be consumed
+          expect(fs.existsSync(branchMarker)).toBe(true);
+
+          // Warning must be emitted
+          const warnCalls = warnSpy.mock.calls.map((c) => c.join(" "));
+          expect(warnCalls.some((w) => w.includes("Failed to persist cooldown state; branch switch marker retained."))).toBe(true);
+        } finally {
+          warnSpy.mockRestore();
+        }
+      }
+    });
+
+    it("updateCooldown retains .branch-switched when writeCooldown fails due to I/O or rename error", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+      const branchMarker = path.join(targetDir, ".branch-switched");
+
+      fs.mkdirSync(targetDir, { recursive: true });
+      fs.writeFileSync(branchMarker, Date.now().toString(), "utf8");
+
+      // Spy on fs.renameSync to simulate I/O failure when writing/persisting .prune-cooldown
+      const origRename = fs.renameSync.bind(fs);
+      const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation((oldPath, newPath) => {
+        if (typeof newPath === "string" && newPath.includes(".prune-cooldown")) {
+          const err = new Error("EACCES: permission denied, rename");
+          err.code = "EACCES";
+          throw err;
+        }
+        return origRename(oldPath, newPath);
+      });
+
+      try {
+        const updateRes = updateCooldown(targetDir, cooldownFile, branchMarker, true, tempRoot, false);
+        // writeCooldown must fail due to simulated I/O error, returning false
+        expect(updateRes).toBe(false);
+
+        // Crucial invariant: .branch-switched MUST be retained, not consumed
+        expect(fs.existsSync(branchMarker)).toBe(true);
+        expect(fs.existsSync(cooldownFile)).toBe(false);
+      } finally {
+        renameSpy.mockRestore();
+      }
+    });
+
+    it("runPruneTarget preserves .branch-switched and emits [WARN] when cooldown persistence fails due to I/O error", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      const debugDir = path.join(targetDir, "debug");
+      const depsDir = path.join(debugDir, "deps");
+      const cooldownFile = path.join(targetDir, ".prune-cooldown");
+      const branchMarker = path.join(targetDir, ".branch-switched");
+
+      fs.mkdirSync(depsDir, { recursive: true });
+      fs.writeFileSync(branchMarker, Date.now().toString(), "utf8");
+
+      // Add a stale file so pruning produces a successful cleanup
+      const now = Date.now();
+      const past40m = new Date(now - 40 * 60 * 1000);
+      const appOld = path.join(depsDir, "tauri_appkokoro_engine-1111111111111111.exe");
+      const appNew = path.join(depsDir, "tauri_appkokoro_engine-2222222222222222.exe");
+      fs.writeFileSync(appOld, "old-app");
+      fs.writeFileSync(appNew, "new-app");
+      fs.utimesSync(appOld, past40m, past40m);
+      fs.utimesSync(appNew, new Date(), new Date());
+
+      // Spy on fs.renameSync to simulate I/O failure when persisting .prune-cooldown
+      const origRename = fs.renameSync.bind(fs);
+      const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation((oldPath, newPath) => {
+        if (typeof newPath === "string" && newPath.includes(".prune-cooldown")) {
+          const err = new Error("EIO: i/o error, rename");
+          err.code = "EIO";
+          throw err;
+        }
+        return origRename(oldPath, newPath);
+      });
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      try {
+        const res = runPruneTarget([], tempRoot);
+        // Pruning itself was performed
+        expect(res.count).toBeGreaterThan(0);
+        expect(res.cooldownUpdated).toBe(false);
+        expect(res.branchMarkerRetained).toBe(true);
+
+        // .branch-switched must NOT be consumed
+        expect(fs.existsSync(branchMarker)).toBe(true);
+        expect(fs.existsSync(cooldownFile)).toBe(false);
+
+        // Warning must be emitted
+        const warnCalls = warnSpy.mock.calls.map((c) => c.join(" "));
+        expect(warnCalls.some((w) => w.includes("Failed to persist cooldown state; branch switch marker retained."))).toBe(true);
+      } finally {
+        renameSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+    });
   });
 
   describe("Targeted Fixture: Git Hook Symlink, Reparse Point & External Target Protection", () => {
@@ -2798,6 +3054,212 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       expect(fs.existsSync(path.join(normalDir, "post-merge"))).toBe(true);
       const tmpFiles = fs.readdirSync(normalDir).filter((f) => f.startsWith(".sentinel-") && f.endsWith(".tmp"));
       expect(tmpFiles).toHaveLength(0);
+    });
+  });
+
+  describe("Targeted Fixture: Safe Branch Switch Marker & Hook Payload Security", () => {
+    it("markBranchSwitch creates .branch-switched atomically in standard repo", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      fs.mkdirSync(srcTauri, { recursive: true });
+
+      const res = markBranchSwitch(tempRoot);
+      expect(res.success).toBe(true);
+      expect(res.mode).toBe("mark-branch-switch");
+
+      const markerPath = path.join(srcTauri, "target", ".branch-switched");
+      expect(fs.existsSync(markerPath)).toBe(true);
+
+      const content = fs.readFileSync(markerPath, "utf8").trim();
+      const ts = parseInt(content, 10);
+      expect(Number.isFinite(ts)).toBe(true);
+      expect(ts).toBeGreaterThan(0);
+
+      // Verify no temporary files left in target directory
+      const tmpFiles = fs.readdirSync(path.join(srcTauri, "target")).filter((f) => f.startsWith(".branch-switched.") && f.endsWith(".tmp"));
+      expect(tmpFiles).toHaveLength(0);
+    });
+
+    it("markBranchSwitch rejects writing when src-tauri/target is a directory junction or symlink", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      fs.mkdirSync(srcTauri, { recursive: true });
+
+      const externalDir = path.join(tempRoot, "external-target");
+      fs.mkdirSync(externalDir, { recursive: true });
+
+      const targetLink = path.join(srcTauri, "target");
+      createDirLink(externalDir, targetLink);
+      expect(fs.lstatSync(targetLink).isSymbolicLink()).toBe(true);
+
+      const res = markBranchSwitch(tempRoot);
+      expect(res.success).toBe(false);
+      expect(["symlink", "canonical_escape", "canonical_divergence"]).toContain(res.reason);
+
+      // CRITICAL: external target directory must remain completely untouched
+      const extEntries = fs.readdirSync(externalDir);
+      expect(extEntries).toHaveLength(0);
+      expect(fs.existsSync(path.join(externalDir, ".branch-switched"))).toBe(false);
+    });
+
+    it("markBranchSwitch rejects writing when src-tauri itself is a directory junction or symlink", () => {
+      const externalSrcTauri = path.join(tempRoot, "external-src-tauri");
+      fs.mkdirSync(externalSrcTauri, { recursive: true });
+
+      const srcTauriLink = path.join(tempRoot, "src-tauri");
+      createDirLink(externalSrcTauri, srcTauriLink);
+      expect(fs.lstatSync(srcTauriLink).isSymbolicLink()).toBe(true);
+
+      const res = markBranchSwitch(tempRoot);
+      expect(res.success).toBe(false);
+      expect(["symlink", "canonical_escape", "canonical_divergence"]).toContain(res.reason);
+
+      expect(fs.existsSync(path.join(externalSrcTauri, "target"))).toBe(false);
+    });
+
+    it("markBranchSwitch rejects writing when .branch-switched destination is a symlink to an external file", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      const targetDir = path.join(srcTauri, "target");
+      fs.mkdirSync(targetDir, { recursive: true });
+
+      const sensitiveFile = path.join(tempRoot, "sensitive-data.txt");
+      fs.writeFileSync(sensitiveFile, "CRITICAL_SYSTEM_DATA_DO_NOT_OVERWRITE", "utf8");
+
+      const markerPath = path.join(targetDir, ".branch-switched");
+      const linkCreated = tryCreateFileLink(sensitiveFile, markerPath);
+
+      if (linkCreated) {
+        const res = markBranchSwitch(tempRoot);
+        expect(res.success).toBe(false);
+        expect(res.reason).toBe("symlink");
+
+        // Content of sensitive file must remain identical
+        expect(fs.readFileSync(sensitiveFile, "utf8")).toBe("CRITICAL_SYSTEM_DATA_DO_NOT_OVERWRITE");
+      }
+    });
+
+    it("runPruneTarget handles --mark-branch-switch via CLI invocation correctly", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      fs.mkdirSync(srcTauri, { recursive: true });
+
+      const res = runPruneTarget(["--mark-branch-switch"], tempRoot);
+      expect(res.success).toBe(true);
+
+      const markerPath = path.join(srcTauri, "target", ".branch-switched");
+      expect(fs.existsSync(markerPath)).toBe(true);
+    });
+
+    it("runPruneTarget --mark-branch-switch CLI invocation against a linked target directory junction safely rejects and protects external directory", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      fs.mkdirSync(srcTauri, { recursive: true });
+
+      const externalDir = path.join(tempRoot, "external-target-cli");
+      fs.mkdirSync(externalDir, { recursive: true });
+
+      const targetLink = path.join(srcTauri, "target");
+      createDirLink(externalDir, targetLink);
+      expect(fs.lstatSync(targetLink).isSymbolicLink()).toBe(true);
+
+      // Invoke via runPruneTarget with --mark-branch-switch CLI argument
+      const res = runPruneTarget(["--mark-branch-switch"], tempRoot);
+      expect(res.success).toBe(false);
+      expect(["symlink", "canonical_escape", "canonical_divergence"]).toContain(res.reason);
+
+      // CRITICAL: external target directory must remain completely untouched
+      const extEntries = fs.readdirSync(externalDir);
+      expect(extEntries).toHaveLength(0);
+      expect(fs.existsSync(path.join(externalDir, ".branch-switched"))).toBe(false);
+    });
+
+    it("executing Git hook payload via node against a repository with linked target exits safely without modifying external directory", () => {
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      fs.mkdirSync(srcTauri, { recursive: true });
+
+      const externalDir = path.join(tempRoot, "external-target-hook-exec");
+      fs.mkdirSync(externalDir, { recursive: true });
+
+      const targetLink = path.join(srcTauri, "target");
+      createDirLink(externalDir, targetLink);
+      expect(fs.lstatSync(targetLink).isSymbolicLink()).toBe(true);
+
+      // Copy prune-target.mjs into the mock repo structure so the hook snippet's relative command works
+      const scriptsDir = path.join(tempRoot, "scripts");
+      fs.mkdirSync(scriptsDir, { recursive: true });
+      const prunerSource = path.resolve("scripts/prune-target.mjs");
+      fs.copyFileSync(prunerSource, path.join(scriptsDir, "prune-target.mjs"));
+
+      // Execute the exact command emitted in getSentinelSnippet():
+      // node scripts/prune-target.mjs --mark-branch-switch
+      const spawnResult = childProcess.spawnSync(
+        process.execPath,
+        ["scripts/prune-target.mjs", "--mark-branch-switch"],
+        {
+          cwd: tempRoot,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }
+      );
+
+      // Hook command must exit cleanly with code 0 (safe exit that won't fail git checkout)
+      expect(spawnResult.status).toBe(0);
+
+      // CRITICAL: external target directory must remain completely untouched
+      const extEntries = fs.readdirSync(externalDir);
+      expect(extEntries).toHaveLength(0);
+      expect(fs.existsSync(path.join(externalDir, ".branch-switched"))).toBe(false);
+    });
+
+    it("getSentinelSnippet emits node --mark-branch-switch command without raw shell redirection", () => {
+      for (const hookName of ["post-checkout", "post-merge"]) {
+        const snippet = getSentinelSnippet(hookName);
+        expect(snippet.includes("node scripts/prune-target.mjs --mark-branch-switch")).toBe(true);
+        expect(snippet.includes("mkdir -p src-tauri/target")).toBe(false);
+        expect(snippet.includes("date +%s >")).toBe(false);
+      }
+    });
+
+    it("injectSentinelBlockIntoShellScript upgrades legacy Sentinel block in-place", () => {
+      const legacyHook = `#!/bin/sh\n# Custom pre-body\n${SENTINEL_BLOCK_START}\nif [ "$3" = "1" ]; then\n  mkdir -p src-tauri/target 2>/dev/null || true\n  date +%s > src-tauri/target/.branch-switched 2>/dev/null || true\nfi\n${SENTINEL_BLOCK_END}\necho "custom user logic"\nexit 0\n`;
+
+      const upgraded = injectSentinelBlockIntoShellScript(legacyHook, "post-checkout");
+      expect(upgraded.includes("node scripts/prune-target.mjs --mark-branch-switch")).toBe(true);
+      expect(upgraded.includes("date +%s > src-tauri/target/.branch-switched")).toBe(false);
+      expect(upgraded.includes("custom user logic")).toBe(true);
+      expect(upgraded.includes("# Custom pre-body")).toBe(true);
+
+      const occurrences = upgraded.split(SENTINEL_BLOCK_START).length - 1;
+      expect(occurrences).toBe(1);
+    });
+
+    it("--setup-hooks upgrades existing repository hooks containing legacy payload", () => {
+      const fakeGitDir = path.join(tempRoot, ".git");
+      const fakeHooksDir = path.join(fakeGitDir, "hooks");
+      fs.mkdirSync(fakeHooksDir, { recursive: true });
+
+      // Simulate pre-existing legacy hook in .git/hooks
+      const legacyCheckout = `#!/bin/sh\n${SENTINEL_BLOCK_START}\nif [ "$3" = "1" ]; then\n  mkdir -p src-tauri/target 2>/dev/null || true\n  date +%s > src-tauri/target/.branch-switched 2>/dev/null || true\nfi\n${SENTINEL_BLOCK_END}\nexit 0\n`;
+      fs.writeFileSync(path.join(fakeHooksDir, "post-checkout"), legacyCheckout, "utf8");
+      fs.writeFileSync(path.join(fakeHooksDir, "pre-commit"), "#!/bin/sh\nexit 0\n");
+
+      setGitExecutorForTesting((cmd) => {
+        if (typeof cmd === "string" && cmd.includes("git config --get core.hooksPath")) {
+          throw new Error("not set");
+        }
+        if (typeof cmd === "string" && cmd.includes("git rev-parse --git-path hooks")) {
+          return fakeHooksDir + "\n";
+        }
+        return "";
+      });
+
+      try {
+        const result = runPruneTarget(["--setup-hooks"], tempRoot);
+        expect(result.success).toBe(true);
+
+        const updated = fs.readFileSync(path.join(fakeHooksDir, "post-checkout"), "utf8");
+        expect(updated.includes("node scripts/prune-target.mjs --mark-branch-switch")).toBe(true);
+        expect(updated.includes("mkdir -p src-tauri/target")).toBe(false);
+        expect(updated.includes("date +%s >")).toBe(false);
+      } finally {
+        setGitExecutorForTesting(null);
+      }
     });
   });
 });

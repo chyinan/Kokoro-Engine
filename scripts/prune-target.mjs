@@ -890,10 +890,152 @@ function writeCooldown(targetDir, cooldownFile, canonicalRoot, isDryRun = false)
 function updateCooldown(targetDir, cooldownFile, branchSwitchFile, hasBranchSwitched, canonicalRoot, isDryRun = false) {
   if (isDryRun) return false;
   const wrote = writeCooldown(targetDir, cooldownFile, canonicalRoot, isDryRun);
-  if (hasBranchSwitched && branchSwitchFile) {
-    consumeBranchSwitchMarker(targetDir, branchSwitchFile, canonicalRoot, isDryRun);
+  if (wrote) {
+    if (hasBranchSwitched && branchSwitchFile) {
+      consumeBranchSwitchMarker(targetDir, branchSwitchFile, canonicalRoot, isDryRun);
+    }
   }
   return wrote;
+}
+
+function markBranchSwitch(customRoot = process.cwd()) {
+  try {
+    const root = customRoot;
+    const canonicalRoot = getSafeRealPath(root);
+    if (!canonicalRoot) {
+      return { success: false, reason: "cannot_resolve_root" };
+    }
+
+    const srcTauriDir = path.join(root, "src-tauri");
+    let stLstat;
+    try {
+      stLstat = fs.lstatSync(srcTauriDir);
+    } catch (err) {
+      return { success: false, reason: err?.code === "ENOENT" ? "src_tauri_not_found" : err.message };
+    }
+
+    if (stLstat.isSymbolicLink() || !stLstat.isDirectory()) {
+      return { success: false, reason: "symlink" };
+    }
+
+    const realSrcTauri = getSafeRealPath(srcTauriDir);
+    if (!realSrcTauri || !isCanonicallyContained(realSrcTauri, canonicalRoot)) {
+      return { success: false, reason: "canonical_escape" };
+    }
+    if (normalizeCanonicalPath(realSrcTauri) !== normalizeCanonicalPath(path.join(canonicalRoot, "src-tauri"))) {
+      return { success: false, reason: "canonical_divergence" };
+    }
+
+    const targetDir = path.join(srcTauriDir, "target");
+    let targetExists = false;
+    try {
+      const tLstat = fs.lstatSync(targetDir);
+      if (tLstat.isSymbolicLink() || !tLstat.isDirectory()) {
+        return { success: false, reason: "symlink" };
+      }
+      targetExists = true;
+    } catch (err) {
+      if (err?.code !== "ENOENT") {
+        return { success: false, reason: err.message };
+      }
+    }
+
+    if (!targetExists) {
+      // Re-verify srcTauri before creating target
+      try {
+        const checkSt = fs.lstatSync(srcTauriDir);
+        if (checkSt.isSymbolicLink() || !checkSt.isDirectory()) {
+          return { success: false, reason: "symlink" };
+        }
+        fs.mkdirSync(targetDir, { recursive: false });
+      } catch (err) {
+        return { success: false, reason: err.message };
+      }
+
+      try {
+        const newLstat = fs.lstatSync(targetDir);
+        if (newLstat.isSymbolicLink() || !newLstat.isDirectory()) {
+          return { success: false, reason: "symlink" };
+        }
+      } catch (err) {
+        return { success: false, reason: err.message };
+      }
+    }
+
+    const realTarget = getSafeRealPath(targetDir);
+    if (!realTarget || !isCanonicallyContained(realTarget, canonicalRoot)) {
+      return { success: false, reason: "canonical_escape" };
+    }
+    if (normalizeCanonicalPath(realTarget) !== normalizeCanonicalPath(path.join(realSrcTauri, "target"))) {
+      return { success: false, reason: "canonical_divergence" };
+    }
+
+    const markerFile = path.join(targetDir, ".branch-switched");
+    try {
+      const mLstat = fs.lstatSync(markerFile);
+      if (mLstat.isSymbolicLink() || !mLstat.isFile()) {
+        return { success: false, reason: "symlink" };
+      }
+      const realMarker = getSafeRealPath(markerFile);
+      if (!realMarker || !isCanonicallyContained(realMarker, canonicalRoot)) {
+        return { success: false, reason: "canonical_escape" };
+      }
+    } catch (err) {
+      if (err?.code !== "ENOENT") {
+        return { success: false, reason: err.message };
+      }
+    }
+
+    // Atomic write via no-follow temporary file in realTarget
+    const randSuffix = Math.random().toString(36).slice(2, 10);
+    const tempFileName = `.branch-switched.${process.pid}.${Date.now()}.${randSuffix}.tmp`;
+    const tempFilePath = path.join(realTarget, tempFileName);
+
+    let tempCreated = false;
+    try {
+      const openFlags =
+        fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        fs.constants.O_WRONLY |
+        (fs.constants.O_NOFOLLOW || 0);
+      const fd = fs.openSync(tempFilePath, openFlags, 0o600);
+      try {
+        const timestamp = Math.floor(Date.now() / 1000).toString();
+        fs.writeSync(fd, timestamp, 0, "utf8");
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      tempCreated = true;
+
+      const tLstat = fs.lstatSync(tempFilePath);
+      if (tLstat.isSymbolicLink() || !tLstat.isFile()) {
+        return { success: false, reason: "symlink" };
+      }
+
+      // Re-verify destination immediately before swap to mitigate TOCTOU
+      try {
+        const destLstat = fs.lstatSync(markerFile);
+        if (destLstat.isSymbolicLink() || !destLstat.isFile()) {
+          return { success: false, reason: "symlink" };
+        }
+      } catch (err) {
+        if (err?.code !== "ENOENT") return { success: false, reason: err.message };
+      }
+
+      fs.renameSync(tempFilePath, markerFile);
+      tempCreated = false;
+      return { success: true, mode: "mark-branch-switch", path: markerFile };
+    } finally {
+      if (tempCreated) {
+        try {
+          fs.unlinkSync(tempFilePath);
+        } catch (_) {}
+      }
+    }
+  } catch (err) {
+    return { success: false, reason: err?.message || "unknown_error" };
+  }
 }
 
 // =============================================================================
@@ -907,14 +1049,16 @@ function getSentinelSnippet(hookName) {
   if (hookName === "post-checkout") {
     return `${SENTINEL_BLOCK_START}
 if [ "$3" = "1" ]; then
-  mkdir -p src-tauri/target 2>/dev/null || true
-  date +%s > src-tauri/target/.branch-switched 2>/dev/null || true
+  if command -v node >/dev/null 2>&1 && [ -f scripts/prune-target.mjs ]; then
+    node scripts/prune-target.mjs --mark-branch-switch 2>/dev/null || true
+  fi
 fi
 ${SENTINEL_BLOCK_END}\n`;
   }
   return `${SENTINEL_BLOCK_START}
-mkdir -p src-tauri/target 2>/dev/null || true
-date +%s > src-tauri/target/.branch-switched 2>/dev/null || true
+if command -v node >/dev/null 2>&1 && [ -f scripts/prune-target.mjs ]; then
+  node scripts/prune-target.mjs --mark-branch-switch 2>/dev/null || true
+fi
 ${SENTINEL_BLOCK_END}\n`;
 }
 
@@ -926,8 +1070,20 @@ function isPosixShellScript(content) {
 
 function injectSentinelBlockIntoShellScript(originalContent, hookName) {
   const normalized = originalContent.replace(/\r\n/g, "\n");
-  const firstNewlineIdx = normalized.indexOf("\n");
   const snippet = getSentinelSnippet(hookName);
+
+  if (normalized.includes(SENTINEL_BLOCK_START)) {
+    const startIdx = normalized.indexOf(SENTINEL_BLOCK_START);
+    const endIdx = normalized.indexOf(SENTINEL_BLOCK_END);
+    if (endIdx !== -1 && endIdx >= startIdx) {
+      const before = normalized.slice(0, startIdx);
+      const after = normalized.slice(endIdx + SENTINEL_BLOCK_END.length);
+      const cleanAfter = after.startsWith("\n") ? after.slice(1) : after;
+      return `${before}${snippet}${cleanAfter}`;
+    }
+  }
+
+  const firstNewlineIdx = normalized.indexOf("\n");
   if (firstNewlineIdx === -1) {
     return `${normalized}\n\n${snippet}`;
   }
@@ -1088,6 +1244,11 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
   const targetDir = path.join(root, "src-tauri", "target");
   const debugDir = path.join(targetDir, "debug");
 
+  const isMarkBranchSwitch = args.includes("--mark-branch-switch");
+  if (isMarkBranchSwitch) {
+    return markBranchSwitch(root);
+  }
+
   const isAuto = args.includes("--auto");
   const isDryRun = args.includes("--dry-run");
   const isDoctor = args.includes("--doctor");
@@ -1232,11 +1393,13 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
               }
               try {
                 const content = fs.readFileSync(hookPath, "utf8");
-                if (content.includes(SENTINEL_BLOCK_START)) {
-                  anyChained = true;
-                } else if (isPosixShellScript(content)) {
+                if (isPosixShellScript(content)) {
                   const injected = injectSentinelBlockIntoShellScript(content, hookName);
-                  if (writeHookAtomic(customHooksDir, hookName, injected)) {
+                  if (injected !== content) {
+                    if (writeHookAtomic(customHooksDir, hookName, injected)) {
+                      anyChained = true;
+                    }
+                  } else {
                     anyChained = true;
                   }
                 } else {
@@ -1361,9 +1524,11 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
             }
             try {
               const content = fs.readFileSync(hookPath, "utf8");
-              if (!content.includes(SENTINEL_BLOCK_START) && isPosixShellScript(content)) {
+              if (isPosixShellScript(content)) {
                 const injected = injectSentinelBlockIntoShellScript(content, hookName);
-                writeHookAtomic(gitEnv.hooksDir, hookName, injected);
+                if (injected !== content) {
+                  writeHookAtomic(gitEnv.hooksDir, hookName, injected);
+                }
               }
             } catch (_) {}
           } else {
@@ -1753,9 +1918,19 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
   // Only consume .branch-switched and set full cooldown when cleanup was safe (no active locks and not incomplete)
   const isCleanupSafe = !incResult.hasActiveLock && !depsResult.hasActiveLock && !incResult.incomplete && !depsResult.incomplete;
 
+  let cooldownUpdated = false;
   if (!isDryRun) {
     if (isCleanupSafe) {
-      updateCooldown(targetDir, cooldownFile, branchSwitchFile, hasBranchSwitched, canonicalRoot, isDryRun);
+      cooldownUpdated = updateCooldown(targetDir, cooldownFile, branchSwitchFile, hasBranchSwitched, canonicalRoot, isDryRun);
+      if (!cooldownUpdated) {
+        if (hasBranchSwitched) {
+          if (isVerbose || !isAuto) {
+            console.warn("[WARN] Failed to persist cooldown state; branch switch marker retained.");
+          }
+        } else if (isVerbose || !isAuto) {
+          console.warn("[WARN] Failed to persist cooldown state.");
+        }
+      }
     } else {
       if (hasBranchSwitched && (isVerbose || !isAuto)) {
         console.warn("[WARN] Active compiler locks or incomplete cleanup detected; branch switch marker retained.");
@@ -1791,6 +1966,8 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
     initialDebugSize,
     nonDebugSize,
     hasActiveLock: incResult.hasActiveLock || depsResult.hasActiveLock,
+    cooldownUpdated: Boolean(cooldownUpdated),
+    branchMarkerRetained: Boolean(!isDryRun && hasBranchSwitched && (!isCleanupSafe || !cooldownUpdated)),
   };
 }
 
@@ -1829,6 +2006,7 @@ export {
   KNOWN_TEST_HARNESSES,
   isEligibleDepsArtifact,
   setGitExecutorForTesting,
+  markBranchSwitch,
   runPruneTarget,
 };
 
