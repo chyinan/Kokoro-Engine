@@ -3289,9 +3289,11 @@ export function runPruneTarget(args = process.argv.slice(2)) {
     console.log("Kokoro Storage Sentinel - Target Pruner & Watchdog");
     const incDir = path.join(process.cwd(), "src-tauri", "target", "debug", "incremental");
     if (fs.existsSync(incDir)) {
-      const entries = fs.readdirSync(incDir);
-      for (const e of entries) {
-        fs.rmSync(path.join(incDir, e), { recursive: true, force: true });
+      const entries = fs.readdirSync(incDir)
+        .map(name => ({ name, mtime: fs.statSync(path.join(incDir, name)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime);
+      for (const e of entries.slice(1)) {
+        fs.rmSync(path.join(incDir, e.name), { recursive: true, force: true });
       }
     }
   }
@@ -3336,7 +3338,13 @@ if (invokedPath && invokedPath.endsWith("prune-target.mjs")) {
       fs.mkdirSync(sessionOld, { recursive: true });
       fs.writeFileSync(path.join(sessionOld, "dep-graph.bin"), "data");
       fs.utimesSync(sessionOld, 1000, 1000);
+      if (!fs.existsSync(sessionNew)) {
+        fs.mkdirSync(sessionNew, { recursive: true });
+        fs.writeFileSync(path.join(sessionNew, "dep-graph.bin"), "data");
+        fs.utimesSync(sessionNew, 2000, 2000);
+      }
       expect(fs.existsSync(sessionOld)).toBe(true);
+      expect(fs.existsSync(sessionNew)).toBe(true);
 
       // Execute the NEW injected hook payload (from SENTINEL_HOOK_CMD)
       const evalMatch = SENTINEL_HOOK_CMD.match(/node -e '([^']+)'/);
