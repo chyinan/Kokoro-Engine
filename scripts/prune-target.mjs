@@ -1045,19 +1045,22 @@ function markBranchSwitch(customRoot = process.cwd()) {
 const SENTINEL_BLOCK_START = "# >>> Kokoro Storage Sentinel (DO NOT EDIT) >>>";
 const SENTINEL_BLOCK_END = "# <<< Kokoro Storage Sentinel <<<";
 
+const SENTINEL_HOOK_CMD =
+  'node -e \'const fs=require("fs");try{if(fs.readFileSync("scripts/prune-target.mjs","utf8").includes("markBranchSwitch")){import("./scripts/prune-target.mjs").then(m=>typeof m.markBranchSwitch==="function"&&m.markBranchSwitch()).catch(()=>{})}}catch(_){}\' 2>/dev/null || true';
+
 function getSentinelSnippet(hookName) {
   if (hookName === "post-checkout") {
     return `${SENTINEL_BLOCK_START}
 if [ "$3" = "1" ]; then
   if command -v node >/dev/null 2>&1 && [ -f scripts/prune-target.mjs ]; then
-    node scripts/prune-target.mjs --mark-branch-switch 2>/dev/null || true
+    ${SENTINEL_HOOK_CMD}
   fi
 fi
 ${SENTINEL_BLOCK_END}\n`;
   }
   return `${SENTINEL_BLOCK_START}
 if command -v node >/dev/null 2>&1 && [ -f scripts/prune-target.mjs ]; then
-  node scripts/prune-target.mjs --mark-branch-switch 2>/dev/null || true
+  ${SENTINEL_HOOK_CMD}
 fi
 ${SENTINEL_BLOCK_END}\n`;
 }
@@ -2003,6 +2006,7 @@ export {
   getSentinelSnippet,
   SENTINEL_BLOCK_START,
   SENTINEL_BLOCK_END,
+  SENTINEL_HOOK_CMD,
   KNOWN_TEST_HARNESSES,
   isEligibleDepsArtifact,
   setGitExecutorForTesting,

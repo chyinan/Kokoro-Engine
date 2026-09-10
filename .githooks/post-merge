@@ -4,7 +4,7 @@
 # Execution time: < 50ms. Never blocks or fails git operations.
 
 if command -v node >/dev/null 2>&1 && [ -f scripts/prune-target.mjs ]; then
-  node scripts/prune-target.mjs --mark-branch-switch 2>/dev/null || true
+  node -e 'const fs=require("fs");try{if(fs.readFileSync("scripts/prune-target.mjs","utf8").includes("markBranchSwitch")){import("./scripts/prune-target.mjs").then(m=>typeof m.markBranchSwitch==="function"&&m.markBranchSwitch()).catch(()=>{})}}catch(_){}' 2>/dev/null || true
 fi
 
 exit 0

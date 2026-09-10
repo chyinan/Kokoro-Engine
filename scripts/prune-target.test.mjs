@@ -35,6 +35,7 @@ import {
   isEligibleDepsArtifact,
   setGitExecutorForTesting,
   markBranchSwitch,
+  SENTINEL_HOOK_CMD,
 } from "./prune-target.mjs";
 
 describe("scripts/prune-target.mjs security & canonical containment", () => {
@@ -3186,11 +3187,12 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       const prunerSource = path.resolve("scripts/prune-target.mjs");
       fs.copyFileSync(prunerSource, path.join(scriptsDir, "prune-target.mjs"));
 
-      // Execute the exact command emitted in getSentinelSnippet():
-      // node scripts/prune-target.mjs --mark-branch-switch
+      // Execute the exact Node evaluation payload emitted in SENTINEL_HOOK_CMD
+      const evalMatch = SENTINEL_HOOK_CMD.match(/node -e '([^']+)'/);
+      const evalCode = evalMatch ? evalMatch[1] : "";
       const spawnResult = childProcess.spawnSync(
         process.execPath,
-        ["scripts/prune-target.mjs", "--mark-branch-switch"],
+        ["-e", evalCode],
         {
           cwd: tempRoot,
           encoding: "utf8",
@@ -3207,10 +3209,11 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       expect(fs.existsSync(path.join(externalDir, ".branch-switched"))).toBe(false);
     });
 
-    it("getSentinelSnippet emits node --mark-branch-switch command without raw shell redirection", () => {
+    it("getSentinelSnippet emits capability-detecting node command without raw shell redirection", () => {
       for (const hookName of ["post-checkout", "post-merge"]) {
         const snippet = getSentinelSnippet(hookName);
-        expect(snippet.includes("node scripts/prune-target.mjs --mark-branch-switch")).toBe(true);
+        expect(snippet.includes(SENTINEL_HOOK_CMD)).toBe(true);
+        expect(snippet.includes("markBranchSwitch")).toBe(true);
         expect(snippet.includes("mkdir -p src-tauri/target")).toBe(false);
         expect(snippet.includes("date +%s >")).toBe(false);
       }
@@ -3220,7 +3223,7 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
       const legacyHook = `#!/bin/sh\n# Custom pre-body\n${SENTINEL_BLOCK_START}\nif [ "$3" = "1" ]; then\n  mkdir -p src-tauri/target 2>/dev/null || true\n  date +%s > src-tauri/target/.branch-switched 2>/dev/null || true\nfi\n${SENTINEL_BLOCK_END}\necho "custom user logic"\nexit 0\n`;
 
       const upgraded = injectSentinelBlockIntoShellScript(legacyHook, "post-checkout");
-      expect(upgraded.includes("node scripts/prune-target.mjs --mark-branch-switch")).toBe(true);
+      expect(upgraded.includes(SENTINEL_HOOK_CMD)).toBe(true);
       expect(upgraded.includes("date +%s > src-tauri/target/.branch-switched")).toBe(false);
       expect(upgraded.includes("custom user logic")).toBe(true);
       expect(upgraded.includes("# Custom pre-body")).toBe(true);
@@ -3254,12 +3257,141 @@ describe("scripts/prune-target.mjs security & canonical containment", () => {
         expect(result.success).toBe(true);
 
         const updated = fs.readFileSync(path.join(fakeHooksDir, "post-checkout"), "utf8");
-        expect(updated.includes("node scripts/prune-target.mjs --mark-branch-switch")).toBe(true);
+        expect(updated.includes(SENTINEL_HOOK_CMD)).toBe(true);
         expect(updated.includes("mkdir -p src-tauri/target")).toBe(false);
         expect(updated.includes("date +%s >")).toBe(false);
       } finally {
         setGitExecutorForTesting(null);
       }
+    });
+
+    it("regression: injected hook against older script version (6e22dbe) performs capability detection and NEVER triggers destructive pruning", () => {
+      const scriptsDir = path.join(tempRoot, "scripts");
+      fs.mkdirSync(scriptsDir, { recursive: true });
+
+      // Retrieve older 6e22dbe version of scripts/prune-target.mjs
+      let oldScript = "";
+      try {
+        oldScript = childProcess.execSync("git show 6e22dbe:scripts/prune-target.mjs", {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        });
+      } catch (_) {}
+
+      if (!oldScript) {
+        // Fallback mock representation of 6e22dbe behavior: no markBranchSwitch export and unknown args trigger manual prune
+        oldScript = `
+import fs from "node:fs";
+import path from "node:path";
+export function runPruneTarget(args = process.argv.slice(2)) {
+  const isAuto = args.includes("--auto");
+  if (!isAuto) {
+    console.log("Kokoro Storage Sentinel - Target Pruner & Watchdog");
+    const incDir = path.join(process.cwd(), "src-tauri", "target", "debug", "incremental");
+    if (fs.existsSync(incDir)) {
+      const entries = fs.readdirSync(incDir);
+      for (const e of entries) {
+        fs.rmSync(path.join(incDir, e), { recursive: true, force: true });
+      }
+    }
+  }
+}
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : null;
+if (invokedPath && invokedPath.endsWith("prune-target.mjs")) {
+  runPruneTarget();
+}
+`;
+      }
+
+      fs.writeFileSync(path.join(scriptsDir, "prune-target.mjs"), oldScript, "utf8");
+
+      // Set up mock incremental compilation sessions matching Cargo hash format
+      const incDir = path.join(tempRoot, "src-tauri", "target", "debug", "incremental");
+      const sessionOld = path.join(incDir, "characters-1111111111111111");
+      const sessionNew = path.join(incDir, "characters-2222222222222222");
+      fs.mkdirSync(sessionOld, { recursive: true });
+      fs.mkdirSync(sessionNew, { recursive: true });
+      fs.writeFileSync(path.join(sessionOld, "dep-graph.bin"), "data");
+      fs.writeFileSync(path.join(sessionNew, "dep-graph.bin"), "data");
+
+      // Set deterministic mtime so sessionOld is older
+      fs.utimesSync(sessionOld, 1000, 1000);
+      fs.utimesSync(sessionNew, 2000, 2000);
+
+      // Verify that the OLD bare command (node scripts/prune-target.mjs --mark-branch-switch) WOULD have pruned
+      const reproResult = childProcess.spawnSync(
+        process.execPath,
+        ["scripts/prune-target.mjs", "--mark-branch-switch"],
+        {
+          cwd: tempRoot,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }
+      );
+      // Older script printed the manual prune banner and deleted the older session
+      expect(reproResult.stdout.includes("Kokoro Storage Sentinel - Target Pruner & Watchdog")).toBe(true);
+      expect(fs.existsSync(sessionOld)).toBe(false);
+
+      // Now recreate the session to test the NEW capability-detecting hook payload
+      fs.mkdirSync(sessionOld, { recursive: true });
+      fs.writeFileSync(path.join(sessionOld, "dep-graph.bin"), "data");
+      fs.utimesSync(sessionOld, 1000, 1000);
+      expect(fs.existsSync(sessionOld)).toBe(true);
+
+      // Execute the NEW injected hook payload (from SENTINEL_HOOK_CMD)
+      const evalMatch = SENTINEL_HOOK_CMD.match(/node -e '([^']+)'/);
+      const evalCode = evalMatch ? evalMatch[1] : "";
+
+      const hookResult = childProcess.spawnSync(
+        process.execPath,
+        ["-e", evalCode],
+        {
+          cwd: tempRoot,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }
+      );
+
+      // 1. Hook exits cleanly with code 0
+      expect(hookResult.status).toBe(0);
+
+      // 2. No manual pruner banner printed
+      expect(hookResult.stdout || "").not.toContain("Kokoro Storage Sentinel - Target Pruner & Watchdog");
+
+      // 3. CRITICAL: Compilation cache sessions remain 100% INTACT (no destructive pruning)
+      expect(fs.existsSync(sessionOld)).toBe(true);
+      expect(fs.existsSync(sessionNew)).toBe(true);
+      expect(fs.existsSync(path.join(sessionOld, "dep-graph.bin"))).toBe(true);
+    });
+
+    it("regression: injected hook against current modern script succeeds and writes .branch-switched marker", () => {
+      const scriptsDir = path.join(tempRoot, "scripts");
+      fs.mkdirSync(scriptsDir, { recursive: true });
+      const prunerSource = path.resolve("scripts/prune-target.mjs");
+      fs.copyFileSync(prunerSource, path.join(scriptsDir, "prune-target.mjs"));
+
+      const srcTauri = path.join(tempRoot, "src-tauri");
+      fs.mkdirSync(srcTauri, { recursive: true });
+
+      const evalMatch = SENTINEL_HOOK_CMD.match(/node -e '([^']+)'/);
+      const evalCode = evalMatch ? evalMatch[1] : "";
+
+      const hookResult = childProcess.spawnSync(
+        process.execPath,
+        ["-e", evalCode],
+        {
+          cwd: tempRoot,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }
+      );
+
+      expect(hookResult.status).toBe(0);
+      const markerPath = path.join(srcTauri, "target", ".branch-switched");
+      expect(fs.existsSync(markerPath)).toBe(true);
+      const ts = parseInt(fs.readFileSync(markerPath, "utf8").trim(), 10);
+      expect(Number.isFinite(ts)).toBe(true);
+      expect(ts).toBeGreaterThan(0);
     });
   });
 });
