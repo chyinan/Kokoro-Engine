@@ -46,6 +46,7 @@ Kokoro Engine 不是“聊天壳子 + 桌宠皮肤”。它是一个完整的桌
 - **All-in-one**：Live2D、LLM、TTS、STT等技术集成在一个运行时闭环。
 - **Built for extensibility**：高自由度 MOD 系统 + MCP 协议，天然面向扩展。
 - **Local-first**：本地存储记忆、离线优先、数据链路可控。
+- **Developer-friendly & Zero-waste**：告别 Rust/Tauri 项目常见的 `target` 目录数十 GB 暴涨与磁盘写满痛点，内置全链路自动闭环存储看门狗（KSS），支持分支切换孤儿消解、测试产物时效收敛与低空间紧急熔断，保障日常开发极速轻快。
 
 ## 一览
 
@@ -87,6 +88,10 @@ cd kokoro-engine
 npm install
 npm run tauri dev
 ```
+
+> 💡 **开发者友好说明（全自动存储看门狗与编译优化）**：
+> 频繁调试与测试 Rust 项目常导致 `target` 目录占用突破数十 GB。Kokoro Engine 内置了**全生命周期闭环存储看门狗**（开发期自动控水在 12GB 内、Git 分支切换感知并定向消解孤儿代际、测试二进制自动收敛、宿主驱动器可用空间 < 5GB 紧急熔断），日常无需任何手动清理。
+> 开发者可随时运行 `npm run storage:doctor` 进行一键存储体检，详见 [开发者存储占用与极速编译优化指南](docs/developer-storage-guide.md)。
 
 #### 构建发行版
 

@@ -34,6 +34,49 @@ jobs:
       - name: Run tests
         run: npm run test
 
+      - name: Exercise Git Sentinel hooks (POSIX)
+        run: |
+          # 1. Verify tracked mode in Git index is 100755
+          CHECKOUT_MODE=$(git ls-files -s .githooks/post-checkout | awk '{print $1}')
+          MERGE_MODE=$(git ls-files -s .githooks/post-merge | awk '{print $1}')
+          if [ "$CHECKOUT_MODE" != "100755" ] || [ "$MERGE_MODE" != "100755" ]; then
+            echo "::error::Git hooks not tracked with mode 100755 (post-checkout: $CHECKOUT_MODE, post-merge: $MERGE_MODE)"
+            exit 1
+          fi
+
+          # 2. Verify filesystem executable permission on Linux
+          test -x .githooks/post-checkout || (echo "::error::.githooks/post-checkout is not executable" && exit 1)
+          test -x .githooks/post-merge || (echo "::error::.githooks/post-merge is not executable" && exit 1)
+
+          # 3. Verify core.hooksPath was configured by postinstall
+          CURRENT_HOOKS=$(git config --get core.hooksPath || true)
+          if [ "$CURRENT_HOOKS" != ".githooks" ]; then
+            echo "::error::core.hooksPath is not .githooks (found: '$CURRENT_HOOKS')"
+            exit 1
+          fi
+
+          # 4. Exercise post-checkout hook via branch checkout
+          rm -f src-tauri/target/.branch-switched
+          CURRENT_REF=$(git rev-parse HEAD)
+          git checkout -b test-ci-sentinel-hook
+          if [ ! -f src-tauri/target/.branch-switched ]; then
+            echo "::error::post-checkout hook did not generate src-tauri/target/.branch-switched on branch checkout"
+            exit 1
+          fi
+
+          # 5. Clean up marker and exercise post-merge hook
+          rm -f src-tauri/target/.branch-switched
+          .githooks/post-merge
+          if [ ! -f src-tauri/target/.branch-switched ]; then
+            echo "::error::post-merge hook failed to execute"
+            exit 1
+          fi
+          rm -f src-tauri/target/.branch-switched
+
+          # 6. Safely restore prior Git ref and remove temporary branch
+          git checkout "$CURRENT_REF"
+          git branch -D test-ci-sentinel-hook
+
   backend:
     name: Backend Tests
     runs-on: ubuntu-latest

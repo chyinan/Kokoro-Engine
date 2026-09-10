@@ -89,3 +89,6 @@ tokio-test = "0.4"
 [profile.dev.package."*"]
 debug = 1
 
+[profile.test.package."*"]
+debug = 1
+

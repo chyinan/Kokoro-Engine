@@ -45,6 +45,7 @@ Kokoro Engine is not just a chat shell with a desktop pet skin. It is a complete
 - **All-in-one**: Live2D, LLM, TTS, and STT are integrated into one runtime loop.
 - **Built for extensibility**: a high-freedom MOD system and MCP protocol.
 - **Local-first**: local memory storage, offline-first behavior, and a controllable data path.
+- **Developer-friendly & Zero-waste**: Eliminates the notorious multi-gigabyte `target/` bloat and disk exhaustion common in Rust/Tauri projects. Built-in closed-loop storage sentinel (KSS) automatically handles branch-switch orphan eviction, test artifact decay, and drive-level low-disk circuit breaking for a fast, lightweight dev experience.
 
 ## Overview
 
@@ -86,6 +87,10 @@ cd kokoro-engine
 npm install
 npm run tauri dev
 ```
+
+> 💡 **Developer-Friendly Note (Automated Storage Management & Diagnostics)**:
+> Frequent Rust dev cycles often cause build caches to swell beyond dozens of gigabytes. Kokoro Engine includes an **automated, closed-loop storage watchdog** (dynamically regulates target dev cache within a 12 GB watermark, cleans orphan caches on Git branch switches, purges stale test binaries, and triggers emergency relief if free drive space drops below 5 GB) with zero manual intervention required.
+> Run `npm run storage:doctor` anytime for an instant health dashboard. See [Developer Storage & Fast Build Guide](docs/developer-storage-guide.md) for details.
 
 #### Build release
 

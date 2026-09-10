@@ -1,1 +1,2 @@
 src-tauri/migrations/*.sql text eol=lf
+.githooks/* text eol=lf

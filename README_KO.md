@@ -45,6 +45,7 @@ Kokoro Engine은 단순한 채팅 껍데기 + 데스크톱 펫 스킨이 아닙�
 - **All-in-one**: Live2D, LLM, TTS, STT를 하나의 런타임 루프로 통합.
 - **Built for extensibility**: 고자유도 MOD 시스템 + MCP 프로토콜.
 - **Local-first**: 로컬 메모리 저장, 오프라인 우선, 제어 가능한 데이터 경로.
+- **Developer-friendly & Zero-waste**: Rust/Tauri 프로젝트에서 흔히 발생하는 `target` 디렉터리 수십 GB 비대화 및 디스크 부족 문제를 완벽히 해결. 브랜치 전환 시 고아 캐시 자동 정리, 테스트 바이너리 수명 주기 관리, 여유 공간 부족 시 긴급 보호가 포함된 완전 자동화 스토리지 센티넬(KSS) 내장.
 
 ## 한눈에 보기
 
@@ -86,6 +87,10 @@ cd kokoro-engine
 npm install
 npm run tauri dev
 ```
+
+> 💡 **개발자 친화적 안내 (완전자동 스토리지 관리 및 빌드 최적화)**:
+> Rust 개발 중 빌드 캐시가 수십 GB로 폭증하는 것을 방지하기 위해 Kokoro Engine은 **완전자동 폐쇄루프 스토리지 워치독**을 탑재하고 있습니다(개발 중 12GB 이하 유지, Git 브랜치 전환 감지 및 고아 세션 정리, 디스크 여유 공간 5GB 미만 시 긴급 보호). 수동 정리 없이 쾌적하게 개발할 수 있습니다.
+> 언제든지 `npm run storage:doctor` 명령으로 스토리지 상태를 진단할 수 있으며, 자세한 내용은 [개발자 스토리지 및 빌드 가이드](docs/developer-storage-guide.md)를 참고하세요.
 
 #### 릴리스 빌드
 
