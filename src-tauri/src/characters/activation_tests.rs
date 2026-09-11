@@ -10,7 +10,7 @@ use crate::error::KokoroError;
 use crate::tts::config::{ProviderConfig, TtsSystemConfig};
 use async_trait::async_trait;
 use serde_json::json;
-use sqlx::SqlitePool;
+use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -126,6 +126,17 @@ impl ActivationRuntimeBackend for TestBackend {
 async fn pool() -> SqlitePool {
     let orchestrator = AIOrchestrator::new("sqlite::memory:").await.unwrap();
     orchestrator.db.clone()
+}
+
+async fn single_connection_pool() -> SqlitePool {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_millis(250))
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    pool
 }
 
 fn provider(id: &str, provider_type: &str) -> ProviderConfig {
@@ -1191,6 +1202,50 @@ async fn backend_failure_on_apply_restores_conversation_history_and_memory_bound
         vec!["user message".to_string(), "old response".to_string()]
     );
     assert_eq!(*backend.history_boundary.lock().await, 2);
+}
+
+#[tokio::test]
+async fn apply_and_restore_failures_recover_with_a_single_connection_pool() {
+    let pool = single_connection_pool().await;
+    insert_character(&pool, "old", "Old Char", json!({})).await;
+    insert_character(&pool, "next", "Next Char", json!({})).await;
+    let coordinator = ActivationCoordinator::default();
+    let backend = TestBackend::default();
+
+    let old_token = coordinator
+        .prepare(&pool, "old", &config(vec![], None), &[], &backend)
+        .await
+        .unwrap();
+    coordinator
+        .commit(&pool, old_token, &backend)
+        .await
+        .unwrap();
+
+    let next_token = coordinator
+        .prepare(&pool, "next", &config(vec![], None), &[], &backend)
+        .await
+        .unwrap();
+    *backend.fail_next_apply.lock().await = true;
+    *backend.fail_next_restore.lock().await = true;
+    *backend.state.lock().await = BackendRuntimeSnapshot {
+        character_id: "corrupted".into(),
+        ..Default::default()
+    };
+
+    let err = coordinator
+        .commit(&pool, next_token, &backend)
+        .await
+        .expect_err("activation must report the injected apply failure");
+
+    assert!(
+        err.to_string().contains("recovered from committed state"),
+        "recovery should complete before returning the activation error: {err}"
+    );
+    assert_eq!(backend.state.lock().await.character_id, "old");
+    assert!(
+        backend.degraded.lock().await.is_none(),
+        "successful recovery must not leave the backend degraded"
+    );
 }
 
 #[tokio::test]
