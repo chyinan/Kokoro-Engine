@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback, useDeferredV
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
-import { streamChat, cancelChatTurn, onChatTurnAcknowledged, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, editConversationMessage, listCharacters, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
+import { streamChat, cancelChatTurn, onChatTurnAcknowledged, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, editConversationMessage, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
 import type { CommittedCharacterRuntime, FailureEvent, ToolTraceItem, StreamChatResponse } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -15,7 +15,6 @@ import ConversationSidebar from "./ConversationSidebar";
 import { ChatMessage } from "./ChatMessage";
 import { createChatCharacterSynchronizer, type ChatCharacterSynchronizer } from "./chat-character-sync";
 import {
-    getCharacterHeaderDisplayName,
     getInitialCharacterConversationTarget,
     isFailureForActiveChat,
     shouldIgnoreLegacyChatError,
@@ -273,28 +272,6 @@ export default function ChatPanel({
         getActiveCharacterIdForConversationRestore,
     );
     const activeCharacterIdRef = useRef(activeCharacterId);
-    const [characterName, setCharacterName] = useState<string>(() => {
-        const committed = readJsonSetting<CommittedCharacterRuntime | null>(
-            APP_SETTING_KEYS.characterRuntimeCache,
-            null,
-        );
-        return getCharacterHeaderDisplayName(committed?.runtime?.character_name);
-    });
-
-    useEffect(() => {
-        let active = true;
-        if (!characterName || activeCharacterId) {
-            void listCharacters().then(chars => {
-                if (!active) return;
-                const match = chars.find(c => c.id === activeCharacterId);
-                if (match?.name) {
-                    setCharacterName(getCharacterHeaderDisplayName(match.name));
-                }
-            }).catch(() => {});
-        }
-        return () => { active = false; };
-    }, [activeCharacterId, characterName]);
-
     const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
     const activeConversationIdRef = useRef(activeConversationId);
     activeConversationIdRef.current = activeConversationId;
@@ -778,10 +755,6 @@ export default function ChatPanel({
         const handleRuntimeChanged = (event: Event): void => {
             const detail = (event as CustomEvent<CommittedCharacterRuntime>).detail;
             const eventCharacterId = detail?.runtime?.character_id;
-            const eventCharacterName = detail?.runtime?.character_name;
-            if (eventCharacterName) {
-                setCharacterName(getCharacterHeaderDisplayName(eventCharacterName));
-            }
             const targetConversationId = detail?.target_conversation_id ?? null;
             if (!shouldSynchronizeOnRuntimeChanged(
                 activeCharacterIdRef.current,
@@ -3192,17 +3165,6 @@ export default function ChatPanel({
                     <span className="font-heading text-sm font-semibold tracking-wider uppercase text-[var(--color-text-secondary)] flex-shrink-0">
                         {isStreaming ? t("chat.status.streaming") : t("chat.status.chat")}
                     </span>
-                    {characterName && (
-                        <span className="flex items-center gap-1.5 min-w-0">
-                            <span className="text-[var(--color-text-muted)] opacity-30 text-xs select-none">/</span>
-                            <span
-                                className="text-xs font-medium text-[var(--color-text-primary)] truncate max-w-[130px]"
-                                title={characterName}
-                            >
-                                {characterName}
-                            </span>
-                        </span>
-                    )}
                 </div>
                 <div className="flex items-center gap-1">
                     <motion.button

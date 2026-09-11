@@ -160,6 +160,28 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
         vi.restoreAllMocks();
     });
 
+    it("does not show the character name in the chat header", async () => {
+        localStorage.setItem("kokoro_character_runtime_cache", JSON.stringify({
+            runtime: { character_name: "Kokoro" },
+        }));
+
+        try {
+            await act(async () => {
+                root.render(createElement(ChatPanel));
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+            });
+
+            const header = Array.from(container.querySelectorAll("div")).find(element =>
+                element.className.includes("border-b border-[var(--color-border)]"),
+            );
+
+            expect(header?.textContent).toContain("chat.status.chat");
+            expect(header?.textContent).not.toContain("Kokoro");
+        } finally {
+            localStorage.removeItem("kokoro_character_runtime_cache");
+        }
+    });
+
     it("clears busy state and finalizes turn when chat-turn-finish event is dropped", async () => {
         await act(async () => {
             root.render(createElement(ChatPanel));
