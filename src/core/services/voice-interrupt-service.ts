@@ -14,6 +14,8 @@ export class VoiceInterruptService {
     private sourceNode: MediaStreamAudioSourceNode | null = null;
     private rafId: number | null = null;
     private active = false;
+    private starting = false;
+    private generation = 0;
 
     // VAD parameters
     private threshold = 0.04;        // RMS threshold for speech detection
@@ -31,10 +33,13 @@ export class VoiceInterruptService {
      * Call this when TTS starts playing.
      */
     async start(): Promise<void> {
-        if (this.active) return;
+        if (this.active || this.starting) return;
+        this.starting = true;
+        const generation = ++this.generation;
 
+        let stream: MediaStream;
         try {
-            this.stream = await navigator.mediaDevices.getUserMedia({
+            stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     echoCancellation: true,
                     noiseSuppression: true,
@@ -42,10 +47,20 @@ export class VoiceInterruptService {
                 },
             });
         } catch (err) {
+            if (generation !== this.generation) return;
+            this.starting = false;
             console.warn("[VoiceInterrupt] Microphone access denied:", err);
             return;
         }
 
+        // A stopped request may still obtain permission; release its own stream
+        // without touching a newer start's resources or pending state.
+        if (generation !== this.generation) {
+            stream.getTracks().forEach(t => t.stop());
+            return;
+        }
+        this.starting = false;
+        this.stream = stream;
         this.audioCtx = new AudioContext();
         this.analyser = this.audioCtx.createAnalyser();
         this.analyser.fftSize = 512;
@@ -68,6 +83,8 @@ export class VoiceInterruptService {
      * Call this when TTS finishes or is interrupted.
      */
     stop(): void {
+        this.generation++;
+        this.starting = false;
         this.active = false;
 
         if (this.rafId != null) {
