@@ -56,6 +56,7 @@ export class AudioStreamManager {
     private playStateListeners: ((playing: boolean) => void)[] = [];
     private animationFrameId?: number;
     private analysisActive = false;
+    private playbackGeneration = 0;
 
     constructor() {
         this.audioContext = new AudioContext();
@@ -99,7 +100,9 @@ export class AudioStreamManager {
     }
 
     public async queueAudio(data: Uint8Array | number[]) {
+        const generation = this.playbackGeneration;
         await this.resume();
+        if (generation !== this.playbackGeneration) return;
 
         const chunk = data instanceof Uint8Array ? data : new Uint8Array(data);
         if (chunk.byteLength === 0) {
@@ -111,7 +114,7 @@ export class AudioStreamManager {
         }
 
         if (this.streamMode === "wav") {
-            await this.queueWavChunk(chunk);
+            await this.queueWavChunk(chunk, generation);
             return;
         }
 
@@ -156,6 +159,8 @@ export class AudioStreamManager {
     }
 
     public stop() {
+        // Invalidate pending resume/decode operations before tearing down playback.
+        this.playbackGeneration++;
         this.audioElement.pause();
         if (this.objectUrl) {
             this.audioElement.removeAttribute("src");
@@ -231,13 +236,15 @@ export class AudioStreamManager {
         }, { once: true });
     }
 
-    private async queueWavChunk(chunk: Uint8Array) {
+    private async queueWavChunk(chunk: Uint8Array, generation: number) {
         try {
             const buffer = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
             const decoded = await this.audioContext.decodeAudioData(buffer);
+            if (generation !== this.playbackGeneration) return;
             this.wavQueue.push(decoded);
             this.playNextWav();
         } catch (error) {
+            if (generation !== this.playbackGeneration) return;
             console.error("[Audio] Failed to decode WAV chunk:", error);
             this.stop();
         }
@@ -263,9 +270,8 @@ export class AudioStreamManager {
         this.startAnalysis();
 
         source.onended = () => {
-            if (this.currentSource === source) {
-                this.currentSource = null;
-            }
+            if (this.currentSource !== source) return;
+            this.currentSource = null;
             if (this.wavQueue.length > 0) {
                 this.playNextWav();
                 return;
