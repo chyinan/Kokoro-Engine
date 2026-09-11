@@ -89,9 +89,9 @@ npm install
 npm run tauri dev
 ```
 
-> 💡 **开发者友好说明（全自动存储看门狗与编译优化）**：
-> 频繁调试与测试 Rust 项目常导致 `target` 目录占用突破数十 GB。Kokoro Engine 内置了**全生命周期闭环存储看门狗**（开发期自动控水在 12GB 内、Git 分支切换感知并定向消解孤儿代际、测试二进制自动收敛、宿主驱动器可用空间 < 5GB 紧急熔断），日常无需任何手动清理。
-> 开发者可随时运行 `npm run storage:doctor` 进行一键存储体检，详见 [开发者存储占用与极速编译优化指南](docs/developer-storage-guide.md)。
+> 💡 **开发者友好说明（100% 全自动化存储闭环看门狗）**：
+> 频繁调试与测试 Rust/Tauri 项目常导致 `target` 目录突破数十 GB 甚至写满磁盘。Kokoro Engine 内置了**全生命周期闭环存储看门狗（Kokoro Storage Sentinel, KSS）**：`npm install` 自动配置安全 Hooks，分支切换极速感知并定向消解孤儿代际，启动 `npm run tauri dev` 或 `npm run dev` 自动控水在 12GB 警戒线内（带编译器锁安全避让），测试产物自动按 30 分钟窗口收敛，驱动器剩余空间 < 5GB 自动紧急熔断。**日常开发全程自动化静默护航，完全无需任何手动清理命令**。
+> 开发者亦可随时运行 `npm run storage:doctor` 进行透明体检，详见 [开发者存储占用全生命周期闭环管理与极速编译指南](docs/developer-storage-guide.md)。
 
 #### 构建发行版
 
