@@ -583,6 +583,13 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
             setConfirmDeleteId(null);
         } catch (error) {
             console.error("[CharacterManager] Failed to activate character:", error);
+            setImportFeedback({
+                kind: "error",
+                message: t("settings.errors.character_activate", {
+                    defaultValue: `Unable to activate character: ${getKokoroErrorMessage(error)}`,
+                    error: getKokoroErrorMessage(error),
+                }),
+            });
         }
     };
 
@@ -618,6 +625,13 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
             await selectCharacter(newChar, nextList);
         } catch (err) {
             console.error("[CharacterManager] Failed to create character:", err);
+            setImportFeedback({
+                kind: "error",
+                message: t("settings.persona.status.create_failed", {
+                    defaultValue: `Unable to create character: ${getKokoroErrorMessage(err)}`,
+                    error: getKokoroErrorMessage(err),
+                }),
+            });
         }
     };
 
@@ -747,6 +761,13 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
             }
         } catch (err) {
             console.error("[CharacterManager] Failed to delete character:", err);
+            setImportFeedback({
+                kind: "error",
+                message: t("settings.persona.status.delete_failed", {
+                    defaultValue: `Unable to delete character: ${getKokoroErrorMessage(err)}`,
+                    error: getKokoroErrorMessage(err),
+                }),
+            });
         }
     };
 

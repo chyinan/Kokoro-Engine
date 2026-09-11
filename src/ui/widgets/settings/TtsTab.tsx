@@ -11,7 +11,7 @@ import { Trash2, RefreshCw } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { inputClasses, labelClasses, sectionHeadingClasses } from "../../styles/settings-primitives";
 import { Select } from "@/components/ui/select";
-import { synthesize, listGptSovitsModels } from "../../../lib/kokoro-bridge";
+import { getKokoroErrorMessage, synthesize, listGptSovitsModels } from "../../../lib/kokoro-bridge";
 import type { GptSovitsModels } from "../../../lib/kokoro-bridge";
 import type { ProviderStatus, VoiceProfile, TtsSystemConfig } from "../../../lib/kokoro-bridge";
 import type { ProviderConfigData } from "../../../core/types/mod";
@@ -91,6 +91,7 @@ export default function TtsTab({
 }: TtsTabProps) {
     const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
     const [scannedModels, setScannedModels] = useState<Record<string, GptSovitsModels>>({});
+    const [testError, setTestError] = useState<string | null>(null);
     const { t } = useTranslation();
     const activeProvider = ttsConfig?.providers.find(p => p.id === ttsProviderId);
     const isActiveReferenceCloneProvider = isReferenceCloneProviderType(activeProvider?.provider_type);
@@ -349,12 +350,16 @@ export default function TtsTab({
                 <div className="pt-2">
                     <button
                         onClick={() => {
-                            synthesize("Hello! This is a test of the TTS system.", {
+                            setTestError(null);
+                            void synthesize("Hello! This is a test of the TTS system.", {
                                 provider_id: ttsProviderId || undefined,
                                 voice: ttsVoice || undefined,
                                 speed: parseFloat(ttsSpeed || "1.0"),
                                 pitch: parseFloat(ttsPitch || "1.0"),
-                            }).catch(err => console.error("[TTS] Test failed:", err));
+                            }).catch(err => {
+                                console.error("[TTS] Test failed:", err);
+                                setTestError(getKokoroErrorMessage(err));
+                            });
                         }}
                         className={clsx(
                             "w-full py-2.5 rounded-lg text-xs font-heading font-semibold tracking-wider uppercase transition-all",
@@ -365,6 +370,11 @@ export default function TtsTab({
                     >
                         {t("settings.tts.active_settings.test")}
                     </button>
+                    {testError && (
+                        <p role="alert" className="mt-2 text-xs text-[var(--color-error)]">
+                            {testError}
+                        </p>
+                    )}
                 </div>
             </div>
 

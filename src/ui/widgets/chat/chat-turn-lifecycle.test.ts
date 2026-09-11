@@ -12,6 +12,7 @@ import {
     hasResidualActiveTurn,
     mergeResyncedConversationMessages,
     isChatSessionCurrent,
+    shouldAppendDelayedChatError,
     registerExternalTurn,
     unregisterExternalTurn,
     isAuthorizedExternalTurn,
@@ -1382,6 +1383,15 @@ describe("isChatSessionCurrent", () => {
 
     it("returns false when both generation and conversation id changed", () => {
         expect(isChatSessionCurrent(1, "conv-1", 2, "conv-2")).toBe(false);
+    });
+});
+
+describe("shouldAppendDelayedChatError", () => {
+    it("rejects a delayed error after a newer request or session starts", () => {
+        expect(shouldAppendDelayedChatError("req-1", 1, 1, "req-1")).toBe(true);
+        expect(shouldAppendDelayedChatError("req-1", 2, 1, "req-1")).toBe(false);
+        expect(shouldAppendDelayedChatError("req-1", 1, 1, "req-2")).toBe(false);
+        expect(shouldAppendDelayedChatError("req-1", 1, 1, null)).toBe(false);
     });
 });
 

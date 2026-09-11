@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
     ensureTurnMessage,
+    getApprovalErrorMessage,
     stripStreamingMarkup,
     updateTurnMessage,
     type ChatPanelMessage,
@@ -37,5 +38,12 @@ describe("chat turn state", () => {
         const state = turn({ messageIndex: 0 });
         const next = updateTurnMessage(messages, state, (message) => ({ ...message, text: "hello" }));
         expect(next[0]?.text).toBe("hello");
+    });
+
+    it("keeps structured approval errors readable", () => {
+        expect(getApprovalErrorMessage({
+            code: "TOOL_APPROVAL_EXPIRED",
+            message: "tool approval has expired",
+        })).toBe("tool approval has expired");
     });
 });

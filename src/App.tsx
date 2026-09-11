@@ -824,6 +824,11 @@ function App() {
     }
   }
 
+  async function reconcileCharacterCatalogAfterContentChange(): Promise<void> {
+    await loadCharacterCatalog();
+    await characterActivation.recoverCommittedRuntime();
+  }
+
   async function updateActiveCharacterRuntime(
     overrides: Readonly<CharacterRuntimeOverrides>,
   ): Promise<void> {
@@ -2729,6 +2734,7 @@ function App() {
             }}
             onCharacterRuntimeChange={updateActiveCharacterRuntime}
             onCharactersChanged={(nextCharacters) => setCharacters(Array.from(nextCharacters))}
+            onCharacterCatalogChanged={reconcileCharacterCatalogAfterContentChange}
             characters={characters}
             resolveAvatarUrl={(path) => mapCharacterAvatarUrl(path, convertFileSrc)}
             // User Profile (from localStorage)

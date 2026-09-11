@@ -50,6 +50,7 @@ export type ContentLibraryProps = {
   readonly dependencies?: Readonly<ContentLibraryDependencies>;
   readonly installedVersions?: Readonly<Record<string, string>>;
   readonly registryUrl?: string;
+  readonly onCharacterCatalogChanged?: () => Promise<void> | void;
 };
 
 const defaultDependencies: ContentLibraryDependencies = {
@@ -90,6 +91,15 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
   const [permissionTarget, setPermissionTarget] = useState<{ readonly entry: RegistryEntry; readonly operation: "install" | "update" } | null>(null);
 
   const dispatch = (event: ContentLibraryEvent) => setState((current) => reduceContentLibraryState(current, event));
+
+  const reconcileCharacterCatalog = async (contentType: ContentLibraryTab): Promise<void> => {
+    if (contentType !== "character" || props.onCharacterCatalogChanged === undefined) return;
+    try {
+      await props.onCharacterCatalogChanged();
+    } catch (error) {
+      console.warn("[ContentLibrary] Failed to reconcile character catalog after package operation:", error);
+    }
+  };
 
   const loadRegistry = async (): Promise<void> => {
     setLoading(true);
@@ -141,6 +151,7 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
           if (entry.content_type === "character") {
             const installed = await dependencies.installCharacter(entry.id, entry.version, props.registryUrl);
             dispatch({ type: "operation-succeeded", operation, contentType: entry.content_type, entryId: entry.id, version: installed.version || entry.version });
+            await reconcileCharacterCatalog(entry.content_type);
           } else {
             await dependencies.installMod(entry, permissionConfirmed, props.registryUrl);
             dispatch({ type: "operation-succeeded", operation, contentType: entry.content_type, entryId: entry.id, version: entry.version });
@@ -149,6 +160,7 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
           if (entry.content_type === "character") {
             const installed = await dependencies.installCharacter(entry.id, entry.version, props.registryUrl);
             dispatch({ type: "operation-succeeded", operation, contentType: entry.content_type, entryId: entry.id, version: installed.version || entry.version });
+            await reconcileCharacterCatalog(entry.content_type);
           } else {
             await dependencies.update(entry, permissionConfirmed, props.registryUrl);
             dispatch({ type: "operation-succeeded", operation, contentType: entry.content_type, entryId: entry.id, version: entry.version });
@@ -160,6 +172,7 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
             await dependencies.remove(entry);
           }
           dispatch({ type: "operation-succeeded", operation, contentType: entry.content_type, entryId: entry.id });
+          await reconcileCharacterCatalog(entry.content_type);
         }
       } catch (error) {
         dispatch({ type: "operation-failed", operation, contentType: entry.content_type, entryId: entry.id, error });
@@ -185,6 +198,7 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
         if (!dependencies.installCharacterFromUrl) throw new Error("character URL installation is unavailable");
         const installed = await dependencies.installCharacterFromUrl(target.url);
         dispatch({ type: "operation-succeeded", operation: "install", contentType: target.contentType, entryId: installed.id, version: installed.version });
+        await reconcileCharacterCatalog(target.contentType);
       }
       setUrl("");
     } catch (error) {

@@ -164,6 +164,7 @@ interface SettingsPanelProps {
     onActivateCharacter: (characterId: string) => Promise<void>;
     onCharacterRuntimeChange: (overrides: Readonly<CharacterRuntimeOverrides>) => Promise<void>;
     onCharactersChanged?: (characters: ReadonlyArray<CharacterRecord>) => void;
+    onCharacterCatalogChanged?: () => Promise<void> | void;
     characters?: CharacterRecord[];
     resolveAvatarUrl?: (path: string) => string;
     // User Profile
@@ -317,7 +318,7 @@ function normalizeTtsVoice(
     return getDefaultTtsVoice(providerId, voices);
 }
 
-export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange: _onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, resolveAvatarUrl, initialTelegramStatus, onVisionConfigChange, onActivateCharacter, onCharacterRuntimeChange, onCharactersChanged, characterToEditId, activeCharacterId }: SettingsPanelProps) {
+export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange: _onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, resolveAvatarUrl, initialTelegramStatus, onVisionConfigChange, onActivateCharacter, onCharacterRuntimeChange, onCharactersChanged, onCharacterCatalogChanged, characterToEditId, activeCharacterId }: SettingsPanelProps) {
     const { t, i18n } = useTranslation();
     const [internalActiveTab, setInternalActiveTab] = useState<SettingsTabId>(() => {
         const saved = readStringSetting(APP_SETTING_KEYS.settingsActiveTab, "");
@@ -1283,7 +1284,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                 <div className={clsx(activeTab === "mods" ? "block" : "hidden", "min-h-[812px]")}>
                                     <div className="flex min-h-[812px] flex-col gap-3">
                                         <div className="h-[400px] shrink-0">
-                                            <ContentLibrary />
+                                            <ContentLibrary onCharacterCatalogChanged={onCharacterCatalogChanged} />
                                         </div>
                                         <div className="h-[400px] shrink-0">
                                             <ModList />

@@ -310,7 +310,10 @@ export function useVoiceInput(
             console.error("Failed to start mic:", err);
             await stopCapture().catch(() => undefined);
             captureTransport.current = null;
-            setState(VoiceState.Error);
+            // Startup failure must leave the control retryable.  The old Error
+            // state was not handled by stop(), so a denied permission or a
+            // missing device permanently locked the microphone button.
+            setState(VoiceState.Idle);
         }
     }, [state, performSnapshot, startNativeCapture, startWebCapture, stopCapture]);
 

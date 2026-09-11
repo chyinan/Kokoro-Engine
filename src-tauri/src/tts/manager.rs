@@ -306,6 +306,8 @@ impl TtsService {
             })
             .buffered(2); // Pipeline depth
 
+        let mut synthesis_error: Option<String> = None;
+
         // Process results in order
         while let Some(result) = stream.next().await {
             match result {
@@ -323,6 +325,10 @@ impl TtsService {
                             }
                             Err(e) => {
                                 tracing::error!(target: "tts", "Stream error for '{}': {}", sentence, e);
+                                record_tts_error(
+                                    &mut synthesis_error,
+                                    format!("TTS stream error for '{}': {}", sentence, e),
+                                );
                                 failed = true;
                                 break;
                             }
@@ -355,6 +361,7 @@ impl TtsService {
                 Ok(_) => {} // Should not happen
                 Err(e) => {
                     tracing::error!(target: "tts", "{}", e);
+                    record_tts_error(&mut synthesis_error, e);
                 }
             }
         }
@@ -362,6 +369,10 @@ impl TtsService {
         // Emit End
         app.emit("tts:end", TtsEndEvent { text: text.clone() })
             .map_err(|e| e.to_string())?;
+
+        if let Some(error) = synthesis_error {
+            return Err(error);
+        }
 
         if let Some(hooks) = hook_runtime.as_ref() {
             hooks
@@ -584,4 +595,24 @@ fn split_sentences(text: &str) -> Vec<&str> {
         }
     }
     result
+}
+
+fn record_tts_error(current: &mut Option<String>, error: String) {
+    if current.is_none() {
+        *current = Some(error);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::record_tts_error;
+
+    #[test]
+    fn records_the_first_synthesis_error_for_the_command_result() {
+        let mut error = None;
+        record_tts_error(&mut error, "provider unavailable".to_string());
+        record_tts_error(&mut error, "second sentence failed".to_string());
+
+        assert_eq!(error.as_deref(), Some("provider unavailable"));
+    }
 }

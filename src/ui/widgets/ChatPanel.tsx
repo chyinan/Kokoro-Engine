@@ -47,6 +47,7 @@ import {
     hasResidualActiveTurn,
     mergeResyncedConversationMessages,
     isChatSessionCurrent,
+    shouldAppendDelayedChatError,
     isAuthorizedExternalTurn,
     DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS,
     DEFAULT_BACKEND_PREPARATION_WATCHDOG_TIMEOUT_MS,
@@ -1023,7 +1024,10 @@ export default function ChatPanel({
             const playback = getTtsPlaybackSettings();
             if (!isCancelRequested && res?.status !== "cancelled" && playback.enabled && cleanText.trim()) {
                 const { enabled: _enabled, ...ttsConfig } = playback;
-                synthesize(cleanText.trim(), ttsConfig).catch(err => console.error("[TTS] Auto-speak failed via fallback teardown:", err));
+                synthesize(cleanText.trim(), ttsConfig).catch(err => {
+                    console.error("[TTS] Auto-speak failed via fallback teardown:", err);
+                    setError(getAsyncErrorMessage(err));
+                });
             }
         }
 
@@ -2046,7 +2050,10 @@ export default function ChatPanel({
                         if (status === "completed" && playback.enabled && cleanText.trim()) {
                             console.log("[TTS] Auto-speak triggered, text length:", cleanText.length);
                             const { enabled: _enabled, ...ttsConfig } = playback;
-                            synthesize(cleanText.trim(), ttsConfig).catch(err => console.error("[TTS] Auto-speak failed:", err));
+                            synthesize(cleanText.trim(), ttsConfig).catch(err => {
+                                console.error("[TTS] Auto-speak failed:", err);
+                                setError(getAsyncErrorMessage(err));
+                            });
                         }
                     }),
 
@@ -2362,6 +2369,14 @@ export default function ChatPanel({
                 lastFailedRequestRef.current = { message: trimmed || "(image attached)", images: imagesToSend.length > 0 ? imagesToSend : undefined, allowImageGen };
 
                 setTimeout(() => {
+                    if (!shouldAppendDelayedChatError(
+                        clientRequestId,
+                        conversationGenerationRef.current,
+                        requestGeneration,
+                        latestClientRequestIdRef.current,
+                    )) {
+                        return;
+                    }
                     setMessages(prev => [...prev, {
                         role: "kokoro",
                         text: t("chat.errors.connection_error"),

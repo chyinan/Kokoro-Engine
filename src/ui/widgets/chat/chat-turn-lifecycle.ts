@@ -672,3 +672,16 @@ export function isChatSessionCurrent(
         currentConversationId === startConversationId
     );
 }
+
+/**
+ * Delayed request errors may only update the UI while their request is still
+ * the latest request in the current conversation generation.
+ */
+export function shouldAppendDelayedChatError(
+    clientRequestId: string,
+    currentGeneration: number,
+    requestGeneration: number,
+    latestClientRequestId: string | null,
+): boolean {
+    return currentGeneration === requestGeneration && latestClientRequestId === clientRequestId;
+}

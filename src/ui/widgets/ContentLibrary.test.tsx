@@ -111,6 +111,18 @@ describe("ContentLibrary", () => {
     act(() => root.unmount());
   });
 
+  it("notifies the app to reconcile the character catalog after installation", async () => {
+    const onCharacterCatalogChanged = vi.fn(async () => undefined);
+    const { container, root } = renderLibrary({ onCharacterCatalogChanged });
+    await act(async () => { await Promise.resolve(); });
+
+    click(container, '[data-content-action="install:kokoro"]');
+    await act(async () => { await Promise.resolve(); });
+
+    expect(onCharacterCatalogChanged).toHaveBeenCalledOnce();
+    act(() => root.unmount());
+  });
+
   it("updates and removes characters through character package operations", async () => {
     const installCharacter = vi.fn(async () => ({ id: "kokoro", version: "1.1.0", name: "Kokoro", trust: "official", package_dir: "" }));
     const removeCharacter = vi.fn(async () => undefined);

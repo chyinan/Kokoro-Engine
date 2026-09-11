@@ -424,6 +424,39 @@ describe("CharacterManager lifecycle and draft management", () => {
     expect(saveResult.errors?.length ?? 0).toBe(0);
   });
 
+  it("shows activation failures in the settings surface instead of only logging them", async () => {
+    const onActivateCharacter = vi.fn(async () => {
+      throw new Error("activation failed");
+    });
+
+    await act(async () => {
+      root.render(
+        createElement(CharacterManager as any, {
+          characters: [char1, char2],
+          activeCharacterId: "char-1",
+          characterToEditId: "char-1",
+          onActivateCharacter,
+        }),
+      );
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+
+    const rows = container.querySelectorAll(".group.relative");
+    const secondCharacterButton = rows[1]?.querySelector("button");
+    expect(secondCharacterButton).not.toBeNull();
+
+    await act(async () => {
+      secondCharacterButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("settings.errors.character_activate");
+  });
+
   it("editing fields then clicking current character retains draft and allows global save and cancel", async () => {
     const managerRef = createRef<CharacterManagerRef>();
     const onActivateCharacter = vi.fn(async () => undefined);

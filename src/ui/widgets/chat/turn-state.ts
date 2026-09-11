@@ -140,7 +140,22 @@ export function buildToolTraceItem(event: {
 }
 
 export function getApprovalErrorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
+    if (error instanceof Error) {
+        return error.message;
+    }
+    if (typeof error === "object" && error !== null) {
+        const message = (error as { readonly message?: unknown }).message;
+        if (typeof message === "string" && message.length > 0) {
+            return message;
+        }
+        try {
+            const serialized = JSON.stringify(error);
+            if (typeof serialized === "string") return serialized;
+        } catch {
+            // Fall through to the generic string conversion for unusual host objects.
+        }
+    }
+    return String(error);
 }
 
 export function getApprovalRequestId(tool: ToolTraceItem): string | null {
