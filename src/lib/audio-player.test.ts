@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 type SetupResult = {
   decodeAudioDataMock: ReturnType<typeof vi.fn>;
   isTypeSupportedMock: ReturnType<typeof vi.fn>;
+  sources: AudioBufferSourceNode[];
 };
 
 function setupAudioEnvironment(): SetupResult {
@@ -11,6 +12,7 @@ function setupAudioEnvironment(): SetupResult {
 
   const decodeAudioDataMock = vi.fn().mockResolvedValue({ duration: 1 });
   const isTypeSupportedMock = vi.fn().mockReturnValue(true);
+  const sources: AudioBufferSourceNode[] = [];
 
   const analyser = {
     fftSize: 0,
@@ -52,7 +54,7 @@ function setupAudioEnvironment(): SetupResult {
     }
 
     createBufferSource() {
-      return {
+      const source = {
         buffer: null,
         connect: vi.fn(),
         disconnect: vi.fn(),
@@ -60,6 +62,8 @@ function setupAudioEnvironment(): SetupResult {
         stop: vi.fn(),
         onended: null,
       } as unknown as AudioBufferSourceNode;
+      sources.push(source);
+      return source;
     }
 
     resume = vi.fn().mockResolvedValue(undefined);
@@ -94,6 +98,7 @@ function setupAudioEnvironment(): SetupResult {
   return {
     decodeAudioDataMock,
     isTypeSupportedMock,
+    sources,
   };
 }
 
@@ -103,6 +108,84 @@ describe("AudioStreamManager format routing", () => {
   beforeEach(() => {
     vi.resetModules();
     env = setupAudioEnvironment();
+  });
+
+  const wavChunk = new Uint8Array([
+    0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00,
+    0x57, 0x41, 0x56, 0x45,
+  ]);
+
+  function deferDecode() {
+    let resolve!: (buffer: AudioBuffer) => void;
+    let reject!: (error: Error) => void;
+    env.decodeAudioDataMock.mockImplementationOnce(() => new Promise<AudioBuffer>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    }));
+    return {
+      finish: () => resolve({ duration: 1 } as AudioBuffer),
+      fail: () => reject(new Error("stale decode failure")),
+    };
+  }
+
+  it("discards audio stopped while waiting for resume", async () => {
+    const { AudioStreamManager } = await import("./audio-player");
+    const manager = new AudioStreamManager();
+    let resume!: () => void;
+    vi.spyOn(manager, "resume").mockImplementationOnce(() => new Promise<void>(resolve => {
+      resume = resolve;
+    }));
+    const pending = manager.queueAudio(wavChunk);
+    manager.stop();
+    resume();
+    await pending;
+    expect(env.decodeAudioDataMock).not.toHaveBeenCalled();
+    expect(env.sources).toHaveLength(0);
+    expect(manager.isPlaying).toBe(false);
+  });
+
+  it.each(["stop", "clearQueue"] as const)("does not restart pending WAV decoding after %s", async (action) => {
+    const { AudioStreamManager } = await import("./audio-player");
+    const manager = new AudioStreamManager();
+    const decode = deferDecode();
+    const pending = manager.queueAudio(wavChunk);
+    await Promise.resolve();
+    expect(env.decodeAudioDataMock).toHaveBeenCalledTimes(1);
+    manager[action]();
+    decode.finish();
+    await pending;
+    expect(env.sources).toHaveLength(0);
+    expect(manager.isPlaying).toBe(false);
+  });
+
+  it.each(["finish", "fail"] as const)("ignores stale decode %s after new playback starts", async (outcome) => {
+    const { AudioStreamManager } = await import("./audio-player");
+    const manager = new AudioStreamManager();
+    const decode = deferDecode();
+    const pending = manager.queueAudio(wavChunk);
+    await Promise.resolve();
+    manager.clearQueue();
+    await manager.queueAudio(wavChunk);
+    decode[outcome]();
+    await pending;
+    expect(manager.isPlaying).toBe(true);
+    expect(env.sources).toHaveLength(1);
+    expect(env.sources[0].stop).not.toHaveBeenCalled();
+    env.sources[0].onended?.call(env.sources[0], new Event("ended"));
+    expect(env.sources).toHaveLength(1);
+    expect(manager.isPlaying).toBe(false);
+  });
+
+  it("ignores the stopped source's delayed ended event during new playback", async () => {
+    const { AudioStreamManager } = await import("./audio-player");
+    const manager = new AudioStreamManager();
+    await manager.queueAudio(wavChunk);
+    const oldSource = env.sources[0];
+    manager.stop();
+    await manager.queueAudio(wavChunk);
+    oldSource.onended?.call(oldSource, new Event("ended"));
+    expect(manager.isPlaying).toBe(true);
+    expect(env.sources[1].stop).not.toHaveBeenCalled();
   });
 
   it("detects WAV container from RIFF/WAVE header", async () => {
