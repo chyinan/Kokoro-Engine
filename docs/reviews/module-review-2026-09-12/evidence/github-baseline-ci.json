@@ -1,0 +1,9 @@
+﻿{
+    "command":  "gh run list --repo chyinan/Kokoro-Engine --commit 8ea9cf4377cbec642e57ec3b9b3498a7ae13d893 --limit 20 --json databaseId,headSha,name,status,conclusion,url,createdAt",
+    "workingDirectory":  "D:\\Programs\\Kokoro-Engine",
+    "startedUtc":  "2026-09-12T04:08:00.6017789+00:00",
+    "finishedUtc":  "2026-09-12T04:08:02.0424782+00:00",
+    "durationSeconds":  1.4406993,
+    "exitCode":  0,
+    "log":  "D:\\Programs\\Kokoro-Engine\\docs\\reviews\\module-review-2026-09-12\\evidence\\github-baseline-ci.log"
+}

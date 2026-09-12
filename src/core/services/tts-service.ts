@@ -38,9 +38,6 @@ class BrowserSpeechSynthesis {
             return;
         }
 
-        // Cancel any ongoing speech
-        this.synthesis.cancel();
-
         const utterance = new SpeechSynthesisUtterance(text);
 
         if (speed != null) utterance.rate = speed;
@@ -74,6 +71,9 @@ export class TtsService {
     private interruptCleanup: (() => void) | null = null;
     /** Generation counter — incremented on each init/cleanup to invalidate stale async listeners */
     private generation = 0;
+    /** Playback generation — invalidates audio that arrives after a stream is interrupted/ended. */
+    private playbackGeneration = 0;
+    private isStreamActive = false;
 
     async init() {
         // Tear down any previous listeners before re-registering
@@ -86,6 +86,8 @@ export class TtsService {
         const unlistenStart = await listen<TtsStartEvent>("tts:start", (_event) => {
             if (this.generation !== gen) return;
             console.log("[TTS] Started:", _event.payload.text);
+            this.playbackGeneration++;
+            this.isStreamActive = true;
             audioPlayer.clearQueue();
             this.browserTTS.cancel();
             this.startVoiceInterrupt();
@@ -95,8 +97,10 @@ export class TtsService {
 
         // Listen for Audio Chunks (from Rust providers)
         const unlistenAudio = await listen<TtsAudioEvent>("tts:audio", async (event) => {
-            if (this.generation !== gen) return;
+            if (this.generation !== gen || !this.isStreamActive) return;
+            const playbackGeneration = this.playbackGeneration;
             await audioPlayer.queueAudio(event.payload.data);
+            if (this.playbackGeneration !== playbackGeneration) return;
         });
         if (this.generation !== gen) { unlistenAudio(); return; }
         this.unlistenFunctions.push(unlistenAudio);
@@ -105,7 +109,7 @@ export class TtsService {
         const unlistenBrowserDelegate = await listen<TtsBrowserDelegateEvent>(
             "tts:browser-delegate",
             (event) => {
-                if (this.generation !== gen) return;
+                if (this.generation !== gen || !this.isStreamActive) return;
                 const { text, voice, speed, pitch } = event.payload;
                 console.log("[TTS] Browser delegate:", text.substring(0, 50));
                 this.browserTTS.speak(text, voice, speed, pitch);
@@ -118,6 +122,8 @@ export class TtsService {
         const unlistenEnd = await listen<TtsEndEvent>("tts:end", (_event) => {
             if (this.generation !== gen) return;
             console.log("[TTS] Stream ended:", _event.payload.text);
+            this.isStreamActive = false;
+            this.playbackGeneration++;
             audioPlayer.finishStream();
             this.stopVoiceInterrupt();
         });
@@ -132,6 +138,8 @@ export class TtsService {
 
     cleanup() {
         this.generation++; // invalidate any in-flight init()
+        this.playbackGeneration++;
+        this.isStreamActive = false;
         this.cleanupListeners();
         this.browserTTS.cancel();
         this.stopVoiceInterrupt();
@@ -148,6 +156,8 @@ export class TtsService {
 
         this.interruptCleanup = this.voiceInterrupt.onInterrupt(() => {
             console.log("[TTS] Voice interrupt triggered — stopping playback");
+            this.playbackGeneration++;
+            this.isStreamActive = false;
             audioPlayer.stop();
             this.browserTTS.cancel();
             this.stopVoiceInterrupt();

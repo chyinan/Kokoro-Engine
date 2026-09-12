@@ -161,6 +161,10 @@ pub struct ActionRegistry {
     entries_by_id: HashMap<String, ActionEntry>,
     alias_to_ids: HashMap<String, Vec<String>>,
     mcp_tool_ids: HashSet<String>,
+    /// Monotonically increasing identity for the current registry contents.
+    /// Approval continuations use this to reject a handler that was replaced
+    /// while the user was deciding whether to run it.
+    generation: u64,
 }
 
 const MEMORY_ACTIONS: &[&str] = &["search_memory", "store_memory", "forget_memory"];
@@ -194,7 +198,12 @@ impl ActionRegistry {
             entries_by_id: HashMap::new(),
             alias_to_ids: HashMap::new(),
             mcp_tool_ids: HashSet::new(),
+            generation: 0,
         }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     fn make_action_info(
@@ -238,6 +247,7 @@ impl ActionRegistry {
     }
 
     fn insert_entry(&mut self, info: ActionInfo, handler: Arc<dyn ActionHandler>) {
+        self.generation = self.generation.wrapping_add(1);
         if let Some(old_entry) = self.entries_by_id.remove(&info.id) {
             self.remove_alias_mapping(&old_entry.info);
             if old_entry.info.source == ActionSource::Mcp {
@@ -302,6 +312,9 @@ impl ActionRegistry {
 
     /// Remove all previously registered MCP tools.
     pub fn clear_mcp_tools(&mut self) {
+        if !self.mcp_tool_ids.is_empty() {
+            self.generation = self.generation.wrapping_add(1);
+        }
         let ids: Vec<_> = self.mcp_tool_ids.drain().collect();
         for id in ids {
             if let Some(entry) = self.entries_by_id.remove(&id) {

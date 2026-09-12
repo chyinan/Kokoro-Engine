@@ -1,13 +1,14 @@
+// pattern: Imperative Shell
 //! MCP Manager — manages multiple MCP server connections.
 //!
 //! Loads server configs, starts/stops servers, aggregates tools.
 
 use super::client::McpClient;
-use super::transport::{SseTransport, StdioTransport, StreamableHttpTransport};
+use super::transport::{McpTransport, SseTransport, StdioTransport, StreamableHttpTransport};
 use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -65,8 +66,11 @@ pub struct McpManager {
     configs: Vec<McpServerConfig>,
     clients: HashMap<String, Arc<Mutex<McpClient>>>,
     config_path: String,
-    /// Servers currently being connected to in the background.
-    pending_connections: HashSet<String>,
+    /// Servers currently being connected to in the background, keyed by the
+    /// connection generation that owns the attempt.
+    pending_connections: HashMap<String, u64>,
+    /// Monotonic per-server generations invalidate late connection results.
+    connection_generations: HashMap<String, u64>,
     /// Error messages from failed connection attempts.
     connection_errors: HashMap<String, String>,
 }
@@ -77,20 +81,92 @@ impl McpManager {
             configs: Vec::new(),
             clients: HashMap::new(),
             config_path: config_path.to_string(),
-            pending_connections: HashSet::new(),
+            pending_connections: HashMap::new(),
+            connection_generations: HashMap::new(),
             connection_errors: HashMap::new(),
         }
     }
 
     /// Mark a server as currently connecting.
-    pub fn mark_connecting(&mut self, name: &str) {
-        self.pending_connections.insert(name.to_string());
+    pub fn mark_connecting(&mut self, name: &str) -> u64 {
+        let generation = self
+            .connection_generations
+            .entry(name.to_string())
+            .and_modify(|value| *value = value.wrapping_add(1))
+            .or_insert(1);
+        self.pending_connections
+            .insert(name.to_string(), *generation);
         self.connection_errors.remove(name);
+        *generation
     }
 
     /// Clear connecting state (on success or failure).
     pub fn clear_connecting(&mut self, name: &str) {
         self.pending_connections.remove(name);
+    }
+
+    pub fn clear_connecting_if_current(&mut self, name: &str, generation: u64) -> bool {
+        if self.pending_connections.get(name).copied() == Some(generation) {
+            self.pending_connections.remove(name);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Invalidate all pending work for a server. This is called before a
+    /// disable/remove/replace operation so a late handshake cannot revive it.
+    pub fn invalidate_connection(&mut self, name: &str) -> u64 {
+        let generation = self
+            .connection_generations
+            .entry(name.to_string())
+            .and_modify(|value| *value = value.wrapping_add(1))
+            .or_insert(1);
+        self.pending_connections.remove(name);
+        *generation
+    }
+
+    pub fn is_connection_current(&self, name: &str, generation: u64) -> bool {
+        self.pending_connections.get(name).copied() == Some(generation)
+            && self.connection_generations.get(name).copied() == Some(generation)
+            && self
+                .configs
+                .iter()
+                .any(|config| config.name == name && config.enabled)
+    }
+
+    /// Commit a client only when the configuration that started the attempt
+    /// is still the enabled, current configuration. A stale client is returned
+    /// to its caller so its transport can be shut down outside the manager lock.
+    pub fn commit_client(
+        &mut self,
+        name: String,
+        generation: u64,
+        client: McpClient,
+    ) -> Result<(), McpClient> {
+        if !self.is_connection_current(&name, generation) {
+            return Err(client);
+        }
+
+        self.pending_connections.remove(&name);
+        if let Some(previous) = self
+            .clients
+            .insert(name, Arc::new(Mutex::new(client)))
+        {
+            // The old client is dropped here. Callers that replace a live
+            // connection should explicitly disconnect it before committing.
+            drop(previous);
+        }
+        Ok(())
+    }
+
+    pub fn finish_connection_error(&mut self, name: &str, generation: u64, error: String) -> bool {
+        if !self.is_connection_current(name, generation) {
+            return false;
+        }
+        self.pending_connections.remove(name);
+        self.connection_errors.insert(name.to_string(), error);
+        true
     }
 
     /// Record a connection error for a server.
@@ -146,13 +222,16 @@ impl McpManager {
 
     /// Return all enabled configs and mark them as "connecting".
     /// Caller should release the lock, then spawn per-server connection tasks.
-    pub fn prepare_connect_all(&mut self) -> Vec<McpServerConfig> {
+    pub fn prepare_connect_all(&mut self) -> Vec<(McpServerConfig, u64)> {
         let configs: Vec<McpServerConfig> =
             self.configs.iter().filter(|c| c.enabled).cloned().collect();
-        for cfg in &configs {
-            self.mark_connecting(&cfg.name);
-        }
         configs
+            .into_iter()
+            .map(|cfg| {
+                let generation = self.mark_connecting(&cfg.name);
+                (cfg, generation)
+            })
+            .collect()
     }
 
     /// Insert a pre-built client (used after lock-free connection).
@@ -168,43 +247,52 @@ impl McpManager {
         Ok(())
     }
 
-    /// Disconnect and remove a server.
-    pub async fn disconnect_server(&mut self, name: &str) -> Result<(), KokoroError> {
-        if let Some(client) = self.clients.remove(name) {
-            client.lock().await.shutdown().await?;
-        }
-        Ok(())
+    /// Detach a client without awaiting its transport shutdown. Callers that
+    /// hold the manager mutex can then release it before waiting on I/O.
+    pub fn take_client(&mut self, name: &str) -> Option<Arc<Mutex<McpClient>>> {
+        self.clients.remove(name)
     }
 
-    /// Add a new server config and optionally connect.
-    pub async fn add_server(
+    /// Replace a server configuration and return its previous client handle.
+    ///
+    /// This method only mutates in-memory state and persists the config.  The
+    /// returned client must be shut down by the caller after releasing the
+    /// manager mutex so a slow transport cannot block other MCP operations.
+    pub fn upsert_server_config(
         &mut self,
         config: McpServerConfig,
-        connect: bool,
-    ) -> Result<(), KokoroError> {
-        // Remove existing with same name
+    ) -> Result<Option<Arc<Mutex<McpClient>>>, KokoroError> {
+        // Remove existing with same name and invalidate any in-flight
+        // connection before the replacement is persisted.
+        self.invalidate_connection(&config.name);
+        let old_client = self.clients.remove(&config.name);
         self.configs.retain(|c| c.name != config.name);
         self.configs.push(config.clone());
         self.save_configs()?;
-
-        if connect && config.enabled {
-            self.connect_server(&config).await?;
-        }
-        Ok(())
+        Ok(old_client)
     }
 
-    /// Remove a server config and disconnect.
-    pub async fn remove_server(&mut self, name: &str) -> Result<(), KokoroError> {
-        self.disconnect_server(name).await?;
+    /// Remove a server configuration and return its client handle. The caller
+    /// can release the manager mutex before awaiting transport shutdown.
+    pub fn detach_server_for_removal(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<Arc<Mutex<McpClient>>>, KokoroError> {
+        self.invalidate_connection(name);
+        let client = self.clients.remove(name);
         self.configs.retain(|c| c.name != name);
         self.save_configs()?;
-        Ok(())
+        Ok(client)
     }
 
-    /// Toggle a server's enabled state.
-    /// If disabling, disconnects the server. If enabling, only saves config
-    /// (caller should spawn background connection task).
-    pub async fn toggle_server(&mut self, name: &str, enabled: bool) -> Result<(), KokoroError> {
+    /// Persist a server's enabled state and detach a client when disabling.
+    /// Transport shutdown is intentionally left to the caller so it can happen
+    /// outside the manager mutex.
+    pub fn set_server_enabled(
+        &mut self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<Option<Arc<Mutex<McpClient>>>, KokoroError> {
         let config = self
             .configs
             .iter_mut()
@@ -214,9 +302,10 @@ impl McpManager {
         self.save_configs()?;
 
         if !enabled {
-            self.disconnect_server(name).await?;
+            self.invalidate_connection(name);
+            return Ok(self.take_client(name));
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Get status of all configured servers.
@@ -226,7 +315,7 @@ impl McpManager {
         let mut statuses = Vec::new();
 
         for config in &self.configs {
-            let is_pending = self.pending_connections.contains(&config.name);
+            let is_pending = self.pending_connections.contains_key(&config.name);
             let error = self.connection_errors.get(&config.name).cloned();
 
             // Fast path: if the server is still connecting or has no client,
@@ -283,24 +372,54 @@ impl McpManager {
         tool_name: &str,
         arguments: Value,
     ) -> Result<super::client::McpToolResult, String> {
+        let client = self.client_handle(server_name)?;
+        let result = client.lock().await.call_tool(tool_name, arguments).await;
+        result
+    }
+
+    /// Clone a validated client handle while the manager lock is held. Callers
+    /// must release the manager lock before awaiting remote I/O on the client.
+    pub fn client_handle(
+        &self,
+        server_name: &str,
+    ) -> Result<Arc<Mutex<McpClient>>, String> {
+        let config = self
+            .configs
+            .iter()
+            .find(|config| config.name == server_name)
+            .ok_or_else(|| format!("Server '{}' is not configured", server_name))?;
+        if !config.enabled {
+            return Err(format!("Server '{}' is disabled", server_name));
+        }
+
+        // Clone the client handle under the manager lock, then release that
+        // lock before waiting for a potentially slow remote tool call.
         let client = self
             .clients
             .get(server_name)
+            .cloned()
             .ok_or_else(|| format!("Server '{}' not connected", server_name))?;
 
-        client.lock().await.call_tool(tool_name, arguments).await
+        Ok(client)
     }
 
-    /// Get all tools from all connected servers, keyed by (server_name, tool).
-    pub async fn all_tools(&self) -> Vec<(String, super::client::McpToolInfo)> {
-        let mut all = Vec::new();
-        for (name, client) in &self.clients {
-            let c = client.lock().await;
-            for tool in c.tools() {
-                all.push((name.clone(), tool.clone()));
-            }
-        }
-        all
+    /// Clone handles for enabled connected servers.  Callers must release the
+    /// manager mutex before awaiting any individual client lock.
+    pub fn tool_client_handles(&self) -> Vec<(String, Arc<Mutex<McpClient>>)> {
+        self.clients
+            .iter()
+            .filter_map(|(name, client)| {
+                if self
+                    .configs
+                    .iter()
+                    .any(|config| config.name == *name && config.enabled)
+                {
+                    Some((name.clone(), client.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Get configs (for serialization to frontend).
@@ -342,7 +461,10 @@ pub async fn build_connected_client(config: &McpServerConfig) -> Result<McpClien
                 ))
             })?;
             let transport = SseTransport::new(url);
-            transport.connect().await?;
+            if let Err(error) = transport.connect().await {
+                let _ = transport.shutdown().await;
+                return Err(KokoroError::ExternalService(error));
+            }
             Arc::new(transport)
         }
         _ => {
@@ -351,7 +473,10 @@ pub async fn build_connected_client(config: &McpServerConfig) -> Result<McpClien
                     if url.trim_end_matches('/').ends_with("/sse") {
                         tracing::info!(target: "mcp", "Auto-detected SSE transport for '{}'", config.name);
                         let transport = SseTransport::new(url);
-                        transport.connect().await?;
+                        if let Err(error) = transport.connect().await {
+                            let _ = transport.shutdown().await;
+                            return Err(KokoroError::ExternalService(error));
+                        }
                         Arc::new(transport)
                     } else {
                         tracing::info!(
@@ -376,6 +501,9 @@ pub async fn build_connected_client(config: &McpServerConfig) -> Result<McpClien
     };
 
     let mut client = McpClient::new(transport);
-    client.connect().await?;
+    if let Err(error) = client.connect().await {
+        let _ = client.shutdown().await;
+        return Err(KokoroError::ExternalService(error));
+    }
     Ok(client)
 }

@@ -1,7 +1,10 @@
+// pattern: Imperative Shell
+
 use crate::ai::context::AIOrchestrator;
 use crate::ai::initiative::InitiativeDecision;
 use chrono::Timelike;
 use serde::Serialize;
+use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// Configuration for the heartbeat system.
@@ -47,7 +50,7 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
     let mut last_proactive_ts = std::time::Instant::now();
     let _last_time_period = current_time_period();
     let mut last_prune_ts = std::time::Instant::now();
-    let mut last_dream_date: Option<chrono::NaiveDate> = None;
+    let mut last_dream_dates: HashMap<String, chrono::NaiveDate> = HashMap::new();
 
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
@@ -98,20 +101,20 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
             );
             let now = chrono::Local::now();
             let today = now.date_naive();
+            let char_id = orchestrator.get_character_id().await;
             if memory_config.dreaming_enabled
                 && now.hour() >= u32::from(memory_config.dream_daily_hour)
-                && last_dream_date != Some(today)
+                && last_dream_dates.get(&char_id) != Some(&today)
                 && idle_secs >= 60
             {
                 let memory_mgr = orchestrator.memory_manager.clone();
-                let char_id = orchestrator.get_character_id().await;
                 let day_start_ts = now.timestamp() - i64::from(now.num_seconds_from_midnight());
                 match memory_mgr
                     .has_dream_job_since(&char_id, "daily_idle", day_start_ts)
                     .await
                 {
                     Ok(true) => {
-                        last_dream_date = Some(today);
+                        last_dream_dates.insert(char_id.clone(), today);
                         continue;
                     }
                     Ok(false) => {}
@@ -123,7 +126,7 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
                         );
                     }
                 }
-                last_dream_date = Some(today);
+                last_dream_dates.insert(char_id.clone(), today);
                 let target_language = orchestrator.response_language.lock().await.clone();
                 let provider = app_handle
                     .try_state::<crate::llm::service::LlmService>()

@@ -14,8 +14,10 @@ import {
   getBotConfig,
   getJailbreakPrompt,
   getAutoBackupConfig,
+  updateCharacter,
 } from "@/lib/kokoro-bridge";
 import SettingsPanel from "./SettingsPanel";
+import type { SettingsTabId } from "./settings/settings-groups";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 window.scrollTo = vi.fn();
@@ -153,6 +155,32 @@ describe("SettingsPanel persona lifecycle and isolation", () => {
     act(() => root.unmount());
     document.body.replaceChildren();
     vi.clearAllMocks();
+  });
+
+  it("does not forward character A runtime changes after switching to B while saving A", async () => {
+    let finishUpdate!: () => void;
+    vi.mocked(updateCharacter).mockImplementationOnce(() => new Promise<void>(resolve => { finishUpdate = resolve; }));
+    const onCharacterRuntimeChange = vi.fn(async () => undefined);
+    const props = {
+      isOpen: true, onClose: vi.fn(), activeTab: "persona" as SettingsTabId, activeCharacterId: "char-1",
+      characters: [char1, char2], backgroundControls: dummyBackgroundControls() as any,
+      displayMode: "full" as const, onDisplayModeChange: vi.fn(), customModelPath: null,
+      onCustomModelChange: vi.fn(), renderFps: 60, onRenderFpsChange: vi.fn(),
+      onActivateCharacter: vi.fn(), onCharacterRuntimeChange, responseLanguage: "en",
+    };
+    await act(async () => root.render(createElement(SettingsPanel, props)));
+    const textareas = container.querySelectorAll("textarea");
+    const persona = textareas.length > 1 ? textareas[1] : textareas[0];
+    expect(persona).toBeDefined();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(persona, "A persona saved slowly");
+      persona.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-onboarding-id="settings-save-button"]')?.click());
+    expect(updateCharacter).toHaveBeenCalled();
+    await act(async () => root.render(createElement(SettingsPanel, { ...props, activeCharacterId: "char-2" })));
+    await act(async () => finishUpdate());
+    expect(onCharacterRuntimeChange).not.toHaveBeenCalledWith(expect.objectContaining({ persona: "A persona saved slowly" }));
   });
 
   it("runtime failure on character A followed by character switch to B does NOT carry over A's persona on save", async () => {

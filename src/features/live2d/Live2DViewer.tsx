@@ -117,6 +117,7 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
 
             return () => {
                 internalControllerRef.current?.destroy();
+                internalControllerRef.current = null;
             };
         }, [controller]);
 
@@ -171,15 +172,29 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
 
         useEffect(() => {
             let unlisten: (() => void) | undefined;
+            let disposed = false;
 
             listen<Live2dModelProfile>("live2d-profile-updated", (event) => {
                 const ctrl = getActiveController();
                 if (!ctrl || !modelPath) return;
                 if (event.payload?.model_path !== modelPath) return;
                 ctrl.setProfile(event.payload);
-            }).then(fn => { unlisten = fn; });
+            }).then(fn => {
+                if (disposed) {
+                    fn();
+                    return;
+                }
+                unlisten = fn;
+            }).catch(error => {
+                if (!disposed) {
+                    console.warn("[Live2DViewer] Failed to subscribe to profile updates:", error);
+                }
+            });
 
-            return () => { unlisten?.(); };
+            return () => {
+                disposed = true;
+                unlisten?.();
+            };
         }, [getActiveController, modelPath]);
 
         // Expose control methods to parent
@@ -214,29 +229,57 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
         // and the floating pet window react through the same controller instance.
         useEffect(() => {
             let unlisten: (() => void) | undefined;
+            let disposed = false;
 
             onChatCue((data) => {
                 const ctrl = getActiveController();
                 if (ctrl) {
                     void ctrl.playCue(data.cue);
                 }
-            }).then(fn => { unlisten = fn; });
+            }).then(fn => {
+                if (disposed) {
+                    fn();
+                    return;
+                }
+                unlisten = fn;
+            }).catch(error => {
+                if (!disposed) {
+                    console.warn("[Live2DViewer] Failed to subscribe to chat cues:", error);
+                }
+            });
 
-            return () => { unlisten?.(); };
+            return () => {
+                disposed = true;
+                unlisten?.();
+            };
         }, [getActiveController]);
 
         // Listen for idle behavior events
         useEffect(() => {
             let unlisten: (() => void) | undefined;
+            let disposed = false;
 
             listen<any>("idle-behavior", (event) => {
                 const ctrl = getActiveController();
                 if (ctrl && event.payload && event.payload.behavior) {
                     ctrl.playIdleBehavior(event.payload.behavior as IdleBehavior);
                 }
-            }).then(fn => { unlisten = fn; });
+            }).then(fn => {
+                if (disposed) {
+                    fn();
+                    return;
+                }
+                unlisten = fn;
+            }).catch(error => {
+                if (!disposed) {
+                    console.warn("[Live2DViewer] Failed to subscribe to idle behavior:", error);
+                }
+            });
 
-            return () => { unlisten?.(); };
+            return () => {
+                disposed = true;
+                unlisten?.();
+            };
         }, [getActiveController]);
 
         // Sync gazeTracking prop to ref (avoids recreating handlePointerMove)

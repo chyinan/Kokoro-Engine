@@ -1,3 +1,4 @@
+// pattern: Imperative Shell
 //! MCP Transport Layer — trait-based abstraction for MCP server communication.
 //!
 //! Implements stdio transport (subprocess stdin/stdout),
@@ -79,6 +80,7 @@ pub struct StdioTransport {
     next_id: AtomicU64,
     connected: Arc<std::sync::atomic::AtomicBool>,
     child: Arc<Mutex<Option<Child>>>,
+    pending: PendingMap,
 }
 
 impl StdioTransport {
@@ -122,8 +124,21 @@ impl StdioTransport {
             .spawn()
             .map_err(|e| format!("Failed to spawn MCP server '{}': {}", command, e))?;
 
-        let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
-        let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
+        let stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => {
+                let _ = child.kill().await;
+                return Err("Failed to get stdin".to_string());
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                let _ = child.kill().await;
+                return Err("Failed to get stdout".to_string());
+            }
+        };
+        let stderr = child.stderr.take();
 
         let connected = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let connected_clone = connected.clone();
@@ -135,26 +150,34 @@ impl StdioTransport {
 
         // Pending response map — shared between writer and reader
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let pending_writer = pending.clone();
         let pending_reader = pending.clone();
+
+        // Always drain stderr. MCP servers commonly emit diagnostics even
+        // while speaking JSON-RPC on stdout; leaving this pipe unread can
+        // eventually block the child and make unrelated requests time out.
+        if let Some(stderr) = stderr {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let preview: String = line.chars().take(512).collect();
+                    tracing::debug!(target: "mcp", "[MCP/Stdio] stderr: {}", preview);
+                }
+            });
+        }
 
         // ── Writer task: receives requests/notifications from channel, writes to stdin ──
         let mut stdin = stdin;
         let pending_cleanup = pending.clone();
+        let connected_writer = connected.clone();
         tokio::spawn(async move {
-            while let Some((body, responder)) = rx.recv().await {
-                // Only register a pending responder for requests (not notifications)
-                if let Some(resp) = responder {
-                    let id = body["id"].as_u64().unwrap_or(0);
-                    pending_writer.lock().await.insert(id, resp);
-                }
-
+            while let Some((body, _responder)) = rx.recv().await {
                 // Serialize and write
                 let mut line = serde_json::to_string(&body).unwrap_or_default();
                 line.push('\n');
 
                 if let Err(e) = stdin.write_all(line.as_bytes()).await {
                     tracing::error!(target: "mcp", "[MCP/Stdio] Write error: {}", e);
+                    connected_writer.store(false, Ordering::SeqCst);
                     // 清理所有 pending 请求，通知等待者连接已断开
                     let mut pending = pending_cleanup.lock().await;
                     for (_, responder) in pending.drain() {
@@ -165,6 +188,7 @@ impl StdioTransport {
                 }
                 if let Err(e) = stdin.flush().await {
                     tracing::error!(target: "mcp", "[MCP/Stdio] Flush error: {}", e);
+                    connected_writer.store(false, Ordering::SeqCst);
                     let mut pending = pending_cleanup.lock().await;
                     for (_, responder) in pending.drain() {
                         let _ = responder
@@ -242,6 +266,7 @@ impl StdioTransport {
             next_id: AtomicU64::new(1),
             connected,
             child: Arc::new(Mutex::new(Some(child))),
+            pending,
         })
     }
 }
@@ -264,16 +289,25 @@ impl McpTransport for StdioTransport {
         }
 
         let (tx, rx) = oneshot::channel();
-        self.sender
-            .send((body, Some(tx)))
-            .await
-            .map_err(|_| "Transport channel closed".to_string())?;
+        // Register before enqueueing so a very fast timeout cannot race the
+        // writer task and leave an unowned responder in the pending map.
+        self.pending.lock().await.insert(id, tx);
+        if self.sender.send((body, None)).await.is_err() {
+            self.pending.lock().await.remove(&id);
+            return Err("Transport channel closed".to_string());
+        }
 
         // Timeout after 30 seconds
-        tokio::time::timeout(std::time::Duration::from_secs(30), rx)
-            .await
-            .map_err(|_| format!("MCP request '{}' timed out", method))?
-            .map_err(|_| "Response channel dropped".to_string())?
+        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+            Ok(result) => result.map_err(|_| "Response channel dropped".to_string())?,
+            Err(_) => {
+                // The writer registers the request asynchronously. Removing
+                // here is idempotent and prevents timed-out requests from
+                // accumulating until the process eventually replies/ exits.
+                self.pending.lock().await.remove(&id);
+                return Err(format!("MCP request '{}' timed out", method));
+            }
+        }
     }
 
     async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), String> {
@@ -304,6 +338,12 @@ impl McpTransport for StdioTransport {
 
     async fn shutdown(&self) -> Result<(), String> {
         self.connected.store(false, Ordering::SeqCst);
+
+        let mut pending = self.pending.lock().await;
+        for (_, responder) in pending.drain() {
+            let _ = responder.send(Err("Transport shutting down".to_string()));
+        }
+        drop(pending);
 
         // Try to kill the child process
         if let Some(mut child) = self.child.lock().await.take() {
@@ -517,6 +557,9 @@ pub struct SseTransport {
     post_endpoint: Arc<Mutex<Option<String>>>,
     /// Pending request map: request ID → oneshot sender for the response.
     pending: PendingMap,
+    /// Owned reader task. Aborting it closes the long-lived response stream
+    /// when this transport is disabled or replaced.
+    reader_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl SseTransport {
@@ -540,6 +583,7 @@ impl SseTransport {
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             post_endpoint: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            reader_task: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -569,7 +613,7 @@ impl SseTransport {
         let pending = self.pending.clone();
 
         // Spawn background task to read the SSE stream
-        tokio::spawn(async move {
+        let reader_task = tokio::spawn(async move {
             use futures::StreamExt;
 
             let mut stream = resp.bytes_stream();
@@ -644,6 +688,7 @@ impl SseTransport {
                 let _ = sender.send(Err("SSE stream closed".to_string()));
             }
         });
+        *self.reader_task.lock().await = Some(reader_task);
 
         // Wait for the endpoint to be received (with timeout)
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -653,7 +698,7 @@ impl SseTransport {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
-                self.connected.store(false, Ordering::SeqCst);
+                self.shutdown().await?;
                 return Err("Timed out waiting for SSE endpoint event".to_string());
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -714,7 +759,7 @@ impl McpTransport for SseTransport {
         self.pending.lock().await.insert(id, tx);
 
         // POST the request (with per-request timeout, not global)
-        let resp = self
+        let resp = match self
             .client
             .post(&url)
             .timeout(std::time::Duration::from_secs(30))
@@ -722,14 +767,15 @@ impl McpTransport for SseTransport {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                // Clean up pending on send failure
-                let pending = self.pending.clone();
-                tokio::spawn(async move {
-                    pending.lock().await.remove(&id);
-                });
-                format!("SSE POST failed: {}", e)
-            })?;
+        {
+            Ok(resp) => resp,
+            Err(error) => {
+                // A failed POST has no chance of producing a response on the
+                // SSE stream, so remove its waiter before returning.
+                self.pending.lock().await.remove(&id);
+                return Err(format!("SSE POST failed: {}", error));
+            }
+        };
 
         if !resp.status().is_success() {
             self.pending.lock().await.remove(&id);
@@ -739,16 +785,13 @@ impl McpTransport for SseTransport {
         }
 
         // Wait for the response to arrive via the SSE stream
-        tokio::time::timeout(std::time::Duration::from_secs(30), rx)
-            .await
-            .map_err(|_| {
-                let pending = self.pending.clone();
-                tokio::spawn(async move {
-                    pending.lock().await.remove(&id);
-                });
-                format!("MCP SSE request '{}' timed out", method)
-            })?
-            .map_err(|_| "SSE response channel dropped".to_string())?
+        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+            Ok(result) => result.map_err(|_| "SSE response channel dropped".to_string())?,
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                return Err(format!("MCP SSE request '{}' timed out", method));
+            }
+        }
     }
 
     async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), String> {
@@ -791,6 +834,9 @@ impl McpTransport for SseTransport {
 
     async fn shutdown(&self) -> Result<(), String> {
         self.connected.store(false, Ordering::SeqCst);
+        if let Some(task) = self.reader_task.lock().await.take() {
+            task.abort();
+        }
         // Clean up all pending requests
         let mut pending = self.pending.lock().await;
         for (_, sender) in pending.drain() {

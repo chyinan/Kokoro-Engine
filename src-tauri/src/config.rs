@@ -190,7 +190,7 @@ fn get_config_path_lock(path: &Path) -> Arc<Mutex<()>> {
 }
 
 #[cfg(windows)]
-fn atomic_replace_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
+pub(crate) fn atomic_replace_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
     let to_u16_vec = |p: &Path| -> Vec<u16> {
@@ -280,7 +280,7 @@ fn atomic_replace_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn atomic_replace_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
+pub(crate) fn atomic_replace_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
     std::fs::rename(temporary, target)
 }
 

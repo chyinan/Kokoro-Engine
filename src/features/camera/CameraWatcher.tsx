@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 import { useEffect, useRef } from "react";
 import { setLatestCameraFrame } from "@/lib/camera-frame-cache";
 
@@ -34,6 +36,20 @@ export function CameraWatcher({ enabled, deviceId }: Props) {
                 if (videoRef.current) {
                     videoRef.current.srcObject = stream;
                     await videoRef.current.play();
+                    if (cancelled) {
+                        // The effect may have been disabled while play() was pending.
+                        // Do not create a timer after its cleanup has already run.
+                        if (videoRef.current.srcObject === stream) {
+                            videoRef.current.pause();
+                            videoRef.current.srcObject = null;
+                        }
+                        stream.getTracks().forEach((t) => t.stop());
+                        return;
+                    }
+                }
+                if (cancelled) {
+                    stream.getTracks().forEach((t) => t.stop());
+                    return;
                 }
                 timerRef.current = setInterval(cacheFrame, CAPTURE_INTERVAL_MS);
             } catch (err) {

@@ -1,12 +1,13 @@
 // pattern: Mixed (needs refactoring)
 // Reason: 该命令文件同时承担 Tauri IPC 编排、流式对话副作用与少量 payload 整形；本次只在现有边界内最小接入 BeforeLlmRequest modify。
 use crate::actions::executor::{
-    apply_before_action_args_payload, assistant_tool_call_metadata_value,
+    action_result_is_success, apply_before_action_args_payload, assistant_tool_call_metadata_value,
     build_action_hook_payload, build_before_action_args_payload, tool_metadata_value,
 };
 use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{
-    build_tool_audit_event, builtin_tool_id, execute_tool_calls_with_cancellation, ActionContext,
+    build_tool_audit_event, builtin_tool_id, evaluate_permission_decision,
+    execute_tool_calls_with_cancellation, ActionContext,
     ActionRegistry, ActionResult, PermissionDecision, ToolAuditInput, ToolCancellationError,
     ToolInvocation,
 };
@@ -1592,15 +1593,36 @@ fn emit_tool_trace_event(
 async fn execute_single_tool_after_approval(
     app: &tauri::AppHandle,
     registry_state: &std::sync::Arc<RwLock<ActionRegistry>>,
+    tool_settings_state: &std::sync::Arc<RwLock<ToolSettings>>,
     character_id: &str,
     tool_call: &ToolInvocation,
+    expected_registry_generation: u64,
 ) -> Result<ActionResult, String> {
     let hook_runtime = app.try_state::<HookRuntime>();
-    let resolved = {
+    let (registry_generation, resolved) = {
         let registry = registry_state.read().await;
-        registry.resolve_action_for_execution(&tool_call.name)
+        (
+            registry.generation(),
+            registry.resolve_action_for_execution(&tool_call.name),
+        )
     };
+    if registry_generation != expected_registry_generation {
+        return Err("Tool changed while approval was pending; approval is no longer valid".to_string());
+    }
     let (action, handler) = resolved.map_err(|error| error.0.clone())?;
+
+    let permission_decision = {
+        let settings = tool_settings_state.read().await;
+        if !settings.is_enabled(&action.id) {
+            return Err(format!("Tool '{}' is disabled", action.id));
+        }
+        evaluate_permission_decision(&action, &settings)
+    };
+    if !matches!(permission_decision, PermissionDecision::Allow) {
+        return Err(crate::actions::permission::decision_reason(&permission_decision)
+            .unwrap_or("tool permission policy denied")
+            .to_string());
+    }
     let mut args_payload = build_before_action_args_payload(
         None,
         character_id,
@@ -1631,7 +1653,7 @@ async fn execute_single_tool_after_approval(
                     Some("chat".to_string()),
                     tool_call,
                     Some(&action),
-                    Some(result.is_ok()),
+                    Some(action_result_is_success(&result)),
                     Some(match &result {
                         Ok(value) => value.message.clone(),
                         Err(error) => error.clone(),
@@ -1715,6 +1737,7 @@ struct ToolApprovalExecutionContext<'a> {
     app: &'a tauri::AppHandle,
     approval_state: &'a PendingToolApprovalState,
     registry_state: &'a std::sync::Arc<RwLock<ActionRegistry>>,
+    tool_settings_state: &'a std::sync::Arc<RwLock<ToolSettings>>,
     character_id: &'a str,
     turn_id: &'a str,
     cancel_state: &'a TurnCancellationState,
@@ -1789,8 +1812,10 @@ async fn wait_for_tool_approval_and_execute(
                 res = tokio::time::timeout(timeout_duration, execute_single_tool_after_approval(
                     ctx.app,
                     ctx.registry_state,
+                    ctx.tool_settings_state,
                     ctx.character_id,
                     &outcome.invocation,
+                    outcome.registry_generation,
                 )) => {
                     match res {
                         Ok(exec_res) => exec_res,
@@ -1879,6 +1904,7 @@ fn sample_tool_trace_outcome_for_test() -> crate::actions::ToolExecutionOutcome 
             risk_tags: vec![crate::actions::registry::ActionRiskTag::Read],
             permission_level: crate::actions::registry::ActionPermissionLevel::Safe,
         }),
+        registry_generation: 0,
         result: Ok(sample_action_result("ok")),
         needs_feedback: true,
         permission_decision: Some(crate::actions::PermissionDecision::Allow),
@@ -1907,6 +1933,7 @@ fn sample_tool_outcome_with_decision(
             risk_tags: vec![crate::actions::registry::ActionRiskTag::Read],
             permission_level: crate::actions::registry::ActionPermissionLevel::Safe,
         }),
+        registry_generation: 0,
         result,
         needs_feedback: true,
         permission_decision: Some(permission_decision),
@@ -3249,6 +3276,7 @@ pub async fn stream_chat(
                         app: &app,
                         approval_state: approval_state.inner().as_ref(),
                         registry_state: &_action_registry.inner().clone(),
+                        tool_settings_state: &tool_settings_state.inner().clone(),
                         character_id: &char_id,
                         turn_id: &assistant_turn_id,
                         cancel_state: cancel_state.inner().as_ref(),
@@ -4960,9 +4988,10 @@ mod tests {
                 parameters: vec![],
                 needs_feedback: true,
                 risk_tags: vec![ActionRiskTag::Read],
-                permission_level: ActionPermissionLevel::Safe,
-            }),
-            result: Ok(sample_action_result("ok")),
+            permission_level: ActionPermissionLevel::Safe,
+        }),
+        registry_generation: 0,
+        result: Ok(sample_action_result("ok")),
             needs_feedback: true,
             permission_decision: Some(crate::actions::PermissionDecision::Allow),
         }

@@ -1,8 +1,9 @@
 // pattern: Mixed (needs refactoring)
 // Reason: 该命令文件同时承担 Tauri 命令编排与最小 hook 接线；本次只做直调 action deny 对齐，不额外拆分命令层。
 use crate::actions::executor::{
-    apply_before_action_args_payload, build_action_hook_payload, build_before_action_args_payload,
-    continue_unless_denied, denied_by_hook_message, ToolInvocation,
+    action_result_is_success, apply_before_action_args_payload, build_action_hook_payload,
+    build_before_action_args_payload, continue_unless_denied, denied_by_hook_message,
+    ToolInvocation,
 };
 use crate::actions::permission::{
     decision_reason, evaluate_permission_decision, PermissionDecision,
@@ -447,7 +448,7 @@ async fn emit_after_action_hook(
                     Some("direct_execute".to_string()),
                     invocation,
                     action,
-                    Some(result.is_ok()),
+                    Some(action_result_is_success(result)),
                     Some(result_message_for_hook(result)),
                 ),
             )

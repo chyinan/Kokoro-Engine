@@ -664,7 +664,7 @@ pub fn run() {
 
                 // Spawn a task per server so they connect in parallel
                 let mut handles = Vec::new();
-                for cfg in configs {
+                for (cfg, generation) in configs {
                     let mgr_arc = mcp_mgr_clone.clone();
                     let app_handle = mcp_app.clone();
                     handles.push(tauri::async_runtime::spawn(async move {
@@ -674,14 +674,13 @@ pub fn run() {
                             crate::mcp::manager::build_connected_client(&cfg).await;
 
                         // Brief lock only to insert the result.
-                        let connect_result = {
+                        let (connect_result, stale_client) = {
                             let mut mgr = mgr_arc.lock().await;
-                            mgr.clear_connecting(&cfg.name);
                             match build_result {
-                                Ok(client) => {
-                                    mgr.insert_client(cfg.name.clone(), client);
-                                    Ok(())
-                                }
+                                Ok(client) => match mgr.commit_client(cfg.name.clone(), generation, client) {
+                                    Ok(()) => (Ok(()), None),
+                                    Err(client) => (Err("connection result was superseded".to_string()), Some(client)),
+                                },
                                 Err(e) => {
                                     let display_error = match &e {
                                         crate::error::KokoroError::Config(message)
@@ -698,11 +697,20 @@ pub fn run() {
                                         | crate::error::KokoroError::Chat(message)
                                         | crate::error::KokoroError::Validation(message) => message.clone(),
                                     };
-                                    mgr.set_connection_error(&cfg.name, display_error);
-                                    Err(e)
+                                    if mgr.finish_connection_error(&cfg.name, generation, display_error.clone()) {
+                                        (Err(display_error), None)
+                                    } else {
+                                        (
+                                            Err("connection result was superseded".to_string()),
+                                            None,
+                                        )
+                                    }
                                 }
                             }
                         };
+                        if let Some(client) = stale_client {
+                            let _ = client.shutdown().await;
+                        }
 
                         if let Ok(()) = connect_result {
                             tracing::info!(target: "mcp", "Connected '{}', registering tools...", cfg.name);

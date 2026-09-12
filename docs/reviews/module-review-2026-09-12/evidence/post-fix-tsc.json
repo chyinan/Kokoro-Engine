@@ -1,0 +1,9 @@
+﻿{
+    "command":  "npm exec tsc -- --noEmit",
+    "workingDirectory":  "D:\\Programs\\Kokoro-Engine",
+    "startedUtc":  "2026-09-12T09:16:15.6957401+00:00",
+    "finishedUtc":  "2026-09-12T09:16:24.4122207+00:00",
+    "durationSeconds":  8.7164805999999988,
+    "exitCode":  0,
+    "log":  "D:\\Programs\\Kokoro-Engine\\docs\\reviews\\module-review-2026-09-12\\evidence\\post-fix-tsc.log"
+}

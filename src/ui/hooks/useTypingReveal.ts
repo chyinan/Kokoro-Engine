@@ -68,21 +68,49 @@ export function useTypingReveal({ onReveal, active }: UseTypingRevealOptions) {
     // Listen for chat-typing events from backend to set speed
     useEffect(() => {
         let unlisten: (() => void) | undefined;
+        let disposed = false;
         listen<TypingEvent>("chat-typing", (ev) => {
             speedRef.current = ev.payload.speed;
-        }).then(fn => { unlisten = fn; });
+        }).then(fn => {
+            if (disposed) {
+                fn();
+                return;
+            }
+            unlisten = fn;
+        }).catch(error => {
+            if (!disposed) {
+                console.warn("[TypingReveal] Failed to subscribe to chat-typing:", error);
+            }
+        });
 
-        return () => unlisten?.();
+        return () => {
+            disposed = true;
+            unlisten?.();
+        };
     }, []);
 
     // Listen for cue events to track current playback intent
     useEffect(() => {
         let unlisten: (() => void) | undefined;
+        let disposed = false;
         listen<{ cue: string }>("chat-cue", (ev) => {
             emotionRef.current = ev.payload.cue;
-        }).then(fn => { unlisten = fn; });
+        }).then(fn => {
+            if (disposed) {
+                fn();
+                return;
+            }
+            unlisten = fn;
+        }).catch(error => {
+            if (!disposed) {
+                console.warn("[TypingReveal] Failed to subscribe to chat-cue:", error);
+            }
+        });
 
-        return () => unlisten?.();
+        return () => {
+            disposed = true;
+            unlisten?.();
+        };
     }, []);
 
     // ── Helpers ─────────────────────────

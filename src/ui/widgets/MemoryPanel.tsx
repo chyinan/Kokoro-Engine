@@ -134,10 +134,15 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
     const [dreamConfigSaving, setDreamConfigSaving] = useState(false);
     const [dreamConfigSaved, setDreamConfigSaved] = useState(false);
     const pageSize = 50; // Load more for graph/timeline
+    const requestEpochRef = useRef(0);
 
     // ── Character selector state ──
     const [characters, setCharacters] = useState<CharacterRecord[]>([]);
     const [selectedCharId, setSelectedCharId] = useState<string>(characterId);
+
+    useEffect(() => {
+        requestEpochRef.current += 1;
+    }, [selectedCharId]);
 
     // Load character list for the dropdown
     useEffect(() => {
@@ -155,6 +160,8 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
 
     const fetchDreaming = useCallback(async (showLoading = true) => {
         if (!selectedCharId) return;
+        const requestedCharacterId = selectedCharId;
+        const requestEpoch = requestEpochRef.current;
         if (showLoading) {
             setDreamLoading(true);
         }
@@ -165,13 +172,15 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                 listDreamJobs(selectedCharId, 5),
                 listDreamProposals(selectedCharId, "pending", 50),
             ]);
+            if (requestEpochRef.current !== requestEpoch || selectedCharId !== requestedCharacterId) return;
             setDreamingSummary(summary);
             setDreamJobs(jobs);
             setDreamProposals(proposals);
         } catch (e) {
+            if (requestEpochRef.current !== requestEpoch || selectedCharId !== requestedCharacterId) return;
             setDreamError(typeof e === "string" ? e : ((e as any)?.message ?? JSON.stringify(e)));
         } finally {
-            if (showLoading) {
+            if (showLoading && requestEpochRef.current === requestEpoch && selectedCharId === requestedCharacterId) {
                 setDreamLoading(false);
             }
         }
@@ -215,15 +224,21 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
     const fetchMemories = useCallback(async () => {
         console.log("[MemoryPanel] fetchMemories called with selectedCharId:", selectedCharId);
         if (!selectedCharId) return;
+        const requestedCharacterId = selectedCharId;
+        const requestEpoch = requestEpochRef.current;
         setLoading(true);
         try {
             const res = await listMemories(selectedCharId, pageSize, page * pageSize);
+            if (requestEpochRef.current !== requestEpoch || selectedCharId !== requestedCharacterId) return;
             setMemories(res.memories);
             setTotal(res.total);
         } catch (e) {
+            if (requestEpochRef.current !== requestEpoch || selectedCharId !== requestedCharacterId) return;
             console.error("[MemoryPanel] Failed to load memories:", e);
         } finally {
-            setLoading(false);
+            if (requestEpochRef.current === requestEpoch && selectedCharId === requestedCharacterId) {
+                setLoading(false);
+            }
         }
     }, [selectedCharId, page]);
 

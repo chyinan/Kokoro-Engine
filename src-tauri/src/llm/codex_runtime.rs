@@ -162,6 +162,7 @@ impl CodexRuntimeProvider {
         ),
         String,
     > {
+        let mut attempt_guard = TurnStartGuard::new(server.clone());
         let inputs = prepare_inference_inputs(messages, &tools)?;
         let notifications = server.subscribe();
 
@@ -204,6 +205,7 @@ impl CodexRuntimeProvider {
             .ok_or_else(|| "Codex app-server turn/start returned no turn id".to_string())?
             .to_string();
 
+        attempt_guard.disarm();
         Ok((server, notifications, thread_id, turn_id, turn_started_at))
     }
 
@@ -547,6 +549,32 @@ struct CodexAppServer {
     notifications: broadcast::Sender<Value>,
     exited: AtomicBool,
     working_dir: RuntimePathBuf,
+}
+
+/// Synchronously terminates a server if a turn-start future is cancelled
+/// before it can hand ownership to the returned event stream. This closes the
+/// spawn/initialize/thread-start/turn-start cancellation window.
+struct TurnStartGuard {
+    server: Arc<CodexAppServer>,
+    armed: bool,
+}
+
+impl TurnStartGuard {
+    fn new(server: Arc<CodexAppServer>) -> Self {
+        Self { server, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TurnStartGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.server.terminate();
+        }
+    }
 }
 
 struct CodexEventStream {

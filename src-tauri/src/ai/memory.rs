@@ -640,6 +640,7 @@ struct MemoryDreamProposalRow {
     pub title: String,
     pub rationale: String,
     pub source_memory_ids: String,
+    pub source_memory_versions: String,
     pub target_memory_id: Option<i64>,
     pub proposed_content: Option<String>,
     pub proposed_memory_type: Option<String>,
@@ -725,6 +726,12 @@ struct DreamCandidateEntry {
     entity_key: Option<String>,
     canonical_hash: Option<String>,
     evidence_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DreamMemoryVersion {
+    updated_at: i64,
+    content_hash: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2877,6 +2884,12 @@ impl MemoryManager {
     }
 
     async fn create_dream_proposal(&self, proposal: DreamProposalInsert<'_>) -> Result<i64> {
+        let source_memory_versions = self
+            .capture_dream_memory_versions(
+                proposal.source_memory_ids,
+                proposal.target_memory_id,
+            )
+            .await?;
         let now = now_ts();
         let applied_at = if matches!(proposal.status, "auto_applied" | "approved") {
             Some(now)
@@ -2887,8 +2900,8 @@ impl MemoryManager {
             "INSERT INTO memory_dream_proposals \
              (character_id, proposal_type, status, confidence, title, rationale, source_memory_ids, \
               target_memory_id, proposed_content, proposed_memory_type, proposed_entity_key, impact, \
-              created_at, updated_at, applied_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              created_at, updated_at, applied_at, source_memory_versions) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(proposal.character_id)
         .bind(proposal.proposal_type)
@@ -2905,9 +2918,48 @@ impl MemoryManager {
         .bind(now)
         .bind(now)
         .bind(applied_at)
+        .bind(source_memory_versions)
         .execute(&self.db)
         .await?;
         Ok(result.last_insert_rowid())
+    }
+
+    /// Capture the exact source revision used to build a proposal. The snapshot
+    /// is deliberately taken at proposal creation so an approval can detect a
+    /// manual edit even when SQLite timestamps have only one-second precision.
+    async fn capture_dream_memory_versions(
+        &self,
+        source_ids: &[i64],
+        target_id: Option<i64>,
+    ) -> Result<String> {
+        let mut ids = source_ids.to_vec();
+        if let Some(target_id) = target_id {
+            ids.push(target_id);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+
+        let mut versions = HashMap::with_capacity(ids.len());
+        for id in ids {
+            let row = sqlx::query("SELECT content, updated_at FROM memories WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.db)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("dream proposal source memory {id} not found"))?;
+            // Creation records a snapshot even for restored or legacy rows;
+            // approval is the authoritative boundary that rechecks ownership
+            // and active status inside its write transaction.
+            let content: String = row.get("content");
+            versions.insert(
+                id,
+                DreamMemoryVersion {
+                    updated_at: row.get("updated_at"),
+                    content_hash: canonical_hash(&content),
+                },
+            );
+        }
+
+        Ok(serde_json::to_string(&versions)?)
     }
 
     async fn load_dream_entries(&self, character_id: &str) -> Result<Vec<DreamCandidateEntry>> {
@@ -3042,13 +3094,22 @@ impl MemoryManager {
             .or_else(|| metadata.canonical_content.clone())
             .unwrap_or_else(|| keeper.content.clone());
 
+        // The keeper's content may be replaced by an LLM-produced merge. Keep
+        // the semantic index and deduplication fingerprint in sync with that
+        // final content before any row is promoted.
+        let merged_embedding = self.embed(&merged_content).await?;
+        let merged_embedding_bytes = bincode::serialize(&merged_embedding)?;
+        let merged_hash = canonical_hash(&merged_content);
+
         sqlx::query(
             "UPDATE memories \
-             SET content = ?, importance = ?, tier = ?, confidence = ?, first_seen_at = ?, \
+             SET content = ?, embedding = ?, canonical_hash = ?, importance = ?, tier = ?, confidence = ?, first_seen_at = ?, \
                  last_seen_at = ?, evidence_count = ?, updated_at = ?, supersedes = ? \
              WHERE id = ?",
         )
         .bind(&merged_content)
+        .bind(merged_embedding_bytes)
+        .bind(merged_hash)
         .bind(max_importance)
         .bind(tier)
         .bind(confidence.clamp(0.0, 1.0))
@@ -3727,7 +3788,8 @@ impl MemoryManager {
         let rows = sqlx::query_as::<_, MemoryDreamProposalRow>(
             "SELECT id, character_id, proposal_type, status, confidence, title, rationale, \
                     source_memory_ids, target_memory_id, proposed_content, proposed_memory_type, \
-                    proposed_entity_key, impact, created_at, updated_at, applied_at \
+                    proposed_entity_key, impact, created_at, updated_at, applied_at, \
+                    source_memory_versions \
              FROM memory_dream_proposals \
              WHERE character_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?",
         )
@@ -3740,7 +3802,9 @@ impl MemoryManager {
         let mut proposals = Vec::with_capacity(rows.len());
         for row in rows {
             let source_ids = parse_proposal_ids(&row.source_memory_ids);
-            let source_memories = self.load_dream_source_memories(&source_ids).await?;
+            let source_memories = self
+                .load_dream_source_memories(character_id, &source_ids)
+                .await?;
             proposals.push(row.into_record(source_memories));
         }
 
@@ -3749,6 +3813,7 @@ impl MemoryManager {
 
     async fn load_dream_source_memories(
         &self,
+        character_id: &str,
         source_ids: &[i64],
     ) -> Result<Vec<MemoryDreamSourceRecord>> {
         let mut memories = Vec::with_capacity(source_ids.len());
@@ -3756,9 +3821,10 @@ impl MemoryManager {
             if let Some(memory) = sqlx::query_as::<_, MemoryDreamSourceRecord>(
                 "SELECT id, content, created_at, updated_at, importance, tier, memory_type, \
                         entity_key, status \
-                 FROM memories WHERE id = ?",
+                 FROM memories WHERE id = ? AND character_id = ?",
             )
             .bind(id)
+            .bind(character_id)
             .fetch_optional(&self.db)
             .await?
             {
@@ -3804,7 +3870,8 @@ impl MemoryManager {
         let proposal = sqlx::query_as::<_, MemoryDreamProposalRow>(
             "SELECT id, character_id, proposal_type, status, confidence, title, rationale, \
                     source_memory_ids, target_memory_id, proposed_content, proposed_memory_type, \
-                    proposed_entity_key, impact, created_at, updated_at, applied_at \
+                    proposed_entity_key, impact, created_at, updated_at, applied_at, \
+                    source_memory_versions \
              FROM memory_dream_proposals WHERE id = ?",
         )
         .bind(proposal_id)
@@ -3821,9 +3888,26 @@ impl MemoryManager {
             .target_memory_id
             .or_else(|| source_ids.first().copied())
             .ok_or_else(|| anyhow::anyhow!("dream proposal has no target memory"))?;
-        let now = now_ts();
+        let expected_versions: HashMap<i64, DreamMemoryVersion> =
+            serde_json::from_str(&proposal.source_memory_versions).map_err(|error| {
+                anyhow::anyhow!("dream proposal has invalid memory revision snapshot: {error}")
+            })?;
+        let mut expected_ids = source_ids.iter().copied().collect::<HashSet<_>>();
+        expected_ids.insert(target_id);
+        if expected_versions.len() != expected_ids.len()
+            || expected_ids
+                .iter()
+                .any(|memory_id| !expected_versions.contains_key(memory_id))
+        {
+            return Err(anyhow::anyhow!(
+                "dream proposal is missing a complete memory revision snapshot"
+            ));
+        }
 
-        if let Some(content) = proposal.proposed_content.as_deref() {
+        // Embedding can be slow, so prepare it before opening the write
+        // transaction. All authoritative checks and writes below happen in one
+        // transaction and are rolled back together on any failure.
+        let prepared_update = if let Some(content) = proposal.proposed_content.as_deref() {
             let embedding = self.embed(content).await?;
             let embedding_bytes = bincode::serialize(&embedding)?;
             let metadata = MemoryMetadata {
@@ -3834,22 +3918,75 @@ impl MemoryManager {
                 entity_key: proposal.proposed_entity_key.clone(),
                 canonical_content: None,
             };
-            sqlx::query(
+            Some((embedding_bytes, metadata, canonical_hash(content)))
+        } else {
+            None
+        };
+
+        let now = now_ts();
+        let mut transaction = self.db.begin().await?;
+        let target_and_sources = expected_ids.iter().copied().collect::<Vec<_>>();
+        for memory_id in target_and_sources {
+            let row = sqlx::query(
+                "SELECT character_id, content, updated_at, status FROM memories WHERE id = ?",
+            )
+            .bind(memory_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("dream proposal memory {memory_id} not found"))?;
+            let owner: String = row.get("character_id");
+            let status: String = row.get("status");
+            let updated_at: i64 = row.get("updated_at");
+            let content: String = row.get("content");
+            let expected = expected_versions.get(&memory_id).ok_or_else(|| {
+                anyhow::anyhow!("dream proposal has no revision for memory {memory_id}")
+            })?;
+            if owner != proposal.character_id {
+                return Err(anyhow::anyhow!(
+                    "dream proposal memory {memory_id} belongs to another character"
+                ));
+            }
+            if status != "active" {
+                return Err(anyhow::anyhow!(
+                    "dream proposal memory {memory_id} is no longer active"
+                ));
+            }
+            if updated_at != expected.updated_at
+                || canonical_hash(&content) != expected.content_hash
+            {
+                return Err(anyhow::anyhow!(
+                    "dream proposal memory {memory_id} changed since the proposal was created"
+                ));
+            }
+        }
+
+        if let (Some(content), Some((embedding_bytes, metadata, content_hash))) = (
+            proposal.proposed_content.as_deref(),
+            prepared_update,
+        ) {
+            let result = sqlx::query(
                 "UPDATE memories SET content = ?, embedding = ?, memory_type = ?, entity_key = ?, \
                     canonical_hash = ?, confidence = ?, updated_at = ?, last_seen_at = ?, status = 'active' \
-                 WHERE id = ?",
+                 WHERE id = ? AND character_id = ? AND status = 'active' AND updated_at = ?",
             )
             .bind(content)
             .bind(embedding_bytes)
             .bind(metadata.memory_type)
             .bind(metadata.entity_key)
-            .bind(canonical_hash(content))
+            .bind(content_hash)
             .bind(proposal.confidence)
             .bind(now)
             .bind(now)
             .bind(target_id)
-            .execute(&self.db)
+            .bind(&proposal.character_id)
+            .bind(expected_versions[&target_id].updated_at)
+            .execute(&mut *transaction)
             .await?;
+            if result.rows_affected() != 1 {
+                return Err(anyhow::anyhow!(
+                    "dream proposal target changed while approval was in progress"
+                ));
+            }
         }
 
         let superseded_ids: Vec<i64> = source_ids
@@ -3857,41 +3994,61 @@ impl MemoryManager {
             .copied()
             .filter(|id| *id != target_id)
             .collect();
-        if !superseded_ids.is_empty() {
-            for superseded_id in &superseded_ids {
-                sqlx::query(
-                    "UPDATE memories SET status = 'superseded', updated_at = ?, supersedes = ? WHERE id = ?",
-                )
-                .bind(now)
-                .bind(proposal_ids_json(&[target_id])?)
-                .bind(superseded_id)
-                .execute(&self.db)
-                .await?;
+        for superseded_id in &superseded_ids {
+            let result = sqlx::query(
+                "UPDATE memories SET status = 'superseded', updated_at = ?, supersedes = ? \
+                 WHERE id = ? AND character_id = ? AND status = 'active' AND updated_at = ?",
+            )
+            .bind(now)
+            .bind(proposal_ids_json(&[target_id])?)
+            .bind(superseded_id)
+            .bind(&proposal.character_id)
+            .bind(expected_versions[superseded_id].updated_at)
+            .execute(&mut *transaction)
+            .await?;
+            if result.rows_affected() != 1 {
+                return Err(anyhow::anyhow!(
+                    "dream proposal source memory {superseded_id} changed while approval was in progress"
+                ));
             }
         }
 
-        sqlx::query(
-            "UPDATE memory_dream_proposals SET status = 'approved', updated_at = ?, applied_at = ? WHERE id = ?",
+        let proposal_result = sqlx::query(
+            "UPDATE memory_dream_proposals SET status = 'approved', updated_at = ?, applied_at = ? \
+             WHERE id = ? AND character_id = ? AND status = 'pending'",
         )
         .bind(now)
         .bind(now)
         .bind(proposal_id)
-        .execute(&self.db)
+        .bind(&proposal.character_id)
+        .execute(&mut *transaction)
+        .await?;
+        if proposal_result.rows_affected() != 1 {
+            return Err(anyhow::anyhow!(
+                "dream proposal was already handled by another request"
+            ));
+        }
+
+        sqlx::query(
+            "INSERT INTO memory_operations \
+             (character_id, operation_type, actor, memory_id, proposal_id, before_json, after_json, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&proposal.character_id)
+        .bind(&proposal.proposal_type)
+        .bind("user")
+        .bind(target_id)
+        .bind(proposal_id)
+        .bind(serde_json::json!({ "source_memory_ids": source_ids }).to_string())
+        .bind(
+            serde_json::json!({ "target_id": target_id, "superseded_ids": superseded_ids })
+                .to_string(),
+        )
+        .bind(now)
+        .execute(&mut *transaction)
         .await?;
 
-        self.record_memory_operation(MemoryOperationRecord {
-            character_id: &proposal.character_id,
-            operation_type: &proposal.proposal_type,
-            actor: "user",
-            memory_id: Some(target_id),
-            proposal_id: Some(proposal_id),
-            before_json: Some(serde_json::json!({ "source_memory_ids": source_ids }).to_string()),
-            after_json: Some(
-                serde_json::json!({ "target_id": target_id, "superseded_ids": superseded_ids })
-                    .to_string(),
-            ),
-        })
-        .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -4532,6 +4689,94 @@ mod tests {
             .await
             .expect("Failed to run migrations");
         pool
+    }
+
+    async fn review_seed_memory(pool: &sqlx::SqlitePool, character: &str) -> i64 {
+        sqlx::query("INSERT INTO memories (content, embedding, created_at, updated_at, character_id) VALUES ('original memory', X'', 100, 100, ?)")
+            .bind(character)
+            .execute(pool)
+            .await
+            .unwrap()
+            .last_insert_rowid()
+    }
+
+    async fn review_seed_proposal(manager: &MemoryManager, character: &str, memory_id: i64) -> i64 {
+        manager.create_dream_proposal(DreamProposalInsert {
+            character_id: character,
+            proposal_type: "semantic_review",
+            status: "pending",
+            confidence: 0.85,
+            title: "Review replacement",
+            rationale: "Review regression fixture",
+            source_memory_ids: &[memory_id],
+            target_memory_id: Some(memory_id),
+            proposed_content: Some("proposal replacement"),
+            proposed_memory_type: Some("fact"),
+            proposed_entity_key: None,
+            impact: "Replace target",
+        }).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn review_r06_approval_must_not_resurrect_deleted_memory() {
+        let pool = setup_test_pool().await;
+        let manager = MemoryManager::new(pool.clone());
+        let memory_id = review_seed_memory(&pool, "character-a").await;
+        let proposal_id = review_seed_proposal(&manager, "character-a", memory_id).await;
+        manager.delete_memory(memory_id).await.unwrap();
+
+        let _ = manager.approve_dream_proposal(proposal_id).await;
+
+        let status: String = sqlx::query_scalar("SELECT status FROM memories WHERE id = ?")
+            .bind(memory_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(status, "archived", "approving a stale proposal must not undo a user deletion");
+    }
+
+    #[tokio::test]
+    async fn review_r06_approval_must_not_overwrite_newer_manual_edit() {
+        let pool = setup_test_pool().await;
+        let manager = MemoryManager::new(pool.clone());
+        let memory_id = review_seed_memory(&pool, "character-a").await;
+        let proposal_id = review_seed_proposal(&manager, "character-a", memory_id).await;
+        manager.update_memory(memory_id, "newer manual correction", 0.9).await.unwrap();
+
+        let _ = manager.approve_dream_proposal(proposal_id).await;
+
+        let content: String = sqlx::query_scalar("SELECT content FROM memories WHERE id = ?")
+            .bind(memory_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(content, "newer manual correction", "proposal must validate the source revision before replacing it");
+    }
+
+    #[tokio::test]
+    async fn review_r06_proposal_must_not_modify_another_characters_memory() {
+        let pool = setup_test_pool().await;
+        let manager = MemoryManager::new(pool.clone());
+        let memory_id = review_seed_memory(&pool, "character-a").await;
+        // Models a restored proposal whose integer target id collided with local data.
+        let proposal_id = review_seed_proposal(&manager, "character-b", memory_id).await;
+
+        let _ = manager.approve_dream_proposal(proposal_id).await;
+
+        let content: String = sqlx::query_scalar("SELECT content FROM memories WHERE id = ?")
+            .bind(memory_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(content, "original memory", "proposal ownership must match every target/source memory");
+    }
+
+    #[tokio::test]
+    async fn review_r06_approval_failure_must_rollback_memory_changes() {
+        let pool = setup_test_pool().await;
+        let manager = MemoryManager::new(pool.clone());
+        let memory_id = review_seed_memory(&pool, "character-a").await;
+        let proposal_id = review_seed_proposal(&manager, "character-a", memory_id).await;
+        sqlx::query("CREATE TRIGGER review_fail_proposal_status BEFORE UPDATE ON memory_dream_proposals WHEN NEW.status = 'approved' BEGIN SELECT RAISE(ABORT, 'review injected proposal failure'); END")
+            .execute(&pool).await.unwrap();
+
+        let error = manager.approve_dream_proposal(proposal_id).await.unwrap_err();
+        assert!(error.to_string().contains("review injected proposal failure"));
+
+        let content: String = sqlx::query_scalar("SELECT content FROM memories WHERE id = ?")
+            .bind(memory_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(content, "original memory", "failed proposal approval must rollback its earlier writes");
     }
 
     #[tokio::test]

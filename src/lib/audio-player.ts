@@ -43,7 +43,10 @@ export class AudioStreamManager {
     private audioElement: HTMLAudioElement;
     private mediaElementSource: MediaElementAudioSourceNode;
     private appendQueue: Uint8Array[] = [];
-    private wavQueue: AudioBuffer[] = [];
+    // Decoding may finish out of order; retain the arrival sequence until playback.
+    private wavQueue = new Map<number, AudioBuffer>();
+    private nextWavSequence = 0;
+    private nextWavPlaybackSequence = 0;
     private mediaSource: MediaSource | null = null;
     private sourceBuffer: SourceBuffer | null = null;
     private objectUrl: string | null = null;
@@ -100,21 +103,22 @@ export class AudioStreamManager {
     }
 
     public async queueAudio(data: Uint8Array | number[]) {
-        const generation = this.playbackGeneration;
-        await this.resume();
-        if (generation !== this.playbackGeneration) return;
-
         const chunk = data instanceof Uint8Array ? data : new Uint8Array(data);
         if (chunk.byteLength === 0) {
             return;
         }
+
+        const generation = this.playbackGeneration;
+        const sequence = this.nextWavSequence++;
+        await this.resume();
+        if (generation !== this.playbackGeneration) return;
 
         if (!this.streamMode) {
             this.streamMode = detectAudioContainer(chunk);
         }
 
         if (this.streamMode === "wav") {
-            await this.queueWavChunk(chunk, generation);
+            await this.queueWavChunk(chunk, generation, sequence);
             return;
         }
 
@@ -127,7 +131,7 @@ export class AudioStreamManager {
         this.streamEnded = true;
 
         if (this.streamMode === "wav") {
-            if (!this.currentSource && this.wavQueue.length === 0) {
+            if (!this.currentSource && this.wavQueue.size === 0) {
                 this._isPlaying = false;
                 this.stopAnalysis();
                 this.broadcastAnalysis({ amplitude: 0, lowFreqEnergy: 0, highFreqEnergy: 0 });
@@ -192,7 +196,9 @@ export class AudioStreamManager {
         this.mediaSource = null;
         this.sourceBuffer = null;
         this.appendQueue = [];
-        this.wavQueue = [];
+        this.wavQueue.clear();
+        this.nextWavSequence = 0;
+        this.nextWavPlaybackSequence = 0;
         this.streamEnded = false;
         this.playbackStarted = false;
         this.streamMode = null;
@@ -236,12 +242,12 @@ export class AudioStreamManager {
         }, { once: true });
     }
 
-    private async queueWavChunk(chunk: Uint8Array, generation: number) {
+    private async queueWavChunk(chunk: Uint8Array, generation: number, sequence: number) {
         try {
             const buffer = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
             const decoded = await this.audioContext.decodeAudioData(buffer);
             if (generation !== this.playbackGeneration) return;
-            this.wavQueue.push(decoded);
+            this.wavQueue.set(sequence, decoded);
             this.playNextWav();
         } catch (error) {
             if (generation !== this.playbackGeneration) return;
@@ -251,14 +257,16 @@ export class AudioStreamManager {
     }
 
     private playNextWav() {
-        if (this.currentSource || this.wavQueue.length === 0) {
+        if (this.currentSource) {
             return;
         }
 
-        const buffer = this.wavQueue.shift();
+        const buffer = this.wavQueue.get(this.nextWavPlaybackSequence);
         if (!buffer) {
             return;
         }
+        this.wavQueue.delete(this.nextWavPlaybackSequence);
+        this.nextWavPlaybackSequence++;
 
         const source = this.audioContext.createBufferSource();
         source.buffer = buffer;
@@ -272,7 +280,7 @@ export class AudioStreamManager {
         source.onended = () => {
             if (this.currentSource !== source) return;
             this.currentSource = null;
-            if (this.wavQueue.length > 0) {
+            if (this.wavQueue.has(this.nextWavPlaybackSequence)) {
                 this.playNextWav();
                 return;
             }

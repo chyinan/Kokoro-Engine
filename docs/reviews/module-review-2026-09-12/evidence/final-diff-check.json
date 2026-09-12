@@ -1,0 +1,9 @@
+{
+  "command": "git diff --check",
+  "workingDirectory": "D:/Programs/Kokoro-Engine",
+  "startedUtc": "2026-09-12T11:37:15.314351+00:00",
+  "finishedUtc": "2026-09-12T11:37:15.314351+00:00",
+  "durationSeconds": 0,
+  "exitCode": 0,
+  "log": "D:\\Programs\\Kokoro-Engine\\docs\\reviews\\module-review-2026-09-12\\evidence\\final-diff-check.log"
+}

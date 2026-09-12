@@ -2589,6 +2589,10 @@ export default function ChatPanel({
                 setError(getAsyncErrorMessage(err));
                 return;
             }
+            // clear_history invalidates the backend's active conversation too.
+            // Keep the frontend snapshot aligned so the next turn creates a new conversation.
+            setActiveConversationId(null);
+            activeConversationIdRef.current = null;
             setMessages([]);
             setShowScrollBottom(false);
             setHasNewMessagesBelow(false);
@@ -2620,6 +2624,14 @@ export default function ChatPanel({
         const previousText = targetMsg.text;
         const targetId = targetMsg.id;
         const targetClientRequestId = targetMsg.clientRequestId;
+        const editGeneration = conversationGenerationRef.current;
+        const editConversationId = activeConversationIdRef.current;
+        const isEditSessionCurrent = () => isChatSessionCurrent(
+            editGeneration,
+            editConversationId,
+            conversationGenerationRef.current,
+            activeConversationIdRef.current,
+        );
 
         // 1. 本地乐观更新 UI
         setMessages(prev => {
@@ -2633,11 +2645,12 @@ export default function ChatPanel({
         // 2. 异步持久化到 SQLite 并同步后端 LLM 上下文
         try {
             let messageId = targetMsg.id;
-            const convId = activeConversationIdRef.current ?? undefined;
+            const convId = editConversationId ?? undefined;
             if (!messageId) {
                 // 若刚发送未完成握手，等待极短时间（最多 600ms）确保 ID 到达
                 for (let i = 0; i < 12; i++) {
                     await new Promise(r => setTimeout(r, 50));
+                    if (!isEditSessionCurrent()) return;
                     const latest = messagesRef.current[globalIndex];
                     if (latest?.id) {
                         messageId = latest.id;
@@ -2651,17 +2664,24 @@ export default function ChatPanel({
                 throw new Error("Message ID not yet synchronized, cannot edit");
             }
 
+            if (!isEditSessionCurrent()) return;
             const res = await editConversationMessage({
                 conversation_id: convId,
                 message_id: messageId,
                 new_content: trimmed,
             });
+            if (!isEditSessionCurrent()) return;
             // 3. 回填生成的新 message_id 并同步后端截断后的内容
             if (res?.message_id) {
                 setMessages(prev => {
                     const targetIdx = prev.findIndex(m => m.id === res.message_id);
-                    const idx = targetIdx !== -1 ? targetIdx : globalIndex;
-                    if (prev[idx]) {
+                    const fallbackIdx = targetId
+                        ? prev.findIndex(m => m.id === targetId)
+                        : targetClientRequestId
+                            ? prev.findIndex(m => m.clientRequestId === targetClientRequestId)
+                            : -1;
+                    const idx = targetIdx !== -1 ? targetIdx : fallbackIdx;
+                    if (idx !== -1 && prev[idx]) {
                         const updated = [...prev];
                         updated[idx] = {
                             ...updated[idx],
@@ -2675,14 +2695,12 @@ export default function ChatPanel({
             }
         } catch (e) {
             console.error("[ChatPanel] Failed to persist message edit:", e);
+            if (!isEditSessionCurrent()) return;
             // 1. 回滚恢复旧消息文本，避免乐观更新在持久化失败后残留脏数据
             setMessages(prev => {
                 let targetIdx = targetId ? prev.findIndex(m => m.id === targetId) : -1;
                 if (targetIdx === -1 && targetClientRequestId) {
                     targetIdx = prev.findIndex(m => m.clientRequestId === targetClientRequestId);
-                }
-                if (targetIdx === -1 && prev[globalIndex] && prev[globalIndex].text === trimmed) {
-                    targetIdx = globalIndex;
                 }
                 if (targetIdx !== -1 && prev[targetIdx].text === trimmed) {
                     const updated = [...prev];

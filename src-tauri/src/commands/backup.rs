@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 use crate::ai::context::AIOrchestrator;
 use crate::characters::catalog::{
     validate_package_directory as validate_catalog_package_directory, CharacterCatalog,
@@ -479,30 +481,90 @@ fn open_regular_non_redirected_file(path: &Path, label: &str) -> Result<Option<F
     Ok(Some(file))
 }
 
-fn create_regular_export_file(path: &Path) -> Result<File, KokoroError> {
+struct AtomicExportGuard {
+    temporary: PathBuf,
+    committed: bool,
+}
+
+impl AtomicExportGuard {
+    fn new(temporary: PathBuf) -> Self {
+        Self {
+            temporary,
+            committed: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for AtomicExportGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.temporary);
+        }
+    }
+}
+
+fn create_atomic_export_file(path: &Path) -> Result<(AtomicExportGuard, File), KokoroError> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
         ensure_non_redirected_parent_chain(parent, parent)?;
     }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().ok_or_else(|| {
+        KokoroError::Validation("backup export target has no filename".to_string())
+    })?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        Uuid::new_v4()
+    ));
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     configure_no_follow(&mut options);
-    let file = options.open(path).map_err(|error| {
+    let file = options.open(&temporary).map_err(|error| {
         KokoroError::Io(format!(
-            "failed to create backup export {}: {error}",
-            path.display()
+            "failed to create temporary backup export {}: {error}",
+            temporary.display()
         ))
     })?;
     let metadata = file.metadata().map_err(KokoroError::from)?;
     if is_filesystem_redirect(&metadata) || !metadata.is_file() {
+        let _ = fs::remove_file(&temporary);
         return Err(KokoroError::Validation(format!(
-            "backup export target is not a regular file: {}",
-            path.display()
+            "temporary backup export is not a regular file: {}",
+            temporary.display()
         )));
     }
-    Ok(file)
+    Ok((AtomicExportGuard::new(temporary), file))
+}
+
+fn commit_atomic_export(
+    guard: &mut AtomicExportGuard,
+    file: File,
+    target: &Path,
+) -> Result<(), KokoroError> {
+    file.sync_all().map_err(|error| {
+        KokoroError::Io(format!(
+            "failed to sync temporary backup export {}: {error}",
+            guard.temporary.display()
+        ))
+    })?;
+    crate::config::atomic_replace_file(&guard.temporary, target).map_err(|error| {
+        KokoroError::Io(format!(
+            "failed to atomically replace backup export {}: {error}",
+            target.display()
+        ))
+    })?;
+    guard.disarm();
+    Ok(())
 }
 
 fn copy_regular_file_to_new_path(
@@ -1795,6 +1857,107 @@ async fn remap_imported_character_ids(
     Ok(remapped)
 }
 
+/// Skip imports keep local rows with the same integer primary key. Any
+/// imported relation that still points at such a key would silently attach to
+/// the local row, so reject the whole import before the first live mutation.
+pub(crate) async fn reject_unsafe_skip_memory_conflicts(
+    connection: &mut SqliteConnection,
+) -> Result<(), KokoroError> {
+    sqlx::query("CREATE TEMP TABLE IF NOT EXISTS backup_skip_memory_ids (id INTEGER PRIMARY KEY)")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("DELETE FROM temp.backup_skip_memory_ids")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "INSERT INTO temp.backup_skip_memory_ids (id) \
+         SELECT imported.id FROM import_db.memories imported \
+         INNER JOIN memories local ON local.id = imported.id",
+    )
+    .execute(&mut *connection)
+    .await?;
+
+    let conflict_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM temp.backup_skip_memory_ids",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    if conflict_count == 0 {
+        return Ok(());
+    }
+
+    let invalid_proposal_json: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM import_db.memory_dream_proposals \
+         WHERE source_memory_ids IS NOT NULL AND NOT json_valid(source_memory_ids)",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap_or(0);
+    if invalid_proposal_json > 0 {
+        return Err(KokoroError::Validation(
+            "skip import contains a proposal with invalid source memory ids".to_string(),
+        ));
+    }
+
+    let unsafe_proposal_references: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM import_db.memory_dream_proposals proposal \
+         WHERE proposal.target_memory_id IN (SELECT id FROM temp.backup_skip_memory_ids) \
+            OR EXISTS (\
+                SELECT 1 FROM json_each(proposal.source_memory_ids) source \
+                WHERE CAST(source.value AS INTEGER) IN (SELECT id FROM temp.backup_skip_memory_ids)\
+            )",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap_or(0);
+    let unsafe_candidate_references: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM import_db.memory_candidates \
+         WHERE applied_memory_id IN (SELECT id FROM temp.backup_skip_memory_ids)",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap_or(0);
+    let unsafe_evidence_references: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM import_db.memory_evidence \
+         WHERE memory_id IN (SELECT id FROM temp.backup_skip_memory_ids)",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap_or(0);
+    let unsafe_operation_references: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM import_db.memory_operations \
+         WHERE memory_id IN (SELECT id FROM temp.backup_skip_memory_ids)",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap_or(0);
+    let unsafe_memory_links: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM import_db.memories memory \
+         WHERE EXISTS (\
+             SELECT 1 FROM json_each(\
+                 CASE WHEN json_valid(memory.supersedes) THEN memory.supersedes ELSE '[]' END\
+             ) link WHERE CAST(link.value AS INTEGER) IN (SELECT id FROM temp.backup_skip_memory_ids)\
+         )",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap_or(0);
+
+    if unsafe_proposal_references
+        + unsafe_candidate_references
+        + unsafe_evidence_references
+        + unsafe_operation_references
+        + unsafe_memory_links
+        > 0
+    {
+        return Err(KokoroError::Validation(format!(
+            "skip import refuses {conflict_count} conflicting memory id(s) because imported dream relations would point at local rows"
+        )));
+    }
+
+    Ok(())
+}
+
 /// Open a read-only sqlx pool to a given DB file.
 async fn open_readonly_pool(path: &Path) -> Result<SqlitePool, KokoroError> {
     if open_regular_non_redirected_file(path, "database")?.is_none() {
@@ -1992,6 +2155,71 @@ async fn write_character_resources<W: Write + Seek>(
     Ok(())
 }
 
+fn is_backup_secret_key(key: &str) -> bool {
+    let normalized = key.trim().to_ascii_lowercase().replace('-', "_");
+    if normalized.ends_with("_env") {
+        return false;
+    }
+    let compact = normalized.replace('_', "");
+    normalized == "token"
+        || normalized.ends_with("_token")
+        || normalized == "secret"
+        || normalized.ends_with("_secret")
+        || normalized.contains("api_key")
+        || compact.contains("apikey")
+        || compact.ends_with("token")
+        || compact.ends_with("secret")
+        || normalized.contains("access_token")
+        || compact.contains("accesstoken")
+        || normalized.contains("authorization")
+        || normalized.contains("password")
+        || normalized.contains("credential")
+}
+
+/// Remove secret values from arbitrary provider configuration JSON while
+/// preserving the surrounding shape so data-only backups remain importable.
+fn sanitize_backup_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let keys = object.keys().cloned().collect::<Vec<_>>();
+            for key in keys {
+                if key.eq_ignore_ascii_case("env") {
+                    object.insert(key, serde_json::Value::Object(serde_json::Map::new()));
+                    continue;
+                }
+                if is_backup_secret_key(&key) {
+                    object.remove(&key);
+                    continue;
+                }
+                if let Some(child) = object.get_mut(&key) {
+                    sanitize_backup_json(child);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                sanitize_backup_json(item);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
+fn sanitize_backup_config(content: &str, filename: &str) -> Result<String, KokoroError> {
+    let mut value: serde_json::Value = serde_json::from_str(content).map_err(|error| {
+        KokoroError::Validation(format!("invalid JSON config {filename}: {error}"))
+    })?;
+    sanitize_backup_json(&mut value);
+    serde_json::to_string_pretty(&value).map_err(|error| {
+        KokoroError::Internal(format!(
+            "failed to serialize sanitized config {filename}: {error}"
+        ))
+    })
+}
+
 // ── Commands ─────────────────────────────────────────
 
 #[tauri::command]
@@ -2007,7 +2235,7 @@ pub async fn export_data(
 
     let out_path = PathBuf::from(&export_path);
     validate_export_target(&app_data, &out_path)?;
-    let file = create_regular_export_file(&out_path)?;
+    let (mut export_guard, file) = create_atomic_export_file(&out_path)?;
     let mut zip = zip::ZipWriter::new(file);
     let zip_options =
         SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -2089,6 +2317,7 @@ pub async fn export_data(
                 "config",
             )?)
             .map_err(|error| KokoroError::Validation(format!("config is not UTF-8: {error}")))?;
+            let content = sanitize_backup_config(&content, name)?;
             let entry = format!("configs/{}", name);
             zip.start_file(&entry, zip_options)
                 .map_err(|e| KokoroError::Internal(format!("ZIP error: {}", e)))?;
@@ -2098,8 +2327,10 @@ pub async fn export_data(
         }
     }
 
-    zip.finish()
+    let file = zip
+        .finish()
         .map_err(|e| KokoroError::Internal(format!("ZIP finish error: {}", e)))?;
+    commit_atomic_export(&mut export_guard, file, &out_path)?;
 
     let size_bytes = fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
     stats.configs = config_count;
@@ -2127,7 +2358,7 @@ pub async fn export_data_to_path(
     let db = db_path(app_data);
 
     validate_export_target(app_data, out_path)?;
-    let file = create_regular_export_file(out_path)?;
+    let (mut export_guard, file) = create_atomic_export_file(out_path)?;
     let mut zip = zip::ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
@@ -2191,6 +2422,7 @@ pub async fn export_data_to_path(
                 "config",
             )?)
             .map_err(|error| KokoroError::Validation(format!("config is not UTF-8: {error}")))?;
+            let content = sanitize_backup_config(&content, name)?;
             let entry = format!("configs/{}", name);
             zip.start_file(&entry, options)
                 .map_err(|e| KokoroError::Internal(format!("ZIP error: {}", e)))?;
@@ -2200,8 +2432,10 @@ pub async fn export_data_to_path(
         }
     }
 
-    zip.finish()
+    let file = zip
+        .finish()
         .map_err(|e| KokoroError::Internal(format!("ZIP finish error: {}", e)))?;
+    commit_atomic_export(&mut export_guard, file, out_path)?;
 
     let size_bytes = fs::metadata(out_path).map(|m| m.len()).unwrap_or(0);
     stats.configs = config_count;
@@ -2491,6 +2725,41 @@ pub async fn import_data(
         .await
         .ok();
 
+        // Normalize the additive proposal revision column before copying any
+        // dream tables. Older backups do not have it; such proposals retain
+        // the empty default and are rejected safely by the approval path.
+        let import_proposal_exists: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM import_db.sqlite_master WHERE type = 'table' AND name = 'memory_dream_proposals'",
+        )
+        .fetch_optional(&mut *conn)
+        .await?;
+        if import_proposal_exists.is_some() {
+            let proposal_columns: Vec<String> = sqlx::query(
+                "PRAGMA import_db.table_info(memory_dream_proposals)",
+            )
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+            if !proposal_columns
+                .iter()
+                .any(|column| column == "source_memory_versions")
+            {
+                sqlx::query(
+                    "ALTER TABLE import_db.memory_dream_proposals \
+                     ADD COLUMN source_memory_versions TEXT NOT NULL DEFAULT '[]'",
+                )
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    KokoroError::Database(format!(
+                        "Failed to normalize import proposal revision column: {error}"
+                    ))
+                })?;
+            }
+        }
+
         // 打印备份里实际的 character_id 分布
         let char_ids: Vec<String> =
             sqlx::query_scalar("SELECT DISTINCT character_id FROM import_db.memories")
@@ -2674,6 +2943,10 @@ pub async fn import_data(
             sqlx::query("CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content); END").execute(&mut *transaction).await?;
             sqlx::query("CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content); INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content); END").execute(&mut *transaction).await?;
         } else {
+            // Skip preserves local integer IDs. Reject any imported relation
+            // that would otherwise follow a skipped ID into a local memory.
+            reject_unsafe_skip_memory_conflicts(&mut transaction).await?;
+
             // skip 模式：先重建 FTS 以防损坏
             sqlx::query("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
                 .execute(&mut *transaction)

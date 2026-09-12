@@ -1,0 +1,9 @@
+﻿{
+    "command":  "npm test",
+    "workingDirectory":  "D:\\Programs\\Kokoro-Engine",
+    "startedUtc":  "2026-09-12T03:55:58.1440741+00:00",
+    "finishedUtc":  "2026-09-12T03:56:13.3666515+00:00",
+    "durationSeconds":  15.222577399999999,
+    "exitCode":  1,
+    "log":  "D:\\Programs\\Kokoro-Engine\\docs\\reviews\\module-review-2026-09-12\\evidence\\baseline-frontend.log"
+}

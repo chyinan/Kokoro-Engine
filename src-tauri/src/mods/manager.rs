@@ -45,6 +45,8 @@ pub enum ScriptCommand {
         event: String,
         payload: serde_json::Value,
     },
+    /// Invalidate listeners registered by the previously active MOD.
+    ResetListeners,
     Shutdown,
 }
 
@@ -151,6 +153,8 @@ pub struct ModManager {
     pub active_theme: Option<ModThemeJson>,
     /// Currently active layout loaded from a mod's layout.json
     pub active_layout: Option<JsonValue>,
+    /// Identity of the MOD whose scripts currently own the QuickJS listeners.
+    active_mod_id: Option<String>,
 }
 
 impl ModManager {
@@ -174,6 +178,7 @@ impl ModManager {
             runtime_state: Arc::new(AtomicU8::new(ModRuntimeState::Uninitialized.as_u8())),
             active_theme: None,
             active_layout: None,
+            active_mod_id: None,
         }
     }
 
@@ -245,6 +250,11 @@ impl ModManager {
                             if let Err(_e) = ctx.eval::<(), _>(dispatch_code.as_str()) {
                                 // Silently ignore — expected when no mods register listeners
                             }
+                        });
+                    }
+                    ScriptCommand::ResetListeners => {
+                        ctx.with(|ctx| {
+                            let _ = ctx.eval::<(), _>("globalThis.__listeners = {};");
                         });
                     }
                     ScriptCommand::Shutdown => break,
@@ -582,12 +592,15 @@ impl ModManager {
         }
 
         if let Some(hooks) = app_handle.try_state::<HookRuntime>() {
+            self.active_mod_id = Some(mod_id.to_string());
             hooks
                 .emit_best_effort(
                     &HookEvent::OnModLoaded,
                     &build_mod_hook_payload(&manifest, "loaded"),
                 )
                 .await;
+        } else {
+            self.active_mod_id = Some(mod_id.to_string());
         }
 
         Ok(())
@@ -662,9 +675,19 @@ impl ModManager {
 
     /// 卸载当前活跃的 Mod（清除主题、布局、组件），恢复原生模式
     pub async fn unload_mod<R: tauri::Runtime>(&mut self, app_handle: &tauri::AppHandle<R>) {
-        let manifest = self.loaded_mods.values().next().cloned();
+        let manifest = self
+            .active_mod_id
+            .as_deref()
+            .and_then(|id| self.loaded_mods.get(id))
+            .cloned();
+        self.active_mod_id = None;
         self.active_theme = None;
         self.active_layout = None;
+        if let Some(tx) = &self.script_tx {
+            if let Err(error) = tx.send(ScriptCommand::ResetListeners).await {
+                tracing::warn!(target: "mods", "Failed to reset MOD listeners during unload: {}", error);
+            }
+        }
         let _ = app_handle.emit("mod:unload", ());
         if let (Some(hooks), Some(manifest)) = (app_handle.try_state::<HookRuntime>(), manifest) {
             hooks

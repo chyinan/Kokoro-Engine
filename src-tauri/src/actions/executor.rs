@@ -25,6 +25,9 @@ pub struct ToolInvocation {
 pub struct ToolExecutionOutcome {
     pub invocation: ToolInvocation,
     pub action: Option<ActionInfo>,
+    /// Registry generation used to resolve this invocation. Approval
+    /// continuations must execute only the same registry snapshot.
+    pub registry_generation: u64,
     pub result: Result<ActionResult, String>,
     pub needs_feedback: bool,
     pub permission_decision: Option<PermissionDecision>,
@@ -57,6 +60,12 @@ pub(crate) async fn wait_for_cancel_event(rx: &mut Option<tokio::sync::watch::Re
 
 pub(crate) fn denied_by_hook_message(reason: &str) -> String {
     format!("Denied by hook: {}", reason)
+}
+
+/// Hook/audit success reflects the action's business result. A handler can
+/// complete its transport successfully while returning `ActionResult::err`.
+pub fn action_result_is_success<E>(result: &Result<ActionResult, E>) -> bool {
+    result.as_ref().map(|value| value.success).unwrap_or(false)
 }
 
 pub(crate) fn continue_unless_denied<T>(
@@ -1328,13 +1337,18 @@ pub async fn execute_tool_calls_with_cancellation(
         };
 
         let gated = continue_unless_denied(gate, || ());
-        let (action, needs_feedback, permission_decision, result) = match gated {
-            Err(error) => (None, true, None, Err(error)),
+        let (action, needs_feedback, permission_decision, result, registry_generation) = match gated {
+            Err(error) => {
+                let generation = registry_state.read().await.generation();
+                (None, true, None, Err(error), generation)
+            }
             Ok(()) => {
                 let resolved = {
                     let registry = registry_state.read().await;
-                    registry.resolve_action_for_execution(&tool_call.name)
+                    let generation = registry.generation();
+                    (generation, registry.resolve_action_for_execution(&tool_call.name))
                 };
+                let (registry_generation, resolved) = resolved;
                 let needs_feedback = resolved
                     .as_ref()
                     .map(|(action, _)| action.needs_feedback)
@@ -1447,7 +1461,7 @@ pub async fn execute_tool_calls_with_cancellation(
                     Err(error) => (None, Err(error.0.clone())),
                 };
 
-                (action, needs_feedback, permission_decision, result)
+                (action, needs_feedback, permission_decision, result, registry_generation)
             }
         };
 
@@ -1468,7 +1482,7 @@ pub async fn execute_tool_calls_with_cancellation(
                 Some("chat".to_string()),
                 tool_call,
                 action.as_ref(),
-                Some(result.is_ok()),
+                Some(action_result_is_success(&result)),
                 result_message,
             );
             emit_after_action_invoke_with_protection(
@@ -1484,6 +1498,7 @@ pub async fn execute_tool_calls_with_cancellation(
         outcomes.push(ToolExecutionOutcome {
             invocation: tool_call.clone(),
             action,
+            registry_generation,
             result,
             needs_feedback,
             permission_decision,

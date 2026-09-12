@@ -1,4 +1,7 @@
+// pattern: Imperative Shell
+
 use super::config::{ImageGenProviderConfig, ImageGenSystemConfig};
+
 use super::google::GoogleImageGenProvider;
 use super::interface::{ImageGenError, ImageGenParams, ImageGenProvider};
 use super::openai::OpenAIImageGenProvider;
@@ -25,6 +28,16 @@ pub struct ImageGenService {
     default_provider: Arc<RwLock<Option<String>>>,
     output_dir: PathBuf,
     generating: Arc<AtomicBool>,
+}
+
+struct GenerationGuard {
+    generating: Arc<AtomicBool>,
+}
+
+impl Drop for GenerationGuard {
+    fn drop(&mut self) {
+        self.generating.store(false, Ordering::SeqCst);
+    }
 }
 
 impl ImageGenService {
@@ -142,7 +155,7 @@ impl ImageGenService {
         params: Option<ImageGenParams>,
         window_size: Option<(u32, u32)>,
     ) -> Result<ImageGenResult, ImageGenError> {
-        // Drop background requests if a generation is already in flight
+        // Drop background requests if a generation is already in flight.
         if self
             .generating
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -153,10 +166,15 @@ impl ImageGenService {
             ));
         }
 
+        // Keep the busy flag correct when the caller cancels or aborts this
+        // future while the provider is still running.
+        let _generation_guard = GenerationGuard {
+            generating: self.generating.clone(),
+        };
+
         let result = self
             .generate_inner(prompt, provider_id, params, window_size)
             .await;
-        self.generating.store(false, Ordering::SeqCst);
         result
     }
 
@@ -240,6 +258,18 @@ impl ImageGenService {
         );
 
         let response = provider.generate(gen_params).await?;
+
+        const MAX_GENERATED_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+        if response.data.is_empty() || response.data.len() > MAX_GENERATED_IMAGE_BYTES {
+            return Err(ImageGenError::GenerationFailed(
+                "provider returned an invalid image payload".to_string(),
+            ));
+        }
+        image::load_from_memory(&response.data).map_err(|error| {
+            ImageGenError::GenerationFailed(format!(
+                "provider returned invalid image data: {error}"
+            ))
+        })?;
 
         // Save image to disk
         let filename = format!(
@@ -360,5 +390,71 @@ fn apply_prompt_prefix(prefix: Option<&str>, prompt: &str) -> String {
         format!("{} {}", prefix, prompt)
     } else {
         format!("{}, {}", prefix, prompt)
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use super::super::interface::ImageGenResponse;
+    use async_trait::async_trait;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::sync::Notify;
+
+    struct ControlledProvider {
+        started: Arc<Notify>,
+        calls: AtomicUsize,
+        hang_first: bool,
+    }
+
+    #[async_trait]
+    impl ImageGenProvider for ControlledProvider {
+        fn id(&self) -> String { "controlled".into() }
+        fn provider_type(&self) -> String { "test".into() }
+        async fn is_available(&self) -> bool { true }
+        async fn generate(&self, _: ImageGenParams) -> Result<ImageGenResponse, ImageGenError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            if self.hang_first && call == 0 { futures::future::pending::<()>().await; }
+            if self.hang_first {
+                return Err(ImageGenError::GenerationFailed("controlled retry reached provider".into()));
+            }
+            Ok(ImageGenResponse { format: "png".into(), data: b"not an image".to_vec() })
+        }
+    }
+
+    fn controlled_service(output: PathBuf, hang_first: bool) -> (ImageGenService, Arc<Notify>) {
+        let started = Arc::new(Notify::new());
+        let provider: Box<dyn ImageGenProvider> = Box::new(ControlledProvider {
+            started: started.clone(), calls: AtomicUsize::new(0), hang_first,
+        });
+        (ImageGenService {
+            providers: Arc::new(RwLock::new(HashMap::from([("controlled".into(), provider)]))),
+            provider_configs: Arc::new(RwLock::new(HashMap::new())),
+            default_provider: Arc::new(RwLock::new(Some("controlled".into()))),
+            output_dir: output,
+            generating: Arc::new(AtomicBool::new(false)),
+        }, started)
+    }
+
+    #[tokio::test]
+    async fn review_r12_cancelled_generation_must_allow_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let (service, started) = controlled_service(directory.path().into(), true);
+        let worker = service.clone();
+        let task = tokio::spawn(async move { worker.generate("first".into(), None, None, None).await });
+        started.notified().await;
+        task.abort();
+        assert!(matches!(task.await, Err(join_error) if join_error.is_cancelled()));
+        let retry = service.generate("retry".into(), None, None, None).await;
+        assert!(matches!(retry, Err(ImageGenError::GenerationFailed(ref message)) if message == "controlled retry reached provider"), "retry did not reach the provider after cancellation");
+    }
+
+    #[tokio::test]
+    async fn review_r12_invalid_image_response_must_not_be_saved_as_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let (service, _) = controlled_service(directory.path().into(), false);
+        assert!(service.generate("test".into(), None, None, None).await.is_err());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 }

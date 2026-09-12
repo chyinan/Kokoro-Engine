@@ -1,3 +1,4 @@
+// pattern: Imperative Shell
 //! MCP ↔ ActionRegistry Bridge
 //!
 //! Wraps each MCP tool as an `ActionHandler` so the LLM can invoke
@@ -5,12 +6,16 @@
 
 use super::manager::McpManager;
 use crate::actions::registry::{
-    ActionContext, ActionError, ActionHandler, ActionParam, ActionResult,
+    ActionContext, ActionError, ActionHandler, ActionParam, ActionPermissionLevel,
+    ActionResult, ActionRiskTag,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use std::sync::OnceLock;
+
+static MCP_REFRESH_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 /// An ActionHandler that delegates to an MCP server tool.
 pub struct McpToolHandler {
@@ -85,6 +90,22 @@ impl ActionHandler for McpToolHandler {
         true
     }
 
+    /// MCP servers are external code and their schemas are not a trusted
+    /// authorization source. Keep every unknown tool behind the strictest
+    /// shared action policy until a user-facing capability grant exists.
+    fn risk_tags(&self) -> Vec<ActionRiskTag> {
+        vec![
+            ActionRiskTag::Read,
+            ActionRiskTag::Write,
+            ActionRiskTag::External,
+            ActionRiskTag::Sensitive,
+        ]
+    }
+
+    fn permission_level(&self) -> ActionPermissionLevel {
+        ActionPermissionLevel::Elevated
+    }
+
     async fn execute(
         &self,
         args: HashMap<String, String>,
@@ -101,9 +122,16 @@ impl ActionHandler for McpToolHandler {
                 .collect(),
         );
 
-        let manager = self.manager.lock().await;
-        let result = manager
-            .call_tool(&self.server_name, &self.tool_name, arguments)
+        let client = {
+            let manager = self.manager.lock().await;
+            manager
+                .client_handle(&self.server_name)
+                .map_err(ActionError)?
+        };
+        let result = client
+            .lock()
+            .await
+            .call_tool(&self.tool_name, arguments)
             .await
             .map_err(ActionError)?;
 
@@ -140,9 +168,32 @@ pub async fn register_mcp_tools(
     manager: &Arc<Mutex<McpManager>>,
     registry: &tokio::sync::RwLock<crate::actions::ActionRegistry>,
 ) {
-    let mgr = manager.lock().await;
-    let tools = mgr.all_tools().await;
-    drop(mgr); // Release lock before acquiring registry write lock
+    // Serialize refresh snapshots and publication. Without this, an older
+    // refresh that captured a soon-to-be-removed client could publish after a
+    // newer remove/reconnect refresh and resurrect stale actions.
+    let _refresh_guard = MCP_REFRESH_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+
+    // Clone only the enabled client handles while holding the manager lock.
+    // Listing tools acquires each client lock and may contend with a remote
+    // call, so all awaits happen after the global manager lock is released.
+    let handles = {
+        let mgr = manager.lock().await;
+        mgr.tool_client_handles()
+    };
+    let mut tools = Vec::new();
+    for (server_name, client) in handles {
+        let client = client.lock().await;
+        tools.extend(
+            client
+                .tools()
+                .iter()
+                .cloned()
+                .map(|tool| (server_name.clone(), tool)),
+        );
+    }
 
     let mut reg = registry.write().await;
     reg.clear_mcp_tools();

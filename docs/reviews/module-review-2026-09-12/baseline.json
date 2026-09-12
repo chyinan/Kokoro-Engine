@@ -1,0 +1,34 @@
+{
+  "head": "8ea9cf4377cbec642e57ec3b9b3498a7ae13d893",
+  "timestampUtc": "2026-09-12T03:55:41.9371611+00:00",
+  "status": [
+    " M package.json",
+    " M src-tauri/Cargo.toml",
+    " M src/ui/widgets/CharacterCatalog.test.ts",
+    " M src/ui/widgets/CharacterCatalog.tsx",
+    "?? docs/reviews/"
+  ],
+  "node": "v24.15.0",
+  "npm": "11.12.1",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+  "python": "Python 3.14.4",
+  "initialFiles": [
+    {
+      "path": "package.json",
+      "sha256": "5a118006ca0fc696b2dc2138551b6c7576e9853321e5ad537c7aa914061f607d"
+    },
+    {
+      "path": "src-tauri/Cargo.toml",
+      "sha256": "69b461197e05139f7b5c9f593285f822be0dcaef210ee8f6c54244cc2087f164"
+    },
+    {
+      "path": "src/ui/widgets/CharacterCatalog.test.ts",
+      "sha256": "42060336fd5598075980c44f2b85bf3fe53365108911adf9418efdca4a641a6f"
+    },
+    {
+      "path": "src/ui/widgets/CharacterCatalog.tsx",
+      "sha256": "f0090fe046dfc123581c2f06d94564a46a3d476f4699648d599841e9f8541cfe"
+    }
+  ]
+}

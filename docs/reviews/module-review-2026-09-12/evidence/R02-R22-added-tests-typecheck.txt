@@ -1,0 +1,12 @@
+src/ui/widgets/SettingsPanel.lifecycle.test.tsx(170,68): error TS2769: No overload matches this call.
+  The last overload gave the following error.
+    Argument of type '{ isOpen: boolean; onClose: Mock<Procedure>; activeTab: string; activeCharacterId: string; characters: CharacterRecord[]; backgroundControls: any; displayMode: "full"; ... 7 more ...; responseLanguage: string; }' is not assignable to parameter of type 'Attributes & SettingsPanelProps'.
+      Type '{ isOpen: boolean; onClose: Mock<Procedure>; activeTab: string; activeCharacterId: string; characters: CharacterRecord[]; backgroundControls: any; displayMode: "full"; ... 7 more ...; responseLanguage: string; }' is not assignable to type 'SettingsPanelProps'.
+        Types of property 'activeTab' are incompatible.
+          Type 'string' is not assignable to type '"about" | "persona" | "mcp" | "mods" | "vision" | "stt" | "tts" | "model" | "api" | "bg" | "imagegen" | "memory" | "bot" | "jailbreak" | "backup" | "pet" | undefined'.
+src/ui/widgets/SettingsPanel.lifecycle.test.tsx(180,68): error TS2769: No overload matches this call.
+  The last overload gave the following error.
+    Argument of type '{ activeCharacterId: string; isOpen: boolean; onClose: Mock<Procedure>; activeTab: string; characters: CharacterRecord[]; backgroundControls: any; displayMode: "full"; ... 7 more ...; responseLanguage: string; }' is not assignable to parameter of type 'Attributes & SettingsPanelProps'.
+      Type '{ activeCharacterId: string; isOpen: boolean; onClose: Mock<Procedure>; activeTab: string; characters: CharacterRecord[]; backgroundControls: any; displayMode: "full"; ... 7 more ...; responseLanguage: string; }' is not assignable to type 'SettingsPanelProps'.
+        Types of property 'activeTab' are incompatible.
+          Type 'string' is not assignable to type '"about" | "persona" | "mcp" | "mods" | "vision" | "stt" | "tts" | "model" | "api" | "bg" | "imagegen" | "memory" | "bot" | "jailbreak" | "backup" | "pet" | undefined'.

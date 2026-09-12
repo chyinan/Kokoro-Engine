@@ -1,0 +1,50 @@
+
+ RUN  v4.1.0 D:/Programs/Kokoro-Engine
+
+ ❯ src/ui/widgets/chat/chat-edit-session-switch.test.tsx (2 tests | 2 failed) 135ms
+     × does not apply a delayed edit response to the same position in another conversation 83ms
+     × sends without the previous conversation id after clearing history 51ms
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  12:05:35
+   Duration  1.10s (transform 256ms, setup 0ms, import 398ms, tests 135ms, environment 397ms)
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/ui/widgets/chat/chat-edit-session-switch.test.tsx > ChatPanel edit result session ownership > does not apply a delayed edit response to the same position in another conversation
+AssertionError: expected 'edited in AEdit' to contain 'original B'
+
+Expected: "original B"
+Received: "edited in AEdit"
+
+ ❯ src/ui/widgets/chat/chat-edit-session-switch.test.tsx:109:61
+    107|     await act(async () => finishEdit({ message_id: 101, updated_conten…
+    108|
+    109|     expect(container.querySelector("article")?.textContent).toContain(…
+       |                                                             ^
+    110|     expect(container.querySelector("article")?.getAttribute("data-mess…
+    111|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/ui/widgets/chat/chat-edit-session-switch.test.tsx > ChatPanel edit result session ownership > sends without the previous conversation id after clearing history
+AssertionError: expected 'conv-A' to be undefined
+
+- Expected:
+undefined
+
++ Received:
+"conv-A"
+
+ ❯ src/ui/widgets/chat/chat-edit-session-switch.test.tsx:136:75
+    134|     await act(async () => container.querySelector("form")?.dispatchEve…
+    135|     expect(bridge.streamChat).toHaveBeenCalledOnce();
+    136|     expect(vi.mocked(bridge.streamChat).mock.calls[0][0].conversation_…
+       |                                                                           ^
+    137|   });
+    138| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+

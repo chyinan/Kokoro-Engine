@@ -2,6 +2,7 @@
 
 use super::backup::{
     export_data_to_path, inspect_backup_archive, load_template_references, restore_character_rows,
+    reject_unsafe_skip_memory_conflicts,
     stage_backup_configs, stage_character_resources, BackupManifest, CharacterPackageResolver,
     ConflictStrategy, ExportOptions, ImportOptions, LocalCatalogPackageResolver,
     ResolvedCharacterPackage, MAX_BACKUP_CONFIG_BYTES, MAX_BACKUP_DATABASE_BYTES,
@@ -648,3 +649,102 @@ fn create_directory_or_file_redirect(link: &Path, destination: &Path) -> bool {
 
 #[allow(dead_code)]
 fn assert_paths_are_local(_: &Path) {}
+
+#[tokio::test]
+async fn review_r17_data_only_export_must_exclude_provider_credentials() {
+    use std::io::Read;
+
+    let temp = tempfile::tempdir().unwrap();
+    let app_data = temp.path().join("app-data");
+    fs::create_dir_all(&app_data).unwrap();
+    let sentinel = "review-only-fake-provider-secret";
+    fs::write(app_data.join("llm_config.json"), serde_json::to_vec(&serde_json::json!({
+        "active_provider": "openai",
+        "providers": [{
+            "id": "openai",
+            "api_key": sentinel,
+            "clientSecret": sentinel,
+            "accessToken": sentinel
+        }]
+    })).unwrap()).unwrap();
+    let archive_path = temp.path().join("backup.kokoro");
+
+    export_data_to_path(&app_data, &archive_path, None).await.unwrap();
+
+    let mut archive = zip::ZipArchive::new(fs::File::open(&archive_path).unwrap()).unwrap();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).unwrap();
+        let mut content = Vec::new();
+        entry.read_to_end(&mut content).unwrap();
+        assert!(!String::from_utf8_lossy(&content).contains(sentinel),
+            "backup advertised as excluding provider credentials leaked a fake sentinel in {}", entry.name());
+    }
+}
+
+#[tokio::test]
+async fn review_r17_failed_export_must_preserve_previous_backup() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_data = temp.path().join("app-data");
+    fs::create_dir_all(&app_data).unwrap();
+    fs::write(app_data.join("llm_config.json"), [0xff, 0xfe]).unwrap();
+    let archive_path = temp.path().join("existing.kokoro");
+    let previous_backup = b"previous user backup bytes";
+    fs::write(&archive_path, previous_backup).unwrap();
+
+    let error = export_data_to_path(&app_data, &archive_path, None).await.unwrap_err();
+    assert!(error.to_string().contains("UTF-8"));
+
+    assert_eq!(fs::read(&archive_path).unwrap(), previous_backup,
+        "a failed export must not destroy the user's existing backup");
+}
+
+#[tokio::test]
+async fn review_r17_skip_rejects_proposals_that_reference_skipped_memory_ids() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE memories (id INTEGER PRIMARY KEY, character_id TEXT NOT NULL, supersedes TEXT)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO memories (id, character_id) VALUES (1, 'local-character')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE import_db.memories (id INTEGER PRIMARY KEY, character_id TEXT NOT NULL, supersedes TEXT)",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TABLE import_db.memory_dream_proposals (source_memory_ids TEXT, target_memory_id INTEGER)",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO import_db.memories (id, character_id) VALUES (1, 'other-character')")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO import_db.memory_dream_proposals (source_memory_ids, target_memory_id) VALUES ('[1]', 1)",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+
+    let error = reject_unsafe_skip_memory_conflicts(&mut connection)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("skip import refuses"));
+}

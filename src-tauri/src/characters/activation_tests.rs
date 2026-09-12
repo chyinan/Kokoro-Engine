@@ -1249,6 +1249,43 @@ async fn apply_and_restore_failures_recover_with_a_single_connection_pool() {
 }
 
 #[tokio::test]
+async fn failed_activation_preserves_conversation_selected_since_previous_activation() {
+    let pool = single_connection_pool().await;
+    insert_character(&pool, "old", "", json!({})).await;
+    insert_character(&pool, "next", "", json!({})).await;
+    let coordinator = ActivationCoordinator::default();
+    let backend = TestBackend::default();
+    let old_token = coordinator
+        .prepare(&pool, "old", &config(vec![], None), &[], &backend)
+        .await
+        .unwrap();
+    let committed = coordinator.commit(&pool, old_token, &backend).await.unwrap();
+
+    sqlx::query("INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES ('selected-later', 'old', '', '', '{}', '', '')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    backend
+        .set_conversation_history("selected-later", vec!["current conversation history".into()])
+        .await;
+    // load_conversation updates the live selection, independently of the activation snapshot.
+    backend.state.lock().await.current_conversation_id = Some("selected-later".into());
+    backend.sync_history(Some("selected-later")).await.unwrap();
+    assert_ne!(committed.target_conversation_id, "selected-later");
+
+    let next_token = coordinator
+        .prepare(&pool, "next", &config(vec![], None), &[], &backend)
+        .await
+        .unwrap();
+    *backend.fail_next_apply.lock().await = true;
+    coordinator.commit(&pool, next_token, &backend).await.unwrap_err();
+
+    assert_eq!(backend.state.lock().await.character_id, "old");
+    assert_eq!(backend.state.lock().await.current_conversation_id.as_deref(), Some("selected-later"));
+    assert_eq!(*backend.history.lock().await, vec!["current conversation history".to_string()]);
+}
+
+#[tokio::test]
 async fn transaction_commit_failure_restores_previous_conversation_history_and_memory_boundary() {
     let pool = pool().await;
     insert_character(&pool, "old", "Old Char", json!({})).await;

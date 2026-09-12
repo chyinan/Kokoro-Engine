@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 pub mod audit;
 pub mod builtin;
 pub mod executor;
@@ -7,7 +9,8 @@ pub mod tool_settings;
 
 pub use audit::{build_tool_audit_event, ToolAuditDecision, ToolAuditEvent, ToolAuditInput};
 pub use executor::{
-    execute_tool_calls, execute_tool_calls_with_cancellation, ToolCancellationError,
+    action_result_is_success, execute_tool_calls, execute_tool_calls_with_cancellation,
+    ToolCancellationError,
     ToolExecutionOutcome, ToolInvocation,
 };
 pub use permission::{evaluate_permission_decision, PermissionDecision};

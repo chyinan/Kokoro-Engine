@@ -199,6 +199,27 @@ describe("AudioStreamManager format routing", () => {
     expect(detectAudioContainer(wavHeader)).toBe("wav");
   });
 
+  it("review_r09 preserves WAV arrival order when decoding finishes out of order", async () => {
+    const { AudioStreamManager } = await import("./audio-player");
+    const manager = new AudioStreamManager();
+    const firstAudio = { duration: 1 } as AudioBuffer;
+    const secondAudio = { duration: 2 } as AudioBuffer;
+    let finishFirst!: (value: AudioBuffer) => void;
+    env.decodeAudioDataMock
+      .mockImplementationOnce(() => new Promise<AudioBuffer>(resolve => { finishFirst = resolve; }))
+      .mockResolvedValueOnce(secondAudio);
+
+    const firstRequest = manager.queueAudio(wavChunk);
+    await Promise.resolve();
+    await manager.queueAudio(wavChunk);
+    finishFirst(firstAudio);
+    await firstRequest;
+    const firstPlayed = env.sources[0]?.buffer;
+    manager.stop();
+
+    expect(firstPlayed).toBe(firstAudio);
+  });
+
   it("uses decodeAudioData path for WAV chunks instead of forcing MPEG MSE", async () => {
     const { AudioStreamManager } = await import("./audio-player");
 

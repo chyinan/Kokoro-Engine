@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { db } from "../../lib/db";
 
@@ -23,6 +25,7 @@ export const DEFAULT_BACKGROUND_CONFIG: BackgroundConfig = {
 };
 
 const DEFAULT_BACKGROUND_URL = "/backgrounds/default-cozy-room.png";
+type StoredBackgroundImage = { id: number; url: string };
 
 export function normalizeBackgroundConfigForImageCount(config: BackgroundConfig, imageCount: number): BackgroundConfig {
     if (imageCount === 0 && config.mode === "slideshow") {
@@ -46,7 +49,8 @@ function saveConfig(config: BackgroundConfig) {
 
 export function useBackgroundSlideshow() {
     const [config, setConfigState] = useState<BackgroundConfig>(loadConfig);
-    const [storedImages, setStoredImages] = useState<{ id: number, url: string }[]>([]);
+    const [storedImages, setStoredImages] = useState<StoredBackgroundImage[]>([]);
+    const storedImagesRef = useRef<StoredBackgroundImage[]>([]);
     const [imagesLoaded, setImagesLoaded] = useState(false);
 
     // Derived URL string array for consumption
@@ -54,6 +58,7 @@ export function useBackgroundSlideshow() {
 
     const [currentIndex, setCurrentIndex] = useState(0);
     const [currentUrl, setCurrentUrl] = useState<string | null>(null);
+    const currentUrlRef = useRef<string | null>(null);
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const indexRef = useRef(0);
 
@@ -70,6 +75,7 @@ export function useBackgroundSlideshow() {
                     id: item.id,
                     url: URL.createObjectURL(item.blob)
                 }));
+                storedImagesRef.current = loaded;
                 setStoredImages(loaded);
                 setImagesLoaded(true);
 
@@ -99,6 +105,20 @@ export function useBackgroundSlideshow() {
 
         return () => {
             active = false;
+        };
+    }, []);
+
+    useEffect(() => {
+        storedImagesRef.current = storedImages;
+    }, [storedImages]);
+
+    useEffect(() => {
+        currentUrlRef.current = currentUrl;
+    }, [currentUrl]);
+
+    useEffect(() => {
+        return () => {
+            storedImagesRef.current.forEach(img => URL.revokeObjectURL(img.url));
         };
     }, []);
 
@@ -140,7 +160,11 @@ export function useBackgroundSlideshow() {
         }
 
         if (newItems.length > 0) {
-            setStoredImages(prev => [...prev, ...newItems]);
+            setStoredImages(prev => {
+                const next = [...prev, ...newItems];
+                storedImagesRef.current = next;
+                return next;
+            });
         }
 
         return newItems.length;
@@ -148,7 +172,8 @@ export function useBackgroundSlideshow() {
 
     // Remove a single image
     const removeImage = useCallback(async (index: number) => {
-        const item = storedImages[index];
+        const currentImages = storedImagesRef.current;
+        const item = currentImages[index];
         if (!item) {
             throw new Error(`Image not found at index ${index}`);
         }
@@ -157,8 +182,32 @@ export function useBackgroundSlideshow() {
             await db.deleteImage(item.id);
             URL.revokeObjectURL(item.url);
 
-            setStoredImages(prev => prev.filter((_, i) => i !== index));
-            if (storedImages.length <= 1) {
+            const remainingImages = currentImages.filter((_, i) => i !== index);
+            storedImagesRef.current = remainingImages;
+            setStoredImages(remainingImages);
+
+            const wasCurrent = currentUrlRef.current === item.url;
+            let nextIndex = indexRef.current;
+            if (remainingImages.length === 0) {
+                nextIndex = 0;
+                setCurrentIndex(0);
+                currentUrlRef.current = null;
+                setCurrentUrl(null);
+            } else {
+                if (wasCurrent) {
+                    nextIndex = Math.min(index, remainingImages.length - 1);
+                } else if (index < nextIndex) {
+                    nextIndex -= 1;
+                }
+                indexRef.current = nextIndex;
+                setCurrentIndex(nextIndex);
+                if (wasCurrent) {
+                    currentUrlRef.current = remainingImages[nextIndex].url;
+                    setCurrentUrl(remainingImages[nextIndex].url);
+                }
+            }
+
+            if (currentImages.length <= 1) {
                 setConfigState(prev => {
                     const next = normalizeBackgroundConfigForImageCount(prev, 0);
                     if (next === prev) return prev;
@@ -177,8 +226,10 @@ export function useBackgroundSlideshow() {
         try {
             await db.clearAll();
             storedImages.forEach(img => URL.revokeObjectURL(img.url));
+            storedImagesRef.current = [];
             setStoredImages([]);
             setCurrentIndex(0);
+            currentUrlRef.current = null;
             setCurrentUrl(null);
             setConfigState(prev => {
                 const next = normalizeBackgroundConfigForImageCount(prev, 0);

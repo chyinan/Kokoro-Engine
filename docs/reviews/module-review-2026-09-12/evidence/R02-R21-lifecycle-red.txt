@@ -1,0 +1,62 @@
+
+ RUN  v4.1.0 D:/Programs/Kokoro-Engine
+
+ ❯ src/features/pet/usePetChat.test.ts (13 tests | 1 failed | 12 skipped) 17ms
+     × clears busy state from the completed IPC response when turn-finish is lost 16ms
+ ❯ src/ui/widgets/SettingsPanel.lifecycle.test.tsx (13 tests | 1 failed | 12 skipped) 103ms
+     × does not forward character A runtime changes after switching to B while saving A 102ms
+
+ Test Files  2 failed | 2 skipped (4)
+      Tests  2 failed | 48 skipped (50)
+   Start at  12:09:26
+   Duration  2.27s (transform 1.38s, setup 0ms, import 3.45s, tests 119ms, environment 1.52s)
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/ui/widgets/SettingsPanel.lifecycle.test.tsx > SettingsPanel persona lifecycle and isolation > does not forward character A runtime changes after switching to B while saving A
+AssertionError: expected "vi.fn()" to not be called with arguments: [ ObjectContaining{…} ]
+
+Received:
+
+  1st vi.fn() call:
+
+  [
+-   ObjectContaining {
++   {
+      "persona": "A persona saved slowly",
+    },
+  ]
+
+
+Number of calls: 1
+
+ ❯ src/ui/widgets/SettingsPanel.lifecycle.test.tsx:182:42
+    180|     await act(async () => root.render(createElement(SettingsPanel, { .…
+    181|     await act(async () => finishUpdate());
+    182|     expect(onCharacterRuntimeChange).not.toHaveBeenCalledWith(expect.o…
+       |                                          ^
+    183|   });
+    184|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/features/pet/usePetChat.test.ts > usePetChat > clears busy state from the completed IPC response when turn-finish is lost
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ src/features/pet/usePetChat.test.ts:105:40
+    103|         });
+    104|         expect(coreApi.invoke).toHaveBeenCalledWith("stream_chat", exp…
+    105|         expect(hookState?.isStreaming).toBe(false);
+       |                                        ^
+    106|     });
+    107|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+

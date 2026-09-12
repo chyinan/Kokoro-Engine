@@ -25,6 +25,10 @@ pub struct LlmService {
     providers: Arc<RwLock<HashMap<String, Arc<dyn LlmProvider>>>>,
     active_provider_id: Arc<RwLock<String>>,
     config: Arc<RwLock<LlmConfig>>,
+    /// Serializes the multi-field runtime snapshot. Individual fields remain
+    /// separately owned for compatibility, but readers must hold this guard
+    /// while observing more than one field.
+    state_snapshot: Arc<RwLock<()>>,
     config_path: PathBuf,
 }
 
@@ -100,12 +104,14 @@ impl LlmService {
             providers: Arc::new(RwLock::new(providers)),
             active_provider_id: Arc::new(RwLock::new(active_provider_id)),
             config: Arc::new(RwLock::new(normalized_config)),
+            state_snapshot: Arc::new(RwLock::new(())),
             config_path,
         }
     }
 
     /// Try get a clone of the active provider (Arc'd for async use).
     pub async fn try_provider(&self) -> Result<Arc<dyn LlmProvider>, KokoroError> {
+        let _snapshot_guard = self.state_snapshot.read().await;
         let active_id = self.active_provider_id.read().await.clone();
         let providers = self.providers.read().await;
 
@@ -133,11 +139,13 @@ impl LlmService {
 
     /// Get a clone of the current config.
     pub async fn config(&self) -> LlmConfig {
+        let _snapshot_guard = self.state_snapshot.read().await;
         self.config.read().await.clone()
     }
 
     /// Update config, persist to disk, and hot-swap the active provider.
     pub async fn update_config(&self, new_config: LlmConfig) -> Result<(), KokoroError> {
+        let _snapshot_guard = self.state_snapshot.write().await;
         let normalized_config = normalize_config(new_config);
         // Rebuild providers + active id first
         let rebuilt_providers = try_build_provider_map(&normalized_config)?;
@@ -157,6 +165,7 @@ impl LlmService {
     }
     /// Get the system provider (or fallback to active).
     pub async fn system_provider(&self) -> Arc<dyn LlmProvider> {
+        let _snapshot_guard = self.state_snapshot.read().await;
         let config = self.config.read().await.clone();
         let active_id = self.active_provider_id.read().await.clone();
         let providers = self.providers.read().await;

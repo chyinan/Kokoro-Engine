@@ -1,5 +1,5 @@
 import path from "path";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
@@ -46,5 +46,12 @@ export default defineConfig(async () => ({
         entryFileNames: 'assets/[name]-[hash].js',
       },
     },
+  },
+  test: {
+    include: [
+      "src/**/*.{test,spec}.{ts,tsx}",
+      "scripts/**/*.{test,spec}.{js,mjs,ts}",
+    ],
+    exclude: ["**/node_modules/**", "**/.worktrees/**", "**/dist/**", "**/src-tauri/**"],
   },
 }));
