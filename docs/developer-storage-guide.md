@@ -57,7 +57,7 @@
 1. **非阻塞极速打标（Execution < 50ms）**：
    - 在 Git 触发分支切换（`git checkout <branch>` 或 `git switch`）或合并（`git merge`）时，Git Hook 启动轻量 Node 进程动态探测当前检出分支的脚本能力，仅在具备打标能力的版本中安全写入微型时间戳标记 `target/.branch-switched`（全程受符号链接防护与跨版本兼容自省保护，历史旧分支无副作用静默略过），绝不在 Git 执行期做重度 I/O，不增加开发者操作感知延迟。
 2. **构建前定向深度消解**：
-   - 下次执行开发或测试构建时，看门狗检测到分支切换标记，优先执行深层孤儿会话消解（将增量保留收紧为最新 1 个，迅速释放 3~4 GB 跨分支垃圾），完成后自动清理标记。
+   - 下次运行内置的 npm 开发命令（`npm run tauri dev` / `npm run tauri:dev` / `npm run dev`）或手动执行 `npm run prune:target` 时，看门狗检测到分支切换标记，优先执行深层孤儿会话消解（将增量保留收紧为最新 1 个，迅速释放 3~4 GB 跨分支垃圾），完成后自动清理标记。
 
 ### 阶段三：测试执行链路收敛（Test Ephemeral Retention）
 
@@ -105,7 +105,7 @@ npm run tauri:dev
 npm run dev
 ```
 
-> 💡 **提示**：自动检查挂载于 `npm run tauri dev` / `npm run dev` 脚本的前置钩子中；若习惯直接在终端运行原生 `cargo` 命令，可在构建前按需手动执行 `npm run prune:target`，或利用 Git 分支切换自动打标唤醒清理。
+> 💡 **提示**：自动检查挂载于 `npm run tauri dev` / `npm run tauri:dev` / `npm run dev` 脚本的前置钩子中；若习惯直接在终端运行原生 `cargo` 命令，需要在构建前手动执行 `npm run prune:target`。Git 分支切换只会写入标记，后续运行上述 npm 开发命令或手动执行 `npm run prune:target` 时才会消费标记并清理。
 
 ### 3.2 可选维护与体检看板（按需使用）
 
