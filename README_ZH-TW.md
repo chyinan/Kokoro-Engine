@@ -87,9 +87,9 @@ npm install
 npm run tauri dev
 ```
 
-> 💡 **開發者友善說明（全自動儲存看門狗與編譯最佳化）**：
-> 頻繁除錯與測試 Rust 專案常導致 `target` 目錄佔用突破數十 GB。Kokoro Engine 內建了**全生命週期閉環儲存看門狗**（開發期自動控水在 12GB 內、Git 分支切換感知並定向消解孤兒代際、測試二進位自動收斂、宿主磁碟機可用空間 < 5GB 緊急熔斷），日常無需任何手動清理。
-> 開發者可隨時執行 `npm run storage:doctor` 進行一鍵儲存健檢，詳見 [開發者儲存佔用與極速編譯最佳化指南](docs/developer-storage-guide.md)。
+> 💡 **開發者友善說明（100% 全自動化儲存閉環看門狗）**：
+> 頻繁除錯與測試 Rust/Tauri 專案常導致 `target` 目錄突破數十 GB 甚至寫滿磁碟。Kokoro Engine 內建了**全生命週期閉環儲存看門狗（Kokoro Storage Sentinel, KSS）**：`npm install` 自動配置安全 Hooks，分支切換極速感知並定向消解孤兒代際，啟動 `npm run tauri dev` 或 `npm run dev` 自動控水在 12GB 警戒線內（帶編譯器鎖安全避讓），測試產物自動按 30 分鐘窗口收斂，磁碟機可用空間 < 5GB 自動緊急熔斷。**每次啟動開發前自動靜默檢查與修剪，日常開發無需任何手動清理命令**。
+> 開發者亦可隨時執行 `npm run storage:doctor` 進行透明健檢，詳見 [開發者儲存佔用全生命週期閉環管理與極速編譯指南](docs/developer-storage-guide.md)。
 
 #### 建置發行版
 

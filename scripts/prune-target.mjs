@@ -1714,7 +1714,7 @@ function runPruneTarget(args = process.argv.slice(2), customRoot = process.cwd()
       console.log(`  - [STORAGE] Non-debug artifacts (${doctorNonDebugGb.toFixed(2)} GB in release/vendor) exceed the 12 GB watermark.`);
       console.log("             Debug cache is protected from futile eviction. Run 'npm run clean:target' to clean release builds if needed.");
     } else {
-      console.log("  - [DAILY]  Watchdog automatically maintains target under 12 GB during 'npm run dev'.");
+      console.log("  - [DAILY]  Watchdog automatically maintains target under 12 GB during 'npm run tauri dev' / 'npm run dev'.");
     }
     console.log("================================================================================\n");
     return { success: true, mode: "doctor" };
