@@ -1,0 +1,9 @@
+﻿{
+    "command":  "cargo test --manifest-path src-tauri/Cargo.toml --lib review_r",
+    "workingDirectory":  "D:\\Programs\\Kokoro-Engine",
+    "startedUtc":  "2026-09-12T04:00:54.7528953+00:00",
+    "finishedUtc":  "2026-09-12T04:01:31.6067527+00:00",
+    "durationSeconds":  36.853857399999995,
+    "exitCode":  101,
+    "log":  "D:\\Programs\\Kokoro-Engine\\docs\\reviews\\module-review-2026-09-12\\evidence\\review-red-rust.log"
+}

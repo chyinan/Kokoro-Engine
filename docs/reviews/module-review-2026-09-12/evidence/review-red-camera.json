@@ -1,0 +1,9 @@
+﻿{
+    "command":  "npm test -- src/features/camera/CameraWatcher.lifecycle.test.tsx --exclude **/.worktrees/**",
+    "workingDirectory":  "D:\\Programs\\Kokoro-Engine",
+    "startedUtc":  "2026-09-12T04:05:34.0426387+00:00",
+    "finishedUtc":  "2026-09-12T04:05:36.6229230+00:00",
+    "durationSeconds":  2.5802842999999998,
+    "exitCode":  1,
+    "log":  "D:\\Programs\\Kokoro-Engine\\docs\\reviews\\module-review-2026-09-12\\evidence\\review-red-camera.log"
+}

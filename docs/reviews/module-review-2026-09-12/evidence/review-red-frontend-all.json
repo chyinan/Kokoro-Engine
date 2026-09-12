@@ -1,0 +1,9 @@
+﻿{
+    "command":  "npm test -- src/ui/widgets/chat/chat-edit-session-switch.test.tsx src/features/camera/CameraWatcher.lifecycle.test.tsx src/core/services/tts-service.review.test.ts src/ui/hooks/useWakeWord.review.test.ts src/features/live2d/Live2DViewer.lifecycle.test.tsx src/ui/hooks/useBackgroundSlideshow.lifecycle.test.tsx src/ui/widgets/SettingsPanel.lifecycle.test.tsx src/features/pet/usePetChat.test.ts src/lib/audio-player.test.ts --exclude **/.worktrees/**",
+    "workingDirectory":  "D:\\Programs\\Kokoro-Engine",
+    "startedUtc":  "2026-09-12T08:39:30.8264082+00:00",
+    "finishedUtc":  "2026-09-12T08:39:36.5105258+00:00",
+    "durationSeconds":  5.6841175999999995,
+    "exitCode":  1,
+    "log":  "D:\\Programs\\Kokoro-Engine\\docs\\reviews\\module-review-2026-09-12\\evidence\\review-red-frontend-all.log"
+}

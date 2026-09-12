@@ -193,7 +193,7 @@ export function usePetChat(): PetChatState {
                 return;
             }
 
-            await invoke("stream_chat", {
+            const response = await invoke<{ status?: string | null }>("stream_chat", {
                 request: {
                     message: trimmed,
                     character_id: localStorage.getItem("kokoro_active_character_id") || undefined,
@@ -201,6 +201,20 @@ export function usePetChat(): PetChatState {
                     conversation_id: handshake.conversation_id,
                 },
             });
+            // The IPC response is authoritative even when the finish event is
+            // lost while a pet window is being recreated. Converge the local
+            // lifecycle here; a later finish event is harmlessly ignored.
+            if (response?.status && response.status !== "streaming") {
+                setIsStreaming(false);
+                activeTurnIdRef.current = null;
+                activeClientRequestIdRef.current = null;
+                accumulatedRef.current = "";
+                if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+                hideTimerRef.current = setTimeout(() => {
+                    void invoke("hide_bubble_window").catch(() => {});
+                    hideTimerRef.current = null;
+                }, 5000);
+            }
         } catch (e) {
             console.error("[PetChat] stream_chat error:", e);
             pendingHandshakesRef.current.delete(clientRequestId);

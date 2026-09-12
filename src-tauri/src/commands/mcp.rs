@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 use crate::actions::ActionRegistry;
 use crate::error::KokoroError;
 use crate::mcp::manager::{McpManager, McpServerConfig, McpServerStatus};
@@ -55,42 +57,55 @@ pub async fn add_mcp_server(
     let mgr_arc = manager.inner().clone();
     let reg_arc = registry.inner().clone();
 
-    {
+    let (old_client, generation) = {
         let mut mgr = mgr_arc.lock().await;
-        mgr.add_server(config.clone(), false).await?;
-        if config.enabled {
-            mgr.mark_connecting(&config.name);
-        }
+        let old_client = mgr.upsert_server_config(config.clone())?;
+        let generation = config.enabled.then(|| mgr.mark_connecting(&config.name));
+        (old_client, generation)
+    };
+
+    // A replacement may have an active transport.  Shut it down after the
+    // manager lock is released so a slow MCP process cannot block commands.
+    if let Some(client) = old_client {
+        client
+            .lock()
+            .await
+            .shutdown()
+            .await
+            .map_err(KokoroError::ExternalService)?;
     }
 
-    // Spawn background task to connect
-    if config.enabled {
+    if let Some(generation) = generation {
         let cfg = config.clone();
+        let mgr_arc = mgr_arc.clone();
+        let reg_arc = reg_arc.clone();
         tauri::async_runtime::spawn(async move {
             tracing::info!(target: "mcp", "Background connecting to '{}'...", cfg.name);
             let build_result = crate::mcp::manager::build_connected_client(&cfg).await;
-            let connect_result = {
+            let (connect_result, stale_client) = {
                 let mut mgr = mgr_arc.lock().await;
-                mgr.clear_connecting(&cfg.name);
                 match build_result {
-                    Ok(client) => {
-                        mgr.insert_client(cfg.name.clone(), client);
-                        Ok(())
-                    }
+                    Ok(client) => match mgr.commit_client(cfg.name.clone(), generation, client) {
+                        Ok(()) => (Ok(()), None),
+                        Err(client) => (Err("connection result was superseded".to_string()), Some(client)),
+                    },
                     Err(e) => {
-                        mgr.set_connection_error(&cfg.name, format_connection_error(&e));
-                        Err(e)
+                        let message = format_connection_error(&e);
+                        let accepted = mgr.finish_connection_error(&cfg.name, generation, message.clone());
+                        if accepted { (Err(message), None) }
+                        else { (Err("connection result was superseded".to_string()), None) }
                     }
                 }
             };
+            if let Some(client) = stale_client {
+                let _ = client.shutdown().await;
+            }
             match connect_result {
                 Ok(()) => {
                     tracing::info!(target: "mcp", "Connected '{}', refreshing tools...", cfg.name);
                     crate::mcp::bridge::register_mcp_tools(&mgr_arc, &reg_arc).await;
                 }
-                Err(e) => {
-                    tracing::error!(target: "mcp", "Connection failed for '{}': {}", cfg.name, e)
-                }
+                Err(e) => tracing::error!(target: "mcp", "Connection failed for '{}': {}", cfg.name, e),
             }
         });
     }
@@ -103,9 +118,23 @@ pub async fn add_mcp_server(
 pub async fn remove_mcp_server(
     name: String,
     manager: State<'_, Arc<Mutex<McpManager>>>,
+    registry: State<'_, Arc<RwLock<ActionRegistry>>>,
 ) -> Result<(), KokoroError> {
-    let mut mgr = manager.lock().await;
-    mgr.remove_server(&name).await?;
+    let client = {
+        let mut mgr = manager.lock().await;
+        mgr.detach_server_for_removal(&name)?
+    };
+    if let Some(client) = client {
+        client
+            .lock()
+            .await
+            .shutdown()
+            .await
+            .map_err(KokoroError::ExternalService)?;
+    }
+    // Remove stale MCP actions immediately so the model and direct action
+    // callers cannot invoke tools from the deleted server.
+    crate::mcp::bridge::register_mcp_tools(&manager.inner().clone(), registry.inner()).await;
     Ok(())
 }
 
@@ -128,34 +157,49 @@ pub async fn reconnect_mcp_server(
     let mgr_arc = manager.inner().clone();
     let reg_arc = registry.inner().clone();
 
-    let cfg = {
-        let mut mgr = mgr_arc.lock().await;
+        let (cfg, generation, old_client) = {
+            let mut mgr = mgr_arc.lock().await;
         let cfg = mgr
             .get_config(&name)
             .ok_or_else(|| KokoroError::NotFound(format!("Server '{}' not found", name)))?;
         // Disconnect existing (if any) before retrying
-        let _ = mgr.disconnect_server(&name).await;
-        mgr.mark_connecting(&name);
-        cfg
-    };
+            let old_client = mgr.take_client(&name);
+            let generation = mgr.mark_connecting(&name);
+            (cfg, generation, old_client)
+        };
+
+    if let Some(client) = old_client {
+        client
+            .lock()
+            .await
+            .shutdown()
+            .await
+            .map_err(KokoroError::ExternalService)?;
+    }
 
     tauri::async_runtime::spawn(async move {
         tracing::info!(target: "mcp", "Retrying connection to '{}'...", cfg.name);
         let build_result = crate::mcp::manager::build_connected_client(&cfg).await;
-        let connect_result = {
+        let (connect_result, stale_client) = {
             let mut mgr = mgr_arc.lock().await;
-            mgr.clear_connecting(&cfg.name);
             match build_result {
-                Ok(client) => {
-                    mgr.insert_client(cfg.name.clone(), client);
-                    Ok(())
-                }
+                Ok(client) => match mgr.commit_client(cfg.name.clone(), generation, client) {
+                    Ok(()) => (Ok(()), None),
+                    Err(client) => (Err("connection result was superseded".to_string()), Some(client)),
+                },
                 Err(e) => {
-                    mgr.set_connection_error(&cfg.name, format_connection_error(&e));
-                    Err(e)
+                    let message = format_connection_error(&e);
+                    if mgr.finish_connection_error(&cfg.name, generation, message.clone()) {
+                        (Err(message), None)
+                    } else {
+                        (Err("connection result was superseded".to_string()), None)
+                    }
                 }
             }
         };
+        if let Some(client) = stale_client {
+            let _ = client.shutdown().await;
+        }
         match connect_result {
             Ok(()) => {
                 tracing::info!(target: "mcp", "Reconnected '{}', refreshing tools...", cfg.name);
@@ -181,41 +225,57 @@ pub async fn toggle_mcp_server(
     let mgr_arc = manager.inner().clone();
     let reg_arc = registry.inner().clone();
 
-    let cfg = {
+    let (cfg, client_to_shutdown) = {
         let mut mgr = mgr_arc.lock().await;
-        mgr.toggle_server(&name, enabled).await?;
+        let client_to_shutdown = mgr.set_server_enabled(&name, enabled)?;
 
-        if enabled {
+        let next_config = if enabled {
             let cfg = mgr
                 .get_config(&name)
                 .ok_or_else(|| KokoroError::NotFound(format!("Server '{}' not found", name)))?;
-            mgr.mark_connecting(&name);
-            Some(cfg)
+            let generation = mgr.mark_connecting(&name);
+            Some((cfg, generation))
         } else {
             // Disabled — refresh action registry to remove tools
             None
-        }
+        };
+        (next_config, client_to_shutdown)
     };
 
-    if let Some(cfg) = cfg {
+    if let Some(client) = client_to_shutdown {
+        client
+            .lock()
+            .await
+            .shutdown()
+            .await
+            .map_err(KokoroError::ExternalService)?;
+    }
+
+    if let Some((cfg, generation)) = cfg {
         // Enable: spawn background connection
         tauri::async_runtime::spawn(async move {
             tracing::info!(target: "mcp", "Enabling and connecting '{}'...", cfg.name);
             let build_result = crate::mcp::manager::build_connected_client(&cfg).await;
-            let connect_result = {
+            let (connect_result, stale_client) = {
                 let mut mgr = mgr_arc.lock().await;
-                mgr.clear_connecting(&cfg.name);
                 match build_result {
-                    Ok(client) => {
-                        mgr.insert_client(cfg.name.clone(), client);
-                        Ok(())
-                    }
+                    Ok(client) => match mgr.commit_client(cfg.name.clone(), generation, client) {
+                        Ok(()) => (Ok(()), None),
+                        Err(client) => (Err("connection result was superseded".to_string()), Some(client)),
+                    },
                     Err(e) => {
-                        mgr.set_connection_error(&cfg.name, format_connection_error(&e));
-                        Err(e)
+                        let message = format_connection_error(&e);
+                        if mgr.finish_connection_error(&cfg.name, generation, message.clone()) {
+                            (Err(message), None)
+                        } else {
+                            (Err("connection result was superseded".to_string()), None)
+                        }
                     }
                 }
             };
+            if let Some(client) = stale_client {
+                let _ = client.shutdown().await;
+            }
             match connect_result {
                 Ok(()) => {
                     tracing::info!(target: "mcp", "Connected '{}', refreshing tools...", cfg.name);

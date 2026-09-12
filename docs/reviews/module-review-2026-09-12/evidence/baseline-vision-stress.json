@@ -1,0 +1,9 @@
+﻿{
+    "command":  "cargo test --manifest-path src-tauri/Cargo.toml --lib --features stress vision::tests::concurrency",
+    "workingDirectory":  "D:\\Programs\\Kokoro-Engine",
+    "startedUtc":  "2026-09-12T03:58:26.7183142+00:00",
+    "finishedUtc":  "2026-09-12T04:00:03.1585628+00:00",
+    "durationSeconds":  96.44024859999999,
+    "exitCode":  0,
+    "log":  "D:\\Programs\\Kokoro-Engine\\docs\\reviews\\module-review-2026-09-12\\evidence\\baseline-vision-stress.log"
+}

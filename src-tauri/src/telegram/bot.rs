@@ -1140,8 +1140,15 @@ async fn send_voice_reply(bot: &Bot, chat_id: ChatId, text: &str, app: &tauri::A
 
     match tts_service.synthesize_text(text, None).await {
         Ok(audio_bytes) if !audio_bytes.is_empty() => {
-            let input = InputFile::memory(audio_bytes).file_name("reply.ogg");
-            if let Err(e) = bot.send_voice(chat_id, input).await {
+            let (mime_type, extension) =
+                crate::commands::bot::audio_metadata_for_external(&audio_bytes);
+            let input = InputFile::memory(audio_bytes).file_name(format!("reply.{extension}"));
+            let result = if mime_type == "audio/ogg" {
+                bot.send_voice(chat_id, input).await.map(|_| ())
+            } else {
+                bot.send_audio(chat_id, input).await.map(|_| ())
+            };
+            if let Err(e) = result {
                 tracing::error!(target: "telegram", "[Telegram] Failed to send voice: {}", e);
             }
         }

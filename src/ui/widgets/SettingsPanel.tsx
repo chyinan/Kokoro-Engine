@@ -367,6 +367,9 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     const [localAutoBackupConfig, setLocalAutoBackupConfig] = useState<AutoBackupConfig | null>(null);
     const [isAutoBackupLoading, setIsAutoBackupLoading] = useState(true);
     const openRevisionRef = useRef(0);
+    const activeCharacterIdRef = useRef(activeCharacterId);
+    activeCharacterIdRef.current = activeCharacterId;
+    const previousActiveCharacterIdRef = useRef(activeCharacterId);
     const ttsRefreshRevisionRef = useRef(0);
     const botRefreshRevisionRef = useRef(0);
     const pendingRuntimePersonaRef = useRef<{ characterId: string; persona: string } | null>(null);
@@ -529,6 +532,11 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     };
 
     useEffect(() => {
+        if (previousActiveCharacterIdRef.current !== activeCharacterId) {
+            previousActiveCharacterIdRef.current = activeCharacterId;
+            openRevisionRef.current += 1;
+            pendingRuntimePersonaRef.current = null;
+        }
         if (
             pendingRuntimePersonaRef.current &&
             pendingRuntimePersonaRef.current.characterId !== activeCharacterId
@@ -738,6 +746,11 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     const handleSave = async () => {
         setSaveError(null);
         const saveErrors: string[] = [];
+        const saveRevision = openRevisionRef.current;
+        const saveCharacterId = activeCharacterIdRef.current;
+        const isSaveSessionCurrent = () =>
+            openRevisionRef.current === saveRevision
+            && activeCharacterIdRef.current === saveCharacterId;
 
         // 1. Commit Persona Draft
         let personaSaveResult: CharacterSaveResult | undefined;
@@ -750,7 +763,8 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             console.error("[SettingsPanel] Failed to save character draft:", e);
             saveErrors.push(getKokoroErrorMessage(e));
         }
-        const isCurrentActiveCharacter = personaSaveResult?.changedCharacter?.id === activeCharacterId;
+        const isCurrentActiveCharacter = isSaveSessionCurrent()
+            && personaSaveResult?.changedCharacter?.id === saveCharacterId;
         const personaDirty = Boolean(personaSaveResult?.characterDirty && isCurrentActiveCharacter);
         if (
             personaDirty &&
@@ -914,7 +928,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         // 9. CONDITIONAL RUNTIME RELOAD:
         // Only trigger onCharacterRuntimeChange if one of the runtime-sensitive fields changed!
         const pendingRuntime = pendingRuntimePersonaRef.current;
-        const pendingForActive = (pendingRuntime && pendingRuntime.characterId === activeCharacterId)
+        const pendingForActive = (pendingRuntime && pendingRuntime.characterId === saveCharacterId)
             ? pendingRuntime.persona
             : null;
         const personaToApply = personaDirty
@@ -927,7 +941,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             responseLangDirty,
         });
 
-        if (runtimeDirty) {
+        if (isSaveSessionCurrent() && runtimeDirty) {
             const selectedTtsProvider = localTtsConfig?.providers?.find(
                 (provider) => provider.id === ttsProviderId,
             ) ?? null;
@@ -961,7 +975,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 console.error("[SettingsPanel] Failed to apply character runtime:", e);
                 saveErrors.push(getKokoroErrorMessage(e));
             }
-        } else {
+        } else if (isSaveSessionCurrent()) {
             if (responseLangDirty) {
                 baselineResponseLangRef.current = responseLang;
             }

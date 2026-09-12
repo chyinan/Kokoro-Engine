@@ -243,9 +243,17 @@ impl ActivationCoordinator {
         .map_err(|error| {
             KokoroError::Validation(format!("invalid character runtime profile: {error}"))
         })?;
-        let previous_committed = match persisted_committed {
-            Some(committed) => committed.runtime,
-            None => backend.snapshot().await?,
+        // The backend snapshot is authoritative for the live session. The
+        // persisted activation row is only a recovery fallback when the
+        // backend has not been initialized yet; it may lag a conversation
+        // selection made after the previous activation commit.
+        let backend_snapshot = backend.snapshot().await?;
+        let previous_committed = if backend_snapshot.character_id.is_empty() {
+            persisted_committed
+                .map(|committed| committed.runtime)
+                .unwrap_or(backend_snapshot)
+        } else {
+            backend_snapshot
         };
         let character_name = row.try_get::<String, _>("name")?;
         let user_name = normalized_user_name(row.try_get::<String, _>("user_nickname")?);

@@ -1,0 +1,9 @@
+﻿{
+    "command":  "npm run tauri build -- --bundles nsis",
+    "workingDirectory":  "D:\\Programs\\Kokoro-Engine",
+    "startedUtc":  "2026-09-12T04:02:49.7529572+00:00",
+    "finishedUtc":  "2026-09-12T04:08:11.0079939+00:00",
+    "durationSeconds":  321.2550367,
+    "exitCode":  1,
+    "log":  "D:\\Programs\\Kokoro-Engine\\docs\\reviews\\module-review-2026-09-12\\evidence\\baseline-windows-installer.log"
+}

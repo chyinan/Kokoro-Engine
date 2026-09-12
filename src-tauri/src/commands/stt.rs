@@ -128,12 +128,14 @@ pub async fn start_native_wake_word(
     wake_word_state: State<'_, NativeWakeWordState>,
     wake_word: String,
     trigger_on_speech: Option<bool>,
+    owner: Option<u64>,
 ) -> Result<(), KokoroError> {
     crate::stt::wake_word::start_native_wake_word(
         &app,
         wake_word_state.inner(),
         wake_word,
         trigger_on_speech.unwrap_or(false),
+        owner,
     )
     .map_err(KokoroError::Stt)
 }
@@ -142,8 +144,9 @@ pub async fn start_native_wake_word(
 pub async fn stop_native_wake_word(
     app: AppHandle,
     wake_word_state: State<'_, NativeWakeWordState>,
+    owner: Option<u64>,
 ) -> Result<(), KokoroError> {
-    crate::stt::wake_word::stop_native_wake_word(&app, wake_word_state.inner())
+    crate::stt::wake_word::stop_native_wake_word(&app, wake_word_state.inner(), owner)
         .map_err(KokoroError::Stt)
 }
 

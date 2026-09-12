@@ -1,0 +1,9 @@
+﻿{
+    "command":  "python -m pytest -q",
+    "workingDirectory":  "D:\\Programs\\Kokoro-Engine\\integrations\\astrbot-kokoro",
+    "startedUtc":  "2026-09-12T03:56:19.8831428+00:00",
+    "finishedUtc":  "2026-09-12T03:56:24.4026235+00:00",
+    "durationSeconds":  4.5194807,
+    "exitCode":  1,
+    "log":  "D:\\Programs\\Kokoro-Engine\\docs\\reviews\\module-review-2026-09-12\\evidence\\baseline-astrbot.log"
+}

@@ -1,0 +1,9 @@
+﻿{
+    "command":  "rtk proxy npm test -- docs/reviews/module-review-2026-09-12/evidence/R08-typing-listener-lifecycle.test.ts",
+    "workingDirectory":  "D:\\Programs\\Kokoro-Engine",
+    "startedUtc":  "2026-09-12T04:07:28.8382055+00:00",
+    "finishedUtc":  "2026-09-12T04:07:31.3130184+00:00",
+    "durationSeconds":  2.4748129,
+    "exitCode":  1,
+    "log":  "D:\\Programs\\Kokoro-Engine\\docs\\reviews\\module-review-2026-09-12\\evidence\\R08-typing-listener-lifecycle.log"
+}

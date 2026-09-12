@@ -18,7 +18,20 @@ const subscribeRegistry = (onStoreChange: () => void) => {
 };
 const getRegistrySnapshot = () => registrySnapshot;
 
-const LayoutNodeRenderer = memo(({ node }: { node: LayoutNode }) => {
+type ModPermissions = Readonly<Record<string, readonly string[]>>;
+
+function modIdFromSource(src: string): string | undefined {
+    const match = /^mod:\/\/([^/]+)/.exec(src);
+    return match?.[1];
+}
+
+const LayoutNodeRenderer = memo(({
+    node,
+    modPermissions,
+}: {
+    node: LayoutNode;
+    modPermissions: ModPermissions;
+}) => {
     const { activeTheme } = useTheme();
     // Re-render when registry changes (mod component registered / unregistered)
     useSyncExternalStore(subscribeRegistry, getRegistrySnapshot);
@@ -33,7 +46,7 @@ const LayoutNodeRenderer = memo(({ node }: { node: LayoutNode }) => {
                 <IframeSandbox
                     id={node.id}
                     src={node.src}
-                    permissions={[]}
+                    permissions={[...(modPermissions[modIdFromSource(node.src) ?? ""] ?? [])]}
                     componentProps={node.props}
                 />
             </div>
@@ -110,7 +123,7 @@ const LayoutNodeRenderer = memo(({ node }: { node: LayoutNode }) => {
         return (
             <div className="relative w-full h-full">
                 {node.children.map((child) => (
-                    <LayoutNodeRenderer key={child.id} node={child} />
+                    <LayoutNodeRenderer key={child.id} node={child} modPermissions={modPermissions} />
                 ))}
             </div>
         );
@@ -126,7 +139,7 @@ const LayoutNodeRenderer = memo(({ node }: { node: LayoutNode }) => {
                 }}
             >
                 {node.children.map((child) => (
-                    <LayoutNodeRenderer key={child.id} node={child} />
+                    <LayoutNodeRenderer key={child.id} node={child} modPermissions={modPermissions} />
                 ))}
             </div>
         );
@@ -137,12 +150,20 @@ const LayoutNodeRenderer = memo(({ node }: { node: LayoutNode }) => {
 
 type LayoutRendererProps = {
     readonly config: LayoutConfig;
+    /** Permissions granted by the host for each installed MOD id. */
+    readonly modPermissions?: ModPermissions;
     readonly transparent?: boolean;
     readonly backgroundLayer?: React.ReactNode;
     readonly overlayLayer?: React.ReactNode;
 };
 
-export const LayoutRenderer = ({ config, transparent, backgroundLayer, overlayLayer }: LayoutRendererProps) => {
+export const LayoutRenderer = ({
+    config,
+    modPermissions = {},
+    transparent,
+    backgroundLayer,
+    overlayLayer,
+}: LayoutRendererProps) => {
     return (
         <div className={clsx(
             "w-screen h-screen overflow-hidden text-[var(--color-text-primary)] font-body relative",
@@ -155,7 +176,7 @@ export const LayoutRenderer = ({ config, transparent, backgroundLayer, overlayLa
             <div className="noise-overlay" />
 
             <AnimatePresence mode="wait">
-                <LayoutNodeRenderer node={config.root} />
+                <LayoutNodeRenderer node={config.root} modPermissions={modPermissions} />
             </AnimatePresence>
 
             {overlayLayer && (

@@ -894,6 +894,17 @@ function App() {
     [displayMode, modelUrl, activeLive2dModelPath, activeModelSource, gazeTracking, renderFps, chatPanelWidth, onboardingOpen, handleChatPanelWidthPreview, handleChatPanelWidthChange]
   );
 
+  const modPermissions = useMemo(
+    () => Object.fromEntries(
+      modList.map((mod) => [mod.id, mod.permissions ?? []]),
+    ),
+    [modList],
+  );
+
+  useEffect(() => {
+    registry.setModPermissions(modPermissions);
+  }, [modPermissions]);
+
   const handleDisplayModeChange = (mode: Live2DDisplayMode) => {
     setDisplayMode(mode);
     writeStringSetting(APP_SETTING_KEYS.displayMode, mode);
@@ -2612,6 +2623,7 @@ function App() {
       {/* Background image rendered inside LayoutRenderer, behind Live2D */}
       <LayoutRenderer
         config={layout}
+        modPermissions={modPermissions}
         transparent={!!renderedBackgroundUrl}
         backgroundLayer={
           <BackgroundLayer

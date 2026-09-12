@@ -14,6 +14,7 @@ interface ModComponentEntry {
 export class ComponentRegistry {
     private components = new Map<string, ComponentConstructor>();
     private modComponents = new Map<string, ModComponentEntry>();
+    private modPermissions = new Map<string, readonly string[]>();
     private listeners = new Set<() => void>();
 
     /**
@@ -43,7 +44,7 @@ export class ComponentRegistry {
             return IframeSandbox({
                 id: `${modId}-${slotName}`,
                 src: iframeSrc,
-                permissions: [],
+                permissions: [...(this.modPermissions.get(modId) ?? [])],
                 componentProps: props,
             });
         };
@@ -74,6 +75,14 @@ export class ComponentRegistry {
             this.components.delete(slot);
         }
         this.modComponents.clear();
+        this.notify();
+    }
+
+    /** Replace the host-approved capability grants used by MOD wrappers. */
+    setModPermissions(permissions: Readonly<Record<string, readonly string[]>>) {
+        this.modPermissions = new Map(
+            Object.entries(permissions).map(([modId, grants]) => [modId, [...grants]]),
+        );
         this.notify();
     }
 

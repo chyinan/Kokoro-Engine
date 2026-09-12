@@ -91,6 +91,20 @@ describe("usePetChat", () => {
         });
     });
 
+    it("clears busy state from the completed IPC response when turn-finish is lost", async () => {
+        vi.mocked(coreApi.invoke).mockImplementation(async (command) => {
+            if (command === "stream_chat") {
+                return { status: "completed", conversation_id: "conv-mock", assistant_message_id: 42 } as never;
+            }
+            return undefined as never;
+        });
+        await act(async () => {
+            await hookState?.sendMessage("Completed without finish event");
+        });
+        expect(coreApi.invoke).toHaveBeenCalledWith("stream_chat", expect.anything());
+        expect(hookState?.isStreaming).toBe(false);
+    });
+
     it("prevents sending another message while streaming", async () => {
         expect(hookState).not.toBeNull();
 

@@ -1937,9 +1937,10 @@ async fn attach_generated_images_to_reply(
 async fn attach_voice_reply_to_webhook(app: &tauri::AppHandle, reply: &mut BotReply) {
     match synthesize_bot_audio(app, &reply.reply).await {
         Ok(Some(data)) => {
+            let (mime_type, extension) = audio_metadata(&data);
             reply.audio = Some(BotReplyAudio {
-                mime_type: "audio/ogg".to_string(),
-                file_name: "reply.ogg".to_string(),
+                mime_type: mime_type.to_string(),
+                file_name: format!("reply.{extension}"),
                 data_base64: base64::engine::general_purpose::STANDARD.encode(data),
             });
         }
@@ -1948,6 +1949,23 @@ async fn attach_voice_reply_to_webhook(app: &tauri::AppHandle, reply: &mut BotRe
             tracing::error!(target: "bot::webhook", "failed to synthesize voice reply: {}", error);
         }
     }
+}
+
+fn audio_metadata(bytes: &[u8]) -> (&'static str, &'static str) {
+    if bytes.starts_with(b"OggS") {
+        return ("audio/ogg", "ogg");
+    }
+    if bytes.starts_with(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WAVE" {
+        return ("audio/wav", "wav");
+    }
+    if bytes.starts_with(b"ID3") || (bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0) {
+        return ("audio/mpeg", "mp3");
+    }
+    ("application/octet-stream", "bin")
+}
+
+pub(crate) fn audio_metadata_for_external(bytes: &[u8]) -> (&'static str, &'static str) {
+    audio_metadata(bytes)
 }
 
 async fn download_url_bytes(
@@ -1963,13 +1981,32 @@ async fn download_url_bytes(
     if !response.status().is_success() {
         return Err(format!("download returned {}", response.status()));
     }
+    const MAX_BOT_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_BOT_MEDIA_BYTES)
+    {
+        return Err("downloaded media exceeds the size limit".to_string());
+    }
     let content_type = response
         .headers()
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let data = response.bytes().await.map_err(|error| error.to_string())?;
-    Ok((data.to_vec(), content_type))
+    let mut stream = response.bytes_stream();
+    let mut data = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| error.to_string())?;
+        let next_size = data
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| "downloaded media size overflow".to_string())?;
+        if next_size as u64 > MAX_BOT_MEDIA_BYTES {
+            return Err("downloaded media exceeds the size limit".to_string());
+        }
+        data.extend_from_slice(&chunk);
+    }
+    Ok((data, content_type))
 }
 
 fn normalize_path(path: &str) -> String {
@@ -2019,7 +2056,8 @@ async fn run_http_bot_server(
         .and(warp::body::bytes())
         .and(warp::any().map(move || config.clone()))
         .and(warp::any().map(move || app.clone()))
-        .and_then(handle_http_bot_request);
+        .and_then(handle_http_bot_request)
+        .recover(recover_http_bot_rejection);
 
     tracing::info!(target: "bot::http", "Bot HTTP server listening on {}", addr);
     warp::serve(route)
@@ -2029,6 +2067,19 @@ async fn run_http_bot_server(
         .1
         .await;
     tracing::info!(target: "bot::http", "Bot HTTP server stopped");
+}
+
+async fn recover_http_bot_rejection(
+    rejection: warp::Rejection,
+) -> Result<warp::reply::Response, Infallible> {
+    let (status, message) = if rejection.find::<warp::reject::PayloadTooLarge>().is_some() {
+        (StatusCode::PAYLOAD_TOO_LARGE, "Webhook body exceeds the configured limit")
+    } else if rejection.is_not_found() {
+        (StatusCode::NOT_FOUND, "Not found")
+    } else {
+        (StatusCode::BAD_REQUEST, "Invalid webhook request")
+    };
+    Ok(json_response(json!({ "error": message }), status))
 }
 
 async fn handle_http_bot_request(
@@ -2109,7 +2160,7 @@ fn verify_webhook_bearer(
     expected_token: Option<&str>,
 ) -> Result<(), String> {
     let Some(expected_token) = expected_token.filter(|token| !token.trim().is_empty()) else {
-        return Ok(());
+        return Err("Webhook bearer token is not configured".to_string());
     };
     let Some(authorization) = authorization else {
         return Err("Missing Authorization header".to_string());
@@ -2145,21 +2196,17 @@ fn webhook_conversation_key(
             .map(str::trim)
             .find(|value| !value.is_empty())
     }
-    let (prefix, identity) = if matches!(conversation_type.as_str(), "group" | "channel") {
-        (
-            "group",
-            first_non_empty(&[conversation_id, source, user_id]),
-        )
+    let prefix = if matches!(conversation_type.as_str(), "group" | "channel") {
+        "group"
     } else {
-        (
-            "private",
-            first_non_empty(&[user_id, conversation_id, source]),
-        )
+        "private"
     };
+    let identity = first_non_empty(&[conversation_id, user_id]);
+    let source = first_non_empty(&[source]).unwrap_or("unknown");
     identity
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| format!("{prefix}:{value}"))
+        .map(|value| format!("{prefix}:{source}:{value}"))
 }
 
 /// Scope an external conversation identity to a character before it reaches
@@ -3002,8 +3049,8 @@ async fn handle_discord_message(
                             token,
                             &channel_id,
                             "",
-                            "reply.ogg",
-                            "audio/ogg",
+                            audio_metadata(&audio).1,
+                            audio_metadata(&audio).0,
                             audio,
                         )
                         .await
@@ -3326,7 +3373,35 @@ mod tests {
             verify_webhook_bearer(Some("Basic secret"), Some("secret")).unwrap_err(),
             "Invalid bearer token"
         );
-        assert!(verify_webhook_bearer(None, None).is_ok());
+        assert!(verify_webhook_bearer(None, None).is_err());
+    }
+
+    #[test]
+    fn review_r18_webhook_without_configured_token_must_reject_requests() {
+        assert!(verify_webhook_bearer(None, None).is_err());
+        assert!(verify_webhook_bearer(Some("Bearer test-value"), Some("  ")).is_err());
+    }
+
+    #[test]
+    fn review_r18_webhook_sessions_must_separate_platforms() {
+        let first = webhook_conversation_key(
+            Some("private"), Some("same-user"), Some("same-user"), Some("platform-a"),
+        );
+        let second = webhook_conversation_key(
+            Some("private"), Some("same-user"), Some("same-user"), Some("platform-b"),
+        );
+        assert_ne!(first, second, "platform identity must participate in session identity");
+    }
+
+    #[test]
+    fn review_r18_explicit_private_session_must_not_be_shadowed_by_sender() {
+        let first = webhook_conversation_key(
+            Some("private"), Some("session-a"), Some("same-user"), Some("astrbot"),
+        );
+        let second = webhook_conversation_key(
+            Some("private"), Some("session-b"), Some("same-user"), Some("astrbot"),
+        );
+        assert_ne!(first, second, "AstrBot platform_session must reach persistence identity");
     }
 
     #[test]
@@ -3354,7 +3429,7 @@ mod tests {
         );
         assert_eq!(parsed.audio.as_deref(), Some(&b"hello"[..]));
         assert_eq!(parsed.audio_format.as_deref(), Some("wav"));
-        assert_eq!(parsed.conversation_key.as_deref(), Some("private:user-7"));
+        assert_eq!(parsed.conversation_key.as_deref(), Some("private:unknown:user-7"));
     }
 
     #[test]
@@ -3369,10 +3444,10 @@ mod tests {
         )
         .expect("valid group webhook payload");
 
-        assert_eq!(parsed.conversation_key.as_deref(), Some("group:group-42"));
+        assert_eq!(parsed.conversation_key.as_deref(), Some("group:unknown:group-42"));
         assert_eq!(
             map_webhook_conversation_to_character("char-2", parsed.conversation_key.as_deref()),
-            "char-2:group:group-42"
+            "char-2:group:unknown:group-42"
         );
     }
 
@@ -3390,7 +3465,7 @@ mod tests {
 
         assert_eq!(
             parsed.conversation_key.as_deref(),
-            Some("private:private-session-9")
+            Some("private:unknown:private-session-9")
         );
     }
 

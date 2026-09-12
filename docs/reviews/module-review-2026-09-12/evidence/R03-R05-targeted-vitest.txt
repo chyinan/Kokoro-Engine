@@ -1,0 +1,9 @@
+
+ RUN  v4.1.0 D:/Programs/Kokoro-Engine
+
+
+ Test Files  27 passed (27)
+      Tests  333 passed (333)
+   Start at  12:01:27
+   Duration  3.33s (transform 2.85s, setup 0ms, import 4.46s, tests 2.92s, environment 6.01s)
+

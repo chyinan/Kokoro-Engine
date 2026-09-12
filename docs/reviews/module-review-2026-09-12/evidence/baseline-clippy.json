@@ -1,0 +1,9 @@
+﻿{
+    "command":  "cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings",
+    "workingDirectory":  "D:\\Programs\\Kokoro-Engine",
+    "startedUtc":  "2026-09-12T03:57:02.6016817+00:00",
+    "finishedUtc":  "2026-09-12T03:57:44.3173918+00:00",
+    "durationSeconds":  41.715710099999995,
+    "exitCode":  0,
+    "log":  "D:\\Programs\\Kokoro-Engine\\docs\\reviews\\module-review-2026-09-12\\evidence\\baseline-clippy.log"
+}

@@ -1,0 +1,9 @@
+﻿{
+    "command":  "cargo check --manifest-path src-tauri/Cargo.toml",
+    "workingDirectory":  "D:\\Programs\\Kokoro-Engine",
+    "startedUtc":  "2026-09-12T09:16:15.7830150+00:00",
+    "finishedUtc":  "2026-09-12T09:17:01.5023855+00:00",
+    "durationSeconds":  45.7193705,
+    "exitCode":  101,
+    "log":  "D:\\Programs\\Kokoro-Engine\\docs\\reviews\\module-review-2026-09-12\\evidence\\post-fix-cargo-check.log"
+}

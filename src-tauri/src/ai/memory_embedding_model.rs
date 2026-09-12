@@ -460,22 +460,32 @@ where
 {
     let status = memory_embedding_model_status();
     if status.installed {
-        emit_progress(build_download_progress(
-            "ready",
-            "Memory embedding model is already installed".to_string(),
-            "model.onnx".to_string(),
-            0,
-            0,
-            0,
-            None,
-        ))?;
-        return Ok(status);
+        if try_load_local_embedding_model().is_some() {
+            emit_progress(build_download_progress(
+                "ready",
+                "Memory embedding model is already installed".to_string(),
+                "model.onnx".to_string(),
+                0,
+                0,
+                0,
+                None,
+            ))?;
+            return Ok(status);
+        }
+        tracing::warn!(
+            target: "memory",
+            "[Memory] Installed embedding files failed local verification; re-downloading the complete snapshot"
+        );
     }
 
     ensure_default_model_repo_layout().map_err(|error| error.to_string())?;
 
     let snapshot_dir = default_model_snapshot_dir();
-    let missing_files = missing_required_model_files(&snapshot_dir);
+    let missing_files = if status.installed {
+        required_model_files().into_iter().map(str::to_string).collect()
+    } else {
+        missing_required_model_files(&snapshot_dir)
+    };
     let file_count = missing_files.len();
     let emit_progress: Arc<
         dyn Fn(MemoryEmbeddingModelDownloadProgress) -> std::result::Result<(), String>

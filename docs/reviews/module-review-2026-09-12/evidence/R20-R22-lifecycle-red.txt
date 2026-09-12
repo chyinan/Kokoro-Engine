@@ -1,0 +1,81 @@
+
+ RUN  v4.1.0 D:/Programs/Kokoro-Engine
+
+ ❯ src/ui/hooks/useBackgroundSlideshow.lifecycle.test.tsx (2 tests | 2 failed) 16ms
+     × selects a remaining live image after deleting the displayed image 14ms
+     × releases all loaded object URLs when the hook unmounts 2ms
+ ❯ src/features/live2d/Live2DViewer.lifecycle.test.tsx (2 tests | 2 failed) 25ms
+     × releases subscriptions whose registration finishes after unmount 20ms
+     × keeps an amplitude listener active after StrictMode effect remount 5ms
+
+ Test Files  2 failed (2)
+      Tests  4 failed (4)
+   Start at  12:08:17
+   Duration  712ms (transform 154ms, setup 0ms, import 240ms, tests 42ms, environment 747ms)
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/features/live2d/Live2DViewer.lifecycle.test.tsx > Live2DViewer subscription lifecycle > releases subscriptions whose registration finishes after unmount
+AssertionError: expected "vi.fn()" to be called once, but got 0 times
+ ❯ src/features/live2d/Live2DViewer.lifecycle.test.tsx:54:49
+     52|     const cleanups = resolveRegistrations.map(() => vi.fn());
+     53|     await act(async () => resolveRegistrations.forEach((resolve, index…
+     54|     cleanups.forEach(cleanup => expect(cleanup).toHaveBeenCalledOnce()…
+       |                                                 ^
+     55|   });
+     56|
+ ❯ src/features/live2d/Live2DViewer.lifecycle.test.tsx:54:14
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+ FAIL  src/features/live2d/Live2DViewer.lifecycle.test.tsx > Live2DViewer subscription lifecycle > keeps an amplitude listener active after StrictMode effect remount
+AssertionError: expected +0 to be 1 // Object.is equality
+
+- Expected
++ Received
+
+- 1
++ 0
+
+ ❯ src/features/live2d/Live2DViewer.lifecycle.test.tsx:62:142
+     60|     await act(async () => root.render(createElement(StrictMode, null,
+     61|       createElement(Live2DViewer, { modelUrl: "test.model3.json" }))));
+     62|     expect(vi.mocked(audioPlayer.addAmplitudeListener).mock.calls.leng…
+       |                                                                                                                                              ^
+     63|   });
+     64| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/4]⎯
+
+ FAIL  src/ui/hooks/useBackgroundSlideshow.lifecycle.test.tsx > background image lifecycle > selects a remaining live image after deleting the displayed image
+AssertionError: expected 'blob:image-1' to be 'blob:image-2' // Object.is equality
+
+Expected: "blob:image-2"
+Received: "blob:image-1"
+
+ ❯ src/ui/hooks/useBackgroundSlideshow.lifecycle.test.tsx:48:30
+     46|     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:image-1");
+     47|     expect(state.images).toEqual(["blob:image-2"]);
+     48|     expect(state.currentUrl).toBe("blob:image-2");
+       |                              ^
+     49|   });
+     50|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/4]⎯
+
+ FAIL  src/ui/hooks/useBackgroundSlideshow.lifecycle.test.tsx > background image lifecycle > releases all loaded object URLs when the hook unmounts
+AssertionError: expected "vi.fn()" to be called with arguments: [ 'blob:image-1' ]
+
+Number of calls: 0
+
+ ❯ src/ui/hooks/useBackgroundSlideshow.lifecycle.test.tsx:54:33
+     52|     await act(async () => root.render(createElement(Harness)));
+     53|     await act(async () => root.render(null));
+     54|     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:image-1");
+       |                                 ^
+     55|     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:image-2");
+     56|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯
+
