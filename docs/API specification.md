@@ -251,7 +251,7 @@ interface ChatTurnTextCompleteEvent {
 }
 ```
 
-The current backend always emits `translation` as either a string or `null`; older payloads may omit it. The bridge currently models the legacy-compatible field as `translation?: string`.
+The current backend always emits `translation` as either a string or `null`; older payloads may omit it. The bridge mirrors that runtime contract as `translation?: string | null` while retaining the optional marker for compatibility.
 
 ### `ContextSettings`
 
