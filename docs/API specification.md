@@ -32,7 +32,7 @@ It covers:
 - commands registered in `src-tauri/src/lib.rs`
 - bridge wrappers exported from `src/lib/kokoro-bridge.ts`
 - public backend/bridge events and selected cross-window frontend events
-- custom URI schemes used by MODs and Live2D
+- custom URI schemes used by MODs, Live2D, and instance-owned character assets
 
 It does not try to explain internal architecture. Use `architecture.md` for that.
 
@@ -169,6 +169,89 @@ interface StreamChatResponse {
   status?: "completed" | "cancelled" | string | null;
 }
 ```
+
+<a id="failureevent"></a>
+### `FailureEvent`
+
+```ts
+interface FailureEventContext {
+  deny_kind?: "hook_denied" | "policy_denied" | "fail_closed" | "pending_approval" | "execution_error";
+  approval_status?: "requested" | "approved" | "rejected";
+  [key: string]: unknown;
+}
+
+interface FailureEvent {
+  event_id: string;
+  timestamp: string;
+  domain: string;
+  stage: string;
+  code: string;
+  message: string;
+  retryable: boolean;
+  trace_id: string;
+  conversation_id?: string | null;
+  turn_id?: string | null;
+  character_id?: string | null;
+  context?: FailureEventContext | null;
+}
+```
+
+The Rust failure payload includes the four nullable correlation/context keys. The bridge keeps them optional for compatibility, accepts the legacy `string` form from the raw `chat-failure` event, and normalizes the callback passed to `onChatFailure` to `FailureEvent`. Non-object `context` values are normalized to `null` by the bridge.
+
+<a id="chatturnacknowledgedevent"></a>
+### `ChatTurnAcknowledgedEvent`
+
+```ts
+interface ChatTurnAcknowledgedEvent {
+  turn_id?: string;
+  client_request_id?: string | null;
+}
+```
+
+The current `stream_chat` backend always emits both keys as non-null strings. The optional and nullable markers preserve compatibility with older frontend event payloads.
+
+<a id="chatturnstartevent"></a>
+### `ChatTurnStartEvent`
+
+```ts
+interface ChatTurnStartEvent {
+  turn_id: string;
+  client_request_id?: string | null;
+  conversation_id?: string | null;
+  user_message_id?: number | null;
+}
+```
+
+The current backend always emits all four keys: `turn_id` and `client_request_id` are strings, while `conversation_id` and `user_message_id` may be `null`. The bridge retains optional markers on the correlation fields for compatibility.
+
+<a id="chatturnfinishevent"></a>
+### `ChatTurnFinishEvent`
+
+```ts
+interface ChatTurnFinishEvent {
+  turn_id: string;
+  status: "completed" | "error" | "cancelled";
+  client_request_id?: string | null;
+  conversation_id?: string | null;
+  assistant_message_id?: number | null;
+}
+```
+
+The current backend always emits all five keys: `client_request_id` is a string, and the conversation and assistant-message IDs may be `null`. The bridge retains optional markers on the correlation fields for compatibility.
+
+<a id="chatturntextcompleteevent"></a>
+### `ChatTurnTextCompleteEvent`
+
+```ts
+interface ChatTurnTextCompleteEvent {
+  turn_id: string;
+  text: string;
+  translation_pending: boolean;
+  translation?: string | null;
+}
+```
+
+The current backend always emits `translation` as either a string or `null`; older payloads may omit it. The bridge currently models the legacy-compatible field as `translation?: string`.
 
 ### `ContextSettings`
 
@@ -327,6 +410,23 @@ interface SenseVoiceLocalDownloadProgress {
   total_bytes: number | null;
 }
 ```
+
+<a id="memoryembeddingmodeldownloadprogress"></a>
+### `MemoryEmbeddingModelDownloadProgress`
+
+```ts
+interface MemoryEmbeddingModelDownloadProgress {
+  stage: string;
+  message: string;
+  current_file: string;
+  file_index: number;
+  file_count: number;
+  downloaded_bytes: number;
+  total_bytes: number | null;
+}
+```
+
+Known `stage` values are `checking`, `downloading`, `complete`, `verifying`, and `ready`; consumers must tolerate additional string values.
 
 ### `ToolSettings`
 
@@ -802,7 +902,6 @@ The tables below list the current IPC commands. The `Bridge` column shows whethe
 
 | Command | Bridge | Request | Response | Notes |
 |---|---|---|---|---|
-| `camera-observation` | `onCameraObservation` | event | `string` | Emitted by the bridge listener, not a Rust command. |
 | `start_vision_watcher` | none | none | `void` | Starts the background watcher. |
 | `stop_vision_watcher` | none | none | `void` | Stops the background watcher. |
 | `capture_screen_now` | `captureScreenNow` | none | `string` | Captures the screen and returns a description. |
@@ -996,18 +1095,18 @@ These commands exist in `src-tauri/src/lib.rs`, but `src/lib/kokoro-bridge.ts` d
 | Event | Payload | Emitted by | Bridge wrapper |
 |---|---|---|---|
 | `chat-typing` | `TypingParams` | `chat.rs` | none |
-| `chat-turn-start` | `{ turn_id: string }` | `chat.rs` | `onChatTurnStart` |
+| `chat-turn-start` | [`ChatTurnStartEvent`](#chatturnstartevent) | `chat.rs` | `onChatTurnStart` |
 | `chat-turn-delta` | `{ turn_id: string; delta: string; ... }` | `chat.rs` | `onChatTurnDelta` |
-| `chat-turn-finish` | `{ turn_id: string; status: "completed" \| "cancelled" \| "error" }` | `chat.rs` | `onChatTurnFinish` |
+| `chat-turn-finish` | [`ChatTurnFinishEvent`](#chatturnfinishevent) | `chat.rs` | `onChatTurnFinish` |
 | `chat-turn-translation` | `{ turn_id: string; translation: string }` | `chat.rs` | `onChatTurnTranslation` |
 | `chat-turn-tool` | `ToolTraceItem`-style payload | `chat.rs` | `onChatTurnTool` |
 | `chat-cue` | `{ cue: string; source?: string }` | `chat.rs`, `mods/manager.rs` | `onChatCue` |
 | `chat-imagegen` | `{ prompt: string }` | `actions/builtin.rs` | `onChatImageGen` |
 | `chat-error` | `string` | `chat.rs` | `onChatError` |
 | `chat-warning` | `string` | `chat.rs` | `onChatWarning` |
-| `chat-failure` | `FailureEvent \| string` | `chat.rs` | `onChatFailure` |
-| `chat-turn-acknowledged` | `ChatTurnAcknowledgedEvent` | `chat.rs` | `onChatTurnAcknowledged` |
-| `chat-turn-text-complete` | `ChatTurnTextCompleteEvent` | `chat.rs` | `onChatTurnTextComplete` |
+| `chat-failure` | [`FailureEvent`](#failureevent) `\| string` | `chat.rs` | `onChatFailure` |
+| `chat-turn-acknowledged` | [`ChatTurnAcknowledgedEvent`](#chatturnacknowledgedevent) | `chat.rs` | `onChatTurnAcknowledged` |
+| `chat-turn-text-complete` | [`ChatTurnTextCompleteEvent`](#chatturntextcompleteevent) | `chat.rs` | `onChatTurnTextComplete` |
 
 ### TTS events
 
@@ -1024,7 +1123,7 @@ These commands exist in `src-tauri/src/lib.rs`, but `src/lib/kokoro-bridge.ts` d
 |---|---|---|---|
 | `vision-status` | `"active" \| "inactive"` | `vision/watcher.rs` | none |
 | `vision-observation` | `string \| { summary: string; captured_at?: string; source?: string }` | `vision/watcher.rs` | `onVisionObservation` |
-| `camera-observation` | `string` | frontend camera watcher | `onCameraObservation` |
+| `camera-observation` | `string` | listener only; producer is not present in tracked sources | `onCameraObservation` |
 | `proactive-trigger` | `{ trigger: string; instruction: string; idle_seconds?: number }` | `vision/watcher.rs`, `ai/heartbeat.rs` | none |
 
 ### STT events
@@ -1036,7 +1135,6 @@ These commands exist in `src-tauri/src/lib.rs`, but `src/lib/kokoro-bridge.ts` d
 | `stt:mic-auto-stop` | `()` | `stt/mic.rs` | none |
 | `stt:wake-word-detected` | `string` | `stt/wake_word.rs` | none |
 | `stt:wake-word-error` | `string` | `stt/wake_word.rs` | none |
-| `memory:embedding-model-progress` | `MemoryEmbeddingModelDownloadProgress` | `commands/memory.rs` | `onMemoryEmbeddingModelProgress` |
 
 ### Idle and proactive events
 
@@ -1079,6 +1177,7 @@ These commands exist in `src-tauri/src/lib.rs`, but `src/lib/kokoro-bridge.ts` d
 | Event | Payload | Emitted by | Bridge wrapper |
 |---|---|---|---|
 | `memory:updated` | `string` | `actions/builtin.rs` | none |
+| `memory:embedding-model-progress` | [`MemoryEmbeddingModelDownloadProgress`](#memoryembeddingmodeldownloadprogress) | `commands/memory.rs` | `onMemoryEmbeddingModelProgress` |
 | `pet-window-closed` | `()` | `commands/pet.rs` | none |
 | `bubble-text-update` | `string` | `commands/pet.rs` | none |
 | `toggle-chat-input` | `()` | `lib.rs` | none |
@@ -1115,6 +1214,22 @@ Example:
 
 ```txt
 live2d://localhost/my-model/runtime/model3.json
+```
+
+### `character-instance-resource://`
+
+Serves the managed PNG avatar owned by a character instance from `{app_data_dir}/character-instance-resources/<instance_id>/avatar.png`.
+
+- The canonical reference is `character-instance-resource://<instance_id>/avatar.png`.
+- On Windows WebView2 it is mapped to `http://character-instance-resource.localhost/<instance_id>/avatar.png`.
+- The instance ID must contain 1–128 ASCII letters, digits, hyphens, or underscores, and the only accepted relative path is `avatar.png`.
+- The handler rejects a redirected resource root and canonicalizes the requested file to enforce containment within that root.
+- Successful responses use `Content-Type: image/png`, `Cache-Control: no-store`, and `Access-Control-Allow-Origin: *`.
+
+Example:
+
+```html
+<img src="character-instance-resource://example-character/avatar.png" />
 ```
 
 ---

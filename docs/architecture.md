@@ -151,7 +151,7 @@ Dreaming performs memory consolidation through background jobs and reviewable pr
 - LLM: OpenAI-compatible Chat Completions, OpenAI Responses, Anthropic, Ollama, llama.cpp, and experimental Codex Runtime.
 - TTS: Browser, OpenAI, Azure, ElevenLabs, Edge TTS, GPT-SoVITS, VITS, and OmniVoice.
 - STT: OpenAI/faster-whisper-compatible services, whisper.cpp, SenseVoice remote/local, native microphone streaming, VAD, and wake word.
-- Vision: uploaded images, screen capture, change watcher, and bounded authenticated ingress.
+- Vision: IPC-uploaded images, screen capture, a change watcher, and a loopback-only unauthenticated image file server. Authenticated external ingress is provided by the generic Bot Webhook.
 - Image generation: OpenAI, Stable Diffusion WebUI, and Google providers.
 
 Provider selection and credentials are stored in local app configuration. Codex Runtime delegates to `codex app-server` and does not read or persist Codex credentials.
