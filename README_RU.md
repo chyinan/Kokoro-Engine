@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://t.me/+U39dgiUspCo2NDNh"><img src="https://img.shields.io/badge/Telegram-Community-26A5E4?logo=telegram&logoColor=white" alt="Telegram community" /></a>
   <img src="https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white" alt="Tauri v2" />
-  <img src="https://img.shields.io/badge/React-18%2B-20232A?logo=react&logoColor=61DAFB" alt="React" />
+  <img src="https://img.shields.io/badge/React-19-20232A?logo=react&logoColor=61DAFB" alt="React 19" />
   <img src="https://img.shields.io/badge/Rust-Stable-000000?logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/License-MIT-2EA44F" alt="MIT License" />
 </p>
@@ -36,7 +36,7 @@
 - Импортировать карточки SillyTavern и хранить разговоры и память раздельно для каждого персонажа.
 - Подключить локальную или облачную LLM, а затем по необходимости включать голос, vision, MCP, MOD и Bot.
 
-> Три встроенных персонажа, переключатель на главном экране и онбординг до первого ответа разрабатываются по [плану экосистемы персонажей](docs/design-plans/2026-07-12-user-activation-character-ecosystem.md). В текущем релизе используйте управление персонажами и импорт в Settings.
+> Текущая версия включает трёх встроенных персонажей, переключатель на главном экране, онбординг до первого ответа, а также управление персонажами и импорт в Settings. Обоснование описано в [плане экосистемы персонажей](docs/design-plans/2026-07-12-user-activation-character-ecosystem.md).
 
 ## Уникальность Kokoro Engine
 
@@ -76,7 +76,7 @@ Kokoro Engine — это не просто чат-оболочка с внешн
 
 #### Требования
 
-- [Node.js](https://nodejs.org/) (v18+)
+- [Node.js](https://nodejs.org/) (v20.19+ или v22.12+)
 - [Rust](https://www.rust-lang.org/tools/install) (stable)
 
 #### Установка и запуск
@@ -176,7 +176,7 @@ flowchart LR
   end
 
   subgraph EXT["External Services"]
-    EXT_LLM["OpenAI-Compatible / Ollama / llama.cpp"]
+    EXT_LLM["OpenAI-Compatible / Anthropic / Ollama / llama.cpp / Codex Runtime"]
     EXT_TTS["TTS Providers"]
     EXT_MCP["MCP Servers"]
     EXT_BOT["QQ / Telegram / Discord / LINE / Webhook"]
