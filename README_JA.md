@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://t.me/+U39dgiUspCo2NDNh"><img src="https://img.shields.io/badge/Telegram-Community-26A5E4?logo=telegram&logoColor=white" alt="Telegram community" /></a>
   <img src="https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white" alt="Tauri v2" />
-  <img src="https://img.shields.io/badge/React-18%2B-20232A?logo=react&logoColor=61DAFB" alt="React" />
+  <img src="https://img.shields.io/badge/React-19-20232A?logo=react&logoColor=61DAFB" alt="React 19" />
   <img src="https://img.shields.io/badge/Rust-Stable-000000?logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/License-MIT-2EA44F" alt="MIT License" />
 </p>
@@ -36,7 +36,7 @@
 - SillyTavern キャラクターカードを取り込み、会話と記憶を分離して保持する。
 - ローカルまたはクラウド LLM を接続し、音声、ビジョン、MCP、MOD、Bot を必要に応じて有効にする。
 
-> 3 体の内蔵キャラクター、メイン画面のセレクター、初回返信オンボーディングは[キャラクターエコシステム設計](docs/design-plans/2026-07-12-user-activation-character-ecosystem.md)に沿って実装中です。現行リリースでは設定画面のキャラクター管理とインポートを使用してください。
+> 現行バージョンには 3 体の内蔵キャラクター、メイン画面のセレクター、初回返信オンボーディング、設定画面のキャラクター管理とインポートが含まれます。背景は[キャラクターエコシステム設計](docs/design-plans/2026-07-12-user-activation-character-ecosystem.md)を参照してください。
 
 ## Kokoro Engine の独自性
 
@@ -76,7 +76,7 @@ Kokoro Engine は「チャット UI + デスクトップペットの見た目」
 
 #### 必要環境
 
-- [Node.js](https://nodejs.org/)（v18+）
+- [Node.js](https://nodejs.org/)（v20.19+ または v22.12+）
 - [Rust](https://www.rust-lang.org/tools/install)（stable）
 
 #### インストールと起動
@@ -176,7 +176,7 @@ flowchart LR
   end
 
   subgraph EXT["External Services"]
-    EXT_LLM["OpenAI-Compatible / Ollama / llama.cpp"]
+    EXT_LLM["OpenAI-Compatible / Anthropic / Ollama / llama.cpp / Codex Runtime"]
     EXT_TTS["TTS Providers"]
     EXT_MCP["MCP Servers"]
     EXT_BOT["QQ / Telegram / Discord / LINE / Webhook"]

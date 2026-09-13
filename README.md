@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://t.me/+U39dgiUspCo2NDNh"><img src="https://img.shields.io/badge/Telegram-Community-26A5E4?logo=telegram&logoColor=white" alt="Telegram community" /></a>
   <img src="https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white" alt="Tauri v2" />
-  <img src="https://img.shields.io/badge/React-18%2B-20232A?logo=react&logoColor=61DAFB" alt="React" />
+  <img src="https://img.shields.io/badge/React-19-20232A?logo=react&logoColor=61DAFB" alt="React 19" />
   <img src="https://img.shields.io/badge/Rust-Stable-000000?logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/License-MIT-2EA44F" alt="MIT License" />
 </p>
@@ -37,7 +37,7 @@
 - 导入 SillyTavern 角色卡，用不同人格延续各自的对话与记忆。
 - 连接本地或云端 LLM，并按需开启语音、视觉、MCP、MOD 和 Bot 能力。
 
-> 三个内置角色、主界面角色选择和首次回复引导正在按[角色生态设计](docs/design-plans/2026-07-12-user-activation-character-ecosystem.md)实施，当前发布版请先使用设置中的角色管理与导入功能。
+> 当前版本内置三个角色，并已提供主界面角色选择、首次回复引导，以及设置中的角色管理与导入功能。设计背景见[角色生态设计](docs/design-plans/2026-07-12-user-activation-character-ecosystem.md)。
 
 ##  Kokoro Engine 的独到之处
 
@@ -77,7 +77,7 @@ Kokoro Engine 不是“聊天壳子 + 桌宠皮肤”。它是一个完整的桌
 
 #### 环境要求
 
-- [Node.js](https://nodejs.org/)（v18+）
+- [Node.js](https://nodejs.org/)（v20.19+ 或 v22.12+）
 - [Rust](https://www.rust-lang.org/tools/install)（stable）
 
 #### 安装与运行
@@ -177,7 +177,7 @@ flowchart LR
   end
 
   subgraph EXT["External Services"]
-    EXT_LLM["OpenAI-Compatible / Ollama / llama.cpp"]
+    EXT_LLM["OpenAI-Compatible / Anthropic / Ollama / llama.cpp / Codex Runtime"]
     EXT_TTS["TTS Providers"]
     EXT_MCP["MCP Servers"]
     EXT_BOT["QQ / Telegram / Discord / LINE / Webhook"]
