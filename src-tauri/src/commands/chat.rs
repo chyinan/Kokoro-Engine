@@ -2201,7 +2201,6 @@ pub async fn stream_chat(
             let is_question = request.message.contains('?') || request.message.contains('？');
             let typing_params = crate::ai::typing_sim::calculate_typing_delay(
                 "neutral",
-                0.5,
                 0.6,
                 request.message.chars().count(),
                 is_question,
@@ -3738,8 +3737,8 @@ pub async fn stream_chat(
     // Fallback cue: if main LLM never called play_cue, infer via system LLM
     if !cue_set_by_tool && !full_response.is_empty() {
         tracing::info!(target: "chat", "[Chat] Cue not set by tool, triggering fallback cue analysis");
-        let mut emotion_messages = vec![system_message(
-            crate::ai::prompts::EMOTION_ANALYZER_PROMPT.to_string(),
+        let mut cue_messages = vec![system_message(
+                crate::ai::prompts::CUE_ANALYZER_PROMPT.to_string(),
         )];
         if let Some(profile) = crate::commands::live2d::load_active_live2d_profile() {
             let available_cues = profile
@@ -3748,12 +3747,12 @@ pub async fn stream_chat(
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ");
-            emotion_messages.push(system_message(format!(
+            cue_messages.push(system_message(format!(
                 "Available cues for the active model: {}.\nChoose exactly one from this list, or return null if none fit.",
                 if available_cues.is_empty() { "(none)" } else { &available_cues }
             )));
         }
-        emotion_messages.push(user_text_message(full_response.clone()));
+        cue_messages.push(user_text_message(full_response.clone()));
         let valid_fallback_cues =
             crate::commands::live2d::load_active_live2d_profile().map(|profile| {
                 profile
@@ -3762,7 +3761,7 @@ pub async fn stream_chat(
                     .cloned()
                     .collect::<std::collections::HashSet<_>>()
             });
-        let cue_fut = system_provider.chat(emotion_messages, None);
+        let cue_fut = system_provider.chat(cue_messages, None);
         let cue_timeout = chat_fallback_execution_timeout();
         let cue_res = tokio::select! {
             biased;

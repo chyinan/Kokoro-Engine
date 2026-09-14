@@ -1096,21 +1096,21 @@ export async function listMemories(characterId: string, limit = 50, offset = 0):
     });
 }
 
-export async function updateMemory(id: number, content: string, importance: number): Promise<void> {
+export async function updateMemory(characterId: string, id: number, content: string, importance: number): Promise<void> {
     return invoke("update_memory", {
-        request: { id, content, importance },
+        request: { character_id: characterId, id, content, importance },
     });
 }
 
-export async function deleteMemory(id: number): Promise<void> {
+export async function deleteMemory(characterId: string, id: number): Promise<void> {
     return invoke("delete_memory", {
-        request: { id },
+        request: { character_id: characterId, id },
     });
 }
 
-export async function updateMemoryTier(id: number, tier: string): Promise<void> {
+export async function updateMemoryTier(characterId: string, id: number, tier: string): Promise<void> {
     return invoke("update_memory_tier", {
-        request: { id, tier },
+        request: { character_id: characterId, id, tier },
     });
 }
 

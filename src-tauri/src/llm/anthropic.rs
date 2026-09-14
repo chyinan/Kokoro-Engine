@@ -1,3 +1,5 @@
+// pattern: Mixed (unavoidable)
+// Reason: provider implementation combines protocol transformation with HTTP stream orchestration.
 //! Anthropic provider backed by the native Messages API.
 //!
 //! Unlike OpenAI-compatible providers, Anthropic uses a different message
@@ -21,7 +23,8 @@ use std::pin::Pin;
 
 use crate::llm::messages::extract_message_text;
 use crate::llm::provider::{
-    LlmParams, LlmProvider, LlmStreamEvent, LlmToolCall, LlmToolDefinition,
+    cancellable_unbounded_channel, LlmParams, LlmProvider, LlmStreamEvent, LlmToolCall,
+    LlmToolDefinition,
 };
 
 const DEFAULT_ANTHROPIC_SERVER_BASE_URL: &str = "https://api.anthropic.com";
@@ -124,12 +127,20 @@ impl AnthropicProvider {
 
         let response = ensure_success(response).await?;
         let mut stream = response.bytes_stream().eventsource();
-        let (mut tx, rx) = mpsc::unbounded::<Result<LlmStreamEvent, String>>();
+        let (mut tx, rx, mut cancel_rx) =
+            cancellable_unbounded_channel::<Result<LlmStreamEvent, String>>();
 
         tokio::spawn(async move {
             let mut pending_tool_calls: HashMap<usize, PendingAnthropicToolCall> = HashMap::new();
 
-            while let Some(event_result) = stream.next().await {
+            loop {
+                let event_result = tokio::select! {
+                    _ = cancel_rx.changed() => return,
+                    event_result = stream.next() => event_result,
+                };
+                let Some(event_result) = event_result else {
+                    break;
+                };
                 let event = match event_result {
                     Ok(event) => event,
                     Err(error) => {

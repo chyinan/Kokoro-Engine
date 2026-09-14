@@ -1,3 +1,4 @@
+// pattern: Imperative Shell
 //! Vision Watcher — background loop that captures screen and analyzes with VLM.
 
 use crate::llm::anthropic::AnthropicProvider;
@@ -9,7 +10,7 @@ use crate::vision::config::VisionConfig;
 use crate::vision::context::VisionContext;
 use crate::vision::context::{AnalysisDispatch, VisionFrame};
 use reqwest::Client;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::RwLock;
@@ -18,6 +19,7 @@ use tokio::sync::RwLock;
 #[derive(Clone)]
 pub struct VisionWatcher {
     pub running: Arc<AtomicBool>,
+    producer_generation: Arc<AtomicU64>,
     pub config: Arc<RwLock<VisionConfig>>,
     pub context: VisionContext,
     pub llm_service: Option<LlmService>,
@@ -28,6 +30,7 @@ impl VisionWatcher {
     pub fn new(config: VisionConfig) -> Self {
         Self {
             running: Arc::new(AtomicBool::new(false)),
+            producer_generation: Arc::new(AtomicU64::new(0)),
             config: Arc::new(RwLock::new(config)),
             context: VisionContext::new(),
             llm_service: None,
@@ -64,6 +67,7 @@ impl VisionWatcher {
             tracing::info!(target: "vision", "Watcher already running");
             return;
         }
+        let producer_generation = self.producer_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let watcher = self.clone();
 
         tokio::spawn(async move {
@@ -73,7 +77,7 @@ impl VisionWatcher {
             let mut last_capture_warning: Option<String> = None;
 
             loop {
-                if !watcher.running.load(Ordering::Relaxed) {
+                if !watcher.is_producer_current(producer_generation) {
                     break;
                 }
 
@@ -149,7 +153,14 @@ impl VisionWatcher {
                     let analysis_watcher = watcher.clone();
                     let analysis_app = app_handle.clone();
                     tokio::spawn(async move {
-                        run_analysis_chain(analysis_watcher, analysis_app, frame, generation).await;
+                        run_analysis_chain(
+                            analysis_watcher,
+                            analysis_app,
+                            frame,
+                            generation,
+                            producer_generation,
+                        )
+                        .await;
                     });
                 }
 
@@ -160,16 +171,29 @@ impl VisionWatcher {
             }
 
             tracing::info!(target: "vision", "Watcher stopped");
-            let _ = app_handle.emit("vision-status", "inactive");
+            if watcher.is_producer_current(producer_generation) {
+                let _ = app_handle.emit("vision-status", "inactive");
+            }
         });
+    }
+
+    fn is_producer_current(&self, generation: u64) -> bool {
+        self.running.load(Ordering::Acquire)
+            && self.producer_generation.load(Ordering::Acquire) == generation
     }
 
     /// Stop the background vision loop.
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
+        let stopped_generation = self.producer_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let producer_generation = self.producer_generation.clone();
         let ctx = self.context.clone();
-        ctx.invalidate_auto_generation();
-        tokio::spawn(async move { ctx.clear_auto_state_after_invalidated().await });
+        let context_generation = ctx.invalidate_auto_generation();
+        tokio::spawn(async move {
+            if producer_generation.load(Ordering::Acquire) == stopped_generation {
+                ctx.clear_auto_state_if_current(context_generation).await;
+            }
+        });
     }
 }
 
@@ -178,10 +202,15 @@ async fn run_analysis_chain(
     app_handle: AppHandle,
     first_frame: VisionFrame,
     generation: crate::vision::context::AutoAnalysisGeneration,
+    producer_generation: u64,
 ) {
     let mut current = first_frame;
     loop {
-        if !watcher.auto_capture_active().await {
+        if !watcher.is_producer_current(producer_generation) || !watcher.auto_capture_active().await
+        {
+            if !watcher.is_producer_current(producer_generation) {
+                break;
+            }
             watcher.context.clear_auto_state_on_disable().await;
             break;
         }
@@ -204,10 +233,13 @@ async fn run_analysis_chain(
         }
 
         let completion_config = watcher.config.read().await.clone();
-        if !watcher.running.load(Ordering::Relaxed)
+        if !watcher.is_producer_current(producer_generation)
             || !completion_config.vlm_enabled
             || !completion_config.auto_vision_enabled
         {
+            if !watcher.is_producer_current(producer_generation) {
+                break;
+            }
             watcher.context.clear_auto_state_on_disable().await;
             break;
         }

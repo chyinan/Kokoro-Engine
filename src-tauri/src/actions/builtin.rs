@@ -529,7 +529,7 @@ impl ActionHandler for ForgetMemoryAction {
             let content = mem.content.clone();
             orchestrator
                 .memory_manager
-                .delete_memory(mem.id)
+                .delete_memory(mem.id, &char_id)
                 .await
                 .map_err(|e| ActionError(format!("Failed to delete memory: {}", e)))?;
 

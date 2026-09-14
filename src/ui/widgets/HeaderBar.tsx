@@ -1,3 +1,5 @@
+// pattern: Mixed (unavoidable)
+// Reason: this legacy header combines IPC polling with presentational rendering.
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { clsx } from "clsx";
@@ -35,17 +37,6 @@ export default function HeaderBar({ onSettingsClick }: HeaderBarProps) {
         return () => clearInterval(interval);
     }, []);
 
-    // Mood-based accent color (§2.2 Character Mood Colors)
-    const getMoodColor = (mood: number): string => {
-        if (mood < 0.2) return "#8b9cf7";      // Sad — soft lavender
-        if (mood < 0.4) return "#a78bfa";      // Melancholy — muted violet
-        if (mood < 0.6) return "#00f0ff";      // Neutral — default cyan
-        if (mood < 0.8) return "#34d399";      // Happy — warm teal
-        return "#fbbf24";                       // Joyful — soft gold
-    };
-
-    const moodColor = character ? getMoodColor(character.mood) : "var(--color-accent)";
-
     return (
         <motion.div
             initial={{ opacity: 0, y: -10 }}
@@ -78,14 +69,6 @@ export default function HeaderBar({ onSettingsClick }: HeaderBarProps) {
                         <span className="font-heading text-sm font-semibold tracking-wider uppercase text-[var(--color-text-secondary)]">
                             {character.name}
                         </span>
-                        {/* Mood indicator dot */}
-                        <motion.div
-                            animate={{ backgroundColor: moodColor }}
-                            transition={{ duration: 0.5, ease: "easeInOut" }}
-                            className="w-2.5 h-2.5 rounded-full"
-                            style={{ boxShadow: `0 0 8px ${moodColor}` }}
-                            title={`Mood: ${Math.round(character.mood * 100)}%`}
-                        />
                         <span className="text-[var(--color-text-muted)] text-xs">
                             {character.current_cue}
                         </span>

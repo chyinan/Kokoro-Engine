@@ -1,3 +1,5 @@
+// pattern: Mixed (unavoidable)
+// Reason: this module owns async shared state while keeping generation rules testable.
 //! VisionContext — shared state for captured frames and completed observations.
 
 use crate::vision::config::NormalizedRect;
@@ -76,6 +78,7 @@ pub struct VisionContextInner {
     pub latest_auto_observation: Option<VisionObservation>,
     pub latest_manual_observation: Option<VisionObservation>,
     pub analysis_in_flight: bool,
+    pub analysis_generation: Option<AutoAnalysisGeneration>,
     pub pending_frame: Option<VisionFrame>,
     pub last_error: Option<String>,
     pub text_input_focused: bool,
@@ -96,6 +99,7 @@ impl VisionContext {
                 latest_auto_observation: None,
                 latest_manual_observation: None,
                 analysis_in_flight: false,
+                analysis_generation: None,
                 pending_frame: None,
                 last_error: None,
                 text_input_focused: false,
@@ -122,11 +126,13 @@ impl VisionContext {
         let generation = self.auto_generation.load(Ordering::SeqCst);
         let mut inner = self.inner.write().await;
         inner.latest_frame = Some(frame.clone());
-        if inner.analysis_in_flight {
+        if inner.analysis_in_flight && inner.analysis_generation == Some(generation) {
             inner.pending_frame = Some(frame);
             AnalysisDispatch::NotDispatched
         } else {
             inner.analysis_in_flight = true;
+            inner.analysis_generation = Some(generation);
+            inner.pending_frame = None;
             AnalysisDispatch::Dispatch { frame, generation }
         }
     }
@@ -174,6 +180,7 @@ impl VisionContext {
         let next_frame = inner.pending_frame.take();
         if next_frame.is_none() {
             inner.analysis_in_flight = false;
+            inner.analysis_generation = None;
         }
 
         AutoAnalysisFinish {
@@ -206,19 +213,26 @@ impl VisionContext {
     }
 
     pub async fn clear_auto_state_on_disable(&self) {
-        self.invalidate_auto_generation();
-        self.clear_auto_state_after_invalidated().await;
+        let generation = self.invalidate_auto_generation();
+        self.clear_auto_state_if_current(generation).await;
     }
 
-    pub fn invalidate_auto_generation(&self) {
-        self.auto_generation.fetch_add(1, Ordering::SeqCst);
+    pub fn invalidate_auto_generation(&self) -> AutoAnalysisGeneration {
+        self.auto_generation.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    pub async fn clear_auto_state_after_invalidated(&self) {
+    pub async fn clear_auto_state_if_current(&self, generation: AutoAnalysisGeneration) {
+        if self.auto_generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
         let mut inner = self.inner.write().await;
+        if self.auto_generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
         inner.latest_frame = None;
         inner.latest_auto_observation = None;
         inner.analysis_in_flight = false;
+        inner.analysis_generation = None;
         inner.pending_frame = None;
         inner.last_error = None;
         inner.resume_auto_capture_after = None;
@@ -243,6 +257,7 @@ impl VisionContext {
         inner.latest_auto_observation = None;
         inner.latest_manual_observation = None;
         inner.analysis_in_flight = false;
+        inner.analysis_generation = None;
         inner.pending_frame = None;
         inner.last_error = None;
         inner.resume_auto_capture_after = None;
@@ -380,6 +395,26 @@ mod tests {
         assert!(completion.recorded);
         assert!(completion.next_frame.is_none());
         assert!(!ctx.inner.read().await.analysis_in_flight);
+    }
+
+    #[tokio::test]
+    async fn new_generation_can_dispatch_after_old_analysis_is_invalidated() {
+        let ctx = VisionContext::new();
+        let first = frame("first");
+        let first_generation = dispatched_generation(ctx.submit_auto_frame(first).await);
+
+        ctx.invalidate_auto_generation();
+        let second = frame("second");
+        let dispatch = ctx.submit_auto_frame(second).await;
+
+        match dispatch {
+            AnalysisDispatch::Dispatch { generation, .. } => {
+                assert_ne!(generation, first_generation);
+            }
+            AnalysisDispatch::NotDispatched => {
+                panic!("a new generation must not inherit the old in-flight analysis");
+            }
+        }
     }
 
     #[tokio::test]

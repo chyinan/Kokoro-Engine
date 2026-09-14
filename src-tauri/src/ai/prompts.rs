@@ -1,3 +1,4 @@
+// pattern: Functional Core
 pub const BG_IMAGE_ANALYZER_PROMPT: &str = r#"You are a background scene analyzer for a virtual character chat application.
 Given a character's reply, decide if generating a background image would enhance the atmosphere.
 Return JSON only. No explanation.
@@ -15,7 +16,7 @@ Rules:
 - image_prompt should NOT include any characters or people, only environment/background.
 - If should_generate=false, set image_prompt=null."#;
 
-pub const EMOTION_ANALYZER_PROMPT: &str = r#"You are an emotion analyzer for a virtual character.
+pub const CUE_ANALYZER_PROMPT: &str = r#"You are a visual cue selector for a virtual character.
 Given a character's dialogue response, infer the most fitting visual cue.
 Return JSON only. No explanation.
 

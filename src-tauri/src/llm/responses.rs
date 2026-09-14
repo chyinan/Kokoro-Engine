@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::pin::Pin;
 
 use crate::llm::provider::{
-    build_openai_client, parse_tool_call_arguments, LlmChatMessage, LlmParams, LlmProvider,
-    LlmStreamEvent, LlmToolCall, LlmToolDefinition,
+    build_openai_client, cancellable_unbounded_channel, parse_tool_call_arguments, LlmChatMessage,
+    LlmParams, LlmProvider, LlmStreamEvent, LlmToolCall, LlmToolDefinition,
 };
 use crate::llm::responses_protocol::build_responses_request;
 
@@ -88,14 +88,22 @@ impl OpenAIResponsesProvider {
             .create_stream_byot(&request)
             .await
             .map_err(format_openai_error)?;
-        let (mut tx, rx) = mpsc::unbounded::<Result<LlmStreamEvent, String>>();
+        let (mut tx, rx, mut cancel_rx) =
+            cancellable_unbounded_channel::<Result<LlmStreamEvent, String>>();
 
         tokio::spawn(async move {
             let mut pending_calls: HashMap<u32, PendingFunctionCall> = HashMap::new();
             let mut ready_calls = Vec::new();
             let mut completed = false;
 
-            while let Some(result) = stream.next().await {
+            loop {
+                let result = tokio::select! {
+                    _ = cancel_rx.changed() => return,
+                    result = stream.next() => result,
+                };
+                let Some(result) = result else {
+                    break;
+                };
                 let value = match result {
                     Ok(value) => value,
                     Err(error) => {

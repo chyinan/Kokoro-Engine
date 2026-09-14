@@ -1,3 +1,4 @@
+// pattern: Functional Core
 //! Typing Simulation — variable pre-response delays for realism.
 //!
 //! Before the first `chat-delta` arrives, emit a `chat-typing` event
@@ -29,13 +30,11 @@ pub enum TypingSpeed {
 ///
 /// Factors:
 /// - `emotion`: current character emotion
-/// - `mood`: current mood value (0.0-1.0)
 /// - `expressiveness`: character expressiveness (0.0-1.0)
 /// - `user_message_len`: length of user's message in chars
 /// - `is_question`: whether the user asked a question
 pub fn calculate_typing_delay(
     emotion: &str,
-    _mood: f32,
     expressiveness: f32,
     user_message_len: usize,
     is_question: bool,
@@ -84,8 +83,8 @@ mod tests {
 
     #[test]
     fn surprise_character_responds_faster() {
-        let excited = calculate_typing_delay("surprise", 0.9, 0.7, 20, false);
-        let neutral = calculate_typing_delay("neutral", 0.5, 0.7, 20, false);
+        let excited = calculate_typing_delay("surprise", 0.7, 20, false);
+        let neutral = calculate_typing_delay("neutral", 0.7, 20, false);
         assert!(
             excited.duration_ms < neutral.duration_ms,
             "Excited should be faster: {}ms vs {}ms",
@@ -96,8 +95,8 @@ mod tests {
 
     #[test]
     fn sadness_takes_longer() {
-        let thinking = calculate_typing_delay("sadness", 0.5, 0.5, 30, false);
-        let neutral = calculate_typing_delay("neutral", 0.5, 0.5, 30, false);
+        let thinking = calculate_typing_delay("sadness", 0.5, 30, false);
+        let neutral = calculate_typing_delay("neutral", 0.5, 30, false);
         assert!(
             thinking.duration_ms > neutral.duration_ms,
             "Thinking should be slower: {}ms vs {}ms",
@@ -108,8 +107,8 @@ mod tests {
 
     #[test]
     fn question_increases_delay() {
-        let question = calculate_typing_delay("neutral", 0.5, 0.5, 30, true);
-        let statement = calculate_typing_delay("neutral", 0.5, 0.5, 30, false);
+        let question = calculate_typing_delay("neutral", 0.5, 30, true);
+        let statement = calculate_typing_delay("neutral", 0.5, 30, false);
         assert!(
             question.duration_ms > statement.duration_ms,
             "Questions should take longer: {}ms vs {}ms",
@@ -120,8 +119,8 @@ mod tests {
 
     #[test]
     fn long_message_increases_delay() {
-        let short = calculate_typing_delay("neutral", 0.5, 0.5, 10, false);
-        let long = calculate_typing_delay("neutral", 0.5, 0.5, 200, false);
+        let short = calculate_typing_delay("neutral", 0.5, 10, false);
+        let long = calculate_typing_delay("neutral", 0.5, 200, false);
         assert!(
             long.duration_ms > short.duration_ms,
             "Long messages should need more thinking: {}ms vs {}ms",
@@ -132,8 +131,8 @@ mod tests {
 
     #[test]
     fn delay_clamped_within_bounds() {
-        let fast = calculate_typing_delay("surprise", 0.9, 1.0, 5, false);
-        let slow = calculate_typing_delay("sadness", 0.1, 0.0, 500, true);
+        let fast = calculate_typing_delay("surprise", 1.0, 5, false);
+        let slow = calculate_typing_delay("sadness", 0.0, 500, true);
         assert!(fast.duration_ms >= 200, "Min should be 200ms");
         assert!(slow.duration_ms <= 5000, "Max should be 5000ms");
     }

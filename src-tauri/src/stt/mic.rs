@@ -1,3 +1,4 @@
+// pattern: Imperative Shell
 use crate::stt::stream::{AudioBuffer, SAMPLE_RATE};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig};
@@ -5,8 +6,10 @@ use rubato::{FastFixedIn, PolynomialDegree, Resampler};
 use serde::Serialize;
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 use std::fs;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -58,6 +61,29 @@ impl NativeMicState {
         spawn_mic_worker(rx, app.clone());
         *guard = Some(tx.clone());
         Ok(tx)
+    }
+}
+
+struct NativeFrameProcessorHandle {
+    cancel: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl NativeFrameProcessorHandle {
+    fn stop(mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl Drop for NativeFrameProcessorHandle {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
     }
 }
 
@@ -196,8 +222,8 @@ pub fn start_native_mic(app: &AppHandle, mic_state: &NativeMicState) -> Result<(
     })
     .map_err(|_| "Native microphone worker is unavailable".to_string())?;
     response_rx
-        .recv()
-        .map_err(|_| "Native microphone worker did not respond".to_string())?
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| "Native microphone worker did not respond within 10 seconds".to_string())?
 }
 
 pub fn start_native_mic_with_options(
@@ -213,8 +239,8 @@ pub fn start_native_mic_with_options(
     })
     .map_err(|_| "Native microphone worker is unavailable".to_string())?;
     response_rx
-        .recv()
-        .map_err(|_| "Native microphone worker did not respond".to_string())?
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| "Native microphone worker did not respond within 10 seconds".to_string())?
 }
 
 pub fn stop_native_mic(app: &AppHandle, mic_state: &NativeMicState) -> Result<(), String> {
@@ -225,13 +251,13 @@ pub fn stop_native_mic(app: &AppHandle, mic_state: &NativeMicState) -> Result<()
     })
     .map_err(|_| "Native microphone worker is unavailable".to_string())?;
     response_rx
-        .recv()
-        .map_err(|_| "Native microphone worker did not respond".to_string())?
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| "Native microphone worker did not respond within 10 seconds".to_string())?
 }
 
 fn spawn_mic_worker(rx: Receiver<WorkerCommand>, app: AppHandle) {
     std::thread::spawn(move || {
-        let mut stream: Option<Stream> = None;
+        let mut stream: Option<(Stream, NativeFrameProcessorHandle)> = None;
 
         while let Ok(command) = rx.recv() {
             match command {
@@ -243,11 +269,13 @@ fn spawn_mic_worker(rx: Receiver<WorkerCommand>, app: AppHandle) {
                         Ok(())
                     } else {
                         match build_native_input_stream(&app, auto_stop_on_silence) {
-                            Ok(new_stream) => {
+                            Ok((new_stream, processor)) => {
                                 if let Err(err) = new_stream.play() {
+                                    drop(new_stream);
+                                    processor.stop();
                                     Err(format!("Failed to start microphone stream: {err}"))
                                 } else {
-                                    stream = Some(new_stream);
+                                    stream = Some((new_stream, processor));
                                     Ok(())
                                 }
                             }
@@ -257,7 +285,10 @@ fn spawn_mic_worker(rx: Receiver<WorkerCommand>, app: AppHandle) {
                     let _ = response.send(result);
                 }
                 WorkerCommand::Stop { response } => {
-                    stream.take();
+                    if let Some((input_stream, processor)) = stream.take() {
+                        drop(input_stream);
+                        processor.stop();
+                    }
                     let _ = app.emit(
                         "stt:mic-volume",
                         MicVolumeEvent {
@@ -275,7 +306,7 @@ fn spawn_mic_worker(rx: Receiver<WorkerCommand>, app: AppHandle) {
 fn build_native_input_stream(
     app: &AppHandle,
     auto_stop_on_silence: bool,
-) -> Result<Stream, String> {
+) -> Result<(Stream, NativeFrameProcessorHandle), String> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -289,7 +320,7 @@ fn build_native_input_stream(
     let sample_rate = stream_config.sample_rate.0;
     let app_handle = app.clone();
 
-    match config.sample_format() {
+    let result = match config.sample_format() {
         SampleFormat::I8 => build_input_stream::<i8>(
             &device,
             &stream_config,
@@ -373,7 +404,8 @@ fn build_native_input_stream(
         sample_format => Err(format!(
             "Unsupported microphone sample format: {sample_format}"
         )),
-    }
+    };
+    result
 }
 
 fn build_input_stream<T>(
@@ -383,7 +415,7 @@ fn build_input_stream<T>(
     sample_rate: u32,
     app: AppHandle,
     auto_stop_on_silence: bool,
-) -> Result<Stream, String>
+) -> Result<(Stream, NativeFrameProcessorHandle), String>
 where
     T: SizedSample + Sample + Send + 'static,
     f32: FromSample<T>,
@@ -391,9 +423,9 @@ where
     let mut processor = NativeInputProcessor::new(sample_rate, channels)?;
     let err_app = app.clone();
     let (frame_tx, frame_rx) = mpsc::sync_channel::<NativeAudioFrame>(8);
-    spawn_frame_processor(app.clone(), frame_rx, auto_stop_on_silence)?;
+    let frame_processor = spawn_frame_processor(app.clone(), frame_rx, auto_stop_on_silence)?;
 
-    device
+    let stream = device
         .build_input_stream(
             config,
             move |data: &[T], _| {
@@ -421,18 +453,21 @@ where
             },
             None,
         )
-        .map_err(|err| format!("Failed to build microphone input stream: {err}"))
+        .map_err(|err| format!("Failed to build microphone input stream: {err}"))?;
+    Ok((stream, frame_processor))
 }
 
 fn spawn_frame_processor(
     app: AppHandle,
     frame_rx: Receiver<NativeAudioFrame>,
     auto_stop_on_silence: bool,
-) -> Result<(), String> {
+) -> Result<NativeFrameProcessorHandle, String> {
     if auto_stop_on_silence {
         let _ = create_voice_activity_detector()?;
     }
-    std::thread::spawn(move || {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_worker = cancel.clone();
+    let join = std::thread::spawn(move || {
         let mut processor = match NativeFrameProcessor::new(app, auto_stop_on_silence) {
             Ok(processor) => processor,
             Err(err) => {
@@ -440,15 +475,45 @@ fn spawn_frame_processor(
                 return;
             }
         };
-        while let Ok(frame) = frame_rx.recv() {
-            processor.process_frame(frame);
+        while !cancel_worker.load(Ordering::SeqCst) {
+            match frame_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(frame) => {
+                    if cancel_worker.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    processor.process_frame(frame);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
         }
     });
-    Ok(())
+    Ok(NativeFrameProcessorHandle {
+        cancel,
+        join: Some(join),
+    })
 }
 
 pub(crate) fn create_voice_activity_detector() -> Result<VoiceActivityDetector, String> {
     let model_path = ensure_silero_vad_model()?;
+    match create_voice_activity_detector_from_path(&model_path) {
+        Ok(detector) => Ok(detector),
+        Err(first_error) => {
+            tracing::warn!(
+                target: "stt",
+                "[STT] Cached Silero VAD model failed validation; retrying download: {first_error}"
+            );
+            let _ = fs::remove_file(&model_path);
+            let refreshed_path = ensure_silero_vad_model()?;
+            create_voice_activity_detector_from_path(&refreshed_path)
+                .map_err(|second_error| format!("{first_error}; retry failed: {second_error}"))
+        }
+    }
+}
+
+fn create_voice_activity_detector_from_path(
+    model_path: &Path,
+) -> Result<VoiceActivityDetector, String> {
     let config = VadModelConfig {
         silero_vad: SileroVadModelConfig {
             model: Some(model_path.to_string_lossy().into_owned()),
@@ -465,9 +530,8 @@ pub(crate) fn create_voice_activity_detector() -> Result<VoiceActivityDetector, 
         ..VadModelConfig::default()
     };
 
-    let detector = VoiceActivityDetector::create(&config, 30.0)
-        .ok_or_else(|| "Failed to create sherpa-onnx voice activity detector".to_string())?;
-    Ok(detector)
+    VoiceActivityDetector::create(&config, 30.0)
+        .ok_or_else(|| "failed to create sherpa-onnx voice activity detector".to_string())
 }
 
 fn ensure_silero_vad_model() -> Result<std::path::PathBuf, String> {
@@ -483,15 +547,44 @@ fn ensure_silero_vad_model() -> Result<std::path::PathBuf, String> {
     }
 
     let bytes = tauri::async_runtime::block_on(async {
-        reqwest::get(SILERO_VAD_MODEL_URL)
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|err| format!("Failed to build Silero VAD HTTP client: {err}"))?
+            .get(SILERO_VAD_MODEL_URL)
+            .send()
             .await
             .map_err(|err| format!("Failed to download silero VAD model: {err}"))?
+            .error_for_status()
+            .map_err(|err| format!("Silero VAD model request failed: {err}"))?
             .bytes()
             .await
             .map_err(|err| format!("Failed to read silero VAD model bytes: {err}"))
     })?;
 
-    fs::write(&model_path, &bytes).map_err(|err| err.to_string())?;
+    let temporary = model_path.with_file_name(format!(
+        ".{}.{}.download",
+        SILERO_VAD_MODEL_NAME,
+        uuid::Uuid::new_v4()
+    ));
+    let write_result = (|| -> Result<(), String> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|err| format!("failed to create temporary Silero VAD model: {err}"))?;
+        std::io::Write::write_all(&mut file, &bytes)
+            .map_err(|err| format!("failed to write Silero VAD model: {err}"))?;
+        file.sync_all()
+            .map_err(|err| format!("failed to sync Silero VAD model: {err}"))?;
+        crate::config::atomic_replace_file(&temporary, &model_path)
+            .map_err(|err| format!("failed to install Silero VAD model: {err}"))?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
     Ok(model_path)
 }
 

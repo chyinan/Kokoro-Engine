@@ -1,3 +1,5 @@
+// pattern: Mixed (unavoidable)
+// Reason: provider implementations combine protocol transformation with HTTP stream orchestration.
 //! LLM Provider trait and async-openai-backed provider implementation.
 
 use async_openai::config::OpenAIConfig;
@@ -15,6 +17,7 @@ use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use crate::llm::messages::{
     sanitize_chat_tool_message_sequence, sanitize_llm_tool_message_sequence,
@@ -82,6 +85,44 @@ struct PartialToolCall {
     id: String,
     name: String,
     arguments: String,
+}
+
+pub(crate) struct CancelOnDropStream<T> {
+    receiver: mpsc::UnboundedReceiver<T>,
+    cancel: Option<tokio::sync::watch::Sender<bool>>,
+}
+
+impl<T> Stream for CancelOnDropStream<T> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.receiver).poll_next(cx)
+    }
+}
+
+impl<T> Drop for CancelOnDropStream<T> {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(true);
+        }
+    }
+}
+
+pub(crate) fn cancellable_unbounded_channel<T>() -> (
+    mpsc::UnboundedSender<T>,
+    CancelOnDropStream<T>,
+    tokio::sync::watch::Receiver<bool>,
+) {
+    let (sender, receiver) = mpsc::unbounded();
+    let (cancel, cancel_receiver) = tokio::sync::watch::channel(false);
+    (
+        sender,
+        CancelOnDropStream {
+            receiver,
+            cancel: Some(cancel),
+        },
+        cancel_receiver,
+    )
 }
 
 /// Common interface for LLM providers (OpenAI, Ollama, etc.)
@@ -212,22 +253,28 @@ pub async fn create_chat_stream(
         .await
         .map_err(format_openai_error)?;
 
-    let (mut tx, rx) = mpsc::unbounded::<Result<String, String>>();
+    let (mut tx, rx, mut cancel_rx) = cancellable_unbounded_channel::<Result<String, String>>();
     tokio::spawn(async move {
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(chunk) => {
-                    for choice in chunk.choices {
-                        if let Some(content) = choice.delta.content {
-                            if tx.start_send(Ok(content)).is_err() {
-                                return;
+        loop {
+            tokio::select! {
+                _ = cancel_rx.changed() => return,
+                result = stream.next() => {
+                    let Some(result) = result else { break };
+                    match result {
+                        Ok(chunk) => {
+                            for choice in chunk.choices {
+                                if let Some(content) = choice.delta.content {
+                                    if tx.start_send(Ok(content)).is_err() {
+                                        return;
+                                    }
+                                }
                             }
                         }
+                        Err(error) => {
+                            let _ = tx.start_send(Err(format_openai_error(error)));
+                            return;
+                        }
                     }
-                }
-                Err(error) => {
-                    let _ = tx.start_send(Err(format_openai_error(error)));
-                    return;
                 }
             }
         }
@@ -250,35 +297,42 @@ pub async fn create_chat_stream_with_tools(
         .await
         .map_err(format_openai_error)?;
 
-    let (mut tx, rx) = mpsc::unbounded::<Result<LlmStreamEvent, String>>();
+    let (mut tx, rx, mut cancel_rx) =
+        cancellable_unbounded_channel::<Result<LlmStreamEvent, String>>();
 
     tokio::spawn(async move {
         let mut pending_tool_calls: HashMap<u32, PartialToolCall> = HashMap::new();
 
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(chunk) => {
-                    for choice in chunk.choices {
-                        if let Some(content) = choice.delta.content.clone() {
-                            if tx.start_send(Ok(LlmStreamEvent::Text(content))).is_err() {
-                                return;
+        loop {
+            tokio::select! {
+                _ = cancel_rx.changed() => return,
+                result = stream.next() => {
+                    let Some(result) = result else { break };
+                    match result {
+                        Ok(chunk) => {
+                            for choice in chunk.choices {
+                                if let Some(content) = choice.delta.content.clone() {
+                                    if tx.start_send(Ok(LlmStreamEvent::Text(content))).is_err() {
+                                        return;
+                                    }
+                                }
+
+                                if let Some(tool_calls) = choice.delta.tool_calls.clone() {
+                                    apply_tool_call_chunks(&mut pending_tool_calls, tool_calls);
+                                }
+
+                                if matches!(choice.finish_reason, Some(FinishReason::ToolCalls))
+                                    && emit_pending_tool_calls(&mut tx, &mut pending_tool_calls).is_err()
+                                {
+                                    return;
+                                }
                             }
                         }
-
-                        if let Some(tool_calls) = choice.delta.tool_calls.clone() {
-                            apply_tool_call_chunks(&mut pending_tool_calls, tool_calls);
-                        }
-
-                        if matches!(choice.finish_reason, Some(FinishReason::ToolCalls))
-                            && emit_pending_tool_calls(&mut tx, &mut pending_tool_calls).is_err()
-                        {
+                        Err(error) => {
+                            let _ = tx.start_send(Err(format_openai_error(error)));
                             return;
                         }
                     }
-                }
-                Err(error) => {
-                    let _ = tx.start_send(Err(format_openai_error(error)));
-                    return;
                 }
             }
         }
@@ -568,63 +622,70 @@ impl OpenAIProvider {
         let request = build_rich_request_json(&self.model, messages, options, tools, true)?;
         let response = self.post_chat_json(request).await?;
         let mut stream = response.bytes_stream().eventsource();
-        let (mut tx, rx) = mpsc::unbounded::<Result<LlmStreamEvent, String>>();
+        let (mut tx, rx, mut cancel_rx) =
+            cancellable_unbounded_channel::<Result<LlmStreamEvent, String>>();
 
         tokio::spawn(async move {
             let mut pending_tool_calls: HashMap<u32, PartialToolCall> = HashMap::new();
 
-            while let Some(event_result) = stream.next().await {
-                let event = match event_result {
-                    Ok(event) => event,
-                    Err(error) => {
-                        let _ = tx.start_send(Err(format!(
-                            "OpenAI-compatible SSE stream error: {}",
-                            error
-                        )));
-                        return;
-                    }
-                };
+            loop {
+                tokio::select! {
+                    _ = cancel_rx.changed() => return,
+                    event_result = stream.next() => {
+                        let Some(event_result) = event_result else { break };
+                        let event = match event_result {
+                            Ok(event) => event,
+                            Err(error) => {
+                                let _ = tx.start_send(Err(format!(
+                                    "OpenAI-compatible SSE stream error: {}",
+                                    error
+                                )));
+                                return;
+                            }
+                        };
 
-                if event.data == "[DONE]" {
-                    break;
-                }
-
-                let parsed = match serde_json::from_str::<OpenAICompatStreamChunk>(&event.data) {
-                    Ok(parsed) => parsed,
-                    Err(error) => {
-                        let _ = tx.start_send(Err(format!(
-                            "Failed to parse OpenAI-compatible stream event JSON: {}",
-                            error
-                        )));
-                        return;
-                    }
-                };
-
-                for choice in parsed.choices {
-                    if let Some(reasoning) = choice.delta.reasoning_content {
-                        if !reasoning.is_empty()
-                            && tx
-                                .start_send(Ok(LlmStreamEvent::ReasoningContent(reasoning)))
-                                .is_err()
-                        {
-                            return;
+                        if event.data == "[DONE]" {
+                            break;
                         }
-                    }
 
-                    if let Some(content) = choice.delta.content {
-                        if tx.start_send(Ok(LlmStreamEvent::Text(content))).is_err() {
-                            return;
+                        let parsed = match serde_json::from_str::<OpenAICompatStreamChunk>(&event.data) {
+                            Ok(parsed) => parsed,
+                            Err(error) => {
+                                let _ = tx.start_send(Err(format!(
+                                    "Failed to parse OpenAI-compatible stream event JSON: {}",
+                                    error
+                                )));
+                                return;
+                            }
+                        };
+
+                        for choice in parsed.choices {
+                            if let Some(reasoning) = choice.delta.reasoning_content {
+                                if !reasoning.is_empty()
+                                    && tx
+                                        .start_send(Ok(LlmStreamEvent::ReasoningContent(reasoning)))
+                                        .is_err()
+                                {
+                                    return;
+                                }
+                            }
+
+                            if let Some(content) = choice.delta.content {
+                                if tx.start_send(Ok(LlmStreamEvent::Text(content))).is_err() {
+                                    return;
+                                }
+                            }
+
+                            if let Some(tool_calls) = choice.delta.tool_calls {
+                                apply_tool_call_chunks(&mut pending_tool_calls, tool_calls);
+                            }
+
+                            if matches!(choice.finish_reason, Some(FinishReason::ToolCalls))
+                                && emit_pending_tool_calls(&mut tx, &mut pending_tool_calls).is_err()
+                            {
+                                return;
+                            }
                         }
-                    }
-
-                    if let Some(tool_calls) = choice.delta.tool_calls {
-                        apply_tool_call_chunks(&mut pending_tool_calls, tool_calls);
-                    }
-
-                    if matches!(choice.finish_reason, Some(FinishReason::ToolCalls))
-                        && emit_pending_tool_calls(&mut tx, &mut pending_tool_calls).is_err()
-                    {
-                        return;
                     }
                 }
             }
@@ -754,5 +815,22 @@ impl LlmProvider for OpenAIProvider {
 
     fn id(&self) -> &str {
         &self.provider_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cancellable_unbounded_channel;
+
+    #[tokio::test]
+    async fn dropping_stream_signals_reader_cancellation() {
+        let (_sender, stream, mut cancel_rx) = cancellable_unbounded_channel::<u8>();
+        drop(stream);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), cancel_rx.changed())
+            .await
+            .expect("drop should signal cancellation")
+            .expect("cancellation sender should still be alive");
+        assert!(*cancel_rx.borrow());
     }
 }

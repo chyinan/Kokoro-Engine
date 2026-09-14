@@ -1,3 +1,4 @@
+// pattern: Imperative Shell
 use crate::ai::context::AIOrchestrator;
 use crate::error::KokoroError;
 use crate::llm::service::LlmService;
@@ -50,6 +51,7 @@ pub async fn list_memories(
 
 #[derive(Deserialize)]
 pub struct UpdateMemoryRequest {
+    pub character_id: String,
     pub id: i64,
     pub content: String,
     pub importance: f64,
@@ -60,15 +62,26 @@ pub async fn update_memory(
     request: UpdateMemoryRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    if request.character_id.trim().is_empty() {
+        return Err(KokoroError::Validation(
+            "character_id must not be empty".to_string(),
+        ));
+    }
     state
         .memory_manager
-        .update_memory(request.id, &request.content, request.importance)
+        .update_memory(
+            request.id,
+            &request.character_id,
+            &request.content,
+            request.importance,
+        )
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))
 }
 
 #[derive(Deserialize)]
 pub struct DeleteMemoryRequest {
+    pub character_id: String,
     pub id: i64,
 }
 
@@ -77,15 +90,21 @@ pub async fn delete_memory(
     request: DeleteMemoryRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    if request.character_id.trim().is_empty() {
+        return Err(KokoroError::Validation(
+            "character_id must not be empty".to_string(),
+        ));
+    }
     state
         .memory_manager
-        .delete_memory(request.id)
+        .delete_memory(request.id, &request.character_id)
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))
 }
 
 #[derive(Deserialize)]
 pub struct UpdateMemoryTierRequest {
+    pub character_id: String,
     pub id: i64,
     pub tier: String,
 }
@@ -95,6 +114,11 @@ pub async fn update_memory_tier(
     request: UpdateMemoryTierRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    if request.character_id.trim().is_empty() {
+        return Err(KokoroError::Validation(
+            "character_id must not be empty".to_string(),
+        ));
+    }
     if request.tier != "core" && request.tier != "ephemeral" {
         return Err(KokoroError::Validation(
             "tier must be 'core' or 'ephemeral'".to_string(),
@@ -102,7 +126,7 @@ pub async fn update_memory_tier(
     }
     state
         .memory_manager
-        .update_memory_tier(request.id, &request.tier)
+        .update_memory_tier(request.id, &request.character_id, &request.tier)
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))
 }
@@ -239,4 +263,22 @@ pub async fn download_memory_embedding_model(
     })
     .await
     .map_err(KokoroError::Internal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeleteMemoryRequest, UpdateMemoryRequest, UpdateMemoryTierRequest};
+
+    #[test]
+    fn memory_mutation_requests_require_character_id() {
+        let update: Result<UpdateMemoryRequest, _> =
+            serde_json::from_str(r#"{"id":1,"content":"updated","importance":0.8}"#);
+        let delete: Result<DeleteMemoryRequest, _> = serde_json::from_str(r#"{"id":1}"#);
+        let tier: Result<UpdateMemoryTierRequest, _> =
+            serde_json::from_str(r#"{"id":1,"tier":"core"}"#);
+
+        assert!(update.is_err(), "update must include character_id");
+        assert!(delete.is_err(), "delete must include character_id");
+        assert!(tier.is_err(), "tier update must include character_id");
+    }
 }

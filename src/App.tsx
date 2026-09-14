@@ -2274,14 +2274,18 @@ function App() {
     }
     if (detail.action === 'update_memory' && detail.data) {
       const { id, content, importance } = detail.data;
-      updateMemory(id, content, importance)
+      const characterId = activeCharacterId.trim();
+      if (!characterId) return;
+      updateMemory(characterId, id, content, importance)
         .then(() => {
-          if (detail.data?.tier) return updateMemoryTier(id, detail.data.tier);
+          if (detail.data?.tier) return updateMemoryTier(characterId, id, detail.data.tier);
         })
         .catch(err => console.error('[App] Memory update failed:', err));
     }
     if (detail.action === 'delete_memory' && detail.data?.id !== undefined) {
-      deleteMemory(detail.data.id)
+      const characterId = activeCharacterId.trim();
+      if (!characterId) return;
+      deleteMemory(characterId, detail.data.id)
         .catch(err => console.error('[App] Memory delete failed:', err));
     }
 

@@ -7,9 +7,11 @@ use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tauri::{AppHandle, Manager};
 
 const CONFIG_FILE: &str = "auto_backup_config.json";
+static AUTO_BACKUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoBackupConfig {
@@ -93,10 +95,14 @@ pub async fn run_auto_backup_now(app: AppHandle) -> Result<String, KokoroError> 
 }
 
 pub async fn do_backup(app_data: &Path, config: &AutoBackupConfig) -> Result<String, KokoroError> {
+    let _backup_guard = AUTO_BACKUP_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     let dir = PathBuf::from(&config.backup_dir);
     fs::create_dir_all(&dir).map_err(KokoroError::from)?;
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let filename = format!("kokoro-auto-{}.kokoro", timestamp);
+    let filename = format!("kokoro-auto-{}-{}.kokoro", timestamp, uuid::Uuid::new_v4());
     let out_path = dir.join(&filename);
     // Auto backup is deliberately data-only; resource inclusion is a manual export choice.
     export_data_to_path(app_data, &out_path, None).await?;

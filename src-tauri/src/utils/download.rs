@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use uuid::Uuid;
 
 const DEFAULT_PARALLEL_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_PARALLEL_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
@@ -84,8 +85,7 @@ pub async fn download_file_with_progress(
         .unwrap_or_else(|_| total_bytes.unwrap_or(0));
     let final_total_bytes = total_bytes.or(Some(downloaded_bytes));
 
-    tokio::fs::rename(&tmp_path, target_path)
-        .await
+    crate::config::atomic_replace_file(&tmp_path, target_path)
         .map_err(|error| format!("Failed to finalize download: {}", error))?;
 
     let final_progress = DownloadProgress {
@@ -97,14 +97,11 @@ pub async fn download_file_with_progress(
 }
 
 fn temporary_download_path(target_path: &Path) -> PathBuf {
-    target_path.with_extension(format!(
-        "{}download",
-        target_path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .map(|extension| format!("{}.", extension))
-            .unwrap_or_default()
-    ))
+    let file_name = target_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    target_path.with_file_name(format!(".{file_name}.{}.download", Uuid::new_v4()))
 }
 
 fn content_range_total(response: &reqwest::Response) -> Option<u64> {
@@ -333,28 +330,84 @@ mod review_tests {
             ("bytes=0-3", "bytes 0-3/8", "ABCD"),
             ("bytes=4-7", "bytes 0-3/8", "ABCD"),
         ] {
-            Mock::given(method("GET")).and(path("/model"))
+            Mock::given(method("GET"))
+                .and(path("/model"))
                 .and(header("Range", range))
-                .respond_with(ResponseTemplate::new(206)
-                    .insert_header("Content-Range", content_range).set_body_bytes(body))
-                .with_priority(1).mount(&server).await;
+                .respond_with(
+                    ResponseTemplate::new(206)
+                        .insert_header("Content-Range", content_range)
+                        .set_body_bytes(body),
+                )
+                .with_priority(1)
+                .mount(&server)
+                .await;
         }
         // A valid single-stream fallback is acceptable if the bad range is rejected.
-        Mock::given(method("GET")).and(path("/model"))
+        Mock::given(method("GET"))
+            .and(path("/model"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes("ABCDEFGH"))
-            .with_priority(10).mount(&server).await;
+            .with_priority(10)
+            .mount(&server)
+            .await;
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("model.bin");
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
-        let result = download_file_with_progress(&client, &format!("{}/model", server.uri()),
-            &target, DownloadOptions {
-                parallel_threshold_bytes: 1, parallel_chunk_bytes: 4, parallel_downloads: 2,
-            }, Arc::new(|_| Ok(()))).await;
+        let result = download_file_with_progress(
+            &client,
+            &format!("{}/model", server.uri()),
+            &target,
+            DownloadOptions {
+                parallel_threshold_bytes: 1,
+                parallel_chunk_bytes: 4,
+                parallel_downloads: 2,
+            },
+            Arc::new(|_| Ok(())),
+        )
+        .await;
 
         if result.is_ok() {
-            assert_eq!(std::fs::read(&target).unwrap(), b"ABCDEFGH",
-                "wrong Content-Range must not be assembled and promoted as a successful download");
+            assert_eq!(
+                std::fs::read(&target).unwrap(),
+                b"ABCDEFGH",
+                "wrong Content-Range must not be assembled and promoted as a successful download"
+            );
         }
+    }
+
+    #[test]
+    fn download_temp_paths_are_unique_for_concurrent_attempts() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("model.bin");
+        assert_ne!(
+            temporary_download_path(&target),
+            temporary_download_path(&target)
+        );
+    }
+
+    #[tokio::test]
+    async fn download_replaces_existing_target_file() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/model"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes("new-content"))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("model.bin");
+        std::fs::write(&target, "old-content").unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        download_file_with_progress(
+            &client,
+            &format!("{}/model", server.uri()),
+            &target,
+            DownloadOptions::default(),
+            Arc::new(|_| Ok(())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new-content");
     }
 }

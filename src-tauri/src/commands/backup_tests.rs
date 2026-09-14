@@ -422,6 +422,17 @@ fn config_import_rejects_nested_unknown_and_database_names() {
 }
 
 #[test]
+fn config_import_ignores_removed_emotion_state_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backup = tmp.path().join("legacy-emotion.kokoro");
+    write_config_archive(&backup, &[("configs/emotion_state.json", br#"{"mood":0.5}"#)]);
+
+    let configs = stage_backup_configs(&backup).unwrap();
+
+    assert!(configs.is_empty());
+}
+
+#[test]
 fn config_import_rejects_duplicate_allowed_names() {
     let tmp = tempfile::tempdir().unwrap();
     let backup = tmp.path().join("duplicate.kokoro");

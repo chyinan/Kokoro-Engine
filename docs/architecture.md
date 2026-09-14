@@ -92,7 +92,6 @@ src/
 │   │   ├── ChatMessage.tsx        # Chat message bubble (edit, continue-from, regenerate)
 │   │   ├── SettingsPanel.tsx      # Settings modal (persona/model/TTS/STT/vision/MCP/Telegram/pet/backup etc.)
 │   │   ├── HeaderBar.tsx          # Top bar
-│   │   ├── FooterBar.tsx          # Bottom bar (emotion display, real-time sync)
 │   │   ├── BackgroundLayer.tsx    # Background rendering
 │   │   ├── CharacterManager.tsx   # Character CRUD
 │   │   ├── ConversationSidebar.tsx
@@ -170,12 +169,8 @@ src-tauri/src/
 │
 ├── ai/                            # AI orchestration & autonomous behavior
 │   ├── context.rs                 # AIOrchestrator — prompt assembly, context mgmt
-│   ├── emotion.rs                 # Emotion state & personality model
-│   ├── emotion_events.rs          # Emotion event types
-│   ├── expression_driver.rs       # Expression → Live2D mapping
 │   ├── memory.rs                  # Memory manager (vector DB + tiering)
 │   ├── memory_extractor.rs        # Auto-extract memories from chat
-│   ├── sentiment.rs               # Sentiment analysis
 │   ├── style_adapter.rs           # Response style adaptation
 │   ├── router.rs                  # Model routing (Fast/Smart/Cheap)
 │   ├── prompts.rs                 # System prompt templates
@@ -205,7 +200,6 @@ src-tauri/src/
 │   ├── cache.rs                   # Audio caching
 │   ├── queue.rs                   # TTS queue management
 │   ├── voice_registry.rs          # Voice profile registry
-│   ├── emotion_tts.rs             # Emotion-aware TTS
 │   ├── openai.rs                  # OpenAI TTS
 │   ├── browser.rs                 # Browser TTS (Web Speech API)
 │   ├── local_gpt_sovits.rs        # GPT-SoVITS local
@@ -304,7 +298,6 @@ mods/
 ├── imagegen_config.json
 ├── mcp_servers.json
 ├── telegram_config.json           # Telegram Bot config (token, whitelist)
-└── emotion_state.json             # Persisted emotion state across restarts
 ```
 
 ---
@@ -363,7 +356,6 @@ graph TD
 
     AIO --> CTX["Context Manager"]
     AIO --> MEM["Memory Manager"]
-    AIO --> EMO["Emotion System"]
     AIO --> HB["Heartbeat"]
     AIO --> LLM["LLM Adapter"]
 
@@ -386,7 +378,6 @@ graph TD
         AIO
         CTX
         MEM
-        EMO
         LLM
     end
 
@@ -528,7 +519,6 @@ User message
 **Stream Buffering**: `[TOOL_CALL:...]` and `[TRANSLATE:...]` tags are held in a buffer during streaming and never sent to the frontend raw.
 
 **Prompt Assembly Notes**:
-- current emotion state is not injected into the main chat prompt
 - active Live2D cue names are injected when a model profile exposes prompt-visible cues
 - cues marked `exclude_from_prompt` stay available at runtime but are hidden from prompt guidance
 
@@ -597,7 +587,6 @@ Text ──▶ TtsService ──▶ TtsRouter::select_provider() ──▶ TtsPr
 
 - **`TtsProvider` trait** — provider abstraction for synth and capabilities.
 - **Router-driven selection** — `router.rs` picks providers by preference + capability score.
-- **Emotion-aware adaptation** — `emotion_tts.rs` adjusts runtime voice parameters.
 - **Caching + queue** — `cache.rs` avoids duplicate synthesis; `queue.rs` serializes playback.
 - **Runtime events** — `tts:start`, `tts:audio`, `tts:browser-delegate`, `tts:end`.
 
@@ -747,7 +736,6 @@ sequenceDiagram
 | **SSE streaming** | Token-by-token delivery for real-time character responses |
 | **Intl.Segmenter for CJK** | Browser-native word segmentation for Chinese/Japanese/Korean in memory graph |
 | **Multi-provider LLM** | Unique Provider IDs allow different providers for main LLM and system LLM; presets for quick switching |
-| **Emotion persistence** | Emotion state saved to disk and restored on startup, surviving app restarts |
 | **Jailbreak placeholders** | `{{char}}` and `{{user}}` placeholder mapping in jailbreak prompts, consistent with Persona |
 | **Telegram Bot bridge** | Long-polling Telegram Bot bridges to internal services without public IP requirement |
 

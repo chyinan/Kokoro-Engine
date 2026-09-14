@@ -4,7 +4,7 @@ use anyhow::Result;
 #[cfg(not(test))]
 use fastembed::TextEmbedding;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 #[cfg(not(test))]
@@ -1615,6 +1615,27 @@ impl MemoryManager {
         Ok(count > 0)
     }
 
+    /// Recover summary work left behind by a previous process. A pending or
+    /// running task cannot still be owned once the application has restarted.
+    pub async fn mark_interrupted_conversation_summary_tasks(&self) -> Result<u64> {
+        let now = now_ts();
+        let result = sqlx::query(
+            "UPDATE conversation_summaries
+             SET status = CASE
+                    WHEN failure_count + 1 >= ? THEN 'circuit_open'
+                    ELSE 'failed'
+                 END,
+                 failure_count = failure_count + 1,
+                 updated_at = ?
+             WHERE status IN ('pending', 'running')",
+        )
+        .bind(CONVERSATION_SUMMARY_FAILURE_THRESHOLD)
+        .bind(now)
+        .execute(&self.db)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Lazily initializes the embedding model on first call from local files.
     /// Initialization never downloads or contacts a remote model host; explicit
     /// settings actions own any download work so a normal chat turn is non-blocking.
@@ -1702,6 +1723,16 @@ impl MemoryManager {
     }
 
     async fn record_memory_operation(&self, operation: MemoryOperationRecord<'_>) -> Result<()> {
+        let mut transaction = self.db.begin().await?;
+        Self::insert_memory_operation(&mut transaction, operation).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn insert_memory_operation(
+        transaction: &mut sqlx::Transaction<'_, Sqlite>,
+        operation: MemoryOperationRecord<'_>,
+    ) -> Result<()> {
         sqlx::query(
             "INSERT INTO memory_operations \
              (character_id, operation_type, actor, memory_id, proposal_id, before_json, after_json, created_at) \
@@ -1715,7 +1746,7 @@ impl MemoryManager {
         .bind(operation.before_json)
         .bind(operation.after_json)
         .bind(now_ts())
-        .execute(&self.db)
+        .execute(&mut **transaction)
         .await?;
         Ok(())
     }
@@ -2457,6 +2488,22 @@ impl MemoryManager {
             return Ok(None);
         }
 
+        let inherited_failure_count: i64 = sqlx::query(
+            "SELECT status, failure_count FROM conversation_summaries
+             WHERE conversation_id = ? ORDER BY version DESC LIMIT 1",
+        )
+        .bind(conversation_id)
+        .fetch_optional(&self.db)
+        .await?
+        .filter(|row| {
+            matches!(
+                row.get::<String, _>("status").as_str(),
+                "failed" | "circuit_open"
+            )
+        })
+        .map(|row| row.get::<i64, _>("failure_count"))
+        .unwrap_or(0);
+
         let latest_ready_end: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(end_message_id), 0)
              FROM conversation_summaries
@@ -2528,13 +2575,14 @@ impl MemoryManager {
         let record_id = sqlx::query(
             "INSERT INTO conversation_summaries
              (conversation_id, character_id, version, start_message_id, end_message_id, summary, status, failure_count, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, '', 'pending', 0, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, '', 'pending', ?, ?, ?)",
         )
         .bind(conversation_id)
         .bind(character_id)
         .bind(version)
         .bind(start_message_id)
         .bind(end_message_id)
+        .bind(inherited_failure_count)
         .bind(now)
         .bind(now)
         .execute(&self.db)
@@ -2834,7 +2882,16 @@ impl MemoryManager {
 
     /// Update a memory's content and importance. Re-embeds the content.
     /// Automatically syncs tier based on new importance.
-    pub async fn update_memory(&self, id: i64, content: &str, importance: f64) -> Result<()> {
+    pub async fn update_memory(
+        &self,
+        id: i64,
+        character_id: &str,
+        content: &str,
+        importance: f64,
+    ) -> Result<()> {
+        if character_id.trim().is_empty() {
+            anyhow::bail!("character_id must not be empty");
+        }
         let embedding = self.embed(content).await?;
         let embedding_bytes: Vec<u8> = bincode::serialize(&embedding)?;
         let clamped = importance.clamp(0.0, 1.0);
@@ -2843,8 +2900,8 @@ impl MemoryManager {
         let hash = canonical_hash(metadata.canonical_content.as_deref().unwrap_or(content));
         let now = now_ts();
 
-        sqlx::query(
-            "UPDATE memories SET content = ?, embedding = ?, importance = ?, tier = ?, memory_type = ?, entity_key = ?, canonical_hash = ?, updated_at = ?, last_seen_at = ? WHERE rowid = ?",
+        let result = sqlx::query(
+            "UPDATE memories SET content = ?, embedding = ?, importance = ?, tier = ?, memory_type = ?, entity_key = ?, canonical_hash = ?, updated_at = ?, last_seen_at = ? WHERE rowid = ? AND character_id = ? AND status = 'active'",
         )
         .bind(content)
         .bind(embedding_bytes)
@@ -2856,40 +2913,78 @@ impl MemoryManager {
         .bind(now)
         .bind(now)
         .bind(id)
+        .bind(character_id)
         .execute(&self.db)
         .await?;
+
+        if result.rows_affected() != 1 {
+            anyhow::bail!(
+                "memory {id} does not belong to character {character_id} or is not active"
+            );
+        }
 
         Ok(())
     }
 
     /// Delete a memory by ID.
-    pub async fn delete_memory(&self, id: i64) -> Result<()> {
-        sqlx::query("UPDATE memories SET status = 'archived', updated_at = ? WHERE rowid = ?")
+    pub async fn delete_memory(&self, id: i64, character_id: &str) -> Result<()> {
+        if character_id.trim().is_empty() {
+            anyhow::bail!("character_id must not be empty");
+        }
+        let result = sqlx::query(
+            "UPDATE memories SET status = 'archived', updated_at = ? WHERE rowid = ? AND character_id = ? AND status = 'active'",
+        )
             .bind(now_ts())
             .bind(id)
+            .bind(character_id)
             .execute(&self.db)
             .await?;
+        if result.rows_affected() != 1 {
+            anyhow::bail!(
+                "memory {id} does not belong to character {character_id} or is not active"
+            );
+        }
         Ok(())
     }
 
     /// Update a memory's tier (e.g. "core" or "ephemeral").
-    pub async fn update_memory_tier(&self, id: i64, tier: &str) -> Result<()> {
-        sqlx::query("UPDATE memories SET tier = ?, updated_at = ? WHERE rowid = ?")
+    pub async fn update_memory_tier(&self, id: i64, character_id: &str, tier: &str) -> Result<()> {
+        if character_id.trim().is_empty() {
+            anyhow::bail!("character_id must not be empty");
+        }
+        let result = sqlx::query(
+            "UPDATE memories SET tier = ?, updated_at = ? WHERE rowid = ? AND character_id = ? AND status = 'active'",
+        )
             .bind(tier)
             .bind(now_ts())
             .bind(id)
+            .bind(character_id)
             .execute(&self.db)
             .await?;
+        if result.rows_affected() != 1 {
+            anyhow::bail!(
+                "memory {id} does not belong to character {character_id} or is not active"
+            );
+        }
         Ok(())
     }
 
     async fn create_dream_proposal(&self, proposal: DreamProposalInsert<'_>) -> Result<i64> {
         let source_memory_versions = self
-            .capture_dream_memory_versions(
-                proposal.source_memory_ids,
-                proposal.target_memory_id,
-            )
+            .capture_dream_memory_versions(proposal.source_memory_ids, proposal.target_memory_id)
             .await?;
+        let mut transaction = self.db.begin().await?;
+        let id = Self::insert_dream_proposal(&mut transaction, proposal, &source_memory_versions)
+            .await?;
+        transaction.commit().await?;
+        Ok(id)
+    }
+
+    async fn insert_dream_proposal(
+        transaction: &mut sqlx::Transaction<'_, Sqlite>,
+        proposal: DreamProposalInsert<'_>,
+        source_memory_versions: &str,
+    ) -> Result<i64> {
         let now = now_ts();
         let applied_at = if matches!(proposal.status, "auto_applied" | "approved") {
             Some(now)
@@ -2919,7 +3014,7 @@ impl MemoryManager {
         .bind(now)
         .bind(applied_at)
         .bind(source_memory_versions)
-        .execute(&self.db)
+        .execute(&mut **transaction)
         .await?;
         Ok(result.last_insert_rowid())
     }
@@ -2942,10 +3037,10 @@ impl MemoryManager {
         let mut versions = HashMap::with_capacity(ids.len());
         for id in ids {
             let row = sqlx::query("SELECT content, updated_at FROM memories WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.db)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("dream proposal source memory {id} not found"))?;
+                .bind(id)
+                .fetch_optional(&self.db)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("dream proposal source memory {id} not found"))?;
             // Creation records a snapshot even for restored or legacy rows;
             // approval is the authoritative boundary that rechecks ownership
             // and active status inside its write transaction.
@@ -3094,18 +3189,28 @@ impl MemoryManager {
             .or_else(|| metadata.canonical_content.clone())
             .unwrap_or_else(|| keeper.content.clone());
 
+        // Capture revisions before the potentially slow embedding call so a
+        // concurrent manual edit cannot be mistaken for the input snapshot.
+        let source_memory_versions = self
+            .capture_dream_memory_versions(&source_ids, Some(keeper.id))
+            .await?;
+        let expected_versions: HashMap<i64, DreamMemoryVersion> =
+            serde_json::from_str(&source_memory_versions)?;
+
         // The keeper's content may be replaced by an LLM-produced merge. Keep
         // the semantic index and deduplication fingerprint in sync with that
         // final content before any row is promoted.
         let merged_embedding = self.embed(&merged_content).await?;
         let merged_embedding_bytes = bincode::serialize(&merged_embedding)?;
         let merged_hash = canonical_hash(&merged_content);
+        let mut transaction = self.db.begin().await?;
+        let now = now_ts();
 
-        sqlx::query(
+        let keeper_result = sqlx::query(
             "UPDATE memories \
              SET content = ?, embedding = ?, canonical_hash = ?, importance = ?, tier = ?, confidence = ?, first_seen_at = ?, \
                  last_seen_at = ?, evidence_count = ?, updated_at = ?, supersedes = ? \
-             WHERE id = ?",
+             WHERE id = ? AND character_id = ? AND status = 'active' AND updated_at = ? AND content = ?",
         )
         .bind(&merged_content)
         .bind(merged_embedding_bytes)
@@ -3116,25 +3221,44 @@ impl MemoryManager {
         .bind(first_seen_at)
         .bind(last_seen_at)
         .bind(evidence_count)
-        .bind(now_ts())
+        .bind(now)
         .bind(proposal_ids_json(&superseded_ids)?)
         .bind(keeper.id)
-        .execute(&self.db)
+        .bind(character_id)
+        .bind(expected_versions[&keeper.id].updated_at)
+        .bind(&keeper.content)
+        .execute(&mut *transaction)
         .await?;
-
-        for superseded_id in &superseded_ids {
-            sqlx::query(
-                "UPDATE memories SET status = 'superseded', updated_at = ?, supersedes = ? WHERE id = ?",
-            )
-            .bind(now_ts())
-            .bind(proposal_ids_json(&[keeper.id])?)
-            .bind(superseded_id)
-            .execute(&self.db)
-            .await?;
+        if keeper_result.rows_affected() != 1 {
+            anyhow::bail!("dream merge keeper is no longer active for character {character_id}");
         }
 
-        let proposal_id = self
-            .create_dream_proposal(DreamProposalInsert {
+        for superseded_id in &superseded_ids {
+            let result = sqlx::query(
+                "UPDATE memories SET status = 'superseded', updated_at = ?, supersedes = ? WHERE id = ? AND character_id = ? AND status = 'active' AND updated_at = ? AND content = ?",
+            )
+            .bind(now)
+            .bind(proposal_ids_json(&[keeper.id])?)
+            .bind(superseded_id)
+            .bind(character_id)
+            .bind(expected_versions[superseded_id].updated_at)
+            .bind(
+                entries
+                    .iter()
+                    .find(|entry| entry.id == *superseded_id)
+                    .map(|entry| entry.content.as_str())
+                    .unwrap_or_default(),
+            )
+            .execute(&mut *transaction)
+            .await?;
+            if result.rows_affected() != 1 {
+                anyhow::bail!("dream merge source memory {superseded_id} is no longer active for character {character_id}");
+            }
+        }
+
+        let proposal_id = Self::insert_dream_proposal(
+            &mut transaction,
+            DreamProposalInsert {
                 character_id,
                 proposal_type,
                 status: "auto_applied",
@@ -3148,22 +3272,30 @@ impl MemoryManager {
                 proposed_entity_key: keeper.entity_key.as_deref(),
                 impact:
                     "Auto-merged duplicate active memories; source rows were marked superseded.",
-            })
-            .await?;
-
-        self.record_memory_operation(MemoryOperationRecord {
-            character_id,
-            operation_type: proposal_type,
-            actor: "dreaming",
-            memory_id: Some(keeper.id),
-            proposal_id: Some(proposal_id),
-            before_json: Some(serde_json::json!({ "source_memory_ids": source_ids }).to_string()),
-            after_json: Some(
-                serde_json::json!({ "keeper_id": keeper.id, "superseded_ids": superseded_ids })
-                    .to_string(),
-            ),
-        })
+            },
+            &source_memory_versions,
+        )
         .await?;
+
+        Self::insert_memory_operation(
+            &mut transaction,
+            MemoryOperationRecord {
+                character_id,
+                operation_type: proposal_type,
+                actor: "dreaming",
+                memory_id: Some(keeper.id),
+                proposal_id: Some(proposal_id),
+                before_json: Some(
+                    serde_json::json!({ "source_memory_ids": source_ids }).to_string(),
+                ),
+                after_json: Some(
+                    serde_json::json!({ "keeper_id": keeper.id, "superseded_ids": superseded_ids })
+                        .to_string(),
+                ),
+            },
+        )
+        .await?;
+        transaction.commit().await?;
         Ok(1)
     }
 
@@ -3960,10 +4092,9 @@ impl MemoryManager {
             }
         }
 
-        if let (Some(content), Some((embedding_bytes, metadata, content_hash))) = (
-            proposal.proposed_content.as_deref(),
-            prepared_update,
-        ) {
+        if let (Some(content), Some((embedding_bytes, metadata, content_hash))) =
+            (proposal.proposed_content.as_deref(), prepared_update)
+        {
             let result = sqlx::query(
                 "UPDATE memories SET content = ?, embedding = ?, memory_type = ?, entity_key = ?, \
                     canonical_hash = ?, confidence = ?, updated_at = ?, last_seen_at = ?, status = 'active' \
@@ -4068,7 +4199,7 @@ impl MemoryManager {
         // Among records old enough to potentially be below threshold, check each one.
         // We do the exact per-row check in Rust to handle varying importance values.
         let rows = sqlx::query(
-            "SELECT id, created_at, importance FROM memories \
+            "SELECT id, content, created_at, updated_at, importance FROM memories \
              WHERE character_id = ? AND tier = 'ephemeral' AND status = 'active' AND created_at < ?",
         )
         .bind(character_id)
@@ -4079,17 +4210,28 @@ impl MemoryManager {
         let mut deleted = 0u64;
         for row in rows {
             let id: i64 = row.get("id");
+            let content: String = row.get("content");
             let created_at: i64 = row.get("created_at");
+            let updated_at: i64 = row.get("updated_at");
             let importance: f64 = row.get("importance");
             let age_days = (now - created_at) as f64 / 86400.0;
             let decay = (0.5_f64).powf(age_days / MEMORY_HALF_LIFE_DAYS);
             if importance * decay < threshold {
-                sqlx::query("UPDATE memories SET status = 'archived', updated_at = ? WHERE id = ?")
+                let result = sqlx::query(
+                    "UPDATE memories SET status = 'archived', updated_at = ? \
+                     WHERE id = ? AND character_id = ? AND tier = 'ephemeral' AND status = 'active' \
+                       AND created_at = ? AND updated_at = ? AND importance = ? AND content = ?",
+                )
                     .bind(now)
                     .bind(id)
+                    .bind(character_id)
+                    .bind(created_at)
+                    .bind(updated_at)
+                    .bind(importance)
+                    .bind(content)
                     .execute(&self.db)
                     .await?;
-                deleted += 1;
+                deleted += u64::from(result.rows_affected() == 1);
             }
         }
 
@@ -4701,20 +4843,23 @@ mod tests {
     }
 
     async fn review_seed_proposal(manager: &MemoryManager, character: &str, memory_id: i64) -> i64 {
-        manager.create_dream_proposal(DreamProposalInsert {
-            character_id: character,
-            proposal_type: "semantic_review",
-            status: "pending",
-            confidence: 0.85,
-            title: "Review replacement",
-            rationale: "Review regression fixture",
-            source_memory_ids: &[memory_id],
-            target_memory_id: Some(memory_id),
-            proposed_content: Some("proposal replacement"),
-            proposed_memory_type: Some("fact"),
-            proposed_entity_key: None,
-            impact: "Replace target",
-        }).await.unwrap()
+        manager
+            .create_dream_proposal(DreamProposalInsert {
+                character_id: character,
+                proposal_type: "semantic_review",
+                status: "pending",
+                confidence: 0.85,
+                title: "Review replacement",
+                rationale: "Review regression fixture",
+                source_memory_ids: &[memory_id],
+                target_memory_id: Some(memory_id),
+                proposed_content: Some("proposal replacement"),
+                proposed_memory_type: Some("fact"),
+                proposed_entity_key: None,
+                impact: "Replace target",
+            })
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -4723,13 +4868,22 @@ mod tests {
         let manager = MemoryManager::new(pool.clone());
         let memory_id = review_seed_memory(&pool, "character-a").await;
         let proposal_id = review_seed_proposal(&manager, "character-a", memory_id).await;
-        manager.delete_memory(memory_id).await.unwrap();
+        manager
+            .delete_memory(memory_id, "character-a")
+            .await
+            .unwrap();
 
         let _ = manager.approve_dream_proposal(proposal_id).await;
 
         let status: String = sqlx::query_scalar("SELECT status FROM memories WHERE id = ?")
-            .bind(memory_id).fetch_one(&pool).await.unwrap();
-        assert_eq!(status, "archived", "approving a stale proposal must not undo a user deletion");
+            .bind(memory_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            status, "archived",
+            "approving a stale proposal must not undo a user deletion"
+        );
     }
 
     #[tokio::test]
@@ -4738,13 +4892,22 @@ mod tests {
         let manager = MemoryManager::new(pool.clone());
         let memory_id = review_seed_memory(&pool, "character-a").await;
         let proposal_id = review_seed_proposal(&manager, "character-a", memory_id).await;
-        manager.update_memory(memory_id, "newer manual correction", 0.9).await.unwrap();
+        manager
+            .update_memory(memory_id, "character-a", "newer manual correction", 0.9)
+            .await
+            .unwrap();
 
         let _ = manager.approve_dream_proposal(proposal_id).await;
 
         let content: String = sqlx::query_scalar("SELECT content FROM memories WHERE id = ?")
-            .bind(memory_id).fetch_one(&pool).await.unwrap();
-        assert_eq!(content, "newer manual correction", "proposal must validate the source revision before replacing it");
+            .bind(memory_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            content, "newer manual correction",
+            "proposal must validate the source revision before replacing it"
+        );
     }
 
     #[tokio::test]
@@ -4758,8 +4921,14 @@ mod tests {
         let _ = manager.approve_dream_proposal(proposal_id).await;
 
         let content: String = sqlx::query_scalar("SELECT content FROM memories WHERE id = ?")
-            .bind(memory_id).fetch_one(&pool).await.unwrap();
-        assert_eq!(content, "original memory", "proposal ownership must match every target/source memory");
+            .bind(memory_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            content, "original memory",
+            "proposal ownership must match every target/source memory"
+        );
     }
 
     #[tokio::test]
@@ -4771,12 +4940,178 @@ mod tests {
         sqlx::query("CREATE TRIGGER review_fail_proposal_status BEFORE UPDATE ON memory_dream_proposals WHEN NEW.status = 'approved' BEGIN SELECT RAISE(ABORT, 'review injected proposal failure'); END")
             .execute(&pool).await.unwrap();
 
-        let error = manager.approve_dream_proposal(proposal_id).await.unwrap_err();
-        assert!(error.to_string().contains("review injected proposal failure"));
+        let error = manager
+            .approve_dream_proposal(proposal_id)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("review injected proposal failure"));
 
         let content: String = sqlx::query_scalar("SELECT content FROM memories WHERE id = ?")
-            .bind(memory_id).fetch_one(&pool).await.unwrap();
-        assert_eq!(content, "original memory", "failed proposal approval must rollback its earlier writes");
+            .bind(memory_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            content, "original memory",
+            "failed proposal approval must rollback its earlier writes"
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_summary_failures_reach_circuit_breaker_threshold() {
+        let pool = setup_test_pool().await;
+        let manager = MemoryManager::new(pool.clone());
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('summary-circuit', 'character-a', 'summary', '1', '1')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for index in 0..8 {
+            sqlx::query(
+                "INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES ('summary-circuit', ?, ?, ?)",
+            )
+            .bind(if index % 2 == 0 { "user" } else { "assistant" })
+            .bind(format!("message-{index}"))
+            .bind(index.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        for _ in 0..3 {
+            let task = manager
+                .get_conversation_summary_task("summary-circuit", "character-a")
+                .await
+                .unwrap()
+                .expect("a summary task should be queued");
+            manager
+                .mark_conversation_summary_running(task.record_id)
+                .await
+                .unwrap();
+            manager
+                .fail_conversation_summary(task.record_id, "provider unavailable")
+                .await
+                .unwrap();
+        }
+
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM conversation_summaries WHERE conversation_id = 'summary-circuit' ORDER BY version DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "circuit_open");
+    }
+
+    #[tokio::test]
+    async fn interrupted_conversation_summary_tasks_become_retryable() {
+        let pool = setup_test_pool().await;
+        let manager = MemoryManager::new(pool.clone());
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('summary-restart', 'character-a', 'summary', '1', '1')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for index in 0..8 {
+            sqlx::query(
+                "INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES ('summary-restart', 'user', ?, ?)",
+            )
+            .bind(format!("message-{index}"))
+            .bind(index.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let task = manager
+            .get_conversation_summary_task("summary-restart", "character-a")
+            .await
+            .unwrap()
+            .unwrap();
+        manager
+            .mark_conversation_summary_running(task.record_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            manager
+                .mark_interrupted_conversation_summary_tasks()
+                .await
+                .unwrap(),
+            1
+        );
+
+        let retry = manager
+            .get_conversation_summary_task("summary-restart", "character-a")
+            .await
+            .unwrap();
+        assert!(retry.is_some(), "an interrupted summary must be retryable");
+    }
+
+    #[tokio::test]
+    async fn auto_merge_failure_rolls_back_all_memory_changes() {
+        let pool = setup_test_pool().await;
+        let manager = MemoryManager::new(pool.clone());
+        let embedding = bincode::serialize(&test_embedding("duplicate memory")).unwrap();
+        let hash = canonical_hash("duplicate memory");
+        for _ in 0..2 {
+            sqlx::query(
+                "INSERT INTO memories (content, embedding, created_at, updated_at, importance, character_id, tier, memory_type, status, confidence, first_seen_at, last_seen_at, evidence_count, canonical_hash) VALUES ('duplicate memory', ?, 1, 1, 0.5, 'character-a', 'ephemeral', 'fact', 'active', 0.9, 1, 1, 1, ?)",
+            )
+            .bind(&embedding)
+            .bind(&hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("CREATE TRIGGER review_fail_auto_merge BEFORE INSERT ON memory_dream_proposals WHEN NEW.status = 'auto_applied' BEGIN SELECT RAISE(ABORT, 'review injected auto merge failure'); END")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(manager
+            .run_dream_now("character-a", "manual")
+            .await
+            .is_err());
+        let statuses: Vec<String> = sqlx::query_scalar(
+            "SELECT status FROM memories WHERE character_id = 'character-a' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(statuses, vec!["active", "active"]);
+    }
+
+    #[tokio::test]
+    async fn memory_mutations_reject_a_different_character_owner() {
+        let pool = setup_test_pool().await;
+        let manager = MemoryManager::new(pool.clone());
+        let memory_id = review_seed_memory(&pool, "character-a").await;
+
+        assert!(manager
+            .update_memory(memory_id, "character-b", "must not update", 0.9)
+            .await
+            .is_err());
+        assert!(manager
+            .delete_memory(memory_id, "character-b")
+            .await
+            .is_err());
+
+        let content: String = sqlx::query_scalar("SELECT content FROM memories WHERE id = ?")
+            .bind(memory_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM memories WHERE id = ?")
+            .bind(memory_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(content, "original memory");
+        assert_eq!(status, "active");
     }
 
     #[tokio::test]

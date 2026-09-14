@@ -48,11 +48,13 @@ const CONFIG_FILES: &[&str] = &[
     "proactive_enabled.json",
     "memory_system_config.json",
     "memory_upgrade_config.json",
-    "emotion_state.json",
     "context_settings.json",
     "current_conversation_id.json",
     "user_profile.json",
 ];
+/// Config entries produced by removed subsystems. They remain importable as
+/// no-ops so old backups can still be opened without restoring dead state.
+const LEGACY_IGNORED_CONFIG_FILES: &[&str] = &["emotion_state.json"];
 
 pub(crate) const MAX_BACKUP_RESOURCE_PACKAGES: usize = 64;
 pub(crate) const MAX_BACKUP_RESOURCE_FILES: usize = 2_048;
@@ -567,32 +569,69 @@ fn commit_atomic_export(
     Ok(())
 }
 
-fn copy_regular_file_to_new_path(
+async fn create_consistent_database_snapshot(
     source: &Path,
-    target: &Path,
-    label: &str,
-) -> Result<bool, KokoroError> {
-    if let Some(parent) = target
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        ensure_non_redirected_parent_chain(parent, parent)?;
+) -> Result<Option<Vec<u8>>, KokoroError> {
+    if open_regular_non_redirected_file(source, "database")?.is_none() {
+        return Ok(None);
     }
-    let Some(mut input) = open_regular_non_redirected_file(source, label)? else {
-        return Ok(false);
-    };
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    configure_no_follow(&mut options);
-    let mut output = options.open(target).map_err(|error| {
-        KokoroError::Io(format!(
-            "failed to stage {label} {}: {error}",
-            target.display()
-        ))
-    })?;
-    std::io::copy(&mut input, &mut output).map_err(KokoroError::from)?;
-    output.sync_all().map_err(KokoroError::from)?;
-    Ok(true)
+
+    let parent = source.parent().unwrap_or_else(|| Path::new("."));
+    ensure_non_redirected_parent_chain(parent, parent)?;
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("kokoro.db");
+    let snapshot = parent.join(format!(".{file_name}.{}.snapshot", Uuid::new_v4()));
+
+    let result = async {
+        let url = format!("sqlite://{}", source.to_string_lossy().replace('\\', "/"));
+        let options = SqliteConnectOptions::from_str(&url)
+            .map_err(|error| KokoroError::Internal(format!("invalid database path: {error}")))?;
+        let pool = SqlitePool::connect_with(options)
+            .await
+            .map_err(|error| KokoroError::Database(format!("failed to open database: {error}")))?;
+        let snapshot_sql = snapshot
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace('\'', "''");
+        sqlx::query(&format!("VACUUM INTO '{snapshot_sql}'"))
+            .execute(&pool)
+            .await
+            .map_err(|error| {
+                KokoroError::Database(format!("failed to create database snapshot: {error}"))
+            })?;
+        pool.close().await;
+
+        let mut snapshot_file =
+            open_regular_non_redirected_file(&snapshot, "database snapshot")?
+                .ok_or_else(|| KokoroError::Io("database snapshot was not created".to_string()))?;
+        let bytes = read_limited_bytes(
+            &mut snapshot_file,
+            MAX_BACKUP_DATABASE_BYTES,
+            "database snapshot",
+        )?;
+        let validation_pool = open_readonly_pool(&snapshot).await?;
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&validation_pool)
+            .await
+            .map_err(|error| {
+                KokoroError::Database(format!("failed to validate database snapshot: {error}"))
+            })?;
+        validation_pool.close().await;
+        if integrity != "ok" {
+            return Err(KokoroError::Database(format!(
+                "database snapshot integrity check failed: {integrity}"
+            )));
+        }
+        Ok(bytes)
+    }
+    .await;
+
+    let _ = fs::remove_file(&snapshot);
+    let _ = fs::remove_file(snapshot.with_extension("snapshot-wal"));
+    let _ = fs::remove_file(snapshot.with_extension("snapshot-shm"));
+    result.map(Some)
 }
 
 fn configure_no_follow(options: &mut OpenOptions) {
@@ -948,14 +987,17 @@ pub(crate) fn stage_backup_configs(
                 "config path must contain a single filename: {name}"
             )));
         }
-        if !allowed.contains(filename) {
-            return Err(KokoroError::Validation(format!(
-                "unknown config filename: {filename}"
-            )));
-        }
         if !seen.insert(filename.to_string()) {
             return Err(KokoroError::Validation(format!(
                 "duplicate config filename: {filename}"
+            )));
+        }
+        if LEGACY_IGNORED_CONFIG_FILES.contains(&filename) {
+            continue;
+        }
+        if !allowed.contains(filename) {
+            return Err(KokoroError::Validation(format!(
+                "unknown config filename: {filename}"
             )));
         }
         let content = String::from_utf8(read_limited_bytes(
@@ -1019,7 +1061,17 @@ fn replace_configs_atomically(
         let target = app_data.join(filename);
         let temporary = app_data.join(format!(".{filename}.{token}.import"));
         let backup = app_data.join(format!(".{filename}.{token}.backup"));
-        if let Err(error) = fs::write(&temporary, content) {
+        let prepared_content = match prepare_backup_config_for_install(app_data, filename, content)
+        {
+            Ok(content) => content,
+            Err(error) => {
+                for (_, staged, _, _, _) in &plans {
+                    let _ = fs::remove_file(staged);
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = fs::write(&temporary, prepared_content) {
             for (_, staged, _, _, _) in &plans {
                 let _ = fs::remove_file(staged);
             }
@@ -1833,6 +1885,10 @@ async fn remap_imported_character_ids(
         "memory_dream_jobs",
         "memory_dream_proposals",
         "memory_operations",
+        "session_summaries",
+        "conversation_summaries",
+        "memory_write_events",
+        "memory_retrieval_logs",
     ] {
         let exists: Option<String> = sqlx::query_scalar(
             "SELECT name FROM import_db.sqlite_master WHERE type = 'table' AND name = ?",
@@ -1857,6 +1913,132 @@ async fn remap_imported_character_ids(
     Ok(remapped)
 }
 
+async fn restore_optional_table(
+    connection: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    table: &str,
+    columns: &[&str],
+    overwrite: bool,
+) -> Result<(), KokoroError> {
+    let import_exists: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM import_db.sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .bind(table)
+    .fetch_optional(&mut **connection)
+    .await?;
+    let Some(_) = import_exists else {
+        return Ok(());
+    };
+
+    let import_columns: HashSet<String> =
+        sqlx::query(&format!("PRAGMA import_db.table_info({table})"))
+            .fetch_all(&mut **connection)
+            .await?
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+    let selected_columns = columns
+        .iter()
+        .copied()
+        .filter(|column| import_columns.contains(*column))
+        .collect::<Vec<_>>();
+    if selected_columns.is_empty() {
+        return Ok(());
+    }
+
+    if overwrite {
+        sqlx::query(&format!("DELETE FROM {table}"))
+            .execute(&mut **connection)
+            .await?;
+    }
+
+    let column_list = selected_columns.join(", ");
+    let insert = if overwrite {
+        "INSERT"
+    } else {
+        "INSERT OR IGNORE"
+    };
+    sqlx::query(&format!(
+        "{insert} INTO {table} ({column_list}) SELECT {column_list} FROM import_db.{table}"
+    ))
+    .execute(&mut **connection)
+    .await
+    .map_err(|error| KokoroError::Database(format!("failed to restore {table}: {error}")))?;
+    Ok(())
+}
+
+async fn restore_optional_backup_tables(
+    connection: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    overwrite: bool,
+) -> Result<(), KokoroError> {
+    restore_optional_table(
+        connection,
+        "session_summaries",
+        &["id", "character_id", "summary", "created_at"],
+        overwrite,
+    )
+    .await?;
+    restore_optional_table(
+        connection,
+        "conversation_summaries",
+        &[
+            "id",
+            "conversation_id",
+            "character_id",
+            "version",
+            "start_message_id",
+            "end_message_id",
+            "summary",
+            "status",
+            "failure_count",
+            "created_at",
+            "updated_at",
+        ],
+        overwrite,
+    )
+    .await?;
+    // emotion_snapshots belongs to the removed emotion subsystem. Keep its
+    // migration for old databases, but do not restore dead state from backups.
+    restore_optional_table(
+        connection,
+        "memory_write_events",
+        &[
+            "id",
+            "character_id",
+            "source",
+            "trigger",
+            "extracted_count",
+            "stored_count",
+            "deduplicated_count",
+            "invalidated_count",
+            "duration_ms",
+            "created_at",
+        ],
+        overwrite,
+    )
+    .await?;
+    restore_optional_table(
+        connection,
+        "memory_retrieval_logs",
+        &[
+            "id",
+            "character_id",
+            "query",
+            "semantic_candidates",
+            "bm25_candidates",
+            "fused_candidates",
+            "injected_count",
+            "created_at",
+            "overlap_count",
+            "semantic_only_count",
+            "bm25_only_count",
+            "filtered_out_count",
+        ],
+        overwrite,
+    )
+    .await?;
+    Ok(())
+}
+
 /// Skip imports keep local rows with the same integer primary key. Any
 /// imported relation that still points at such a key would silently attach to
 /// the local row, so reject the whole import before the first live mutation.
@@ -1877,11 +2059,10 @@ pub(crate) async fn reject_unsafe_skip_memory_conflicts(
     .execute(&mut *connection)
     .await?;
 
-    let conflict_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM temp.backup_skip_memory_ids",
-    )
-    .fetch_one(&mut *connection)
-    .await?;
+    let conflict_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM temp.backup_skip_memory_ids")
+            .fetch_one(&mut *connection)
+            .await?;
     if conflict_count == 0 {
         return Ok(());
     }
@@ -2220,6 +2401,76 @@ fn sanitize_backup_config(content: &str, filename: &str) -> Result<String, Kokor
     })
 }
 
+fn merge_local_backup_secrets(imported: &mut serde_json::Value, local: &serde_json::Value) {
+    match (imported, local) {
+        (serde_json::Value::Object(imported_object), serde_json::Value::Object(local_object)) => {
+            for (key, local_value) in local_object {
+                if key.eq_ignore_ascii_case("env") {
+                    if let Some(imported_value) = imported_object.get_mut(key) {
+                        merge_local_backup_secrets(imported_value, local_value);
+                    } else {
+                        imported_object.insert(key.clone(), local_value.clone());
+                    }
+                    continue;
+                }
+                if is_backup_secret_key(key) {
+                    if !imported_object.contains_key(key) {
+                        imported_object.insert(key.clone(), local_value.clone());
+                    }
+                    continue;
+                }
+                if let Some(imported_value) = imported_object.get_mut(key) {
+                    merge_local_backup_secrets(imported_value, local_value);
+                }
+            }
+        }
+        (serde_json::Value::Array(imported_items), serde_json::Value::Array(local_items)) => {
+            for imported_item in imported_items {
+                let local_item = local_items.iter().find(|local_item| {
+                    ["id", "provider_id", "name"].iter().any(|key| {
+                        imported_item.get(*key).and_then(serde_json::Value::as_str)
+                            == local_item.get(*key).and_then(serde_json::Value::as_str)
+                            && imported_item.get(*key).is_some()
+                    })
+                });
+                if let Some(local_item) = local_item {
+                    merge_local_backup_secrets(imported_item, local_item);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn prepare_backup_config_for_install(
+    app_data: &Path,
+    filename: &str,
+    content: &str,
+) -> Result<String, KokoroError> {
+    let mut imported: serde_json::Value = serde_json::from_str(content).map_err(|error| {
+        KokoroError::Validation(format!("invalid JSON config {filename}: {error}"))
+    })?;
+    let original = imported.clone();
+    sanitize_backup_json(&mut imported);
+
+    let local_path = app_data.join(filename);
+    if let Ok(local_content) = fs::read_to_string(&local_path) {
+        if let Ok(local) = serde_json::from_str::<serde_json::Value>(&local_content) {
+            merge_local_backup_secrets(&mut imported, &local);
+        }
+    }
+
+    if imported == original {
+        return Ok(content.to_string());
+    }
+
+    serde_json::to_string_pretty(&imported).map_err(|error| {
+        KokoroError::Internal(format!(
+            "failed to serialize imported config {filename}: {error}"
+        ))
+    })
+}
+
 // ── Commands ─────────────────────────────────────────
 
 #[tauri::command]
@@ -2259,44 +2510,8 @@ pub async fn export_data(
     zip.write_all(manifest_json.as_bytes())
         .map_err(KokoroError::from)?;
 
-    // 3. kokoro.db — fs::copy to temp to avoid WAL lock issues
-    if open_regular_non_redirected_file(&db, "database")?.is_some() {
-        let tmp_db = app_data.join(format!(".kokoro_backup_tmp-{}.db", Uuid::new_v4()));
-        copy_regular_file_to_new_path(&db, &tmp_db, "database")?;
-        // Also copy WAL/SHM if present so the copy is consistent
-        let wal = db.with_extension("db-wal");
-        copy_regular_file_to_new_path(&wal, &tmp_db.with_extension("db-wal"), "database WAL")?;
-        let shm = db.with_extension("db-shm");
-        copy_regular_file_to_new_path(
-            &shm,
-            &tmp_db.with_extension("db-shm"),
-            "database shared memory",
-        )?;
-
-        // Checkpoint the temp copy to merge WAL into main DB file
-        {
-            let url = format!("sqlite://{}", tmp_db.to_string_lossy().replace('\\', "/"));
-            if let Ok(opts) = SqliteConnectOptions::from_str(&url) {
-                if let Ok(pool) = SqlitePool::connect_with(opts).await {
-                    let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-                        .execute(&pool)
-                        .await;
-                    pool.close().await;
-                }
-            }
-        }
-
-        let db_bytes = read_limited_bytes(
-            fs::File::open(&tmp_db).map_err(KokoroError::from)?,
-            MAX_BACKUP_DATABASE_BYTES,
-            "database",
-        )?;
-
-        // Clean up temp files
-        let _ = fs::remove_file(&tmp_db);
-        let _ = fs::remove_file(tmp_db.with_extension("db-wal"));
-        let _ = fs::remove_file(tmp_db.with_extension("db-shm"));
-
+    // 3. kokoro.db — create a consistent SQLite snapshot before archiving it.
+    if let Some(db_bytes) = create_consistent_database_snapshot(&db).await? {
         zip.start_file("kokoro.db", zip_options)
             .map_err(|e| KokoroError::Internal(format!("ZIP error: {}", e)))?;
         zip.write_all(&db_bytes).map_err(KokoroError::from)?;
@@ -2378,36 +2593,7 @@ pub async fn export_data_to_path(
     zip.write_all(manifest_json.as_bytes())
         .map_err(KokoroError::from)?;
 
-    if open_regular_non_redirected_file(&db, "database")?.is_some() {
-        let tmp_db = app_data.join(format!(".kokoro_autobackup_tmp-{}.db", Uuid::new_v4()));
-        copy_regular_file_to_new_path(&db, &tmp_db, "database")?;
-        let wal = db.with_extension("db-wal");
-        let shm = db.with_extension("db-shm");
-        copy_regular_file_to_new_path(&wal, &tmp_db.with_extension("db-wal"), "database WAL")?;
-        copy_regular_file_to_new_path(
-            &shm,
-            &tmp_db.with_extension("db-shm"),
-            "database shared memory",
-        )?;
-        {
-            let url = format!("sqlite://{}", tmp_db.to_string_lossy().replace('\\', "/"));
-            if let Ok(opts) = SqliteConnectOptions::from_str(&url) {
-                if let Ok(pool) = SqlitePool::connect_with(opts).await {
-                    let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-                        .execute(&pool)
-                        .await;
-                    pool.close().await;
-                }
-            }
-        }
-        let db_bytes = read_limited_bytes(
-            fs::File::open(&tmp_db).map_err(KokoroError::from)?,
-            MAX_BACKUP_DATABASE_BYTES,
-            "database",
-        )?;
-        let _ = fs::remove_file(&tmp_db);
-        let _ = fs::remove_file(tmp_db.with_extension("db-wal"));
-        let _ = fs::remove_file(tmp_db.with_extension("db-shm"));
+    if let Some(db_bytes) = create_consistent_database_snapshot(&db).await? {
         zip.start_file("kokoro.db", options)
             .map_err(|e| KokoroError::Internal(format!("ZIP error: {}", e)))?;
         zip.write_all(&db_bytes).map_err(KokoroError::from)?;
@@ -2478,7 +2664,10 @@ pub async fn preview_import(file_path: String) -> Result<ImportPreview, KokoroEr
         if let Ok(entry) = archive.by_index(i) {
             let name = entry.name().to_string();
             if name.starts_with("configs/") && name.len() > 8 {
-                config_files.push(name.trim_start_matches("configs/").to_string());
+                let filename = name.trim_start_matches("configs/");
+                if !LEGACY_IGNORED_CONFIG_FILES.contains(&filename) {
+                    config_files.push(filename.to_string());
+                }
             }
         }
     }
@@ -2734,14 +2923,13 @@ pub async fn import_data(
         .fetch_optional(&mut *conn)
         .await?;
         if import_proposal_exists.is_some() {
-            let proposal_columns: Vec<String> = sqlx::query(
-                "PRAGMA import_db.table_info(memory_dream_proposals)",
-            )
-            .fetch_all(&mut *conn)
-            .await?
-            .into_iter()
-            .map(|row| row.get::<String, _>("name"))
-            .collect();
+            let proposal_columns: Vec<String> =
+                sqlx::query("PRAGMA import_db.table_info(memory_dream_proposals)")
+                    .fetch_all(&mut *conn)
+                    .await?
+                    .into_iter()
+                    .map(|row| row.get::<String, _>("name"))
+                    .collect();
             if !proposal_columns
                 .iter()
                 .any(|column| column == "source_memory_versions")
@@ -2901,16 +3089,17 @@ pub async fn import_data(
                 .bind(table)
                 .fetch_optional(&mut *transaction)
                 .await?;
-                if import_has_table.is_some() {
-                    sqlx::query(&format!("DELETE FROM {table}"))
-                        .execute(&mut *transaction)
-                        .await?;
-                    sqlx::query(&format!(
-                        "INSERT INTO {table} SELECT * FROM import_db.{table}"
-                    ))
+                if import_has_table.is_none() {
+                    continue;
+                }
+                sqlx::query(&format!("DELETE FROM {table}"))
                     .execute(&mut *transaction)
                     .await?;
-                }
+                sqlx::query(&format!(
+                    "INSERT INTO {table} SELECT * FROM import_db.{table}"
+                ))
+                .execute(&mut *transaction)
+                .await?;
             }
 
             let r = sqlx::query(conversation_insert_sql)
@@ -3011,6 +3200,12 @@ pub async fn import_data(
                 .execute(&mut *transaction)
                 .await?;
         }
+
+        restore_optional_backup_tables(
+            &mut transaction,
+            options.conflict_strategy == ConflictStrategy::Overwrite,
+        )
+        .await?;
 
         result.imported_characters = apply_character_rows(
             &mut transaction,
@@ -3482,6 +3677,28 @@ mod tests {
     }
 
     #[test]
+    fn config_replacement_preserves_local_provider_secrets() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("llm_config.json");
+        fs::write(
+            &target,
+            r#"{"providers":[{"id":"local","api_key":"keep-this-secret","extra":{"token":"keep-this-token"}}]}"#,
+        )
+        .unwrap();
+        let configs = vec![(
+            "llm_config.json".to_string(),
+            r#"{"providers":[{"id":"local","extra":{}}]}"#.to_string(),
+        )];
+
+        let mut guard = replace_configs_atomically(temp.path(), &configs).unwrap();
+        let restored = fs::read_to_string(&target).unwrap();
+        guard.disarm();
+
+        assert!(restored.contains("keep-this-secret"));
+        assert!(restored.contains("keep-this-token"));
+    }
+
+    #[test]
     fn import_temp_directories_are_uuid_scoped_and_cleanup_on_drop() {
         let first = create_scoped_temp_dir("kokoro_import").unwrap();
         let second = create_scoped_temp_dir("kokoro_import").unwrap();
@@ -3530,5 +3747,199 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn consistent_database_snapshot_preserves_wal_commits() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.db");
+        let url = format!("sqlite://{}", source.to_string_lossy().replace('\\', "/"));
+        let options = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::query("PRAGMA journal_mode = WAL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE records (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO records (id, value) VALUES (1, 'committed')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let bytes = create_consistent_database_snapshot(&source)
+            .await
+            .unwrap()
+            .unwrap();
+        pool.close().await;
+        let snapshot = temp.path().join("snapshot.db");
+        fs::write(&snapshot, bytes).unwrap();
+        let snapshot_url = format!("sqlite://{}", snapshot.to_string_lossy().replace('\\', "/"));
+        let snapshot_pool = SqlitePool::connect(&snapshot_url).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM records")
+            .fetch_one(&snapshot_pool)
+            .await
+            .unwrap();
+        snapshot_pool.close().await;
+
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn optional_backup_tables_restore_session_summaries() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE import_db.session_summaries (id INTEGER PRIMARY KEY, character_id TEXT NOT NULL, summary TEXT NOT NULL, created_at INTEGER NOT NULL)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO import_db.session_summaries (id, character_id, summary, created_at) VALUES (1, 'character-a', 'restored summary', 1)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+        let mut transaction = connection.begin().await.unwrap();
+        restore_optional_backup_tables(&mut transaction, false)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let summary: String =
+            sqlx::query_scalar("SELECT summary FROM session_summaries WHERE id = 1")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+
+        assert_eq!(summary, "restored summary");
+    }
+
+    #[tokio::test]
+    async fn optional_backup_overwrite_keeps_local_rows_when_import_table_is_missing() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query(
+            "INSERT INTO session_summaries (character_id, summary, created_at) VALUES ('local', 'keep me', 1)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+
+        let mut transaction = connection.begin().await.unwrap();
+        restore_optional_backup_tables(&mut transaction, true)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let summary: String = sqlx::query_scalar(
+            "SELECT summary FROM session_summaries WHERE character_id = 'local'",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(summary, "keep me");
+    }
+
+    #[tokio::test]
+    async fn target_character_remap_ignores_legacy_emotion_snapshots() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE import_db.emotion_snapshots (character_id TEXT PRIMARY KEY, emotion TEXT NOT NULL, mood REAL NOT NULL, accumulated_inertia REAL NOT NULL, updated_at INTEGER NOT NULL)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO import_db.emotion_snapshots (character_id, emotion, mood, accumulated_inertia, updated_at) VALUES ('character-a', 'calm', 0.2, 0.1, 1), ('character-b', 'happy', 0.8, 0.3, 2)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+        let remapped = remap_imported_character_ids(&mut connection, "target-character")
+            .await
+            .unwrap();
+
+        assert!(!remapped
+            .iter()
+            .any(|(table, _)| table == "emotion_snapshots"));
+        let snapshot_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM import_db.emotion_snapshots")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+        assert_eq!(snapshot_count, 2);
+    }
+
+    #[tokio::test]
+    async fn optional_backup_restore_ignores_legacy_emotion_snapshots() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE import_db.emotion_snapshots (character_id TEXT PRIMARY KEY, emotion TEXT NOT NULL, mood REAL NOT NULL, accumulated_inertia REAL NOT NULL, updated_at INTEGER NOT NULL)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO import_db.emotion_snapshots (character_id, emotion, mood, accumulated_inertia, updated_at) VALUES ('legacy-character', 'calm', 0.2, 0.1, 1)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+        let mut transaction = connection.begin().await.unwrap();
+        restore_optional_backup_tables(&mut transaction, false)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let snapshot_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emotion_snapshots")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(snapshot_count, 0);
     }
 }

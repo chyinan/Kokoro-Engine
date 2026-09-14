@@ -16,6 +16,8 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+
+const CONVERSATION_SUMMARY_PROVIDER_TIMEOUT_SECS: u64 = 120;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -470,6 +472,16 @@ impl AIOrchestrator {
                 interrupted
             );
         }
+        let interrupted_summaries = memory_manager
+            .mark_interrupted_conversation_summary_tasks()
+            .await?;
+        if interrupted_summaries > 0 {
+            tracing::warn!(
+                target: "context",
+                "[Context] Marked {} interrupted conversation summary task(s) from a previous process",
+                interrupted_summaries
+            );
+        }
 
         Ok(Self {
             db: pool,
@@ -583,9 +595,7 @@ impl AIOrchestrator {
             .chat_turn_lock
             .clone()
             .try_lock_owned()
-            .map_err(|_| {
-                "chat_turn_busy: A chat turn is already in progress".to_string()
-            })?;
+            .map_err(|_| "chat_turn_busy: A chat turn is already in progress".to_string())?;
         *guard = Some(ActiveChatTurnContext {
             client_request_id: client_request_id.to_string(),
             started_at: Instant::now(),
@@ -636,10 +646,6 @@ impl AIOrchestrator {
     }
 
     pub async fn set_system_prompt(&self, prompt: String) {
-        self.set_system_prompt_with_reset(prompt, true).await;
-    }
-
-    pub async fn set_system_prompt_with_reset(&self, prompt: String, _reset_emotion: bool) {
         let mut sp = self.system_prompt.lock().await;
         *sp = prompt;
     }
@@ -879,8 +885,13 @@ impl AIOrchestrator {
                     let prompt =
                         build_conversation_summary_prompt(&task.transcript, &summary_language);
 
-                    match provider.chat(vec![user_text_message(prompt)], None).await {
-                        Ok(text) if !text.trim().is_empty() => {
+                    let summary_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(CONVERSATION_SUMMARY_PROVIDER_TIMEOUT_SECS),
+                        provider.chat(vec![user_text_message(prompt)], None),
+                    )
+                    .await;
+                    match summary_result {
+                        Ok(Ok(text)) if !text.trim().is_empty() => {
                             let summary = text.trim().to_string();
                             if let Err(e) = memory_manager
                                 .complete_conversation_summary(task.record_id, &summary)
@@ -893,7 +904,7 @@ impl AIOrchestrator {
                                 );
                             }
                         }
-                        Ok(_) => {
+                        Ok(Ok(_)) => {
                             let _ = memory_manager
                                 .fail_conversation_summary(
                                     task.record_id,
@@ -901,9 +912,17 @@ impl AIOrchestrator {
                                 )
                                 .await;
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             let _ = memory_manager
                                 .fail_conversation_summary(task.record_id, &e.to_string())
+                                .await;
+                        }
+                        Err(_) => {
+                            let _ = memory_manager
+                                .fail_conversation_summary(
+                                    task.record_id,
+                                    "conversation summary provider timed out",
+                                )
                                 .await;
                         }
                     }
@@ -1560,7 +1579,6 @@ impl AIOrchestrator {
             sp.clone()
         };
 
-        // Emotion state hint — subtly colors tone without overriding character persona
         system_parts.push(format!("<character>\n{}\n</character>", character_block));
 
         // Section 3: Long-term memory (higher priority than summaries)
@@ -2181,14 +2199,9 @@ mod tests {
         insert_test_conversation(&orchestrator, "conv-1").await;
         *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
 
-        let draft_id = insert_conversation_row(
-            &orchestrator,
-            "conv-1",
-            "assistant",
-            "draft message",
-            None,
-        )
-        .await;
+        let draft_id =
+            insert_conversation_row(&orchestrator, "conv-1", "assistant", "draft message", None)
+                .await;
         let tool_id = insert_conversation_row(
             &orchestrator,
             "conv-1",
@@ -2378,7 +2391,9 @@ mod tests {
     async fn compose_prompt_for_conversation_uses_snapshot_and_target_conversation() {
         let orchestrator = setup_test_orchestrator().await;
         orchestrator.set_memory_enabled(false).await;
-        orchestrator.set_response_language("English".to_string()).await;
+        orchestrator
+            .set_response_language("English".to_string())
+            .await;
 
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -3463,4 +3478,3 @@ mod tests {
         assert!(!orchestrator.is_chat_busy());
     }
 }
-

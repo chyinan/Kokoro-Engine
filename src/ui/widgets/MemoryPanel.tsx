@@ -140,9 +140,33 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
     const [characters, setCharacters] = useState<CharacterRecord[]>([]);
     const [selectedCharId, setSelectedCharId] = useState<string>(characterId);
 
-    useEffect(() => {
+    const resetForCharacterChange = useCallback(() => {
         requestEpochRef.current += 1;
-    }, [selectedCharId]);
+        setMemories([]);
+        setTotal(0);
+        setLoading(false);
+        setPage(0);
+        setSearchQuery("");
+        setEditingId(null);
+        setDeletingId(null);
+        setEditContent("");
+        setEditContentPrefix(null);
+        setDreamingSummary(null);
+        setDreamJobs([]);
+        setDreamProposals([]);
+        setDreamLoading(false);
+        setDreamActionId(null);
+        setDreamError(null);
+    }, []);
+
+    useEffect(() => {
+        resetForCharacterChange();
+    }, [resetForCharacterChange, selectedCharId]);
+
+    useEffect(() => {
+        resetForCharacterChange();
+        setSelectedCharId(characterId);
+    }, [characterId, resetForCharacterChange]);
 
     // Load character list for the dropdown
     useEffect(() => {
@@ -215,12 +239,6 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
             .finally(() => setDreamConfigLoading(false));
     }, []);
 
-    // Reset page when switching characters
-    useEffect(() => {
-        setPage(0);
-        setSearchQuery("");
-    }, [selectedCharId]);
-
     const fetchMemories = useCallback(async () => {
         console.log("[MemoryPanel] fetchMemories called with selectedCharId:", selectedCharId);
         if (!selectedCharId) return;
@@ -276,25 +294,32 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
 
     const saveEdit = async () => {
         if (editingId === null) return;
+        const requestedCharacterId = selectedCharId;
+        const requestEpoch = requestEpochRef.current;
         try {
             await updateMemory(
+                requestedCharacterId,
                 editingId,
                 restoreStructuredMemoryPrefix(editContentPrefix, editContent),
                 editImportance,
             );
+            if (requestEpochRef.current !== requestEpoch || selectedCharId !== requestedCharacterId) return;
             setEditingId(null);
             setEditContentPrefix(null);
-            fetchMemories();
+            await fetchMemories();
         } catch (e) {
             console.error("[MemoryPanel] Failed to update memory:", e);
         }
     };
 
     const confirmDelete = async (id: number) => {
+        const requestedCharacterId = selectedCharId;
+        const requestEpoch = requestEpochRef.current;
         try {
-            await deleteMemory(id);
+            await deleteMemory(requestedCharacterId, id);
+            if (requestEpochRef.current !== requestEpoch || selectedCharId !== requestedCharacterId) return;
             setDeletingId(null);
-            fetchMemories();
+            await fetchMemories();
         } catch (e) {
             console.error("[MemoryPanel] Failed to delete memory:", e);
         }
