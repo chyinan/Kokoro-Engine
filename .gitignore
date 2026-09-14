@@ -1,4 +1,4 @@
-# Logs
+# Logs & Diagnostics
 logs
 *.log
 npm-debug.log*
@@ -7,51 +7,65 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Frontend Build & Test (React / Vite / Vitest / TypeScript)
+dist/
+dist-ssr/
+coverage/
 *.local
+*.tsbuildinfo
+.eslintcache
 
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-.juno_task
-_bmad
-_bmad-output
-.agent
-.cursor
-.agent/workflows
-CLAUDE.md
-
-# Rust
-src-tauri/target/
+# Rust & Cargo
 **/target/
-target-codex-*/
-src-tauri/target-codex-*/
+**/target-codex-*/
 **/*.rs.bk
+**/proptest-regressions/
 
-# Nix
-result
-result-*
+# Tauri v2
+src-tauri/gen/schemas/
+src-tauri/target/ort-dist/
 
-# Database
+# Native Binaries & ONNX Runtime (auto-downloaded by build.rs)
+onnxruntime.dll
+libonnxruntime.dylib
+libonnxruntime.so
+
+# Python & AstrBot Integration (integrations/astrbot-kokoro)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Databases & Local Persistence
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
 
-# Environment Variables
+# Environment Variables & Secrets
 .env
 .env.*
 !.env.example
+*.pem
+*.key
 
-# OS Generated Files
+# Operating System Files
 .DS_Store
 .DS_Store?
 ._*
@@ -59,25 +73,37 @@ result-*
 .Trashes
 ehthumbs.db
 Thumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
 
-# 3rd Party Tools
+# Editors & IDEs
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# AI Assistants & Local Metadata
+.agent
+.cursor
+.claude
+CLAUDE.md
+.juno_task
+_bmad
+_bmad-output
+
+# Third-Party Tools & Nix Build
 bin/
 include/
-
-# ONNX Runtime (auto-downloaded by build.rs)
-onnxruntime.dll
-libonnxruntime.dylib
-libonnxruntime.so
-src-tauri/onnxruntime.dll
-src-tauri/libonnxruntime.dylib
-src-tauri/libonnxruntime.so
-src-tauri/target/ort-dist/
+result
+result-*
 
 # AI Models
 models/
 
-
-
-src-tauri/proptest-regressions/vision/tests/property_tests.txt
-.claude
+# Scratch & Git Worktrees
+scratch/
 .worktrees/
