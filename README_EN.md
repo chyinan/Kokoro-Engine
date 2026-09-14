@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://t.me/+U39dgiUspCo2NDNh"><img src="https://img.shields.io/badge/Telegram-Community-26A5E4?logo=telegram&logoColor=white" alt="Telegram community" /></a>
   <img src="https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white" alt="Tauri v2" />
-  <img src="https://img.shields.io/badge/React-18%2B-20232A?logo=react&logoColor=61DAFB" alt="React" />
+  <img src="https://img.shields.io/badge/React-19-20232A?logo=react&logoColor=61DAFB" alt="React 19" />
   <img src="https://img.shields.io/badge/Rust-Stable-000000?logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/License-MIT-2EA44F" alt="MIT License" />
 </p>
@@ -36,7 +36,7 @@
 - Import SillyTavern character cards and keep separate conversations and memories.
 - Connect a local or cloud LLM, then opt into voice, vision, MCP, MOD, and bot features.
 
-> Three built-in characters, a main-screen selector, and first-reply onboarding are being implemented from the [character ecosystem design](docs/design-plans/2026-07-12-user-activation-character-ecosystem.md). The current release uses character management and import in Settings.
+> The current version includes three built-in characters, a main-screen selector, first-reply onboarding, and character management/import in Settings. See the [character ecosystem design](docs/design-plans/2026-07-12-user-activation-character-ecosystem.md) for the rationale.
 
 ## What makes Kokoro Engine stand out
 
@@ -76,7 +76,7 @@ Go to the [Releases page](https://github.com/chyinan/Kokoro-Engine/releases), do
 
 #### Requirements
 
-- [Node.js](https://nodejs.org/) (v18+)
+- [Node.js](https://nodejs.org/) (v20.19+ or v22.12+)
 - [Rust](https://www.rust-lang.org/tools/install) (stable)
 
 #### Install and run
@@ -176,7 +176,7 @@ flowchart LR
   end
 
   subgraph EXT["External Services"]
-    EXT_LLM["OpenAI-Compatible / Ollama / llama.cpp"]
+    EXT_LLM["OpenAI-Compatible / Anthropic / Ollama / llama.cpp / Codex Runtime"]
     EXT_TTS["TTS Providers"]
     EXT_MCP["MCP Servers"]
     EXT_BOT["QQ / Telegram / Discord / LINE / Webhook"]

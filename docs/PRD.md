@@ -1,7 +1,7 @@
 # Kokoro Engine — Product Requirements Document
 
-> **Version:** 1.3
-> **Last Updated:** 2026-07-13
+> **Version:** 1.4
+> **Last Updated:** 2026-09-13
 > **Status:** Active Development
 
 ---
@@ -66,24 +66,26 @@ See the [user activation and character ecosystem design](design-plans/2026-07-12
 
 - [x] Live2D model viewer with interaction (gaze, expressions, hit areas, drawable-level hit testing, cue-driven reactions)
 - [x] Chat system (text input / output, streaming, message editing, continue-from)
-- [x] Pluggable LLM API adapter (OpenAI-compatible + Ollama, multi-provider with presets)
-- [x] Pluggable TTS system (GPT-SoVITS, VITS, OpenAI, Azure, ElevenLabs, Browser TTS)
+- [x] Pluggable LLM API adapters (OpenAI-compatible Chat Completions and Responses, Anthropic, Ollama, llama.cpp, and experimental Codex Runtime; multi-provider presets)
+- [x] Pluggable TTS system (GPT-SoVITS, VITS, OmniVoice, OpenAI, Azure, ElevenLabs, Edge TTS, Browser TTS)
 - [x] Context manager (conversation history, prompt assembly, jailbreak prompts with {{char}}/{{user}} placeholders)
 - [x] Character state and cue mapping (persistent state across restarts, semantic cue routing, expression/motion sync)
 
 ### Post-MVP (Completed ✅)
 
-- [x] Vector memory / RAG systems (three-layer memory: core/ephemeral/consolidated)
+- [x] Vector memory / RAG systems (core and ephemeral persistence tiers plus consolidation/dreaming)
 - [x] Embedding models (FastEmbed all-MiniLM-L6-v2, ONNX offline)
 - [x] MOD system (HTML/CSS/JS UI override, QuickJS script sandbox, custom themes)
 - [x] MCP protocol support (stdio + Streamable HTTP, auto tool registration)
 - [x] Vision system (screen capture, VLM analysis, pixel diff detection)
 - [x] Image generation (Stable Diffusion WebUI, DALL-E, Google Gemini)
-- [x] STT (Whisper, faster-whisper, whisper.cpp)
+- [x] STT (OpenAI Whisper, faster-whisper-compatible endpoints, whisper.cpp, SenseVoice cloud/local, native microphone, VAD, and wake word)
 - [x] Autonomous behavior (curiosity, initiative, idle behaviors)
-- [x] Telegram Bot remote interaction (long polling, text/voice/photo, session commands)
+- [x] Remote interaction through QQ, Telegram, Discord, LINE, and an authenticated generic Webhook
 - [x] Multi-provider LLM (unique Provider IDs, separate main/system LLM)
-- [x] i18n (5 languages: zh, en, ja, ko, ru)
+- [x] Character registry and template/instance lifecycle with source-bound trust and non-destructive package removal
+- [x] Desktop pet and synchronized speech-bubble windows
+- [x] i18n (6 locales: zh, zh-TW, en, ja, ko, ru)
 
 ### Explicitly Out of Scope (for now)
 
@@ -101,7 +103,7 @@ See the [user activation and character ecosystem design](design-plans/2026-07-12
 ┌─────────────────────────────────────┐
 │  1. System Persona                  │  ← Character personality card
 ├─────────────────────────────────────┤
-│  2. Lorebook / World Context        │  ← Optional world-building data
+│  2. Retrieved Memory Context        │  ← Optional character-scoped recall
 ├─────────────────────────────────────┤
 │  3. Conversation History            │  ← Rolling window
 ├─────────────────────────────────────┤
@@ -111,8 +113,8 @@ See the [user activation and character ecosystem design](design-plans/2026-07-12
 
 ### Optimizations
 
-- **Partial refresh** instead of full prompt repetition
-- **Token-efficient** context management
+- **Bounded context assembly** with configurable window or summary strategy
+- **Hybrid memory retrieval** with a keyword fallback when semantic embeddings are unavailable
 
 ---
 
@@ -168,14 +170,14 @@ graph LR
     C -->|Branching narrative| C1[Event scripting]
     D -->|Companion| D1[iOS / Android]
     E -->|Community| E1[Mod marketplace]
-    F -->|Telegram Bot| F1[Text/Voice/Photo ✅]
+    F -->|Bot bridges| F1[QQ/Telegram/Discord/LINE/Webhook ✅]
 ```
 
 | Feature | Status | Description |
 |---|---|---|
-| Advanced Memory | ✅ Done | Three-layer memory (core/ephemeral/consolidated), hybrid search (semantic + BM25 RRF), LLM-driven consolidation |
+| Advanced Memory | ✅ Done | Character-scoped tiers, semantic + BM25/RRF retrieval, non-blocking embedding fallback, observability, and proposal-based dreaming |
 | MOD Ecosystem | ✅ Done | HTML/CSS/JS UI override, QuickJS sandbox, custom themes, Genshin demo MOD |
-| Remote Access | ✅ Done | Telegram Bot with text/voice/photo, session commands, Chat ID whitelist |
+| Remote Access | ✅ Done | QQ, Telegram, Discord, LINE, and authenticated Webhook bridges with character-scoped conversations and bounded media contracts |
 | Story / Narrative Engine | 🔮 Planned | Branching storylines with event scripting |
 | Mobile Companion App | 🔮 Planned | iOS and Android native clients |
-| Character Marketplace | 🔮 Planned | Sharing characters, themes, and plugins |
+| Character Marketplace | 🚧 In progress | Trusted official registry plus confirmed community/custom-source installation; broader workshop UX remains planned |
