@@ -1,10 +1,10 @@
 # Kokoro Engine — API specification
 
-> **Version:** 2.0
-> **Last updated:** 2026-04-09
+> **Version:** 2.1
+> **Last updated:** 2026-09-13
 > **Transport:** Tauri IPC (`invoke`) + Tauri events (`emit` / `listen`)
 > **Source of truth:** `src-tauri/src/lib.rs` for registered commands, `src/lib/kokoro-bridge.ts` for frontend bridge wrappers
-> **Related doc:** [architecture.md](file:///d:/Program/Kokoro%20Engine/docs/architecture.md)
+> **Related doc:** [architecture.md](architecture.md)
 
 ---
 
@@ -31,10 +31,33 @@ It covers:
 
 - commands registered in `src-tauri/src/lib.rs`
 - bridge wrappers exported from `src/lib/kokoro-bridge.ts`
-- events emitted by the backend and consumed by the frontend
-- custom URI schemes used by MODs and Live2D
+- public backend/bridge events and selected cross-window frontend events
+- custom URI schemes used by MODs, Live2D, and instance-owned character assets
 
 It does not try to explain internal architecture. Use `architecture.md` for that.
+
+### 2.1 command coverage supplement
+
+The following commands were added after the original 2.0 inventory. Their serialized request and response shapes are defined by Rust command signatures and, where a wrapper exists, `src/lib/kokoro-bridge.ts`. They remain subject to the calling and error conventions in this document.
+
+| Area | Commands |
+|---|---|
+| System | `check_latest_release` |
+| Chat and profile | `is_chat_busy`, `get_user_profile_settings`, `set_user_persona` |
+| Character activation | `prepare_character_activation`, `commit_character_activation`, `get_committed_character_runtime` |
+| Character catalog | `list_character_templates`, `instantiate_character_template`, `duplicate_character`, `restore_character_defaults`, `reconcile_character_template`, `apply_character_template_reconciliation`, `create_character_with_avatar`, `update_character_with_avatar` |
+| Character registry | `list_registry_entries`, `install_character_from_registry`, `install_character_from_url`, `remove_character_package` |
+| Conversations | `edit_conversation_message` |
+| Memory operations | `run_dream_now`, `get_dreaming_summary`, `list_dream_jobs`, `list_dream_proposals`, `approve_dream_proposal`, `reject_dream_proposal` |
+| Memory embedding and observability | `get_memory_embedding_model_status`, `download_memory_embedding_model`, `set_memory_upgrade_config`, `get_memory_upgrade_config`, `get_memory_observability_summary`, `get_latest_memory_write_event`, `get_latest_memory_retrieval_log`, `get_latest_memory_retrieval_eval_summary` |
+| LLM | `test_llm_connection`, `list_anthropic_models`, `get_llama_cpp_status` |
+| Vision | `list_vision_screens`, `set_vision_text_input_focused` |
+| Native audio stream | `process_audio_chunk`, `complete_audio_stream`, `discard_audio_stream`, `snapshot_audio_stream`, `prune_audio_buffer` |
+| MOD lifecycle and registry | `update_mod`, `remove_mod`, `install_mod_from_registry`, `install_mod_from_url` |
+| Unified Bot layer | `get_bot_config`, `save_bot_config`, `respond_qq_authorization`, `start_bot_platform`, `stop_bot_platform`, `get_bot_status` |
+| Pet window | `toggle_pet_window` |
+
+This supplement makes the document inventory complete for the 171 unique frontend-invoked command names registered as of 2026-09-13. `npm run check:ipc` is the required automated consistency check; code remains authoritative if this narrative reference falls behind.
 
 ---
 
@@ -133,8 +156,102 @@ interface ChatRequest {
   images?: string[];
   character_id?: string;
   hidden?: boolean;
+  client_request_id?: string;
+  regenerate?: boolean;
+  conversation_id?: string | null;
+}
+
+interface StreamChatResponse {
+  conversation_id: string;
+  user_message_id?: number | null;
+  assistant_message_id?: number | null;
+  client_request_id?: string | null;
+  status?: "completed" | "cancelled" | string | null;
 }
 ```
+
+<a id="failureevent"></a>
+### `FailureEvent`
+
+```ts
+interface FailureEventContext {
+  deny_kind?: "hook_denied" | "policy_denied" | "fail_closed" | "pending_approval" | "execution_error";
+  approval_status?: "requested" | "approved" | "rejected";
+  [key: string]: unknown;
+}
+
+interface FailureEvent {
+  event_id: string;
+  timestamp: string;
+  domain: string;
+  stage: string;
+  code: string;
+  message: string;
+  retryable: boolean;
+  trace_id: string;
+  conversation_id?: string | null;
+  turn_id?: string | null;
+  character_id?: string | null;
+  context?: FailureEventContext | null;
+}
+```
+
+The Rust failure payload includes the four nullable correlation/context keys. The bridge keeps them optional for compatibility, accepts the legacy `string` form from the raw `chat-failure` event, and normalizes the callback passed to `onChatFailure` to `FailureEvent`. Non-object `context` values are normalized to `null` by the bridge.
+
+<a id="chatturnacknowledgedevent"></a>
+### `ChatTurnAcknowledgedEvent`
+
+```ts
+interface ChatTurnAcknowledgedEvent {
+  turn_id?: string;
+  client_request_id?: string | null;
+}
+```
+
+The current `stream_chat` backend always emits both keys as non-null strings. The optional and nullable markers preserve compatibility with older frontend event payloads.
+
+<a id="chatturnstartevent"></a>
+### `ChatTurnStartEvent`
+
+```ts
+interface ChatTurnStartEvent {
+  turn_id: string;
+  client_request_id?: string | null;
+  conversation_id?: string | null;
+  user_message_id?: number | null;
+}
+```
+
+The current backend always emits all four keys: `turn_id` and `client_request_id` are strings, while `conversation_id` and `user_message_id` may be `null`. The bridge retains optional markers on the correlation fields for compatibility.
+
+<a id="chatturnfinishevent"></a>
+### `ChatTurnFinishEvent`
+
+```ts
+interface ChatTurnFinishEvent {
+  turn_id: string;
+  status: "completed" | "error" | "cancelled";
+  client_request_id?: string | null;
+  conversation_id?: string | null;
+  assistant_message_id?: number | null;
+}
+```
+
+The current backend always emits all five keys: `client_request_id` is a string, and the conversation and assistant-message IDs may be `null`. The bridge retains optional markers on the correlation fields for compatibility.
+
+<a id="chatturntextcompleteevent"></a>
+### `ChatTurnTextCompleteEvent`
+
+```ts
+interface ChatTurnTextCompleteEvent {
+  turn_id: string;
+  text: string;
+  translation_pending: boolean;
+  translation?: string | null;
+}
+```
+
+The current backend always emits `translation` as either a string or `null`; older payloads may omit it. The bridge mirrors that runtime contract as `translation?: string | null` while retaining the optional marker for compatibility.
 
 ### `ContextSettings`
 
@@ -205,9 +322,14 @@ interface TtsSystemConfig {
 
 ```ts
 interface VisionConfig {
-  enabled: boolean;
-  interval_secs: number;
+  vlm_enabled: boolean;
+  auto_vision_enabled: boolean;
+  vision_context_history_mode: "latest" | "full";
+  capture_interval_secs: number;
   change_threshold: number;
+  display_id?: string | null;
+  vlm_region?: { x: number; y: number; width: number; height: number } | null;
+  proactive_vision_enabled: boolean;
   vlm_provider: string;
   vlm_base_url: string | null;
   vlm_model: string;
@@ -288,6 +410,23 @@ interface SenseVoiceLocalDownloadProgress {
   total_bytes: number | null;
 }
 ```
+
+<a id="memoryembeddingmodeldownloadprogress"></a>
+### `MemoryEmbeddingModelDownloadProgress`
+
+```ts
+interface MemoryEmbeddingModelDownloadProgress {
+  stage: string;
+  message: string;
+  current_file: string;
+  file_index: number;
+  file_count: number;
+  downloaded_bytes: number;
+  total_bytes: number | null;
+}
+```
+
+Known `stage` values are `checking`, `downloading`, `complete`, `verifying`, and `ready`; consumers must tolerate additional string values.
 
 ### `ToolSettings`
 
@@ -387,6 +526,13 @@ interface MemoryRecord {
   created_at: number;
   importance: number;
   tier: string;
+  memory_type: string;
+  entity_key: string | null;
+  status: string;
+  confidence: number;
+  first_seen_at: number;
+  last_seen_at: number;
+  evidence_count: number;
 }
 ```
 
@@ -608,6 +754,17 @@ interface CharacterRecord {
   source_format: string;
   created_at: number;
   updated_at: number;
+  template_id?: string | null;
+  template_version?: string | null;
+  template_snapshot_json?: string | null;
+  description?: string;
+  avatar_path?: string | null;
+  greeting?: string;
+  greeting_consumed_at?: number | null;
+  greeting_message_id?: number | null;
+  example_dialogue?: string;
+  runtime_profile_json?: string;
+  user_modified_at?: number | null;
 }
 ```
 
@@ -666,8 +823,8 @@ The tables below list the current IPC commands. The `Bridge` column shows whethe
 | `get_jailbreak_prompt` | `getJailbreakPrompt` | none | `string` | Returns the current jailbreak prompt. |
 | `set_proactive_enabled` | `setProactiveEnabled` | `enabled: boolean` | `void` | Enables or disables proactive messages. |
 | `get_proactive_enabled` | `getProactiveEnabled` | none | `boolean` | Returns proactive toggle state. |
-| `set_memory_enabled` | none | `enabled: boolean` | `void` | Enables or disables memory persistence. |
-| `get_memory_enabled` | none | none | `boolean` | Returns memory toggle state. |
+| `set_memory_enabled` | `setMemoryEnabled` | `enabled: boolean` | `void` | Enables or disables memory persistence. |
+| `get_memory_enabled` | `getMemoryEnabled` | none | `boolean` | Returns memory toggle state. |
 | `clear_history` | `clearHistory` | none | `void` | Clears conversation history. |
 | `delete_last_messages` | `deleteLastMessages` | `count: number`, `expectedConversationId?: string \| null` | `void` | Deletes the last visible messages. Skipped (no-op) when `expectedConversationId` does not match the backend's current conversation, preventing stale deletes after a conversation switch. |
 | `get_context_settings` | `getContextSettings` | none | `ContextSettings` | Returns chat context strategy settings. |
@@ -688,7 +845,7 @@ The tables below list the current IPC commands. The `Bridge` column shows whethe
 
 | Command | Bridge | Request | Response | Notes |
 |---|---|---|---|---|
-| `stream_chat` | `streamChat` | `request: ChatRequest` | `void` | Streaming chat entry point. Emits turn events. |
+| `stream_chat` | `streamChat` | `request: ChatRequest` | `StreamChatResponse` | Streaming chat entry point. Emits turn events and returns persisted message identifiers/status. |
 | `cancel_chat_turn` | `cancelChatTurn` | `turnId: string`, `reason?: string` | `void` | Cancels an in-flight turn. |
 | `approve_tool_approval` | `approveToolApproval` | `approvalRequestId: string` | `void` | Approves a pending tool execution. |
 | `reject_tool_approval` | `rejectToolApproval` | `approvalRequestId: string`, `reason?: string` | `void` | Rejects a pending tool execution. |
@@ -745,7 +902,6 @@ The tables below list the current IPC commands. The `Bridge` column shows whethe
 
 | Command | Bridge | Request | Response | Notes |
 |---|---|---|---|---|
-| `camera-observation` | `onCameraObservation` | event | `string` | Emitted by the bridge listener, not a Rust command. |
 | `start_vision_watcher` | none | none | `void` | Starts the background watcher. |
 | `stop_vision_watcher` | none | none | `void` | Stops the background watcher. |
 | `capture_screen_now` | `captureScreenNow` | none | `string` | Captures the screen and returns a description. |
@@ -919,6 +1075,16 @@ These commands exist in `src-tauri/src/lib.rs`, but `src/lib/kokoro-bridge.ts` d
 | `show_bubble_window` | `pet` | Shows the speech bubble window. |
 | `update_bubble_text` | `pet` | Updates the bubble text. |
 | `hide_bubble_window` | `pet` | Hides the speech bubble window. |
+| `toggle_pet_window` | `pet` | Toggles the floating pet window. |
+| `process_audio_chunk` | `stt::stream` | Appends data to a native audio stream. |
+| `complete_audio_stream` | `stt::stream` | Completes and transcribes a native audio stream. |
+| `discard_audio_stream` | `stt::stream` | Discards a native audio stream. |
+| `snapshot_audio_stream` | `stt::stream` | Returns an audio-stream snapshot. |
+| `prune_audio_buffer` | `stt::stream` | Prunes buffered native audio. |
+| `check_latest_release` | `system` | Checks release metadata. |
+| `update_mod` | `mods` | Updates an installed MOD. |
+| `remove_mod` | `mods` | Removes an installed MOD package. |
+| `install_mod_from_url` | `mods` | Installs an untrusted MOD URL after the caller's confirmation flow. |
 
 ---
 
@@ -929,14 +1095,18 @@ These commands exist in `src-tauri/src/lib.rs`, but `src/lib/kokoro-bridge.ts` d
 | Event | Payload | Emitted by | Bridge wrapper |
 |---|---|---|---|
 | `chat-typing` | `TypingParams` | `chat.rs` | none |
-| `chat-turn-start` | `{ turn_id: string }` | `chat.rs` | `onChatTurnStart` |
+| `chat-turn-start` | [`ChatTurnStartEvent`](#chatturnstartevent) | `chat.rs` | `onChatTurnStart` |
 | `chat-turn-delta` | `{ turn_id: string; delta: string; ... }` | `chat.rs` | `onChatTurnDelta` |
-| `chat-turn-finish` | `{ turn_id: string; status: "completed" \| "error" }` | `chat.rs` | `onChatTurnFinish` |
+| `chat-turn-finish` | [`ChatTurnFinishEvent`](#chatturnfinishevent) | `chat.rs` | `onChatTurnFinish` |
 | `chat-turn-translation` | `{ turn_id: string; translation: string }` | `chat.rs` | `onChatTurnTranslation` |
 | `chat-turn-tool` | `ToolTraceItem`-style payload | `chat.rs` | `onChatTurnTool` |
 | `chat-cue` | `{ cue: string; source?: string }` | `chat.rs`, `mods/manager.rs` | `onChatCue` |
 | `chat-imagegen` | `{ prompt: string }` | `actions/builtin.rs` | `onChatImageGen` |
 | `chat-error` | `string` | `chat.rs` | `onChatError` |
+| `chat-warning` | `string` | `chat.rs` | `onChatWarning` |
+| `chat-failure` | [`FailureEvent`](#failureevent) `\| string` | `chat.rs` | `onChatFailure` |
+| `chat-turn-acknowledged` | [`ChatTurnAcknowledgedEvent`](#chatturnacknowledgedevent) | `chat.rs` | `onChatTurnAcknowledged` |
+| `chat-turn-text-complete` | [`ChatTurnTextCompleteEvent`](#chatturntextcompleteevent) | `chat.rs` | `onChatTurnTextComplete` |
 
 ### TTS events
 
@@ -952,8 +1122,9 @@ These commands exist in `src-tauri/src/lib.rs`, but `src/lib/kokoro-bridge.ts` d
 | Event | Payload | Emitted by | Bridge wrapper |
 |---|---|---|---|
 | `vision-status` | `"active" \| "inactive"` | `vision/watcher.rs` | none |
-| `vision-observation` | `string` | `vision/watcher.rs` | `onVisionObservation` |
-| `proactive-trigger` | `{ trigger: string; idle_seconds: number; instruction: string }` | `vision/watcher.rs`, `ai/heartbeat.rs` | none |
+| `vision-observation` | `string \| { summary: string; captured_at?: string; source?: string }` | `vision/watcher.rs` | `onVisionObservation` |
+| `camera-observation` | `string` | listener only; producer is not present in tracked sources | `onCameraObservation` |
+| `proactive-trigger` | `{ trigger: string; instruction: string; idle_seconds?: number }` | `vision/watcher.rs`, `ai/heartbeat.rs` | none |
 
 ### STT events
 
@@ -963,6 +1134,7 @@ These commands exist in `src-tauri/src/lib.rs`, but `src/lib/kokoro-bridge.ts` d
 | `stt:mic-volume` | `{ volume: number; rms: number }` | `stt/mic.rs` | none |
 | `stt:mic-auto-stop` | `()` | `stt/mic.rs` | none |
 | `stt:wake-word-detected` | `string` | `stt/wake_word.rs` | none |
+| `stt:wake-word-error` | `string` | `stt/wake_word.rs` | none |
 
 ### Idle and proactive events
 
@@ -975,6 +1147,11 @@ These commands exist in `src-tauri/src/lib.rs`, but `src/lib/kokoro-bridge.ts` d
 | Event | Payload | Emitted by | Bridge wrapper |
 |---|---|---|---|
 | `live2d-profile-updated` | `Live2dModelProfile`-style payload | `commands/live2d.rs` | none |
+| `live2d-model-selection-updated` | `Live2dSelectionEvent` | frontend/runtime | none |
+| `character-runtime-committed` | `CommittedCharacterRuntime` | character activation | none |
+| `pet-config-updated` | `PetConfig` | pet settings/window | none |
+| `qq-authorization-request` / `qq-authorization-expired` | `QQAuthorizationRequest` | `qqbot/runtime.rs` | none |
+| `qq-authorization-approved` | authorization result payload | `commands/bot.rs` | none |
 | `mod:theme-override` | `ModThemeJson` | `mods/manager.rs` | `onModThemeOverride` |
 | `mod:layout-override` | `unknown` | `mods/manager.rs` | `onModLayoutOverride` |
 | `mod:components-register` | `Record<string, string>` | `mods/manager.rs` | `onModComponentsRegister` |
@@ -1000,6 +1177,7 @@ These commands exist in `src-tauri/src/lib.rs`, but `src/lib/kokoro-bridge.ts` d
 | Event | Payload | Emitted by | Bridge wrapper |
 |---|---|---|---|
 | `memory:updated` | `string` | `actions/builtin.rs` | none |
+| `memory:embedding-model-progress` | [`MemoryEmbeddingModelDownloadProgress`](#memoryembeddingmodeldownloadprogress) | `commands/memory.rs` | `onMemoryEmbeddingModelProgress` |
 | `pet-window-closed` | `()` | `commands/pet.rs` | none |
 | `bubble-text-update` | `string` | `commands/pet.rs` | none |
 | `toggle-chat-input` | `()` | `lib.rs` | none |
@@ -1036,6 +1214,22 @@ Example:
 
 ```txt
 live2d://localhost/my-model/runtime/model3.json
+```
+
+### `character-instance-resource://`
+
+Serves the managed PNG avatar owned by a character instance from `{app_data_dir}/character-instance-resources/<instance_id>/avatar.png`.
+
+- The canonical reference is `character-instance-resource://<instance_id>/avatar.png`.
+- On Windows WebView2 it is mapped to `http://character-instance-resource.localhost/<instance_id>/avatar.png`.
+- The instance ID must contain 1–128 ASCII letters, digits, hyphens, or underscores, and the only accepted relative path is `avatar.png`.
+- The handler rejects a redirected resource root and canonicalizes the requested file to enforce containment within that root.
+- Successful responses use `Content-Type: image/png`, `Cache-Control: no-store`, and `Access-Control-Allow-Origin: *`.
+
+Example:
+
+```html
+<img src="character-instance-resource://example-character/avatar.png" />
 ```
 
 ---
@@ -1101,11 +1295,11 @@ If you want structured handling, use `parseKokoroError` from `kokoro-bridge.ts`.
 
 ### Exported event wrappers
 
-- chat: `onChatError`, `onChatTurnStart`, `onChatTurnDelta`, `onChatTurnFinish`, `onChatTurnTranslation`, `onChatCue`, `onChatTurnTool`
+- chat: `onChatError`, `onChatWarning`, `onChatFailure`, `onChatTurnStart`, `onChatTurnAcknowledged`, `onChatTurnDelta`, `onChatTurnTextComplete`, `onChatTurnFinish`, `onChatTurnTranslation`, `onChatCue`, `onChatTurnTool`
 - mod: `onModThemeOverride`, `onModLayoutOverride`, `onModComponentsRegister`, `onModUiMessage`, `onModUnload`, `onModScriptEvent`
 - imagegen: `onChatImageGen`, `onImageGenDone`, `onImageGenError`
 - vision: `onVisionObservation`, `onCameraObservation`
-- STT: `onSenseVoiceLocalProgress`
+- STT/memory: `onSenseVoiceLocalProgress`, `onMemoryEmbeddingModelProgress`
 - telegram: `onTelegramChatSync`
 
 ### Bridge-only helpers

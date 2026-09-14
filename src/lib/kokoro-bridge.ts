@@ -484,7 +484,7 @@ export interface ChatTurnTextCompleteEvent {
     turn_id: string;
     text: string;
     translation_pending: boolean;
-    translation?: string;
+    translation?: string | null;
 }
 
 export interface ToolTraceItem {
