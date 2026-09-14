@@ -10,6 +10,7 @@ import { exportData, previewImport, importData, getAutoBackupConfig, saveAutoBac
 import type { ImportPreview, AutoBackupConfig } from '../../../lib/kokoro-bridge';
 import { characterDb } from '../../../lib/db';
 import type { CharacterProfile } from '../../../lib/db';
+import { migrateLegacyCharactersToSqlite } from '../../../lib/legacy-character-migration';
 import { sectionHeadingClasses } from '../../styles/settings-primitives';
 import { backupCredentialWarningKey, buildManualExportOptions, type BackupResourceMode } from './backup-resource-options';
 
@@ -126,6 +127,7 @@ export function BackupTab({
             if (!filePath) { setExporting(false); return; }
 
             // 序列化角色数据：从 SQLite 读文字数据，从 IndexedDB 匹配头像
+            await migrateLegacyCharactersToSqlite();
             const result = await exportData(
                 filePath,
                 buildManualExportOptions(backupResourceMode),
@@ -174,6 +176,9 @@ export function BackupTab({
         setImportDone(null);
         try {
             // Phase 1: 先恢复角色到 IndexedDB，拿到新 ID
+            if (importDb) {
+                await migrateLegacyCharactersToSqlite();
+            }
             let targetCharacterId: string | undefined;
             let payload: any = null;
 

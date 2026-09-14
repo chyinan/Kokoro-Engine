@@ -38,6 +38,7 @@ import { mapLive2dModelUrl, type Live2dModelSource } from "./features/live2d/liv
 import { live2dUrl } from "./lib/utils";
 import { MEMORY_MODEL_DIALOG_EVENT } from "./lib/memory-model-gate";
 import { characterDb } from "./lib/db";
+import { migrateLegacyCharactersToSqlite } from "./lib/legacy-character-migration";
 import {
   APP_SETTING_KEYS,
   type AppSettingKey,
@@ -1406,6 +1407,7 @@ function App() {
     // Backend committed runtime is authoritative for startup and window recreation.
     userProfileHydration.finally(async () => {
       try {
+        await migrateLegacyCharactersToSqlite();
         const { all } = await loadCharacterCatalog();
         const recovered = await characterActivation.recoverCommittedRuntime();
         if (recovered === null) {
@@ -1599,6 +1601,7 @@ function App() {
         setBackupStatus({ phase: "idle" });
         return;
       }
+      await migrateLegacyCharactersToSqlite();
       const result = await exportData(filePath, { include_character_resources: false });
       setBackupStatus({
         phase: "exported",
@@ -1640,6 +1643,9 @@ function App() {
       const importConfigs = options.import_configs ?? true;
       const conflictStrategy = options.conflict_strategy ?? "overwrite";
 
+      if (importDb) {
+        await migrateLegacyCharactersToSqlite();
+      }
       const firstPass = await importData(filePath, {
         import_database: false,
         import_configs: false,
@@ -1680,16 +1686,13 @@ function App() {
         targetCharacterId = payload.activeCharacterId || chars[0]?.stableId;
       }
 
-      if (!targetCharacterId) {
-        targetCharacterId = readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || undefined;
-      }
-
-      const result = await importData(filePath, {
+      const importOptions = {
         import_database: importDb,
         import_configs: importConfigs,
         conflict_strategy: conflictStrategy,
-        target_character_id: targetCharacterId,
-      });
+        ...(targetCharacterId ? { target_character_id: targetCharacterId } : {}),
+      };
+      const result = await importData(filePath, importOptions);
 
       if (payload?.userName != null) {
         writeStringSetting(APP_SETTING_KEYS.userName, payload.userName);

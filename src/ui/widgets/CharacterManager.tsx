@@ -9,8 +9,8 @@ import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHand
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Plus, Upload, Trash2, UserCircle, Check, X, User } from "lucide-react";
-import { characterDb } from "../../lib/db";
 import { parseCharacterCard } from "../../lib/character-card-parser";
+import { migrateLegacyCharactersToSqlite } from "../../lib/legacy-character-migration";
 import { getKokoroErrorMessage, setUserName, setUserPersona, getProactiveEnabled, listCharacters, createCharacter, createCharacterWithAvatar, updateCharacter, updateCharacterWithAvatar, deleteCharacter } from "../../lib/kokoro-bridge";
 import type { CharacterRecord } from "../../lib/kokoro-bridge";
 import { isCharacterEditDirty, isUserProfileDirty } from "./settings-dirty-check";
@@ -271,67 +271,7 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
     const loadCharacters = useCallback(async () => {
         setIsLoading(true);
         try {
-            // Migration/restore: copy IndexedDB characters to SQLite (upsert), then delete from IndexedDB
-            const idbChars = await characterDb.getAll();
-            for (const c of idbChars) {
-                if (!c.stableId) continue;
-                const record = {
-                    id: c.stableId,
-                    name: c.name,
-                    persona: c.persona,
-                    user_nickname: c.userNickname,
-                    source_format: c.sourceFormat ?? "manual",
-                    created_at: c.createdAt ?? 0,
-                    updated_at: c.updatedAt ?? 0,
-                };
-
-                let avatarBytes: Uint8Array | null = null;
-                if (c.avatarBlob) {
-                    try {
-                        avatarBytes = new Uint8Array(await c.avatarBlob.arrayBuffer());
-                    } catch (error) {
-                        console.warn("[CharacterManager] Failed to read legacy avatar during migration:", error);
-                    }
-                }
-
-                let persisted = false;
-                if (avatarBytes !== null) {
-                    try {
-                        await createCharacterWithAvatar({
-                            ...record,
-                            avatar_path: `character-instance-resource://${c.stableId}/avatar.png`,
-                        }, avatarBytes);
-                        persisted = true;
-                    } catch (error) {
-                        console.warn("[CharacterManager] Failed to migrate legacy avatar, retrying without avatar:", error);
-                    }
-                }
-
-                if (!persisted) {
-                    try {
-                        await createCharacter(record);
-                        persisted = true;
-                    } catch (createError) {
-                        try {
-                            // Always update to ensure backup-restored data overwrites stale SQLite records.
-                            await updateCharacter(record);
-                            persisted = true;
-                        } catch (updateError) {
-                            console.error("[CharacterManager] Failed to migrate legacy character:", {
-                                characterId: c.stableId,
-                                createError,
-                                updateError,
-                            });
-                        }
-                    }
-                }
-
-                if (persisted && c.id != null) {
-                    await characterDb.remove(c.id).catch((error) => {
-                        console.warn("[CharacterManager] Failed to remove migrated IndexedDB character:", error);
-                    });
-                }
-            }
+            await migrateLegacyCharactersToSqlite();
 
             const currentUserProfile = loadUserProfile();
             let all = await listCharacters();

@@ -1,6 +1,9 @@
 // pattern: Imperative Shell
 
-use crate::ai::context::AIOrchestrator;
+use crate::ai::context::{
+    acquire_database_operation_read_guard, acquire_database_operation_write_guard, AIOrchestrator,
+};
+use crate::characters::activation::CommittedCharacterRuntime;
 use crate::characters::catalog::{
     validate_package_directory as validate_catalog_package_directory, CharacterCatalog,
 };
@@ -1014,6 +1017,10 @@ pub(crate) fn stage_backup_configs(
         staged.push((filename.to_string(), content));
     }
     Ok(staged)
+}
+
+fn should_import_config(filename: &str, import_database: bool, has_database: bool) -> bool {
+    filename != "current_conversation_id.json" || (import_database && has_database)
 }
 
 pub(crate) fn validate_backup_resource_totals(
@@ -2139,6 +2146,158 @@ pub(crate) async fn reject_unsafe_skip_memory_conflicts(
     Ok(())
 }
 
+/// Skip imports keep local conversations with the same text primary key. An
+/// imported message or summary that still names such a key would silently
+/// attach to the local conversation, so reject the whole import before any
+/// live row is mutated.
+pub(crate) async fn reject_unsafe_skip_conversation_conflicts(
+    connection: &mut SqliteConnection,
+) -> Result<(), KokoroError> {
+    let imported_messages: i64 = if sqlx::query_scalar::<_, String>(
+        "SELECT name FROM import_db.sqlite_master WHERE type IN ('table', 'view') AND name = 'conversation_messages'",
+    )
+    .fetch_optional(&mut *connection)
+    .await?
+    .is_some()
+    {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM import_db.conversation_messages \
+             INNER JOIN conversations local ON local.id = conversation_messages.conversation_id",
+        )
+        .fetch_one(&mut *connection)
+        .await?
+    } else {
+        0
+    };
+    let imported_summaries: i64 = if sqlx::query_scalar::<_, String>(
+        "SELECT name FROM import_db.sqlite_master WHERE type IN ('table', 'view') AND name = 'conversation_summaries'",
+    )
+    .fetch_optional(&mut *connection)
+    .await?
+    .is_some()
+    {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM import_db.conversation_summaries \
+             INNER JOIN conversations local ON local.id = conversation_summaries.conversation_id",
+        )
+        .fetch_one(&mut *connection)
+        .await?
+    } else {
+        0
+    };
+
+    if imported_messages + imported_summaries > 0 {
+        return Err(KokoroError::Validation(
+            "skip import refuses conflicting conversation ids because imported messages or summaries would point at local rows"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Replace derived character activation state only for a full overwrite. The
+/// state is optional: malformed or stale runtime JSON is discarded so it cannot
+/// prevent the authoritative characters, conversations, and memories from
+/// being restored.
+async fn restore_committed_runtime(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    overwrite: bool,
+) -> Result<(), KokoroError> {
+    if !overwrite {
+        return Ok(());
+    }
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS character_activation_runtime (\
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),\
+            revision INTEGER NOT NULL,\
+            runtime_json TEXT NOT NULL\
+         )",
+    )
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query("DELETE FROM character_activation_runtime WHERE singleton = 1")
+        .execute(&mut **transaction)
+        .await?;
+
+    let import_exists: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM import_db.sqlite_master WHERE type = 'table' AND name = 'character_activation_runtime'",
+    )
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if import_exists.is_none() {
+        return Ok(());
+    }
+
+    let Some((revision, runtime_json)) = sqlx::query_as::<_, (i64, String)>(
+        "SELECT revision, runtime_json FROM import_db.character_activation_runtime WHERE singleton = 1",
+    )
+    .fetch_optional(&mut **transaction)
+    .await?
+    else {
+        return Ok(());
+    };
+    let parsed: CommittedCharacterRuntime = match serde_json::from_str(&runtime_json) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(target: "backup", "discarding invalid imported character runtime: {error}");
+            return Ok(());
+        }
+    };
+    let parsed_revision = match i64::try_from(parsed.revision) {
+        Ok(value) => value,
+        Err(_) => {
+            tracing::warn!(target: "backup", "discarding imported character runtime with out-of-range revision");
+            return Ok(());
+        }
+    };
+    if revision < 0 || revision != parsed_revision || parsed.runtime.character_id.trim().is_empty()
+    {
+        tracing::warn!(target: "backup", "discarding inconsistent imported character runtime");
+        return Ok(());
+    }
+
+    let character_exists: i64 =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM characters WHERE id = ?)")
+            .bind(&parsed.runtime.character_id)
+            .fetch_one(&mut **transaction)
+            .await?;
+    if character_exists == 0 {
+        tracing::warn!(
+            target: "backup",
+            "discarding imported character runtime for missing character {}",
+            parsed.runtime.character_id
+        );
+        return Ok(());
+    }
+
+    if let Some(conversation_id) = parsed.runtime.current_conversation_id.as_deref() {
+        let owner: Option<String> =
+            sqlx::query_scalar("SELECT character_id FROM conversations WHERE id = ?")
+                .bind(conversation_id)
+                .fetch_optional(&mut **transaction)
+                .await?;
+        if owner.as_deref() != Some(parsed.runtime.character_id.as_str()) {
+            tracing::warn!(
+                target: "backup",
+                "discarding imported character runtime for unavailable conversation {}",
+                conversation_id
+            );
+            return Ok(());
+        }
+    }
+
+    sqlx::query(
+        "INSERT INTO character_activation_runtime (singleton, revision, runtime_json) VALUES (1, ?, ?)",
+    )
+    .bind(revision)
+    .bind(runtime_json)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 /// Open a read-only sqlx pool to a given DB file.
 async fn open_readonly_pool(path: &Path) -> Result<SqlitePool, KokoroError> {
     if open_regular_non_redirected_file(path, "database")?.is_none() {
@@ -2365,7 +2524,9 @@ fn sanitize_backup_json(value: &mut serde_json::Value) {
             let keys = object.keys().cloned().collect::<Vec<_>>();
             for key in keys {
                 if key.eq_ignore_ascii_case("env") {
-                    object.insert(key, serde_json::Value::Object(serde_json::Map::new()));
+                    if let Some(child) = object.get_mut(&key) {
+                        sanitize_backup_json(child);
+                    }
                     continue;
                 }
                 if is_backup_secret_key(&key) {
@@ -2480,6 +2641,7 @@ pub async fn export_data(
     _characters_json: Option<String>,
     options: Option<ExportOptions>,
 ) -> Result<ExportResult, KokoroError> {
+    let _database_operation_guard = acquire_database_operation_read_guard().await;
     let app_data = app_data_dir(&app)?;
     ensure_non_redirected_parent_chain(&app_data, &app_data)?;
     let db = db_path(&app_data);
@@ -2569,6 +2731,7 @@ pub async fn export_data_to_path(
     out_path: &Path,
     _characters_json: Option<String>,
 ) -> Result<ExportResult, KokoroError> {
+    let _database_operation_guard = acquire_database_operation_read_guard().await;
     ensure_non_redirected_parent_chain(app_data, app_data)?;
     let db = db_path(app_data);
 
@@ -2713,6 +2876,7 @@ pub async fn import_data(
     file_path: String,
     options: ImportOptions,
 ) -> Result<ImportResult, KokoroError> {
+    let _database_operation_guard = acquire_database_operation_write_guard().await;
     let app_data = app_data_dir(&app)?;
     let staged_configs = if options.import_configs {
         stage_backup_configs(Path::new(&file_path))?
@@ -2733,12 +2897,6 @@ pub async fn import_data(
         StagedCharacterResources::default()
     };
     let mut has_db = false;
-    let extracted_configs: Vec<(String, String)> = staged_configs
-        .into_iter()
-        .filter(|(filename, _)| {
-            options.conflict_strategy != ConflictStrategy::Skip || !app_data.join(filename).exists()
-        })
-        .collect();
 
     {
         let path = PathBuf::from(&file_path);
@@ -2758,6 +2916,14 @@ pub async fn import_data(
         }
     }
     // archive is dropped here — safe to .await below
+    let extracted_configs: Vec<(String, String)> = staged_configs
+        .into_iter()
+        .filter(|(filename, _)| should_import_config(filename, options.import_database, has_db))
+        .filter(|(filename, _)| {
+            options.conflict_strategy != ConflictStrategy::Skip || !app_data.join(filename).exists()
+        })
+        .collect();
+
     let mut promoted_resources = if has_db
         && (!staged_resources.packages.is_empty() || !staged_resources.instance_ids.is_empty())
     {
@@ -3134,6 +3300,7 @@ pub async fn import_data(
         } else {
             // Skip preserves local integer IDs. Reject any imported relation
             // that would otherwise follow a skipped ID into a local memory.
+            reject_unsafe_skip_conversation_conflicts(&mut transaction).await?;
             reject_unsafe_skip_memory_conflicts(&mut transaction).await?;
 
             // skip 模式：先重建 FTS 以防损坏
@@ -3211,6 +3378,11 @@ pub async fn import_data(
             &mut transaction,
             prepared_characters,
             options.conflict_strategy.as_str(),
+        )
+        .await?;
+        restore_committed_runtime(
+            &mut transaction,
+            options.conflict_strategy == ConflictStrategy::Overwrite,
         )
         .await?;
         transaction.commit().await?;
@@ -3728,6 +3900,339 @@ mod tests {
         assert!(!should_stage_character_resources(&options, &inspection));
         options.import_database = true;
         assert!(should_stage_character_resources(&options, &inspection));
+    }
+
+    #[test]
+    fn config_only_import_does_not_restore_current_conversation_pointer() {
+        assert!(!should_import_config(
+            "current_conversation_id.json",
+            false,
+            false
+        ));
+        assert!(!should_import_config(
+            "current_conversation_id.json",
+            true,
+            false
+        ));
+        assert!(should_import_config(
+            "current_conversation_id.json",
+            true,
+            true
+        ));
+        assert!(should_import_config(
+            "memory_system_config.json",
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn backup_sanitizer_preserves_non_secret_mcp_env_values() {
+        let sanitized = sanitize_backup_config(
+            r#"[{"name":"server","env":{"LOG_LEVEL":"debug","OPENAI_API_KEY":"secret"}}]"#,
+            "mcp_servers.json",
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&sanitized).unwrap();
+        let env = value[0]["env"].as_object().unwrap();
+
+        assert_eq!(
+            env.get("LOG_LEVEL").and_then(|value| value.as_str()),
+            Some("debug")
+        );
+        assert!(!env.contains_key("OPENAI_API_KEY"));
+    }
+
+    #[tokio::test]
+    async fn overwrite_import_replaces_stale_committed_runtime() {
+        use crate::characters::activation::{BackendRuntimeSnapshot, CommittedCharacterRuntime};
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("CREATE TABLE characters (id TEXT PRIMARY KEY, name TEXT NOT NULL)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE conversations (id TEXT PRIMARY KEY, character_id TEXT NOT NULL)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO characters (id, name) VALUES ('import-character', 'Imported')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id) VALUES ('import-conversation', 'import-character')",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE character_activation_runtime (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), revision INTEGER NOT NULL, runtime_json TEXT NOT NULL)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        let stale = CommittedCharacterRuntime {
+            revision: 1,
+            runtime: BackendRuntimeSnapshot {
+                character_id: "stale-character".to_string(),
+                current_conversation_id: Some("stale-conversation".to_string()),
+                ..Default::default()
+            },
+            target_conversation_id: "stale-conversation".to_string(),
+        };
+        sqlx::query(
+            "INSERT INTO character_activation_runtime (singleton, revision, runtime_json) VALUES (1, ?, ?)",
+        )
+        .bind(stale.revision as i64)
+        .bind(serde_json::to_string(&stale).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE import_db.character_activation_runtime (singleton INTEGER PRIMARY KEY, revision INTEGER NOT NULL, runtime_json TEXT NOT NULL)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        let imported = CommittedCharacterRuntime {
+            revision: 9,
+            runtime: BackendRuntimeSnapshot {
+                character_id: "import-character".to_string(),
+                current_conversation_id: Some("import-conversation".to_string()),
+                ..Default::default()
+            },
+            target_conversation_id: "import-conversation".to_string(),
+        };
+        sqlx::query(
+            "INSERT INTO import_db.character_activation_runtime (singleton, revision, runtime_json) VALUES (1, ?, ?)",
+        )
+        .bind(imported.revision as i64)
+        .bind(serde_json::to_string(&imported).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+        let mut transaction = connection.begin().await.unwrap();
+        restore_committed_runtime(&mut transaction, true)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let restored: String = sqlx::query_scalar(
+            "SELECT runtime_json FROM character_activation_runtime WHERE singleton = 1",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+        let restored: CommittedCharacterRuntime = serde_json::from_str(&restored).unwrap();
+        assert_eq!(restored.revision, imported.revision);
+        assert_eq!(restored.runtime.character_id, "import-character");
+        assert_eq!(
+            restored.runtime.current_conversation_id.as_deref(),
+            Some("import-conversation")
+        );
+    }
+
+    #[tokio::test]
+    async fn overwrite_import_discards_runtime_revision_that_does_not_fit_sqlite() {
+        use crate::characters::activation::{BackendRuntimeSnapshot, CommittedCharacterRuntime};
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("CREATE TABLE characters (id TEXT PRIMARY KEY, name TEXT NOT NULL)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE conversations (id TEXT PRIMARY KEY, character_id TEXT NOT NULL)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO characters (id, name) VALUES ('import-character', 'Imported')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id) VALUES ('import-conversation', 'import-character')",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE import_db.character_activation_runtime (singleton INTEGER PRIMARY KEY, revision INTEGER NOT NULL, runtime_json TEXT NOT NULL)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        let imported = CommittedCharacterRuntime {
+            revision: i64::MAX as u64 + 1,
+            runtime: BackendRuntimeSnapshot {
+                character_id: "import-character".to_string(),
+                current_conversation_id: Some("import-conversation".to_string()),
+                ..Default::default()
+            },
+            target_conversation_id: "import-conversation".to_string(),
+        };
+        sqlx::query(
+            "INSERT INTO import_db.character_activation_runtime (singleton, revision, runtime_json) VALUES (1, -1, ?)",
+        )
+        .bind(serde_json::to_string(&imported).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+        let mut transaction = connection.begin().await.unwrap();
+        restore_committed_runtime(&mut transaction, true)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM character_activation_runtime")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn skip_import_rejects_messages_for_conflicting_conversations() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("CREATE TABLE conversations (id TEXT PRIMARY KEY, character_id TEXT NOT NULL)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO conversations (id, character_id) VALUES ('shared-conversation', 'local-character')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE import_db.conversations (id TEXT PRIMARY KEY, character_id TEXT NOT NULL)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE import_db.conversation_messages (id INTEGER PRIMARY KEY, conversation_id TEXT NOT NULL)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO import_db.conversations (id, character_id) VALUES ('shared-conversation', 'import-character')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO import_db.conversation_messages (id, conversation_id) VALUES (99, 'shared-conversation')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+
+        let error = reject_unsafe_skip_conversation_conflicts(&mut connection)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("skip import refuses conflicting conversation"));
+    }
+
+    #[tokio::test]
+    async fn skip_import_rejects_orphan_messages_that_reference_local_conversations() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("CREATE TABLE conversations (id TEXT PRIMARY KEY, character_id TEXT NOT NULL)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO conversations (id, character_id) VALUES ('shared-conversation', 'local-character')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE import_db.conversation_messages (id INTEGER PRIMARY KEY, conversation_id TEXT NOT NULL)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO import_db.conversation_messages (id, conversation_id) VALUES (99, 'shared-conversation')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+
+        let error = reject_unsafe_skip_conversation_conflicts(&mut connection)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("skip import refuses conflicting conversation"));
+    }
+
+    #[tokio::test]
+    async fn skip_import_rejects_view_messages_that_reference_local_conversations() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("CREATE TABLE conversations (id TEXT PRIMARY KEY, character_id TEXT NOT NULL)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO conversations (id, character_id) VALUES ('shared-conversation', 'local-character')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE VIEW import_db.conversation_messages AS SELECT 99 AS id, 'shared-conversation' AS conversation_id",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+        let error = reject_unsafe_skip_conversation_conflicts(&mut connection)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("skip import refuses conflicting conversation"));
     }
 
     #[tokio::test]

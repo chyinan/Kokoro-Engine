@@ -1,10 +1,13 @@
+// pattern: Imperative Shell
 //! Automatic memory extraction from conversation history.
 //!
 //! Every N conversation turns, the recent history is sent to the LLM
 //! with a special prompt that asks it to extract noteworthy facts.
 //! Extracted memories are stored via MemoryManager for future RAG retrieval.
 
-use crate::ai::context::{is_memory_candidate_message, Message};
+use crate::ai::context::{
+    acquire_database_operation_read_guard, is_memory_candidate_message, Message,
+};
 use crate::ai::memory::MemoryManager;
 use crate::llm::messages::{system_message, user_text_message};
 use crate::llm::provider::LlmProvider;
@@ -136,6 +139,14 @@ pub async fn extract_and_store_memories_with_options(
     character_id: String,
     options: MemoryExtractionOptions,
 ) {
+    let database_operation_guard = acquire_database_operation_read_guard().await;
+    if !database_operation_guard.is_current() {
+        tracing::info!(
+            target: "memory",
+            "discarding memory extraction started before a database restore"
+        );
+        return;
+    }
     let candidate_history = recent_history
         .iter()
         .filter(|message| is_memory_candidate_message(message))
@@ -197,7 +208,11 @@ pub async fn extract_and_store_memories_with_options(
                     for fact in structured {
                         let content = build_storage_content_from_structured_fact(&fact);
                         if let Err(e) = memory_manager
-                            .add_memory_with_importance(&content, &character_id, fact.importance)
+                            .add_memory_with_importance_unlocked(
+                                &content,
+                                &character_id,
+                                fact.importance,
+                            )
                             .await
                         {
                             tracing::error!(
@@ -242,7 +257,7 @@ pub async fn extract_and_store_memories_with_options(
                 let count = scored.len();
                 for sf in scored {
                     if let Err(e) = memory_manager
-                        .add_memory_with_importance(&sf.fact, &character_id, sf.importance)
+                        .add_memory_with_importance_unlocked(&sf.fact, &character_id, sf.importance)
                         .await
                     {
                         tracing::error!(

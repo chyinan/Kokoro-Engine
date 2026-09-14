@@ -1131,6 +1131,15 @@ pub async fn end_session(
     // Generate session summary in the background
     if history.len() >= 2 {
         tauri::async_runtime::spawn(async move {
+            let database_operation_guard =
+                crate::ai::context::acquire_database_operation_read_guard().await;
+            if !database_operation_guard.is_current() {
+                tracing::info!(
+                    target: "context",
+                    "discarding session summary started before a database restore"
+                );
+                return;
+            }
             let transcript = history
                 .iter()
                 .filter(|m| crate::ai::context::is_summary_candidate_message(m))
@@ -1167,7 +1176,10 @@ pub async fn end_session(
                             tracing::info!(target: "ai", "Skip saving summary because memory is disabled");
                             return;
                         }
-                        if let Err(e) = memory_mgr.save_session_summary(&char_id, &summary).await {
+                        if let Err(e) = memory_mgr
+                            .save_session_summary_unlocked(&char_id, &summary)
+                            .await
+                        {
                             tracing::error!(target: "ai", "Failed to save summary: {}", e);
                         } else {
                             tracing::info!(

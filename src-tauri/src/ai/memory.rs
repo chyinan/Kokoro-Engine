@@ -10,7 +10,9 @@ use std::collections::{HashMap, HashSet};
 #[cfg(not(test))]
 use tokio::sync::Mutex;
 
-use crate::ai::context::MemorySnippet;
+use crate::ai::context::{
+    acquire_database_operation_read_guard, DatabaseOperationReadGuard, MemorySnippet,
+};
 #[cfg(not(test))]
 use crate::ai::memory_embedding_model;
 
@@ -2156,6 +2158,8 @@ impl MemoryManager {
         trigger: &str,
         started_at: std::time::Instant,
     ) -> Result<()> {
+        let database_operation_guard = acquire_database_operation_read_guard().await;
+        Self::ensure_database_operation_current(&database_operation_guard)?;
         record_memory_write_if_enabled(self, character_id, source, trigger, started_at).await
     }
 
@@ -2378,8 +2382,24 @@ fn test_embedding(text: &str) -> Vec<f32> {
 // ── Session Summaries / Conversation Summaries ─────────────────────────────
 
 impl MemoryManager {
+    fn ensure_database_operation_current(guard: &DatabaseOperationReadGuard) -> Result<()> {
+        if !guard.is_current() {
+            anyhow::bail!("memory operation superseded by database restore");
+        }
+        Ok(())
+    }
+
     /// Save a session summary for a character.
     pub async fn save_session_summary(&self, character_id: &str, summary: &str) -> Result<()> {
+        self.save_session_summary_unlocked(character_id, summary)
+            .await
+    }
+
+    pub(crate) async fn save_session_summary_unlocked(
+        &self,
+        character_id: &str,
+        summary: &str,
+    ) -> Result<()> {
         sqlx::query(
             "INSERT INTO session_summaries (character_id, summary, created_at) VALUES (?, ?, ?)",
         )
@@ -2682,6 +2702,16 @@ impl MemoryManager {
         character_id: &str,
         importance: f64,
     ) -> Result<()> {
+        self.add_memory_with_importance_unlocked(content, character_id, importance)
+            .await
+    }
+
+    pub(crate) async fn add_memory_with_importance_unlocked(
+        &self,
+        content: &str,
+        character_id: &str,
+        importance: f64,
+    ) -> Result<()> {
         let metadata = infer_memory_metadata(content);
         let storage_probe = metadata.canonical_content.as_deref().unwrap_or(content);
         let hash = canonical_hash(storage_probe);
@@ -2889,6 +2919,8 @@ impl MemoryManager {
         content: &str,
         importance: f64,
     ) -> Result<()> {
+        let database_operation_guard = acquire_database_operation_read_guard().await;
+        Self::ensure_database_operation_current(&database_operation_guard)?;
         if character_id.trim().is_empty() {
             anyhow::bail!("character_id must not be empty");
         }
@@ -2928,6 +2960,8 @@ impl MemoryManager {
 
     /// Delete a memory by ID.
     pub async fn delete_memory(&self, id: i64, character_id: &str) -> Result<()> {
+        let database_operation_guard = acquire_database_operation_read_guard().await;
+        Self::ensure_database_operation_current(&database_operation_guard)?;
         if character_id.trim().is_empty() {
             anyhow::bail!("character_id must not be empty");
         }
@@ -2949,6 +2983,8 @@ impl MemoryManager {
 
     /// Update a memory's tier (e.g. "core" or "ephemeral").
     pub async fn update_memory_tier(&self, id: i64, character_id: &str, tier: &str) -> Result<()> {
+        let database_operation_guard = acquire_database_operation_read_guard().await;
+        Self::ensure_database_operation_current(&database_operation_guard)?;
         if character_id.trim().is_empty() {
             anyhow::bail!("character_id must not be empty");
         }
@@ -3828,6 +3864,19 @@ impl MemoryManager {
         provider: Option<std::sync::Arc<dyn crate::llm::provider::LlmProvider>>,
         target_language: Option<String>,
     ) -> Result<MemoryDreamRunResult> {
+        let database_operation_guard = acquire_database_operation_read_guard().await;
+        Self::ensure_database_operation_current(&database_operation_guard)?;
+        self.run_dream_now_with_provider_unlocked(character_id, trigger, provider, target_language)
+            .await
+    }
+
+    pub(crate) async fn run_dream_now_with_provider_unlocked(
+        &self,
+        character_id: &str,
+        trigger: &str,
+        provider: Option<std::sync::Arc<dyn crate::llm::provider::LlmProvider>>,
+        target_language: Option<String>,
+    ) -> Result<MemoryDreamRunResult> {
         let started_at = now_ts();
         let job_id = sqlx::query(
             "INSERT INTO memory_dream_jobs (character_id, phase, status, trigger, started_at) \
@@ -3988,6 +4037,8 @@ impl MemoryManager {
     }
 
     pub async fn reject_dream_proposal(&self, proposal_id: i64) -> Result<()> {
+        let database_operation_guard = acquire_database_operation_read_guard().await;
+        Self::ensure_database_operation_current(&database_operation_guard)?;
         sqlx::query(
             "UPDATE memory_dream_proposals SET status = 'rejected', updated_at = ? WHERE id = ? AND status = 'pending'",
         )
@@ -3999,6 +4050,8 @@ impl MemoryManager {
     }
 
     pub async fn approve_dream_proposal(&self, proposal_id: i64) -> Result<()> {
+        let database_operation_guard = acquire_database_operation_read_guard().await;
+        Self::ensure_database_operation_current(&database_operation_guard)?;
         let proposal = sqlx::query_as::<_, MemoryDreamProposalRow>(
             "SELECT id, character_id, proposal_type, status, confidence, title, rationale, \
                     source_memory_ids, target_memory_id, proposed_content, proposed_memory_type, \
@@ -4187,6 +4240,8 @@ impl MemoryManager {
     /// below `threshold`. Core memories are never pruned.
     /// Returns the number of deleted rows.
     pub async fn prune_decayed_memories(&self, character_id: &str, threshold: f64) -> Result<u64> {
+        let database_operation_guard = acquire_database_operation_read_guard().await;
+        Self::ensure_database_operation_current(&database_operation_guard)?;
         let now = chrono::Utc::now().timestamp();
         // Compute the minimum age (in seconds) at which a memory with max importance (1.0)
         // would decay below the threshold:
@@ -4268,8 +4323,10 @@ impl MemoryManager {
         provider: std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
         target_language: Option<String>,
     ) -> Result<usize> {
+        let database_operation_guard = acquire_database_operation_read_guard().await;
+        Self::ensure_database_operation_current(&database_operation_guard)?;
         let result = self
-            .run_dream_now_with_provider(
+            .run_dream_now_with_provider_unlocked(
                 character_id,
                 "periodic_consolidation",
                 Some(provider.clone()),

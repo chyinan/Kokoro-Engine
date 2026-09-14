@@ -13,12 +13,59 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 const CONVERSATION_SUMMARY_PROVIDER_TIMEOUT_SECS: u64 = 120;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+
+static DATABASE_OPERATION_GATE: OnceLock<Arc<RwLock<()>>> = OnceLock::new();
+static DATABASE_OPERATION_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) struct DatabaseOperationReadGuard {
+    _guard: OwnedRwLockReadGuard<()>,
+    generation: u64,
+}
+
+impl DatabaseOperationReadGuard {
+    pub(crate) fn is_current(&self) -> bool {
+        DATABASE_OPERATION_GENERATION.load(Ordering::SeqCst) == self.generation
+    }
+}
+
+pub(crate) fn database_operation_gate() -> Arc<RwLock<()>> {
+    DATABASE_OPERATION_GATE
+        .get_or_init(|| Arc::new(RwLock::new(())))
+        .clone()
+}
+
+pub(crate) async fn acquire_database_operation_read_guard() -> DatabaseOperationReadGuard {
+    let generation = DATABASE_OPERATION_GENERATION.load(Ordering::SeqCst);
+    let guard = database_operation_gate().read_owned().await;
+    DatabaseOperationReadGuard {
+        _guard: guard,
+        generation,
+    }
+}
+
+pub(crate) fn try_acquire_database_operation_read_guard(
+) -> Result<DatabaseOperationReadGuard, &'static str> {
+    let generation = DATABASE_OPERATION_GENERATION.load(Ordering::SeqCst);
+    let guard = database_operation_gate()
+        .try_read_owned()
+        .map_err(|_| "A backup import is in progress. Please retry after it completes.")?;
+    Ok(DatabaseOperationReadGuard {
+        _guard: guard,
+        generation,
+    })
+}
+
+pub(crate) async fn acquire_database_operation_write_guard() -> OwnedRwLockWriteGuard<()> {
+    let guard = database_operation_gate().write_owned().await;
+    DATABASE_OPERATION_GENERATION.fetch_add(1, Ordering::SeqCst);
+    guard
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -260,6 +307,7 @@ impl Drop for ActivationLockGuard {
 
 pub struct ChatTurnGuard {
     _read_guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    _database_operation_guard: Option<DatabaseOperationReadGuard>,
 }
 
 impl std::fmt::Debug for ChatTurnGuard {
@@ -358,6 +406,7 @@ impl ActivationGate {
                 }
                 Ok(ChatTurnGuard {
                     _read_guard: read_guard,
+                    _database_operation_guard: None,
                 })
             }
             Err(_) => Err(
@@ -584,7 +633,11 @@ impl AIOrchestrator {
     }
 
     pub fn enter_chat_turn(&self) -> Result<ChatTurnGuard, String> {
-        self.activation_gate.enter_chat_turn()
+        let database_operation_guard =
+            try_acquire_database_operation_read_guard().map_err(str::to_string)?;
+        let mut guard = self.activation_gate.enter_chat_turn()?;
+        guard._database_operation_guard = Some(database_operation_guard);
+        Ok(guard)
     }
 
     pub fn try_acquire_chat_turn(
@@ -854,6 +907,14 @@ impl AIOrchestrator {
                 let cid = character_id.to_string();
                 let summary_language = self.response_language.lock().await.clone();
                 tauri::async_runtime::spawn(async move {
+                    let database_operation_guard = acquire_database_operation_read_guard().await;
+                    if !database_operation_guard.is_current() {
+                        tracing::info!(
+                            target: "context",
+                            "discarding conversation summary started before a database restore"
+                        );
+                        return;
+                    }
                     let task = match memory_manager
                         .get_conversation_summary_task(&conversation_id, &cid)
                         .await
