@@ -20,6 +20,8 @@ vi.mock("react-i18next", () => ({
 const mockUninstalledStatus: EmotionModelStatus = {
   installed: false,
   is_active: false,
+  is_valid: false,
+  error_message: null,
   repo_id: "Johnson8187/Chinese-Emotion-Small",
   download_url: "https://huggingface.co/Johnson8187/Chinese-Emotion-Small",
   install_dir: "C:\\mock\\models\\Chinese-Emotion-Small",
@@ -32,6 +34,8 @@ const mockUninstalledStatus: EmotionModelStatus = {
 const mockInstalledStatus: EmotionModelStatus = {
   installed: true,
   is_active: true,
+  is_valid: true,
+  error_message: null,
   repo_id: "Johnson8187/Chinese-Emotion-Small",
   download_url: "https://huggingface.co/Johnson8187/Chinese-Emotion-Small",
   install_dir: "C:\\mock\\models\\Chinese-Emotion-Small",
@@ -39,6 +43,20 @@ const mockInstalledStatus: EmotionModelStatus = {
   required_files: ["model.onnx", "config.json", "tokenizer.json"],
   missing_files: [],
   memory_bytes: 45000000,
+};
+
+const mockCorruptedStatus: EmotionModelStatus = {
+  installed: true,
+  is_active: false,
+  is_valid: false,
+  error_message: "model.onnx 尺寸过小 (0.0 MB)，疑似下载中断或损坏",
+  repo_id: "Johnson8187/Chinese-Emotion-Small",
+  download_url: "https://huggingface.co/Johnson8187/Chinese-Emotion-Small",
+  install_dir: "C:\\mock\\models\\Chinese-Emotion-Small",
+  model_path: "C:\\mock\\models\\Chinese-Emotion-Small\\model.onnx",
+  required_files: ["model.onnx", "config.json", "tokenizer.json"],
+  missing_files: [],
+  memory_bytes: null,
 };
 
 const mockInferenceResult: EmotionInferenceResult = {
@@ -162,6 +180,28 @@ describe("EmotionModelPanel", () => {
 
     expect(bridge.inferEmotion).toHaveBeenCalled();
     expect(container.textContent).toContain("開心語調");
+  });
+
+  it("renders corrupted model state with repair button and triggers download", async () => {
+    vi.mocked(bridge.getEmotionModelStatus).mockResolvedValue(mockCorruptedStatus);
+
+    await act(async () => {
+      root.render(createElement(EmotionModelPanel));
+    });
+
+    expect(container.textContent).toContain("模型损坏");
+    expect(container.textContent).toContain("model.onnx 尺寸过小");
+
+    const repairBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("修复模型")
+    );
+    expect(repairBtn).toBeDefined();
+
+    await act(async () => {
+      repairBtn?.click();
+    });
+
+    expect(bridge.downloadEmotionModel).toHaveBeenCalled();
   });
 });
 

@@ -63,7 +63,11 @@ export function EmotionModelPanel() {
         try {
             const current = await getEmotionModelStatus();
             setStatus(current);
-            setErrorMessage(null);
+            if (current.error_message) {
+                setErrorMessage(current.error_message);
+            } else {
+                setErrorMessage(null);
+            }
         } catch (err) {
             console.error("Failed to get emotion model status:", err);
             setErrorMessage(String(err));
@@ -279,7 +283,12 @@ export function EmotionModelPanel() {
                 <div className="flex items-center gap-2">
                     {status ? (
                         status.installed ? (
-                            status.is_active ? (
+                            !status.is_valid ? (
+                                <span className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
+                                    {t("settings.model.emotion_model.status_corrupt", { defaultValue: "模型损坏" })}
+                                </span>
+                            ) : status.is_active ? (
                                 <span className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 shadow-sm shadow-emerald-500/10">
                                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                                     {t("settings.model.emotion_model.status_active", { defaultValue: "运行中" })}
@@ -428,22 +437,35 @@ export function EmotionModelPanel() {
                             </>
                         ) : (
                             <>
-                                {/* Start / Stop Toggle */}
-                                <button
-                                    onClick={handleToggleActive}
-                                    disabled={isActionLoading || isDownloading}
-                                    className={clsx(
-                                        "flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all border",
-                                        status.is_active
-                                            ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25"
-                                            : "bg-white/5 border-white/10 text-[var(--color-text-secondary)] hover:bg-white/10"
-                                    )}
-                                >
-                                    <Power size={13} className={status.is_active ? "text-emerald-400" : "text-slate-400"} />
-                                    {status.is_active
-                                        ? t("settings.model.emotion_model.btn_stop", { defaultValue: "停用端侧感知" })
-                                        : t("settings.model.emotion_model.btn_start", { defaultValue: "启动端侧感知" })}
-                                </button>
+                                {!status.is_valid ? (
+                                    <button
+                                        onClick={handleDownload}
+                                        disabled={isDownloading || isActionLoading}
+                                        className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 active:scale-95 disabled:opacity-50 transition-all shadow-sm shadow-rose-600/20"
+                                    >
+                                        <RefreshCw size={13} className={isDownloading ? "animate-spin" : ""} />
+                                        {t("settings.model.emotion_model.repair_btn", {
+                                            defaultValue: "修复模型",
+                                        })}
+                                    </button>
+                                ) : (
+                                    /* Start / Stop Toggle */
+                                    <button
+                                        onClick={handleToggleActive}
+                                        disabled={isActionLoading || isDownloading}
+                                        className={clsx(
+                                            "flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all border",
+                                            status.is_active
+                                                ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25"
+                                                : "bg-white/5 border-white/10 text-[var(--color-text-secondary)] hover:bg-white/10"
+                                        )}
+                                    >
+                                        <Power size={13} className={status.is_active ? "text-emerald-400" : "text-slate-400"} />
+                                        {status.is_active
+                                            ? t("settings.model.emotion_model.btn_stop", { defaultValue: "停用端侧感知" })
+                                            : t("settings.model.emotion_model.btn_start", { defaultValue: "启动端侧感知" })}
+                                    </button>
+                                )}
 
                                 <button
                                     onClick={handleManualImport}

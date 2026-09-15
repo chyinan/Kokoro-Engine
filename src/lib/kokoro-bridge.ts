@@ -1093,6 +1093,8 @@ export async function onMemoryEmbeddingModelProgress(
 export interface EmotionModelStatus {
     installed: boolean;
     is_active: boolean;
+    is_valid: boolean;
+    error_message?: string | null;
     repo_id: string;
     download_url: string;
     install_dir: string;
