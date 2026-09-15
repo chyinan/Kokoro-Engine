@@ -1,4 +1,4 @@
-# Kokoro-Engine 面部表情系统：双轨感知与增值体验包架构设计决策书
+# Kokoro-Engine 面部表情系统架构设计决策书
 
 > **分支声明**：本技术方案对应开发分支为 [`feature/facial-expression-system`](file:///d:/Kokoro-Engine)（基于 `main` 切出）。  
 > **文档归属**：[d:\Kokoro-Engine\learn-research\Facial-expression-research](file:///d:/Kokoro-Engine/learn-research/Facial-expression-research)  
@@ -14,7 +14,7 @@
 
 ## 一、 系统架构总览与分级感知体系
 
-针对用户提出的“**内置轻量引擎 + 可选高精度本地 ONNX 增值体验包（支持手动启停与卸载）**”的核心决策，系统确立**“基础轻量底座 + 按需神经增强 + 50ms 超时熔断”**的分级感知架构。
+采用“**内置轻量引擎 + 可选高精度本地 ONNX 增值体验包（支持手动启停与卸载）**”的核心决策，系统确立**“基础轻量底座 + 按需神经增强 + 50ms 超时熔断”**的分级感知架构。
 
 ```mermaid
 flowchart TD
