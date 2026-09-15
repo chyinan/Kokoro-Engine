@@ -3761,8 +3761,44 @@ pub async fn stream_chat(
                     .cloned()
                     .collect::<std::collections::HashSet<_>>()
             });
-        let cue_fut = system_provider.chat(cue_messages, None);
-        let cue_timeout = chat_fallback_execution_timeout();
+
+        let mut local_emotion_handled = false;
+        let emotion_status = crate::ai::emotion_onnx::get_emotion_model_status();
+        if emotion_status.is_active && emotion_status.installed {
+            tracing::info!(target: "chat", "[Chat] Trying local ONNX emotion inference for response cue");
+            if let Ok(inference) = crate::ai::emotion_onnx::infer_emotion(&full_response) {
+                if let Some(ref cue) = inference.mapped_cue {
+                    let is_valid = valid_fallback_cues
+                        .as_ref()
+                        .map(|cues| cues.contains(cue))
+                        .unwrap_or(false);
+                    if is_valid && inference.confidence >= 0.35 {
+                        tracing::info!(
+                            target: "chat",
+                            "[Chat] Local ONNX detected emotion '{}' ({:.2}) -> cue '{}' in {:.1}ms",
+                            inference.dominant_emotion,
+                            inference.confidence,
+                            cue,
+                            inference.latency_ms
+                        );
+                        let _ = app.emit(
+                            "chat-cue",
+                            serde_json::json!({
+                                "cue": cue,
+                                "source": "local-onnx-emotion",
+                                "emotion": inference.dominant_emotion,
+                                "confidence": inference.confidence,
+                            }),
+                        );
+                        local_emotion_handled = true;
+                    }
+                }
+            }
+        }
+
+        if !local_emotion_handled {
+            let cue_fut = system_provider.chat(cue_messages, None);
+            let cue_timeout = chat_fallback_execution_timeout();
         let cue_res = tokio::select! {
             biased;
             _ = wait_for_cancel_event(&mut cancel_rx) => {
@@ -3818,6 +3854,7 @@ pub async fn stream_chat(
             }
         }
     }
+}
 
     // Emit combined translation from all rounds
     if !all_translations.is_empty() {

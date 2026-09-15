@@ -20,6 +20,7 @@ import {
 } from "../../../lib/kokoro-bridge";
 import type { Live2dCueBinding, Live2dModelInfo, Live2dModelProfile } from "../../../lib/kokoro-bridge";
 import type { Live2DDisplayMode } from "../../../features/live2d/Live2DViewer";
+import { EmotionModelPanel } from "./EmotionModelPanel";
 
 const INTERACTION_GESTURES = [
     { value: "tap" },
@@ -425,6 +426,9 @@ export default function ModelTab({
 
     return (
         <div className="space-y-5">
+            {/* Local Lightweight ONNX Emotion Model */}
+            <EmotionModelPanel />
+
             <div>
                 <label className={labelClasses}>{t("settings.model.display_mode.label")}</label>
                 <p className="text-xs text-[var(--color-text-muted)] mb-3">

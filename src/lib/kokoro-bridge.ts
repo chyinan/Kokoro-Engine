@@ -1090,6 +1090,80 @@ export async function onMemoryEmbeddingModelProgress(
     );
 }
 
+export interface EmotionModelStatus {
+    installed: boolean;
+    is_active: boolean;
+    repo_id: string;
+    download_url: string;
+    install_dir: string;
+    model_path: string;
+    required_files: string[];
+    missing_files: string[];
+    memory_bytes?: number | null;
+}
+
+export interface EmotionInferenceProbability {
+    label: string;
+    label_zh: string;
+    score: number;
+}
+
+export interface EmotionInferenceResult {
+    dominant_emotion: string;
+    label_zh: string;
+    confidence: number;
+    probabilities: EmotionInferenceProbability[];
+    mapped_cue: string | null;
+    latency_ms: number;
+}
+
+export interface EmotionModelDownloadProgress {
+    stage: "checking" | "downloading" | "complete" | "verifying" | "ready" | string;
+    message: string;
+    current_file: string;
+    file_index: number;
+    file_count: number;
+    downloaded_bytes: number;
+    total_bytes: number | null;
+}
+
+export async function getEmotionModelStatus(): Promise<EmotionModelStatus> {
+    return invoke<EmotionModelStatus>("get_emotion_model_status");
+}
+
+export async function downloadEmotionModel(): Promise<EmotionModelStatus> {
+    return invoke<EmotionModelStatus>("download_emotion_model");
+}
+
+export async function uninstallEmotionModel(): Promise<EmotionModelStatus> {
+    return invoke<EmotionModelStatus>("uninstall_emotion_model");
+}
+
+export async function toggleEmotionModel(active: boolean): Promise<EmotionModelStatus> {
+    return invoke<EmotionModelStatus>("toggle_emotion_model", { active });
+}
+
+export async function inferEmotion(text: string): Promise<EmotionInferenceResult> {
+    return invoke<EmotionInferenceResult>("infer_emotion", { text });
+}
+
+export async function openEmotionModelDir(): Promise<string> {
+    return invoke<string>("open_emotion_model_dir");
+}
+
+export async function importEmotionModelPackage(sourcePath: string): Promise<EmotionModelStatus> {
+    return invoke<EmotionModelStatus>("import_emotion_model_package", { sourcePath });
+}
+
+export async function onEmotionModelProgress(
+    callback: (progress: EmotionModelDownloadProgress) => void
+): Promise<UnlistenFn> {
+    return listen<EmotionModelDownloadProgress>(
+        "emotion:model-progress",
+        (event) => callback(event.payload)
+    );
+}
+
 export async function listMemories(characterId: string, limit = 50, offset = 0): Promise<ListMemoriesResponse> {
     return invoke<ListMemoriesResponse>("list_memories", {
         request: { character_id: characterId, limit, offset },
