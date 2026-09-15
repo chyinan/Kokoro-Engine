@@ -558,15 +558,12 @@ where
                 let local_fallbacks = [
                     PathBuf::from("scratch/emotion_onnx_export").join(file_name),
                     PathBuf::from("../scratch/emotion_onnx_export").join(file_name),
-                    PathBuf::from("D:/Kokoro-Engine/scratch/emotion_onnx_export").join(file_name),
                 ];
                 let mut recovered = false;
                 for fb in &local_fallbacks {
-                    if fb.exists() {
-                        if std::fs::copy(fb, &target_path).is_ok() {
-                            recovered = true;
-                            break;
-                        }
+                    if fb.exists() && std::fs::copy(fb, &target_path).is_ok() {
+                        recovered = true;
+                        break;
                     }
                 }
                 if !recovered {
@@ -872,7 +869,7 @@ mod tests {
 
     #[test]
     fn test_import_nonexistent_path_fails() {
-        let res = import_emotion_model_package("C:\\non_existent_folder_xyz_123");
+        let res = import_emotion_model_package("non_existent_folder_xyz_123_kokoro_test");
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("不存在"));
     }
