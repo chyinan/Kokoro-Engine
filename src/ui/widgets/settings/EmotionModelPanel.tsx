@@ -27,6 +27,7 @@ import {
     importEmotionModelPackage,
     onEmotionModelProgress,
     playCue,
+    getKokoroErrorMessage,
 } from "../../../lib/kokoro-bridge";
 import type {
     EmotionModelStatus,
@@ -71,7 +72,7 @@ export function EmotionModelPanel() {
             }
         } catch (err) {
             console.error("Failed to get emotion model status:", err);
-            setErrorMessage(String(err));
+            setErrorMessage(getKokoroErrorMessage(err));
         }
     };
 
@@ -157,7 +158,7 @@ export function EmotionModelPanel() {
             setErrorMessage(null);
         } catch (err) {
             console.error("Manual import failed:", err);
-            setErrorMessage(String(err));
+            setErrorMessage(getKokoroErrorMessage(err));
         } finally {
             setIsActionLoading(false);
             setProgress(null);
@@ -169,7 +170,7 @@ export function EmotionModelPanel() {
             await openEmotionModelDir();
         } catch (err) {
             console.error("Failed to open model directory:", err);
-            setErrorMessage(String(err));
+            setErrorMessage(getKokoroErrorMessage(err));
         }
     };
 
@@ -191,7 +192,7 @@ export function EmotionModelPanel() {
             setStatus(result);
         } catch (err) {
             console.error("Emotion model download failed:", err);
-            setErrorMessage(String(err));
+            setErrorMessage(getKokoroErrorMessage(err));
         } finally {
             setIsDownloading(false);
             setProgress(null);
@@ -208,7 +209,7 @@ export function EmotionModelPanel() {
             setInferenceResult(null);
         } catch (err) {
             console.error("Failed to uninstall emotion model:", err);
-            setErrorMessage(String(err));
+            setErrorMessage(getKokoroErrorMessage(err));
         } finally {
             setIsActionLoading(false);
         }
@@ -223,7 +224,7 @@ export function EmotionModelPanel() {
             setStatus(result);
         } catch (err) {
             console.error("Failed to toggle emotion model active state:", err);
-            setErrorMessage(String(err));
+            setErrorMessage(getKokoroErrorMessage(err));
         } finally {
             setIsActionLoading(false);
         }
@@ -241,7 +242,7 @@ export function EmotionModelPanel() {
             });
         } catch (err) {
             console.error("Emotion inference failed:", err);
-            setErrorMessage(String(err));
+            setErrorMessage(getKokoroErrorMessage(err));
         } finally {
             setIsInferring(false);
         }

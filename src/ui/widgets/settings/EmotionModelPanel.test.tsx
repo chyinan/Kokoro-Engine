@@ -286,6 +286,29 @@ describe("EmotionModelPanel", () => {
     expect(container.textContent).toContain("打开存储目录");
   });
 
+  it("renders human-readable message instead of [object Object] when download fails with structured error", async () => {
+    vi.spyOn(bridge, "downloadEmotionModel").mockRejectedValue({
+      code: "IO_ERROR",
+      message: "磁盘空间不足，无法写入模型文件",
+    });
+
+    await act(async () => {
+      root.render(createElement(EmotionModelPanel));
+    });
+
+    const downloadBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("下载模型")
+    );
+    expect(downloadBtn).toBeDefined();
+
+    await act(async () => {
+      downloadBtn?.click();
+    });
+
+    expect(container.textContent).not.toContain("[object Object]");
+    expect(container.textContent).toContain("磁盘空间不足，无法写入模型文件");
+  });
+
   it("renders installed state with active toggle, reimport buttons, uninstall button, and playground", async () => {
     vi.mocked(bridge.getEmotionModelStatus).mockResolvedValue(mockInstalledStatus);
     mockOpenDialog.mockResolvedValue("C:\\models\\new-folder");

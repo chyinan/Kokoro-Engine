@@ -2225,12 +2225,41 @@ export interface KokoroErrorObject {
     trace_id?: string;
 }
 
+const CANDIDATE_MESSAGE_KEYS = [
+    "message",
+    "error",
+    "reason",
+    "details",
+    "msg",
+    "description",
+] as const;
+
 function stringifyErrorObject(error: object): string {
     try {
-        return JSON.stringify(error);
+        const json = JSON.stringify(error);
+        if (json && json !== "{}") {
+            return json;
+        }
     } catch {
-        return Object.prototype.toString.call(error);
+        // Fall through on circular structures or serialization errors
     }
+
+    // Try custom toString if available and not the default Object.prototype.toString
+    if (
+        typeof (error as { toString?: unknown }).toString === "function" &&
+        (error as { toString: () => string }).toString !== Object.prototype.toString
+    ) {
+        try {
+            const str = (error as { toString: () => string }).toString();
+            if (str && str !== "[object Object]") {
+                return str;
+            }
+        } catch {
+            // Ignore toString errors
+        }
+    }
+
+    return "";
 }
 
 function objectToKokoroError(error: Record<string, unknown>): KokoroErrorObject | null {
@@ -2252,44 +2281,94 @@ function objectToKokoroError(error: Record<string, unknown>): KokoroErrorObject 
 /**
  * 将 Tauri / Rust / JS 各种错误载荷转成人能读的文本。
  */
-export function getKokoroErrorMessage(error: unknown): string {
+export function getKokoroErrorMessage(
+    error: unknown,
+    depth = 0,
+    seen = new WeakSet<object>()
+): string {
+    if (error === null || error === undefined) {
+        return "Unknown error";
+    }
+
     if (error instanceof Error) {
         return error.message;
     }
 
     if (typeof error === "string") {
+        if (!error.trim()) {
+            return "Unknown error";
+        }
         const parsed = parseJsonPayload(error);
-        return parsed === null ? error : getKokoroErrorMessage(parsed);
+        return parsed === null ? error : getKokoroErrorMessage(parsed, depth + 1, seen);
+    }
+
+    if (typeof error === "number" || typeof error === "boolean" || typeof error === "bigint") {
+        return String(error);
     }
 
     if (isRecord(error)) {
+        if (seen.has(error) || depth > 3) {
+            const code = getStringField(error, "code");
+            return code || "Unknown error";
+        }
+        seen.add(error);
+
         const structured = objectToKokoroError(error);
         if (structured) {
             return structured.message;
         }
 
-        const message = error.message ?? error.error;
-        if (typeof message === "string") {
-            return message;
-        }
-        if (isRecord(message)) {
-            return getKokoroErrorMessage(message);
-        }
-
-        const stringValue = Object.values(error).find((value): value is string => typeof value === "string");
-        if (stringValue) {
-            return stringValue;
-        }
-
-        const nestedObject = Object.values(error).find(isRecord);
-        if (nestedObject) {
-            return getKokoroErrorMessage(nestedObject);
+        // 1. Check candidate message keys in priority order
+        for (const key of CANDIDATE_MESSAGE_KEYS) {
+            const val = error[key];
+            if (typeof val === "string" && val.trim().length > 0) {
+                return val;
+            }
+            if (isRecord(val)) {
+                const nested = getKokoroErrorMessage(val, depth + 1, seen);
+                if (nested && nested !== "Unknown error") {
+                    return nested;
+                }
+            }
         }
 
-        return stringifyErrorObject(error);
+        // 2. Check for any string field (excluding sensitive tokens/keys)
+        for (const [key, value] of Object.entries(error)) {
+            if (
+                typeof value === "string" &&
+                value.trim().length > 0 &&
+                !["token", "secret", "password"].includes(key.toLowerCase())
+            ) {
+                return value;
+            }
+        }
+
+        // 3. Check for any nested record
+        const nestedEntry = Object.values(error).find(isRecord);
+        if (nestedEntry) {
+            const nested = getKokoroErrorMessage(nestedEntry, depth + 1, seen);
+            if (nested && nested !== "Unknown error") {
+                return nested;
+            }
+        }
+
+        // 4. Fall back to safe serialization
+        const serialized = stringifyErrorObject(error);
+        if (serialized) {
+            return serialized;
+        }
+
+        // 5. Fall back to code field if present
+        const code = getStringField(error, "code");
+        if (code) {
+            return code;
+        }
+
+        return "Unknown error";
     }
 
-    return String(error);
+    const str = String(error);
+    return str === "[object Object]" ? "Unknown error" : str;
 }
 
 /**

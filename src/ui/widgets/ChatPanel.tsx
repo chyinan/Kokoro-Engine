@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback, useDeferredV
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
-import { streamChat, cancelChatTurn, onChatTurnAcknowledged, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, editConversationMessage, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
+import { streamChat, cancelChatTurn, onChatTurnAcknowledged, onChatTurnStart, onChatTurnDelta, onChatTurnFinish, onChatTurnTextComplete, onChatError, onChatWarning, onChatFailure, onChatTurnTranslation, clearHistory, uploadVisionImage, synthesize, onChatTurnTool, listConversations, loadConversation, editConversationMessage, onTelegramChatSync, onVisionObservation, deleteLastMessages, approveToolApproval, rejectToolApproval, getMemoryEmbeddingModelStatus, setVisionTextInputFocused, getKokoroErrorMessage } from "../../lib/kokoro-bridge";
 import type { CommittedCharacterRuntime, FailureEvent, ToolTraceItem, StreamChatResponse } from "../../lib/kokoro-bridge";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -130,13 +130,7 @@ function logToolEvent(event: { tool: string; result?: { message: string }; error
 }
 
 function getAsyncErrorMessage(error: unknown): string {
-    if (error instanceof Error) {
-        return error.message;
-    }
-    if (typeof error === "object" && error !== null && "message" in error && typeof (error as { message?: unknown }).message === "string") {
-        return (error as { message: string }).message;
-    }
-    return String(error);
+    return getKokoroErrorMessage(error);
 }
 
 function isTurnCancelledError(error: unknown): boolean {

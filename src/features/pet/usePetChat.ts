@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
+import { getKokoroErrorMessage } from "../../lib/kokoro-bridge";
 
 // pattern: Imperative Shell
 
@@ -227,7 +227,7 @@ export function usePetChat(): PetChatState {
             invoke("hide_bubble_window").catch(() => {});
             emit("pet-chat-failed", {
                 client_request_id: clientRequestId,
-                error: e instanceof Error ? e.message : String(e),
+                error: getKokoroErrorMessage(e),
             }).catch(() => {});
         }
     };
