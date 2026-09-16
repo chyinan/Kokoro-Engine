@@ -460,14 +460,20 @@
                 "confidence_label": "Confidence",
                 "latency_label": "Latency",
                 "import_btn": "Manual Import Package",
+                "import_dir_btn": "Import Model Directory",
+                "import_dir_title": "Select Extracted Model Directory (containing model.onnx etc.)",
                 "open_dir_btn": "Open Directory",
                 "import_success": "Emotion package imported successfully! Model is active.",
                 "import_failed": "Import failed: {{error}}",
                 "importing": "Validating and importing model package...",
+                "importing_dir": "Validating and importing model directory...",
+                "reimport_file_btn": "Re-import File",
+                "reimport_dir_btn": "Re-import Directory",
                 "offline_hint_title": "Encountering Network Issues?",
                 "offline_hint_desc": "Upstream repo lacks native ONNX format or connection timed out. You can download the offline archive and import:",
                 "offline_download_release": "Official GitHub Release Mirror",
-                "offline_import_action": "Import Downloaded Archive (.zip)"
+                "offline_import_action": "Import Downloaded Archive (.zip)",
+                "offline_import_dir_action": "Import Extracted Directory"
             },
             "display_mode": {
                 "label": "Display Mode",

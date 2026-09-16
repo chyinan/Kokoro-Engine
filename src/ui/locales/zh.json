@@ -460,14 +460,20 @@
                 "confidence_label": "置信度",
                 "latency_label": "耗时",
                 "import_btn": "手动导入包体",
+                "import_dir_btn": "导入模型目录",
+                "import_dir_title": "选择已解压的模型目录 (包含 model.onnx 等)",
                 "open_dir_btn": "打开存储目录",
                 "import_success": "增值体验包导入成功，模型已就绪并启动！",
                 "import_failed": "导入失败: {{error}}",
                 "importing": "正在校验并导入模型包...",
+                "importing_dir": "正在校验并导入模型目录...",
+                "reimport_file_btn": "重新导入文件",
+                "reimport_dir_btn": "重新导入目录",
                 "offline_hint_title": "下载遇到网络障碍？",
                 "offline_hint_desc": "上游原仓库未托管原生 ONNX 格式，或国内网络连接超时。您可获取离线包后一键导入：",
                 "offline_download_release": "官方 GitHub Release 镜像",
-                "offline_import_action": "导入已下载的离线包 (.zip)"
+                "offline_import_action": "导入已下载的离线包 (.zip)",
+                "offline_import_dir_action": "导入解压目录"
             },
             "display_mode": {
                 "label": "显示模式",

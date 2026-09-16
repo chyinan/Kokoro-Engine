@@ -8,6 +8,11 @@ import type { EmotionModelStatus, EmotionInferenceResult } from "../../../lib/ko
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+const mockOpenDialog = vi.fn();
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: (...args: any[]) => mockOpenDialog(...args),
+}));
+
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string, opts?: { count?: number; defaultValue?: string }) => {
@@ -79,7 +84,7 @@ describe("EmotionModelPanel", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-
+    mockOpenDialog.mockReset();
     vi.spyOn(bridge, "getEmotionModelStatus").mockResolvedValue(mockUninstalledStatus);
     vi.spyOn(bridge, "downloadEmotionModel").mockResolvedValue(mockInstalledStatus);
     vi.spyOn(bridge, "uninstallEmotionModel").mockResolvedValue(mockUninstalledStatus);
@@ -98,7 +103,7 @@ describe("EmotionModelPanel", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders uninstalled state with download button, manual import, and open dir button", async () => {
+  it("renders uninstalled state with download button, manual import, directory import, and open dir button", async () => {
     await act(async () => {
       root.render(createElement(EmotionModelPanel));
     });
@@ -108,6 +113,7 @@ describe("EmotionModelPanel", () => {
     expect(container.textContent).toContain("未安装");
     expect(container.textContent).toContain("下载模型");
     expect(container.textContent).toContain("手动导入包体");
+    expect(container.textContent).toContain("导入模型目录");
     expect(container.textContent).toContain("打开目录");
   });
 
@@ -128,6 +134,136 @@ describe("EmotionModelPanel", () => {
     expect(bridge.openEmotionModelDir).toHaveBeenCalled();
   });
 
+  it("triggers manual file import when import package button is clicked", async () => {
+    mockOpenDialog.mockResolvedValue("C:\\mock\\downloads\\model.zip");
+
+    await act(async () => {
+      root.render(createElement(EmotionModelPanel));
+    });
+
+    const importFileBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("手动导入包体")
+    );
+    expect(importFileBtn).toBeDefined();
+
+    await act(async () => {
+      importFileBtn?.click();
+    });
+
+    expect(mockOpenDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        directory: false,
+        multiple: false,
+      })
+    );
+    expect(bridge.importEmotionModelPackage).toHaveBeenCalledWith("C:\\mock\\downloads\\model.zip");
+  });
+
+  it("triggers manual directory import when import directory button is clicked", async () => {
+    mockOpenDialog.mockResolvedValue("C:\\mock\\models\\Chinese-Emotion-Small");
+
+    await act(async () => {
+      root.render(createElement(EmotionModelPanel));
+    });
+
+    const importDirBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("导入模型目录")
+    );
+    expect(importDirBtn).toBeDefined();
+
+    await act(async () => {
+      importDirBtn?.click();
+    });
+
+    expect(mockOpenDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        directory: true,
+        multiple: false,
+      })
+    );
+    expect(bridge.importEmotionModelPackage).toHaveBeenCalledWith("C:\\mock\\models\\Chinese-Emotion-Small");
+  });
+
+  it("handles cancelled directory import gracefully without error", async () => {
+    mockOpenDialog.mockResolvedValue(null);
+
+    await act(async () => {
+      root.render(createElement(EmotionModelPanel));
+    });
+
+    const importDirBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("导入模型目录")
+    );
+    expect(importDirBtn).toBeDefined();
+
+    await act(async () => {
+      importDirBtn?.click();
+    });
+
+    expect(mockOpenDialog).toHaveBeenCalled();
+    expect(bridge.importEmotionModelPackage).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("Manual import failed");
+  });
+
+  it("renders error banner when directory import fails", async () => {
+    mockOpenDialog.mockResolvedValue("C:\\mock\\models\\empty_dir");
+    vi.mocked(bridge.importEmotionModelPackage).mockRejectedValue(
+      new Error("目录 C:\\mock\\models\\empty_dir 中缺少必需模型文件: model.onnx")
+    );
+
+    await act(async () => {
+      root.render(createElement(EmotionModelPanel));
+    });
+
+    const importDirBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("导入模型目录")
+    );
+
+    await act(async () => {
+      importDirBtn?.click();
+    });
+
+    expect(container.textContent).toContain("缺少必需模型文件: model.onnx");
+    expect(container.textContent).toContain("导入解压目录");
+    expect(container.textContent).toContain("导入已下载的离线包 (.zip)");
+  });
+
+  it("triggers directory import from offline error card", async () => {
+    vi.spyOn(bridge, "downloadEmotionModel").mockRejectedValue(new Error("HTTP 404 Not Found"));
+    mockOpenDialog.mockResolvedValue("C:\\offline\\extracted-model");
+
+    await act(async () => {
+      root.render(createElement(EmotionModelPanel));
+    });
+
+    const downloadBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("下载模型")
+    );
+    await act(async () => {
+      downloadBtn?.click();
+    });
+
+    expect(container.textContent).toContain("HTTP 404 Not Found");
+    expect(container.textContent).toContain("导入解压目录");
+
+    const offlineImportDirBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("导入解压目录")
+    );
+    expect(offlineImportDirBtn).toBeDefined();
+
+    await act(async () => {
+      offlineImportDirBtn?.click();
+    });
+
+    expect(mockOpenDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        directory: true,
+        multiple: false,
+      })
+    );
+    expect(bridge.importEmotionModelPackage).toHaveBeenCalledWith("C:\\offline\\extracted-model");
+  });
+
   it("renders rich error card with offline actions when download fails", async () => {
     vi.spyOn(bridge, "downloadEmotionModel").mockRejectedValue(new Error("HTTP 404 Not Found"));
 
@@ -146,20 +282,41 @@ describe("EmotionModelPanel", () => {
 
     expect(container.textContent).toContain("HTTP 404 Not Found");
     expect(container.textContent).toContain("导入已下载的离线包 (.zip)");
+    expect(container.textContent).toContain("导入解压目录");
     expect(container.textContent).toContain("打开存储目录");
   });
 
-  it("renders installed state with active toggle, uninstall button, and playground", async () => {
+  it("renders installed state with active toggle, reimport buttons, uninstall button, and playground", async () => {
     vi.mocked(bridge.getEmotionModelStatus).mockResolvedValue(mockInstalledStatus);
+    mockOpenDialog.mockResolvedValue("C:\\models\\new-folder");
 
     await act(async () => {
       root.render(createElement(EmotionModelPanel));
     });
 
     expect(container.textContent).toContain("运行中");
+    expect(container.textContent).toContain("重新导入文件");
+    expect(container.textContent).toContain("重新导入目录");
     expect(container.textContent).toContain("卸载模型");
     expect(container.textContent).toContain("情感推理试炼场");
     expect(container.textContent).toContain("测算情感");
+
+    const reimportDirBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("重新导入目录")
+    );
+    expect(reimportDirBtn).toBeDefined();
+
+    await act(async () => {
+      reimportDirBtn?.click();
+    });
+
+    expect(mockOpenDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        directory: true,
+        multiple: false,
+      })
+    );
+    expect(bridge.importEmotionModelPackage).toHaveBeenCalledWith("C:\\models\\new-folder");
   });
 
   it("triggers inferEmotion and shows inference result when test button clicked", async () => {

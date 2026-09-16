@@ -14,6 +14,7 @@ import {
     Send,
     FolderOpen,
     FolderArchive,
+    FolderInput,
     RefreshCw,
 } from "lucide-react";
 import {
@@ -104,19 +105,28 @@ export function EmotionModelPanel() {
         };
     }, []);
 
-    const handleManualImport = async () => {
+    interface ManualImportOptions {
+        directory?: boolean;
+    }
+
+    const handleManualImport = async (options: ManualImportOptions = {}) => {
+        const isDirectory = options.directory ?? false;
         setIsActionLoading(true);
         setErrorMessage(null);
         try {
             const { open } = await import("@tauri-apps/plugin-dialog");
             const selected = await open({
-                title: t("settings.model.emotion_model.import_btn", { defaultValue: "手动导入模型包 (.zip / 目录)" }),
+                title: isDirectory
+                    ? t("settings.model.emotion_model.import_dir_title", { defaultValue: "选择已解压的模型目录 (包含 model.onnx 等)" })
+                    : t("settings.model.emotion_model.import_btn", { defaultValue: "手动导入模型包 (.zip / 目录)" }),
                 multiple: false,
-                directory: false,
-                filters: [
-                    { name: "Emotion Model Archive", extensions: ["zip", "onnx"] },
-                    { name: "All Files", extensions: ["*"] },
-                ],
+                directory: isDirectory,
+                filters: isDirectory
+                    ? undefined
+                    : [
+                        { name: "Emotion Model Archive", extensions: ["zip", "onnx"] },
+                        { name: "All Files", extensions: ["*"] },
+                    ],
             });
 
             if (!selected) {
@@ -132,7 +142,9 @@ export function EmotionModelPanel() {
 
             setProgress({
                 stage: "verifying",
-                message: t("settings.model.emotion_model.importing", { defaultValue: "正在校验并导入模型包..." }),
+                message: isDirectory
+                    ? t("settings.model.emotion_model.importing_dir", { defaultValue: "正在校验并导入模型目录..." })
+                    : t("settings.model.emotion_model.importing", { defaultValue: "正在校验并导入模型包..." }),
                 current_file: "model.onnx",
                 file_index: 1,
                 file_count: 1,
@@ -326,16 +338,27 @@ export function EmotionModelPanel() {
                                     defaultValue: "上游官方源未提供原生 ONNX 格式，或国内网络可能连接超时。您可获取离线包后一键导入：",
                                 })}
                             </span>
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
                                 <button
                                     type="button"
-                                    onClick={handleManualImport}
+                                    onClick={() => handleManualImport({ directory: false })}
                                     disabled={isActionLoading || isDownloading}
                                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-500/30 font-semibold text-[11px] transition-all active:scale-95"
                                 >
                                     <FolderArchive size={13} />
                                     {t("settings.model.emotion_model.offline_import_action", {
                                         defaultValue: "导入已下载的离线包 (.zip)",
+                                    })}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => handleManualImport({ directory: true })}
+                                    disabled={isActionLoading || isDownloading}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-500/30 font-semibold text-[11px] transition-all active:scale-95"
+                                >
+                                    <FolderInput size={13} />
+                                    {t("settings.model.emotion_model.offline_import_dir_action", {
+                                        defaultValue: "导入解压目录",
                                     })}
                                 </button>
                                 <button
@@ -408,13 +431,24 @@ export function EmotionModelPanel() {
                                 </button>
 
                                 <button
-                                    onClick={handleManualImport}
+                                    onClick={() => handleManualImport({ directory: false })}
                                     disabled={isDownloading || isActionLoading}
                                     className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 active:scale-95 disabled:opacity-50 transition-all"
                                 >
                                     <FolderArchive size={14} />
                                     {t("settings.model.emotion_model.import_btn", {
                                         defaultValue: "手动导入包体",
+                                    })}
+                                </button>
+
+                                <button
+                                    onClick={() => handleManualImport({ directory: true })}
+                                    disabled={isDownloading || isActionLoading}
+                                    className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 active:scale-95 disabled:opacity-50 transition-all"
+                                >
+                                    <FolderInput size={14} />
+                                    {t("settings.model.emotion_model.import_dir_btn", {
+                                        defaultValue: "导入模型目录",
                                     })}
                                 </button>
 
@@ -468,12 +502,23 @@ export function EmotionModelPanel() {
                                 )}
 
                                 <button
-                                    onClick={handleManualImport}
+                                    onClick={() => handleManualImport({ directory: false })}
                                     disabled={isActionLoading || isDownloading}
                                     className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/10 transition-colors"
+                                    title={t("settings.model.emotion_model.reimport_file_btn", { defaultValue: "重新导入文件 (.zip/.onnx)" })}
                                 >
                                     <FolderArchive size={13} />
-                                    {t("settings.model.emotion_model.import_btn", { defaultValue: "重新导入" })}
+                                    {t("settings.model.emotion_model.reimport_file_btn", { defaultValue: "重新导入文件" })}
+                                </button>
+
+                                <button
+                                    onClick={() => handleManualImport({ directory: true })}
+                                    disabled={isActionLoading || isDownloading}
+                                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/10 transition-colors"
+                                    title={t("settings.model.emotion_model.reimport_dir_btn", { defaultValue: "重新导入目录" })}
+                                >
+                                    <FolderInput size={13} />
+                                    {t("settings.model.emotion_model.reimport_dir_btn", { defaultValue: "重新导入目录" })}
                                 </button>
 
                                 <button
