@@ -6,7 +6,7 @@ use ort::value::{Tensor, ValueType};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, Once, OnceLock, RwLock};
 use std::time::Instant;
 use tokenizers::Tokenizer;
 
@@ -138,6 +138,125 @@ pub fn set_last_load_error(err: Option<String>) {
 
 pub fn get_last_load_error() -> Option<String> {
     LAST_LOAD_ERROR.read().ok().and_then(|g| g.clone())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmotionSettings {
+    #[serde(default = "default_settings_enabled")]
+    pub enabled: bool,
+}
+
+fn default_settings_enabled() -> bool {
+    true
+}
+
+impl Default for EmotionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_settings_enabled(),
+        }
+    }
+}
+
+fn emotion_settings_path() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Ok(test_path) = std::env::var("KOKORO_EMOTION_SETTINGS_TEST_PATH") {
+            return PathBuf::from(test_path);
+        }
+    }
+    dirs_next::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("com.chyin.kokoro")
+        .join("emotion_settings.json")
+}
+
+pub fn load_emotion_settings_from(path: &Path) -> EmotionSettings {
+    if !path.exists() {
+        return EmotionSettings::default();
+    }
+    match std::fs::read_to_string(path) {
+        Ok(content) => match serde_json::from_str::<EmotionSettings>(&content) {
+            Ok(settings) => settings,
+            Err(err) => {
+                tracing::warn!(
+                    target: "ai",
+                    "[Emotion] Failed to parse emotion settings file at {}: {}. Falling back to default.",
+                    path.display(),
+                    err
+                );
+                EmotionSettings::default()
+            }
+        },
+        Err(err) => {
+            tracing::warn!(
+                target: "ai",
+                "[Emotion] Failed to read emotion settings file at {}: {}. Falling back to default.",
+                path.display(),
+                err
+            );
+            EmotionSettings::default()
+        }
+    }
+}
+
+pub fn save_emotion_settings_to(path: &Path, settings: &EmotionSettings) -> Result<(), String> {
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "Missing parent directory for emotion settings path: {}",
+            path.display()
+        )
+    })?;
+    std::fs::create_dir_all(parent).map_err(|e| {
+        format!(
+            "Failed to create emotion settings parent dir {}: {}",
+            parent.display(),
+            e
+        )
+    })?;
+
+    let tmp_path = parent.join(format!(
+        ".emotion_settings.json.tmp.{}",
+        uuid::Uuid::new_v4()
+    ));
+    let json_data = serde_json::to_string_pretty(settings)
+        .map_err(|e| format!("Failed to serialize emotion settings: {}", e))?;
+
+    std::fs::write(&tmp_path, json_data)
+        .map_err(|e| format!("Failed to write temporary emotion settings file: {}", e))?;
+
+    if let Err(err) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "Failed to atomically persist emotion settings to {}: {}",
+            path.display(),
+            err
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn load_emotion_settings() -> EmotionSettings {
+    load_emotion_settings_from(&emotion_settings_path())
+}
+
+pub fn save_emotion_settings(settings: &EmotionSettings) -> Result<(), String> {
+    save_emotion_settings_to(&emotion_settings_path(), settings)
+}
+
+fn ensure_settings_loaded() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let settings = load_emotion_settings();
+        IS_ENABLED.store(settings.enabled, Ordering::Release);
+    });
+}
+
+#[cfg(test)]
+pub fn reload_emotion_settings_for_test() {
+    let settings = load_emotion_settings();
+    IS_ENABLED.store(settings.enabled, Ordering::Release);
 }
 
 pub const MIN_ONNX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024; // 10MB
@@ -645,6 +764,7 @@ fn build_validated_engine(dir: &Path) -> Result<EmotionEngine, String> {
 }
 
 pub fn get_emotion_model_status() -> EmotionModelStatus {
+    ensure_settings_loaded();
     let initial_snapshot_dir = default_model_snapshot_dir();
     let initial_files_present = missing_required_model_files(&initial_snapshot_dir).is_empty();
 
@@ -711,15 +831,25 @@ pub fn get_emotion_model_status() -> EmotionModelStatus {
 }
 
 pub fn toggle_emotion_model_active(active: bool) -> Result<EmotionModelStatus, String> {
+    ensure_settings_loaded();
     let _lease = ModelMutationLease::acquire("toggle")?;
     if !active {
         IS_ENABLED.store(false, Ordering::Release);
         unload_emotion_engine()?;
+        if let Err(e) = save_emotion_settings(&EmotionSettings { enabled: false }) {
+            tracing::warn!(target: "ai", "[Emotion] Failed to persist disabled setting: {}", e);
+        }
     } else {
         IS_ENABLED.store(true, Ordering::Release);
         if let Err(error) = get_or_load_engine() {
             IS_ENABLED.store(false, Ordering::Release);
+            if let Err(save_err) = save_emotion_settings(&EmotionSettings { enabled: false }) {
+                tracing::warn!(target: "ai", "[Emotion] Failed to persist disabled setting after load failure: {}", save_err);
+            }
             return Err(error);
+        }
+        if let Err(e) = save_emotion_settings(&EmotionSettings { enabled: true }) {
+            tracing::warn!(target: "ai", "[Emotion] Failed to persist enabled setting: {}", e);
         }
     }
     Ok(get_emotion_model_status())
@@ -728,7 +858,7 @@ pub fn toggle_emotion_model_active(active: bool) -> Result<EmotionModelStatus, S
 fn unload_emotion_engine_locked() -> Result<(), String> {
     let mut guard = engine_instance()
         .write()
-        .map_err(|error| format!("Emotion engine lock is poisoned: {}", error))?;
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     *guard = None;
     Ok(())
 }
@@ -736,11 +866,12 @@ fn unload_emotion_engine_locked() -> Result<(), String> {
 pub fn unload_emotion_engine() -> Result<(), String> {
     let _lifecycle = LIFECYCLE_MUTEX
         .lock()
-        .map_err(|error| format!("Emotion lifecycle lock is poisoned: {}", error))?;
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     unload_emotion_engine_locked()
 }
 
 pub fn uninstall_emotion_model() -> Result<EmotionModelStatus, String> {
+    ensure_settings_loaded();
     let _lease = ModelMutationLease::acquire("uninstall")?;
     let lifecycle = LIFECYCLE_MUTEX
         .lock()
@@ -757,6 +888,9 @@ pub fn uninstall_emotion_model() -> Result<EmotionModelStatus, String> {
     set_last_load_error(None);
     MODEL_IS_VALIDATED.store(false, Ordering::Release);
     IS_ENABLED.store(false, Ordering::Release);
+    if let Err(e) = save_emotion_settings(&EmotionSettings { enabled: false }) {
+        tracing::warn!(target: "ai", "[Emotion] Failed to persist disabled setting after uninstall: {}", e);
+    }
     drop(lifecycle);
     Ok(get_emotion_model_status())
 }
@@ -1003,9 +1137,21 @@ fn promote_validated_staging(staging_dir: &Path, enable_after: bool) -> Result<(
 
     match build_validated_engine(&snapshot_dir) {
         Ok(validated_engine) => {
-            *engine = Some(validated_engine);
-            MODEL_IS_VALIDATED.store(true, Ordering::Release);
-            IS_ENABLED.store(enable_after, Ordering::Release);
+            if enable_after {
+                *engine = Some(validated_engine);
+                MODEL_IS_VALIDATED.store(true, Ordering::Release);
+                IS_ENABLED.store(true, Ordering::Release);
+                if let Err(e) = save_emotion_settings(&EmotionSettings { enabled: true }) {
+                    tracing::warn!(target: "ai", "[Emotion] Failed to persist enabled setting after promotion: {}", e);
+                }
+            } else {
+                *engine = None;
+                MODEL_IS_VALIDATED.store(true, Ordering::Release);
+                IS_ENABLED.store(false, Ordering::Release);
+                if let Err(e) = save_emotion_settings(&EmotionSettings { enabled: false }) {
+                    tracing::warn!(target: "ai", "[Emotion] Failed to persist disabled setting after promotion: {}", e);
+                }
+            }
             set_last_load_error(None);
             drop(engine);
             drop(lifecycle);
@@ -1067,11 +1213,20 @@ fn promote_validated_staging(staging_dir: &Path, enable_after: bool) -> Result<(
 }
 
 pub fn import_emotion_model_package(source_path: &str) -> Result<EmotionModelStatus, String> {
+    ensure_settings_loaded();
     let _lease = ModelMutationLease::acquire("import")?;
     let path = Path::new(source_path);
     if !path.exists() {
         return Err(format!("指定的模型文件或目录不存在: {}", source_path));
     }
+
+    let snapshot_dir = default_model_snapshot_dir();
+    let is_installed = missing_required_model_files(&snapshot_dir).is_empty();
+    let enable_after = if is_installed {
+        IS_ENABLED.load(Ordering::Acquire)
+    } else {
+        true
+    };
 
     let repo_dir = default_model_repo_dir();
     let staging_dir = repo_dir.join(format!(".staging.import.{}", uuid::Uuid::new_v4()));
@@ -1161,7 +1316,7 @@ pub fn import_emotion_model_package(source_path: &str) -> Result<EmotionModelSta
 
         // Validate completeness and validity of required files via deep validation
         validate_model_files_deep(&staging_dir)?;
-        promote_validated_staging(&staging_dir, true)
+        promote_validated_staging(&staging_dir, enable_after)
     })();
 
     // Always sweep staging directory
@@ -1180,6 +1335,7 @@ pub async fn download_emotion_model<F>(emit_progress: F) -> Result<EmotionModelS
 where
     F: Fn(EmotionModelDownloadProgress) -> Result<(), String> + Send + Sync + 'static,
 {
+    ensure_settings_loaded();
     let _lease = ModelMutationLease::acquire("download")?;
     let snapshot_dir = default_model_snapshot_dir();
     let repo_dir = default_model_repo_dir();
@@ -1195,6 +1351,9 @@ where
     let missing_initially = missing_required_model_files(&snapshot_dir);
     if missing_initially.is_empty() {
         IS_ENABLED.store(true, Ordering::Release);
+        if let Err(error) = save_emotion_settings(&EmotionSettings { enabled: true }) {
+            tracing::warn!(target: "ai", "[Emotion] Failed to persist enabled setting during download: {}", error);
+        }
         match tokio::task::spawn_blocking(get_or_load_engine).await {
             Ok(Ok(())) => {
                 emit_progress(build_download_progress(
@@ -1358,6 +1517,7 @@ where
 }
 
 fn get_or_load_engine() -> Result<(), String> {
+    ensure_settings_loaded();
     if !IS_ENABLED.load(Ordering::Acquire) {
         return Err("Emotion engine is disabled".to_string());
     }
@@ -1531,6 +1691,8 @@ pub fn infer_emotion(text: &str) -> Result<EmotionInferenceResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_softmax_sum_to_one() {
@@ -1827,6 +1989,7 @@ mod tests {
 
     #[test]
     fn test_import_nonexistent_path_fails() {
+        let _lock = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let res = import_emotion_model_package("non_existent_folder_xyz_123_kokoro_test");
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("不存在"));
@@ -1892,5 +2055,118 @@ mod tests {
         assert_eq!(err, Some("Mock ONNX runtime failure test".to_string()));
         set_last_load_error(None);
         assert_eq!(get_last_load_error(), None);
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, val: &Path) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(orig) = &self.original {
+                std::env::set_var(self.key, orig);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn test_emotion_settings_roundtrip() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let settings_path = temp_dir.path().join("emotion_settings.json");
+
+        assert_eq!(
+            load_emotion_settings_from(&settings_path),
+            EmotionSettings { enabled: true }
+        );
+
+        save_emotion_settings_to(&settings_path, &EmotionSettings { enabled: false })
+            .expect("save disabled");
+        assert_eq!(
+            load_emotion_settings_from(&settings_path),
+            EmotionSettings { enabled: false }
+        );
+
+        save_emotion_settings_to(&settings_path, &EmotionSettings { enabled: true })
+            .expect("save enabled");
+        assert_eq!(
+            load_emotion_settings_from(&settings_path),
+            EmotionSettings { enabled: true }
+        );
+    }
+
+    #[test]
+    fn test_emotion_settings_corrupted_fallback() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let settings_path = temp_dir.path().join("emotion_settings.json");
+
+        std::fs::write(&settings_path, b"{ corrupted invalid json: true").expect("write corrupt");
+        assert_eq!(
+            load_emotion_settings_from(&settings_path),
+            EmotionSettings { enabled: true }
+        );
+    }
+
+    #[test]
+    fn test_toggle_active_persists_state() {
+        let _lock = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let settings_path = temp_dir.path().join("emotion_settings.json");
+        let _env = EnvVarGuard::set("KOKORO_EMOTION_SETTINGS_TEST_PATH", &settings_path);
+
+        // Toggle active = false (with retry in case mutation lease was temporarily held)
+        let mut attempts = 0;
+        let status = loop {
+            match toggle_emotion_model_active(false) {
+                Ok(s) => break s,
+                Err(e) if e.contains("another model operation is running") && attempts < 50 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("toggle active false: {}", e),
+            }
+        };
+        assert!(!status.is_active);
+        assert!(!IS_ENABLED.load(Ordering::Acquire));
+        assert_eq!(load_emotion_settings(), EmotionSettings { enabled: false });
+
+        // Simulate app restart / reload from disk
+        IS_ENABLED.store(true, Ordering::Release); // artificially set in memory
+        reload_emotion_settings_for_test();
+        assert!(!IS_ENABLED.load(Ordering::Acquire)); // reloaded as false from disk!
+
+        // Restore active = true
+        let _ = save_emotion_settings(&EmotionSettings { enabled: true });
+        IS_ENABLED.store(true, Ordering::Release);
+    }
+
+    #[test]
+    fn test_import_preserves_disabled_state_when_already_installed() {
+        let _lock = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let settings_path = temp_dir.path().join("emotion_settings.json");
+        let _env = EnvVarGuard::set("KOKORO_EMOTION_SETTINGS_TEST_PATH", &settings_path);
+
+        save_emotion_settings(&EmotionSettings { enabled: false }).expect("save disabled");
+        reload_emotion_settings_for_test();
+        assert!(!IS_ENABLED.load(Ordering::Acquire));
+
+        let res = import_emotion_model_package("non_existent_path_xyz_123");
+        assert!(res.is_err());
+        assert!(!IS_ENABLED.load(Ordering::Acquire));
+        assert_eq!(load_emotion_settings(), EmotionSettings { enabled: false });
+
+        let _ = save_emotion_settings(&EmotionSettings { enabled: true });
+        IS_ENABLED.store(true, Ordering::Release);
     }
 }
