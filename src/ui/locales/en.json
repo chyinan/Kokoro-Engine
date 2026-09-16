@@ -438,18 +438,21 @@
         "model": {
             "emotion_model": {
                 "title": "Local Lightweight ONNX Emotion Model (Chinese-Emotion-Small)",
-                "desc": "On-device millisecond-level Chinese 8-dimension emotion detection (~1.1GB full-precision model), powering Live2D micro-expressions and TTS tone conditioning.",
+                "desc": "On-device millisecond-level Chinese 8-dimension emotion detection (recommended ~255MB INT8 quantization), powering Live2D micro-expressions and TTS tone conditioning.",
                 "status_installed": "Ready",
                 "status_active": "Active",
                 "status_disabled": "Disabled",
                 "status_not_installed": "Not Installed",
                 "status_corrupt": "Corrupted",
-                "download_btn": "Download Model (~1.1GB)",
+                "download_btn": "Online Download (INT8 ~255MB)",
+                "load_local_detected_btn": "Load Detected Local Model",
                 "repair_btn": "Repair Model",
                 "downloading": "Downloading… {{downloaded}} / {{total}}",
                 "checking": "Checking model files...",
                 "uninstall_btn": "Uninstall Model",
                 "confirm_prompt": "Confirm uninstall?",
+                "confirm_btn": "Confirm",
+                "cancel_btn": "Cancel",
                 "btn_start": "Start Local Emotion",
                 "btn_stop": "Stop Local Emotion",
                 "playground_title": "Emotion Inference Playground",
@@ -473,7 +476,20 @@
                 "offline_hint_desc": "Upstream repo lacks native ONNX format or connection timed out. You can download the offline archive and import:",
                 "offline_download_release": "Official GitHub Release Mirror",
                 "offline_import_action": "Import Downloaded Archive (.zip)",
-                "offline_import_dir_action": "Import Extracted Directory"
+                "offline_import_dir_action": "Import Extracted Directory",
+                "installed_at": "Installed at: {{path}}",
+                "trigger_cue_label": "Trigger Cue: {{cue}}",
+                "refresh_status": "Refresh status",
+                "emotions": {
+                    "neutral": "Neutral",
+                    "caring": "Caring",
+                    "happy": "Happy",
+                    "angry": "Angry",
+                    "sad": "Sad",
+                    "questioning": "Questioning",
+                    "surprised": "Surprised",
+                    "disgusted": "Disgusted"
+                }
             },
             "display_mode": {
                 "label": "Display Mode",

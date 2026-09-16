@@ -438,18 +438,21 @@
         "model": {
             "emotion_model": {
                 "title": "本地轻量级 ONNX 情感模型 (Chinese-Emotion-Small)",
-                "desc": "端侧毫秒级中文 8 维情感识别 (~1.1GB 全精度模型)，无缝驱动 Live2D 微表情与 TTS 语调。",
+                "desc": "端侧毫秒级中文 8 维情感识别 (推荐 ~255MB INT8 量化)，无缝驱动 Live2D 微表情与 TTS 语调。",
                 "status_installed": "已就绪",
                 "status_active": "运行中",
                 "status_disabled": "已停用",
                 "status_not_installed": "未安装",
                 "status_corrupt": "模型损坏",
-                "download_btn": "下载模型 (~1.1GB)",
+                "download_btn": "下载模型 (INT8 ~255MB)",
+                "load_local_detected_btn": "载入检测到的本地模型",
                 "repair_btn": "修复模型",
                 "downloading": "下载中… {{downloaded}} / {{total}}",
                 "checking": "正在检查模型文件...",
                 "uninstall_btn": "卸载模型",
                 "confirm_prompt": "确认卸载?",
+                "confirm_btn": "确认",
+                "cancel_btn": "取消",
                 "btn_start": "启动端侧感知",
                 "btn_stop": "停用端侧感知",
                 "playground_title": "情感推理试炼场 (Live Playground)",
@@ -473,7 +476,20 @@
                 "offline_hint_desc": "上游原仓库未托管原生 ONNX 格式，或国内网络连接超时。您可获取离线包后一键导入：",
                 "offline_download_release": "官方 GitHub Release 镜像",
                 "offline_import_action": "导入已下载的离线包 (.zip)",
-                "offline_import_dir_action": "导入解压目录"
+                "offline_import_dir_action": "导入解压目录",
+                "installed_at": "已安装于: {{path}}",
+                "trigger_cue_label": "触发表情: {{cue}}",
+                "refresh_status": "刷新状态",
+                "emotions": {
+                    "neutral": "平淡语气",
+                    "caring": "关切语调",
+                    "happy": "开心语调",
+                    "angry": "愤怒语调",
+                    "sad": "悲伤语调",
+                    "questioning": "疑问语调",
+                    "surprised": "惊奇语调",
+                    "disgusted": "厌恶语调"
+                }
             },
             "display_mode": {
                 "label": "显示模式",

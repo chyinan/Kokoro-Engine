@@ -118,8 +118,8 @@ export function EmotionModelPanel() {
             const { open } = await import("@tauri-apps/plugin-dialog");
             const selected = await open({
                 title: isDirectory
-                    ? t("settings.model.emotion_model.import_dir_title", { defaultValue: "选择已解压的模型目录 (包含 model.onnx 等)" })
-                    : t("settings.model.emotion_model.import_btn", { defaultValue: "手动导入模型包 (.zip / 目录)" }),
+                    ? t("settings.model.emotion_model.import_dir_title")
+                    : t("settings.model.emotion_model.import_btn"),
                 multiple: false,
                 directory: isDirectory,
                 filters: isDirectory
@@ -144,8 +144,8 @@ export function EmotionModelPanel() {
             setProgress({
                 stage: "verifying",
                 message: isDirectory
-                    ? t("settings.model.emotion_model.importing_dir", { defaultValue: "正在校验并导入模型目录..." })
-                    : t("settings.model.emotion_model.importing", { defaultValue: "正在校验并导入模型包..." }),
+                    ? t("settings.model.emotion_model.importing_dir")
+                    : t("settings.model.emotion_model.importing"),
                 current_file: "model.onnx",
                 file_index: 1,
                 file_count: 1,
@@ -179,7 +179,7 @@ export function EmotionModelPanel() {
         setErrorMessage(null);
         setProgress({
             stage: "checking",
-            message: t("settings.model.emotion_model.checking", { defaultValue: "检查模型资源中..." }),
+            message: t("settings.model.emotion_model.checking"),
             current_file: "chinese-emotion-small-onnx.zip",
             file_index: 1,
             file_count: 1,
@@ -276,18 +276,14 @@ export function EmotionModelPanel() {
                     <div>
                         <div className="flex items-center gap-2">
                             <span className="text-sm font-semibold font-heading text-[var(--color-text-primary)]">
-                                {t("settings.model.emotion_model.title", {
-                                    defaultValue: "本地轻量级 ONNX 情感模型 (Chinese-Emotion-Small)",
-                                })}
+                                {t("settings.model.emotion_model.title")}
                             </span>
                             <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                                FP32 ~1.1GB
+                                INT8 / FP32 ONNX
                             </span>
                         </div>
                         <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
-                            {t("settings.model.emotion_model.desc", {
-                                defaultValue: "端侧毫秒级中文 8 维情感识别 (~1.1GB 全精度模型)，无缝驱动 Live2D 微表情与 TTS 语调",
-                            })}
+                            {t("settings.model.emotion_model.desc")}
                         </p>
                     </div>
                 </div>
@@ -299,22 +295,22 @@ export function EmotionModelPanel() {
                             !status.is_valid ? (
                                 <span className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30">
                                     <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
-                                    {t("settings.model.emotion_model.status_corrupt", { defaultValue: "模型损坏" })}
+                                    {t("settings.model.emotion_model.status_corrupt")}
                                 </span>
                             ) : status.is_active ? (
                                 <span className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 shadow-sm shadow-emerald-500/10">
                                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                                    {t("settings.model.emotion_model.status_active", { defaultValue: "运行中" })}
+                                    {t("settings.model.emotion_model.status_active")}
                                 </span>
                             ) : (
                                 <span className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
                                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                                    {t("settings.model.emotion_model.status_disabled", { defaultValue: "已停用" })}
+                                    {t("settings.model.emotion_model.status_disabled")}
                                 </span>
                             )
                         ) : (
                             <span className="text-xs text-[var(--color-text-muted)] px-2.5 py-1 rounded-full bg-white/5 border border-white/10">
-                                {t("settings.model.emotion_model.status_not_installed", { defaultValue: "未安装" })}
+                                {t("settings.model.emotion_model.status_not_installed")}
                             </span>
                         )
                     ) : (
@@ -335,9 +331,7 @@ export function EmotionModelPanel() {
 
                         <div className="pt-2 border-t border-rose-500/20 flex flex-wrap items-center justify-between gap-2">
                             <span className="text-[11px] text-rose-200/80">
-                                {t("settings.model.emotion_model.offline_hint_desc", {
-                                    defaultValue: "上游官方源未提供原生 ONNX 格式，或国内网络可能连接超时。您可获取离线包后一键导入：",
-                                })}
+                                {t("settings.model.emotion_model.offline_hint_desc")}
                             </span>
                             <div className="flex flex-wrap items-center gap-2">
                                 <button
@@ -347,9 +341,7 @@ export function EmotionModelPanel() {
                                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-500/30 font-semibold text-[11px] transition-all active:scale-95"
                                 >
                                     <FolderArchive size={13} />
-                                    {t("settings.model.emotion_model.offline_import_action", {
-                                        defaultValue: "导入已下载的离线包 (.zip)",
-                                    })}
+                                    {t("settings.model.emotion_model.offline_import_action")}
                                 </button>
                                 <button
                                     type="button"
@@ -358,9 +350,7 @@ export function EmotionModelPanel() {
                                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-500/30 font-semibold text-[11px] transition-all active:scale-95"
                                 >
                                     <FolderInput size={13} />
-                                    {t("settings.model.emotion_model.offline_import_dir_action", {
-                                        defaultValue: "导入解压目录",
-                                    })}
+                                    {t("settings.model.emotion_model.offline_import_dir_action")}
                                 </button>
                                 <button
                                     type="button"
@@ -368,9 +358,7 @@ export function EmotionModelPanel() {
                                     className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-rose-200 border border-white/10 text-[11px] transition-all"
                                 >
                                     <FolderOpen size={13} />
-                                    {t("settings.model.emotion_model.open_dir_btn", {
-                                        defaultValue: "打开存储目录",
-                                    })}
+                                    {t("settings.model.emotion_model.open_dir_btn")}
                                 </button>
                             </div>
                         </div>
@@ -389,7 +377,10 @@ export function EmotionModelPanel() {
                             <div className="flex justify-between items-center text-xs">
                                 <span className="text-[var(--color-text-primary)] font-medium flex items-center gap-2">
                                     <Loader2 size={13} className="animate-spin text-[var(--color-accent)]" />
-                                    {progress?.message || t("settings.model.emotion_model.downloading", { defaultValue: "正在下载模型组件..." })}
+                                    {progress?.message || t("settings.model.emotion_model.downloading", {
+                                        downloaded: formatBytes(progress?.downloaded_bytes ?? 0),
+                                        total: progress?.total_bytes ? formatBytes(progress.total_bytes) : "",
+                                    })}
                                 </span>
                                 <span className="font-mono text-[var(--color-text-muted)]">
                                     {progressPercent != null ? `${progressPercent}%` : ""}
@@ -420,15 +411,37 @@ export function EmotionModelPanel() {
                     <div className="flex flex-wrap items-center gap-2.5">
                         {!status?.installed ? (
                             <>
+                                {status?.local_cache_available && status?.local_cache_path && (
+                                    <button
+                                        onClick={async () => {
+                                            if (!status?.local_cache_path) return;
+                                            setIsActionLoading(true);
+                                            setErrorMessage(null);
+                                            try {
+                                                const res = await importEmotionModelPackage(status.local_cache_path);
+                                                setStatus(res);
+                                            } catch (err) {
+                                                setErrorMessage(getKokoroErrorMessage(err));
+                                            } finally {
+                                                setIsActionLoading(false);
+                                            }
+                                        }}
+                                        disabled={isDownloading || isActionLoading}
+                                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 active:scale-95 disabled:opacity-50 transition-all shadow-sm shadow-emerald-600/20"
+                                        title={status.local_cache_path}
+                                    >
+                                        <Sparkles size={14} />
+                                        {t("settings.model.emotion_model.load_local_detected_btn")}
+                                    </button>
+                                )}
+
                                 <button
                                     onClick={handleDownload}
                                     disabled={isDownloading || isActionLoading}
                                     className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold text-black bg-[var(--color-accent)] hover:opacity-95 active:scale-95 disabled:opacity-50 transition-all shadow-sm shadow-[var(--color-accent)]/20"
                                 >
                                     <Download size={14} />
-                                    {t("settings.model.emotion_model.download_btn", {
-                                        defaultValue: "下载模型 (~1.1GB)",
-                                    })}
+                                    {t("settings.model.emotion_model.download_btn")}
                                 </button>
 
                                 <button
@@ -437,9 +450,7 @@ export function EmotionModelPanel() {
                                     className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 active:scale-95 disabled:opacity-50 transition-all"
                                 >
                                     <FolderArchive size={14} />
-                                    {t("settings.model.emotion_model.import_btn", {
-                                        defaultValue: "手动导入包体",
-                                    })}
+                                    {t("settings.model.emotion_model.import_btn")}
                                 </button>
 
                                 <button
@@ -448,24 +459,22 @@ export function EmotionModelPanel() {
                                     className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 active:scale-95 disabled:opacity-50 transition-all"
                                 >
                                     <FolderInput size={14} />
-                                    {t("settings.model.emotion_model.import_dir_btn", {
-                                        defaultValue: "导入模型目录",
-                                    })}
+                                    {t("settings.model.emotion_model.import_dir_btn")}
                                 </button>
 
                                 <button
                                     onClick={handleOpenDirectory}
                                     className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/5 transition-all"
-                                    title={t("settings.model.emotion_model.open_dir_btn", { defaultValue: "打开存储目录" })}
+                                    title={t("settings.model.emotion_model.open_dir_btn")}
                                 >
                                     <FolderOpen size={14} />
-                                    {t("settings.model.emotion_model.open_dir_btn", { defaultValue: "打开目录" })}
+                                    {t("settings.model.emotion_model.open_dir_btn")}
                                 </button>
 
                                 <button
                                     onClick={() => void refreshStatus()}
                                     className="p-2 rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/5 transition-all"
-                                    title="刷新状态"
+                                    title={t("settings.model.emotion_model.refresh_status")}
                                 >
                                     <RefreshCw size={13} />
                                 </button>
@@ -479,9 +488,7 @@ export function EmotionModelPanel() {
                                         className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 active:scale-95 disabled:opacity-50 transition-all shadow-sm shadow-rose-600/20"
                                     >
                                         <RefreshCw size={13} className={isDownloading ? "animate-spin" : ""} />
-                                        {t("settings.model.emotion_model.repair_btn", {
-                                            defaultValue: "修复模型",
-                                        })}
+                                        {t("settings.model.emotion_model.repair_btn")}
                                     </button>
                                 ) : (
                                     /* Start / Stop Toggle */
@@ -489,16 +496,16 @@ export function EmotionModelPanel() {
                                         onClick={handleToggleActive}
                                         disabled={isActionLoading || isDownloading}
                                         className={clsx(
-                                            "flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all border",
-                                            status.is_active
-                                                ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25"
-                                                : "bg-white/5 border-white/10 text-[var(--color-text-secondary)] hover:bg-white/10"
+                                             "flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all border",
+                                             status.is_active
+                                                 ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25"
+                                                 : "bg-white/5 border-white/10 text-[var(--color-text-secondary)] hover:bg-white/10"
                                         )}
                                     >
                                         <Power size={13} className={status.is_active ? "text-emerald-400" : "text-slate-400"} />
                                         {status.is_active
-                                            ? t("settings.model.emotion_model.btn_stop", { defaultValue: "停用端侧感知" })
-                                            : t("settings.model.emotion_model.btn_start", { defaultValue: "启动端侧感知" })}
+                                            ? t("settings.model.emotion_model.btn_stop")
+                                            : t("settings.model.emotion_model.btn_start")}
                                     </button>
                                 )}
 
@@ -506,20 +513,20 @@ export function EmotionModelPanel() {
                                     onClick={() => handleManualImport({ directory: false })}
                                     disabled={isActionLoading || isDownloading}
                                     className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/10 transition-colors"
-                                    title={t("settings.model.emotion_model.reimport_file_btn", { defaultValue: "重新导入文件 (.zip/.onnx)" })}
+                                    title={t("settings.model.emotion_model.reimport_file_btn")}
                                 >
                                     <FolderArchive size={13} />
-                                    {t("settings.model.emotion_model.reimport_file_btn", { defaultValue: "重新导入文件" })}
+                                    {t("settings.model.emotion_model.reimport_file_btn")}
                                 </button>
 
                                 <button
                                     onClick={() => handleManualImport({ directory: true })}
                                     disabled={isActionLoading || isDownloading}
                                     className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/10 transition-colors"
-                                    title={t("settings.model.emotion_model.reimport_dir_btn", { defaultValue: "重新导入目录" })}
+                                    title={t("settings.model.emotion_model.reimport_dir_btn")}
                                 >
                                     <FolderInput size={13} />
-                                    {t("settings.model.emotion_model.reimport_dir_btn", { defaultValue: "重新导入目录" })}
+                                    {t("settings.model.emotion_model.reimport_dir_btn")}
                                 </button>
 
                                 <button
@@ -527,7 +534,7 @@ export function EmotionModelPanel() {
                                     className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/5 transition-colors"
                                 >
                                     <FolderOpen size={13} />
-                                    {t("settings.model.emotion_model.open_dir_btn", { defaultValue: "打开目录" })}
+                                    {t("settings.model.emotion_model.open_dir_btn")}
                                 </button>
 
                                 {/* Uninstall button */}
@@ -538,25 +545,25 @@ export function EmotionModelPanel() {
                                         className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-[var(--color-text-muted)] hover:text-rose-400 hover:bg-rose-500/10 border border-transparent hover:border-rose-500/20 transition-colors"
                                     >
                                         <Trash2 size={13} />
-                                        {t("settings.model.emotion_model.uninstall_btn", { defaultValue: "卸载模型" })}
+                                        {t("settings.model.emotion_model.uninstall_btn")}
                                     </button>
                                 ) : (
                                     <div className="flex items-center gap-2 bg-rose-500/10 border border-rose-500/30 px-3 py-1.5 rounded-lg">
                                         <span className="text-xs text-rose-300 font-medium">
-                                            {t("settings.model.emotion_model.confirm_prompt", { defaultValue: "确认卸载?" })}
+                                            {t("settings.model.emotion_model.confirm_prompt")}
                                         </span>
                                         <button
                                             onClick={handleUninstall}
                                             disabled={isActionLoading}
                                             className="px-2.5 py-1 text-xs rounded bg-rose-500 text-white font-medium hover:bg-rose-600 active:scale-95"
                                         >
-                                            {t("common.confirm", { defaultValue: "确认" })}
+                                            {t("settings.model.emotion_model.confirm_btn")}
                                         </button>
                                         <button
                                             onClick={() => setShowUninstallConfirm(false)}
                                             className="px-2.5 py-1 text-xs rounded bg-white/10 text-[var(--color-text-secondary)] hover:bg-white/15"
                                         >
-                                            {t("common.cancel", { defaultValue: "取消" })}
+                                            {t("settings.model.emotion_model.cancel_btn")}
                                         </button>
                                     </div>
                                 )}
@@ -566,7 +573,9 @@ export function EmotionModelPanel() {
 
                     {status?.installed && (
                         <div className="text-[11px] text-[var(--color-text-muted)] font-mono">
-                            {status.install_dir ? `已安装于: ${status.install_dir}` : "模型已就绪"}
+                            {status.install_dir
+                                ? t("settings.model.emotion_model.installed_at", { path: status.install_dir })
+                                : t("settings.model.emotion_model.status_installed")}
                         </div>
                     )}
                 </div>
@@ -578,15 +587,11 @@ export function EmotionModelPanel() {
                             <div className="flex items-center gap-1.5">
                                 <Sparkles size={14} className="text-[var(--color-accent)]" />
                                 <span className={labelClasses}>
-                                    {t("settings.model.emotion_model.playground_title", {
-                                        defaultValue: "情感推理试炼场 (Live Playground)",
-                                    })}
+                                    {t("settings.model.emotion_model.playground_title")}
                                 </span>
                             </div>
                             <span className="text-[11px] text-[var(--color-text-muted)]">
-                                {t("settings.model.emotion_model.playground_desc", {
-                                    defaultValue: "测试中文 8 维情感概率分布与 Live2D 表情联动",
-                                })}
+                                {t("settings.model.emotion_model.playground_desc")}
                             </span>
                         </div>
 
@@ -619,9 +624,7 @@ export function EmotionModelPanel() {
                                         void handleTestInference();
                                     }
                                 }}
-                                placeholder={t("settings.model.emotion_model.playground_placeholder", {
-                                    defaultValue: "输入任意文本进行情感分析...",
-                                })}
+                                placeholder={t("settings.model.emotion_model.playground_placeholder")}
                                 className={clsx(inputClasses, "py-2 text-xs")}
                             />
                             <button
@@ -634,9 +637,7 @@ export function EmotionModelPanel() {
                                 ) : (
                                     <Send size={13} />
                                 )}
-                                {t("settings.model.emotion_model.playground_test_btn", {
-                                    defaultValue: "测算情感",
-                                })}
+                                {t("settings.model.emotion_model.playground_test_btn")}
                             </button>
                         </div>
 
@@ -654,10 +655,12 @@ export function EmotionModelPanel() {
                                         <div className="flex items-center gap-3">
                                             <div>
                                                 <span className="text-[var(--color-text-muted)] mr-1.5">
-                                                    {t("settings.model.emotion_model.dominant_label", { defaultValue: "主导情绪:" })}
+                                                    {t("settings.model.emotion_model.dominant_label")}
                                                 </span>
                                                 <span className="font-bold text-[var(--color-accent)] text-sm">
-                                                    {inferenceResult.label_zh}
+                                                    {t(`settings.model.emotion_model.emotions.${inferenceResult.dominant_emotion}`, {
+                                                        defaultValue: inferenceResult.dominant_emotion,
+                                                    })}
                                                 </span>
                                                 <span className="text-[11px] font-mono text-[var(--color-text-muted)] ml-1">
                                                     ({inferenceResult.dominant_emotion})
@@ -665,7 +668,7 @@ export function EmotionModelPanel() {
                                             </div>
 
                                             <div className="text-[11px] text-[var(--color-text-muted)]">
-                                                <span>置信度: </span>
+                                                <span>{t("settings.model.emotion_model.confidence_label")}: </span>
                                                 <span className="font-mono text-emerald-400 font-semibold">
                                                     {(inferenceResult.confidence * 100).toFixed(1)}%
                                                 </span>
@@ -674,7 +677,7 @@ export function EmotionModelPanel() {
 
                                         <div className="flex items-center gap-3">
                                             <span className="text-[11px] font-mono text-[var(--color-text-muted)]">
-                                                耗时: {inferenceResult.latency_ms.toFixed(1)}ms
+                                                {t("settings.model.emotion_model.latency_label")}: {inferenceResult.latency_ms.toFixed(1)}ms
                                             </span>
 
                                             {inferenceResult.mapped_cue && (
@@ -684,7 +687,7 @@ export function EmotionModelPanel() {
                                                     className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[var(--color-accent)]/15 border border-[var(--color-accent)]/30 text-[var(--color-accent)] text-[11px] font-semibold hover:bg-[var(--color-accent)]/25 active:scale-95 transition-all"
                                                 >
                                                     <Play size={10} fill="currentColor" />
-                                                    触发表情: {inferenceResult.mapped_cue}
+                                                    {t("settings.model.emotion_model.trigger_cue_label", { cue: inferenceResult.mapped_cue })}
                                                 </button>
                                             )}
                                         </div>
@@ -693,13 +696,16 @@ export function EmotionModelPanel() {
                                     {/* 8-Emotion Probability Bars */}
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
                                         {inferenceResult.probabilities.map((item, idx) => {
-                                            const isTop = item.label === inferenceResult.dominant_emotion;
+                                            const emotionId = item.id || item.label;
+                                            const isTop = emotionId === inferenceResult.dominant_emotion;
                                             const pct = Math.round(item.score * 100);
                                             return (
                                                 <div key={idx} className="space-y-1">
                                                     <div className="flex justify-between items-center text-[11px]">
                                                         <span className={clsx(isTop ? "font-bold text-[var(--color-text-primary)]" : "text-[var(--color-text-secondary)]")}>
-                                                            {item.label_zh}
+                                                            {t(`settings.model.emotion_model.emotions.${emotionId}`, {
+                                                                defaultValue: emotionId,
+                                                            })}
                                                         </span>
                                                         <span className="font-mono text-[var(--color-text-muted)] text-[10px]">
                                                             {pct}%

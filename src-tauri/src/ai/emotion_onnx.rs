@@ -16,9 +16,14 @@ pub const MODEL_DIR_NAME: &str = "models--Johnson8187--Chinese-Emotion-Small";
 pub const MODEL_REF_NAME: &str = "main";
 pub const MODEL_FALLBACK_ENDPOINT: &str = "https://hf-mirror.com";
 pub const MODEL_ARCHIVE_NAME: &str = "chinese-emotion-small-onnx.zip";
+pub const MODEL_INT8_ARCHIVE_NAME: &str = "chinese-emotion-small-onnx-int8.zip";
 pub const OFFICIAL_RELEASE_TAG: &str = "v0.4.0";
-pub const OFFICIAL_RELEASE_URL: &str = "https://github.com/huwany1/Kokoro-Engine/releases/download/v0.4.0/chinese-emotion-small-onnx.zip";
-pub const OFFICIAL_LATEST_RELEASE_URL: &str = "https://github.com/huwany1/Kokoro-Engine/releases/latest/download/chinese-emotion-small-onnx.zip";
+pub const OFFICIAL_RELEASE_URL: &str = "https://github.com/chyinan/Kokoro-Engine/releases/download/v0.4.0/chinese-emotion-small-onnx.zip";
+pub const OFFICIAL_LATEST_RELEASE_URL: &str = "https://github.com/chyinan/Kokoro-Engine/releases/latest/download/chinese-emotion-small-onnx.zip";
+pub const OFFICIAL_INT8_RELEASE_URL: &str = "https://github.com/chyinan/Kokoro-Engine/releases/download/v0.4.0/chinese-emotion-small-onnx-int8.zip";
+pub const OFFICIAL_INT8_LATEST_RELEASE_URL: &str = "https://github.com/chyinan/Kokoro-Engine/releases/latest/download/chinese-emotion-small-onnx-int8.zip";
+pub const KNOWN_INT8_SHA256: &str = "72cc7b13007631f0f2cb9287bdda999470cd58834b6985b61a5a0d6c598712c3";
+pub const KNOWN_FP32_SHA256: &str = "2ebe21e81303077debe379c2c11e7951ee97cff0c0f4be9a4a2cf6e548522056";
 pub const DEFAULT_CDN_MIRRORS: &[&str] = &[
     "https://ghproxy.net/",
     "https://mirror.ghproxy.com/",
@@ -70,10 +75,18 @@ pub struct EmotionModelStatus {
     pub required_files: Vec<String>,
     pub missing_files: Vec<String>,
     pub memory_bytes: Option<usize>,
+    #[serde(default)]
+    pub local_cache_available: bool,
+    #[serde(default)]
+    pub local_cache_path: Option<String>,
+    #[serde(default)]
+    pub remote_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmotionInferenceProbability {
+    #[serde(default)]
+    pub id: String,
     pub label: String,
     pub label_zh: String,
     pub score: f32,
@@ -82,6 +95,8 @@ pub struct EmotionInferenceProbability {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmotionInferenceResult {
     pub dominant_emotion: String,
+    #[serde(default)]
+    pub dominant_emotion_id: String,
     pub label_zh: String,
     pub confidence: f32,
     pub probabilities: Vec<EmotionInferenceProbability>,
@@ -864,6 +879,11 @@ pub fn get_emotion_model_status() -> EmotionModelStatus {
         None
     };
 
+    let local_cache = detect_local_scratch_source();
+    let local_cache_available = local_cache.is_some();
+    let local_cache_path = local_cache.map(|p| p.to_string_lossy().into_owned());
+    let remote_available = std::env::var("KOKORO_EMOTION_MODEL_URL").is_ok();
+
     EmotionModelStatus {
         installed,
         is_active,
@@ -879,6 +899,9 @@ pub fn get_emotion_model_status() -> EmotionModelStatus {
             .collect(),
         missing_files,
         memory_bytes,
+        local_cache_available,
+        local_cache_path,
+        remote_available,
     }
 }
 
@@ -947,59 +970,143 @@ pub fn uninstall_emotion_model() -> Result<EmotionModelStatus, String> {
     Ok(get_emotion_model_status())
 }
 
+pub fn compute_file_sha256(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("无法打开文件进行哈希校验 {}: {}", path.display(), e))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        use std::io::Read;
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buffer[..n]),
+            Err(e) => return Err(format!("读取文件计算哈希失败: {}", e)),
+        }
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn check_dir_contains_model(dir: &Path) -> Option<PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let int8_zip = dir.join(MODEL_INT8_ARCHIVE_NAME);
+    if int8_zip.is_file() {
+        return Some(int8_zip);
+    }
+    let fp32_zip = dir.join(MODEL_ARCHIVE_NAME);
+    if fp32_zip.is_file() {
+        return Some(fp32_zip);
+    }
+    let onnx_file = dir.join("model.onnx");
+    let int8_file = dir.join("model.int8.onnx");
+    let cfg_file = dir.join("config.json");
+    if (onnx_file.is_file() || int8_file.is_file()) && cfg_file.is_file() {
+        return Some(dir.to_path_buf());
+    }
+    None
+}
+
+pub fn detect_local_scratch_source() -> Option<PathBuf> {
+    if let Ok(custom) = std::env::var("KOKORO_EMOTION_SCRATCH_DIR") {
+        let p = PathBuf::from(custom);
+        return check_dir_contains_model(&p);
+    }
+
+    let candidates = [
+        PathBuf::from("scratch/emotion_onnx_export"),
+        PathBuf::from("../scratch/emotion_onnx_export"),
+        PathBuf::from("../../scratch/emotion_onnx_export"),
+    ];
+
+    for base in &candidates {
+        if let Some(found) = check_dir_contains_model(base) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmotionDownloadCandidate {
-    Archive { url: String, label: String },
-    Endpoint { base_url: String, label: String },
+    Archive {
+        url: String,
+        label: String,
+        expected_sha256: Option<String>,
+    },
+    Endpoint {
+        base_url: String,
+        label: String,
+    },
 }
 
 pub fn resolve_download_candidates() -> Vec<EmotionDownloadCandidate> {
     let mut candidates = Vec::new();
 
-    // 1. Official GitHub Release canonical assets (Primary out-of-the-box distribution)
-    candidates.push(EmotionDownloadCandidate::Archive {
-        url: OFFICIAL_RELEASE_URL.to_string(),
-        label: format!("官方 GitHub Release ({})", OFFICIAL_RELEASE_TAG),
-    });
-    candidates.push(EmotionDownloadCandidate::Archive {
-        url: OFFICIAL_LATEST_RELEASE_URL.to_string(),
-        label: "官方 GitHub Release (latest)".to_string(),
-    });
-
-    // 2. Official Release CDN mirrors (ghproxy etc. for fast mainland China access)
-    for mirror in DEFAULT_CDN_MIRRORS {
-        let mirror_clean = mirror.trim_end_matches('/');
-        candidates.push(EmotionDownloadCandidate::Archive {
-            url: format!("{}/{}", mirror_clean, OFFICIAL_RELEASE_URL),
-            label: format!("官方 Release CDN 加速镜像 ({})", mirror_clean),
-        });
-    }
-
-    // 3. Optional developer environment variable override
+    // 1. Optional developer environment variable override (Highest priority)
     if let Ok(custom_url) = std::env::var("KOKORO_EMOTION_MODEL_URL") {
         let trimmed = custom_url.trim();
         if !trimmed.is_empty() {
             if trimmed.ends_with(".zip") || trimmed.contains(".zip?") {
-                candidates.insert(
-                    0,
-                    EmotionDownloadCandidate::Archive {
-                        url: trimmed.to_string(),
-                        label: "自定义模型包 (KOKORO_EMOTION_MODEL_URL)".to_string(),
-                    },
-                );
+                candidates.push(EmotionDownloadCandidate::Archive {
+                    url: trimmed.to_string(),
+                    label: "自定义模型包 (KOKORO_EMOTION_MODEL_URL)".to_string(),
+                    expected_sha256: None,
+                });
             } else {
-                candidates.insert(
-                    0,
-                    EmotionDownloadCandidate::Endpoint {
-                        base_url: trimmed.trim_end_matches('/').to_string(),
-                        label: "自定义模型端点 (KOKORO_EMOTION_MODEL_URL)".to_string(),
-                    },
-                );
+                candidates.push(EmotionDownloadCandidate::Endpoint {
+                    base_url: trimmed.trim_end_matches('/').to_string(),
+                    label: "自定义模型端点 (KOKORO_EMOTION_MODEL_URL)".to_string(),
+                });
             }
         }
     }
 
-    // 4. Upstream Hugging Face endpoints (fallback probe for individual files if upstream adds ONNX)
+    // 2. High-priority: Official INT8 Release assets (~255MB, fast download & 2.5x CPU speedup)
+    candidates.push(EmotionDownloadCandidate::Archive {
+        url: OFFICIAL_INT8_RELEASE_URL.to_string(),
+        label: format!("官方 INT8 Release ({})", OFFICIAL_RELEASE_TAG),
+        expected_sha256: Some(KNOWN_INT8_SHA256.to_string()),
+    });
+    candidates.push(EmotionDownloadCandidate::Archive {
+        url: OFFICIAL_INT8_LATEST_RELEASE_URL.to_string(),
+        label: "官方 INT8 Release (latest)".to_string(),
+        expected_sha256: Some(KNOWN_INT8_SHA256.to_string()),
+    });
+
+    // 3. Official INT8 CDN mirrors (ghproxy etc.)
+    for mirror in DEFAULT_CDN_MIRRORS {
+        let mirror_clean = mirror.trim_end_matches('/');
+        candidates.push(EmotionDownloadCandidate::Archive {
+            url: format!("{}/{}", mirror_clean, OFFICIAL_INT8_RELEASE_URL),
+            label: format!("官方 INT8 CDN 加速镜像 ({})", mirror_clean),
+            expected_sha256: Some(KNOWN_INT8_SHA256.to_string()),
+        });
+    }
+
+    // 4. Secondary fallback: Official Full FP32 Release assets (~803MB)
+    candidates.push(EmotionDownloadCandidate::Archive {
+        url: OFFICIAL_RELEASE_URL.to_string(),
+        label: format!("官方 FP32 Release ({})", OFFICIAL_RELEASE_TAG),
+        expected_sha256: Some(KNOWN_FP32_SHA256.to_string()),
+    });
+    candidates.push(EmotionDownloadCandidate::Archive {
+        url: OFFICIAL_LATEST_RELEASE_URL.to_string(),
+        label: "官方 FP32 Release (latest)".to_string(),
+        expected_sha256: Some(KNOWN_FP32_SHA256.to_string()),
+    });
+
+    for mirror in DEFAULT_CDN_MIRRORS {
+        let mirror_clean = mirror.trim_end_matches('/');
+        candidates.push(EmotionDownloadCandidate::Archive {
+            url: format!("{}/{}", mirror_clean, OFFICIAL_RELEASE_URL),
+            label: format!("官方 FP32 CDN 加速镜像 ({})", mirror_clean),
+            expected_sha256: Some(KNOWN_FP32_SHA256.to_string()),
+        });
+    }
+
+    // 5. Upstream Hugging Face endpoints (fallback probe for individual files)
     for endpoint in emotion_model_endpoints() {
         candidates.push(EmotionDownloadCandidate::Endpoint {
             base_url: endpoint.clone(),
@@ -1612,14 +1719,44 @@ where
 
     for candidate in &candidates {
         match candidate {
-            EmotionDownloadCandidate::Archive { url, label } => {
+            EmotionDownloadCandidate::Archive {
+                url,
+                label,
+                expected_sha256,
+            } => {
                 tracing::info!(target: "ai", "[Emotion] Attempting archive download from {}: {}", label, url);
+
+                // Fast pre-flight probe to avoid downloading 404 HTML responses
+                if let Ok(resp) = client
+                    .get(url)
+                    .header("Range", "bytes=0-0")
+                    .timeout(std::time::Duration::from_secs(4))
+                    .send()
+                    .await
+                {
+                    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                        tracing::warn!(target: "ai", "[Emotion] Pre-flight probe returned 404 for {}: {}", label, url);
+                        failure_reasons.push(format!("{}: 资源未发布 (HTTP 404 Not Found)", label));
+                        continue;
+                    }
+                }
+
                 let archive_tmp_path = staging_dir.join("package.tmp.zip");
-                let archive_name = MODEL_ARCHIVE_NAME.to_string();
+                let archive_name = if url.contains("int8") {
+                    MODEL_INT8_ARCHIVE_NAME.to_string()
+                } else {
+                    MODEL_ARCHIVE_NAME.to_string()
+                };
+
+                let size_hint = if url.contains("int8") {
+                    "~255MB INT8"
+                } else {
+                    "~803MB FP32"
+                };
 
                 let _ = emit_progress(build_download_progress(
                     "downloading",
-                    format!("正在下载情感模型包 (~1.1GB) [{}]", label),
+                    format!("正在下载情感模型包 ({}) [{}]", size_hint, label),
                     archive_name.clone(),
                     1,
                     1,
@@ -1642,7 +1779,7 @@ where
                     Arc::new(move |p| {
                         progress_sender(build_download_progress(
                             "downloading",
-                            format!("正在下载情感模型包 (~1.1GB) [{}]", progress_label),
+                            format!("正在下载情感模型包 ({}) [{}]", size_hint, progress_label),
                             progress_archive_name.clone(),
                             1,
                             1,
@@ -1668,10 +1805,28 @@ where
                     continue;
                 }
 
+                // Cryptographic integrity check (SHA-256)
+                if let Some(expected_hash) = expected_sha256 {
+                    match compute_file_sha256(&archive_tmp_path) {
+                        Ok(actual_hash) => {
+                            if !actual_hash.eq_ignore_ascii_case(expected_hash) {
+                                tracing::warn!(target: "ai", "[Emotion] SHA-256 mismatch for {}: expected {}, got {}", label, expected_hash, actual_hash);
+                                failure_reasons.push(format!("{}: 哈希校验未通过 (预期 {}, 实际 {})", label, expected_hash, actual_hash));
+                                let _ = std::fs::remove_file(&archive_tmp_path);
+                                continue;
+                            }
+                            tracing::info!(target: "ai", "[Emotion] SHA-256 verified successfully for {}", label);
+                        }
+                        Err(e) => {
+                            tracing::warn!(target: "ai", "[Emotion] Failed to compute SHA-256 for {}: {}", label, e);
+                        }
+                    }
+                }
+
                 let _ = emit_progress(build_download_progress(
                     "extracting",
-                    "正在解压模型组件 (~1.1GB)，请稍候...".to_string(),
-                    MODEL_ARCHIVE_NAME.to_string(),
+                    format!("正在解压模型组件 ({})，请稍候...", size_hint),
+                    archive_name.clone(),
                     1,
                     1,
                     0,
@@ -1688,7 +1843,7 @@ where
                     Ok(())
                 })();
 
-                // Immediately remove the 1.1GB tmp zip archive to reclaim disk space before validation
+                // Immediately remove the tmp zip archive to reclaim disk space before validation
                 let _ = std::fs::remove_file(&archive_tmp_path);
 
                 if let Err(err) = unpack_res {
@@ -1843,24 +1998,51 @@ where
 
     if !download_succeeded {
         // Check local scratch fallback
-        let local_fallbacks = [
-            PathBuf::from("scratch/emotion_onnx_export"),
-            PathBuf::from("../scratch/emotion_onnx_export"),
-        ];
-        let mut local_recovered = false;
-        for fb in &local_fallbacks {
-            if fb.is_dir()
-                && copy_required_files_from_dir(fb, &staging_dir).is_ok()
-                && inspect_model_files_fast(&staging_dir).is_ok()
-                && validate_model_files_deep(&staging_dir).is_ok()
-            {
-                local_recovered = true;
-                tracing::info!(target: "ai", "[Emotion] Recovered model from local development fallback: {}", fb.display());
-                break;
+        if let Some(local_path) = detect_local_scratch_source() {
+            tracing::info!(target: "ai", "[Emotion] Remote download unavailable; recovering from detected local source: {}", local_path.display());
+            let display_name = local_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("local_model");
+
+            let _ = emit_progress(build_download_progress(
+                "extracting",
+                format!("远程下载未就绪，检测到本地已导出的模型组件，自动载入: {}", display_name),
+                "model.onnx".to_string(),
+                1,
+                1,
+                0,
+                None,
+            ));
+
+            let recover_res = (|| -> Result<(), String> {
+                if local_path.is_file() {
+                    let file = std::fs::File::open(&local_path)
+                        .map_err(|e| format!("打开本地压缩包失败: {}", e))?;
+                    let archive = zip::ZipArchive::new(file)
+                        .map_err(|e| format!("解析本地压缩包失败: {}", e))?;
+                    unpack_emotion_zip(archive, &staging_dir)?;
+                } else if local_path.is_dir() {
+                    copy_required_files_from_dir(&local_path, &staging_dir)?;
+                }
+                inspect_model_files_fast(&staging_dir)?;
+                validate_model_files_deep(&staging_dir)?;
+                Ok(())
+            })();
+
+            match recover_res {
+                Ok(()) => {
+                    download_succeeded = true;
+                    tracing::info!(target: "ai", "[Emotion] Successfully imported model from local source: {}", local_path.display());
+                }
+                Err(err) => {
+                    tracing::warn!(target: "ai", "[Emotion] Failed to import from local source {}: {}", local_path.display(), err);
+                    clean_staging_files(&staging_dir);
+                }
             }
         }
 
-        if !local_recovered {
+        if !download_succeeded {
             let error_details = if failure_reasons.is_empty() {
                 "无可用下载候选源".to_string()
             } else {
@@ -1868,13 +2050,17 @@ where
             };
 
             let err_msg = format!(
-                "下载情感模型失败。已尝试官方 Release CDN、加速镜像与 Hugging Face 节点，均未能成功获取。\n\
+                "下载情感模型失败。所有配置的远程下载源均未能成功获取。\n\
                 失败详情: {}\n\
                 \n\
-                由于上游官方源仅提供 safetensors 格式，且当前网络环境下下载完整 ONNX 模型包 (~1.1GB) 受阻：\n\
-                1. 您可直接在浏览器中打开官方 Release 页面下载离线包 ({}):\n   {}\n\
-                2. 下载完成后，在软件面板中点击【导入已下载的离线包 (.zip)】即可一键安装启用。",
-                error_details, MODEL_ARCHIVE_NAME, OFFICIAL_RELEASE_URL
+                【根因排查与解决建议】\n\
+                当前官方托管服务器上尚未发布预打包的 ONNX 格式模型资产，且上游 Hugging Face 源目前仅提供 PyTorch safetensors 格式。\n\
+                \n\
+                【可用解决途径】\n\
+                1. 运行项目提供的打包脚本 `python scripts/package_emotion_onnx.py` 导出并打包模型；\n\
+                2. 在软件设置面板中点击【手动导入包体】直接选取本地 .zip 压缩包或已解压的文件夹；\n\
+                3. 设置环境变量 `KOKORO_EMOTION_MODEL_URL` 指定您自建的对象存储或镜像下载链接。",
+                error_details
             );
             return Err(err_msg);
         }
@@ -1990,12 +2176,14 @@ pub fn infer_emotion(text: &str) -> Result<EmotionInferenceResult, String> {
     if trimmed.is_empty() {
         return Ok(EmotionInferenceResult {
             dominant_emotion: "neutral".to_string(),
+            dominant_emotion_id: "neutral".to_string(),
             label_zh: "平淡語氣".to_string(),
             confidence: 1.0,
             probabilities: EMOTION_LABELS
                 .iter()
                 .enumerate()
                 .map(|(i, &(eng, zh))| EmotionInferenceProbability {
+                    id: eng.to_string(),
                     label: eng.to_string(),
                     label_zh: zh.to_string(),
                     score: if i == 0 { 1.0 } else { 0.0 },
@@ -2050,6 +2238,7 @@ pub fn infer_emotion(text: &str) -> Result<EmotionInferenceResult, String> {
             best_idx = idx;
         }
         prob_list.push(EmotionInferenceProbability {
+            id: eng.to_string(),
             label: eng.to_string(),
             label_zh: zh.to_string(),
             score,
@@ -2068,6 +2257,7 @@ pub fn infer_emotion(text: &str) -> Result<EmotionInferenceResult, String> {
 
     Ok(EmotionInferenceResult {
         dominant_emotion: dominant_eng.to_string(),
+        dominant_emotion_id: dominant_eng.to_string(),
         label_zh: dominant_zh.to_string(),
         confidence: best_score,
         probabilities: prob_list,
@@ -2608,13 +2798,18 @@ mod tests {
     fn test_resolve_download_candidates_order() {
         let candidates = resolve_download_candidates();
         assert!(!candidates.is_empty());
-        // First candidate should be canonical official GitHub release
+        // First candidate should be canonical official INT8 GitHub release
         match &candidates[0] {
-            EmotionDownloadCandidate::Archive { url, label } => {
-                assert_eq!(url, OFFICIAL_RELEASE_URL);
-                assert!(label.contains("官方 GitHub Release"));
+            EmotionDownloadCandidate::Archive {
+                url,
+                label,
+                expected_sha256,
+            } => {
+                assert_eq!(url, OFFICIAL_INT8_RELEASE_URL);
+                assert!(label.contains("官方 INT8 Release"));
+                assert_eq!(expected_sha256.as_deref(), Some(KNOWN_INT8_SHA256));
             }
-            _ => panic!("Expected first candidate to be Archive with OFFICIAL_RELEASE_URL"),
+            _ => panic!("Expected first candidate to be Archive with OFFICIAL_INT8_RELEASE_URL"),
         }
 
         // Must include CDN mirrors
@@ -2629,7 +2824,7 @@ mod tests {
         let _env = EnvVarGuard::set("KOKORO_EMOTION_MODEL_URL", Path::new(custom_test_url));
         let overridden = resolve_download_candidates();
         match &overridden[0] {
-            EmotionDownloadCandidate::Archive { url, label } => {
+            EmotionDownloadCandidate::Archive { url, label, .. } => {
                 assert_eq!(url, custom_test_url);
                 assert!(label.contains("KOKORO_EMOTION_MODEL_URL"));
             }
@@ -2725,25 +2920,30 @@ mod tests {
         // 1. High confidence and wide margin -> confident
         let res_confident = EmotionInferenceResult {
             dominant_emotion: "happy".to_string(),
+            dominant_emotion_id: "happy".to_string(),
             label_zh: "開心語調".to_string(),
             confidence: 0.65,
             probabilities: vec![
                 EmotionInferenceProbability {
+                    id: "happy".to_string(),
                     label: "happy".to_string(),
                     label_zh: "開心語調".to_string(),
                     score: 0.65,
                 },
                 EmotionInferenceProbability {
+                    id: "caring".to_string(),
                     label: "caring".to_string(),
                     label_zh: "關切語調".to_string(),
                     score: 0.15,
                 },
                 EmotionInferenceProbability {
+                    id: "neutral".to_string(),
                     label: "neutral".to_string(),
                     label_zh: "平淡語氣".to_string(),
                     score: 0.10,
                 },
                 EmotionInferenceProbability {
+                    id: "sad".to_string(),
                     label: "sad".to_string(),
                     label_zh: "悲傷語調".to_string(),
                     score: 0.10,
@@ -2759,20 +2959,24 @@ mod tests {
         // 2. High confidence but ambiguous margin (top1 0.46 vs top2 0.43 -> margin 0.03 < 0.15) -> not confident
         let res_ambiguous = EmotionInferenceResult {
             dominant_emotion: "happy".to_string(),
+            dominant_emotion_id: "happy".to_string(),
             label_zh: "開心語調".to_string(),
             confidence: 0.46,
             probabilities: vec![
                 EmotionInferenceProbability {
+                    id: "happy".to_string(),
                     label: "happy".to_string(),
                     label_zh: "開心語調".to_string(),
                     score: 0.46,
                 },
                 EmotionInferenceProbability {
+                    id: "caring".to_string(),
                     label: "caring".to_string(),
                     label_zh: "關切語調".to_string(),
                     score: 0.43,
                 },
                 EmotionInferenceProbability {
+                    id: "neutral".to_string(),
                     label: "neutral".to_string(),
                     label_zh: "平淡語氣".to_string(),
                     score: 0.11,
@@ -2791,15 +2995,18 @@ mod tests {
         // 3. Low confidence (0.35) even with wide margin -> not confident (fails 0.45 threshold)
         let res_low_conf = EmotionInferenceResult {
             dominant_emotion: "sad".to_string(),
+            dominant_emotion_id: "sad".to_string(),
             label_zh: "悲傷語調".to_string(),
             confidence: 0.35,
             probabilities: vec![
                 EmotionInferenceProbability {
+                    id: "sad".to_string(),
                     label: "sad".to_string(),
                     label_zh: "悲傷語調".to_string(),
                     score: 0.35,
                 },
                 EmotionInferenceProbability {
+                    id: "neutral".to_string(),
                     label: "neutral".to_string(),
                     label_zh: "平淡語氣".to_string(),
                     score: 0.15,
@@ -2818,9 +3025,11 @@ mod tests {
         // 4. Edge cases: single probability or empty
         let res_single = EmotionInferenceResult {
             dominant_emotion: "neutral".to_string(),
+            dominant_emotion_id: "neutral".to_string(),
             label_zh: "平淡語氣".to_string(),
             confidence: 1.0,
             probabilities: vec![EmotionInferenceProbability {
+                id: "neutral".to_string(),
                 label: "neutral".to_string(),
                 label_zh: "平淡語氣".to_string(),
                 score: 1.0,
@@ -2900,6 +3109,37 @@ mod tests {
         let result = unpack_emotion_zip_with_limits(archive, &staging_dir, 10, 10, 12);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("累计总大小超过上限"));
+    }
+
+    #[test]
+    fn test_compute_file_sha256() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let test_file = temp_dir.path().join("test_sha.txt");
+        std::fs::write(&test_file, b"hello world").unwrap();
+
+        let hash = compute_file_sha256(&test_file).expect("compute sha256");
+        // echo -n "hello world" | sha256sum -> b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+        assert_eq!(
+            hash,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+    }
+
+    #[test]
+    fn test_detect_local_scratch_source() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let scratch_export = temp_dir.path().join("emotion_onnx_export");
+        std::fs::create_dir_all(&scratch_export).unwrap();
+
+        let _env = EnvVarGuard::set("KOKORO_EMOTION_SCRATCH_DIR", &scratch_export);
+
+        // Empty dir -> None
+        assert!(detect_local_scratch_source().is_none());
+
+        // Place mock int8 archive -> Should detect
+        let int8_zip = scratch_export.join(MODEL_INT8_ARCHIVE_NAME);
+        std::fs::write(&int8_zip, b"mock int8 zip").unwrap();
+        assert_eq!(detect_local_scratch_source(), Some(int8_zip));
     }
 }
 

@@ -1102,17 +1102,24 @@ export interface EmotionModelStatus {
     required_files: string[];
     missing_files: string[];
     memory_bytes?: number | null;
+    local_cache_available?: boolean;
+    local_cache_path?: string | null;
+    remote_available?: boolean;
 }
 
 export interface EmotionInferenceProbability {
+    id: string;
     label: string;
-    label_zh: string;
+    /** @deprecated Use frontend translation keys based on `id` instead */
+    label_zh?: string;
     score: number;
 }
 
 export interface EmotionInferenceResult {
     dominant_emotion: string;
-    label_zh: string;
+    dominant_emotion_id?: string;
+    /** @deprecated Use frontend translation keys based on `dominant_emotion` instead */
+    label_zh?: string;
     confidence: number;
     probabilities: EmotionInferenceProbability[];
     mapped_cue: string | null;

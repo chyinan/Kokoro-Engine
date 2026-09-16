@@ -13,11 +13,42 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: (...args: any[]) => mockOpenDialog(...args),
 }));
 
+import zhLocale from "../../locales/zh.json";
+import enLocale from "../../locales/en.json";
+
+function getNestedValue(obj: any, path: string): string | undefined {
+  const parts = path.split(".");
+  let current = obj;
+  for (const part of parts) {
+    if (current == null) return undefined;
+    current = current[part];
+  }
+  return typeof current === "string" ? current : undefined;
+}
+
+let currentLocale = "zh";
+
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
-    t: (key: string, opts?: { count?: number; defaultValue?: string }) => {
-      if (opts?.defaultValue) return opts.defaultValue;
-      return key;
+    t: (key: string, opts?: Record<string, any>) => {
+      const activeDict = currentLocale === "en" ? enLocale : zhLocale;
+      let str = getNestedValue(activeDict, key);
+      if (str === undefined) {
+        if (opts?.defaultValue !== undefined) return opts.defaultValue;
+        return key;
+      }
+      if (opts) {
+        for (const [k, v] of Object.entries(opts)) {
+          str = str.replace(new RegExp(`{{${k}}}`, "g"), String(v));
+        }
+      }
+      return str;
+    },
+    i18n: {
+      language: currentLocale,
+      changeLanguage: vi.fn((lang: string) => {
+        currentLocale = lang;
+      }),
     },
   }),
 }));
@@ -66,11 +97,12 @@ const mockCorruptedStatus: EmotionModelStatus = {
 
 const mockInferenceResult: EmotionInferenceResult = {
   dominant_emotion: "happy",
+  dominant_emotion_id: "happy",
   label_zh: "開心語調",
   confidence: 0.95,
   probabilities: [
-    { label: "happy", label_zh: "開心語調", score: 0.95 },
-    { label: "neutral", label_zh: "平淡語氣", score: 0.05 },
+    { id: "happy", label: "happy", label_zh: "開心語調", score: 0.95 },
+    { id: "neutral", label: "neutral", label_zh: "平淡語氣", score: 0.05 },
   ],
   mapped_cue: "happy",
   latency_ms: 12.5,
@@ -81,6 +113,7 @@ describe("EmotionModelPanel", () => {
   let root: Root;
 
   beforeEach(() => {
+    currentLocale = "zh";
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -114,7 +147,7 @@ describe("EmotionModelPanel", () => {
     expect(container.textContent).toContain("下载模型");
     expect(container.textContent).toContain("手动导入包体");
     expect(container.textContent).toContain("导入模型目录");
-    expect(container.textContent).toContain("打开目录");
+    expect(container.textContent).toContain("打开存储目录");
   });
 
   it("triggers openEmotionModelDir when open directory button is clicked", async () => {
@@ -123,7 +156,7 @@ describe("EmotionModelPanel", () => {
     });
 
     const openDirBtn = Array.from(container.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("打开目录")
+      b.textContent?.includes("打开存储目录")
     );
     expect(openDirBtn).toBeDefined();
 
@@ -359,7 +392,45 @@ describe("EmotionModelPanel", () => {
     });
 
     expect(bridge.inferEmotion).toHaveBeenCalled();
-    expect(container.textContent).toContain("開心語調");
+    // In Chinese locale, translates stable emotion ID "happy" via zh.json rather than backend label_zh "開心語調"
+    expect(container.textContent).toContain("开心语调");
+    expect(container.textContent).not.toContain("開心語調");
+    expect(container.textContent).toContain("平淡语气");
+    expect(container.textContent).toContain("置信度");
+    expect(container.textContent).toContain("耗时");
+    expect(container.textContent).toContain("触发表情: happy");
+  });
+
+  it("renders emotion labels and UI text in English when locale is en", async () => {
+    currentLocale = "en";
+    vi.mocked(bridge.getEmotionModelStatus).mockResolvedValue(mockInstalledStatus);
+
+    await act(async () => {
+      root.render(createElement(EmotionModelPanel));
+    });
+
+    expect(container.textContent).toContain("Emotion Inference Playground");
+    const testButton = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Infer Emotion")
+    );
+    expect(testButton).toBeDefined();
+
+    await act(async () => {
+      testButton?.click();
+    });
+
+    expect(bridge.inferEmotion).toHaveBeenCalled();
+    // Verifies frontend maps stable emotion IDs to English translations
+    expect(container.textContent).toContain("Happy");
+    expect(container.textContent).toContain("Neutral");
+    expect(container.textContent).toContain("Confidence");
+    expect(container.textContent).toContain("Latency");
+    expect(container.textContent).toContain("Trigger Cue: happy");
+    // Verifies no Chinese leak occurs in English locale
+    expect(container.textContent).not.toContain("開心語調");
+    expect(container.textContent).not.toContain("开心语调");
+    expect(container.textContent).not.toContain("置信度");
+    expect(container.textContent).not.toContain("耗时");
   });
 
   it("renders corrupted model state with repair button and triggers download", async () => {
@@ -382,6 +453,32 @@ describe("EmotionModelPanel", () => {
     });
 
     expect(bridge.downloadEmotionModel).toHaveBeenCalled();
+  });
+
+  it("renders detected local model button and triggers import when clicked", async () => {
+    vi.mocked(bridge.getEmotionModelStatus).mockResolvedValue({
+      ...mockUninstalledStatus,
+      local_cache_available: true,
+      local_cache_path: "D:\\Kokoro-Engine\\scratch\\emotion_onnx_export",
+    });
+    vi.mocked(bridge.importEmotionModelPackage).mockResolvedValue(mockInstalledStatus);
+
+    await act(async () => {
+      root.render(createElement(EmotionModelPanel));
+    });
+
+    expect(container.textContent).toContain("载入检测到的本地模型");
+
+    const loadLocalBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("载入检测到的本地模型")
+    );
+    expect(loadLocalBtn).toBeDefined();
+
+    await act(async () => {
+      loadLocalBtn?.click();
+    });
+
+    expect(bridge.importEmotionModelPackage).toHaveBeenCalledWith("D:\\Kokoro-Engine\\scratch\\emotion_onnx_export");
   });
 });
 
