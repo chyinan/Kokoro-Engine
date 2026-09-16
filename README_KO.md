@@ -253,6 +253,27 @@ Kokoro Engine에 기여해 주신 모든 분들께 감사드립니다.
       <br />
       <sub>@Initsnow</sub>
     </td>
+    <td align="center">
+      <a href="https://github.com/huwany1">
+        <img src="https://avatars.githubusercontent.com/u/154432693?v=4" alt="@huwany1" width="88" height="88" />
+      </a>
+      <br />
+      <sub>@huwany1</sub>
+    </td>
+    <td align="center">
+      <a href="https://github.com/classical-coderrr">
+        <img src="https://avatars.githubusercontent.com/u/153351622?v=4" alt="@classical-coderrr" width="88" height="88" />
+      </a>
+      <br />
+      <sub>@classical-coderrr</sub>
+    </td>
+    <td align="center">
+      <a href="https://github.com/xilingjie">
+        <img src="https://avatars.githubusercontent.com/u/215126570?v=4" alt="@xilingjie" width="88" height="88" />
+      </a>
+      <br />
+      <sub>@xilingjie</sub>
+    </td>
   </tr>
 </table>
 
