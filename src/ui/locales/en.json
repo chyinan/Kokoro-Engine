@@ -438,13 +438,13 @@
         "model": {
             "emotion_model": {
                 "title": "Local Lightweight ONNX Emotion Model (Chinese-Emotion-Small)",
-                "desc": "On-device millisecond-level Chinese 8-dimension emotion detection, powering Live2D micro-expressions and TTS tone conditioning.",
+                "desc": "On-device millisecond-level Chinese 8-dimension emotion detection (~1.1GB full-precision model), powering Live2D micro-expressions and TTS tone conditioning.",
                 "status_installed": "Ready",
                 "status_active": "Active",
                 "status_disabled": "Disabled",
                 "status_not_installed": "Not Installed",
                 "status_corrupt": "Corrupted",
-                "download_btn": "Download Model (~25MB)",
+                "download_btn": "Download Model (~1.1GB)",
                 "repair_btn": "Repair Model",
                 "downloading": "Downloading… {{downloaded}} / {{total}}",
                 "checking": "Checking model files...",

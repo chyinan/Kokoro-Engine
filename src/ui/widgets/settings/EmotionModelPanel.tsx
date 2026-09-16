@@ -180,9 +180,9 @@ export function EmotionModelPanel() {
         setProgress({
             stage: "checking",
             message: t("settings.model.emotion_model.checking", { defaultValue: "检查模型资源中..." }),
-            current_file: "model.onnx",
+            current_file: "chinese-emotion-small-onnx.zip",
             file_index: 1,
-            file_count: 5,
+            file_count: 1,
             downloaded_bytes: 0,
             total_bytes: null,
         });
@@ -281,12 +281,12 @@ export function EmotionModelPanel() {
                                 })}
                             </span>
                             <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                                INT8 ~25MB
+                                FP32 ~1.1GB
                             </span>
                         </div>
                         <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
                             {t("settings.model.emotion_model.desc", {
-                                defaultValue: "端侧毫秒级中文 8 维情感识别，无缝驱动 Live2D 微表情与 TTS 语调",
+                                defaultValue: "端侧毫秒级中文 8 维情感识别 (~1.1GB 全精度模型)，无缝驱动 Live2D 微表情与 TTS 语调",
                             })}
                         </p>
                     </div>
@@ -427,7 +427,7 @@ export function EmotionModelPanel() {
                                 >
                                     <Download size={14} />
                                     {t("settings.model.emotion_model.download_btn", {
-                                        defaultValue: "下载模型 (~25MB)",
+                                        defaultValue: "下载模型 (~1.1GB)",
                                     })}
                                 </button>
 

@@ -438,13 +438,13 @@
         "model": {
             "emotion_model": {
                 "title": "本地轻量级 ONNX 情感模型 (Chinese-Emotion-Small)",
-                "desc": "端侧毫秒级中文 8 维情感识别，无缝驱动 Live2D 微表情与 TTS 语调。",
+                "desc": "端侧毫秒级中文 8 维情感识别 (~1.1GB 全精度模型)，无缝驱动 Live2D 微表情与 TTS 语调。",
                 "status_installed": "已就绪",
                 "status_active": "运行中",
                 "status_disabled": "已停用",
                 "status_not_installed": "未安装",
                 "status_corrupt": "模型损坏",
-                "download_btn": "下载模型 (~25MB)",
+                "download_btn": "下载模型 (~1.1GB)",
                 "repair_btn": "修复模型",
                 "downloading": "下载中… {{downloaded}} / {{total}}",
                 "checking": "正在检查模型文件...",

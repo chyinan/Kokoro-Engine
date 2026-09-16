@@ -15,6 +15,15 @@ pub const MODEL_PAGE_URL: &str = "https://huggingface.co/Johnson8187/Chinese-Emo
 pub const MODEL_DIR_NAME: &str = "models--Johnson8187--Chinese-Emotion-Small";
 pub const MODEL_REF_NAME: &str = "main";
 pub const MODEL_FALLBACK_ENDPOINT: &str = "https://hf-mirror.com";
+pub const MODEL_ARCHIVE_NAME: &str = "chinese-emotion-small-onnx.zip";
+pub const OFFICIAL_RELEASE_TAG: &str = "v0.4.0";
+pub const OFFICIAL_RELEASE_URL: &str = "https://github.com/huwany1/Kokoro-Engine/releases/download/v0.4.0/chinese-emotion-small-onnx.zip";
+pub const OFFICIAL_LATEST_RELEASE_URL: &str = "https://github.com/huwany1/Kokoro-Engine/releases/latest/download/chinese-emotion-small-onnx.zip";
+pub const DEFAULT_CDN_MIRRORS: &[&str] = &[
+    "https://ghproxy.net/",
+    "https://mirror.ghproxy.com/",
+    "https://gh-proxy.com/",
+];
 
 pub const EMOTION_LABELS: [(&str, &str); 8] = [
     ("neutral", "平淡語氣"),
@@ -803,7 +812,10 @@ pub fn get_emotion_model_status() -> EmotionModelStatus {
     let memory_bytes = if is_active {
         engine_instance().read().ok().and_then(|guard| {
             if guard.is_some() {
-                Some(35 * 1024 * 1024)
+                let onnx_size = std::fs::metadata(&model_path)
+                    .map(|m| m.len() as usize)
+                    .unwrap_or(35 * 1024 * 1024);
+                Some(onnx_size + 20 * 1024 * 1024)
             } else {
                 None
             }
@@ -818,7 +830,7 @@ pub fn get_emotion_model_status() -> EmotionModelStatus {
         is_valid,
         error_message,
         repo_id: MODEL_REPO.to_string(),
-        download_url: MODEL_PAGE_URL.to_string(),
+        download_url: OFFICIAL_RELEASE_URL.to_string(),
         install_dir: snapshot_dir.to_string_lossy().into_owned(),
         model_path: model_path.to_string_lossy().into_owned(),
         required_files: required_model_files()
@@ -895,6 +907,144 @@ pub fn uninstall_emotion_model() -> Result<EmotionModelStatus, String> {
     Ok(get_emotion_model_status())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmotionDownloadCandidate {
+    Archive { url: String, label: String },
+    Endpoint { base_url: String, label: String },
+}
+
+pub fn resolve_download_candidates() -> Vec<EmotionDownloadCandidate> {
+    let mut candidates = Vec::new();
+
+    // 1. Official GitHub Release canonical assets (Primary out-of-the-box distribution)
+    candidates.push(EmotionDownloadCandidate::Archive {
+        url: OFFICIAL_RELEASE_URL.to_string(),
+        label: format!("官方 GitHub Release ({})", OFFICIAL_RELEASE_TAG),
+    });
+    candidates.push(EmotionDownloadCandidate::Archive {
+        url: OFFICIAL_LATEST_RELEASE_URL.to_string(),
+        label: "官方 GitHub Release (latest)".to_string(),
+    });
+
+    // 2. Official Release CDN mirrors (ghproxy etc. for fast mainland China access)
+    for mirror in DEFAULT_CDN_MIRRORS {
+        let mirror_clean = mirror.trim_end_matches('/');
+        candidates.push(EmotionDownloadCandidate::Archive {
+            url: format!("{}/{}", mirror_clean, OFFICIAL_RELEASE_URL),
+            label: format!("官方 Release CDN 加速镜像 ({})", mirror_clean),
+        });
+    }
+
+    // 3. Optional developer environment variable override
+    if let Ok(custom_url) = std::env::var("KOKORO_EMOTION_MODEL_URL") {
+        let trimmed = custom_url.trim();
+        if !trimmed.is_empty() {
+            if trimmed.ends_with(".zip") || trimmed.contains(".zip?") {
+                candidates.insert(
+                    0,
+                    EmotionDownloadCandidate::Archive {
+                        url: trimmed.to_string(),
+                        label: "自定义模型包 (KOKORO_EMOTION_MODEL_URL)".to_string(),
+                    },
+                );
+            } else {
+                candidates.insert(
+                    0,
+                    EmotionDownloadCandidate::Endpoint {
+                        base_url: trimmed.trim_end_matches('/').to_string(),
+                        label: "自定义模型端点 (KOKORO_EMOTION_MODEL_URL)".to_string(),
+                    },
+                );
+            }
+        }
+    }
+
+    // 4. Upstream Hugging Face endpoints (fallback probe for individual files if upstream adds ONNX)
+    for endpoint in emotion_model_endpoints() {
+        candidates.push(EmotionDownloadCandidate::Endpoint {
+            base_url: endpoint.clone(),
+            label: format!("Hugging Face ({})", endpoint),
+        });
+    }
+
+    candidates
+}
+
+pub fn is_zip_file(path: &Path) -> bool {
+    let mut buf = [0u8; 4];
+    if let Ok(mut f) = std::fs::File::open(path) {
+        use std::io::Read;
+        if f.read_exact(&mut buf).is_ok() {
+            return buf == [0x50, 0x4B, 0x03, 0x04] || buf == [0x50, 0x4B, 0x05, 0x06];
+        }
+    }
+    false
+}
+
+pub fn clean_staging_files(staging_dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(staging_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                let _ = std::fs::remove_file(p);
+            } else if p.is_dir() {
+                let _ = std::fs::remove_dir_all(p);
+            }
+        }
+    }
+}
+
+/// Safely extracts emotion model files from a zip archive into `staging_dir`.
+///
+/// Features:
+/// - Zip-Slip traversal protection: ensures all entries are confined to `staging_dir`
+/// - Canonical model mapping: maps `model.int8.onnx` or `model.onnx` -> `model.onnx`
+/// - Extracts only `REQUIRED_FILES` (model.onnx, config.json, tokenizer.json, tokenizer_config.json, special_tokens_map.json)
+pub fn unpack_emotion_zip<R: std::io::Read + std::io::Seek>(
+    mut archive: zip::ZipArchive<R>,
+    staging_dir: &Path,
+) -> Result<usize, String> {
+    let mut extracted_count = 0;
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("读取压缩包条目失败: {}", e))?;
+
+        if entry.is_dir() {
+            continue;
+        }
+
+        // Security: Guard against Zip Slip directory traversal
+        let enclosed_name = match entry.enclosed_name() {
+            Some(p) => p.to_path_buf(),
+            None => continue,
+        };
+
+        let file_name = match enclosed_name.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+
+        let target_file_name = if file_name == "model.int8.onnx" || file_name == "model.onnx" {
+            "model.onnx"
+        } else if REQUIRED_FILES.contains(&file_name.as_str()) {
+            file_name.as_str()
+        } else {
+            continue;
+        };
+
+        let dest_path = staging_dir.join(target_file_name);
+        let mut dest_file = std::fs::File::create(&dest_path)
+            .map_err(|e| format!("创建暂存文件 {} 失败: {}", target_file_name, e))?;
+        std::io::copy(&mut entry, &mut dest_file)
+            .map_err(|e| format!("解压文件 {} 失败: {}", target_file_name, e))?;
+        extracted_count += 1;
+    }
+
+    Ok(extracted_count)
+}
+
 fn emotion_model_endpoint() -> String {
     std::env::var("HF_ENDPOINT")
         .unwrap_or_else(|_| "https://huggingface.co".to_string())
@@ -963,7 +1113,7 @@ Kokoro-Engine 本地中文轻量级情感模型 (Chinese-Emotion-Small) 离线�
 
 【必需文件清单 / Required Files】
 本目录下必须包含以下 5 个模型组件文件：
-1. model.onnx               - ONNX 格式的情感推理模型权重 (~25MB INT8 或原生权重)
+1. model.onnx               - ONNX 格式的情感推理模型权重 (~1.1GB FP32 或 INT8 权重)
 2. config.json              - 模型架构与 8 种中文情感分类标签配置
 3. tokenizer.json           - Hugging Face Fast Tokenizer 分词词表
 4. tokenizer_config.json    - 分词器超参配置
@@ -1242,44 +1392,9 @@ pub fn import_emotion_model_package(source_path: &str) -> Result<EmotionModelSta
             if extension == "zip" {
                 let file =
                     std::fs::File::open(path).map_err(|e| format!("打开 ZIP 文件失败: {}", e))?;
-                let mut archive = zip::ZipArchive::new(file)
+                let archive = zip::ZipArchive::new(file)
                     .map_err(|e| format!("解析 ZIP 压缩包失败: {}", e))?;
-
-                for i in 0..archive.len() {
-                    let mut entry = archive
-                        .by_index(i)
-                        .map_err(|e| format!("读取压缩包条目失败: {}", e))?;
-
-                    if entry.is_dir() {
-                        continue;
-                    }
-
-                    // Security: Guard against Zip Slip directory traversal
-                    let enclosed_name = match entry.enclosed_name() {
-                        Some(p) => p.to_path_buf(),
-                        None => continue,
-                    };
-
-                    let file_name = match enclosed_name.file_name().and_then(|n| n.to_str()) {
-                        Some(name) => name.to_string(),
-                        None => continue,
-                    };
-
-                    let target_file_name =
-                        if file_name == "model.int8.onnx" || file_name == "model.onnx" {
-                            "model.onnx"
-                        } else if REQUIRED_FILES.contains(&file_name.as_str()) {
-                            file_name.as_str()
-                        } else {
-                            continue;
-                        };
-
-                    let dest_path = staging_dir.join(target_file_name);
-                    let mut dest_file = std::fs::File::create(&dest_path)
-                        .map_err(|e| format!("创建暂存文件 {} 失败: {}", target_file_name, e))?;
-                    std::io::copy(&mut entry, &mut dest_file)
-                        .map_err(|e| format!("解压文件 {} 失败: {}", target_file_name, e))?;
-                }
+                unpack_emotion_zip(archive, &staging_dir)?;
             } else if extension == "onnx" {
                 let dest_path = staging_dir.join("model.onnx");
                 std::fs::copy(path, &dest_path)
@@ -1380,58 +1495,66 @@ where
         }
     }
 
-    // Repair uses a complete independent candidate. Reusing unchecked files would make
-    // repeated repair attempts preserve corruption.
-    let files_to_download: Vec<String> = REQUIRED_FILES
-        .iter()
-        .map(|file| (*file).to_string())
-        .collect();
-    let file_count = files_to_download.len();
     let emit_progress = Arc::new(emit_progress);
 
     // Staging isolation directory: never write partial or corrupt files directly to snapshot_dir
     let staging_dir = repo_dir.join(format!(".staging.download.{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&staging_dir).map_err(|e| format!("创建下载暂存区失败: {}", e))?;
 
-    let endpoints = emotion_model_endpoints();
+    struct StagingGuard<'a>(&'a Path);
+    impl<'a> Drop for StagingGuard<'a> {
+        fn drop(&mut self) {
+            if self.0.exists() {
+                let _ = std::fs::remove_dir_all(self.0);
+            }
+        }
+    }
+    let staging_guard = StagingGuard(&staging_dir);
+
+    let candidates = resolve_download_candidates();
     let client = reqwest::Client::builder()
         .user_agent("kokoro-engine/0.4.0")
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| format!("Failed to build reqwest client: {}", e))?;
 
-    let download_result = async {
-        for (index, file_name) in files_to_download.iter().enumerate() {
-            let target_path = emotion_model_file_path(&staging_dir, file_name)?;
-            let mut download_ok = false;
-            let mut last_err = String::new();
+    let mut download_succeeded = false;
+    let mut failure_reasons: Vec<String> = Vec::new();
 
-            for endpoint in &endpoints {
-                let url = emotion_model_file_url(endpoint, file_name);
-                let progress_sender = emit_progress.clone();
-                let fname = file_name.clone();
+    for candidate in &candidates {
+        match candidate {
+            EmotionDownloadCandidate::Archive { url, label } => {
+                tracing::info!(target: "ai", "[Emotion] Attempting archive download from {}: {}", label, url);
+                let archive_tmp_path = staging_dir.join("package.tmp.zip");
+                let archive_name = MODEL_ARCHIVE_NAME.to_string();
 
-                emit_progress(build_download_progress(
+                let _ = emit_progress(build_download_progress(
                     "downloading",
-                    format!("正在下载 {} ({}/{})", file_name, index + 1, file_count),
-                    file_name.clone(),
-                    index + 1,
-                    file_count,
+                    format!("正在下载情感模型包 (~1.1GB) [{}]", label),
+                    archive_name.clone(),
+                    1,
+                    1,
                     0,
                     None,
-                ))?;
+                ));
+
+                let progress_sender = emit_progress.clone();
+                let progress_label = label.clone();
+                let progress_archive_name = archive_name.clone();
 
                 let dl_res = crate::utils::download::download_file_with_progress(
                     &client,
-                    &url,
-                    &target_path,
+                    url,
+                    &archive_tmp_path,
                     crate::utils::download::DownloadOptions::default(),
                     Arc::new(move |p| {
                         progress_sender(build_download_progress(
                             "downloading",
-                            format!("正在下载 {} ({}/{})", fname, index + 1, file_count),
-                            fname.clone(),
-                            index + 1,
-                            file_count,
+                            format!("正在下载情感模型包 (~1.1GB) [{}]", progress_label),
+                            progress_archive_name.clone(),
+                            1,
+                            1,
                             p.downloaded_bytes,
                             p.total_bytes,
                         ))
@@ -1439,79 +1562,244 @@ where
                 )
                 .await;
 
-                match dl_res {
-                    Ok(_) => {
-                        download_ok = true;
-                        break;
-                    }
-                    Err(err) => {
-                        last_err = err;
-                    }
+                if let Err(err) = dl_res {
+                    tracing::warn!(target: "ai", "[Emotion] Archive download failed from {}: {}", label, err);
+                    failure_reasons.push(format!("{}: {}", label, err));
+                    let _ = std::fs::remove_file(&archive_tmp_path);
+                    continue;
                 }
-            }
 
-            if !download_ok {
-                // Check local fallback directory (e.g. scratch/emotion_onnx_export)
-                let local_fallbacks = [
-                    PathBuf::from("scratch/emotion_onnx_export").join(file_name),
-                    PathBuf::from("../scratch/emotion_onnx_export").join(file_name),
-                ];
-                let mut recovered = false;
-                for fb in &local_fallbacks {
-                    if fb.exists() && std::fs::copy(fb, &target_path).is_ok() {
-                        recovered = true;
-                        break;
-                    }
+                // Verify magic bytes (reject HTML error page spoofing)
+                if !is_zip_file(&archive_tmp_path) {
+                    tracing::warn!(target: "ai", "[Emotion] Downloaded file from {} is not a valid ZIP archive (possible HTML error response)", label);
+                    failure_reasons.push(format!("{}: 返回内容不是合法 ZIP (疑似 HTML 响应)", label));
+                    let _ = std::fs::remove_file(&archive_tmp_path);
+                    continue;
                 }
-                if !recovered {
-                    let err_msg = if last_err.contains("404") {
-                        format!("上游源未提供原生 {} (HTTP 404)。请使用【手动导入】选取离线模型包，或点击【打开存储目录】查阅部署指引。", file_name)
-                    } else {
-                        format!("下载 {} 失败: {}。国内网络如受限，建议使用【手动导入】或【打开存储目录】放置模型包。", file_name, last_err)
+
+                let _ = emit_progress(build_download_progress(
+                    "extracting",
+                    "正在解压模型组件 (~1.1GB)，请稍候...".to_string(),
+                    MODEL_ARCHIVE_NAME.to_string(),
+                    1,
+                    1,
+                    0,
+                    None,
+                ));
+
+                // Unpack archive
+                let unpack_res = (|| -> Result<(), String> {
+                    let file = std::fs::File::open(&archive_tmp_path)
+                        .map_err(|e| format!("打开下载的压缩包失败: {}", e))?;
+                    let archive = zip::ZipArchive::new(file)
+                        .map_err(|e| format!("解析下载的压缩包失败: {}", e))?;
+                    unpack_emotion_zip(archive, &staging_dir)?;
+                    Ok(())
+                })();
+
+                // Immediately remove the 1.1GB tmp zip archive to reclaim disk space before validation
+                let _ = std::fs::remove_file(&archive_tmp_path);
+
+                if let Err(err) = unpack_res {
+                    tracing::warn!(target: "ai", "[Emotion] Unpack failed for {}: {}", label, err);
+                    failure_reasons.push(format!("{}: 解压失败 ({})", label, err));
+                    clean_staging_files(&staging_dir);
+                    continue;
+                }
+
+                // Validate fast inspection
+                if let Err(err) = inspect_model_files_fast(&staging_dir) {
+                    tracing::warn!(target: "ai", "[Emotion] Fast inspection failed for {}: {}", label, err);
+                    failure_reasons.push(format!("{}: 组件质检未通过 ({})", label, err));
+                    clean_staging_files(&staging_dir);
+                    continue;
+                }
+
+                // Deep validate
+                let _ = emit_progress(build_download_progress(
+                    "verifying",
+                    "正在校验模型权重完整性与推理能力...".to_string(),
+                    "model.onnx".to_string(),
+                    1,
+                    1,
+                    0,
+                    None,
+                ));
+
+                let candidate_dir = staging_dir.clone();
+                let validate_res = tokio::task::spawn_blocking(move || {
+                    validate_model_files_deep(&candidate_dir)
+                })
+                .await
+                .map_err(|e| format!("模型验证任务失败: {}", e))?;
+
+                if let Err(err) = validate_res {
+                    tracing::warn!(target: "ai", "[Emotion] Deep validation failed for {}: {}", label, err);
+                    failure_reasons.push(format!("{}: 深度推理验证失败 ({})", label, err));
+                    clean_staging_files(&staging_dir);
+                    continue;
+                }
+
+                download_succeeded = true;
+                break;
+            }
+            EmotionDownloadCandidate::Endpoint { base_url, label } => {
+                tracing::info!(target: "ai", "[Emotion] Attempting individual files download from {}: {}", label, base_url);
+                let files_to_download: Vec<String> = REQUIRED_FILES.iter().map(|f| (*f).to_string()).collect();
+                let file_count = files_to_download.len();
+                let mut endpoint_ok = true;
+
+                for (index, file_name) in files_to_download.iter().enumerate() {
+                    let target_path = match emotion_model_file_path(&staging_dir, file_name) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            endpoint_ok = false;
+                            failure_reasons.push(format!("{}: 路径解析失败 ({})", label, e));
+                            break;
+                        }
                     };
-                    return Err(err_msg);
+
+                    let url = emotion_model_file_url(base_url, file_name);
+                    let progress_sender = emit_progress.clone();
+                    let fname = file_name.clone();
+
+                    let _ = emit_progress(build_download_progress(
+                        "downloading",
+                        format!("正在下载 {} ({}/{}) [{}]", file_name, index + 1, file_count, label),
+                        file_name.clone(),
+                        index + 1,
+                        file_count,
+                        0,
+                        None,
+                    ));
+
+                    let dl_res = crate::utils::download::download_file_with_progress(
+                        &client,
+                        &url,
+                        &target_path,
+                        crate::utils::download::DownloadOptions::default(),
+                        Arc::new(move |p| {
+                            progress_sender(build_download_progress(
+                                "downloading",
+                                format!("正在下载 {} ({}/{})", fname, index + 1, file_count),
+                                fname.clone(),
+                                index + 1,
+                                file_count,
+                                p.downloaded_bytes,
+                                p.total_bytes,
+                            ))
+                        }),
+                    )
+                    .await;
+
+                    if let Err(err) = dl_res {
+                        tracing::warn!(target: "ai", "[Emotion] File {} download failed from {}: {}", file_name, label, err);
+                        failure_reasons.push(format!("{} ({}): {}", label, file_name, err));
+                        endpoint_ok = false;
+                        break;
+                    }
+                }
+
+                if endpoint_ok {
+                    if let Err(err) = inspect_model_files_fast(&staging_dir) {
+                        tracing::warn!(target: "ai", "[Emotion] Fast inspection failed for {}: {}", label, err);
+                        failure_reasons.push(format!("{}: 组件质检未通过 ({})", label, err));
+                        clean_staging_files(&staging_dir);
+                        continue;
+                    }
+
+                    let _ = emit_progress(build_download_progress(
+                        "verifying",
+                        "正在校验模型权重完整性...".to_string(),
+                        "model.onnx".to_string(),
+                        file_count,
+                        file_count,
+                        0,
+                        None,
+                    ));
+
+                    let candidate_dir = staging_dir.clone();
+                    let validate_res = tokio::task::spawn_blocking(move || {
+                        validate_model_files_deep(&candidate_dir)
+                    })
+                    .await
+                    .map_err(|e| format!("模型验证任务失败: {}", e))?;
+
+                    if let Err(err) = validate_res {
+                        tracing::warn!(target: "ai", "[Emotion] Deep validation failed for {}: {}", label, err);
+                        failure_reasons.push(format!("{}: 深度推理验证失败 ({})", label, err));
+                        clean_staging_files(&staging_dir);
+                        continue;
+                    }
+
+                    download_succeeded = true;
+                    break;
+                } else {
+                    clean_staging_files(&staging_dir);
                 }
             }
         }
-
-        emit_progress(build_download_progress(
-            "verifying",
-            "正在校验模型权重完整性...".to_string(),
-            "model.onnx".to_string(),
-            file_count,
-            file_count,
-            0,
-            None,
-        ))?;
-
-        let candidate = staging_dir.clone();
-        tokio::task::spawn_blocking(move || {
-            validate_model_files_deep(&candidate)?;
-            promote_validated_staging(&candidate, true)
-        })
-        .await
-        .map_err(|error| format!("模型验证任务失败: {}", error))?
     }
-    .await;
 
-    // Clean up staging directory unconditionally
-    if let Err(error) = std::fs::remove_dir_all(&staging_dir) {
-        if staging_dir.exists() {
-            tracing::warn!(target: "ai", "[Emotion] Failed to remove download staging {}: {}", staging_dir.display(), error);
+    if !download_succeeded {
+        // Check local scratch fallback
+        let local_fallbacks = [
+            PathBuf::from("scratch/emotion_onnx_export"),
+            PathBuf::from("../scratch/emotion_onnx_export"),
+        ];
+        let mut local_recovered = false;
+        for fb in &local_fallbacks {
+            if fb.is_dir()
+                && copy_required_files_from_dir(fb, &staging_dir).is_ok()
+                && inspect_model_files_fast(&staging_dir).is_ok()
+                && validate_model_files_deep(&staging_dir).is_ok()
+            {
+                local_recovered = true;
+                tracing::info!(target: "ai", "[Emotion] Recovered model from local development fallback: {}", fb.display());
+                break;
+            }
+        }
+
+        if !local_recovered {
+            let error_details = if failure_reasons.is_empty() {
+                "无可用下载候选源".to_string()
+            } else {
+                failure_reasons.join("; ")
+            };
+
+            let err_msg = format!(
+                "下载情感模型失败。已尝试官方 Release CDN、加速镜像与 Hugging Face 节点，均未能成功获取。\n\
+                失败详情: {}\n\
+                \n\
+                由于上游官方源仅提供 safetensors 格式，且当前网络环境下下载完整 ONNX 模型包 (~1.1GB) 受阻：\n\
+                1. 您可直接在浏览器中打开官方 Release 页面下载离线包 ({}):\n   {}\n\
+                2. 下载完成后，在软件面板中点击【导入已下载的离线包 (.zip)】即可一键安装启用。",
+                error_details, MODEL_ARCHIVE_NAME, OFFICIAL_RELEASE_URL
+            );
+            return Err(err_msg);
         }
     }
 
-    download_result?;
+    // Safely promote candidate into live snapshot
+    let candidate = staging_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        promote_validated_staging(&candidate, true)
+    })
+    .await
+    .map_err(|error| format!("模型发布任务失败: {}", error))??;
 
-    emit_progress(build_download_progress(
+    // Disarm staging guard as staging_dir has been renamed/promoted
+    std::mem::forget(staging_guard);
+
+    let _ = emit_progress(build_download_progress(
         "ready",
         "情感模型已就绪并启动".to_string(),
         "model.onnx".to_string(),
-        file_count,
-        file_count,
+        1,
+        1,
         0,
         None,
-    ))?;
+    ));
 
     Ok(get_emotion_model_status())
 }
@@ -2168,5 +2456,121 @@ mod tests {
 
         let _ = save_emotion_settings(&EmotionSettings { enabled: true });
         IS_ENABLED.store(true, Ordering::Release);
+    }
+
+    #[test]
+    fn test_resolve_download_candidates_order() {
+        let candidates = resolve_download_candidates();
+        assert!(!candidates.is_empty());
+        // First candidate should be canonical official GitHub release
+        match &candidates[0] {
+            EmotionDownloadCandidate::Archive { url, label } => {
+                assert_eq!(url, OFFICIAL_RELEASE_URL);
+                assert!(label.contains("官方 GitHub Release"));
+            }
+            _ => panic!("Expected first candidate to be Archive with OFFICIAL_RELEASE_URL"),
+        }
+
+        // Must include CDN mirrors
+        let has_cdn = candidates.iter().any(|c| match c {
+            EmotionDownloadCandidate::Archive { url, .. } => url.contains("ghproxy"),
+            _ => false,
+        });
+        assert!(has_cdn, "Candidates should include CDN mirror options");
+
+        // Test custom URL override via environment variable
+        let custom_test_url = "https://custom.mirror.org/chinese-emotion-small-onnx.zip";
+        let _env = EnvVarGuard::set("KOKORO_EMOTION_MODEL_URL", Path::new(custom_test_url));
+        let overridden = resolve_download_candidates();
+        match &overridden[0] {
+            EmotionDownloadCandidate::Archive { url, label } => {
+                assert_eq!(url, custom_test_url);
+                assert!(label.contains("KOKORO_EMOTION_MODEL_URL"));
+            }
+            _ => panic!("Expected custom URL to take first priority"),
+        }
+    }
+
+    #[test]
+    fn test_is_zip_file_validation() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let html_path = temp_dir.path().join("error.html");
+        std::fs::write(&html_path, b"<!DOCTYPE html><html><body>404 Not Found</body></html>").unwrap();
+        assert!(!is_zip_file(&html_path), "HTML file must not be detected as ZIP");
+
+        let zip_path = temp_dir.path().join("test.zip");
+        // Valid empty ZIP header
+        std::fs::write(&zip_path, &[0x50, 0x4B, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        assert!(is_zip_file(&zip_path), "Valid zip header must be recognized");
+    }
+
+    #[test]
+    fn test_unpack_emotion_zip_valid_and_normalization() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let staging_dir = temp_dir.path().join("staging");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+
+        // Create an in-memory zip containing model.int8.onnx and config.json
+        let mut zip_buffer = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut zip_buffer);
+            let options = zip::write::SimpleFileOptions::default();
+
+            writer.start_file("model.int8.onnx", options).unwrap();
+            use std::io::Write;
+            writer.write_all(b"fake model onnx content").unwrap();
+
+            writer.start_file("config.json", options).unwrap();
+            writer.write_all(b"{\"num_labels\": 8}").unwrap();
+
+            writer.start_file("ignore_this.txt", options).unwrap();
+            writer.write_all(b"extra file").unwrap();
+
+            writer.finish().unwrap();
+        }
+
+        zip_buffer.set_position(0);
+        let archive = zip::ZipArchive::new(zip_buffer).unwrap();
+        let count = unpack_emotion_zip(archive, &staging_dir).unwrap();
+
+        assert_eq!(count, 2);
+        // model.int8.onnx must be normalized to model.onnx
+        assert!(staging_dir.join("model.onnx").is_file());
+        assert!(!staging_dir.join("model.int8.onnx").exists());
+        assert!(staging_dir.join("config.json").is_file());
+        assert!(!staging_dir.join("ignore_this.txt").exists());
+    }
+
+    #[test]
+    fn test_unpack_emotion_zip_slip_protection() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let staging_dir = temp_dir.path().join("staging");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+
+        let mut zip_buffer = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut zip_buffer);
+            let options = zip::write::SimpleFileOptions::default();
+
+            // Malicious entry attempting path traversal
+            writer.start_file("../outside.txt", options).unwrap();
+            use std::io::Write;
+            writer.write_all(b"evil content").unwrap();
+
+            writer.finish().unwrap();
+        }
+
+        zip_buffer.set_position(0);
+        let archive = zip::ZipArchive::new(zip_buffer).unwrap();
+        let count = unpack_emotion_zip(archive, &staging_dir).unwrap();
+
+        assert_eq!(count, 0);
+        assert!(!temp_dir.path().join("outside.txt").exists());
+    }
+
+    #[test]
+    fn test_status_download_url_points_to_official_release() {
+        let status = get_emotion_model_status();
+        assert_eq!(status.download_url, OFFICIAL_RELEASE_URL);
     }
 }
