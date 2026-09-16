@@ -265,6 +265,10 @@ export function EmotionModelPanel() {
         "哼，我才不在意你刚才说了什么呢，不要理你啦！",
     ];
 
+    const isCorrupted = Boolean(
+        status && !status.is_valid && (status.installed || Boolean(status.error_message))
+    );
+
     return (
         <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)]/80 backdrop-blur-md overflow-hidden transition-all shadow-sm">
             {/* Header */}
@@ -291,13 +295,13 @@ export function EmotionModelPanel() {
                 {/* Status indicator pill */}
                 <div className="flex items-center gap-2">
                     {status ? (
-                        status.installed ? (
-                            !status.is_valid ? (
-                                <span className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
-                                    {t("settings.model.emotion_model.status_corrupt")}
-                                </span>
-                            ) : status.is_active ? (
+                        isCorrupted ? (
+                            <span className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                                <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
+                                {t("settings.model.emotion_model.status_corrupt")}
+                            </span>
+                        ) : status.installed ? (
+                            status.is_active ? (
                                 <span className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 shadow-sm shadow-emerald-500/10">
                                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                                     {t("settings.model.emotion_model.status_active")}
@@ -409,7 +413,77 @@ export function EmotionModelPanel() {
                 {/* Operations Row */}
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                     <div className="flex flex-wrap items-center gap-2.5">
-                        {!status?.installed ? (
+                        {isCorrupted ? (
+                            <>
+                                <button
+                                    onClick={handleDownload}
+                                    disabled={isDownloading || isActionLoading}
+                                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 active:scale-95 disabled:opacity-50 transition-all shadow-sm shadow-rose-600/20"
+                                >
+                                    <RefreshCw size={13} className={isDownloading ? "animate-spin" : ""} />
+                                    {t("settings.model.emotion_model.repair_btn")}
+                                </button>
+
+                                <button
+                                    onClick={() => handleManualImport({ directory: false })}
+                                    disabled={isActionLoading || isDownloading}
+                                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/10 transition-colors"
+                                    title={t("settings.model.emotion_model.reimport_file_btn")}
+                                >
+                                    <FolderArchive size={13} />
+                                    {t("settings.model.emotion_model.reimport_file_btn")}
+                                </button>
+
+                                <button
+                                    onClick={() => handleManualImport({ directory: true })}
+                                    disabled={isActionLoading || isDownloading}
+                                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/10 transition-colors"
+                                    title={t("settings.model.emotion_model.reimport_dir_btn")}
+                                >
+                                    <FolderInput size={13} />
+                                    {t("settings.model.emotion_model.reimport_dir_btn")}
+                                </button>
+
+                                <button
+                                    onClick={handleOpenDirectory}
+                                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] bg-white/5 hover:bg-white/10 border border-white/5 transition-colors"
+                                >
+                                    <FolderOpen size={13} />
+                                    {t("settings.model.emotion_model.open_dir_btn")}
+                                </button>
+
+                                {/* Uninstall button */}
+                                {!showUninstallConfirm ? (
+                                    <button
+                                        onClick={() => setShowUninstallConfirm(true)}
+                                        disabled={isActionLoading || isDownloading}
+                                        className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-[var(--color-text-muted)] hover:text-rose-400 hover:bg-rose-500/10 border border-transparent hover:border-rose-500/20 transition-colors"
+                                    >
+                                        <Trash2 size={13} />
+                                        {t("settings.model.emotion_model.uninstall_btn")}
+                                    </button>
+                                ) : (
+                                    <div className="flex items-center gap-2 bg-rose-500/10 border border-rose-500/30 px-3 py-1.5 rounded-lg">
+                                        <span className="text-xs text-rose-300 font-medium">
+                                            {t("settings.model.emotion_model.confirm_prompt")}
+                                        </span>
+                                        <button
+                                            onClick={handleUninstall}
+                                            disabled={isActionLoading}
+                                            className="px-2.5 py-1 text-xs rounded bg-rose-500 text-white font-medium hover:bg-rose-600 active:scale-95"
+                                        >
+                                            {t("settings.model.emotion_model.confirm_btn")}
+                                        </button>
+                                        <button
+                                            onClick={() => setShowUninstallConfirm(false)}
+                                            className="px-2.5 py-1 text-xs rounded bg-white/10 text-[var(--color-text-secondary)] hover:bg-white/15"
+                                        >
+                                            {t("settings.model.emotion_model.cancel_btn")}
+                                        </button>
+                                    </div>
+                                )}
+                            </>
+                        ) : !status?.installed ? (
                             <>
                                 {status?.local_cache_available && status?.local_cache_path && (
                                     <button
@@ -481,33 +555,22 @@ export function EmotionModelPanel() {
                             </>
                         ) : (
                             <>
-                                {!status.is_valid ? (
-                                    <button
-                                        onClick={handleDownload}
-                                        disabled={isDownloading || isActionLoading}
-                                        className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 active:scale-95 disabled:opacity-50 transition-all shadow-sm shadow-rose-600/20"
-                                    >
-                                        <RefreshCw size={13} className={isDownloading ? "animate-spin" : ""} />
-                                        {t("settings.model.emotion_model.repair_btn")}
-                                    </button>
-                                ) : (
-                                    /* Start / Stop Toggle */
-                                    <button
-                                        onClick={handleToggleActive}
-                                        disabled={isActionLoading || isDownloading}
-                                        className={clsx(
-                                             "flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all border",
-                                             status.is_active
-                                                 ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25"
-                                                 : "bg-white/5 border-white/10 text-[var(--color-text-secondary)] hover:bg-white/10"
-                                        )}
-                                    >
-                                        <Power size={13} className={status.is_active ? "text-emerald-400" : "text-slate-400"} />
-                                        {status.is_active
-                                            ? t("settings.model.emotion_model.btn_stop")
-                                            : t("settings.model.emotion_model.btn_start")}
-                                    </button>
-                                )}
+                                /* Start / Stop Toggle */
+                                <button
+                                    onClick={handleToggleActive}
+                                    disabled={isActionLoading || isDownloading}
+                                    className={clsx(
+                                         "flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all border",
+                                         status.is_active
+                                             ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25"
+                                             : "bg-white/5 border-white/10 text-[var(--color-text-secondary)] hover:bg-white/10"
+                                    )}
+                                >
+                                    <Power size={13} className={status.is_active ? "text-emerald-400" : "text-slate-400"} />
+                                    {status.is_active
+                                        ? t("settings.model.emotion_model.btn_stop")
+                                        : t("settings.model.emotion_model.btn_start")}
+                                </button>
 
                                 <button
                                     onClick={() => handleManualImport({ directory: false })}
@@ -571,17 +634,17 @@ export function EmotionModelPanel() {
                         )}
                     </div>
 
-                    {status?.installed && (
+                    {(status?.installed || isCorrupted) && (
                         <div className="text-[11px] text-[var(--color-text-muted)] font-mono">
-                            {status.install_dir
+                            {status?.install_dir
                                 ? t("settings.model.emotion_model.installed_at", { path: status.install_dir })
                                 : t("settings.model.emotion_model.status_installed")}
                         </div>
                     )}
                 </div>
 
-                {/* Emotion Playground (Available when model is installed) */}
-                {status?.installed && (
+                {/* Emotion Playground (Available when model is installed and valid) */}
+                {status?.installed && status?.is_valid && (
                     <div className="mt-4 pt-4 border-t border-[var(--color-border)]/50 space-y-3">
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-1.5">

@@ -433,7 +433,7 @@ describe("EmotionModelPanel", () => {
     expect(container.textContent).not.toContain("耗时");
   });
 
-  it("renders corrupted model state with repair button and triggers download", async () => {
+  it("renders corrupted model state with repair button, recovery actions, and hides playground", async () => {
     vi.mocked(bridge.getEmotionModelStatus).mockResolvedValue(mockCorruptedStatus);
 
     await act(async () => {
@@ -448,11 +448,58 @@ describe("EmotionModelPanel", () => {
     );
     expect(repairBtn).toBeDefined();
 
+    // Verify recovery actions are available
+    const reimportFileBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.getAttribute("title")?.includes("重新导入文件") || b.textContent?.includes("重新导入文件")
+    );
+    expect(reimportFileBtn).toBeDefined();
+
+    const reimportDirBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.getAttribute("title")?.includes("重新导入目录") || b.textContent?.includes("重新导入目录")
+    );
+    expect(reimportDirBtn).toBeDefined();
+
+    const openDirBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("打开存储目录")
+    );
+    expect(openDirBtn).toBeDefined();
+
+    const uninstallBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("卸载模型")
+    );
+    expect(uninstallBtn).toBeDefined();
+
+    // Crucial: Playground must NOT be rendered when model is corrupted / invalid
+    expect(container.textContent).not.toContain("情感测算演练场");
+    expect(container.textContent).not.toContain("测算情感");
+
     await act(async () => {
       repairBtn?.click();
     });
 
     expect(bridge.downloadEmotionModel).toHaveBeenCalled();
+  });
+
+  it("handles corrupted model defensively even if installed is false when error_message is present", async () => {
+    vi.mocked(bridge.getEmotionModelStatus).mockResolvedValue({
+      ...mockCorruptedStatus,
+      installed: false,
+    });
+
+    await act(async () => {
+      root.render(createElement(EmotionModelPanel));
+    });
+
+    expect(container.textContent).toContain("模型损坏");
+    expect(container.textContent).toContain("model.onnx 尺寸过小");
+
+    const repairBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("修复模型")
+    );
+    expect(repairBtn).toBeDefined();
+
+    expect(container.textContent).not.toContain("情感测算演练场");
+    expect(container.textContent).not.toContain("测算情感");
   });
 
   it("renders detected local model button and triggers import when clicked", async () => {

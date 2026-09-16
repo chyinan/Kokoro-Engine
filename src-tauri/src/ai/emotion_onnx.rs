@@ -327,6 +327,12 @@ pub const MIN_ONNX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024; // 10MB
 pub const MIN_CONFIG_FILE_SIZE_BYTES: u64 = 10; // 10 bytes
 
 fn default_model_cache_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Ok(test_path) = std::env::var("KOKORO_EMOTION_CACHE_TEST_DIR") {
+            return PathBuf::from(test_path);
+        }
+    }
     dirs_next::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("com.chyin.kokoro")
@@ -847,13 +853,23 @@ pub fn get_emotion_model_status() -> EmotionModelStatus {
     let missing_files = missing_required_model_files(&snapshot_dir);
     let model_path = snapshot_dir.join("model.onnx");
     let files_present = missing_files.is_empty();
+    let has_existing_files = snapshot_dir.is_dir()
+        && std::fs::read_dir(&snapshot_dir)
+            .map(|mut it| it.next().is_some())
+            .unwrap_or(false);
 
     let (installed, is_valid, error_message) = if files_present {
         match inspect_model_files_fast(&snapshot_dir) {
             Ok(_) if MODEL_IS_VALIDATED.load(Ordering::Acquire) => (true, true, None),
             Ok(_) => (true, false, get_last_load_error()),
-            Err(err) => (false, false, Some(err)),
+            Err(err) => (true, false, Some(err)),
         }
+    } else if has_existing_files {
+        (
+            true,
+            false,
+            Some(format!("缺失必需模型组件: {}", missing_files.join(", "))),
+        )
     } else {
         (false, false, None)
     };
@@ -2913,6 +2929,50 @@ mod tests {
     fn test_status_download_url_points_to_official_release() {
         let status = get_emotion_model_status();
         assert_eq!(status.download_url, OFFICIAL_RELEASE_URL);
+    }
+
+    #[test]
+    fn test_status_corrupted_model_reports_installed_with_invalid_state() {
+        let _lock = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let cache_dir = temp_dir.path().join("models");
+        let snapshot_dir = cache_dir
+            .join(MODEL_DIR_NAME)
+            .join("snapshots")
+            .join(MODEL_REF_NAME);
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+
+        std::fs::write(snapshot_dir.join("model.onnx"), b"short data").unwrap();
+        for &req in REQUIRED_FILES {
+            if req != "model.onnx" {
+                std::fs::write(snapshot_dir.join(req), b"{}").unwrap();
+            }
+        }
+
+        let _env = EnvVarGuard::set("KOKORO_EMOTION_CACHE_TEST_DIR", &cache_dir);
+
+        let status = get_emotion_model_status();
+        assert!(status.installed, "Corrupted files on disk must report installed=true");
+        assert!(!status.is_valid, "Corrupted files must report is_valid=false");
+        assert!(!status.is_active, "Corrupted files must not be active");
+        assert!(status.error_message.is_some(), "Corrupted files must report error message");
+        assert!(status.error_message.unwrap().contains("model.onnx 尺寸过小"));
+    }
+
+    #[test]
+    fn test_status_empty_model_dir_reports_uninstalled() {
+        let _lock = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let cache_dir = temp_dir.path().join("models");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        let _env = EnvVarGuard::set("KOKORO_EMOTION_CACHE_TEST_DIR", &cache_dir);
+
+        let status = get_emotion_model_status();
+        assert!(!status.installed, "Empty directory must report installed=false");
+        assert!(!status.is_valid, "Empty directory must report is_valid=false");
+        assert!(!status.is_active, "Empty directory must not be active");
+        assert!(status.error_message.is_none(), "Uninstalled must not report error message");
     }
 
     #[test]
