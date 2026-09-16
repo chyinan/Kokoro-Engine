@@ -835,6 +835,7 @@ fn build_validated_engine(dir: &Path) -> Result<EmotionEngine, String> {
 
 pub fn get_emotion_model_status() -> EmotionModelStatus {
     ensure_settings_loaded();
+    ensure_storage_recovered();
     let initial_snapshot_dir = default_model_snapshot_dir();
     let initial_files_present = missing_required_model_files(&initial_snapshot_dir).is_empty();
 
@@ -1312,6 +1313,7 @@ fn build_download_progress(
 }
 
 pub fn open_emotion_model_dir() -> Result<String, String> {
+    ensure_storage_recovered();
     let snapshot_dir = default_model_snapshot_dir();
     std::fs::create_dir_all(&snapshot_dir)
         .map_err(|e| format!("Failed to create model directory: {}", e))?;
@@ -1414,11 +1416,286 @@ fn ensure_snapshot_parent(snapshot_dir: &Path) -> Result<(), String> {
     })
 }
 
-/// Promote one fully validated sibling directory into the fixed live location.
+pub const PROMOTION_JOURNAL_FILE_NAME: &str = ".promotion_journal.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PromotionStage {
+    Prepared,
+    LiveBackedUp,
+    StagingPromoted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionJournal {
+    pub transaction_id: String,
+    pub timestamp: u64,
+    pub staging_dir: PathBuf,
+    pub snapshot_dir: PathBuf,
+    pub backup_dir: PathBuf,
+    pub failed_dir: PathBuf,
+    pub stage: PromotionStage,
+}
+
+impl PromotionJournal {
+    pub fn new(
+        staging_dir: &Path,
+        snapshot_dir: &Path,
+        backup_dir: &Path,
+        failed_dir: &Path,
+    ) -> Self {
+        Self {
+            transaction_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            staging_dir: staging_dir.to_path_buf(),
+            snapshot_dir: snapshot_dir.to_path_buf(),
+            backup_dir: backup_dir.to_path_buf(),
+            failed_dir: failed_dir.to_path_buf(),
+            stage: PromotionStage::Prepared,
+        }
+    }
+
+    pub fn journal_path(repo_dir: &Path) -> PathBuf {
+        repo_dir.join(PROMOTION_JOURNAL_FILE_NAME)
+    }
+
+    pub fn write_atomic(&self, repo_dir: &Path) -> Result<(), String> {
+        let final_path = Self::journal_path(repo_dir);
+        let tmp_path = repo_dir.join(format!(".promotion_journal.tmp.{}", uuid::Uuid::new_v4()));
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("序列化升级日志失败: {}", e))?;
+
+        let mut file = std::fs::File::create(&tmp_path)
+            .map_err(|e| format!("创建临时升级日志失败 {}: {}", tmp_path.display(), e))?;
+        use std::io::Write;
+        file.write_all(json.as_bytes())
+            .map_err(|e| format!("写入临时升级日志失败: {}", e))?;
+        file.sync_all()
+            .map_err(|e| format!("刷盘临时升级日志失败: {}", e))?;
+        drop(file);
+
+        std::fs::rename(&tmp_path, &final_path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("持久化升级日志失败: {}", e)
+        })?;
+        Ok(())
+    }
+
+    pub fn load(repo_dir: &Path) -> Option<Self> {
+        let final_path = Self::journal_path(repo_dir);
+        if !final_path.is_file() {
+            return None;
+        }
+        let content = std::fs::read_to_string(&final_path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    pub fn remove(repo_dir: &Path) {
+        let final_path = Self::journal_path(repo_dir);
+        if final_path.exists() {
+            let _ = std::fs::remove_file(&final_path);
+        }
+    }
+}
+
+/// Prunes leftover temporary files, orphaned staging directories (if no mutation is in flight),
+/// and trims older failed quarantine directories to prevent unbounded disk usage.
+pub fn prune_stale_storage_artifacts(repo_dir: &Path) {
+    if !repo_dir.exists() {
+        return;
+    }
+
+    let can_clean_staging = !MODEL_MUTATION_IN_PROGRESS.load(Ordering::Acquire);
+    let mut failed_dirs: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(repo_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with(".promotion_journal.tmp.") {
+                    let _ = std::fs::remove_file(&path);
+                } else if path.is_dir() {
+                    if can_clean_staging
+                        && (name.starts_with(".staging.download.")
+                            || name.starts_with(".staging.import."))
+                    {
+                        tracing::info!(
+                            target: "ai",
+                            "[Emotion] 清理历史孤立暂存目录: {}",
+                            path.display()
+                        );
+                        let _ = std::fs::remove_dir_all(&path);
+                    } else if name.starts_with(".failed.") {
+                        let mtime = entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        failed_dirs.push((path, mtime));
+                    }
+                }
+            }
+        }
+    }
+
+    // Retain at most 2 latest failed directories for debugging; prune older ones
+    if failed_dirs.len() > 2 {
+        failed_dirs.sort_by_key(|a| std::cmp::Reverse(a.1));
+        for (f_dir, _) in &failed_dirs[2..] {
+            let _ = std::fs::remove_dir_all(f_dir);
+        }
+    }
+}
+
+/// Scans the model repository for interrupted promotions, crash remnants, or leftover
+/// backups, and deterministically restores or repairs the live snapshot location.
 ///
-/// This provides process-local rollback for ordinary I/O/load failures. It is not a
-/// crash-consistent filesystem transaction: the fixed live path requires the Windows
-/// ONNX Session to be dropped before directory renames can proceed.
+/// Returns `Ok(true)` if a recovery restoration was performed, `Ok(false)` if no recovery
+/// was needed, or an `Err` if a fatal I/O failure prevented recovery.
+pub fn recover_interrupted_promotions(
+    repo_dir: &Path,
+    snapshot_dir: &Path,
+) -> Result<bool, String> {
+    if !repo_dir.exists() {
+        return Ok(false);
+    }
+
+    let mut restored = false;
+
+    // 1. Scan for any .backup.* directories
+    let mut backup_dirs: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(repo_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with(".backup.") {
+                        let mtime = entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        backup_dirs.push((path, mtime));
+                    }
+                }
+            }
+        }
+    }
+    // Sort descending by modified time (newest first)
+    backup_dirs.sort_by_key(|a| std::cmp::Reverse(a.1));
+
+    // 2. Assess health of snapshot_dir
+    let snapshot_exists = snapshot_dir.exists();
+    let snapshot_is_valid = snapshot_exists && inspect_model_files_fast(snapshot_dir).is_ok();
+
+    if snapshot_is_valid {
+        // Live snapshot is healthy. Any leftover backup is an uncleaned residue.
+        for (b_dir, _) in &backup_dirs {
+            tracing::info!(
+                target: "ai",
+                "[Emotion] 快照目录完整健康，安全清理残留备份目录: {}",
+                b_dir.display()
+            );
+            let _ = std::fs::remove_dir_all(b_dir);
+        }
+        PromotionJournal::remove(repo_dir);
+    } else {
+        // Live snapshot is missing or corrupted/incomplete.
+        // Search for the latest valid backup to restore from.
+        for (b_dir, _) in &backup_dirs {
+            if inspect_model_files_fast(b_dir).is_ok() {
+                tracing::warn!(
+                    target: "ai",
+                    "[Emotion] 检测到未完成或异常中断的升级事务，正在从有效备份恢复模型快照: {} -> {}",
+                    b_dir.display(),
+                    snapshot_dir.display()
+                );
+
+                // If snapshot_dir currently exists on disk (e.g. corrupt/incomplete candidate),
+                // quarantine or remove it so Windows rename can proceed without collision.
+                if snapshot_dir.exists() {
+                    let failed_dir = repo_dir.join(format!(".failed.{}", uuid::Uuid::new_v4()));
+                    if let Err(e) = std::fs::rename(snapshot_dir, &failed_dir) {
+                        tracing::warn!(
+                            target: "ai",
+                            "[Emotion] 无法隔离异常快照至 {}: {}; 直接移除以继续恢复",
+                            failed_dir.display(),
+                            e
+                        );
+                        let _ = std::fs::remove_dir_all(snapshot_dir);
+                    }
+                }
+
+                ensure_snapshot_parent(snapshot_dir)?;
+
+                if let Err(e) = std::fs::rename(b_dir, snapshot_dir) {
+                    tracing::error!(
+                        target: "ai",
+                        "[Emotion] 从备份 {} 恢复快照 {} 失败: {}",
+                        b_dir.display(),
+                        snapshot_dir.display(),
+                        e
+                    );
+                } else {
+                    restored = true;
+                    tracing::info!(
+                        target: "ai",
+                        "[Emotion] 成功从备份 {} 恢复模型快照",
+                        b_dir.display()
+                    );
+                    PromotionJournal::remove(repo_dir);
+                    break;
+                }
+            } else {
+                tracing::warn!(
+                    target: "ai",
+                    "[Emotion] 清理已损坏的残留备份目录: {}",
+                    b_dir.display()
+                );
+                let _ = std::fs::remove_dir_all(b_dir);
+            }
+        }
+
+        if restored {
+            // Clean up any remaining older backup dirs
+            for (b_dir, _) in &backup_dirs {
+                if b_dir.exists() {
+                    let _ = std::fs::remove_dir_all(b_dir);
+                }
+            }
+        } else if !backup_dirs.is_empty() {
+            // All backup dirs were checked
+            PromotionJournal::remove(repo_dir);
+        }
+    }
+
+    // 3. Clean up orphaned staging, temp journal files, and excessive failed directories
+    prune_stale_storage_artifacts(repo_dir);
+
+    Ok(restored)
+}
+
+/// Idempotent startup hook ensuring model storage is fully consistent and recovered
+/// before any status inspection or inference engine initialization.
+pub fn ensure_storage_recovered() {
+    let repo_dir = default_model_repo_dir();
+    let snapshot_dir = default_model_snapshot_dir();
+    let _lifecycle = LIFECYCLE_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ = recover_interrupted_promotions(&repo_dir, &snapshot_dir);
+}
+
+/// Promote one fully validated sibling directory into the fixed live location with
+/// crash-consistent transaction journaling and self-healing startup recovery.
+///
+/// If any crash, power cut, or failure occurs during directory replacement:
+/// 1. Transaction journal `.promotion_journal.json` persists intent and stage.
+/// 2. If the live snapshot is missing or corrupted, startup self-healing detects the
+///    leftover `.backup.*` directory, quarantines any damaged candidate, and restores
+///    the verified prior model snapshot.
+/// 3. Orphaned `.staging.*` and leftover `.backup.*` directories are automatically
+///    reclaimed on recovery.
 fn promote_validated_staging(staging_dir: &Path, enable_after: bool) -> Result<(), String> {
     let snapshot_dir = default_model_snapshot_dir();
     let repo_dir = default_model_repo_dir();
@@ -1438,8 +1715,15 @@ fn promote_validated_staging(staging_dir: &Path, enable_after: bool) -> Result<(
     // Lock order is lifecycle -> engine. Every loader/publisher follows this order.
     *engine = None;
     let had_live_snapshot = snapshot_dir.exists();
+
+    // Initialize promotion journal for crash-consistency
+    let mut journal = PromotionJournal::new(staging_dir, &snapshot_dir, &backup_dir, &failed_dir);
     if had_live_snapshot {
+        if let Err(e) = journal.write_atomic(&repo_dir) {
+            tracing::warn!(target: "ai", "[Emotion] 记录升级准备日志失败: {}", e);
+        }
         if let Err(error) = std::fs::rename(&snapshot_dir, &backup_dir) {
+            PromotionJournal::remove(&repo_dir);
             let reload_error = if previous_enabled {
                 build_validated_engine(&snapshot_dir)
                     .map(|restored| *engine = Some(restored))
@@ -1458,6 +1742,8 @@ fn promote_validated_staging(staging_dir: &Path, enable_after: bool) -> Result<(
             );
             return Err(message);
         }
+        journal.stage = PromotionStage::LiveBackedUp;
+        let _ = journal.write_atomic(&repo_dir);
     }
 
     if let Err(promote_error) = std::fs::rename(staging_dir, &snapshot_dir) {
@@ -1466,6 +1752,7 @@ fn promote_validated_staging(staging_dir: &Path, enable_after: bool) -> Result<(
         } else {
             None
         };
+        PromotionJournal::remove(&repo_dir);
         let reload_error = if rollback_error.is_none() && had_live_snapshot && previous_enabled {
             build_validated_engine(&snapshot_dir)
                 .map(|restored| *engine = Some(restored))
@@ -1496,6 +1783,11 @@ fn promote_validated_staging(staging_dir: &Path, enable_after: bool) -> Result<(
         return Err(message);
     }
 
+    if had_live_snapshot {
+        journal.stage = PromotionStage::StagingPromoted;
+        let _ = journal.write_atomic(&repo_dir);
+    }
+
     match build_validated_engine(&snapshot_dir) {
         Ok(validated_engine) => {
             if enable_after {
@@ -1520,6 +1812,7 @@ fn promote_validated_staging(staging_dir: &Path, enable_after: bool) -> Result<(
                 if let Err(error) = std::fs::remove_dir_all(&backup_dir) {
                     tracing::warn!(target: "ai", "[Emotion] Failed to remove model backup {}: {}", backup_dir.display(), error);
                 }
+                PromotionJournal::remove(&repo_dir);
             }
             Ok(())
         }
@@ -1530,6 +1823,7 @@ fn promote_validated_staging(staging_dir: &Path, enable_after: bool) -> Result<(
             } else {
                 None
             };
+            PromotionJournal::remove(&repo_dir);
             let reload_error = if had_live_snapshot
                 && quarantine_error.is_none()
                 && rollback_error.is_none()
@@ -1575,6 +1869,7 @@ fn promote_validated_staging(staging_dir: &Path, enable_after: bool) -> Result<(
 
 pub fn import_emotion_model_package(source_path: &str) -> Result<EmotionModelStatus, String> {
     ensure_settings_loaded();
+    ensure_storage_recovered();
     let _lease = ModelMutationLease::acquire("import")?;
     let path = Path::new(source_path);
     if !path.exists() {
@@ -1678,6 +1973,7 @@ where
     F: Fn(EmotionModelDownloadProgress) -> Result<(), String> + Send + Sync + 'static,
 {
     ensure_settings_loaded();
+    ensure_storage_recovered();
     let _lease = ModelMutationLease::acquire("download")?;
     let (cancel_handle, cancel_token) = crate::utils::download::DownloadCancelHandle::new();
     {
@@ -2173,6 +2469,7 @@ where
 
 fn get_or_load_engine() -> Result<(), String> {
     ensure_settings_loaded();
+    ensure_storage_recovered();
     if !IS_ENABLED.load(Ordering::Acquire) {
         return Err("Emotion engine is disabled".to_string());
     }
@@ -3265,6 +3562,168 @@ mod tests {
         let int8_zip = scratch_export.join(MODEL_INT8_ARCHIVE_NAME);
         std::fs::write(&int8_zip, b"mock int8 zip").unwrap();
         assert_eq!(detect_local_scratch_source(), Some(int8_zip));
+    }
+
+    fn create_mock_valid_model_dir(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for &req in REQUIRED_FILES {
+            let p = dir.join(req);
+            if req == "model.onnx" {
+                let f = std::fs::File::create(&p).unwrap();
+                f.set_len(11 * 1024 * 1024).unwrap(); // >= 10MB
+            } else if req == "config.json" {
+                std::fs::write(&p, b"{\"valid\": true, \"label2id\": {\"neutral\": 0, \"caring\": 1, \"happy\": 2, \"angry\": 3, \"sad\": 4, \"questioning\": 5, \"surprised\": 6, \"disgusted\": 7}}").unwrap();
+            } else {
+                std::fs::write(&p, b"{\"dummy\": true}").unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn test_recovery_restores_valid_backup_when_snapshot_missing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_dir = temp_dir.path().join(MODEL_DIR_NAME);
+        let snapshot_dir = repo_dir.join("snapshots").join(MODEL_REF_NAME);
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let backup_dir = repo_dir.join(format!(".backup.{}", uuid::Uuid::new_v4()));
+        create_mock_valid_model_dir(&backup_dir);
+
+        assert!(!snapshot_dir.exists());
+        assert!(backup_dir.exists());
+
+        let restored = recover_interrupted_promotions(&repo_dir, &snapshot_dir).expect("recovery");
+        assert!(restored, "Should have restored snapshot from backup");
+        assert!(snapshot_dir.exists());
+        assert!(inspect_model_files_fast(&snapshot_dir).is_ok());
+        assert!(!backup_dir.exists());
+    }
+
+    #[test]
+    fn test_recovery_replaces_corrupted_snapshot_with_valid_backup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_dir = temp_dir.path().join(MODEL_DIR_NAME);
+        let snapshot_dir = repo_dir.join("snapshots").join(MODEL_REF_NAME);
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+
+        // Create corrupt snapshot
+        std::fs::write(snapshot_dir.join("model.onnx"), b"too short").unwrap();
+        for &req in REQUIRED_FILES {
+            if req != "model.onnx" {
+                std::fs::write(snapshot_dir.join(req), b"{}").unwrap();
+            }
+        }
+        assert!(inspect_model_files_fast(&snapshot_dir).is_err());
+
+        // Create valid backup
+        let backup_dir = repo_dir.join(format!(".backup.{}", uuid::Uuid::new_v4()));
+        create_mock_valid_model_dir(&backup_dir);
+
+        let restored = recover_interrupted_promotions(&repo_dir, &snapshot_dir).expect("recovery");
+        assert!(restored, "Should have restored snapshot from backup");
+        assert!(inspect_model_files_fast(&snapshot_dir).is_ok());
+        assert!(!backup_dir.exists());
+
+        // Corrupt snapshot was quarantined into .failed.*
+        let mut failed_count = 0;
+        for entry in std::fs::read_dir(&repo_dir).unwrap().flatten() {
+            if entry.file_name().to_string_lossy().starts_with(".failed.") {
+                failed_count += 1;
+            }
+        }
+        assert!(failed_count >= 1, "Corrupted snapshot must be quarantined");
+    }
+
+    #[test]
+    fn test_recovery_prunes_leftover_backup_when_snapshot_is_healthy() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_dir = temp_dir.path().join(MODEL_DIR_NAME);
+        let snapshot_dir = repo_dir.join("snapshots").join(MODEL_REF_NAME);
+        create_mock_valid_model_dir(&snapshot_dir);
+
+        let backup_dir = repo_dir.join(format!(".backup.{}", uuid::Uuid::new_v4()));
+        create_mock_valid_model_dir(&backup_dir);
+
+        let restored = recover_interrupted_promotions(&repo_dir, &snapshot_dir).expect("recovery");
+        assert!(!restored, "No recovery was needed because live snapshot was already healthy");
+        assert!(inspect_model_files_fast(&snapshot_dir).is_ok());
+        assert!(!backup_dir.exists(), "Leftover backup must be pruned");
+    }
+
+    #[test]
+    fn test_journal_atomic_write_load_and_cleanup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_dir = temp_dir.path().join(MODEL_DIR_NAME);
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let staging_dir = repo_dir.join(".staging.import.test");
+        let snapshot_dir = repo_dir.join("snapshots").join("main");
+        let backup_dir = repo_dir.join(".backup.test");
+        let failed_dir = repo_dir.join(".failed.test");
+
+        let mut journal = PromotionJournal::new(&staging_dir, &snapshot_dir, &backup_dir, &failed_dir);
+        assert_eq!(journal.stage, PromotionStage::Prepared);
+
+        journal.write_atomic(&repo_dir).unwrap();
+        assert!(PromotionJournal::journal_path(&repo_dir).is_file());
+
+        let loaded = PromotionJournal::load(&repo_dir).expect("load journal");
+        assert_eq!(loaded.transaction_id, journal.transaction_id);
+        assert_eq!(loaded.stage, PromotionStage::Prepared);
+
+        journal.stage = PromotionStage::LiveBackedUp;
+        journal.write_atomic(&repo_dir).unwrap();
+        let loaded2 = PromotionJournal::load(&repo_dir).expect("load journal stage update");
+        assert_eq!(loaded2.stage, PromotionStage::LiveBackedUp);
+
+        PromotionJournal::remove(&repo_dir);
+        assert!(PromotionJournal::load(&repo_dir).is_none());
+    }
+
+    #[test]
+    fn test_prune_stale_storage_artifacts() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_dir = temp_dir.path().join(MODEL_DIR_NAME);
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let orphan_staging1 = repo_dir.join(".staging.download.123");
+        let orphan_staging2 = repo_dir.join(".staging.import.456");
+        let tmp_journal = repo_dir.join(".promotion_journal.tmp.789");
+        std::fs::create_dir_all(&orphan_staging1).unwrap();
+        std::fs::create_dir_all(&orphan_staging2).unwrap();
+        std::fs::write(&tmp_journal, b"tmp").unwrap();
+
+        assert!(orphan_staging1.exists());
+        assert!(orphan_staging2.exists());
+        assert!(tmp_journal.exists());
+
+        prune_stale_storage_artifacts(&repo_dir);
+
+        assert!(!orphan_staging1.exists());
+        assert!(!orphan_staging2.exists());
+        assert!(!tmp_journal.exists());
+    }
+
+    #[test]
+    fn test_status_recovers_interrupted_promotion_transparently() {
+        let _lock = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let cache_dir = temp_dir.path().join("models");
+        let repo_dir = cache_dir.join(MODEL_DIR_NAME);
+        let snapshot_dir = repo_dir.join("snapshots").join(MODEL_REF_NAME);
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        // Simulate crash mid-promotion: live snapshot missing, valid backup directory exists
+        let backup_dir = repo_dir.join(format!(".backup.{}", uuid::Uuid::new_v4()));
+        create_mock_valid_model_dir(&backup_dir);
+
+        let _env = EnvVarGuard::set("KOKORO_EMOTION_CACHE_TEST_DIR", &cache_dir);
+
+        assert!(!snapshot_dir.exists());
+        let status = get_emotion_model_status();
+        assert!(status.installed, "Startup recovery must restore valid backup transparently");
+        assert!(snapshot_dir.exists(), "Snapshot directory must be restored");
+        assert!(!backup_dir.exists(), "Backup directory must be cleaned up after recovery");
     }
 }
 
