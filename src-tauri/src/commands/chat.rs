@@ -3763,35 +3763,44 @@ pub async fn stream_chat(
             });
 
         let mut local_emotion_handled = false;
-        let emotion_status = crate::ai::emotion_onnx::get_emotion_model_status();
-        if emotion_status.is_active && emotion_status.installed {
+        let emotion_text = full_response.clone();
+        let local_emotion = tokio::task::spawn_blocking(move || {
+            let status = crate::ai::emotion_onnx::get_emotion_model_status();
+            if status.is_active && status.installed {
+                crate::ai::emotion_onnx::infer_emotion(&emotion_text).ok()
+            } else {
+                None
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(inference) = local_emotion {
             tracing::info!(target: "chat", "[Chat] Trying local ONNX emotion inference for response cue");
-            if let Ok(inference) = crate::ai::emotion_onnx::infer_emotion(&full_response) {
-                if let Some(ref cue) = inference.mapped_cue {
-                    let is_valid = valid_fallback_cues
-                        .as_ref()
-                        .map(|cues| cues.contains(cue))
-                        .unwrap_or(false);
-                    if is_valid && inference.confidence >= 0.35 {
-                        tracing::info!(
-                            target: "chat",
-                            "[Chat] Local ONNX detected emotion '{}' ({:.2}) -> cue '{}' in {:.1}ms",
-                            inference.dominant_emotion,
-                            inference.confidence,
-                            cue,
-                            inference.latency_ms
-                        );
-                        let _ = app.emit(
-                            "chat-cue",
-                            serde_json::json!({
-                                "cue": cue,
-                                "source": "local-onnx-emotion",
-                                "emotion": inference.dominant_emotion,
-                                "confidence": inference.confidence,
-                            }),
-                        );
-                        local_emotion_handled = true;
-                    }
+            if let Some(ref cue) = inference.mapped_cue {
+                let is_valid = valid_fallback_cues
+                    .as_ref()
+                    .map(|cues| cues.contains(cue))
+                    .unwrap_or(false);
+                if is_valid && inference.confidence >= 0.35 {
+                    tracing::info!(
+                        target: "chat",
+                        "[Chat] Local ONNX detected emotion '{}' ({:.2}) -> cue '{}' in {:.1}ms",
+                        inference.dominant_emotion,
+                        inference.confidence,
+                        cue,
+                        inference.latency_ms
+                    );
+                    let _ = app.emit(
+                        "chat-cue",
+                        serde_json::json!({
+                            "cue": cue,
+                            "source": "local-onnx-emotion",
+                            "emotion": inference.dominant_emotion,
+                            "confidence": inference.confidence,
+                        }),
+                    );
+                    local_emotion_handled = true;
                 }
             }
         }

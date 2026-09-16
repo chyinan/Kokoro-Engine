@@ -3,8 +3,7 @@ use crate::ai::emotion_onnx::{
     download_emotion_model as ai_download_emotion_model,
     get_emotion_model_status as ai_get_emotion_model_status,
     import_emotion_model_package as ai_import_emotion_model_package,
-    infer_emotion as ai_infer_emotion,
-    open_emotion_model_dir as ai_open_emotion_model_dir,
+    infer_emotion as ai_infer_emotion, open_emotion_model_dir as ai_open_emotion_model_dir,
     toggle_emotion_model_active as ai_toggle_emotion_model_active,
     uninstall_emotion_model as ai_uninstall_emotion_model, EmotionInferenceResult,
     EmotionModelStatus,
@@ -13,7 +12,9 @@ use crate::error::KokoroError;
 
 #[tauri::command]
 pub async fn get_emotion_model_status() -> Result<EmotionModelStatus, KokoroError> {
-    Ok(ai_get_emotion_model_status())
+    tokio::task::spawn_blocking(ai_get_emotion_model_status)
+        .await
+        .map_err(|e| KokoroError::Internal(format!("Status task failed: {}", e)))
 }
 
 #[tauri::command]
@@ -32,12 +33,18 @@ pub async fn download_emotion_model(
 
 #[tauri::command]
 pub async fn uninstall_emotion_model() -> Result<EmotionModelStatus, KokoroError> {
-    ai_uninstall_emotion_model().map_err(KokoroError::Internal)
+    tokio::task::spawn_blocking(ai_uninstall_emotion_model)
+        .await
+        .map_err(|e| KokoroError::Internal(format!("Uninstall task failed: {}", e)))?
+        .map_err(KokoroError::Internal)
 }
 
 #[tauri::command]
 pub async fn toggle_emotion_model(active: bool) -> Result<EmotionModelStatus, KokoroError> {
-    ai_toggle_emotion_model_active(active).map_err(KokoroError::Internal)
+    tokio::task::spawn_blocking(move || ai_toggle_emotion_model_active(active))
+        .await
+        .map_err(|e| KokoroError::Internal(format!("Toggle task failed: {}", e)))?
+        .map_err(KokoroError::Internal)
 }
 
 #[tauri::command]
@@ -62,4 +69,3 @@ pub async fn import_emotion_model_package(
         .map_err(|e| KokoroError::Internal(format!("Import task failed: {}", e)))?
         .map_err(KokoroError::Internal)
 }
-
