@@ -449,6 +449,8 @@
                 "repair_btn": "モデルを修復",
                 "downloading": "ダウンロード中… {{downloaded}} / {{total}}",
                 "checking": "モデルファイルを確認中...",
+                "cancel_download_btn": "ダウンロードをキャンセル",
+                "cancelling": "ダウンロードをキャンセル中...",
                 "uninstall_btn": "モデルをアンインストール",
                 "confirm_prompt": "アンインストールしますか？",
                 "confirm_btn": "確認",

@@ -449,6 +449,8 @@
                 "repair_btn": "모델 복구",
                 "downloading": "다운로드 중… {{downloaded}} / {{total}}",
                 "checking": "모델 파일 확인 중...",
+                "cancel_download_btn": "다운로드 취소",
+                "cancelling": "다운로드 취소 중...",
                 "uninstall_btn": "모델 제거",
                 "confirm_prompt": "제거하시겠습니까?",
                 "confirm_btn": "확인",

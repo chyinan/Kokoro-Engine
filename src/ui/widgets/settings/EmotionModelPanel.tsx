@@ -16,10 +16,12 @@ import {
     FolderArchive,
     FolderInput,
     RefreshCw,
+    X,
 } from "lucide-react";
 import {
     getEmotionModelStatus,
     downloadEmotionModel,
+    cancelEmotionModelDownload,
     uninstallEmotionModel,
     toggleEmotionModel,
     inferEmotion,
@@ -41,7 +43,7 @@ function formatBytes(bytes: number): string {
     const k = 1024;
     const sizes = ["B", "KB", "MB", "GB"];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
 
 export function EmotionModelPanel() {
@@ -49,6 +51,7 @@ export function EmotionModelPanel() {
     const [status, setStatus] = useState<EmotionModelStatus | null>(null);
     const [progress, setProgress] = useState<EmotionModelDownloadProgress | null>(null);
     const [isDownloading, setIsDownloading] = useState(false);
+    const [isCancelling, setIsCancelling] = useState(false);
     const [isActionLoading, setIsActionLoading] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [showUninstallConfirm, setShowUninstallConfirm] = useState(false);
@@ -176,6 +179,7 @@ export function EmotionModelPanel() {
 
     const handleDownload = async () => {
         setIsDownloading(true);
+        setIsCancelling(false);
         setErrorMessage(null);
         setProgress({
             stage: "checking",
@@ -195,7 +199,20 @@ export function EmotionModelPanel() {
             setErrorMessage(getKokoroErrorMessage(err));
         } finally {
             setIsDownloading(false);
+            setIsCancelling(false);
             setProgress(null);
+        }
+    };
+
+    const handleCancelDownload = async () => {
+        setIsCancelling(true);
+        try {
+            await cancelEmotionModelDownload();
+        } catch (err) {
+            console.error("Failed to cancel emotion model download:", err);
+            setErrorMessage(getKokoroErrorMessage(err));
+        } finally {
+            setIsCancelling(false);
         }
     };
 
@@ -386,9 +403,20 @@ export function EmotionModelPanel() {
                                         total: progress?.total_bytes ? formatBytes(progress.total_bytes) : "",
                                     })}
                                 </span>
-                                <span className="font-mono text-[var(--color-text-muted)]">
-                                    {progressPercent != null ? `${progressPercent}%` : ""}
-                                </span>
+                                <div className="flex items-center gap-2.5">
+                                    <span className="font-mono text-[var(--color-text-muted)]">
+                                        {progressPercent != null ? `${progressPercent}%` : ""}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onClick={handleCancelDownload}
+                                        disabled={isCancelling}
+                                        className="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium text-rose-300 hover:text-white bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/30 transition-all disabled:opacity-50"
+                                    >
+                                        <X size={11} />
+                                        {isCancelling ? t("settings.model.emotion_model.cancelling") : t("settings.model.emotion_model.cancel_download_btn")}
+                                    </button>
+                                </div>
                             </div>
 
                             <div className="w-full h-2 bg-black/40 rounded-full overflow-hidden border border-white/5">

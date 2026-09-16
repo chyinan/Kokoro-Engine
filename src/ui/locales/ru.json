@@ -449,6 +449,8 @@
         "repair_btn": "Восстановить модель",
         "downloading": "Загрузка… {{downloaded}} / {{total}}",
         "checking": "Проверка файлов модели...",
+        "cancel_download_btn": "Отменить загрузку",
+        "cancelling": "Отмена загрузки...",
         "uninstall_btn": "Удалить модель",
         "confirm_prompt": "Подтвердить удаление?",
         "confirm_btn": "Подтвердить",

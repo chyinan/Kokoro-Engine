@@ -449,6 +449,8 @@
                 "repair_btn": "修復模型",
                 "downloading": "下載中… {{downloaded}} / {{total}}",
                 "checking": "正在檢查模型檔案...",
+                "cancel_download_btn": "取消下載",
+                "cancelling": "正在取消下載...",
                 "uninstall_btn": "解除安裝模型",
                 "confirm_prompt": "確認解除安裝?",
                 "confirm_btn": "確認",

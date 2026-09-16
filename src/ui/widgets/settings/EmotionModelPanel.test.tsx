@@ -527,5 +527,45 @@ describe("EmotionModelPanel", () => {
 
     expect(bridge.importEmotionModelPackage).toHaveBeenCalledWith("D:\\Kokoro-Engine\\scratch\\emotion_onnx_export");
   });
+
+  it("renders cancel button during download and triggers cancelEmotionModelDownload", async () => {
+    let resolveDownload: (value: EmotionModelStatus) => void = () => {};
+    const downloadPromise = new Promise<EmotionModelStatus>((resolve) => {
+      resolveDownload = resolve;
+    });
+    vi.mocked(bridge.downloadEmotionModel).mockReturnValue(downloadPromise);
+    const cancelSpy = vi.spyOn(bridge, "cancelEmotionModelDownload").mockResolvedValue(true);
+
+    await act(async () => {
+      root.render(createElement(EmotionModelPanel));
+    });
+
+    const downloadBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("下载模型")
+    );
+    expect(downloadBtn).toBeDefined();
+
+    await act(async () => {
+      downloadBtn?.click();
+    });
+
+    // Should show cancel download button while downloading
+    const cancelBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("取消下载")
+    );
+    expect(cancelBtn).toBeDefined();
+
+    await act(async () => {
+      cancelBtn?.click();
+    });
+
+    expect(cancelSpy).toHaveBeenCalled();
+
+    // Clean up pending download
+    await act(async () => {
+      resolveDownload(mockInstalledStatus);
+    });
+  });
 });
+
 

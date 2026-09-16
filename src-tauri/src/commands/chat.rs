@@ -3764,17 +3764,42 @@ pub async fn stream_chat(
 
         let mut local_emotion_handled = false;
         let emotion_text = full_response.clone();
-        let local_emotion = tokio::task::spawn_blocking(move || {
+        let local_inference_task = tokio::task::spawn_blocking(move || {
             let status = crate::ai::emotion_onnx::get_emotion_model_status();
             if status.is_active && status.installed {
                 crate::ai::emotion_onnx::infer_emotion(&emotion_text).ok()
             } else {
                 None
             }
-        })
-        .await
-        .ok()
-        .flatten();
+        });
+
+        const LOCAL_EMOTION_INFERENCE_TIMEOUT: std::time::Duration =
+            std::time::Duration::from_millis(1500);
+
+        let local_emotion = tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut cancel_rx) => {
+                tracing::info!(
+                    target: "chat",
+                    "[stream_chat] Turn {} (request {}) cancelled during local emotion inference",
+                    assistant_turn_id,
+                    client_request_id
+                );
+                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+            }
+            _ = tokio::time::sleep(LOCAL_EMOTION_INFERENCE_TIMEOUT) => {
+                tracing::warn!(
+                    target: "chat",
+                    "[stream_chat] Turn {} local emotion inference timed out after {:?}",
+                    assistant_turn_id,
+                    LOCAL_EMOTION_INFERENCE_TIMEOUT
+                );
+                None
+            }
+            res = local_inference_task => {
+                res.ok().flatten()
+            }
+        };
         if let Some(inference) = local_emotion {
             tracing::info!(target: "chat", "[Chat] Trying local ONNX emotion inference for response cue");
             if let Some(ref cue) = inference.mapped_cue {

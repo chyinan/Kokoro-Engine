@@ -449,6 +449,8 @@
                 "repair_btn": "Repair Model",
                 "downloading": "Downloading… {{downloaded}} / {{total}}",
                 "checking": "Checking model files...",
+                "cancel_download_btn": "Cancel Download",
+                "cancelling": "Cancelling download...",
                 "uninstall_btn": "Uninstall Model",
                 "confirm_prompt": "Confirm uninstall?",
                 "confirm_btn": "Confirm",

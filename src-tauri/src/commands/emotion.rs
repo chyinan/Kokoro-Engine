@@ -1,5 +1,6 @@
 // pattern: Imperative Shell
 use crate::ai::emotion_onnx::{
+    cancel_emotion_model_download as ai_cancel_emotion_model_download,
     download_emotion_model as ai_download_emotion_model,
     get_emotion_model_status as ai_get_emotion_model_status,
     import_emotion_model_package as ai_import_emotion_model_package,
@@ -32,6 +33,11 @@ pub async fn download_emotion_model(
 }
 
 #[tauri::command]
+pub async fn cancel_emotion_model_download() -> Result<bool, KokoroError> {
+    ai_cancel_emotion_model_download().map_err(KokoroError::Internal)
+}
+
+#[tauri::command]
 pub async fn uninstall_emotion_model() -> Result<EmotionModelStatus, KokoroError> {
     tokio::task::spawn_blocking(ai_uninstall_emotion_model)
         .await
@@ -49,10 +55,14 @@ pub async fn toggle_emotion_model(active: bool) -> Result<EmotionModelStatus, Ko
 
 #[tauri::command]
 pub async fn infer_emotion(text: String) -> Result<EmotionInferenceResult, KokoroError> {
-    tokio::task::spawn_blocking(move || ai_infer_emotion(&text))
-        .await
-        .map_err(|e| KokoroError::Internal(format!("Task execution error: {}", e)))?
-        .map_err(KokoroError::Internal)
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || ai_infer_emotion(&text)),
+    )
+    .await
+    .map_err(|_| KokoroError::Internal("Emotion inference timed out after 5s".to_string()))?
+    .map_err(|e| KokoroError::Internal(format!("Task execution error: {}", e)))?
+    .map_err(KokoroError::Internal)
 }
 
 #[tauri::command]

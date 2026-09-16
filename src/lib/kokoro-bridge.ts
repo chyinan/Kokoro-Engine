@@ -1144,6 +1144,10 @@ export async function downloadEmotionModel(): Promise<EmotionModelStatus> {
     return invoke<EmotionModelStatus>("download_emotion_model");
 }
 
+export async function cancelEmotionModelDownload(): Promise<boolean> {
+    return invoke<boolean>("cancel_emotion_model_download");
+}
+
 export async function uninstallEmotionModel(): Promise<EmotionModelStatus> {
     return invoke<EmotionModelStatus>("uninstall_emotion_model");
 }

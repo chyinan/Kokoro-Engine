@@ -1657,12 +1657,43 @@ pub fn import_emotion_model_package(source_path: &str) -> Result<EmotionModelSta
     Ok(get_emotion_model_status())
 }
 
+static ACTIVE_DOWNLOAD_CANCEL: std::sync::Mutex<Option<crate::utils::download::DownloadCancelHandle>> =
+    std::sync::Mutex::new(None);
+
+pub const EMOTION_DOWNLOAD_OVERALL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(1200);
+
+pub fn cancel_emotion_model_download() -> Result<bool, String> {
+    let guard = ACTIVE_DOWNLOAD_CANCEL.lock().map_err(|e| e.to_string())?;
+    if let Some(ref handle) = *guard {
+        handle.cancel();
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 pub async fn download_emotion_model<F>(emit_progress: F) -> Result<EmotionModelStatus, String>
 where
     F: Fn(EmotionModelDownloadProgress) -> Result<(), String> + Send + Sync + 'static,
 {
     ensure_settings_loaded();
     let _lease = ModelMutationLease::acquire("download")?;
+    let (cancel_handle, cancel_token) = crate::utils::download::DownloadCancelHandle::new();
+    {
+        let mut guard = ACTIVE_DOWNLOAD_CANCEL.lock().map_err(|e| e.to_string())?;
+        *guard = Some(cancel_handle);
+    }
+    struct DownloadCancelGuard;
+    impl Drop for DownloadCancelGuard {
+        fn drop(&mut self) {
+            if let Ok(mut guard) = ACTIVE_DOWNLOAD_CANCEL.lock() {
+                *guard = None;
+            }
+        }
+    }
+    let _cancel_guard = DownloadCancelGuard;
+
     let snapshot_dir = default_model_snapshot_dir();
     let repo_dir = default_model_repo_dir();
     std::fs::create_dir_all(&repo_dir)
@@ -1734,6 +1765,11 @@ where
     let mut failure_reasons: Vec<String> = Vec::new();
 
     for candidate in &candidates {
+        if cancel_token.is_cancelled() {
+            failure_reasons.push("下载已被用户取消".to_string());
+            break;
+        }
+
         match candidate {
             EmotionDownloadCandidate::Archive {
                 url,
@@ -1790,6 +1826,8 @@ where
                     &archive_tmp_path,
                     crate::utils::download::DownloadOptions {
                         max_bytes: Some(MAX_EMOTION_ARCHIVE_DOWNLOAD_BYTES),
+                        overall_timeout: Some(EMOTION_DOWNLOAD_OVERALL_TIMEOUT),
+                        cancel_token: Some(cancel_token.clone()),
                         ..Default::default()
                     },
                     Arc::new(move |p| {
@@ -1810,6 +1848,9 @@ where
                     tracing::warn!(target: "ai", "[Emotion] Archive download failed from {}: {}", label, err);
                     failure_reasons.push(format!("{}: {}", label, err));
                     let _ = std::fs::remove_file(&archive_tmp_path);
+                    if cancel_token.is_cancelled() {
+                        break;
+                    }
                     continue;
                 }
 
@@ -1912,6 +1953,12 @@ where
                 let mut endpoint_ok = true;
 
                 for (index, file_name) in files_to_download.iter().enumerate() {
+                    if cancel_token.is_cancelled() {
+                        endpoint_ok = false;
+                        failure_reasons.push("下载已被用户取消".to_string());
+                        break;
+                    }
+
                     let target_path = match emotion_model_file_path(&staging_dir, file_name) {
                         Ok(p) => p,
                         Err(e) => {
@@ -1947,6 +1994,8 @@ where
                         &target_path,
                         crate::utils::download::DownloadOptions {
                             max_bytes: Some(file_max_bytes),
+                            overall_timeout: Some(EMOTION_DOWNLOAD_OVERALL_TIMEOUT),
+                            cancel_token: Some(cancel_token.clone()),
                             ..Default::default()
                         },
                         Arc::new(move |p| {
@@ -2007,12 +2056,28 @@ where
                     break;
                 } else {
                     clean_staging_files(&staging_dir);
+                    if cancel_token.is_cancelled() {
+                        break;
+                    }
                 }
             }
         }
     }
 
     if !download_succeeded {
+        if cancel_token.is_cancelled() {
+            let _ = emit_progress(build_download_progress(
+                "cancelled",
+                "下载已被用户取消".to_string(),
+                "".to_string(),
+                0,
+                0,
+                0,
+                None,
+            ));
+            return Err("下载已被用户取消".to_string());
+        }
+
         // Check local scratch fallback
         if let Some(local_path) = detect_local_scratch_source() {
             tracing::info!(target: "ai", "[Emotion] Remote download unavailable; recovering from detected local source: {}", local_path.display());

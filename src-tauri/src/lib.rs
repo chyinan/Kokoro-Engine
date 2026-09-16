@@ -183,6 +183,7 @@ pub fn run() {
             commands::memory::download_memory_embedding_model,
             commands::emotion::get_emotion_model_status,
             commands::emotion::download_emotion_model,
+            commands::emotion::cancel_emotion_model_download,
             commands::emotion::uninstall_emotion_model,
             commands::emotion::toggle_emotion_model,
             commands::emotion::infer_emotion,
