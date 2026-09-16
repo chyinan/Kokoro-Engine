@@ -24,6 +24,7 @@ pub struct DownloadOptions {
     pub parallel_threshold_bytes: u64,
     pub parallel_chunk_bytes: u64,
     pub parallel_downloads: usize,
+    pub max_bytes: Option<u64>,
 }
 
 impl Default for DownloadOptions {
@@ -32,6 +33,7 @@ impl Default for DownloadOptions {
             parallel_threshold_bytes: DEFAULT_PARALLEL_THRESHOLD_BYTES,
             parallel_chunk_bytes: DEFAULT_PARALLEL_CHUNK_BYTES,
             parallel_downloads: DEFAULT_PARALLEL_DOWNLOADS,
+            max_bytes: None,
         }
     }
 }
@@ -52,7 +54,16 @@ pub async fn download_file_with_progress(
     let tmp_path = temporary_download_path(target_path);
     let (total_bytes, range_supported) = probe_download(client, url).await?;
 
-    if range_supported
+    if let (Some(max), Some(total)) = (options.max_bytes, total_bytes) {
+        if total > max {
+            return Err(format!(
+                "下载文件大小超过允许的最大限制 ({} 字节 > {} 字节)",
+                total, max
+            ));
+        }
+    }
+
+    let download_result = if range_supported
         && total_bytes
             .map(|bytes| bytes >= options.parallel_threshold_bytes)
             .unwrap_or(false)
@@ -73,10 +84,17 @@ pub async fn download_file_with_progress(
                 url,
                 error
             );
-            download_single(client, url, &tmp_path, total_bytes, &progress).await?;
+            download_single(client, url, &tmp_path, total_bytes, options.max_bytes, &progress).await
+        } else {
+            Ok(())
         }
     } else {
-        download_single(client, url, &tmp_path, total_bytes, &progress).await?;
+        download_single(client, url, &tmp_path, total_bytes, options.max_bytes, &progress).await
+    };
+
+    if let Err(error) = download_result {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(error);
     }
 
     let downloaded_bytes = tokio::fs::metadata(&tmp_path)
@@ -157,6 +175,7 @@ async fn download_single(
     url: &str,
     tmp_path: &Path,
     probed_total_bytes: Option<u64>,
+    max_bytes: Option<u64>,
     progress: &DownloadProgressCallback,
 ) -> Result<(), String> {
     let response = client
@@ -167,6 +186,14 @@ async fn download_single(
         .error_for_status()
         .map_err(|error| format!("Download failed: {}", error))?;
     let total_bytes = response.content_length().or(probed_total_bytes);
+    if let (Some(max), Some(total)) = (max_bytes, total_bytes) {
+        if total > max {
+            return Err(format!(
+                "下载文件大小超过允许的最大限制 ({} 字节 > {} 字节)",
+                total, max
+            ));
+        }
+    }
     let mut downloaded_bytes = 0u64;
     let mut stream = response.bytes_stream();
     let mut file = tokio::fs::File::create(tmp_path)
@@ -184,6 +211,14 @@ async fn download_single(
             .await
             .map_err(|error| format!("Failed to write download: {}", error))?;
         downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
+        if let Some(max) = max_bytes {
+            if downloaded_bytes > max {
+                return Err(format!(
+                    "下载数据量超过允许的最大限制 ({} 字节 > {} 字节)",
+                    downloaded_bytes, max
+                ));
+            }
+        }
         progress(DownloadProgress {
             downloaded_bytes,
             total_bytes,
@@ -204,6 +239,14 @@ async fn download_parallel(
     options: &DownloadOptions,
     progress: &DownloadProgressCallback,
 ) -> Result<(), String> {
+    if let Some(max) = options.max_bytes {
+        if total_bytes > max {
+            return Err(format!(
+                "下载文件大小超过允许的最大限制 ({} 字节 > {} 字节)",
+                total_bytes, max
+            ));
+        }
+    }
     let file = tokio::fs::File::create(tmp_path)
         .await
         .map_err(|error| format!("Failed to create download file: {}", error))?;
@@ -361,6 +404,7 @@ mod review_tests {
                 parallel_threshold_bytes: 1,
                 parallel_chunk_bytes: 4,
                 parallel_downloads: 2,
+                max_bytes: None,
             },
             Arc::new(|_| Ok(())),
         )
@@ -410,4 +454,35 @@ mod review_tests {
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new-content");
     }
+
+    #[tokio::test]
+    async fn download_aborts_when_exceeding_max_bytes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/too-large"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes("1234567890"))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("model.bin");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let result = download_file_with_progress(
+            &client,
+            &format!("{}/too-large", server.uri()),
+            &target,
+            DownloadOptions {
+                max_bytes: Some(5),
+                ..Default::default()
+            },
+            Arc::new(|_| Ok(())),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("超过允许的最大限制"));
+        assert!(!target.exists());
+    }
 }
+

@@ -3782,12 +3782,13 @@ pub async fn stream_chat(
                     .as_ref()
                     .map(|cues| cues.contains(cue))
                     .unwrap_or(false);
-                if is_valid && inference.confidence >= 0.35 {
+                if is_valid && inference.is_confident() {
                     tracing::info!(
                         target: "chat",
-                        "[Chat] Local ONNX detected emotion '{}' ({:.2}) -> cue '{}' in {:.1}ms",
+                        "[Chat] Local ONNX detected emotion '{}' ({:.2}, margin: {:.2}) -> cue '{}' in {:.1}ms",
                         inference.dominant_emotion,
                         inference.confidence,
+                        inference.confidence_margin(),
                         cue,
                         inference.latency_ms
                     );
@@ -3798,9 +3799,18 @@ pub async fn stream_chat(
                             "source": "local-onnx-emotion",
                             "emotion": inference.dominant_emotion,
                             "confidence": inference.confidence,
+                            "margin": inference.confidence_margin(),
                         }),
                     );
                     local_emotion_handled = true;
+                } else if is_valid {
+                    tracing::debug!(
+                        target: "chat",
+                        "[Chat] Local ONNX emotion '{}' failed confidence gate (confidence: {:.2}, margin: {:.2}, required: >=0.45, margin >=0.15), deferring to fallback cue analyzer",
+                        inference.dominant_emotion,
+                        inference.confidence,
+                        inference.confidence_margin()
+                    );
                 }
             }
         }
