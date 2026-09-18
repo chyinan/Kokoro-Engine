@@ -59,6 +59,16 @@ const CONFIG_FILES: &[&str] = &[
 /// no-ops so old backups can still be opened without restoring dead state.
 const LEGACY_IGNORED_CONFIG_FILES: &[&str] = &["emotion_state.json"];
 
+/// Tables whose rows carry an integer reference into `memories.id`. A restore
+/// that replaces `memories` must clear these even when the backup predates them,
+/// because the same integer id now belongs to a different imported memory.
+const MEMORY_REFERENCING_TABLES: &[&str] = &[
+    "memory_candidates",
+    "memory_evidence",
+    "memory_dream_proposals",
+    "memory_operations",
+];
+
 pub(crate) const MAX_BACKUP_RESOURCE_PACKAGES: usize = 64;
 pub(crate) const MAX_BACKUP_RESOURCE_FILES: usize = 2_048;
 pub(crate) const MAX_BACKUP_RESOURCE_BYTES: u64 = 512 * 1024 * 1024;
@@ -68,6 +78,9 @@ pub(crate) const MAX_BACKUP_DATABASE_BYTES: u64 = 512 * 1024 * 1024;
 /// without a strict per-file bound.
 pub(crate) const MAX_BACKUP_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_BACKUP_MANIFEST_BYTES: u64 = 64 * 1024;
+/// Current archive format. Manual and automatic exports share one value: the
+/// manifest version describes the archive layout, not the export entry point.
+pub(crate) const BACKUP_FORMAT_VERSION: &str = "2";
 
 // ── Types ────────────────────────────────────────────
 
@@ -305,7 +318,7 @@ pub struct BackupArchiveInspection {
     pub includes_provider_credentials: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct BackupStats {
     pub memories: i64,
     pub conversations: i64,
@@ -320,6 +333,20 @@ pub struct ExportResult {
     pub stats: BackupStats,
 }
 
+/// One character instance stored inside a backup.
+///
+/// Instance ids are generated per machine, so a backup taken elsewhere never
+/// reuses a local id. The preview exposes them so the user can decide, per
+/// character, whether to import it as a new instance or merge its data into an
+/// existing one.
+#[derive(Clone, Debug, Serialize)]
+pub struct BackupCharacterSummary {
+    pub id: String,
+    pub name: String,
+    pub memory_count: i64,
+    pub conversation_count: i64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ImportPreview {
     pub manifest: BackupManifest,
@@ -327,6 +354,17 @@ pub struct ImportPreview {
     pub has_configs: bool,
     pub config_files: Vec<String>,
     pub stats: BackupStats,
+    /// Empty when the backup predates the SQLite character table.
+    pub characters: Vec<BackupCharacterSummary>,
+}
+
+/// Routes the rows of one imported character to a local character instance.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CharacterMerge {
+    /// Character id as stored inside the backup.
+    pub imported_id: String,
+    /// Existing local character that receives the imported rows.
+    pub target_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,7 +372,14 @@ pub struct ImportOptions {
     pub import_database: bool,
     pub import_configs: bool,
     pub conflict_strategy: ConflictStrategy,
-    pub target_character_id: Option<String>,
+    /// Characters to merge into an existing local instance. Every imported
+    /// character that is neither listed here nor in `ignored_characters` is
+    /// imported as a new instance.
+    #[serde(default)]
+    pub character_merges: Vec<CharacterMerge>,
+    /// Characters whose rows must not be restored at all.
+    #[serde(default)]
+    pub ignored_characters: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -359,7 +404,14 @@ pub struct ImportResult {
     pub imported_conversations: i64,
     pub imported_configs: usize,
     pub imported_characters: i64,
+    /// Imported characters whose rows were routed into an existing local instance.
+    pub merged_characters: i64,
+    /// Imported characters whose rows were left out of the restore.
+    pub ignored_characters: i64,
     pub characters_json: Option<String>,
+    /// Memories the skip strategy dropped because the imported row violates a
+    /// local constraint even though its id was free.
+    pub skipped_memories: i64,
     pub debug_log: Vec<String>,
 }
 
@@ -572,9 +624,17 @@ fn commit_atomic_export(
     Ok(())
 }
 
+/// A verified, self-consistent copy of the live database taken with `VACUUM INTO`.
+struct DatabaseSnapshot {
+    bytes: Vec<u8>,
+    /// Counted from the snapshot itself, so the numbers the user sees always
+    /// describe the bytes that were archived.
+    stats: BackupStats,
+}
+
 async fn create_consistent_database_snapshot(
     source: &Path,
-) -> Result<Option<Vec<u8>>, KokoroError> {
+) -> Result<Option<DatabaseSnapshot>, KokoroError> {
     if open_regular_non_redirected_file(source, "database")?.is_none() {
         return Ok(None);
     }
@@ -621,13 +681,19 @@ async fn create_consistent_database_snapshot(
             .map_err(|error| {
                 KokoroError::Database(format!("failed to validate database snapshot: {error}"))
             })?;
+        let stats = BackupStats {
+            memories: count_rows(&validation_pool, CountTable::Memories).await,
+            conversations: count_rows(&validation_pool, CountTable::Conversations).await,
+            messages: count_rows(&validation_pool, CountTable::ConversationMessages).await,
+            configs: 0,
+        };
         validation_pool.close().await;
         if integrity != "ok" {
             return Err(KokoroError::Database(format!(
                 "database snapshot integrity check failed: {integrity}"
             )));
         }
-        Ok(bytes)
+        Ok(DatabaseSnapshot { bytes, stats })
     }
     .await;
 
@@ -1872,51 +1938,211 @@ async fn detach_import_database_best_effort(connection: &mut SqliteConnection) -
     }
 }
 
-async fn remap_imported_character_ids(
+/// Character-scoped tables rewritten when an imported character is merged into
+/// an existing local one. `conversation_messages` is reached through its
+/// conversation, which is character-scoped.
+const IMPORT_CHARACTER_SCOPED_TABLES: &[&str] = &[
+    "memories",
+    "conversations",
+    "memory_candidates",
+    "memory_evidence",
+    "memory_dream_jobs",
+    "memory_dream_proposals",
+    "memory_operations",
+    "session_summaries",
+    "conversation_summaries",
+    "memory_write_events",
+    "memory_retrieval_logs",
+];
+
+/// Validate the requested character selection against both databases.
+///
+/// A merge names a character inside the backup and a character that already
+/// exists locally; an ignore names a character that must not be restored at all.
+/// Silently accepting an unknown id would route the rows nowhere (or drop data
+/// the user never selected), so every entry is checked before the first live
+/// mutation.
+async fn validate_character_selection(
     connection: &mut SqliteConnection,
-    target_id: &str,
-) -> Result<Vec<(String, u64)>, KokoroError> {
-    let target_id = target_id.trim();
-    if target_id.is_empty() {
+    import_has_characters: bool,
+    merges: &[CharacterMerge],
+    ignored: &[String],
+) -> Result<(), KokoroError> {
+    if merges.is_empty() && ignored.is_empty() {
+        return Ok(());
+    }
+    if !import_has_characters {
         return Err(KokoroError::Validation(
-            "target character id cannot be empty".to_string(),
+            "backup has no characters table, so nothing can be merged or ignored".to_string(),
         ));
     }
 
-    let mut remapped = Vec::new();
-    for table in [
-        "memories",
-        "conversations",
-        "memory_candidates",
-        "memory_evidence",
-        "memory_dream_jobs",
-        "memory_dream_proposals",
-        "memory_operations",
-        "session_summaries",
-        "conversation_summaries",
-        "memory_write_events",
-        "memory_retrieval_logs",
-    ] {
-        let exists: Option<String> = sqlx::query_scalar(
-            "SELECT name FROM import_db.sqlite_master WHERE type = 'table' AND name = ?",
-        )
-        .bind(table)
-        .fetch_optional(&mut *connection)
-        .await?;
-        if exists.is_none() {
-            continue;
+    let mut seen = HashSet::new();
+    for merge in merges {
+        let imported_id = merge.imported_id.trim();
+        let target_id = merge.target_id.trim();
+        if imported_id.is_empty() || target_id.is_empty() {
+            return Err(KokoroError::Validation(
+                "character merge ids cannot be empty".to_string(),
+            ));
+        }
+        if !seen.insert(imported_id.to_string()) {
+            return Err(KokoroError::Validation(format!(
+                "character '{imported_id}' is mapped more than once"
+            )));
+        }
+        if imported_id == target_id {
+            return Err(KokoroError::Validation(format!(
+                "character '{imported_id}' cannot be merged into itself"
+            )));
         }
 
-        let result = sqlx::query(&format!(
-            "UPDATE import_db.{table} SET character_id = ? WHERE character_id != ?"
-        ))
-        .bind(target_id)
-        .bind(target_id)
-        .execute(&mut *connection)
-        .await?;
-        remapped.push((table.to_string(), result.rows_affected()));
+        let imported_exists: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM import_db.characters WHERE id = ?)")
+                .bind(imported_id)
+                .fetch_one(&mut *connection)
+                .await?;
+        if imported_exists == 0 {
+            return Err(KokoroError::Validation(format!(
+                "backup does not contain character '{imported_id}'"
+            )));
+        }
+
+        let target_exists: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM characters WHERE id = ?)")
+                .bind(target_id)
+                .fetch_one(&mut *connection)
+                .await?;
+        if target_exists == 0 {
+            return Err(KokoroError::Validation(format!(
+                "local character '{target_id}' does not exist"
+            )));
+        }
     }
 
+    let mut ignored_seen = HashSet::new();
+    for ignored_id in ignored {
+        let ignored_id = ignored_id.trim();
+        if ignored_id.is_empty() {
+            return Err(KokoroError::Validation(
+                "ignored character ids cannot be empty".to_string(),
+            ));
+        }
+        if !ignored_seen.insert(ignored_id.to_string()) {
+            return Err(KokoroError::Validation(format!(
+                "character '{ignored_id}' is ignored more than once"
+            )));
+        }
+        if seen.contains(ignored_id) {
+            return Err(KokoroError::Validation(format!(
+                "character '{ignored_id}' cannot be merged and ignored at the same time"
+            )));
+        }
+
+        let imported_exists: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM import_db.characters WHERE id = ?)")
+                .bind(ignored_id)
+                .fetch_one(&mut *connection)
+                .await?;
+        if imported_exists == 0 {
+            return Err(KokoroError::Validation(format!(
+                "backup does not contain character '{ignored_id}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Drop one imported character and everything it owns from the attached backup
+/// database, so an ignored character contributes no rows to the restore.
+///
+/// The backup database is a throwaway copy, so this only affects the import.
+async fn remove_imported_character(
+    connection: &mut SqliteConnection,
+    character_id: &str,
+) -> Result<u64, KokoroError> {
+    let mut removed = 0_u64;
+    // Messages are reached through their conversation, so both tables must exist.
+    if import_table_exists(connection, "conversation_messages").await?
+        && import_table_exists(connection, "conversations").await?
+    {
+        removed += sqlx::query(
+            "DELETE FROM import_db.conversation_messages WHERE conversation_id IN \
+             (SELECT id FROM import_db.conversations WHERE character_id = ?)",
+        )
+        .bind(character_id)
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| {
+            KokoroError::Database(format!(
+                "failed to drop ignored conversation messages: {error}"
+            ))
+        })?
+        .rows_affected();
+    }
+    for table in IMPORT_CHARACTER_SCOPED_TABLES {
+        if !import_table_exists(connection, table).await? {
+            continue;
+        }
+        removed += sqlx::query(&format!(
+            "DELETE FROM import_db.{table} WHERE character_id = ?"
+        ))
+        .bind(character_id)
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| {
+            KokoroError::Database(format!("failed to drop ignored {table} rows: {error}"))
+        })?
+        .rows_affected();
+    }
+    if import_table_exists(connection, "characters").await? {
+        removed += sqlx::query("DELETE FROM import_db.characters WHERE id = ?")
+            .bind(character_id)
+            .execute(&mut *connection)
+            .await
+            .map_err(|error| {
+                KokoroError::Database(format!("failed to drop ignored character row: {error}"))
+            })?
+            .rows_affected();
+    }
+    Ok(removed)
+}
+
+/// Route every row of the listed imported characters to its local target.
+///
+/// Runs inside the import transaction before any row is copied, so the merge is
+/// what the memory, conversation, and summary inserts see.
+async fn apply_import_character_merges(
+    connection: &mut SqliteConnection,
+    merges: &[CharacterMerge],
+) -> Result<Vec<(String, u64)>, KokoroError> {
+    let mut remapped = Vec::new();
+    for merge in merges {
+        let imported_id = merge.imported_id.trim();
+        let target_id = merge.target_id.trim();
+        for table in IMPORT_CHARACTER_SCOPED_TABLES {
+            let exists: Option<String> = sqlx::query_scalar(
+                "SELECT name FROM import_db.sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(table)
+            .fetch_optional(&mut *connection)
+            .await?;
+            if exists.is_none() {
+                continue;
+            }
+
+            let result = sqlx::query(&format!(
+                "UPDATE import_db.{table} SET character_id = ? WHERE character_id = ?"
+            ))
+            .bind(target_id)
+            .bind(imported_id)
+            .execute(&mut *connection)
+            .await?;
+            if result.rows_affected() > 0 {
+                remapped.push((format!("{table}:{imported_id}"), result.rows_affected()));
+            }
+        }
+    }
     Ok(remapped)
 }
 
@@ -1984,25 +2210,9 @@ async fn restore_optional_backup_tables(
         overwrite,
     )
     .await?;
-    restore_optional_table(
-        connection,
-        "conversation_summaries",
-        &[
-            "id",
-            "conversation_id",
-            "character_id",
-            "version",
-            "start_message_id",
-            "end_message_id",
-            "summary",
-            "status",
-            "failure_count",
-            "created_at",
-            "updated_at",
-        ],
-        overwrite,
-    )
-    .await?;
+    // `conversation_summaries` is handled by the caller instead: a skip import
+    // must only accept summaries for conversations that are new locally, and has
+    // to shift their message id range together with the imported messages.
     // emotion_snapshots belongs to the removed emotion subsystem. Keep its
     // migration for old databases, but do not restore dead state from backups.
     restore_optional_table(
@@ -2046,154 +2256,506 @@ async fn restore_optional_backup_tables(
     Ok(())
 }
 
-/// Skip imports keep local rows with the same integer primary key. Any
-/// imported relation that still points at such a key would silently attach to
-/// the local row, so reject the whole import before the first live mutation.
-pub(crate) async fn reject_unsafe_skip_memory_conflicts(
-    connection: &mut SqliteConnection,
+/// Copy the dream and audit tables for a full overwrite.
+///
+/// `memories` is replaced wholesale by an overwrite, so every surviving local row
+/// that points at a memory id now points at a *different* memory. Tables holding a
+/// memory reference must therefore be cleared even when the backup predates them;
+/// otherwise stale dream proposals and audit rows silently re-attach to the
+/// imported memories. Tables without a memory reference (`memory_dream_jobs`) are
+/// only touched when the backup actually carries them.
+async fn restore_memory_aux_tables_overwrite(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    debug_log: &mut Vec<String>,
 ) -> Result<(), KokoroError> {
+    for table in [
+        "memory_candidates",
+        "memory_evidence",
+        "memory_dream_jobs",
+        "memory_dream_proposals",
+        "memory_operations",
+    ] {
+        let import_has_table: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM import_db.sqlite_master WHERE type='table' AND name = ?",
+        )
+        .bind(table)
+        .fetch_optional(&mut **transaction)
+        .await?;
+        if import_has_table.is_none() && !MEMORY_REFERENCING_TABLES.contains(&table) {
+            continue;
+        }
+        let cleared = sqlx::query(&format!("DELETE FROM {table}"))
+            .execute(&mut **transaction)
+            .await?;
+        if import_has_table.is_none() {
+            tracing::info!(
+                target: "backup",
+                "[Backup] Cleared {} stale local {table} row(s): backup has no counterparts",
+                cleared.rows_affected()
+            );
+            debug_log.push(format!(
+                "cleared local {table} (absent from backup): {}",
+                cleared.rows_affected()
+            ));
+            continue;
+        }
+        sqlx::query(&format!(
+            "INSERT INTO {table} SELECT * FROM import_db.{table}"
+        ))
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
+const CONVERSATION_SUMMARY_COLUMNS: &[&str] = &[
+    "id",
+    "conversation_id",
+    "character_id",
+    "version",
+    "start_message_id",
+    "end_message_id",
+    "summary",
+    "status",
+    "failure_count",
+    "created_at",
+    "updated_at",
+];
+
+/// Restore conversation summaries for the active conflict strategy.
+///
+/// An overwrite replaces every conversation, so the summaries are restored
+/// verbatim. A skip import keeps the local conversations, so only summaries that
+/// belong to a conversation which is new locally may be copied, and their message
+/// id range is shifted by the same offset that was applied to the imported
+/// messages so the range keeps pointing at its own conversation.
+async fn restore_conversation_summaries(
+    connection: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    overwrite: bool,
+) -> Result<i64, KokoroError> {
+    if overwrite {
+        restore_optional_table(
+            connection,
+            "conversation_summaries",
+            CONVERSATION_SUMMARY_COLUMNS,
+            true,
+        )
+        .await?;
+        return Ok(0);
+    }
+
+    let import_exists: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM import_db.sqlite_master \
+         WHERE type IN ('table', 'view') AND name = 'conversation_summaries'",
+    )
+    .fetch_optional(&mut **connection)
+    .await?;
+    if import_exists.is_none() {
+        return Ok(0);
+    }
+
+    let result = sqlx::query(
+        "INSERT OR IGNORE INTO conversation_summaries \
+         (conversation_id, character_id, version, start_message_id, end_message_id, \
+          summary, status, failure_count, created_at, updated_at) \
+         SELECT summary.conversation_id, summary.character_id, summary.version, \
+                summary.start_message_id + (SELECT offset FROM temp.backup_skip_message_offset), \
+                summary.end_message_id + (SELECT offset FROM temp.backup_skip_message_offset), \
+                summary.summary, summary.status, summary.failure_count, \
+                summary.created_at, summary.updated_at \
+         FROM import_db.conversation_summaries summary \
+         INNER JOIN temp.backup_skip_new_conversations scope \
+                 ON scope.id = summary.conversation_id \
+         WHERE EXISTS (SELECT 1 FROM conversations local WHERE local.id = summary.conversation_id)",
+    )
+    .execute(&mut **connection)
+    .await
+    .map_err(|error| {
+        KokoroError::Database(format!("failed to restore conversation summaries: {error}"))
+    })?;
+    Ok(result.rows_affected() as i64)
+}
+
+/// Copy messages that belong to conversations which are new locally.
+///
+/// Imported message ids come from the source machine and routinely collide with
+/// unrelated local messages, so they are moved above every local id instead of
+/// being dropped by `INSERT OR IGNORE`. The ordering of the imported rows — and
+/// therefore the ordering inside each conversation — is preserved.
+async fn insert_skip_conversation_messages(
+    connection: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<i64, KokoroError> {
+    let import_exists: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM import_db.sqlite_master \
+         WHERE type IN ('table', 'view') AND name = 'conversation_messages'",
+    )
+    .fetch_optional(&mut **connection)
+    .await?;
+    if import_exists.is_none() {
+        return Ok(0);
+    }
+    // An archive entry that is not shaped like the live table (an exotic view, a
+    // foreign database) must not abort the whole restore.
+    let columns = table_columns(connection, Some("import_db"), "conversation_messages").await?;
+    if ![
+        "id",
+        "conversation_id",
+        "role",
+        "content",
+        "metadata",
+        "created_at",
+    ]
+    .iter()
+    .all(|column| columns.contains(*column))
+    {
+        return Ok(0);
+    }
+
+    let result = sqlx::query(
+        "INSERT INTO conversation_messages \
+         (id, conversation_id, role, content, metadata, created_at) \
+         SELECT message.id + (SELECT offset FROM temp.backup_skip_message_offset), \
+                message.conversation_id, message.role, message.content, \
+                message.metadata, message.created_at \
+         FROM import_db.conversation_messages message \
+         INNER JOIN temp.backup_skip_new_conversations scope \
+                 ON scope.id = message.conversation_id \
+         WHERE EXISTS (SELECT 1 FROM conversations local WHERE local.id = message.conversation_id) \
+         ORDER BY message.id",
+    )
+    .execute(&mut **connection)
+    .await
+    .map_err(|error| {
+        KokoroError::Database(format!("failed to restore conversation messages: {error}"))
+    })?;
+    Ok(result.rows_affected() as i64)
+}
+
+/// Outcome of resolving skip-import memory id conflicts.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SkipMemoryConflicts {
+    /// Imported memories whose id is already used locally by a *different* memory.
+    pub conflicting_ids: i64,
+    /// Imported relation rows dropped because they would point at a local memory.
+    pub dropped_relations: i64,
+}
+
+async fn table_columns(
+    connection: &mut SqliteConnection,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<HashSet<String>, KokoroError> {
+    let pragma = match schema {
+        Some(schema) => format!("PRAGMA {schema}.table_info({table})"),
+        None => format!("PRAGMA table_info({table})"),
+    };
+    let rows = sqlx::query(&pragma).fetch_all(&mut *connection).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect())
+}
+
+async fn import_table_exists(
+    connection: &mut SqliteConnection,
+    table: &str,
+) -> Result<bool, KokoroError> {
+    let found: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM import_db.sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+    )
+    .bind(table)
+    .fetch_optional(&mut *connection)
+    .await?;
+    Ok(found.is_some())
+}
+
+/// Skip imports keep local rows with the same integer primary key, so an imported
+/// row that references such a key must never be copied: it would silently attach
+/// to a *different* local memory once the ids are reused.
+///
+/// A shared id is only a conflict when the local and the imported row really are
+/// different memories (different content or owner). Re-importing an unchanged
+/// backup therefore keeps working, while genuinely stale relations are dropped by
+/// the caller instead of failing the whole restore. When identity cannot be
+/// proven — an import or live schema without a `content` column — every shared id
+/// is treated as a conflict.
+pub(crate) async fn resolve_skip_memory_conflicts(
+    connection: &mut SqliteConnection,
+) -> Result<SkipMemoryConflicts, KokoroError> {
     sqlx::query("CREATE TEMP TABLE IF NOT EXISTS backup_skip_memory_ids (id INTEGER PRIMARY KEY)")
         .execute(&mut *connection)
         .await?;
     sqlx::query("DELETE FROM temp.backup_skip_memory_ids")
         .execute(&mut *connection)
         .await?;
-    sqlx::query(
+
+    let live_columns = table_columns(connection, None, "memories").await?;
+    let import_columns = table_columns(connection, Some("import_db"), "memories").await?;
+    let mut identity = Vec::new();
+    if live_columns.contains("content") && import_columns.contains("content") {
+        identity.push("local.content IS NOT imported.content");
+    }
+    if live_columns.contains("character_id") && import_columns.contains("character_id") {
+        identity.push("local.character_id IS NOT imported.character_id");
+    }
+    // Without comparable identity columns any shared id may belong to another
+    // memory, so fall back to treating the whole overlap as conflicting.
+    let identity_predicate = if identity.is_empty() {
+        "1".to_string()
+    } else {
+        identity.join(" OR ")
+    };
+
+    sqlx::query(&format!(
         "INSERT INTO temp.backup_skip_memory_ids (id) \
          SELECT imported.id FROM import_db.memories imported \
-         INNER JOIN memories local ON local.id = imported.id",
+         INNER JOIN memories local ON local.id = imported.id \
+         WHERE {identity_predicate}"
+    ))
+    .execute(&mut *connection)
+    .await?;
+
+    let conflicting_ids: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM temp.backup_skip_memory_ids")
+            .fetch_one(&mut *connection)
+            .await?;
+
+    // Count only for reporting: the skip inserts below exclude these rows.
+    let mut dropped_relations = 0_i64;
+    for (table, predicate) in [
+        (
+            "memory_candidates",
+            "applied_memory_id IS NOT NULL AND applied_memory_id IN (SELECT id FROM temp.backup_skip_memory_ids)",
+        ),
+        (
+            "memory_evidence",
+            "memory_id IS NOT NULL AND memory_id IN (SELECT id FROM temp.backup_skip_memory_ids)",
+        ),
+        (
+            "memory_operations",
+            "memory_id IS NOT NULL AND memory_id IN (SELECT id FROM temp.backup_skip_memory_ids)",
+        ),
+        (
+            "memory_dream_proposals",
+            "target_memory_id IS NOT NULL AND target_memory_id IN (SELECT id FROM temp.backup_skip_memory_ids)",
+        ),
+    ] {
+        if !import_table_exists(connection, table).await? {
+            continue;
+        }
+        let count: i64 =
+            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM import_db.{table} WHERE {predicate}"))
+                .fetch_one(&mut *connection)
+                .await?;
+        dropped_relations += count;
+    }
+    if import_table_exists(connection, "memories").await? {
+        let linked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM import_db.memories memory \
+             WHERE EXISTS (\
+                 SELECT 1 FROM json_each(\
+                     CASE WHEN json_valid(memory.supersedes) THEN memory.supersedes ELSE '[]' END\
+                 ) link WHERE CAST(link.value AS INTEGER) IN (SELECT id FROM temp.backup_skip_memory_ids)\
+             )",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap_or(0);
+        dropped_relations += linked;
+    }
+
+    Ok(SkipMemoryConflicts {
+        conflicting_ids,
+        dropped_relations,
+    })
+}
+
+/// Skip imports keep local conversations with the same text primary key, so
+/// imported messages and summaries must never be attached to them.
+///
+/// Instead of rejecting the whole restore, this records the imported
+/// conversations that are genuinely new locally (only those are copied) and the
+/// id offset that moves imported message ids above every local id, so a new
+/// conversation keeps its full history instead of colliding with local message
+/// primary keys.
+pub(crate) async fn prepare_skip_conversation_scope(
+    connection: &mut SqliteConnection,
+) -> Result<i64, KokoroError> {
+    sqlx::query(
+        "CREATE TEMP TABLE IF NOT EXISTS backup_skip_new_conversations (id TEXT PRIMARY KEY)",
+    )
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("DELETE FROM temp.backup_skip_new_conversations")
+        .execute(&mut *connection)
+        .await?;
+    if import_table_exists(connection, "conversations").await? {
+        sqlx::query(
+            "INSERT OR IGNORE INTO temp.backup_skip_new_conversations (id) \
+             SELECT imported.id FROM import_db.conversations imported \
+             WHERE NOT EXISTS (SELECT 1 FROM conversations local WHERE local.id = imported.id)",
+        )
+        .execute(&mut *connection)
+        .await?;
+    }
+
+    sqlx::query(
+        "CREATE TEMP TABLE IF NOT EXISTS backup_skip_message_offset (offset INTEGER NOT NULL)",
+    )
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("DELETE FROM temp.backup_skip_message_offset")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "INSERT INTO temp.backup_skip_message_offset (offset) \
+         SELECT COALESCE(MAX(id), 0) FROM conversation_messages",
     )
     .execute(&mut *connection)
     .await?;
 
-    let conflict_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM temp.backup_skip_memory_ids")
+    let new_conversations: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM temp.backup_skip_new_conversations")
             .fetch_one(&mut *connection)
             .await?;
-    if conflict_count == 0 {
-        return Ok(());
+    Ok(new_conversations)
+}
+
+/// Insert the dream and audit relations for a skip import.
+///
+/// Every relation that names a conflicting memory id is excluded: those ids now
+/// belong to the local row that skip mode preserved, so copying the row would
+/// attach imported data to a memory it never described. Everything else is
+/// imported normally (`INSERT OR IGNORE` still drops rows whose own id is taken).
+async fn insert_skip_memory_relations(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<(), KokoroError> {
+    for (table, safety_filter) in [
+        (
+            "memory_candidates",
+            "applied_memory_id IS NULL OR applied_memory_id NOT IN (SELECT id FROM temp.backup_skip_memory_ids)",
+        ),
+        (
+            "memory_evidence",
+            "memory_id IS NULL OR memory_id NOT IN (SELECT id FROM temp.backup_skip_memory_ids)",
+        ),
+        ("memory_dream_jobs", "1"),
+        (
+            "memory_dream_proposals",
+            "((target_memory_id IS NULL OR target_memory_id NOT IN (SELECT id FROM temp.backup_skip_memory_ids)) \
+              AND NOT EXISTS (SELECT 1 FROM json_each(\
+                  CASE WHEN json_valid(source_memory_ids) THEN source_memory_ids ELSE '[]' END) source \
+                  WHERE CAST(source.value AS INTEGER) IN (SELECT id FROM temp.backup_skip_memory_ids)))",
+        ),
+        (
+            "memory_operations",
+            "memory_id IS NULL OR memory_id NOT IN (SELECT id FROM temp.backup_skip_memory_ids)",
+        ),
+    ] {
+        if !import_table_exists(transaction, table).await? {
+            continue;
+        }
+        sqlx::query(&format!(
+            "INSERT OR IGNORE INTO {table} SELECT * FROM import_db.{table} WHERE {safety_filter}"
+        ))
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            KokoroError::Database(format!("failed to restore {table} relations: {error}"))
+        })?;
     }
-
-    let invalid_proposal_json: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM import_db.memory_dream_proposals \
-         WHERE source_memory_ids IS NOT NULL AND NOT json_valid(source_memory_ids)",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .unwrap_or(0);
-    if invalid_proposal_json > 0 {
-        return Err(KokoroError::Validation(
-            "skip import contains a proposal with invalid source memory ids".to_string(),
-        ));
-    }
-
-    let unsafe_proposal_references: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM import_db.memory_dream_proposals proposal \
-         WHERE proposal.target_memory_id IN (SELECT id FROM temp.backup_skip_memory_ids) \
-            OR EXISTS (\
-                SELECT 1 FROM json_each(proposal.source_memory_ids) source \
-                WHERE CAST(source.value AS INTEGER) IN (SELECT id FROM temp.backup_skip_memory_ids)\
-            )",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .unwrap_or(0);
-    let unsafe_candidate_references: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM import_db.memory_candidates \
-         WHERE applied_memory_id IN (SELECT id FROM temp.backup_skip_memory_ids)",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .unwrap_or(0);
-    let unsafe_evidence_references: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM import_db.memory_evidence \
-         WHERE memory_id IN (SELECT id FROM temp.backup_skip_memory_ids)",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .unwrap_or(0);
-    let unsafe_operation_references: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM import_db.memory_operations \
-         WHERE memory_id IN (SELECT id FROM temp.backup_skip_memory_ids)",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .unwrap_or(0);
-    let unsafe_memory_links: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM import_db.memories memory \
-         WHERE EXISTS (\
-             SELECT 1 FROM json_each(\
-                 CASE WHEN json_valid(memory.supersedes) THEN memory.supersedes ELSE '[]' END\
-             ) link WHERE CAST(link.value AS INTEGER) IN (SELECT id FROM temp.backup_skip_memory_ids)\
-         )",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .unwrap_or(0);
-
-    if unsafe_proposal_references
-        + unsafe_candidate_references
-        + unsafe_evidence_references
-        + unsafe_operation_references
-        + unsafe_memory_links
-        > 0
-    {
-        return Err(KokoroError::Validation(format!(
-            "skip import refuses {conflict_count} conflicting memory id(s) because imported dream relations would point at local rows"
-        )));
-    }
-
     Ok(())
 }
 
-/// Skip imports keep local conversations with the same text primary key. An
-/// imported message or summary that still names such a key would silently
-/// attach to the local conversation, so reject the whole import before any
-/// live row is mutated.
-pub(crate) async fn reject_unsafe_skip_conversation_conflicts(
-    connection: &mut SqliteConnection,
-) -> Result<(), KokoroError> {
-    let imported_messages: i64 = if sqlx::query_scalar::<_, String>(
-        "SELECT name FROM import_db.sqlite_master WHERE type IN ('table', 'view') AND name = 'conversation_messages'",
-    )
-    .fetch_optional(&mut *connection)
-    .await?
-    .is_some()
-    {
-        sqlx::query_scalar(
-            "SELECT COUNT(*) FROM import_db.conversation_messages \
-             INNER JOIN conversations local ON local.id = conversation_messages.conversation_id",
-        )
-        .fetch_one(&mut *connection)
-        .await?
-    } else {
-        0
-    };
-    let imported_summaries: i64 = if sqlx::query_scalar::<_, String>(
-        "SELECT name FROM import_db.sqlite_master WHERE type IN ('table', 'view') AND name = 'conversation_summaries'",
-    )
-    .fetch_optional(&mut *connection)
-    .await?
-    .is_some()
-    {
-        sqlx::query_scalar(
-            "SELECT COUNT(*) FROM import_db.conversation_summaries \
-             INNER JOIN conversations local ON local.id = conversation_summaries.conversation_id",
-        )
-        .fetch_one(&mut *connection)
-        .await?
-    } else {
-        0
-    };
+/// Skip-mode memory insert.
+///
+/// `INSERT OR IGNORE` keeps the local row for every reused id, and a `supersedes`
+/// link that names a conflicting id is cleared: that id belongs to a local memory
+/// the imported row never replaced.
+const MEMORY_INSERT_SKIP_SQL: &str = "INSERT OR IGNORE INTO memories \
+     (id, content, embedding, created_at, updated_at, importance, character_id, tier, consolidated_from, \
+      memory_type, entity_key, status, confidence, first_seen_at, last_seen_at, evidence_count, \
+      source_kind, source_refs, supersedes, canonical_hash, last_dreamed_at) \
+     SELECT id, content, embedding, created_at, updated_at, importance, character_id, tier, consolidated_from, \
+            memory_type, entity_key, status, confidence, first_seen_at, last_seen_at, evidence_count, \
+            source_kind, source_refs, \
+            CASE \
+                WHEN supersedes IS NULL THEN NULL \
+                WHEN EXISTS (SELECT 1 FROM json_each(\
+                         CASE WHEN json_valid(supersedes) THEN supersedes ELSE '[]' END) link \
+                     WHERE CAST(link.value AS INTEGER) IN (SELECT id FROM temp.backup_skip_memory_ids)) \
+                    THEN '[]' \
+                ELSE supersedes \
+            END, \
+            canonical_hash, last_dreamed_at FROM import_db.memories";
 
-    if imported_messages + imported_summaries > 0 {
-        return Err(KokoroError::Validation(
-            "skip import refuses conflicting conversation ids because imported messages or summaries would point at local rows"
-                .to_string(),
-        ));
+/// Delete memories that no local character owns, together with the rows that
+/// reference them.
+///
+/// A memory is only reachable through its owner: the memory panel lists them per
+/// character and retrieval filters by `character_id`. Rows left without an owner
+/// — an imported pre-character-era backup, a character id the local database
+/// never had — are therefore unreachable garbage, and are removed instead of
+/// being reported to the user.
+async fn purge_orphaned_memories(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<i64, KokoroError> {
+    const ORPHANED_MEMORY: &str =
+        "NOT EXISTS (SELECT 1 FROM characters ch WHERE ch.id = memories.character_id)";
+
+    for (table, column) in [
+        ("memory_candidates", "applied_memory_id"),
+        ("memory_evidence", "memory_id"),
+        ("memory_operations", "memory_id"),
+    ] {
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE {column} IN (SELECT id FROM memories WHERE {ORPHANED_MEMORY})"
+        ))
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            KokoroError::Database(format!("failed to purge orphaned {table} rows: {error}"))
+        })?;
+    }
+    sqlx::query(
+        "DELETE FROM memory_dream_proposals \
+         WHERE target_memory_id IN (SELECT id FROM memories WHERE NOT EXISTS \
+                   (SELECT 1 FROM characters ch WHERE ch.id = memories.character_id)) \
+            OR EXISTS (SELECT 1 FROM json_each(\
+                   CASE WHEN json_valid(source_memory_ids) THEN source_memory_ids ELSE '[]' END) source \
+               WHERE CAST(source.value AS INTEGER) IN (SELECT id FROM memories WHERE NOT EXISTS \
+                   (SELECT 1 FROM characters ch WHERE ch.id = memories.character_id)))",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        KokoroError::Database(format!("failed to purge orphaned dream proposals: {error}"))
+    })?;
+
+    for table in crate::commands::characters::CHARACTER_OWNED_TABLES {
+        if *table == "memories" {
+            continue;
+        }
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE character_id NOT IN (SELECT id FROM characters)"
+        ))
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            KokoroError::Database(format!("failed to purge orphaned {table} rows: {error}"))
+        })?;
     }
 
-    Ok(())
+    let purged = sqlx::query(
+        "DELETE FROM memories WHERE NOT EXISTS \
+                              (SELECT 1 FROM characters ch WHERE ch.id = memories.character_id)",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        KokoroError::Database(format!("failed to purge orphaned memories: {error}"))
+    })?;
+    Ok(purged.rows_affected() as i64)
 }
 
 /// Replace derived character activation state only for a full overwrite. The
@@ -2653,14 +3215,19 @@ pub async fn export_data(
     let zip_options =
         SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    // 1. Gather stats before copying
-    let mut stats = gather_stats(&db).await;
+    // 1. Snapshot the database first: the archived bytes are the source of truth
+    // for both the archive and the counts reported back to the user.
+    let snapshot = create_consistent_database_snapshot(&db).await?;
+    let mut stats = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.stats.clone())
+        .unwrap_or_default();
     let mut config_count: usize = 0;
 
     // 2. manifest.json
     let options_value = options.unwrap_or_default();
     let manifest = BackupManifest {
-        version: "2".to_string(),
+        version: BACKUP_FORMAT_VERSION.to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         includes_character_resources: options_value.include_character_resources,
@@ -2672,11 +3239,11 @@ pub async fn export_data(
     zip.write_all(manifest_json.as_bytes())
         .map_err(KokoroError::from)?;
 
-    // 3. kokoro.db — create a consistent SQLite snapshot before archiving it.
-    if let Some(db_bytes) = create_consistent_database_snapshot(&db).await? {
+    // 3. kokoro.db — the consistent SQLite snapshot created above.
+    if let Some(snapshot) = snapshot {
         zip.start_file("kokoro.db", zip_options)
             .map_err(|e| KokoroError::Internal(format!("ZIP error: {}", e)))?;
-        zip.write_all(&db_bytes).map_err(KokoroError::from)?;
+        zip.write_all(&snapshot.bytes).map_err(KokoroError::from)?;
     }
 
     // 4. Optional character packages. Character rows themselves are already in SQLite.
@@ -2740,11 +3307,15 @@ pub async fn export_data_to_path(
     let mut zip = zip::ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    let mut stats = gather_stats(&db).await;
+    let snapshot = create_consistent_database_snapshot(&db).await?;
+    let mut stats = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.stats.clone())
+        .unwrap_or_default();
     let mut config_count: usize = 0;
 
     let manifest = BackupManifest {
-        version: "1".to_string(),
+        version: BACKUP_FORMAT_VERSION.to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         includes_character_resources: false,
@@ -2756,10 +3327,10 @@ pub async fn export_data_to_path(
     zip.write_all(manifest_json.as_bytes())
         .map_err(KokoroError::from)?;
 
-    if let Some(db_bytes) = create_consistent_database_snapshot(&db).await? {
+    if let Some(snapshot) = snapshot {
         zip.start_file("kokoro.db", options)
             .map_err(|e| KokoroError::Internal(format!("ZIP error: {}", e)))?;
-        zip.write_all(&db_bytes).map_err(KokoroError::from)?;
+        zip.write_all(&snapshot.bytes).map_err(KokoroError::from)?;
     }
 
     for name in CONFIG_FILES {
@@ -2837,7 +3408,7 @@ pub async fn preview_import(file_path: String) -> Result<ImportPreview, KokoroEr
     let has_configs = !config_files.is_empty();
 
     // If DB present, extract to temp and count rows
-    let stats = if has_database {
+    let (stats, characters) = if has_database {
         let tmp_guard = create_scoped_temp_dir("kokoro_import_preview")?;
         let tmp_dir_path = tmp_guard.path();
         let tmp_db = tmp_dir_path.join("preview.db");
@@ -2851,14 +3422,19 @@ pub async fn preview_import(file_path: String) -> Result<ImportPreview, KokoroEr
             out.write_all(&bytes).map_err(KokoroError::from)?;
         }
 
-        gather_stats(&tmp_db).await
+        let stats = gather_stats(&tmp_db).await;
+        let characters = read_backup_characters(&tmp_db).await;
+        (stats, characters)
     } else {
-        BackupStats {
-            memories: 0,
-            conversations: 0,
-            messages: 0,
-            configs: 0,
-        }
+        (
+            BackupStats {
+                memories: 0,
+                conversations: 0,
+                messages: 0,
+                configs: 0,
+            },
+            Vec::new(),
+        )
     };
 
     Ok(ImportPreview {
@@ -2867,7 +3443,59 @@ pub async fn preview_import(file_path: String) -> Result<ImportPreview, KokoroEr
         has_configs,
         config_files,
         stats,
+        characters,
     })
+}
+
+/// List the character instances stored in a backup database, with the amount of
+/// data each of them owns. Backups written before characters moved into SQLite
+/// have no `characters` table and yield an empty list, which the import treats as
+/// "nothing to map".
+async fn read_backup_characters(path: &Path) -> Vec<BackupCharacterSummary> {
+    let Ok(pool) = open_readonly_pool(path).await else {
+        return Vec::new();
+    };
+    let characters = async {
+        if !table_exists(&pool, "characters").await? {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT character.id AS id, character.name AS name, \
+                    (SELECT COUNT(*) FROM memories memory WHERE memory.character_id = character.id) AS memory_count, \
+                    (SELECT COUNT(*) FROM conversations conversation WHERE conversation.character_id = character.id) AS conversation_count \
+             FROM characters character ORDER BY character.name COLLATE NOCASE ASC, character.id ASC",
+        )
+        .fetch_all(&pool)
+        .await?;
+        let mut summaries = Vec::with_capacity(rows.len());
+        for row in rows {
+            summaries.push(BackupCharacterSummary {
+                id: row.get::<String, _>("id"),
+                name: row.get::<String, _>("name"),
+                memory_count: row.get::<i64, _>("memory_count"),
+                conversation_count: row.get::<i64, _>("conversation_count"),
+            });
+        }
+        Ok::<_, sqlx::Error>(summaries)
+    }
+    .await;
+    pool.close().await;
+    match characters {
+        Ok(summaries) => summaries,
+        Err(error) => {
+            tracing::warn!(target: "backup", "[Backup] Failed to read backup characters: {error}");
+            Vec::new()
+        }
+    }
+}
+
+async fn table_exists(pool: &SqlitePool, table: &str) -> Result<bool, sqlx::Error> {
+    let found: Option<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+            .bind(table)
+            .fetch_optional(pool)
+            .await?;
+    Ok(found.is_some())
 }
 
 #[tauri::command]
@@ -2936,7 +3564,7 @@ pub async fn import_data(
     } else {
         ResourcePromotionGuard::empty()
     };
-    let prepared_characters = if has_db {
+    let (mut prepared_characters, import_has_characters) = if has_db {
         let source_pool = open_readonly_pool(&tmp_dir.join("import.db")).await?;
         let catalog_root = app_data.join("characters");
         let local_resolver = LocalCatalogPackageResolver::new(catalog_root.clone());
@@ -2955,10 +3583,13 @@ pub async fn import_data(
             }
         }
         let rows = prepare_character_rows(&source_pool, &official_resolver).await?;
+        let import_has_characters = table_exists(&source_pool, "characters")
+            .await
+            .unwrap_or(false);
         source_pool.close().await;
-        rows
+        (rows, import_has_characters)
     } else {
-        Vec::new()
+        (Vec::new(), false)
     };
 
     // Phase 2: Async DB operations
@@ -2967,8 +3598,11 @@ pub async fn import_data(
         imported_conversations: 0,
         imported_configs: 0,
         imported_characters: 0,
+        merged_characters: 0,
+        ignored_characters: 0,
         // Kept only for wire compatibility with old frontends; SQLite is authoritative.
         characters_json: None,
+        skipped_memories: 0,
         debug_log: Vec::new(),
     };
     let mut config_replacement = replace_configs_atomically(&app_data, &extracted_configs)?;
@@ -2990,6 +3624,15 @@ pub async fn import_data(
             .execute(&mut *conn)
             .await
             .map_err(|e| KokoroError::Database(format!("ATTACH failed: {}", e)))?;
+
+        // The archive must actually contain a Kokoro database before any live row
+        // is touched; an unrelated SQLite file would otherwise fail deep inside
+        // the column normalization below.
+        if !import_table_exists(&mut conn, "memories").await? {
+            return Err(KokoroError::Validation(
+                "backup database does not contain a memories table".to_string(),
+            ));
+        }
 
         // 验证 ATTACH 成功，能读到数据
         let import_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM import_db.memories")
@@ -3125,18 +3768,26 @@ pub async fn import_data(
             .debug_log
             .push(format!("import_db character_ids: {:?}", char_ids));
         result.debug_log.push(format!(
-            "target_character_id: {:?}",
-            options.target_character_id
+            "character merges: {:?}",
+            options
+                .character_merges
+                .iter()
+                .map(|merge| format!("{}->{}", merge.imported_id, merge.target_id))
+                .collect::<Vec<_>>()
         ));
 
-        let import_conversation_columns: Vec<String> =
+        let import_has_conversations = import_table_exists(&mut conn, "conversations").await?;
+        let import_conversation_columns: Vec<String> = if import_has_conversations {
             sqlx::query("PRAGMA import_db.table_info(conversations)")
                 .fetch_all(&mut *conn)
                 .await
                 .unwrap_or_default()
                 .into_iter()
                 .map(|row| row.get::<String, _>("name"))
-                .collect();
+                .collect()
+        } else {
+            Vec::new()
+        };
         let import_has_topic = import_conversation_columns.iter().any(|col| col == "topic");
         let import_has_pinned_state = import_conversation_columns
             .iter()
@@ -3173,35 +3824,70 @@ pub async fn import_data(
              SELECT id, content, embedding, created_at, updated_at, importance, character_id, tier, consolidated_from, \
                     memory_type, entity_key, status, confidence, first_seen_at, last_seen_at, evidence_count, \
                     source_kind, source_refs, supersedes, canonical_hash, last_dreamed_at FROM import_db.memories";
-        let memory_insert_skip_sql = "INSERT OR IGNORE INTO memories \
-             (id, content, embedding, created_at, updated_at, importance, character_id, tier, consolidated_from, \
-              memory_type, entity_key, status, confidence, first_seen_at, last_seen_at, evidence_count, \
-              source_kind, source_refs, supersedes, canonical_hash, last_dreamed_at) \
-             SELECT id, content, embedding, created_at, updated_at, importance, character_id, tier, consolidated_from, \
-                    memory_type, entity_key, status, confidence, first_seen_at, last_seen_at, evidence_count, \
-                    source_kind, source_refs, supersedes, canonical_hash, last_dreamed_at FROM import_db.memories";
+
+        // Validate the character selection before opening the transaction so an
+        // invalid choice fails without touching the live database.
+        validate_character_selection(
+            &mut conn,
+            import_has_characters,
+            &options.character_merges,
+            &options.ignored_characters,
+        )
+        .await?;
 
         // Every live-table mutation below shares this connection transaction. DDL for
         // the FTS triggers is transactional in SQLite, so any error restores both data
         // and trigger state before the connection is released.
         let mut transaction = conn.begin().await?;
 
-        if let Some(ref target_id) = options.target_character_id {
-            tracing::info!(target: "backup", "[Backup] Remapping imported character_ids to '{}'", target_id);
-            result.debug_log.push(format!(
-                "remapping imported character_ids to: {}",
-                target_id
-            ));
-            for (table, count) in remap_imported_character_ids(&mut transaction, target_id).await? {
-                result
-                    .debug_log
-                    .push(format!("imported {table} remapped: {count}"));
-            }
-        } else {
+        // Ignored characters contribute nothing: their rows leave the backup
+        // database before any copy statement runs, and their instance is not
+        // imported either. Dropping first also keeps the routing step below from
+        // ever moving rows out of a character the user chose to leave out.
+        let ignored_ids: HashSet<String> = options
+            .ignored_characters
+            .iter()
+            .map(|id| id.trim().to_string())
+            .collect();
+        for ignored_id in &ignored_ids {
+            let dropped = remove_imported_character(&mut transaction, ignored_id).await?;
+            tracing::info!(
+                target: "backup",
+                "[Backup] Ignored character '{ignored_id}' ({dropped} row(s) dropped)"
+            );
             result
                 .debug_log
-                .push("no target_character_id — remap skipped".to_string());
+                .push(format!("ignored {ignored_id}: {dropped} row(s) dropped"));
         }
+        result.ignored_characters = prepared_characters
+            .iter()
+            .filter(|row| ignored_ids.contains(&row.id))
+            .count() as i64;
+        prepared_characters.retain(|row| !ignored_ids.contains(&row.id));
+
+        // Merging rewrites the remaining imported rows before they are copied, so
+        // memories and conversations land on the local character the user picked.
+        for (table, count) in
+            apply_import_character_merges(&mut transaction, &options.character_merges).await?
+        {
+            tracing::info!(target: "backup", "[Backup] Merged {count} row(s) of {table}");
+            result
+                .debug_log
+                .push(format!("merged {table} rows: {count}"));
+        }
+
+        // A merged character keeps its local instance row; only the others are
+        // inserted as new characters.
+        let merged_ids: HashSet<&str> = options
+            .character_merges
+            .iter()
+            .map(|merge| merge.imported_id.trim())
+            .collect();
+        result.merged_characters = prepared_characters
+            .iter()
+            .filter(|row| merged_ids.contains(row.id.as_str()))
+            .count() as i64;
+        prepared_characters.retain(|row| !merged_ids.contains(row.id.as_str()));
 
         if options.conflict_strategy == ConflictStrategy::Overwrite {
             // 先删除 FTS 触发器，避免批量操作时触发器访问损坏的 FTS 索引
@@ -3242,53 +3928,35 @@ pub async fn import_data(
                 .debug_log
                 .push(format!("inserted memories: {}", result.imported_memories));
 
-            for table in [
-                "memory_candidates",
-                "memory_evidence",
-                "memory_dream_jobs",
-                "memory_dream_proposals",
-                "memory_operations",
-            ] {
-                let import_has_table: Option<String> = sqlx::query_scalar(
-                    "SELECT name FROM import_db.sqlite_master WHERE type='table' AND name = ?",
-                )
-                .bind(table)
-                .fetch_optional(&mut *transaction)
-                .await?;
-                if import_has_table.is_none() {
-                    continue;
-                }
-                sqlx::query(&format!("DELETE FROM {table}"))
-                    .execute(&mut *transaction)
-                    .await?;
-                sqlx::query(&format!(
-                    "INSERT INTO {table} SELECT * FROM import_db.{table}"
-                ))
-                .execute(&mut *transaction)
-                .await?;
-            }
+            restore_memory_aux_tables_overwrite(&mut transaction, &mut result.debug_log).await?;
 
-            let r = sqlx::query(conversation_insert_sql)
-                .execute(&mut *transaction)
-                .await
-                .map_err(|e| {
-                    KokoroError::Database(format!("INSERT conversations failed: {}", e))
-                })?;
-            result.imported_conversations = r.rows_affected() as i64;
+            if import_has_conversations {
+                let r = sqlx::query(conversation_insert_sql)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|e| {
+                        KokoroError::Database(format!("INSERT conversations failed: {}", e))
+                    })?;
+                result.imported_conversations = r.rows_affected() as i64;
+            }
             result.debug_log.push(format!(
                 "inserted conversations: {}",
                 result.imported_conversations
             ));
 
-            sqlx::query(
-                "INSERT INTO conversation_messages (id, conversation_id, role, content, metadata, created_at)
-                 SELECT id, conversation_id, role, content, metadata, created_at FROM import_db.conversation_messages",
-            )
-                .execute(&mut *transaction)
-            .await
-            .map_err(|e| {
-                KokoroError::Database(format!("INSERT conversation_messages failed: {}", e))
-            })?;
+            let import_has_messages =
+                import_table_exists(&mut transaction, "conversation_messages").await?;
+            if import_has_messages {
+                sqlx::query(
+                    "INSERT INTO conversation_messages (id, conversation_id, role, content, metadata, created_at)
+                     SELECT id, conversation_id, role, content, metadata, created_at FROM import_db.conversation_messages",
+                )
+                    .execute(&mut *transaction)
+                .await
+                .map_err(|e| {
+                    KokoroError::Database(format!("INSERT conversation_messages failed: {}", e))
+                })?;
+            }
 
             // 重建 FTS 索引并恢复触发器
             sqlx::query("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
@@ -3298,23 +3966,54 @@ pub async fn import_data(
             sqlx::query("CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content); END").execute(&mut *transaction).await?;
             sqlx::query("CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content); INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content); END").execute(&mut *transaction).await?;
         } else {
-            // Skip preserves local integer IDs. Reject any imported relation
-            // that would otherwise follow a skipped ID into a local memory.
-            reject_unsafe_skip_conversation_conflicts(&mut transaction).await?;
-            reject_unsafe_skip_memory_conflicts(&mut transaction).await?;
+            // Skip preserves local integer IDs and local conversations. Relations
+            // that would follow a skipped ID into a *different* local row are
+            // dropped instead of being attached; messages are only copied for
+            // conversations that are new locally and are re-numbered above every
+            // local message id so they cannot collide either.
+            let memory_conflicts = resolve_skip_memory_conflicts(&mut transaction).await?;
+            let new_conversations = prepare_skip_conversation_scope(&mut transaction).await?;
+            result.debug_log.push(format!(
+                "skip scope: {} conflicting memory id(s), {} dropped relation row(s), {} new conversation(s)",
+                memory_conflicts.conflicting_ids,
+                memory_conflicts.dropped_relations,
+                new_conversations
+            ));
 
             // skip 模式：先重建 FTS 以防损坏
             sqlx::query("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
                 .execute(&mut *transaction)
                 .await?;
 
-            let r = sqlx::query(memory_insert_skip_sql)
+            let r = sqlx::query(MEMORY_INSERT_SKIP_SQL)
                 .execute(&mut *transaction)
                 .await
                 .map_err(|e| {
                     KokoroError::Database(format!("INSERT OR IGNORE memories failed: {}", e))
                 })?;
             result.imported_memories = r.rows_affected() as i64;
+            // `INSERT OR IGNORE` also drops rows that violate a local constraint
+            // (for example a NULL in a column the live schema requires). Surface
+            // that instead of reporting a silent shortfall.
+            let importable: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM import_db.memories imported \
+                 WHERE NOT EXISTS (SELECT 1 FROM memories local WHERE local.id = imported.id)",
+            )
+            .fetch_one(&mut *transaction)
+            .await
+            .unwrap_or(result.imported_memories);
+            if importable > result.imported_memories {
+                result.skipped_memories = importable - result.imported_memories;
+                tracing::warn!(
+                    target: "backup",
+                    "[Backup] Skip import dropped {} memory row(s) that violate the local schema",
+                    result.skipped_memories
+                );
+                result.debug_log.push(format!(
+                    "dropped memories that violate the local schema: {}",
+                    result.skipped_memories
+                ));
+            }
             tracing::info!(
                 target: "backup",
                 "[Backup] Inserted {} memories (skip mode)",
@@ -3325,43 +4024,29 @@ pub async fn import_data(
                 result.imported_memories
             ));
 
-            for table in [
-                "memory_candidates",
-                "memory_evidence",
-                "memory_dream_jobs",
-                "memory_dream_proposals",
-                "memory_operations",
-            ] {
-                let import_has_table: Option<String> = sqlx::query_scalar(
-                    "SELECT name FROM import_db.sqlite_master WHERE type='table' AND name = ?",
-                )
-                .bind(table)
-                .fetch_optional(&mut *transaction)
-                .await?;
-                if import_has_table.is_some() {
-                    sqlx::query(&format!(
-                        "INSERT OR IGNORE INTO {table} SELECT * FROM import_db.{table}"
-                    ))
-                    .execute(&mut *transaction)
-                    .await?;
-                }
-            }
+            insert_skip_memory_relations(&mut transaction).await?;
 
-            let r = sqlx::query(conversation_insert_skip_sql)
-                .execute(&mut *transaction)
-                .await
-                .map_err(|e| {
-                    KokoroError::Database(format!("INSERT OR IGNORE conversations failed: {}", e))
-                })?;
-            result.imported_conversations = r.rows_affected() as i64;
+            if import_has_conversations {
+                let r = sqlx::query(conversation_insert_skip_sql)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|e| {
+                        KokoroError::Database(format!(
+                            "INSERT OR IGNORE conversations failed: {}",
+                            e
+                        ))
+                    })?;
+                result.imported_conversations = r.rows_affected() as i64;
+            }
             result.debug_log.push(format!(
                 "inserted conversations (skip): {}",
                 result.imported_conversations
             ));
 
-            sqlx::query("INSERT OR IGNORE INTO conversation_messages (id, conversation_id, role, content, metadata, created_at) SELECT id, conversation_id, role, content, metadata, created_at FROM import_db.conversation_messages")
-                .execute(&mut *transaction).await
-                .map_err(|e| KokoroError::Database(format!("INSERT OR IGNORE conversation_messages failed: {}", e)))?;
+            let restored_messages = insert_skip_conversation_messages(&mut transaction).await?;
+            result.debug_log.push(format!(
+                "inserted conversation messages (skip): {restored_messages}"
+            ));
 
             sqlx::query("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
                 .execute(&mut *transaction)
@@ -3369,6 +4054,11 @@ pub async fn import_data(
         }
 
         restore_optional_backup_tables(
+            &mut transaction,
+            options.conflict_strategy == ConflictStrategy::Overwrite,
+        )
+        .await?;
+        restore_conversation_summaries(
             &mut transaction,
             options.conflict_strategy == ConflictStrategy::Overwrite,
         )
@@ -3385,6 +4075,20 @@ pub async fn import_data(
             options.conflict_strategy == ConflictStrategy::Overwrite,
         )
         .await?;
+        // Characters are restored above, so this is the first point where an
+        // imported memory can be attributed to an owner. Anything still without
+        // one is unreachable and is removed quietly.
+        let purged_memories = purge_orphaned_memories(&mut transaction).await?;
+        if purged_memories > 0 {
+            tracing::info!(
+                target: "backup",
+                "[Backup] Purged {} memory row(s) without a local character owner",
+                purged_memories
+            );
+            result
+                .debug_log
+                .push(format!("purged orphaned memories: {purged_memories}"));
+        }
         transaction.commit().await?;
 
         // Database rows now reference the imported files. Do not let a later
@@ -3394,12 +4098,17 @@ pub async fn import_data(
 
         detach_import_database_best_effort(&mut conn).await;
 
-        // Persist only after every live database table has committed.
-        if let Some(ref target_id) = options.target_character_id {
-            crate::ai::context::AIOrchestrator::persist_active_character_id(target_id);
-            result
-                .debug_log
-                .push(format!("persisted active_character_id: {}", target_id));
+        // A merge means the user chose a local character to keep using, so make it
+        // the active one once every live table has committed.
+        for merge in &options.character_merges {
+            let target_id = merge.target_id.trim();
+            if !target_id.is_empty() {
+                crate::ai::context::AIOrchestrator::persist_active_character_id(target_id);
+                result
+                    .debug_log
+                    .push(format!("persisted active_character_id: {target_id}"));
+                break;
+            }
         }
 
         drop(conn);
@@ -3448,7 +4157,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn target_character_remap_changes_import_rows_without_touching_live_rows() {
+    async fn character_merge_rewrites_import_rows_without_touching_live_rows() {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -3475,29 +4184,184 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO import_db.memories (id, character_id) VALUES (2, 'import-character')",
+            "INSERT INTO import_db.memories (id, character_id) VALUES (2, 'import-character'), \
+             (3, 'other-import-character')",
         )
         .execute(&mut *connection)
         .await
         .unwrap();
 
-        remap_imported_character_ids(&mut connection, "target-character")
-            .await
-            .unwrap();
+        apply_import_character_merges(
+            &mut connection,
+            &[CharacterMerge {
+                imported_id: "import-character".to_string(),
+                target_id: "live-character".to_string(),
+            }],
+        )
+        .await
+        .unwrap();
 
         let live_character: String =
             sqlx::query_scalar("SELECT character_id FROM memories WHERE id = 1")
                 .fetch_one(&mut *connection)
                 .await
                 .unwrap();
-        let imported_character: String =
+        let merged: String =
             sqlx::query_scalar("SELECT character_id FROM import_db.memories WHERE id = 2")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+        let untouched: String =
+            sqlx::query_scalar("SELECT character_id FROM import_db.memories WHERE id = 3")
                 .fetch_one(&mut *connection)
                 .await
                 .unwrap();
 
         assert_eq!(live_character, "live-character");
-        assert_eq!(imported_character, "target-character");
+        assert_eq!(merged, "live-character");
+        assert_eq!(
+            untouched, "other-import-character",
+            "only the listed character is routed"
+        );
+    }
+
+    #[tokio::test]
+    async fn character_merge_validation_rejects_unknown_ids() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("INSERT INTO characters (id, name) VALUES ('local-1', 'Local')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE import_db.characters (id TEXT PRIMARY KEY, name TEXT)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO import_db.characters (id, name) VALUES ('remote-1', 'Remote')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+
+        let cases = [
+            (
+                CharacterMerge {
+                    imported_id: "missing".to_string(),
+                    target_id: "local-1".to_string(),
+                },
+                "backup does not contain character",
+            ),
+            (
+                CharacterMerge {
+                    imported_id: "remote-1".to_string(),
+                    target_id: "missing".to_string(),
+                },
+                "local character",
+            ),
+            (
+                CharacterMerge {
+                    imported_id: "remote-1".to_string(),
+                    target_id: "remote-1".to_string(),
+                },
+                "cannot be merged into itself",
+            ),
+        ];
+        for (merge, expected) in cases {
+            let error = validate_character_selection(&mut connection, true, &[merge], &[])
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        validate_character_selection(
+            &mut connection,
+            true,
+            &[CharacterMerge {
+                imported_id: "remote-1".to_string(),
+                target_id: "local-1".to_string(),
+            }],
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let duplicate = validate_character_selection(
+            &mut connection,
+            true,
+            &[
+                CharacterMerge {
+                    imported_id: "remote-1".to_string(),
+                    target_id: "local-1".to_string(),
+                },
+                CharacterMerge {
+                    imported_id: "remote-1".to_string(),
+                    target_id: "local-1".to_string(),
+                },
+            ],
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("mapped more than once"));
+
+        let no_characters = validate_character_selection(
+            &mut connection,
+            false,
+            &[CharacterMerge {
+                imported_id: "remote-1".to_string(),
+                target_id: "local-1".to_string(),
+            }],
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert!(no_characters.to_string().contains("no characters table"));
+
+        // Ignoring a character is validated with the same rules.
+        validate_character_selection(&mut connection, true, &[], &["remote-1".to_string()])
+            .await
+            .unwrap();
+
+        let ignored_unknown =
+            validate_character_selection(&mut connection, true, &[], &["missing".to_string()])
+                .await
+                .unwrap_err();
+        assert!(ignored_unknown
+            .to_string()
+            .contains("backup does not contain character"));
+
+        let ignored_twice = validate_character_selection(
+            &mut connection,
+            true,
+            &[],
+            &["remote-1".to_string(), "remote-1".to_string()],
+        )
+        .await
+        .unwrap_err();
+        assert!(ignored_twice.to_string().contains("ignored more than once"));
+
+        let merged_and_ignored = validate_character_selection(
+            &mut connection,
+            true,
+            &[CharacterMerge {
+                imported_id: "remote-1".to_string(),
+                target_id: "local-1".to_string(),
+            }],
+            &["remote-1".to_string()],
+        )
+        .await
+        .unwrap_err();
+        assert!(merged_and_ignored
+            .to_string()
+            .contains("merged and ignored at the same time"));
     }
 
     #[tokio::test]
@@ -3895,7 +4759,8 @@ mod tests {
             import_database: false,
             import_configs: true,
             conflict_strategy: ConflictStrategy::Overwrite,
-            target_character_id: None,
+            character_merges: Vec::new(),
+            ignored_characters: Vec::new(),
         };
         assert!(!should_stage_character_resources(&options, &inspection));
         options.import_database = true;
@@ -4112,19 +4977,51 @@ mod tests {
         assert_eq!(count, 0);
     }
 
+    /// Mirrors the live conversation schema for the skip-scope tests.
+    async fn create_conversation_tables(connection: &mut SqliteConnection) {
+        sqlx::query("CREATE TABLE conversations (id TEXT PRIMARY KEY, character_id TEXT NOT NULL)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE conversation_messages (\
+                id INTEGER PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL, \
+                content TEXT NOT NULL, metadata TEXT, created_at TEXT NOT NULL)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    }
+
+    async fn create_import_conversation_tables(connection: &mut SqliteConnection) {
+        sqlx::query("CREATE TABLE import_db.conversations (id TEXT PRIMARY KEY, character_id TEXT NOT NULL)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE import_db.conversation_messages (\
+                id INTEGER PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL, \
+                content TEXT NOT NULL, metadata TEXT, created_at TEXT NOT NULL)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
-    async fn skip_import_rejects_messages_for_conflicting_conversations() {
+    async fn skip_import_never_attaches_messages_to_a_local_conversation() {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
             .unwrap();
         let mut connection = pool.acquire().await.unwrap();
-        sqlx::query("CREATE TABLE conversations (id TEXT PRIMARY KEY, character_id TEXT NOT NULL)")
+        create_conversation_tables(&mut connection).await;
+        sqlx::query("INSERT INTO conversations (id, character_id) VALUES ('shared-conversation', 'local-character')")
             .execute(&mut *connection)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO conversations (id, character_id) VALUES ('shared-conversation', 'local-character')")
+        sqlx::query("INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (1, 'shared-conversation', 'user', 'local one', '1')")
             .execute(&mut *connection)
             .await
             .unwrap();
@@ -4132,47 +5029,53 @@ mod tests {
             .execute(&mut *connection)
             .await
             .unwrap();
-        sqlx::query(
-            "CREATE TABLE import_db.conversations (id TEXT PRIMARY KEY, character_id TEXT NOT NULL)",
-        )
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-        sqlx::query(
-            "CREATE TABLE import_db.conversation_messages (id INTEGER PRIMARY KEY, conversation_id TEXT NOT NULL)",
-        )
-        .execute(&mut *connection)
-        .await
-        .unwrap();
+        create_import_conversation_tables(&mut connection).await;
         sqlx::query("INSERT INTO import_db.conversations (id, character_id) VALUES ('shared-conversation', 'import-character')")
             .execute(&mut *connection)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO import_db.conversation_messages (id, conversation_id) VALUES (99, 'shared-conversation')")
+        sqlx::query("INSERT INTO import_db.conversation_messages (id, conversation_id, role, content, created_at) VALUES (99, 'shared-conversation', 'user', 'imported', '1')")
             .execute(&mut *connection)
             .await
             .unwrap();
 
-        let error = reject_unsafe_skip_conversation_conflicts(&mut connection)
+        let new_conversations = prepare_skip_conversation_scope(&mut connection)
             .await
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("skip import refuses conflicting conversation"));
+            .unwrap();
+        assert_eq!(new_conversations, 0);
+        sqlx::query("INSERT OR IGNORE INTO conversations (id, character_id) SELECT id, character_id FROM import_db.conversations")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+
+        let mut transaction = connection.begin().await.unwrap();
+        let inserted = insert_skip_conversation_messages(&mut transaction)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        assert_eq!(
+            inserted, 0,
+            "a pre-existing local conversation keeps its own history"
+        );
+        let contents: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM conversation_messages WHERE conversation_id = 'shared-conversation' ORDER BY id",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(contents, vec!["local one"]);
     }
 
     #[tokio::test]
-    async fn skip_import_rejects_orphan_messages_that_reference_local_conversations() {
+    async fn skip_import_ignores_orphan_messages_that_reference_local_conversations() {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
             .unwrap();
         let mut connection = pool.acquire().await.unwrap();
-        sqlx::query("CREATE TABLE conversations (id TEXT PRIMARY KEY, character_id TEXT NOT NULL)")
-            .execute(&mut *connection)
-            .await
-            .unwrap();
+        create_conversation_tables(&mut connection).await;
         sqlx::query("INSERT INTO conversations (id, character_id) VALUES ('shared-conversation', 'local-character')")
             .execute(&mut *connection)
             .await
@@ -4181,41 +5084,40 @@ mod tests {
             .execute(&mut *connection)
             .await
             .unwrap();
-        sqlx::query(
-            "CREATE TABLE import_db.conversation_messages (id INTEGER PRIMARY KEY, conversation_id TEXT NOT NULL)",
-        )
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO import_db.conversation_messages (id, conversation_id) VALUES (99, 'shared-conversation')")
+        create_import_conversation_tables(&mut connection).await;
+        sqlx::query("INSERT INTO import_db.conversation_messages (id, conversation_id, role, content, created_at) VALUES (99, 'shared-conversation', 'user', 'orphan', '1')")
             .execute(&mut *connection)
             .await
             .unwrap();
 
-        let error = reject_unsafe_skip_conversation_conflicts(&mut connection)
+        let new_conversations = prepare_skip_conversation_scope(&mut connection)
             .await
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("skip import refuses conflicting conversation"));
+            .unwrap();
+        assert_eq!(new_conversations, 0);
+
+        let mut transaction = connection.begin().await.unwrap();
+        let inserted = insert_skip_conversation_messages(&mut transaction)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        assert_eq!(inserted, 0);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
-    async fn skip_import_rejects_view_messages_that_reference_local_conversations() {
+    async fn skip_import_ignores_unsupported_import_message_shapes() {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
             .unwrap();
         let mut connection = pool.acquire().await.unwrap();
-        sqlx::query("CREATE TABLE conversations (id TEXT PRIMARY KEY, character_id TEXT NOT NULL)")
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO conversations (id, character_id) VALUES ('shared-conversation', 'local-character')")
-            .execute(&mut *connection)
-            .await
-            .unwrap();
+        create_conversation_tables(&mut connection).await;
         sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
             .execute(&mut *connection)
             .await
@@ -4227,12 +5129,787 @@ mod tests {
         .await
         .unwrap();
 
-        let error = reject_unsafe_skip_conversation_conflicts(&mut connection)
+        let mut transaction = connection.begin().await.unwrap();
+        let inserted = insert_skip_conversation_messages(&mut transaction)
             .await
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("skip import refuses conflicting conversation"));
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        assert_eq!(inserted, 0);
+    }
+
+    #[tokio::test]
+    async fn skip_import_moves_new_conversation_history_above_local_message_ids() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        create_conversation_tables(&mut connection).await;
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id) VALUES ('shared-conversation', 'alice')",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        for (id, content) in [(1_i64, "local one"), (2, "local two")] {
+            sqlx::query("INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (?, 'shared-conversation', 'user', ?, '1')")
+                .bind(id)
+                .bind(content)
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+        }
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        create_import_conversation_tables(&mut connection).await;
+        sqlx::query("INSERT INTO import_db.conversations (id, character_id) VALUES ('shared-conversation', 'alice'), ('new-conversation', 'bob')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        for (id, conversation, content) in [
+            (1_i64, "shared-conversation", "stale copy one"),
+            (2, "shared-conversation", "stale copy two"),
+            (3, "new-conversation", "new one"),
+            (4, "new-conversation", "new two"),
+        ] {
+            sqlx::query("INSERT INTO import_db.conversation_messages (id, conversation_id, role, content, created_at) VALUES (?, ?, 'user', ?, '1')")
+                .bind(id)
+                .bind(conversation)
+                .bind(content)
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+        }
+
+        let new_conversations = prepare_skip_conversation_scope(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(new_conversations, 1);
+        sqlx::query("INSERT OR IGNORE INTO conversations (id, character_id) SELECT id, character_id FROM import_db.conversations")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+
+        let mut transaction = connection.begin().await.unwrap();
+        let inserted = insert_skip_conversation_messages(&mut transaction)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        assert_eq!(
+            inserted, 2,
+            "only the new conversation contributes messages"
+        );
+        let local: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM conversation_messages WHERE conversation_id = 'shared-conversation' ORDER BY id",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(local, vec!["local one", "local two"]);
+
+        let moved: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, content FROM conversation_messages WHERE conversation_id = 'new-conversation' ORDER BY id",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(
+            moved,
+            vec![(5_i64, "new one".to_string()), (6, "new two".to_string())],
+            "imported ids must move above every local message id"
+        );
+    }
+
+    #[tokio::test]
+    async fn overwrite_import_clears_memory_relations_the_backup_does_not_carry() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query(
+            "INSERT INTO memories (id, content, embedding, created_at, updated_at, character_id) \
+             VALUES (1, 'local memory', X'', 1, 1, 'alice')",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO memory_evidence (memory_id, character_id, source_kind, created_at) \
+             VALUES (1, 'alice', 'chat', 1)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO memory_dream_proposals (character_id, proposal_type, status, title, created_at, updated_at) \
+             VALUES ('alice', 'merge', 'pending', 'stale proposal', 1, 1)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        // An old backup: no dream tables at all.
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+
+        let mut debug_log = Vec::new();
+        let mut transaction = connection.begin().await.unwrap();
+        restore_memory_aux_tables_overwrite(&mut transaction, &mut debug_log)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        for table in MEMORY_REFERENCING_TABLES {
+            let remaining: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+            assert_eq!(
+                remaining, 0,
+                "{table} must not keep rows that point at replaced memory ids"
+            );
+        }
+        assert!(debug_log
+            .iter()
+            .any(|line| line.contains("memory_evidence")));
+    }
+
+    #[tokio::test]
+    async fn skip_import_keeps_local_rows_and_drops_only_stale_relations() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        for (id, content) in [(1_i64, "unchanged memory"), (2, "local edit")] {
+            sqlx::query(
+                "INSERT INTO memories (id, content, embedding, created_at, updated_at, importance, character_id, tier, canonical_hash) \
+                 VALUES (?, ?, X'', 1, 1, 0.5, 'alice', 'ephemeral', ?)",
+            )
+            .bind(id)
+            .bind(content)
+            .bind(content)
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO memory_operations (id, character_id, operation_type, actor, memory_id, created_at) \
+             VALUES (10, 'alice', 'insert_active', 'pipeline', 1, 1), (11, 'alice', 'insert_active', 'pipeline', 2, 1)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE import_db.memories AS SELECT * FROM memories WHERE 0")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE import_db.memory_operations AS SELECT * FROM memory_operations WHERE 0",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        for (id, content, supersedes) in [
+            (1_i64, "unchanged memory", None),
+            (2, "backup version of the edited memory", None),
+            (3, "brand new memory", Some("[2]")),
+        ] {
+            sqlx::query(
+                "INSERT INTO import_db.memories (id, content, embedding, created_at, updated_at, importance, \
+                 character_id, tier, canonical_hash, supersedes, memory_type, status, confidence, \
+                 first_seen_at, last_seen_at, evidence_count, source_kind, source_refs) \
+                 VALUES (?, ?, X'', 1, 1, 0.5, 'alice', 'ephemeral', ?, ?, 'fact', 'active', 0.6, 1, 1, 1, 'extractor', '[]')",
+            )
+            .bind(id)
+            .bind(content)
+            .bind(content)
+            .bind(supersedes)
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO import_db.memory_operations (id, character_id, operation_type, actor, memory_id, created_at) \
+             VALUES (10, 'alice', 'insert_active', 'pipeline', 1, 1), \
+                    (12, 'alice', 'insert_active', 'pipeline', 2, 1), \
+                    (13, 'alice', 'insert_active', 'pipeline', 3, 1)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+        let conflicts = resolve_skip_memory_conflicts(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(
+            conflicts.conflicting_ids, 1,
+            "only the memory that really differs is a conflict"
+        );
+        assert_eq!(
+            conflicts.dropped_relations, 2,
+            "one audit row and one supersedes link point at the conflicting memory"
+        );
+
+        let mut transaction = connection.begin().await.unwrap();
+        let inserted = sqlx::query(MEMORY_INSERT_SKIP_SQL)
+            .execute(&mut *transaction)
+            .await
+            .unwrap()
+            .rows_affected();
+        insert_skip_memory_relations(&mut transaction)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        assert_eq!(inserted, 1, "only the brand new memory is inserted");
+
+        let local_edit: String = sqlx::query_scalar("SELECT content FROM memories WHERE id = 2")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(local_edit, "local edit");
+
+        let supersedes: Option<String> =
+            sqlx::query_scalar("SELECT supersedes FROM memories WHERE id = 3")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+        assert_eq!(
+            supersedes.as_deref(),
+            Some("[]"),
+            "a link into a conflicting local memory must be cleared"
+        );
+
+        let operations: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM memory_operations ORDER BY id")
+                .fetch_all(&mut *connection)
+                .await
+                .unwrap();
+        assert_eq!(
+            operations,
+            vec![10, 11, 13],
+            "the audit row for the conflicting memory is dropped, the new one is kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_purges_memories_without_a_local_character() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("INSERT INTO characters (id, name) VALUES ('alice', 'Alice'), ('bob', 'Bob')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO memories (id, content, embedding, created_at, updated_at, character_id) \
+             VALUES (1, 'owned', X'', 1, 1, 'alice'), \
+                    (2, 'legacy default', X'', 1, 1, 'default'), \
+                    (3, 'deleted owner', X'', 1, 1, 'ghost')",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO memory_evidence (memory_id, character_id, source_kind, created_at) \
+             VALUES (1, 'alice', 'chat', 1), (2, 'default', 'chat', 1), (3, 'ghost', 'chat', 1)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO memory_dream_jobs (character_id, phase, status, trigger, started_at) \
+             VALUES ('ghost', 'dream', 'completed', 'manual', 1)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+        let mut transaction = connection.begin().await.unwrap();
+        let purged = purge_orphaned_memories(&mut transaction).await.unwrap();
+        transaction.commit().await.unwrap();
+
+        assert_eq!(purged, 2);
+        let contents: Vec<String> = sqlx::query_scalar("SELECT content FROM memories")
+            .fetch_all(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(contents, vec!["owned"]);
+
+        let evidence: Vec<i64> = sqlx::query_scalar("SELECT memory_id FROM memory_evidence")
+            .fetch_all(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(
+            evidence,
+            vec![1],
+            "relations of purged memories must go too"
+        );
+
+        let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_dream_jobs")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(
+            jobs, 0,
+            "per-character rows of a missing character must go too"
+        );
+    }
+
+    /// Resolver used by the cross-machine fixtures: no character packages exist,
+    /// which is exactly the "restore onto a clean machine" situation.
+    struct NoPackages;
+    impl CharacterPackageResolver for NoPackages {
+        fn resolve_exact(
+            &self,
+            _template_id: &str,
+            _template_version: &str,
+        ) -> Result<Option<ResolvedCharacterPackage>, String> {
+            Ok(None)
+        }
+    }
+
+    /// Two databases as they look on two different machines: the same character
+    /// display name, but a different instance id on each side.
+    async fn cross_machine_pools() -> (tempfile::TempDir, SqlitePool, SqlitePool) {
+        let temp = tempfile::tempdir().unwrap();
+        let live_url = format!(
+            "sqlite://{}",
+            temp.path()
+                .join("live.db")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+        let backup_url = format!(
+            "sqlite://{}",
+            temp.path()
+                .join("backup.db")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+        let live = SqliteConnectOptions::from_str(&live_url)
+            .unwrap()
+            .create_if_missing(true);
+        let live = SqlitePool::connect_with(live).await.unwrap();
+        let backup = SqliteConnectOptions::from_str(&backup_url)
+            .unwrap()
+            .create_if_missing(true);
+        let backup = SqlitePool::connect_with(backup).await.unwrap();
+        sqlx::migrate!("./migrations").run(&live).await.unwrap();
+        sqlx::migrate!("./migrations").run(&backup).await.unwrap();
+
+        // This machine.
+        sqlx::query("INSERT INTO characters (id, name) VALUES ('local-pc', 'Kokoro')")
+            .execute(&live)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, title, created_at, updated_at) \
+             VALUES ('conv-local', 'local-pc', 'Local chat', 'now', 'now')",
+        )
+        .execute(&live)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO conversation_messages (conversation_id, role, content, created_at) \
+             VALUES ('conv-local', 'user', 'local message', 'now')",
+        )
+        .execute(&live)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO memories (content, embedding, created_at, updated_at, character_id) \
+             VALUES ('local memory', X'', 1, 1, 'local-pc')",
+        )
+        .execute(&live)
+        .await
+        .unwrap();
+
+        // The other machine: same display name, different instance id.
+        sqlx::query("INSERT INTO characters (id, name) VALUES ('remote-pc', 'Kokoro')")
+            .execute(&backup)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, title, created_at, updated_at) \
+             VALUES ('conv-remote', 'remote-pc', 'Remote chat', 'now', 'now')",
+        )
+        .execute(&backup)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO conversation_messages (conversation_id, role, content, created_at) \
+             VALUES ('conv-remote', 'user', 'remote message', 'now')",
+        )
+        .execute(&backup)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO memories (content, embedding, created_at, updated_at, character_id) \
+             VALUES ('remote memory', X'', 1, 1, 'remote-pc')",
+        )
+        .execute(&backup)
+        .await
+        .unwrap();
+
+        (temp, live, backup)
+    }
+
+    /// Result of replaying the overwrite branch of `import_data`.
+    struct OverwriteOutcome {
+        conn: sqlx::pool::PoolConnection<sqlx::Sqlite>,
+        purged: i64,
+        merged: i64,
+        ignored: i64,
+    }
+
+    /// Replays the overwrite branch of `import_data` for the fixture above. The
+    /// statement order mirrors production: ignore, merge, copy, characters, purge.
+    async fn run_cross_machine_overwrite(
+        live: &SqlitePool,
+        backup: &SqlitePool,
+        backup_path: &Path,
+        merges: &[CharacterMerge],
+        ignored: &[&str],
+    ) -> OverwriteOutcome {
+        let mut prepared = prepare_character_rows(backup, &NoPackages).await.unwrap();
+
+        let mut conn = live.acquire().await.unwrap();
+        sqlx::query("ATTACH DATABASE ? AS import_db")
+            .bind(backup_path.to_string_lossy().replace('\\', "/"))
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+
+        let mut transaction = conn.begin().await.unwrap();
+        let ignored_ids: HashSet<String> = ignored.iter().map(|id| id.to_string()).collect();
+        for ignored_id in &ignored_ids {
+            remove_imported_character(&mut transaction, ignored_id)
+                .await
+                .unwrap();
+        }
+        let ignored_characters = prepared
+            .iter()
+            .filter(|row| ignored_ids.contains(&row.id))
+            .count() as i64;
+        prepared.retain(|row| !ignored_ids.contains(&row.id));
+
+        apply_import_character_merges(&mut transaction, merges)
+            .await
+            .unwrap();
+        let merged_ids: HashSet<&str> = merges
+            .iter()
+            .map(|merge| merge.imported_id.as_str())
+            .collect();
+        let merged_characters = prepared
+            .iter()
+            .filter(|row| merged_ids.contains(row.id.as_str()))
+            .count() as i64;
+        prepared.retain(|row| !merged_ids.contains(row.id.as_str()));
+
+        for statement in [
+            "DELETE FROM conversation_messages",
+            "DELETE FROM conversations",
+            "DELETE FROM memories",
+        ] {
+            sqlx::query(statement)
+                .execute(&mut *transaction)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO memories (id, content, embedding, created_at, updated_at, importance, character_id, tier, \
+             consolidated_from, memory_type, entity_key, status, confidence, first_seen_at, last_seen_at, \
+             evidence_count, source_kind, source_refs, supersedes, canonical_hash, last_dreamed_at) \
+             SELECT id, content, embedding, created_at, updated_at, importance, character_id, tier, \
+             consolidated_from, memory_type, entity_key, status, confidence, first_seen_at, last_seen_at, \
+             evidence_count, source_kind, source_refs, supersedes, canonical_hash, last_dreamed_at FROM import_db.memories",
+        )
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) \
+             SELECT id, character_id, title, topic, pinned_state, created_at, updated_at FROM import_db.conversations",
+        )
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO conversation_messages (id, conversation_id, role, content, metadata, created_at) \
+             SELECT id, conversation_id, role, content, metadata, created_at FROM import_db.conversation_messages",
+        )
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        apply_character_rows(&mut transaction, prepared, "overwrite")
+            .await
+            .unwrap();
+        let purged = purge_orphaned_memories(&mut transaction).await.unwrap();
+        transaction.commit().await.unwrap();
+
+        OverwriteOutcome {
+            conn,
+            purged,
+            merged: merged_characters,
+            ignored: ignored_characters,
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_machine_overwrite_restore_keeps_the_backup_character_identity() {
+        let (temp, live, backup) = cross_machine_pools().await;
+        let backup_path = temp.path().join("backup.db");
+
+        let OverwriteOutcome {
+            mut conn,
+            purged,
+            merged,
+            ignored,
+        } = run_cross_machine_overwrite(&live, &backup, &backup_path, &[], &[]).await;
+
+        assert_eq!(
+            purged, 0,
+            "memories of the imported character must survive the orphan purge"
+        );
+        assert_eq!(merged, 0);
+        assert_eq!(ignored, 0);
+
+        let mut names: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, name FROM characters ORDER BY id")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                ("local-pc".to_string(), "Kokoro".to_string()),
+                ("remote-pc".to_string(), "Kokoro".to_string()),
+            ],
+            "without a merge the import never deduplicates by display name"
+        );
+
+        let memories: Vec<(String, String)> =
+            sqlx::query_as("SELECT character_id, content FROM memories")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(
+            memories,
+            vec![("remote-pc".to_string(), "remote memory".to_string())]
+        );
+
+        let conversations: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, character_id FROM conversations")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(
+            conversations,
+            vec![("conv-remote".to_string(), "remote-pc".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_machine_overwrite_restore_can_merge_into_a_local_character() {
+        let (temp, live, backup) = cross_machine_pools().await;
+        let backup_path = temp.path().join("backup.db");
+
+        let OverwriteOutcome {
+            mut conn,
+            purged,
+            merged,
+            ..
+        } = run_cross_machine_overwrite(
+            &live,
+            &backup,
+            &backup_path,
+            &[CharacterMerge {
+                imported_id: "remote-pc".to_string(),
+                target_id: "local-pc".to_string(),
+            }],
+            &[],
+        )
+        .await;
+
+        assert_eq!(
+            merged, 1,
+            "the merged character is not imported as a new one"
+        );
+        assert_eq!(purged, 0);
+
+        let names: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, name FROM characters ORDER BY id")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(
+            names,
+            vec![("local-pc".to_string(), "Kokoro".to_string())],
+            "a merge leaves exactly one character behind"
+        );
+
+        let memories: Vec<(String, String)> =
+            sqlx::query_as("SELECT character_id, content FROM memories")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(
+            memories,
+            vec![("local-pc".to_string(), "remote memory".to_string())],
+            "imported memories follow the local character"
+        );
+
+        let conversations: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, character_id FROM conversations")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(
+            conversations,
+            vec![("conv-remote".to_string(), "local-pc".to_string())],
+            "imported conversations follow the local character"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_machine_overwrite_restore_can_ignore_a_backup_character() {
+        let (temp, live, backup) = cross_machine_pools().await;
+        let backup_path = temp.path().join("backup.db");
+
+        // A second character in the backup that the user does not want at all.
+        sqlx::query("INSERT INTO characters (id, name) VALUES ('remote-archive', 'Archive')")
+            .execute(&backup)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, title, created_at, updated_at) \
+             VALUES ('conv-archive', 'remote-archive', 'Archive chat', 'now', 'now')",
+        )
+        .execute(&backup)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO conversation_messages (conversation_id, role, content, created_at) \
+             VALUES ('conv-archive', 'user', 'archived message', 'now')",
+        )
+        .execute(&backup)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO memories (content, embedding, created_at, updated_at, character_id) \
+             VALUES ('archived memory', X'', 1, 1, 'remote-archive')",
+        )
+        .execute(&backup)
+        .await
+        .unwrap();
+
+        let OverwriteOutcome {
+            mut conn,
+            purged,
+            merged,
+            ignored,
+        } = run_cross_machine_overwrite(&live, &backup, &backup_path, &[], &["remote-archive"])
+            .await;
+
+        assert_eq!(ignored, 1, "the ignored character is reported");
+        assert_eq!(merged, 0);
+        assert_eq!(purged, 0, "nothing is left behind for the orphan purge");
+
+        let mut names: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, name FROM characters ORDER BY id")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                ("local-pc".to_string(), "Kokoro".to_string()),
+                ("remote-pc".to_string(), "Kokoro".to_string()),
+            ],
+            "the ignored character is not imported"
+        );
+
+        let memories: Vec<(String, String)> =
+            sqlx::query_as("SELECT character_id, content FROM memories")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(
+            memories,
+            vec![("remote-pc".to_string(), "remote memory".to_string())],
+            "memories of the ignored character are not copied"
+        );
+
+        let conversations: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, character_id FROM conversations ORDER BY id")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(
+            conversations,
+            vec![("conv-remote".to_string(), "remote-pc".to_string())]
+        );
+
+        let messages: Vec<String> = sqlx::query_scalar("SELECT content FROM conversation_messages")
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            messages,
+            vec!["remote message"],
+            "messages of the ignored character are not copied"
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_lists_backup_characters_with_their_data_counts() {
+        let (temp, live, backup) = cross_machine_pools().await;
+
+        let summaries = read_backup_characters(&temp.path().join("backup.db")).await;
+        assert_eq!(
+            summaries.len(),
+            1,
+            "the preview must expose the backup characters"
+        );
+        assert_eq!(summaries[0].id, "remote-pc");
+        assert_eq!(summaries[0].name, "Kokoro");
+        assert_eq!(summaries[0].memory_count, 1);
+        assert_eq!(summaries[0].conversation_count, 1);
+
+        // A backup from before characters moved into SQLite has no table at all.
+        sqlx::query("DROP TABLE characters")
+            .execute(&backup)
+            .await
+            .unwrap();
+        assert!(read_backup_characters(&temp.path().join("backup.db"))
+            .await
+            .is_empty());
+
+        drop(live);
     }
 
     #[tokio::test]
@@ -4276,10 +5953,12 @@ mod tests {
             .await
             .unwrap();
 
-        let bytes = create_consistent_database_snapshot(&source)
+        let snapshot_bytes = create_consistent_database_snapshot(&source)
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(snapshot_bytes.stats.memories, 0);
+        let bytes = snapshot_bytes.bytes;
         pool.close().await;
         let snapshot = temp.path().join("snapshot.db");
         fs::write(&snapshot, bytes).unwrap();
@@ -4394,13 +6073,19 @@ mod tests {
         .await
         .unwrap();
 
-        let remapped = remap_imported_character_ids(&mut connection, "target-character")
-            .await
-            .unwrap();
+        let remapped = apply_import_character_merges(
+            &mut connection,
+            &[CharacterMerge {
+                imported_id: "character-a".to_string(),
+                target_id: "target-character".to_string(),
+            }],
+        )
+        .await
+        .unwrap();
 
         assert!(!remapped
             .iter()
-            .any(|(table, _)| table == "emotion_snapshots"));
+            .any(|(table, _)| table.starts_with("emotion_snapshots")));
         let snapshot_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM import_db.emotion_snapshots")
                 .fetch_one(&mut *connection)

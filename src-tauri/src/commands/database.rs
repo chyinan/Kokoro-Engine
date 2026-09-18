@@ -20,17 +20,32 @@ pub async fn init_db(_state: State<'_, AIOrchestrator>) -> Result<String, Kokoro
 pub async fn test_vector_store(
     state: State<'_, AIOrchestrator>,
 ) -> Result<DbTestResult, KokoroError> {
+    // Memories only exist for a real character instance, so the diagnostic runs
+    // against the first one instead of inventing an owner.
+    let character_id: Option<String> =
+        sqlx::query_scalar("SELECT id FROM characters ORDER BY created_at ASC, id ASC LIMIT 1")
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| KokoroError::Database(e.to_string()))?;
+    let Some(character_id) = character_id else {
+        return Ok(DbTestResult {
+            success: false,
+            message: "No character exists to own a test memory.".to_string(),
+            record_count: 0,
+        });
+    };
+
     // 1. Add a test memory
     state
         .memory_manager
-        .add_memory("Test memory: Kokoro loves apples.", "test")
+        .add_memory("Test memory: Kokoro loves apples.", &character_id)
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
 
     // 2. Search
     let results = state
         .memory_manager
-        .search_memories("What does Kokoro love?", 1, "test")
+        .search_memories("What does Kokoro love?", 1, &character_id)
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
 

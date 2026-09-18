@@ -1,18 +1,24 @@
 // pattern: Imperative Shell
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { clsx } from 'clsx';
 import { Download, Upload, Loader2, Check, AlertTriangle, Database, FileJson, Clock, FolderOpen, Trash2, Play } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { save, open, open as openDialog } from '@tauri-apps/plugin-dialog';
-import { exportData, previewImport, importData, getAutoBackupConfig, saveAutoBackupConfig, runAutoBackupNow, setUserName, setUserPersona } from '../../../lib/kokoro-bridge';
-import type { ImportPreview, AutoBackupConfig } from '../../../lib/kokoro-bridge';
-import { characterDb } from '../../../lib/db';
-import type { CharacterProfile } from '../../../lib/db';
+import { exportData, previewImport, importData, getAutoBackupConfig, saveAutoBackupConfig, runAutoBackupNow, listCharacters } from '../../../lib/kokoro-bridge';
+import type { ImportPreview, AutoBackupConfig, CharacterRecord } from '../../../lib/kokoro-bridge';
 import { migrateLegacyCharactersToSqlite } from '../../../lib/legacy-character-migration';
-import { sectionHeadingClasses } from '../../styles/settings-primitives';
+import { sectionHeadingClasses, labelClasses } from '../../styles/settings-primitives';
+import { Select } from '../../../components/ui/select';
 import { backupCredentialWarningKey, buildManualExportOptions, type BackupResourceMode } from './backup-resource-options';
+import {
+    buildCharacterPlan,
+    defaultCharacterTargets,
+    IGNORE_CHARACTER_TARGET,
+    NEW_CHARACTER_TARGET,
+    type CharacterTargets,
+} from './backup-character-mapping';
 
 function formatBytes(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -52,6 +58,24 @@ export function BackupTab({
     const [importDb, setImportDb] = useState(true);
     const [importConfigs, setImportConfigs] = useState(true);
     const [conflictStrategy, setConflictStrategy] = useState<"skip" | "overwrite">("overwrite");
+    const [localCharacters, setLocalCharacters] = useState<ReadonlyArray<Pick<CharacterRecord, "id" | "name">>>([]);
+    const [characterTargets, setCharacterTargets] = useState<CharacterTargets>({});
+
+    // Mirrors the character picker used by the Bot tab so the dropdown matches the
+    // rest of the settings surface.
+    const characterTargetOptions = useMemo(() => [
+        { value: NEW_CHARACTER_TARGET, label: t('settings.backup.character_target_new') },
+        ...localCharacters.map(local => ({
+            value: local.id,
+            label: t('settings.backup.character_target_merge', { name: local.name }),
+        })),
+        { value: IGNORE_CHARACTER_TARGET, label: t('settings.backup.character_target_ignore') },
+    ], [localCharacters, t]);
+
+    const ignoredCharacterCount = useMemo(
+        () => Object.values(characterTargets).filter(target => target === IGNORE_CHARACTER_TARGET).length,
+        [characterTargets],
+    );
 
     // Auto backup state
     const [internalAutoBackup, setInternalAutoBackup] = useState<AutoBackupConfig>({
@@ -163,6 +187,12 @@ export function BackupTab({
             setPreview(p);
             setImportDb(p.has_database);
             setImportConfigs(p.has_configs);
+
+            // Character instance ids are per machine, so the backup can never match
+            // a local id. Offer the choice instead of guessing.
+            const characters = await listCharacters().catch(() => []);
+            setLocalCharacters(characters);
+            setCharacterTargets(defaultCharacterTargets(p.characters ?? [], characters));
         } catch (e: any) {
             const msg = typeof e === 'string' ? e : (e?.message ?? JSON.stringify(e));
             setImportError(msg);
@@ -175,113 +205,45 @@ export function BackupTab({
         setImportError(null);
         setImportDone(null);
         try {
-            // Phase 1: 先恢复角色到 IndexedDB，拿到新 ID
+            // Phase 1: make sure any legacy IndexedDB characters reached SQLite
+            // before the restore replaces the tables they live in.
             if (importDb) {
                 await migrateLegacyCharactersToSqlite();
             }
-            let targetCharacterId: string | undefined;
-            let payload: any = null;
 
-            // 先调用 importData 不带 target_character_id，拿到 characters_json
-            // Legacy characters.json is intentionally ignored; SQLite restore is authoritative.
-            const firstPass: { characters_json?: string } = {};
-
-            if (firstPass.characters_json && importDb) {
-                try {
-                    payload = JSON.parse(firstPass.characters_json);
-                    const chars: (Omit<CharacterProfile, 'avatarBlob'> & { avatarB64?: string })[] =
-                        payload.characters ?? payload; // 兼容旧格式
-
-                    // 恢复用户资料 localStorage
-                    if (payload.userName != null) {
-                        localStorage.setItem('kokoro_user_name', payload.userName);
-                        await setUserName(payload.userName);
-                    }
-                    if (payload.userPersona != null) {
-                        localStorage.setItem('kokoro_user_persona', payload.userPersona);
-                        await setUserPersona(payload.userPersona);
-                    }
-                    if (payload.userLanguage != null) localStorage.setItem('kokoro_user_language', payload.userLanguage);
-                    if (payload.responseLanguage != null) localStorage.setItem('kokoro_response_language', payload.responseLanguage);
-                    if (payload.voiceInterrupt != null) localStorage.setItem('kokoro_voice_interrupt', payload.voiceInterrupt);
-
-                    // 先写入所有备份角色，全部成功后再删旧角色，避免中途失败导致数据损坏
-                    const newIds: number[] = [];
-                    for (const c of chars) {
-                        let avatarBlob: Blob | undefined;
-                        if (c.avatarB64) {
-                            const bytes = Uint8Array.from(atob(c.avatarB64), ch => ch.charCodeAt(0));
-                            avatarBlob = new Blob([bytes]);
-                        }
-                        const { avatarB64, id: _oldId, ...rest } = c;
-                        const newId = await characterDb.add({ ...rest, avatarBlob });
-                        newIds.push(newId);
-                    }
-                    // 所有新角色写入成功，再清空旧角色
-                    const existing = await characterDb.getAll();
-                    for (const c of existing) {
-                        if (c.id !== undefined && !newIds.includes(c.id)) {
-                            await characterDb.remove(c.id);
-                        }
-                    }
-                    // stableId is preserved in rest, so use it directly
-                    const oldActiveId = payload.activeCharacterId;
-                    console.log('[Backup] oldActiveId (stableId):', oldActiveId);
-                    targetCharacterId = oldActiveId || undefined;
-                    // Fall back to first restored character's stableId
-                    if (!targetCharacterId) {
-                        const allRestored = await characterDb.getAll();
-                        targetCharacterId = allRestored[0]?.stableId;
-                    }
-                    console.log('[Backup] targetCharacterId resolved to:', targetCharacterId);
-                } catch (e) {
-                    console.error('[Backup] Failed to restore characters:', e);
-                }
-            }
-
-            // Backup restore is app-wide and commits SQLite atomically. Do not
-            // mutate the per-character runtime cache here; App startup will
-            // recover the backend committed runtime after the reload below.
-            targetCharacterId = undefined;
-
-            // Phase 2: 用正确的 target_character_id 导入数据库和配置
-            console.log('[Backup] Phase 2 importData options:', {
-                import_database: importDb,
-                import_configs: importConfigs,
-                conflict_strategy: conflictStrategy,
-                target_character_id: targetCharacterId,
-            });
+            // Backup restore is app-wide and commits SQLite atomically. The backup's
+            // own `characters` rows are authoritative, except for the characters the
+            // user explicitly routed into an existing local instance.
+            // App startup recovers the committed runtime after the reload below.
+            const plan = importDb
+                ? buildCharacterPlan(characterTargets)
+                : { merges: [], ignored: [] };
             const result = await importData(importFilePath, {
                 import_database: importDb,
                 import_configs: importConfigs,
                 conflict_strategy: conflictStrategy,
+                character_merges: plan.merges,
+                ignored_characters: plan.ignored,
             });
-            console.log('[Backup] Phase 2 result:', result);
 
-            // The characters payload is sourced from localStorage at export time and is
-            // the most authoritative copy for the user profile fields. Re-apply it after
-            // config import so a stale user_profile.json inside the backup cannot wipe it.
-            if (payload?.userName != null) {
-                localStorage.setItem('kokoro_user_name', payload.userName);
-                await setUserName(payload.userName);
+            const notes: string[] = [];
+            if (result.merged_characters) {
+                notes.push(t('settings.backup.merged_characters', { count: result.merged_characters }));
             }
-            if (payload?.userPersona != null) {
-                localStorage.setItem('kokoro_user_persona', payload.userPersona);
-                await setUserPersona(payload.userPersona);
+            if (result.ignored_characters) {
+                notes.push(t('settings.backup.ignored_characters', { count: result.ignored_characters }));
+            }
+            if (result.skipped_memories) {
+                notes.push(t('settings.backup.skipped_memories', { count: result.skipped_memories }));
             }
 
-            const debugInfo = [
-                `oldActiveId: ${payload?.activeCharacterId ?? 'n/a'}`,
-                `targetCharacterId: ${targetCharacterId ?? 'undefined'}`,
-                ...(result.debug_log ?? []),
-            ].join('\n');
-            setImportDone(
-                t('settings.backup.import_stats', {
-                    memories: result.imported_memories,
-                    conversations: result.imported_conversations,
-                    configs: result.imported_configs,
-                }) + `\n${t('settings.backup.restored_characters', { count: result.imported_characters })}` + '\n\n[debug]\n' + debugInfo
-            );
+            const summary = t('settings.backup.import_stats', {
+                memories: result.imported_memories,
+                conversations: result.imported_conversations,
+                configs: result.imported_configs,
+            }) + `\n${t('settings.backup.restored_characters', { count: result.imported_characters })}`;
+
+            setImportDone(notes.length > 0 ? `${summary}\n\n${notes.join('\n')}` : summary);
             setPreview(null);
             setTimeout(() => window.location.reload(), 1500);
         } catch (e: any) {
@@ -544,6 +506,45 @@ export function BackupTab({
                                 </label>
                             )}
                         </div>
+
+                        {/* Character ownership: backups carry the other machine's ids */}
+                        {importDb && (preview.characters?.length ?? 0) > 0 && (
+                            <div className="space-y-3">
+                                <div className="space-y-1">
+                                    <div className="text-xs text-[var(--color-text-muted)] font-semibold">
+                                        {t('settings.backup.character_mapping_label')}
+                                    </div>
+                                    <p className="text-[11px] text-[var(--color-text-muted)]">
+                                        {t('settings.backup.character_mapping_hint')}
+                                    </p>
+                                </div>
+                                {preview.characters.map(character => (
+                                    <div key={character.id}>
+                                        <label className={labelClasses}>{character.name}</label>
+                                        <Select
+                                            value={characterTargets[character.id] ?? NEW_CHARACTER_TARGET}
+                                            onChange={value => setCharacterTargets(prev => ({
+                                                ...prev,
+                                                [character.id]: value,
+                                            }))}
+                                            options={characterTargetOptions}
+                                        />
+                                        <div className="text-xs text-[var(--color-text-muted)] mt-1">
+                                            {t('settings.backup.character_data_summary', {
+                                                memories: character.memory_count,
+                                                conversations: character.conversation_count,
+                                            })}
+                                        </div>
+                                    </div>
+                                ))}
+                                {ignoredCharacterCount > 0 && (
+                                    <div className="flex items-start gap-2 text-[11px] text-amber-300">
+                                        <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                                        <span>{t('settings.backup.character_ignore_warning')}</span>
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         {/* Conflict strategy */}
                         <div className="space-y-1">

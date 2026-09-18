@@ -26,7 +26,8 @@ Use strict TypeScript, React function components, and `@/*` imports when they im
 - `src/lib/kokoro-bridge.ts` is the typed frontend/backend boundary; update Rust command registration and bridge types together.
 - Character runtime changes go through the serialized activation owner. Persist per-character overrides through prepare/apply/commit; keep provider secrets and other app-wide credentials separate.
 - Registry trust is source-bound: only the canonical official endpoint plus official identity may produce an official label. URL/custom registry installs are community/untrusted and require explicit confirmation.
-- Registry and backup writes use staging, canonical containment, size limits, and reparse/symlink checks before promotion. User instances, conversations, memories, and settings survive package removal.
+- Registry and backup writes use staging, canonical containment, size limits, and reparse/symlink checks before promotion. Uninstalling a content package keeps user instances, conversations, memories, and settings.
+- Deleting a character instance is destructive and confirmed in the UI: it removes the instance together with its conversations, messages, memories, and per-character derived rows (`CHARACTER_OWNED_TABLES`). A memory is only reachable through its owning character, so memory writes are skipped, and orphaned rows purged, whenever no such character exists.
 - Webhook and AstrBot payloads use character-scoped conversations, Bearer authentication, bounded bodies, JSON errors, and explicit text/image/audio media contracts. AstrBot audio converted through `Record.convert_to_base64()` is sent as WAV.
 - Memory embedding is optional and non-blocking: unavailable semantic retrieval yields a typed unavailable result/BM25 fallback while basic LLM chat remains usable.
 

@@ -1687,6 +1687,25 @@ impl MemoryManager {
             .await
     }
 
+    /// Whether `character_id` names a character instance the database knows about.
+    ///
+    /// Memories are only reachable through their owner: the memory panel lists
+    /// them per character, and retrieval filters by `character_id`. A chat request
+    /// without a selected character falls back to a synthetic id, so every write
+    /// path checks ownership first instead of creating a row no surface can show.
+    pub(crate) async fn memory_owner_exists(&self, character_id: &str) -> Result<bool> {
+        let character_id = character_id.trim();
+        if character_id.is_empty() {
+            return Ok(false);
+        }
+        let exists: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM characters WHERE id = ?)")
+                .bind(character_id)
+                .fetch_one(&self.db)
+                .await?;
+        Ok(exists == 1)
+    }
+
     async fn insert_memory_candidate(&self, candidate: NewMemoryCandidate<'_>) -> Result<i64> {
         let result = sqlx::query(
             "INSERT INTO memory_candidates \
@@ -2712,6 +2731,16 @@ impl MemoryManager {
         character_id: &str,
         importance: f64,
     ) -> Result<()> {
+        // Ownership is checked before embedding so an unknown character costs
+        // nothing and cannot leave an invisible row behind.
+        if !self.memory_owner_exists(character_id).await? {
+            tracing::warn!(
+                target: "memory",
+                "[Memory] Skipping write for unknown character '{}'",
+                character_id
+            );
+            return Ok(());
+        }
         let metadata = infer_memory_metadata(content);
         let storage_probe = metadata.canonical_content.as_deref().unwrap_or(content);
         let hash = canonical_hash(storage_probe);
@@ -5208,14 +5237,57 @@ mod tests {
         assert_eq!(status, "archived");
     }
 
+    /// Memories are owned by a character instance, so tests must create one.
+    async fn seed_character(pool: &sqlx::SqlitePool, id: &str) {
+        sqlx::query(
+            "INSERT OR IGNORE INTO characters \
+             (id, name, persona, user_nickname, source_format, created_at, updated_at) \
+             VALUES (?, ?, '', 'User', 'manual', 0, 0)",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("Failed to seed character");
+    }
+
+    #[tokio::test]
+    async fn memory_writes_are_skipped_for_an_unknown_character() {
+        let pool = setup_test_pool().await;
+        let manager = MemoryManager::new(pool.clone());
+
+        manager
+            .add_memory("Ghost memory", "default")
+            .await
+            .expect("an unknown owner must not fail the caller");
+
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "no memory may exist without an owning character");
+
+        seed_character(&pool, "default").await;
+        manager
+            .add_memory("Owned memory", "default")
+            .await
+            .expect("a real character can store memories");
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 1);
+    }
+
     #[tokio::test]
     async fn test_memory_manager_add_and_retrieve() {
         let pool = setup_test_pool().await;
-        let manager = MemoryManager::new(pool);
+        let manager = MemoryManager::new(pool.clone());
 
         // Add a memory
         let content = "Test memory content";
         let char_id = "test_char";
+        seed_character(&pool, char_id).await;
         manager
             .add_memory(content, char_id)
             .await
@@ -5241,7 +5313,10 @@ mod tests {
     #[tokio::test]
     async fn test_memory_manager_character_isolation() {
         let pool = setup_test_pool().await;
-        let manager = MemoryManager::new(pool);
+        let manager = MemoryManager::new(pool.clone());
+
+        seed_character(&pool, "alice").await;
+        seed_character(&pool, "bob").await;
 
         // Add memories for different characters
         manager
@@ -5296,9 +5371,10 @@ mod tests {
     #[tokio::test]
     async fn test_memory_manager_multiple_memories() {
         let pool = setup_test_pool().await;
-        let manager = MemoryManager::new(pool);
+        let manager = MemoryManager::new(pool.clone());
 
         let char_id = "test_char";
+        seed_character(&pool, char_id).await;
 
         // Add multiple distinct memories (with unique content to avoid deduplication)
         let memories_to_add = vec![

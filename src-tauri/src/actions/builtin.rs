@@ -455,6 +455,17 @@ impl ActionHandler for StoreMemoryAction {
         let orchestrator = ctx.app.state::<crate::ai::context::AIOrchestrator>();
         let char_id = ctx.character_id.clone();
 
+        if !orchestrator
+            .memory_manager
+            .memory_owner_exists(&char_id)
+            .await
+            .map_err(|e| ActionError(format!("Failed to verify the active character: {}", e)))?
+        {
+            return Err(ActionError(format!(
+                "Cannot store memory: no character owns id '{char_id}'. Ask the user to select a character first."
+            )));
+        }
+
         orchestrator
             .memory_manager
             .add_memory_with_importance(fact, &char_id, importance)

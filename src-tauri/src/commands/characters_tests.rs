@@ -582,28 +582,101 @@ async fn restore_defaults_preserves_consumed_greeting_conversations_and_memories
 }
 
 #[tokio::test]
-async fn delete_removes_only_the_instance_row() {
+async fn delete_removes_the_instance_with_its_conversations_and_memories() {
+    let temp = TempDir::new().unwrap();
     let pool = migrated_pool().await;
     create_character_in_pool(&pool, complete_create_request("instance"))
         .await
         .unwrap();
+    create_character_in_pool(&pool, complete_create_request("keeper"))
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO conversations (id, character_id, title, created_at, updated_at) \
-         VALUES ('conversation', 'instance', 'Chat', 'now', 'now')",
+         VALUES ('conversation', 'instance', 'Chat', 'now', 'now'), \
+                ('kept', 'keeper', 'Kept', 'now', 'now')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO conversation_messages (conversation_id, role, content, created_at) \
+         VALUES ('conversation', 'user', 'hello', 'now'), ('kept', 'user', 'hi', 'now')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO memories (content, embedding, created_at, updated_at, character_id) \
+         VALUES ('mine', X'', 1, 1, 'instance'), ('theirs', X'', 1, 1, 'keeper')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO memory_evidence (memory_id, character_id, source_kind, created_at) \
+         SELECT id, character_id, 'chat', 1 FROM memories",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO memory_dream_jobs (character_id, phase, status, trigger, started_at) \
+         VALUES ('instance', 'dream', 'completed', 'manual', 1)",
     )
     .execute(&pool)
     .await
     .unwrap();
 
-    delete_character_in_pool(&pool, "instance").await.unwrap();
+    delete_character_with_resources_in_pool(&pool, temp.path(), "instance")
+        .await
+        .unwrap();
 
-    assert_eq!(list_characters_from_pool(&pool).await.unwrap().len(), 0);
-    let conversation_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE character_id = 'instance'")
-            .fetch_one(&pool)
+    let characters = list_characters_from_pool(&pool).await.unwrap();
+    assert_eq!(characters.len(), 1);
+    assert_eq!(characters[0].id, "keeper");
+
+    for table in [
+        "conversations",
+        "memories",
+        "memory_evidence",
+        "memory_dream_jobs",
+    ] {
+        let remaining: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {table} WHERE character_id = 'instance'"
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            remaining, 0,
+            "{table} still holds rows of the deleted character"
+        );
+    }
+    let deleted_messages: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = 'conversation'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        deleted_messages, 0,
+        "messages of a deleted conversation remain"
+    );
+
+    let survivors: Vec<String> =
+        sqlx::query_scalar("SELECT content FROM memories ORDER BY content")
+            .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(conversation_count, 1);
+    assert_eq!(survivors, vec!["theirs"]);
+    let kept_messages: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = 'kept'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept_messages, 1);
 }
 
 #[test]

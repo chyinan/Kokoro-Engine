@@ -1692,19 +1692,38 @@ export interface BackupManifest {
     includes_character_resources: boolean;
 }
 
+/** One character instance stored inside a backup. */
+export interface BackupCharacterSummary {
+    id: string;
+    name: string;
+    memory_count: number;
+    conversation_count: number;
+}
+
 export interface ImportPreview {
     manifest: BackupManifest;
     has_database: boolean;
     has_configs: boolean;
     config_files: string[];
     stats: BackupStats;
+    /** Empty when the backup predates the SQLite character table. */
+    characters: BackupCharacterSummary[];
+}
+
+/** Routes the rows of one imported character into an existing local character. */
+export interface CharacterMerge {
+    imported_id: string;
+    target_id: string;
 }
 
 export interface ImportOptions {
     import_database: boolean;
     import_configs: boolean;
     conflict_strategy: "skip" | "overwrite";
-    target_character_id?: string;
+    /** Characters to merge into a local instance; the rest are imported as new. */
+    character_merges?: CharacterMerge[];
+    /** Characters to leave out of the restore entirely. */
+    ignored_characters?: string[];
 }
 
 export interface ImportResult {
@@ -1712,7 +1731,11 @@ export interface ImportResult {
     imported_conversations: number;
     imported_configs: number;
     imported_characters: number;
+    merged_characters?: number;
+    ignored_characters?: number;
     characters_json?: string;
+    /** Imported memories dropped by the skip strategy because they violate the local schema. */
+    skipped_memories?: number;
     debug_log?: string[];
 }
 

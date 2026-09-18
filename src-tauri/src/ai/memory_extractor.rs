@@ -147,6 +147,27 @@ pub async fn extract_and_store_memories_with_options(
         );
         return;
     }
+    // Never spend an LLM call on a character the database does not have.
+    match memory_manager.memory_owner_exists(&character_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(
+                target: "memory",
+                "[Memory] Skipping extraction for unknown character '{}'",
+                character_id
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::error!(
+                target: "memory",
+                "[Memory] Failed to verify character '{}' before extraction: {}",
+                character_id,
+                error
+            );
+            return;
+        }
+    }
     let candidate_history = recent_history
         .iter()
         .filter(|message| is_memory_candidate_message(message))

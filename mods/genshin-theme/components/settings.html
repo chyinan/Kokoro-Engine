@@ -4222,6 +4222,87 @@
             let _backupImportDb = true;
             let _backupImportConfigs = true;
             let _backupConflictStrategy = 'overwrite';
+            let _backupCharacterTargets = {};
+            let _backupCharacterKey = '';
+            /** Selector value meaning "do not restore this character at all". */
+            const BACKUP_IGNORE_TARGET = '__ignore__';
+
+            /**
+             * Character instance ids are generated per device, so a backup never
+             * reuses a local id. A single same-name local character is suggested as
+             * a merge; anything ambiguous is imported as a new character. Every
+             * entry stays editable.
+             */
+            function defaultBackupCharacterTargets(backupCharacters, localCharacters) {
+                const targets = {};
+                (backupCharacters || []).forEach(backup => {
+                    const name = String(backup.name || '').trim().toLowerCase();
+                    const matches = (localCharacters || []).filter(
+                        local => String(local.name || '').trim().toLowerCase() === name
+                    );
+                    targets[backup.id] = matches.length === 1 ? matches[0].id : '';
+                });
+                return targets;
+            }
+
+            function buildBackupCharacterPlan() {
+                const merges = [];
+                const ignored = [];
+                Object.keys(_backupCharacterTargets).forEach(importedId => {
+                    const targetId = _backupCharacterTargets[importedId];
+                    if (targetId === BACKUP_IGNORE_TARGET) {
+                        ignored.push(importedId);
+                    } else if (targetId) {
+                        merges.push({ imported_id: importedId, target_id: targetId });
+                    }
+                });
+                return { merges: merges, ignored: ignored };
+            }
+
+            function renderBackupCharacterMapping(container, p) {
+                const backupCharacters = Array.isArray(p.characters) ? p.characters : [];
+                if (backupCharacters.length === 0) return;
+                const localCharacters = state.characters || [];
+
+                // Recompute the suggestion only when the selected backup changes, so
+                // a re-render never discards choices the user already made.
+                const key = backupCharacters.map(c => c.id).sort().join('|');
+                if (key !== _backupCharacterKey) {
+                    _backupCharacterKey = key;
+                    _backupCharacterTargets = defaultBackupCharacterTargets(backupCharacters, localCharacters);
+                }
+
+                const note = document.createElement('div');
+                note.style.cssText = 'font-size:11px;color:var(--gi-ink-muted);margin:10px 0 4px;line-height:1.6';
+                note.textContent = '角色实例 ID 因设备而异。请选择备份中每个角色的记忆和对话归到哪个本地角色。';
+                container.appendChild(note);
+
+                backupCharacters.forEach(character => {
+                    const options = [{ value: '', label: '作为新角色导入' }]
+                        .concat(localCharacters.map(local => ({
+                            value: local.id,
+                            label: `合并到「${local.name}」`
+                        })))
+                        .concat([{ value: BACKUP_IGNORE_TARGET, label: '忽略（不导入）' }]);
+                    container.appendChild(createSelect(
+                        escapeHtml(character.name || character.id),
+                        `${character.memory_count || 0} 条记忆 · ${character.conversation_count || 0} 个对话`,
+                        options,
+                        _backupCharacterTargets[character.id] || '',
+                        (value) => { _backupCharacterTargets[character.id] = value; }
+                    ));
+                });
+
+                const ignoredCount = Object.keys(_backupCharacterTargets)
+                    .filter(importedId => _backupCharacterTargets[importedId] === BACKUP_IGNORE_TARGET)
+                    .length;
+                if (ignoredCount > 0) {
+                    const warning = document.createElement('div');
+                    warning.style.cssText = 'font-size:11px;color:#b45309;line-height:1.6;margin-top:6px';
+                    warning.textContent = '被忽略的角色不会导入；覆盖模式下它的记忆和对话也不会恢复。';
+                    container.appendChild(warning);
+                }
+            }
 
             function renderBackup() {
                 const sec = createSection("数据备份与恢复");
@@ -4282,6 +4363,8 @@
                         { value: 'skip', label: '跳过' }
                     ], _backupConflictStrategy, (v) => { _backupConflictStrategy = v; }));
 
+                    renderBackupCharacterMapping(importSec, p);
+
                     const confirmBtn = document.createElement('button');
                     confirmBtn.className = 'gi-btn danger';
                     confirmBtn.style.width = '100%';
@@ -4290,10 +4373,13 @@
                     confirmBtn.disabled = status.phase === 'importing' || (!_backupImportDb && !_backupImportConfigs);
                     confirmBtn.onclick = () => {
                         if (!confirm('确定导入该备份吗？这可能覆盖当前数据。')) return;
+                        const characterPlan = buildBackupCharacterPlan();
                         Kokoro.action('confirm_import_backup', {
                             import_database: _backupImportDb,
                             import_configs: _backupImportConfigs,
-                            conflict_strategy: _backupConflictStrategy
+                            conflict_strategy: _backupConflictStrategy,
+                            character_merges: characterPlan.merges,
+                            ignored_characters: characterPlan.ignored
                         });
                     };
                     importSec.appendChild(confirmBtn);

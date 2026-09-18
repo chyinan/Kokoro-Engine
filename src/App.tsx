@@ -37,7 +37,6 @@ import type { Live2DDisplayMode } from "./features/live2d/Live2DViewer";
 import { mapLive2dModelUrl, type Live2dModelSource } from "./features/live2d/live2d-model-url";
 import { live2dUrl } from "./lib/utils";
 import { MEMORY_MODEL_DIALOG_EVENT } from "./lib/memory-model-gate";
-import { characterDb } from "./lib/db";
 import { migrateLegacyCharactersToSqlite } from "./lib/legacy-character-migration";
 import {
   APP_SETTING_KEYS,
@@ -357,6 +356,7 @@ import {
   type BotStatus,
   type AutoBackupConfig,
   type ImportPreview,
+  type CharacterMerge,
   type CharacterRecord,
   type CharacterTemplateManifest,
   type MemoryEmbeddingModelStatus,
@@ -1632,13 +1632,13 @@ function App() {
     import_database?: boolean;
     import_configs?: boolean;
     conflict_strategy?: "skip" | "overwrite";
+    character_merges?: CharacterMerge[];
+    ignored_characters?: string[];
   }) => {
     const filePath = backupStatus.importFilePath;
     if (!filePath) return;
     setBackupStatus(prev => ({ ...prev, phase: "importing", message: "正在导入备份..." }));
     try {
-      let payload: any = null;
-      let targetCharacterId: string | undefined;
       const importDb = options.import_database ?? true;
       const importConfigs = options.import_configs ?? true;
       const conflictStrategy = options.conflict_strategy ?? "overwrite";
@@ -1646,62 +1646,18 @@ function App() {
       if (importDb) {
         await migrateLegacyCharactersToSqlite();
       }
-      const firstPass = await importData(filePath, {
-        import_database: false,
-        import_configs: false,
-        conflict_strategy: conflictStrategy,
-      });
 
-      if (firstPass.characters_json && importDb) {
-        payload = JSON.parse(firstPass.characters_json);
-        const chars = payload.characters ?? payload;
-
-        if (payload.userName != null) {
-          writeStringSetting(APP_SETTING_KEYS.userName, payload.userName);
-          await setUserName(payload.userName);
-        }
-        if (payload.userPersona != null) {
-          writeStringSetting(APP_SETTING_KEYS.userPersona, payload.userPersona);
-          await setUserPersona(payload.userPersona);
-        }
-        if (payload.userLanguage != null) writeStringSetting(APP_SETTING_KEYS.userLanguage, payload.userLanguage);
-        if (payload.voiceInterrupt != null) writeStringSetting(APP_SETTING_KEYS.voiceInterrupt, payload.voiceInterrupt);
-
-        const newIds: number[] = [];
-        for (const char of chars) {
-          let avatarBlob: Blob | undefined;
-          if (char.avatarB64) {
-            const bytes = Uint8Array.from(atob(char.avatarB64), c => c.charCodeAt(0));
-            avatarBlob = new Blob([bytes]);
-          }
-          const { avatarB64: _avatarB64, id: _oldId, ...rest } = char;
-          const newId = await characterDb.add({ ...rest, avatarBlob });
-          newIds.push(newId);
-        }
-        const existing = await characterDb.getAll();
-        for (const char of existing) {
-          if (char.id !== undefined && !newIds.includes(char.id)) await characterDb.remove(char.id);
-        }
-
-        targetCharacterId = payload.activeCharacterId || chars[0]?.stableId;
-      }
-
-      const importOptions = {
+      // The backup's own `characters` rows are authoritative. Callers may route a
+      // character into an existing local instance with `character_merges`, or
+      // leave one out entirely with `ignored_characters`; anything unlisted is
+      // imported as a new character.
+      const result = await importData(filePath, {
         import_database: importDb,
         import_configs: importConfigs,
         conflict_strategy: conflictStrategy,
-        ...(targetCharacterId ? { target_character_id: targetCharacterId } : {}),
-      };
-      const result = await importData(filePath, importOptions);
-
-      if (payload?.userName != null) {
-        writeStringSetting(APP_SETTING_KEYS.userName, payload.userName);
-        await setUserName(payload.userName);
-      }
-      if (payload?.userPersona != null) {
-        writeStringSetting(APP_SETTING_KEYS.userPersona, payload.userPersona);
-        await setUserPersona(payload.userPersona);
-      }
+        character_merges: importDb ? options.character_merges ?? [] : [],
+        ignored_characters: importDb ? options.ignored_characters ?? [] : [],
+      });
 
       setBackupStatus({
         phase: "imported",

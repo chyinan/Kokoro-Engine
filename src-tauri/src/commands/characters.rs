@@ -821,23 +821,6 @@ pub(crate) async fn update_character_with_resources_in_pool(
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) async fn delete_character_in_pool(
-    pool: &SqlitePool,
-    id: &str,
-) -> Result<(), KokoroError> {
-    if id.trim().is_empty() {
-        return Err(KokoroError::Validation(
-            "character id cannot be empty".to_string(),
-        ));
-    }
-    sqlx::query("DELETE FROM characters WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
 pub(crate) async fn delete_character_with_resources_in_pool(
     pool: &SqlitePool,
     app_data: &Path,
@@ -861,6 +844,10 @@ pub(crate) async fn delete_character_with_resources_in_pool(
     };
 
     let mut transaction = pool.begin().await?;
+    // Deleting an instance removes everything it owns. Leaving the memories and
+    // conversations behind would only hide them: nothing else can attribute them
+    // to a character afterwards.
+    purge_character_owned_rows(&mut transaction, id).await?;
     let delete_result = sqlx::query("DELETE FROM characters WHERE id = ?")
         .bind(id)
         .execute(&mut *transaction)
@@ -881,6 +868,52 @@ pub(crate) async fn delete_character_with_resources_in_pool(
         ));
     }
     removal.finalize()?;
+    Ok(())
+}
+
+/// Tables that store a `character_id` next to their own payload. Rows in these
+/// tables are owned by the character instance and disappear with it. Backup
+/// restore reuses this list to purge rows whose character no longer exists.
+pub(crate) const CHARACTER_OWNED_TABLES: &[&str] = &[
+    "memories",
+    "memory_candidates",
+    "memory_evidence",
+    "memory_dream_jobs",
+    "memory_dream_proposals",
+    "memory_operations",
+    "memory_write_events",
+    "memory_retrieval_logs",
+    "session_summaries",
+    "conversation_summaries",
+];
+
+/// Remove every row owned by `character_id`, inside the caller's transaction.
+pub(crate) async fn purge_character_owned_rows(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    character_id: &str,
+) -> Result<(), KokoroError> {
+    // Messages are reached through their conversation, which is character-scoped.
+    sqlx::query(
+        "DELETE FROM conversation_messages WHERE conversation_id IN \
+         (SELECT id FROM conversations WHERE character_id = ?)",
+    )
+    .bind(character_id)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query("DELETE FROM conversations WHERE character_id = ?")
+        .bind(character_id)
+        .execute(&mut **transaction)
+        .await?;
+
+    for table in CHARACTER_OWNED_TABLES {
+        sqlx::query(&format!("DELETE FROM {table} WHERE character_id = ?"))
+            .bind(character_id)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                KokoroError::Database(format!("failed to delete {table} rows: {error}"))
+            })?;
+    }
     Ok(())
 }
 

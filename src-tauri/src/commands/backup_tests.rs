@@ -1,12 +1,12 @@
 // pattern: Imperative Shell
 
 use super::backup::{
-    export_data_to_path, inspect_backup_archive, load_template_references, restore_character_rows,
-    reject_unsafe_skip_memory_conflicts,
-    stage_backup_configs, stage_character_resources, BackupManifest, CharacterPackageResolver,
-    ConflictStrategy, ExportOptions, ImportOptions, LocalCatalogPackageResolver,
-    ResolvedCharacterPackage, MAX_BACKUP_CONFIG_BYTES, MAX_BACKUP_DATABASE_BYTES,
-    MAX_BACKUP_RESOURCE_BYTES, MAX_BACKUP_RESOURCE_FILES, MAX_BACKUP_RESOURCE_PACKAGES,
+    export_data_to_path, inspect_backup_archive, load_template_references,
+    resolve_skip_memory_conflicts, restore_character_rows, stage_backup_configs,
+    stage_character_resources, BackupManifest, CharacterPackageResolver, ConflictStrategy,
+    ExportOptions, ImportOptions, LocalCatalogPackageResolver, ResolvedCharacterPackage,
+    MAX_BACKUP_CONFIG_BYTES, MAX_BACKUP_DATABASE_BYTES, MAX_BACKUP_RESOURCE_BYTES,
+    MAX_BACKUP_RESOURCE_FILES, MAX_BACKUP_RESOURCE_PACKAGES,
 };
 use crate::registry::client::sha256_hex;
 use crate::registry::manifest::{RegistryEntry, RegistryRecommendations};
@@ -583,8 +583,7 @@ fn import_options_reject_unknown_conflict_strategy() {
     let error = serde_json::from_value::<ImportOptions>(serde_json::json!({
         "import_database": true,
         "import_configs": false,
-        "conflict_strategy": "merge",
-        "target_character_id": null
+        "conflict_strategy": "merge"
     }))
     .unwrap_err();
     assert!(error.to_string().contains("unknown variant"));
@@ -592,11 +591,39 @@ fn import_options_reject_unknown_conflict_strategy() {
     let overwrite = serde_json::from_value::<ImportOptions>(serde_json::json!({
         "import_database": true,
         "import_configs": false,
-        "conflict_strategy": "overwrite",
-        "target_character_id": null
+        "conflict_strategy": "overwrite"
     }))
     .unwrap();
     assert_eq!(overwrite.conflict_strategy, ConflictStrategy::Overwrite);
+    assert!(overwrite.character_merges.is_empty());
+    assert!(overwrite.ignored_characters.is_empty());
+}
+
+#[test]
+fn import_options_default_the_character_selection_to_import_everything() {
+    let options = serde_json::from_value::<ImportOptions>(serde_json::json!({
+        "import_database": true,
+        "import_configs": true,
+        "conflict_strategy": "skip"
+    }))
+    .unwrap();
+
+    assert!(
+        options.character_merges.is_empty() && options.ignored_characters.is_empty(),
+        "an older caller that sends no character selection imports every character as new"
+    );
+
+    let selected = serde_json::from_value::<ImportOptions>(serde_json::json!({
+        "import_database": true,
+        "import_configs": true,
+        "conflict_strategy": "skip",
+        "character_merges": [{ "imported_id": "remote", "target_id": "local" }],
+        "ignored_characters": ["remote-archive"]
+    }))
+    .unwrap();
+    assert_eq!(selected.character_merges.len(), 1);
+    assert_eq!(selected.character_merges[0].imported_id, "remote");
+    assert_eq!(selected.ignored_characters, vec!["remote-archive".to_string()]);
 }
 
 #[tokio::test]
@@ -710,7 +737,7 @@ async fn review_r17_failed_export_must_preserve_previous_backup() {
 }
 
 #[tokio::test]
-async fn review_r17_skip_rejects_proposals_that_reference_skipped_memory_ids() {
+async fn review_r17_skip_flags_rows_that_really_are_different_memories() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -726,6 +753,14 @@ async fn review_r17_skip_rejects_proposals_that_reference_skipped_memory_ids() {
         .execute(&pool)
         .await
         .unwrap();
+    // The live schema always carries the dream tables; an unqualified INSERT would
+    // otherwise resolve to the attached database instead.
+    sqlx::query(
+        "CREATE TABLE memory_dream_proposals (source_memory_ids TEXT, target_memory_id INTEGER)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut connection = pool.acquire().await.unwrap();
     sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
         .execute(&mut *connection)
@@ -754,8 +789,78 @@ async fn review_r17_skip_rejects_proposals_that_reference_skipped_memory_ids() {
     .await
     .unwrap();
 
-    let error = reject_unsafe_skip_memory_conflicts(&mut connection)
+    let conflicts = resolve_skip_memory_conflicts(&mut connection)
         .await
-        .unwrap_err();
-    assert!(error.to_string().contains("skip import refuses"));
+        .unwrap();
+    assert_eq!(conflicts.conflicting_ids, 1);
+    assert_eq!(conflicts.dropped_relations, 1);
+
+    // The relation rows that would attach to the local memory are excluded by the
+    // skip inserts instead of aborting the whole restore.
+    sqlx::query(
+        "INSERT OR IGNORE INTO memory_dream_proposals SELECT * FROM import_db.memory_dream_proposals \
+         WHERE (target_memory_id IS NULL OR target_memory_id NOT IN (SELECT id FROM temp.backup_skip_memory_ids))",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    let proposals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_dream_proposals")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    assert_eq!(proposals, 0);
+}
+
+#[tokio::test]
+async fn review_r17_skip_accepts_an_unchanged_backup() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE memories (id INTEGER PRIMARY KEY, content TEXT, character_id TEXT NOT NULL, supersedes TEXT)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO memories (id, content, character_id) VALUES (1, 'same', 'alice')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE import_db.memories (id INTEGER PRIMARY KEY, content TEXT, character_id TEXT NOT NULL, supersedes TEXT)",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TABLE import_db.memory_operations (id INTEGER PRIMARY KEY, memory_id INTEGER)",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO import_db.memories (id, content, character_id) VALUES (1, 'same', 'alice')")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO import_db.memory_operations (id, memory_id) VALUES (7, 1)")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+    let conflicts = resolve_skip_memory_conflicts(&mut connection)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        conflicts.conflicting_ids, 0,
+        "an id that still holds the same memory is not a conflict"
+    );
+    assert_eq!(conflicts.dropped_relations, 0);
 }

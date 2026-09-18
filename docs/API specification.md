@@ -717,17 +717,41 @@ interface ImportPreview {
   has_configs: boolean;
   config_files: string[];
   stats: BackupStats;
+  /** Character instances stored in the backup; empty for pre-SQLite-character backups. */
+  characters: BackupCharacterSummary[];
+}
+
+interface BackupCharacterSummary {
+  id: string;
+  name: string;
+  memory_count: number;
+  conversation_count: number;
 }
 ```
 
 ### `ImportOptions`
+
+Character instance ids are generated per machine, so a backup never reuses a
+local id. `character_merges` routes the rows of a backup character into an
+existing local instance, `ignored_characters` leaves them out of the restore
+entirely, and every character that appears in neither list is imported as a new
+instance. All ids are validated before the first live row is touched; a character
+cannot be merged and ignored at the same time.
 
 ```ts
 interface ImportOptions {
   import_database: boolean;
   import_configs: boolean;
   conflict_strategy: "skip" | "overwrite";
-  target_character_id?: string;
+  character_merges?: CharacterMerge[];
+  ignored_characters?: string[];
+}
+
+interface CharacterMerge {
+  /** Character id as stored inside the backup. */
+  imported_id: string;
+  /** Existing local character that receives the imported rows. */
+  target_id: string;
 }
 ```
 
@@ -738,6 +762,13 @@ interface ImportResult {
   imported_memories: number;
   imported_conversations: number;
   imported_configs: number;
+  imported_characters: number;
+  /** Characters whose rows were routed into an existing local instance. */
+  merged_characters?: number;
+  /** Characters whose rows were left out of the restore. */
+  ignored_characters?: number;
+  /** Memories dropped by the skip strategy because they violate the local schema. */
+  skipped_memories?: number;
   characters_json?: string;
   debug_log?: string[];
 }

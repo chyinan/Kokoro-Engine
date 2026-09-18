@@ -986,41 +986,32 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
             <div className="bg-black/30 border border-[var(--color-border)] rounded-lg overflow-hidden max-h-[180px] overflow-y-auto scrollable">
                 {characters.map(char => (
                     <div key={char.id} className="group relative">
-                        {/* Confirm-delete overlay */}
-                        <AnimatePresence>
-                            {confirmDeleteId === char.id && (
-                                <motion.div
-                                    initial={{ opacity: 0 }}
-                                    animate={{ opacity: 1 }}
-                                    exit={{ opacity: 0 }}
-                                    className="absolute inset-0 z-10 flex items-center justify-between px-4 bg-black/80 backdrop-blur-sm"
-                                >
-                                    <span className="text-[11px] text-[var(--color-error)] truncate">
-                                        {t("settings.persona.list.delete_confirm", { name: char.name })}
-                                    </span>
-                                    <div className="flex gap-1.5 shrink-0">
-                                        <motion.button
-                                            whileHover={{ scale: 1.1 }}
-                                            whileTap={{ scale: 0.9 }}
-                                            onClick={() => handleDelete(char.id)}
-                                            className="px-2.5 py-1 rounded text-[10px] font-heading font-semibold uppercase bg-[var(--color-error)]/20 text-[var(--color-error)] hover:bg-[var(--color-error)]/30 transition-colors"
-                                        >
-                                            {t("settings.persona.list.delete")}
-                                        </motion.button>
-                                        <motion.button
-                                            whileHover={{ scale: 1.1 }}
-                                            whileTap={{ scale: 0.9 }}
-                                            onClick={() => setConfirmDeleteId(null)}
-                                            className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] transition-colors"
-                                        >
-                                            <X size={14} strokeWidth={2} />
-                                        </motion.button>
-                                    </div>
-                                </motion.div>
-                            )}
-                        </AnimatePresence>
-
-                        {/* Row */}
+                        {confirmDeleteId === char.id ? (
+                            <div className="space-y-2 bg-[var(--color-error)]/10 px-4 py-2.5">
+                                <p className="text-[11px] leading-snug text-[var(--color-error)]">
+                                    {t("settings.persona.list.delete_confirm", { name: char.name })}
+                                </p>
+                                <div className="flex items-center gap-1.5">
+                                    <motion.button
+                                        whileHover={{ scale: 1.05 }}
+                                        whileTap={{ scale: 0.95 }}
+                                        onClick={() => handleDelete(char.id)}
+                                        className="px-2.5 py-1 rounded text-[10px] font-heading font-semibold uppercase bg-[var(--color-error)]/20 text-[var(--color-error)] hover:bg-[var(--color-error)]/30 transition-colors"
+                                    >
+                                        {t("settings.persona.list.delete")}
+                                    </motion.button>
+                                    <motion.button
+                                        whileHover={{ scale: 1.1 }}
+                                        whileTap={{ scale: 0.9 }}
+                                        onClick={() => setConfirmDeleteId(null)}
+                                        className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] transition-colors"
+                                        title={t("common.actions.cancel")}
+                                    >
+                                        <X size={14} strokeWidth={2} />
+                                    </motion.button>
+                                </div>
+                            </div>
+                        ) : (
                         <button
                             onClick={() => selectCharacter(char)}
                             className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-[var(--color-text-secondary)] hover:bg-white/5 transition-colors"
@@ -1057,6 +1048,7 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                                 <Trash2 size={13} strokeWidth={1.5} />
                             </motion.div>
                         </button>
+                        )}
                     </div>
                 ))}
             </div>
