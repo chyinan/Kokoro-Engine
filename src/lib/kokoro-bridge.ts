@@ -1090,6 +1090,93 @@ export async function onMemoryEmbeddingModelProgress(
     );
 }
 
+export interface EmotionModelStatus {
+    installed: boolean;
+    is_active: boolean;
+    is_valid: boolean;
+    error_message?: string | null;
+    repo_id: string;
+    download_url: string;
+    install_dir: string;
+    model_path: string;
+    required_files: string[];
+    missing_files: string[];
+    memory_bytes?: number | null;
+    local_cache_available?: boolean;
+    local_cache_path?: string | null;
+    remote_available?: boolean;
+}
+
+export interface EmotionInferenceProbability {
+    id: string;
+    label: string;
+    /** @deprecated Use frontend translation keys based on `id` instead */
+    label_zh?: string;
+    score: number;
+}
+
+export interface EmotionInferenceResult {
+    dominant_emotion: string;
+    dominant_emotion_id?: string;
+    /** @deprecated Use frontend translation keys based on `dominant_emotion` instead */
+    label_zh?: string;
+    confidence: number;
+    probabilities: EmotionInferenceProbability[];
+    mapped_cue: string | null;
+    latency_ms: number;
+}
+
+export interface EmotionModelDownloadProgress {
+    stage: "checking" | "downloading" | "complete" | "verifying" | "ready" | string;
+    message: string;
+    current_file: string;
+    file_index: number;
+    file_count: number;
+    downloaded_bytes: number;
+    total_bytes: number | null;
+}
+
+export async function getEmotionModelStatus(): Promise<EmotionModelStatus> {
+    return invoke<EmotionModelStatus>("get_emotion_model_status");
+}
+
+export async function downloadEmotionModel(): Promise<EmotionModelStatus> {
+    return invoke<EmotionModelStatus>("download_emotion_model");
+}
+
+export async function cancelEmotionModelDownload(): Promise<boolean> {
+    return invoke<boolean>("cancel_emotion_model_download");
+}
+
+export async function uninstallEmotionModel(): Promise<EmotionModelStatus> {
+    return invoke<EmotionModelStatus>("uninstall_emotion_model");
+}
+
+export async function toggleEmotionModel(active: boolean): Promise<EmotionModelStatus> {
+    return invoke<EmotionModelStatus>("toggle_emotion_model", { active });
+}
+
+export async function inferEmotion(text: string): Promise<EmotionInferenceResult> {
+    return invoke<EmotionInferenceResult>("infer_emotion", { text });
+}
+
+export async function openEmotionModelDir(): Promise<string> {
+    return invoke<string>("open_emotion_model_dir");
+}
+
+export async function importEmotionModelPackage(sourcePath: string): Promise<EmotionModelStatus> {
+    return invoke<EmotionModelStatus>("import_emotion_model_package", { sourcePath });
+}
+
+export async function onEmotionModelProgress(
+    callback: (progress: EmotionModelDownloadProgress) => void
+): Promise<UnlistenFn> {
+    return listen<EmotionModelDownloadProgress>(
+        "emotion:model-progress",
+        (event) => callback(event.payload)
+    );
+}
+
 export async function listMemories(characterId: string, limit = 50, offset = 0): Promise<ListMemoriesResponse> {
     return invoke<ListMemoriesResponse>("list_memories", {
         request: { character_id: characterId, limit, offset },
@@ -2172,12 +2259,41 @@ export interface KokoroErrorObject {
     trace_id?: string;
 }
 
+const CANDIDATE_MESSAGE_KEYS = [
+    "message",
+    "error",
+    "reason",
+    "details",
+    "msg",
+    "description",
+] as const;
+
 function stringifyErrorObject(error: object): string {
     try {
-        return JSON.stringify(error);
+        const json = JSON.stringify(error);
+        if (json && json !== "{}") {
+            return json;
+        }
     } catch {
-        return Object.prototype.toString.call(error);
+        // Fall through on circular structures or serialization errors
     }
+
+    // Try custom toString if available and not the default Object.prototype.toString
+    if (
+        typeof (error as { toString?: unknown }).toString === "function" &&
+        (error as { toString: () => string }).toString !== Object.prototype.toString
+    ) {
+        try {
+            const str = (error as { toString: () => string }).toString();
+            if (str && str !== "[object Object]") {
+                return str;
+            }
+        } catch {
+            // Ignore toString errors
+        }
+    }
+
+    return "";
 }
 
 function objectToKokoroError(error: Record<string, unknown>): KokoroErrorObject | null {
@@ -2199,44 +2315,94 @@ function objectToKokoroError(error: Record<string, unknown>): KokoroErrorObject 
 /**
  * 将 Tauri / Rust / JS 各种错误载荷转成人能读的文本。
  */
-export function getKokoroErrorMessage(error: unknown): string {
+export function getKokoroErrorMessage(
+    error: unknown,
+    depth = 0,
+    seen = new WeakSet<object>()
+): string {
+    if (error === null || error === undefined) {
+        return "Unknown error";
+    }
+
     if (error instanceof Error) {
         return error.message;
     }
 
     if (typeof error === "string") {
+        if (!error.trim()) {
+            return "Unknown error";
+        }
         const parsed = parseJsonPayload(error);
-        return parsed === null ? error : getKokoroErrorMessage(parsed);
+        return parsed === null ? error : getKokoroErrorMessage(parsed, depth + 1, seen);
+    }
+
+    if (typeof error === "number" || typeof error === "boolean" || typeof error === "bigint") {
+        return String(error);
     }
 
     if (isRecord(error)) {
+        if (seen.has(error) || depth > 3) {
+            const code = getStringField(error, "code");
+            return code || "Unknown error";
+        }
+        seen.add(error);
+
         const structured = objectToKokoroError(error);
         if (structured) {
             return structured.message;
         }
 
-        const message = error.message ?? error.error;
-        if (typeof message === "string") {
-            return message;
-        }
-        if (isRecord(message)) {
-            return getKokoroErrorMessage(message);
-        }
-
-        const stringValue = Object.values(error).find((value): value is string => typeof value === "string");
-        if (stringValue) {
-            return stringValue;
-        }
-
-        const nestedObject = Object.values(error).find(isRecord);
-        if (nestedObject) {
-            return getKokoroErrorMessage(nestedObject);
+        // 1. Check candidate message keys in priority order
+        for (const key of CANDIDATE_MESSAGE_KEYS) {
+            const val = error[key];
+            if (typeof val === "string" && val.trim().length > 0) {
+                return val;
+            }
+            if (isRecord(val)) {
+                const nested = getKokoroErrorMessage(val, depth + 1, seen);
+                if (nested && nested !== "Unknown error") {
+                    return nested;
+                }
+            }
         }
 
-        return stringifyErrorObject(error);
+        // 2. Check for any string field (excluding sensitive tokens/keys)
+        for (const [key, value] of Object.entries(error)) {
+            if (
+                typeof value === "string" &&
+                value.trim().length > 0 &&
+                !["token", "secret", "password"].includes(key.toLowerCase())
+            ) {
+                return value;
+            }
+        }
+
+        // 3. Check for any nested record
+        const nestedEntry = Object.values(error).find(isRecord);
+        if (nestedEntry) {
+            const nested = getKokoroErrorMessage(nestedEntry, depth + 1, seen);
+            if (nested && nested !== "Unknown error") {
+                return nested;
+            }
+        }
+
+        // 4. Fall back to safe serialization
+        const serialized = stringifyErrorObject(error);
+        if (serialized) {
+            return serialized;
+        }
+
+        // 5. Fall back to code field if present
+        const code = getStringField(error, "code");
+        if (code) {
+            return code;
+        }
+
+        return "Unknown error";
     }
 
-    return String(error);
+    const str = String(error);
+    return str === "[object Object]" ? "Unknown error" : str;
 }
 
 /**

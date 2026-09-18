@@ -3761,8 +3761,88 @@ pub async fn stream_chat(
                     .cloned()
                     .collect::<std::collections::HashSet<_>>()
             });
-        let cue_fut = system_provider.chat(cue_messages, None);
-        let cue_timeout = chat_fallback_execution_timeout();
+
+        let mut local_emotion_handled = false;
+        let emotion_text = full_response.clone();
+        let local_inference_task = tokio::task::spawn_blocking(move || {
+            let status = crate::ai::emotion_onnx::get_emotion_model_status();
+            if status.is_active && status.installed {
+                crate::ai::emotion_onnx::infer_emotion(&emotion_text).ok()
+            } else {
+                None
+            }
+        });
+
+        const LOCAL_EMOTION_INFERENCE_TIMEOUT: std::time::Duration =
+            std::time::Duration::from_millis(1500);
+
+        let local_emotion = tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut cancel_rx) => {
+                tracing::info!(
+                    target: "chat",
+                    "[stream_chat] Turn {} (request {}) cancelled during local emotion inference",
+                    assistant_turn_id,
+                    client_request_id
+                );
+                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+            }
+            _ = tokio::time::sleep(LOCAL_EMOTION_INFERENCE_TIMEOUT) => {
+                tracing::warn!(
+                    target: "chat",
+                    "[stream_chat] Turn {} local emotion inference timed out after {:?}",
+                    assistant_turn_id,
+                    LOCAL_EMOTION_INFERENCE_TIMEOUT
+                );
+                None
+            }
+            res = local_inference_task => {
+                res.ok().flatten()
+            }
+        };
+        if let Some(inference) = local_emotion {
+            tracing::info!(target: "chat", "[Chat] Trying local ONNX emotion inference for response cue");
+            if let Some(ref cue) = inference.mapped_cue {
+                let is_valid = valid_fallback_cues
+                    .as_ref()
+                    .map(|cues| cues.contains(cue))
+                    .unwrap_or(false);
+                if is_valid && inference.is_confident() {
+                    tracing::info!(
+                        target: "chat",
+                        "[Chat] Local ONNX detected emotion '{}' ({:.2}, margin: {:.2}) -> cue '{}' in {:.1}ms",
+                        inference.dominant_emotion,
+                        inference.confidence,
+                        inference.confidence_margin(),
+                        cue,
+                        inference.latency_ms
+                    );
+                    let _ = app.emit(
+                        "chat-cue",
+                        serde_json::json!({
+                            "cue": cue,
+                            "source": "local-onnx-emotion",
+                            "emotion": inference.dominant_emotion,
+                            "confidence": inference.confidence,
+                            "margin": inference.confidence_margin(),
+                        }),
+                    );
+                    local_emotion_handled = true;
+                } else if is_valid {
+                    tracing::debug!(
+                        target: "chat",
+                        "[Chat] Local ONNX emotion '{}' failed confidence gate (confidence: {:.2}, margin: {:.2}, required: >=0.45, margin >=0.15), deferring to fallback cue analyzer",
+                        inference.dominant_emotion,
+                        inference.confidence,
+                        inference.confidence_margin()
+                    );
+                }
+            }
+        }
+
+        if !local_emotion_handled {
+            let cue_fut = system_provider.chat(cue_messages, None);
+            let cue_timeout = chat_fallback_execution_timeout();
         let cue_res = tokio::select! {
             biased;
             _ = wait_for_cancel_event(&mut cancel_rx) => {
@@ -3818,6 +3898,7 @@ pub async fn stream_chat(
             }
         }
     }
+}
 
     // Emit combined translation from all rounds
     if !all_translations.is_empty() {

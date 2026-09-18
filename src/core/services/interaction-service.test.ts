@@ -34,6 +34,7 @@ vi.mock("../../lib/kokoro-bridge", () => ({
         return typeof err === "object" && err !== null && String(err.message || "").includes("chat_turn_busy");
     }),
     getMemoryEmbeddingModelStatus: vi.fn(async () => ({ installed: true })),
+    getKokoroErrorMessage: vi.fn((err: unknown) => (err instanceof Error ? err.message : typeof err === "object" && err !== null && "message" in err ? String((err as any).message) : String(err))),
 }));
 
 vi.mock("../../lib/memory-model-gate", () => ({

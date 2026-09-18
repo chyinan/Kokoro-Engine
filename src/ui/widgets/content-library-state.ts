@@ -1,6 +1,4 @@
-// pattern: Functional Core
-
-import type { RegistryEntry } from "@/lib/kokoro-bridge";
+import { getKokoroErrorMessage, type RegistryEntry } from "@/lib/kokoro-bridge";
 
 export const CONTENT_LIBRARY_OFFICIAL_REGISTRY =
   "https://raw.githubusercontent.com/chyinan/Kokoro-Engine/main/registry/v1/index.json";
@@ -263,11 +261,7 @@ export function getSafePreviewUrl(value: string, downloadUrl?: string): string |
 }
 
 export function getActionableContentError(error: unknown): ContentActionableError {
-  const raw = error instanceof Error
-    ? error.message
-    : typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
-      ? error.message
-      : String(error);
+  const raw = getKokoroErrorMessage(error);
   const normalized = raw.toLowerCase();
   if (normalized.includes("incompatible") || normalized.includes("engine version")) {
     return {

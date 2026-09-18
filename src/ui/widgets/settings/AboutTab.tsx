@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, ExternalLink, Github, Loader2, RefreshCw, Send, Tag } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { clsx } from "clsx";
-import { getEngineInfo } from "../../../lib/kokoro-bridge";
+import { getEngineInfo, getKokoroErrorMessage } from "../../../lib/kokoro-bridge";
 import { sectionHeadingClasses } from "../../styles/settings-primitives";
 import logoUrl from "../../../../logo.png";
 
@@ -49,12 +49,6 @@ function compareVersions(a: string, b: string): number | null {
     }
 
     return 0;
-}
-
-function stringifyError(error: unknown): string {
-    if (typeof error === "string") return error;
-    if (error instanceof Error) return error.message;
-    return String(error);
 }
 
 async function openExternalUrl(url: string): Promise<void> {
@@ -104,7 +98,7 @@ export default function AboutTab() {
             const comparison = currentVersion ? compareVersions(latest.tag_name, currentVersion) : null;
             setStatus(comparison === null ? "unknown" : comparison > 0 ? "available" : "latest");
         } catch (e) {
-            setError(stringifyError(e));
+            setError(getKokoroErrorMessage(e));
             setStatus("error");
         }
     };

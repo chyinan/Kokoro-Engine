@@ -190,3 +190,48 @@ describe("bridge invoke error normalization", () => {
         await expect(getEngineInfo()).rejects.toBe("network unreachable");
     });
 });
+
+describe("getKokoroErrorMessage robustness and structured errors", () => {
+    it("extracts candidate message keys according to priority", () => {
+        expect(getKokoroErrorMessage({ code: "IO_ERROR", reason: "磁盘空间不足" })).toBe("磁盘空间不足");
+        expect(getKokoroErrorMessage({ code: "AUTH_ERROR", details: "无效的身份令牌" })).toBe("无效的身份令牌");
+        expect(getKokoroErrorMessage({ msg: "服务暂不可用" })).toBe("服务暂不可用");
+    });
+
+    it("extracts nested record errors recursively", () => {
+        expect(getKokoroErrorMessage({ error: { message: "网络连接拒绝" } })).toBe("网络连接拒绝");
+        expect(getKokoroErrorMessage({ details: { reason: "模型校验和不匹配" } })).toBe("模型校验和不匹配");
+    });
+
+    it("handles circular references without throwing or producing [object Object]", () => {
+        const circular: Record<string, unknown> = { code: "CIRCULAR_REF" };
+        circular.self = circular;
+
+        const result = getKokoroErrorMessage(circular);
+        expect(result).toBe("CIRCULAR_REF");
+        expect(result).not.toBe("[object Object]");
+    });
+
+    it("handles null, undefined, and empty objects safely", () => {
+        expect(getKokoroErrorMessage(null)).toBe("Unknown error");
+        expect(getKokoroErrorMessage(undefined)).toBe("Unknown error");
+        expect(getKokoroErrorMessage({})).toBe("Unknown error");
+        expect(getKokoroErrorMessage("")).toBe("Unknown error");
+        expect(getKokoroErrorMessage("   ")).toBe("Unknown error");
+    });
+
+    it("uses custom toString when available and meaningful", () => {
+        const customObj = {
+            toString() {
+                return "Custom error message";
+            },
+        };
+        expect(getKokoroErrorMessage(customObj)).toBe("Custom error message");
+    });
+
+    it("never returns [object Object] for arbitrary objects", () => {
+        const weirdObj = Object.create(null);
+        expect(getKokoroErrorMessage(weirdObj)).toBe("Unknown error");
+    });
+});
+

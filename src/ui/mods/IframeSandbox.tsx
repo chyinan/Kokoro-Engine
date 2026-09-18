@@ -4,6 +4,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { modMessageBus } from './ModMessageBus';
 import { invoke } from '@tauri-apps/api/core';
 import { open as dialogOpen } from '@tauri-apps/plugin-dialog';
+import { getKokoroErrorMessage } from '@/lib/kokoro-bridge';
 
 /** Message protocol between host ↔ iframe */
 interface ModMessage {
@@ -393,7 +394,7 @@ export const IframeSandbox = ({
                                 respond({ id: invokePayload.id, result });
                             })
                             .catch((err) => {
-                                respond({ id: invokePayload.id, error: String(err) });
+                                respond({ id: invokePayload.id, error: getKokoroErrorMessage(err) });
                             });
                     }
                     break;

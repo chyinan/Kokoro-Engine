@@ -1,4 +1,4 @@
-import type { ToolTraceItem } from "@/lib/kokoro-bridge";
+import { getKokoroErrorMessage, type ToolTraceItem } from "@/lib/kokoro-bridge";
 import {
     hasActiveKokoroBubble,
     hasVisibleAssistantContent,
@@ -140,22 +140,7 @@ export function buildToolTraceItem(event: {
 }
 
 export function getApprovalErrorMessage(error: unknown): string {
-    if (error instanceof Error) {
-        return error.message;
-    }
-    if (typeof error === "object" && error !== null) {
-        const message = (error as { readonly message?: unknown }).message;
-        if (typeof message === "string" && message.length > 0) {
-            return message;
-        }
-        try {
-            const serialized = JSON.stringify(error);
-            if (typeof serialized === "string") return serialized;
-        } catch {
-            // Fall through to the generic string conversion for unusual host objects.
-        }
-    }
-    return String(error);
+    return getKokoroErrorMessage(error);
 }
 
 export function getApprovalRequestId(tool: ToolTraceItem): string | null {

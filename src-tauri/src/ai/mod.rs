@@ -3,6 +3,7 @@
 pub mod context;
 pub mod curiosity;
 pub mod database_migrations;
+pub mod emotion_onnx;
 pub mod heartbeat;
 pub mod idle_behaviors;
 pub mod initiative;

@@ -8,7 +8,7 @@
  *
  */
 import type { CueName } from "../../features/live2d/Live2DController";
-import { streamChat, cancelChatTurn, onChatTurnFinish, onChatTurnStart, isChatBusy, isChatTurnBusyError, getMemoryEmbeddingModelStatus } from "../../lib/kokoro-bridge";
+import { streamChat, cancelChatTurn, onChatTurnFinish, onChatTurnStart, isChatBusy, isChatTurnBusyError, getMemoryEmbeddingModelStatus, getKokoroErrorMessage } from "../../lib/kokoro-bridge";
 import { emit, listen } from "@tauri-apps/api/event";
 import { requestMemoryModelDialog } from "../../lib/memory-model-gate";
 
@@ -307,7 +307,7 @@ export class InteractionService {
             }
             emit("interaction-trigger-failed", {
                 client_request_id: clientRequestId,
-                error: err instanceof Error ? err.message : String(err),
+                error: getKokoroErrorMessage(err),
             }).catch(() => {});
         }
 

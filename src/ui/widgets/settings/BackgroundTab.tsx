@@ -13,6 +13,7 @@ import {
     Database,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { getKokoroErrorMessage } from "../../../lib/kokoro-bridge";
 import { labelClasses, sectionHeadingClasses } from "../../styles/settings-primitives";
 import type { BackgroundControls } from "../SettingsPanel";
 import type { BackgroundConfig } from "../../hooks/useBackgroundSlideshow";
@@ -63,7 +64,7 @@ export default function BackgroundTab({
                 showFeedback("error", t("settings.background.library.no_valid_images"));
             }
         } catch (e) {
-            showFeedback("error", String(e));
+            showFeedback("error", getKokoroErrorMessage(e));
         }
     };
 
@@ -72,7 +73,7 @@ export default function BackgroundTab({
             await bg.removeImage(index);
             showFeedback("success", t("settings.background.library.deleted"));
         } catch (e) {
-            showFeedback("error", String(e));
+            showFeedback("error", getKokoroErrorMessage(e));
         }
     };
 
@@ -97,7 +98,7 @@ export default function BackgroundTab({
             await bg.clearImages();
             showFeedback("success", t("settings.background.library.cleared"));
         } catch (e) {
-            showFeedback("error", String(e));
+            showFeedback("error", getKokoroErrorMessage(e));
         }
     };
 
