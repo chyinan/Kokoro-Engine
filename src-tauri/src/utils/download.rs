@@ -36,6 +36,36 @@ impl Default for DownloadOptions {
     }
 }
 
+struct TemporaryDownloadGuard {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl TemporaryDownloadGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TemporaryDownloadGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 pub async fn download_file_with_progress(
     client: &reqwest::Client,
     url: &str,
@@ -49,7 +79,7 @@ pub async fn download_file_with_progress(
             .map_err(|error| format!("Failed to create download directory: {}", error))?;
     }
 
-    let tmp_path = temporary_download_path(target_path);
+    let mut tmp_path = TemporaryDownloadGuard::new(temporary_download_path(target_path));
     let (total_bytes, range_supported) = probe_download(client, url).await?;
 
     if range_supported
@@ -60,7 +90,7 @@ pub async fn download_file_with_progress(
         if let Err(error) = download_parallel(
             client,
             url,
-            &tmp_path,
+            tmp_path.path(),
             total_bytes.unwrap(),
             &options,
             &progress,
@@ -73,20 +103,21 @@ pub async fn download_file_with_progress(
                 url,
                 error
             );
-            download_single(client, url, &tmp_path, total_bytes, &progress).await?;
+            download_single(client, url, tmp_path.path(), total_bytes, &progress).await?;
         }
     } else {
-        download_single(client, url, &tmp_path, total_bytes, &progress).await?;
+        download_single(client, url, tmp_path.path(), total_bytes, &progress).await?;
     }
 
-    let downloaded_bytes = tokio::fs::metadata(&tmp_path)
+    let downloaded_bytes = tokio::fs::metadata(tmp_path.path())
         .await
         .map(|metadata| metadata.len())
         .unwrap_or_else(|_| total_bytes.unwrap_or(0));
     let final_total_bytes = total_bytes.or(Some(downloaded_bytes));
 
-    crate::config::atomic_replace_file(&tmp_path, target_path)
+    crate::config::atomic_replace_file(tmp_path.path(), target_path)
         .map_err(|error| format!("Failed to finalize download: {}", error))?;
+    tmp_path.commit();
 
     let final_progress = DownloadProgress {
         downloaded_bytes,
@@ -409,5 +440,46 @@ mod review_tests {
         .unwrap();
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new-content");
+        assert!(
+            std::fs::read_dir(temp.path())
+                .unwrap()
+                .all(|entry| entry.is_ok()),
+            "successful downloads should not leave unreadable entries"
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_download_removes_partial_temporary_file() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/model"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes("partial-content"))
+            .mount(&server)
+            .await;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("model.bin");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let result = download_file_with_progress(
+            &client,
+            &format!("{}/model", server.uri()),
+            &target,
+            DownloadOptions::default(),
+            Arc::new(|_| Err("stop after first progress event".to_string())),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!target.exists());
+        let leftovers: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "failed downloads must not leave temporary files: {leftovers:?}"
+        );
     }
 }

@@ -1,3 +1,4 @@
+// pattern: Imperative Shell
 use crate::hooks::{HookEvent, HookPayload, HookRuntime, ModHookPayload};
 use crate::mods::api::ScriptEvent;
 use crate::mods::manifest::ModManifest;
@@ -7,10 +8,56 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, oneshot};
+
+const SCRIPT_EXECUTION_BUDGET: Duration = Duration::from_secs(5);
+
+fn install_script_interrupt_handler(runtime: &rquickjs::Runtime) -> Arc<Mutex<Option<Instant>>> {
+    let deadline = Arc::new(Mutex::new(None));
+    let interrupt_deadline = deadline.clone();
+    runtime.set_interrupt_handler(Some(Box::new(move || {
+        interrupt_deadline
+            .lock()
+            .map(|deadline| deadline.is_some_and(|deadline| Instant::now() >= deadline))
+            .unwrap_or(true)
+    })));
+    deadline
+}
+
+fn eval_script_with_budget(
+    context: &rquickjs::Context,
+    deadline: &Arc<Mutex<Option<Instant>>>,
+    code: &str,
+    budget: Duration,
+) -> Result<(), String> {
+    {
+        let mut guard = deadline
+            .lock()
+            .map_err(|_| "failed to lock script execution budget".to_string())?;
+        *guard = Some(Instant::now() + budget);
+    }
+
+    let result = context.with(|ctx| ctx.eval::<(), _>(code).map_err(|error| error.to_string()));
+    let timed_out = deadline
+        .lock()
+        .map(|guard| guard.is_some_and(|deadline| Instant::now() >= deadline))
+        .unwrap_or(true);
+    if let Ok(mut guard) = deadline.lock() {
+        *guard = None;
+    }
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(_error) if timed_out => Err(format!(
+            "script execution timed out after {} ms",
+            budget.as_millis()
+        )),
+        Err(error) => Err(error),
+    }
+}
 
 /// 验证 `file_path` 在规范化后仍位于 `base_dir` 内，防止路径遍历攻击。
 /// 返回规范化后的绝对路径，若路径逃出 base_dir 则返回 Err。
@@ -214,6 +261,7 @@ impl ModManager {
                     return;
                 }
             };
+            let script_deadline = install_script_interrupt_handler(&rt);
 
             // Register the Kokoro API with the event sender
             ctx.with(|ctx| {
@@ -228,10 +276,12 @@ impl ModManager {
             while let Some(cmd) = rx.blocking_recv() {
                 match cmd {
                     ScriptCommand::Eval { code, reply } => {
-                        let result = ctx.with(|ctx| {
-                            ctx.eval::<(), _>(code.as_str())
-                                .map_err(|e| format!("{}", e))
-                        });
+                        let result = eval_script_with_budget(
+                            &ctx,
+                            &script_deadline,
+                            code.as_str(),
+                            SCRIPT_EXECUTION_BUDGET,
+                        );
                         let _ = reply.send(result);
                     }
                     ScriptCommand::DispatchEvent { event, payload } => {
@@ -871,6 +921,47 @@ mod tests {
         assert!(
             !production_part.contains("rquickjs::Context::full(&rt).expect("),
             "production init path should not panic on context creation"
+        );
+    }
+
+    #[test]
+    fn script_execution_budget_interrupts_an_infinite_loop() {
+        let runtime = rquickjs::Runtime::new().expect("runtime should initialize");
+        let context = rquickjs::Context::full(&runtime).expect("context should initialize");
+        let deadline = install_script_interrupt_handler(&runtime);
+
+        let result = eval_script_with_budget(
+            &context,
+            &deadline,
+            "while (true) {}",
+            Duration::from_millis(50),
+        );
+
+        assert!(result.is_err(), "an infinite script must be interrupted");
+        assert!(
+            result
+                .expect_err("infinite script must return an error")
+                .contains("timed out"),
+            "the error should identify the execution budget"
+        );
+    }
+
+    #[test]
+    fn script_execution_budget_allows_a_short_script() {
+        let runtime = rquickjs::Runtime::new().expect("runtime should initialize");
+        let context = rquickjs::Context::full(&runtime).expect("context should initialize");
+        let deadline = install_script_interrupt_handler(&runtime);
+
+        let result = eval_script_with_budget(
+            &context,
+            &deadline,
+            "let result = 1 + 1;",
+            Duration::from_millis(50),
+        );
+
+        assert!(
+            result.is_ok(),
+            "a short script should complete successfully"
         );
     }
 
