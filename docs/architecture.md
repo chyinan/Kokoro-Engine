@@ -9,7 +9,7 @@
 
 ## 1. System overview
 
-Kokoro Engine 0.4.0 is a local-first Tauri v2 desktop character runtime. React 19 and TypeScript implement the user interface; Rust owns orchestration, persistence, provider integrations, resource safety, and long-running services.
+Kokoro Engine 0.4.5 is a local-first Tauri v2 desktop character runtime. React 19 and TypeScript implement the user interface; Rust owns orchestration, persistence, provider integrations, resource safety, and long-running services.
 
 ```mermaid
 flowchart LR
@@ -213,7 +213,7 @@ Registry changes additionally require `node scripts/build-content-registry.mjs` 
 
 | Area | Current state |
 |---|---|
-| Application | Kokoro Engine 0.4.0, Tauri v2, React 19, Rust 2021 |
+| Application | Kokoro Engine 0.4.5, Tauri v2, React 19, Rust 2021 |
 | Locales | 6: zh, zh-TW, en, ja, ko, ru |
 | Durable storage | SQLite plus platform-local configuration and resources |
 | Character content | kokoro, pico, seren, and template packages |

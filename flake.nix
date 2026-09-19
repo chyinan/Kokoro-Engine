@@ -22,7 +22,7 @@
         lib = pkgs.lib;
 
         pname = "kokoro-engine";
-        version = "0.4.0";
+        version = "0.4.5";
 
         src = lib.cleanSource ./.;
 

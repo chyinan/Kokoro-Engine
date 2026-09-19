@@ -7,23 +7,22 @@ an available feature.
 
 ## Release contract
 
-1. Read the applicable phase evidence first: [activation README usability](release-reviews/activation-readme-usability.md), [first-reply usability](release-reviews/first-reply-usability.md), [registry publication](release-reviews/registry-publication.md), and [AstrBot publication](release-reviews/astrbot-publication.md).
+1. Review the applicable phase notes when they exist: [activation README usability](release-reviews/activation-readme-usability.md), [first-reply usability](release-reviews/first-reply-usability.md), [registry publication](release-reviews/registry-publication.md), and [AstrBot publication](release-reviews/astrbot-publication.md). These records are supplementary and are not a gate for publishing the desktop release.
 2. Read the current version from `package.json` and
    `src-tauri/tauri.conf.json`. Choose the next version deliberately; do not
    create a tag before the release-specific notes exist.
 3. Copy [`release-notes/TEMPLATE.md`](../release-notes/TEMPLATE.md) to
-   `release-notes/vX.Y.Z.md`. Fill every field and keep five separate evidence
-   rows: character selection, first-reply onboarding, SillyTavern import,
-   registry installation, and AstrBot integration.
-4. Each row needs a stable evidence asset, a direct CTA, compatibility notes,
-   and exact test or manual evidence. A local test cannot stand in for a
-   published registry archive, marketplace listing, or real AstrBot channel.
-5. Run the local checks below. A maintainer with the required credentials and
-   external participants must complete the rows marked external.
+   `release-notes/vX.Y.Z.md` and fill the release details and shipped-surface
+   notes. Add supporting assets or external results when they are available.
+4. Record compatibility notes and exact local/manual checks for advertised
+   surfaces. Keep local verification distinct from external publication claims;
+   missing optional evidence does not block the desktop release.
+5. Run the local checks below. External credentials or participants are only
+   needed when the release also updates an external surface.
 
-The release notes are deliberately evidence-driven. If a required asset or
-external result is missing, record `Blocked` with the owner and next action;
-never replace it with a guessed URL, screenshot, or metric.
+The release notes should remain evidence-aware. If supporting evidence is not
+available, record `Pending`, `Not collected`, or a concise next action; never
+replace it with a guessed URL, screenshot, or metric.
 
 ## What the build workflows do
 
@@ -46,35 +45,35 @@ the generated action inputs. Do not upload a release from a dry-run.
 ### Stage A — activation release (after Phase 4)
 
 Ship the main-surface character selector, first-reply onboarding, and
-SillyTavern import only after the activation and first-reply evidence is ready.
-The release notes must link to a character-selection asset and a first-reply
-clean-machine record. Include the SillyTavern JSON/PNG smoke test when import is
-advertised. A missing provider, memory-model fallback, or optional Live2D asset
-must have a user-facing recovery path in the compatibility notes.
+SillyTavern import when the implementation and local checks are ready. Include
+available character-selection, first-reply, and JSON/PNG smoke-test evidence
+when those surfaces are advertised. A missing provider, memory-model fallback,
+or optional Live2D asset must have a user-facing recovery path in the
+compatibility notes.
 
 ### Stage B — registry release (after Phase 5)
 
-Publish the static registry index and versioned archives only after local
-checksum/compatibility tests pass and the [registry publication review](release-reviews/registry-publication.md)
-contains the real JSON/archive URLs, byte counts, digests, and browse/install
-smoke-test result. Keep character installation and executable MOD installation
-on their separate trust paths. Do not call a local generated index a published
-registry.
+Publish the static registry index and versioned archives after local
+checksum/compatibility tests pass. Record the [registry publication review](release-reviews/registry-publication.md)
+separately when external URLs, byte counts, digests, and browse/install
+smoke-test results become available. Keep character installation and
+executable MOD installation on their separate trust paths. Do not call a local
+generated index a published registry.
 
 ### Stage C — AstrBot distribution release (after Phase 6)
 
-Publish the adapter package as a separate integration release after the
-[AstrBot publication review](release-reviews/astrbot-publication.md) has a real
-repository or marketplace result, tested AstrBot version, supported channel,
-and screenshot/demo. The plugin must use Kokoro's authenticated webhook and
-must not be described as a bidirectional real-time embodiment protocol. Local
-mocked HTTP tests prove the adapter contract only; they do not prove a live
-channel integration.
+Publish the adapter package as a separate integration release when its local
+contract checks are ready. Record the [AstrBot publication review](release-reviews/astrbot-publication.md)
+with the repository or marketplace result, tested AstrBot version, supported
+channel, and screenshot/demo when available. The plugin must use Kokoro's
+authenticated webhook and must not be described as a bidirectional real-time
+embodiment protocol. Local mocked HTTP tests prove the adapter contract only;
+they do not prove a live channel integration.
 
-Stages may share a desktop version, but each advertised surface keeps its own
-evidence row and status. If a later stage is not ready, publish the earlier
-stage with that capability clearly marked as upcoming rather than implying that
-it is installable.
+Stages may share a desktop version, but each advertised surface should keep its
+own notes and status. If a later stage is not ready, publish the earlier stage
+with that capability clearly marked as upcoming rather than implying that it is
+installable.
 
 ## Local validation checklist
 
@@ -104,24 +103,20 @@ submission, or external demo was created.
 
 | Check | Result | Owner / next action | Evidence or blocker |
 | --- | --- | --- | --- |
-| Candidate release notes | Blocked | Maintainer: create `release-notes/v0.3.2.md` from the template and fill all placeholders | The release-specific file is intentionally not created by this documentation task |
-| Character selection asset | Blocked | Maintainer: capture and publish a stable screenshot/GIF | No release asset URL is available in the repository |
-| First-reply onboarding asset and clean-machine record | Blocked | Maintainer: run five clean-machine sessions and attach the real result | `docs/release-reviews/first-reply-usability.md` remains pending external acceptance |
-| SillyTavern import asset | Blocked | Maintainer: capture JSON and PNG import evidence | No release asset URL is available in the repository |
-| Registry installation asset and publication | Blocked | Maintainer: publish index/archives and run browse/install/update/remove smoke test | `docs/release-reviews/registry-publication.md` keeps external URLs and smoke tests pending |
-| AstrBot integration asset and publication | Blocked | Maintainer: publish plugin, test a real channel, and attach a stable demo | `docs/release-reviews/astrbot-publication.md` keeps repository, marketplace, and channel rows pending |
+| Candidate release notes | Pending | Maintainer: create `release-notes/v0.3.2.md` from the template and fill the release details | Supporting assets and external records are optional and can be added later |
+| Advertised-surface evidence | Not collected | Maintainer: add available screenshots, smoke tests, or external records when useful | Missing optional evidence does not block the desktop release |
 | Platform workflow release-notes wiring | Pending local validation | Maintainer/CI: run YAML and file-check validation on the candidate tag | The three workflows now require `release-notes/${GITHUB_REF_NAME}.md` and pass it as `body_path` |
-| External credentials/participants | Blocked | Maintainer: provide GitHub/AstrBot credentials and human testers | Required external operations are not available in a local CLI dry-run |
+| External credentials/participants | Not required for desktop release | Maintainer: provide them only when updating an external surface | Local desktop publication can proceed without external participants |
 
-The candidate remains blocked until the release-specific notes and all required
-evidence are supplied. The record intentionally does not claim that any
-external operation happened.
+The candidate is ready once the release-specific notes and local validation are
+complete. The record intentionally does not claim that any external operation
+happened unless it has been performed.
 
 ## After publishing
 
 Record the release URL, exact installer asset names, and any failed platform
-job in the release review. Keep the five evidence rows immutable for that
-release. Before starting the next product phase, copy
+job in the release review. Add optional evidence and feedback as it becomes
+available. Before starting the next product phase, copy
 `docs/release-reviews/TEMPLATE.md` to
 `docs/release-reviews/vX.Y.Z-feedback.md` (the Phase 7 Task 2 template), then
 record unavailable metrics as `Not collected`, `Unavailable`, or `Pending

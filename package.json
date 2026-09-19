@@ -1,7 +1,7 @@
 {
   "name": "tauri-appkokoro-engine",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.4.5",
   "type": "module",
   "scripts": {
     "postinstall": "node scripts/prune-target.mjs --setup-hooks --safe",
