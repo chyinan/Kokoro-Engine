@@ -16,6 +16,27 @@ pub struct DreamMemoryV2Checksums {
     pub crlf: [u8; 48],
 }
 
+pub fn classify_line_ending_checksum(
+    sql: &str,
+    current_checksum: &[u8],
+    stored_checksum: &[u8],
+) -> ChecksumKind {
+    if stored_checksum == current_checksum {
+        return ChecksumKind::Current;
+    }
+
+    let lf_sql = sql.replace("\r\n", "\n");
+    let crlf_sql = lf_sql.replace('\n', "\r\n");
+    let lf_checksum = Sha384::digest(lf_sql.as_bytes());
+    let crlf_checksum = Sha384::digest(crlf_sql.as_bytes());
+
+    if stored_checksum == lf_checksum.as_slice() || stored_checksum == crlf_checksum.as_slice() {
+        ChecksumKind::CompatibleLineEndingVariant
+    } else {
+        ChecksumKind::Unknown
+    }
+}
+
 pub fn dream_memory_v2_checksums() -> DreamMemoryV2Checksums {
     let current = Sha384::digest(DREAM_MEMORY_V2_SQL).into();
     let mut crlf_sql = Vec::with_capacity(DREAM_MEMORY_V2_SQL.len());

@@ -1,16 +1,17 @@
 // pattern: Imperative Shell
 
 use crate::ai::migration_compatibility::{
-    classify_dream_memory_v2_checksum, dream_memory_v2_checksums, ChecksumKind,
+    classify_line_ending_checksum, ChecksumKind,
 };
 use anyhow::{bail, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::{migrate::Migrator, Row, SqlitePool};
 
 const DREAM_MEMORY_V2_VERSION: i64 = 8;
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 pub async fn run(pool: &SqlitePool) -> Result<()> {
     repair_compatible_migration_checksums(pool).await?;
-    sqlx::migrate!("./migrations").run(pool).await?;
+    MIGRATOR.run(pool).await?;
     Ok(())
 }
 
@@ -24,46 +25,58 @@ async fn repair_compatible_migration_checksums(pool: &SqlitePool) -> Result<()> 
         return Ok(());
     }
 
-    let Some(row) =
-        sqlx::query("SELECT checksum FROM _sqlx_migrations WHERE version = ? AND success = TRUE")
-            .bind(DREAM_MEMORY_V2_VERSION)
-            .fetch_optional(pool)
-            .await?
-    else {
-        return Ok(());
-    };
-    let stored_checksum: Vec<u8> = row.try_get("checksum")?;
-    let checksums = dream_memory_v2_checksums();
+    for migration in MIGRATOR.iter() {
+        let Some(row) = sqlx::query(
+            "SELECT checksum FROM _sqlx_migrations WHERE version = ? AND success = TRUE",
+        )
+        .bind(migration.version)
+        .fetch_optional(pool)
+        .await?
+        else {
+            continue;
+        };
+        let stored_checksum: Vec<u8> = row.try_get("checksum")?;
 
-    match classify_dream_memory_v2_checksum(&stored_checksum, &checksums) {
-        ChecksumKind::Current | ChecksumKind::Unknown => return Ok(()),
-        ChecksumKind::CompatibleLineEndingVariant => {}
-    }
+        match classify_line_ending_checksum(
+            migration.sql.as_ref(),
+            migration.checksum.as_ref(),
+            &stored_checksum,
+        ) {
+            ChecksumKind::Current | ChecksumKind::Unknown => continue,
+            ChecksumKind::CompatibleLineEndingVariant => {}
+        }
 
-    if !dream_memory_v2_schema_is_complete(pool).await? {
-        bail!(
-            "refusing to repair migration 8 checksum because the dream memory v2 schema is incomplete"
+        if migration.version == DREAM_MEMORY_V2_VERSION
+            && !dream_memory_v2_schema_is_complete(pool).await?
+        {
+            bail!(
+                "refusing to repair migration 8 checksum because the dream memory v2 schema is incomplete"
+            );
+        }
+
+        let result = sqlx::query(
+            "UPDATE _sqlx_migrations SET checksum = ? \
+             WHERE version = ? AND success = TRUE AND checksum = ?",
+        )
+        .bind(migration.checksum.as_ref())
+        .bind(migration.version)
+        .bind(&stored_checksum)
+        .execute(pool)
+        .await?;
+
+        if result.rows_affected() != 1 {
+            bail!(
+                "migration {} checksum changed while compatibility repair was running",
+                migration.version
+            );
+        }
+
+        tracing::warn!(
+            target: "database",
+            "normalized migration {} checksum after detecting an LF/CRLF-only difference",
+            migration.version
         );
     }
-
-    let result = sqlx::query(
-        "UPDATE _sqlx_migrations SET checksum = ? \
-         WHERE version = ? AND success = TRUE AND checksum = ?",
-    )
-    .bind(checksums.current.as_slice())
-    .bind(DREAM_MEMORY_V2_VERSION)
-    .bind(checksums.crlf.as_slice())
-    .execute(pool)
-    .await?;
-
-    if result.rows_affected() != 1 {
-        bail!("migration 8 checksum changed while compatibility repair was running");
-    }
-
-    tracing::warn!(
-        target: "database",
-        "normalized migration 8 checksum after detecting an LF/CRLF-only difference"
-    );
     Ok(())
 }
 
@@ -87,8 +100,9 @@ async fn dream_memory_v2_schema_is_complete(pool: &SqlitePool) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::repair_compatible_migration_checksums;
+    use super::{repair_compatible_migration_checksums, run};
     use crate::ai::migration_compatibility::dream_memory_v2_checksums;
+    use sha2::{Digest, Sha384};
     use sqlx::{Row, SqlitePool};
 
     #[tokio::test]
@@ -198,7 +212,7 @@ mod tests {
             .await
             .unwrap();
 
-        repair_compatible_migration_checksums(&pool).await.unwrap();
+        run(&pool).await.unwrap();
 
         let checksum: Vec<u8> =
             sqlx::query("SELECT checksum FROM _sqlx_migrations WHERE version = 8")
@@ -237,5 +251,35 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("schema is incomplete"));
+    }
+
+    #[tokio::test]
+    async fn repairs_line_ending_checksum_for_any_applied_migration() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let migrator = sqlx::migrate!("./migrations");
+        migrator.run(&pool).await.unwrap();
+
+        let migration = migrator.iter().find(|migration| migration.version == 1).unwrap();
+        let alternate_sql = if migration.sql.contains("\r\n") {
+            migration.sql.replace("\r\n", "\n")
+        } else {
+            migration.sql.replace('\n', "\r\n")
+        };
+        let alternate_checksum = Sha384::digest(alternate_sql.as_bytes()).to_vec();
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 1")
+            .bind(&alternate_checksum)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run(&pool).await.unwrap();
+
+        let checksum: Vec<u8> =
+            sqlx::query("SELECT checksum FROM _sqlx_migrations WHERE version = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("checksum");
+        assert_eq!(checksum.as_slice(), migration.checksum.as_ref());
     }
 }
