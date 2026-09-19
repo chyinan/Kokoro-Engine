@@ -90,9 +90,6 @@ describe("ConversationSidebar", () => {
         it("calls onClose when clicking outside the sidebar drawer (on document)", async () => {
             const { onClose } = await renderSidebar();
 
-            const backdrop = container.querySelector('[data-testid="conversation-sidebar-backdrop"]');
-            expect(backdrop).not.toBeNull();
-
             await act(async () => {
                 document.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
             });
@@ -138,17 +135,24 @@ describe("ConversationSidebar", () => {
             toggleBtn.remove();
         });
 
-        it("calls onClose when clicking on the backdrop overlay", async () => {
+        it("does not render a fullscreen backdrop overlay", async () => {
             const { onClose } = await renderSidebar();
 
             const backdrop = container.querySelector('[data-testid="conversation-sidebar-backdrop"]');
-            expect(backdrop).not.toBeNull();
+            expect(backdrop).toBeNull();
+            expect(onClose).not.toHaveBeenCalled();
+        });
+    });
 
-            await act(async () => {
-                backdrop?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-            });
+    describe("legacy drawer layout", () => {
+        it("opens from the left with the established surface background", async () => {
+            await renderSidebar();
 
-            expect(onClose).toHaveBeenCalled();
+            const drawer = container.querySelector(".left-0");
+            expect(drawer).not.toBeNull();
+            expect(drawer?.className).toContain("bg-[var(--color-bg-surface)]");
+            expect(drawer?.className).not.toContain("bg-[var(--color-bg-secondary)]");
+            expect(drawer?.className).not.toContain("backdrop-blur-md");
         });
     });
 

@@ -227,53 +227,50 @@ export default function ConversationSidebar({
         <AnimatePresence>
             {open && (
                 <motion.div
-                    key="conversation-sidebar-backdrop"
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.15 }}
-                    onClick={onClose}
-                    className="absolute inset-0 bg-black/20 backdrop-blur-[0.5px] z-20 cursor-pointer"
-                    data-testid="conversation-sidebar-backdrop"
-                    aria-hidden="true"
-                />
-            )}
-            {open && (
-                <motion.div
                     key="conversation-sidebar-drawer"
                     ref={containerRef}
-                    initial={{ x: "100%" }}
-                    animate={{ x: 0 }}
-                    exit={{ x: "100%" }}
-                    transition={{ type: "spring", damping: 28, stiffness: 300 }}
-                    className="absolute inset-y-0 right-0 w-72 bg-[var(--color-bg-secondary)] border-l border-[var(--color-border)] shadow-2xl z-30 flex flex-col backdrop-blur-md"
+                    initial={{ x: -280, opacity: 0 }}
+                    animate={{ x: 0, opacity: 1 }}
+                    exit={{ x: -280, opacity: 0 }}
+                    transition={{ type: "spring", stiffness: 300, damping: 30 }}
+                    className={clsx(
+                        "absolute inset-y-0 left-0 z-[100] w-[260px]",
+                        "bg-[var(--color-bg-surface)] backdrop-blur-[var(--glass-blur)]",
+                        "border-r border-[var(--color-border)]",
+                        "flex flex-col shadow-xl"
+                    )}
                 >
                     {/* Header */}
-                    <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
-                        <div className="flex items-center gap-2 text-sm font-medium text-[var(--color-text-primary)]">
-                            <History size={16} strokeWidth={1.5} />
-                            <span>{t("chat.history.title")}</span>
+                    <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--color-border)]">
+                        <div className="flex items-center gap-2">
+                            <History size={14} strokeWidth={1.5} className="text-[var(--color-text-muted)]" />
+                            <span className="text-xs font-semibold tracking-wider uppercase text-[var(--color-text-secondary)]">
+                                {t("chat.history.title")}
+                            </span>
                         </div>
                         <button
                             onClick={onClose}
-                            className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/5 transition-colors"
+                            className="p-1.5 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
                         >
-                            <X size={16} strokeWidth={1.5} />
+                            <X size={14} strokeWidth={1.5} />
                         </button>
                     </div>
 
                     {/* New chat button */}
-                    <div className="p-2">
+                    <div className="px-3 py-2">
                         <button
                             type="button"
                             onClick={handleCreate}
                             disabled={isActionBlocked}
                             title={isActionBlocked ? t("chat.history.creating", "正在创建新对话...") : undefined}
                             className={clsx(
-                                "w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors border",
+                                "w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs",
+                                "border border-dashed border-[var(--color-border)]",
+                                "text-[var(--color-text-muted)] hover:text-[var(--color-accent)] hover:border-[var(--color-accent)]/50",
+                                "transition-colors",
                                 isActionBlocked
-                                    ? "opacity-50 cursor-not-allowed bg-white/5 border-transparent text-[var(--color-text-muted)]"
-                                    : "bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 text-[var(--color-accent)] border-[var(--color-accent)]/20 cursor-pointer"
+                                    ? "opacity-50 cursor-not-allowed"
+                                    : "cursor-pointer"
                             )}
                         >
                             {isActionBlocked ? (
@@ -297,7 +294,7 @@ export default function ConversationSidebar({
                                     key={conv.id}
                                     onClick={() => handleLoad(conv.id)}
                                     className={clsx(
-                                        "group flex items-center gap-2 px-3 py-2.5 rounded-lg transition-colors",
+                                        "group flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer transition-colors",
                                         isActionBlocked ? "cursor-not-allowed opacity-60" : "cursor-pointer",
                                         activeConversationId === conv.id
                                             ? "bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30"
