@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
     ensureTurnMessage,
     getApprovalErrorMessage,
+    stripPlainTextFormatting,
     stripStreamingMarkup,
     updateTurnMessage,
     type ChatPanelMessage,
@@ -24,6 +25,30 @@ describe("chat turn state", () => {
     it("strips streamed control markup", () => {
         expect(stripStreamingMarkup("hello[TOOL_CALL:get_time|{}]world")).toBe("helloworld");
         expect(stripStreamingMarkup("hello[TRANSLATE:你好]")).toBe("hello");
+    });
+
+    it("strips escaped and regular bold markers from date and weekday replies", () => {
+        expect(stripPlainTextFormatting("今天是 \\*\\*2026年9月21日，星期一\\*\\*。"))
+            .toBe("今天是 2026年9月21日，星期一。");
+        expect(stripPlainTextFormatting("今天是 **2026年9月21日**，**星期一**。"))
+            .toBe("今天是 2026年9月21日，星期一。");
+    });
+
+    it("strips multiple bold segments without removing ordinary stars", () => {
+        expect(stripPlainTextFormatting("\\*\\*日期\\*\\*：\\*\\*2026-09-21\\*\\*。"))
+            .toBe("日期：2026-09-21。");
+        expect(stripPlainTextFormatting("2**3** and unfinished **bold"))
+            .toBe("2**3** and unfinished **bold");
+        expect(stripPlainTextFormatting("**bold**suffix"))
+            .toBe("boldsuffix");
+        expect(stripPlainTextFormatting("今天是 \\*星期一\\*。"))
+            .toBe("今天是 星期一。");
+        expect(stripPlainTextFormatting("今天是 *星期一*。"))
+            .toBe("今天是 星期一。");
+        expect(stripPlainTextFormatting("2 * 3 = 6\n* 条目"))
+            .toBe("2 * 3 = 6\n* 条目");
+        expect(stripPlainTextFormatting("literal \\* star"))
+            .toBe("literal \\* star");
     });
 
     it("creates one assistant message for a turn", () => {

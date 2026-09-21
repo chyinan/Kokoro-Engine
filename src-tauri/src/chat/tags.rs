@@ -49,7 +49,68 @@ pub(crate) fn strip_leaked_tags(text: &str) -> String {
             result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
         }
     }
-    result.trim().to_string()
+    strip_markdown_emphasis_markers(result.trim())
+}
+
+/// Remove paired Markdown emphasis delimiters from text rendered as plain text.
+///
+/// The chat UI intentionally does not render Markdown. Some providers still
+/// return escaped or regular emphasis delimiters, such as `\\*\\*today\\*\\*`,
+/// `**today**`, or `*today*`, which would otherwise leak into the visible
+/// conversation. Keep unmatched delimiters and word-like exponent/identifier
+/// forms intact.
+pub(crate) fn strip_markdown_emphasis_markers(text: &str) -> String {
+    let mut result = text.to_string();
+    for marker in [r"\*\*", "**", r"\*", "*"] {
+        let mut search_from = 0usize;
+        loop {
+            let Some(open_rel) = result[search_from..].find(marker) else {
+                break;
+            };
+            let open = search_from + open_rel;
+            let content_start = open + marker.len();
+            if marker == "*"
+                && (open > 0
+                    && (result.as_bytes()[open - 1] == b'*'
+                        || result.as_bytes()[open - 1] == b'\\')
+                    || result.as_bytes().get(content_start) == Some(&b'*'))
+            {
+                search_from = content_start;
+                continue;
+            }
+            let Some(close_rel) = result[content_start..].find(marker) else {
+                break;
+            };
+            let close = content_start + close_rel;
+            let content = &result[content_start..close];
+
+            if content.trim().is_empty() {
+                search_from = content_start;
+                continue;
+            }
+
+            let previous = result[..open].chars().next_back();
+            let first_content = content.chars().next();
+            let last_content = content.chars().next_back();
+            let has_content_boundary_whitespace = first_content
+                .map(char::is_whitespace)
+                .unwrap_or(true)
+                || last_content.map(char::is_whitespace).unwrap_or(true);
+            let looks_like_word_operator = previous
+                .zip(first_content)
+                .map(|(left, right)| left.is_ascii_alphanumeric() && right.is_ascii_alphanumeric())
+                .unwrap_or(false);
+            if has_content_boundary_whitespace || looks_like_word_operator {
+                search_from = content_start;
+                continue;
+            }
+
+            result.replace_range(close..close + marker.len(), "");
+            result.replace_range(open..open + marker.len(), "");
+            search_from = open;
+        }
+    }
+    result
 }
 
 /// Strip `[TRANSLATE:...]` tags from text.
@@ -444,6 +505,46 @@ mod tests {
     fn test_strip_leaked_tags_no_tag() {
         let input = "clean text";
         assert_eq!(strip_leaked_tags(input), "clean text");
+    }
+
+    #[test]
+    fn test_strip_markdown_emphasis_markers_for_date_and_weekday_replies() {
+        assert_eq!(
+            strip_markdown_emphasis_markers(r"今天是 \*\*2026年9月21日，星期一\*\*。"),
+            "今天是 2026年9月21日，星期一。"
+        );
+        assert_eq!(
+            strip_markdown_emphasis_markers(r"今天是 **2026年9月21日**，**星期一**。"),
+            "今天是 2026年9月21日，星期一。"
+        );
+    }
+
+    #[test]
+    fn test_strip_markdown_emphasis_markers_handles_multiple_segments_and_punctuation() {
+        assert_eq!(
+            strip_markdown_emphasis_markers(r"\*\*日期\*\*：\*\*2026-09-21\*\*。"),
+            "日期：2026-09-21。"
+        );
+    }
+
+    #[test]
+    fn test_strip_markdown_emphasis_markers_preserves_unmatched_and_word_operator_stars() {
+        assert_eq!(strip_markdown_emphasis_markers(r"unfinished \*\*bold"), r"unfinished \*\*bold");
+        assert_eq!(strip_markdown_emphasis_markers("2**3**"), "2**3**");
+        assert_eq!(strip_markdown_emphasis_markers(r"literal \* star"), r"literal \* star");
+    }
+
+    #[test]
+    fn test_strip_markdown_emphasis_markers_handles_italics_without_harming_math_or_lists() {
+        assert_eq!(
+            strip_markdown_emphasis_markers(r"今天是 \*星期一\*。"),
+            "今天是 星期一。"
+        );
+        assert_eq!(
+            strip_markdown_emphasis_markers("今天是 *星期一*。"),
+            "今天是 星期一。"
+        );
+        assert_eq!(strip_markdown_emphasis_markers("2 * 3 = 6\n* 条目"), "2 * 3 = 6\n* 条目");
     }
 
     #[test]

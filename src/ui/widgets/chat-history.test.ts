@@ -12,6 +12,22 @@ function createMessage(overrides: Partial<ConversationMessage>): ConversationMes
 }
 
 describe("buildChatMessagesFromConversation", () => {
+    it("历史消息回放时清理转义和普通粗体标记", () => {
+        const messages: Array<ConversationMessage> = [
+            createMessage({
+                role: "assistant",
+                content: "今天是 \\*\\*2026年9月21日，星期一\\*\\*。\n**现在是晴天**。",
+            }),
+        ];
+
+        const chatMessages = buildChatMessagesFromConversation(messages);
+
+        expect(chatMessages[0]).toEqual(expect.objectContaining({
+            role: "kokoro",
+            text: "今天是 2026年9月21日，星期一。\n现在是晴天。",
+        }));
+    });
+
     it("将 role=context 的视觉观察恢复为上下文消息并映射 metadata", () => {
         const messages: Array<ConversationMessage> = [
             createMessage({

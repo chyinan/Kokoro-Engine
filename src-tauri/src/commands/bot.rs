@@ -8,6 +8,7 @@ use crate::ai::memory_event_ingress::{
     MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
+use crate::chat::tags::strip_markdown_emphasis_markers;
 use crate::error::KokoroError;
 use crate::imagegen::ImageGenService;
 use crate::llm::messages::{
@@ -1529,7 +1530,7 @@ fn strip_leaked_tags(text: &str) -> String {
             result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
         }
     }
-    result.trim().to_string()
+    strip_markdown_emphasis_markers(result.trim())
 }
 
 fn merge_continuation_text(accumulated: &mut String, next: &str) {

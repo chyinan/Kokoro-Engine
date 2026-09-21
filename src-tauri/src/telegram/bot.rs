@@ -11,6 +11,7 @@ use crate::ai::memory_event_ingress::{
     MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
+use crate::chat::tags::strip_markdown_emphasis_markers;
 use crate::imagegen::ImageGenService;
 use crate::llm::messages::{
     assistant_text_message, is_user_message, replace_user_message_with_images, role_text_message,
@@ -1379,7 +1380,7 @@ fn strip_leaked_tags(text: &str) -> String {
             result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
         }
     }
-    result.trim().to_string()
+    strip_markdown_emphasis_markers(result.trim())
 }
 
 /// Strip control tags that shouldn't appear in Telegram messages:
