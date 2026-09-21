@@ -12,6 +12,13 @@ function createMessage(overrides: Partial<ConversationMessage>): ConversationMes
 }
 
 describe("buildChatMessagesFromConversation", () => {
+    it("trims stored assistant text during history replay", () => {
+        const chatMessages = buildChatMessagesFromConversation([
+            createMessage({ role: "assistant", content: "  saved reply  " }),
+        ]);
+
+        expect(chatMessages[0]?.text).toBe("saved reply");
+    });
     it("历史消息回放时清理转义和普通粗体标记", () => {
         const messages: Array<ConversationMessage> = [
             createMessage({

@@ -51,6 +51,27 @@ describe("chat turn state", () => {
             .toBe("literal \\* star");
     });
 
+    it("preserves emphasis-like stars inside inline code spans", () => {
+        expect(stripPlainTextFormatting("Use `*foo*` and `**bar**` literally"))
+            .toBe("Use `*foo*` and `**bar**` literally");
+        expect(stripPlainTextFormatting("Regex /\\*foo\\*/ and glob *.config.*"))
+            .toBe("Regex /\\*foo\\*/ and glob *.config.*");
+    });
+
+    it("cleans emphasis markers split across streaming deltas after merging", () => {
+        let accumulated = "";
+        let visible = "";
+
+        for (const delta of ["**", "weekday", "**"]) {
+            accumulated += delta;
+            const cleaned = stripStreamingMarkup(accumulated, { removeUnmatched: true });
+            expect(cleaned.startsWith(visible)).toBe(true);
+            visible += cleaned.slice(visible.length);
+        }
+
+        expect(visible).toBe("weekday");
+    });
+
     it("creates one assistant message for a turn", () => {
         const state = turn();
         const messages = ensureTurnMessage([], state);

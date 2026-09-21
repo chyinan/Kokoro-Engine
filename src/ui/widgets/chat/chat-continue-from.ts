@@ -30,3 +30,17 @@ export function getContinueFromCutoffIndex(
 
     return globalIndex + 1;
 }
+
+/**
+ * Return the last persisted visible message ID captured by the UI. The backend
+ * uses it as a compare-and-swap guard before deleting a conversation suffix.
+ */
+export function getExpectedTailMessageId(
+    messages: ReadonlyArray<ChatPanelMessage>,
+): number | null {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const id = messages[index]?.id;
+        if (typeof id === "number") return id;
+    }
+    return null;
+}

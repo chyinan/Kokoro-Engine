@@ -20,7 +20,7 @@ import {
     shouldIgnoreLegacyChatError,
     shouldSynchronizeOnRuntimeChanged,
 } from "./chat-character-sync-core";
-import { getStreamingRevealText, hasActiveKokoroBubble, shouldRenderTypingIndicator } from "./chat-streaming-state";
+import { hasActiveKokoroBubble, shouldRenderTypingIndicator } from "./chat-streaming-state";
 import {
     canSubmitApproval,
     ensureTurnMessage,
@@ -30,6 +30,7 @@ import {
     hasRenderableTurnContent,
     removeTurnMessages,
     stripStoredMarkup,
+    stripStreamingControlMarkup,
     stripStreamingMarkup,
     updateApprovalToolLocally,
     updateTurnMessage,
@@ -52,7 +53,7 @@ import {
     DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS,
     DEFAULT_BACKEND_PREPARATION_WATCHDOG_TIMEOUT_MS,
 } from "./chat/chat-turn-lifecycle";
-import { getContinueFromCutoffIndex } from "./chat/chat-continue-from";
+import { getContinueFromCutoffIndex, getExpectedTailMessageId } from "./chat/chat-continue-from";
 import { buildChatMessagesFromConversation } from "./chat-history";
 import {
     computeTargetScrollTop,
@@ -354,6 +355,7 @@ export default function ChatPanel({
     const isStreamingRef = useRef(false);
     const [isBusy, setIsBusy] = useState(false);
     const isBusyRef = useRef(false);
+    const continueFromInFlightRef = useRef(false);
     const [isSwitchingConversation, setIsSwitchingConversation] = useState(false);
     const isSwitchingConversationRef = useRef(false);
     const ttsSpeakingRef = useRef(false);
@@ -1807,6 +1809,7 @@ export default function ChatPanel({
                             clientRequestId: validation.matchedClientRequestId,
                             messageIndex: prevTurn?.messageIndex ?? null,
                             rawText: prevTurn?.rawText ?? "",
+                            streamingVisibleText: prevTurn?.streamingVisibleText ?? "",
                             visibleTextStarted: prevTurn?.visibleTextStarted ?? false,
                             translation: prevTurn?.translation,
                             translationPending: prevTurn?.translationPending ?? false,
@@ -1823,17 +1826,21 @@ export default function ChatPanel({
                         const turn = currentTurnRef.current;
                         if (!turn || turn.turnId !== turn_id || turn.generation !== conversationGenerationRef.current) return;
 
-                        const delta = stripStreamingMarkup(rawDelta);
+                        const delta = stripStreamingControlMarkup(rawDelta);
                         if (!delta) return;
 
                         turn.rawText += delta;
                         rawResponseRef.current = turn.rawText;
 
-                        const revealText = getStreamingRevealText({
-                            accumulatedText: turn.rawText,
-                            delta,
-                            hasVisibleTextStarted: turn.visibleTextStarted,
+                        const cleanStreamingText = stripStreamingMarkup(turn.rawText, {
+                            removeUnmatched: true,
                         });
+                        const previousStreamingText = turn.streamingVisibleText ?? "";
+                        if (!cleanStreamingText.startsWith(previousStreamingText)) {
+                            return;
+                        }
+                        const revealText = cleanStreamingText.slice(previousStreamingText.length);
+                        turn.streamingVisibleText = cleanStreamingText;
                         if (!revealText) return;
 
                         setIsThinking(false);
@@ -2740,6 +2747,7 @@ export default function ChatPanel({
         );
 
         const msgs = messagesRef.current;
+        const expectedTailMessageId = getExpectedTailMessageId(msgs);
         const lastUserIndex = msgs.slice(0, globalIndex).reverse().findIndex(m => m.role === "user");
         if (lastUserIndex === -1) return;
         const userMsgIndex = globalIndex - 1 - lastUserIndex;
@@ -2760,7 +2768,7 @@ export default function ChatPanel({
 
         try {
             // 先删除数据库，再更新 UI，避免竞态条件
-            await deleteLastMessages(messagesToDelete, startConversationId);
+            await deleteLastMessages(messagesToDelete, startConversationId, expectedTailMessageId);
         } catch (e) {
             console.error("[ChatPanel] Failed to delete messages:", e);
             if (!isSessionCurrent()) return;
@@ -2816,6 +2824,10 @@ export default function ChatPanel({
 
     const onContinueFrom = useCallback(async (globalIndex: number) => {
         if (isBusyRef.current || isStreamingRef.current) return;
+        if (continueFromInFlightRef.current) return;
+        continueFromInFlightRef.current = true;
+
+        try {
 
         const msgs = messagesRef.current;
         const cutoffIndex = getContinueFromCutoffIndex(msgs, globalIndex);
@@ -2824,12 +2836,13 @@ export default function ChatPanel({
         // 第一次异步操作前捕获会话代次与会话 ID，防止删除期间会话切换导致截断作用到新会话
         const startGeneration = conversationGenerationRef.current;
         const startConversationId = activeConversationIdRef.current;
+        const expectedTailMessageId = getExpectedTailMessageId(msgs);
 
         const messagesToDelete = msgs.length - cutoffIndex;
         if (messagesToDelete > 0) {
             try {
                 // 先删除数据库，再更新 UI，避免竞态条件
-                await deleteLastMessages(messagesToDelete, startConversationId);
+                await deleteLastMessages(messagesToDelete, startConversationId, expectedTailMessageId);
                 // 删除期间会话已切换：立即中止，不截断新会话 UI
                 if (!isChatSessionCurrent(
                     startGeneration,
@@ -2859,6 +2872,9 @@ export default function ChatPanel({
                     });
                 }
             }
+        }
+        } finally {
+            continueFromInFlightRef.current = false;
         }
     }, [resyncConversationMessages, setError, t]);
 

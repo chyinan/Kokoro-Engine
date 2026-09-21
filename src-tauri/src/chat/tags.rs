@@ -60,6 +60,61 @@ pub(crate) fn strip_leaked_tags(text: &str) -> String {
 /// conversation. Keep unmatched delimiters and word-like exponent/identifier
 /// forms intact.
 pub(crate) fn strip_markdown_emphasis_markers(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut segment_start = 0usize;
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] != b'`' || (index > 0 && bytes[index - 1] == b'\\') {
+            index += 1;
+            continue;
+        }
+
+        let mut opening_end = index + 1;
+        while opening_end < bytes.len() && bytes[opening_end] == b'`' {
+            opening_end += 1;
+        }
+        let delimiter_len = opening_end - index;
+        let mut cursor = opening_end;
+        let mut closing_start = None;
+
+        while cursor < bytes.len() {
+            if bytes[cursor] != b'`' || (cursor > 0 && bytes[cursor - 1] == b'\\') {
+                cursor += 1;
+                continue;
+            }
+
+            let mut closing_end = cursor + 1;
+            while closing_end < bytes.len() && bytes[closing_end] == b'`' {
+                closing_end += 1;
+            }
+            if closing_end - cursor == delimiter_len {
+                closing_start = Some(cursor);
+                break;
+            }
+            cursor = closing_end;
+        }
+
+        let Some(closing_start) = closing_start else {
+            // An unmatched backtick is safer when left untouched: stars after
+            // it may be part of an unfinished code span.
+            result.push_str(&strip_markdown_emphasis_segment(&text[segment_start..index]));
+            result.push_str(&text[index..]);
+            return result;
+        };
+
+        result.push_str(&strip_markdown_emphasis_segment(&text[segment_start..index]));
+        result.push_str(&text[index..closing_start + delimiter_len]);
+        index = closing_start + delimiter_len;
+        segment_start = index;
+    }
+
+    result.push_str(&strip_markdown_emphasis_segment(&text[segment_start..]));
+    result
+}
+
+fn strip_markdown_emphasis_segment(text: &str) -> String {
     let mut result = text.to_string();
     for marker in [r"\*\*", "**", r"\*", "*"] {
         let mut search_from = 0usize;
@@ -86,6 +141,13 @@ pub(crate) fn strip_markdown_emphasis_markers(text: &str) -> String {
                 continue;
             }
 
+            if looks_like_regex_literal(&result, open, close, marker)
+                || looks_like_glob_pattern(&result, open, close, marker)
+            {
+                search_from = content_start;
+                continue;
+            }
+
             let previous = result[..open].chars().next_back();
             let first_content = content.chars().next();
             let last_content = content.chars().next_back();
@@ -108,6 +170,42 @@ pub(crate) fn strip_markdown_emphasis_markers(text: &str) -> String {
         }
     }
     result
+}
+
+fn looks_like_regex_literal(text: &str, open: usize, close: usize, marker: &str) -> bool {
+    let Some(opening_slash) = text[..open].rfind('/') else {
+        return false;
+    };
+    if opening_slash > 0 && text.as_bytes()[opening_slash - 1] == b'\\' {
+        return false;
+    }
+
+    let before_slash = text[..opening_slash].chars().next_back();
+    if before_slash.is_some_and(|character| !character.is_whitespace() && !"([{=:;,!?".contains(character)) {
+        return false;
+    }
+
+    let closing_slash = close + marker.len();
+    if text.as_bytes().get(closing_slash) != Some(&b'/') {
+        return false;
+    }
+
+    !text[opening_slash + 1..closing_slash].contains('\n')
+}
+
+fn looks_like_glob_pattern(text: &str, open: usize, close: usize, marker: &str) -> bool {
+    let content_start = open + marker.len();
+    let content = &text[content_start..close];
+    let after_close = text[close + marker.len()..].chars().next();
+    let previous = text[..open].chars().next_back();
+
+    content.starts_with('.')
+        || content.ends_with('.')
+        || content
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '[' | ']' | '{' | '}'))
+        || matches!(previous, Some('/' | '\\'))
+        || matches!(after_close, Some('/' | '\\'))
 }
 
 /// Strip `[TRANSLATE:...]` tags from text.
@@ -542,6 +640,18 @@ mod tests {
             "今天是 星期一。"
         );
         assert_eq!(strip_markdown_emphasis_markers("2 * 3 = 6\n* 条目"), "2 * 3 = 6\n* 条目");
+    }
+
+    #[test]
+    fn test_strip_markdown_emphasis_markers_preserves_inline_code() {
+        assert_eq!(
+            strip_markdown_emphasis_markers("请使用 `*foo*` 和 `**bar**` 匹配文件名"),
+            "请使用 `*foo*` 和 `**bar**` 匹配文件名"
+        );
+        assert_eq!(
+            strip_markdown_emphasis_markers(r"Regex /\*foo\*/ and glob *.config.*"),
+            r"Regex /\*foo\*/ and glob *.config.*"
+        );
     }
 
     #[test]

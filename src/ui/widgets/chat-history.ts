@@ -129,7 +129,7 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
                 if (translateMatch) translation = translateMatch[1].trim();
             }
 
-            const text = stripStoredMarkup(m.content);
+            const text = stripStoredMarkup(m.content).trim();
             const pendingTools = turnId ? pendingToolsByTurn.get(turnId) : undefined;
 
             chatMsgs.push({

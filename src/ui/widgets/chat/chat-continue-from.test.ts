@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getContinueFromCutoffIndex } from "./chat-continue-from";
+import { getContinueFromCutoffIndex, getExpectedTailMessageId } from "./chat-continue-from";
 import type { ChatPanelMessage } from "./turn-state";
 
 describe("continue from chat message", () => {
@@ -43,5 +43,14 @@ describe("continue from chat message", () => {
     it("ignores an invalid message index", () => {
         expect(getContinueFromCutoffIndex(messages, -1)).toBeNull();
         expect(getContinueFromCutoffIndex(messages, messages.length)).toBeNull();
+    });
+
+    it("captures the latest persisted message ID for delete compare-and-swap", () => {
+        expect(getExpectedTailMessageId([
+            { role: "user", text: "first", id: 11 },
+            { role: "kokoro", text: "answer", id: 12 },
+            { role: "context", text: "pending" },
+        ])).toBe(12);
+        expect(getExpectedTailMessageId(messages)).toBeNull();
     });
 });

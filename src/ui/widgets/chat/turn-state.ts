@@ -27,6 +27,7 @@ export interface PendingTurnState {
     clientRequestId?: string | null;
     messageIndex: number | null;
     rawText: string;
+    streamingVisibleText?: string;
     visibleTextStarted: boolean;
     translation?: string;
     translationPending: boolean;
@@ -35,7 +36,11 @@ export interface PendingTurnState {
     needsResync?: boolean;
 }
 
-function stripPairedEmphasisMarkers(text: string, marker: string): string {
+function stripPairedEmphasisMarkers(
+    text: string,
+    marker: string,
+    removeUnmatched: boolean,
+): string {
     let result = text;
     let searchFrom = 0;
 
@@ -53,10 +58,23 @@ function stripPairedEmphasisMarkers(text: string, marker: string): string {
             continue;
         }
         const close = result.indexOf(marker, contentStart);
-        if (close < 0) break;
+        if (close < 0) {
+            if (!removeUnmatched) break;
+            result = `${result.slice(0, open)}${result.slice(open + marker.length)}`;
+            searchFrom = open;
+            continue;
+        }
 
         const content = result.slice(contentStart, close);
         if (!content.trim()) {
+            searchFrom = contentStart;
+            continue;
+        }
+
+        if (
+            looksLikeRegexLiteral(result, open, close, marker)
+            || looksLikeGlobPattern(result, open, close, marker)
+        ) {
             searchFrom = contentStart;
             continue;
         }
@@ -81,25 +99,108 @@ function stripPairedEmphasisMarkers(text: string, marker: string): string {
     return result;
 }
 
-export const stripPlainTextFormatting = (text: string) =>
-    stripPairedEmphasisMarkers(
-        stripPairedEmphasisMarkers(
-            stripPairedEmphasisMarkers(
-                stripPairedEmphasisMarkers(text, "\\*\\*"),
-                "**",
-            ),
-            "\\*",
-        ),
-        "*",
-    );
+function looksLikeRegexLiteral(text: string, open: number, close: number, marker: string): boolean {
+    const openingSlash = text.lastIndexOf("/", open - 1);
+    if (openingSlash < 0 || (openingSlash > 0 && text[openingSlash - 1] === "\\")) return false;
 
-export const stripStreamingMarkup = (text: string) => stripPlainTextFormatting(
-    text
-        .replace(/\[ACTION:\w+\]\s*/g, "")
-        .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
-        .replace(/\[TRANSLATE:[^\]]*\]\s*/g, "")
-        .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, ""),
+    const beforeSlash = openingSlash > 0 ? text[openingSlash - 1] : undefined;
+    if (beforeSlash && !/[\s([{=:;,!?]/.test(beforeSlash)) return false;
+    if (text[close + marker.length] !== "/") return false;
+
+    return !text.slice(openingSlash + 1, close + marker.length).includes("\n");
+}
+
+function looksLikeGlobPattern(text: string, open: number, close: number, marker: string): boolean {
+    const content = text.slice(open + marker.length, close);
+    const afterClose = text[close + marker.length];
+    return (
+        content.startsWith(".")
+        || content.endsWith(".")
+        || /[/\\[\]{}]/.test(content)
+        || text[open - 1] === "/"
+        || text[open - 1] === "\\"
+        || afterClose === "/"
+        || afterClose === "\\"
+    );
+}
+
+function stripOutsideCodeSpans(text: string, transform: (segment: string) => string): string {
+    let result = "";
+    let segmentStart = 0;
+    let index = 0;
+
+    while (index < text.length) {
+        if (text[index] !== "`" || (index > 0 && text[index - 1] === "\\")) {
+            index += 1;
+            continue;
+        }
+
+        let openingEnd = index + 1;
+        while (openingEnd < text.length && text[openingEnd] === "`") {
+            openingEnd += 1;
+        }
+        const delimiterLength = openingEnd - index;
+        let cursor = openingEnd;
+        let closingStart = -1;
+
+        while (cursor < text.length) {
+            if (text[cursor] !== "`" || (cursor > 0 && text[cursor - 1] === "\\")) {
+                cursor += 1;
+                continue;
+            }
+
+            let closingEnd = cursor + 1;
+            while (closingEnd < text.length && text[closingEnd] === "`") {
+                closingEnd += 1;
+            }
+            if (closingEnd - cursor === delimiterLength) {
+                closingStart = cursor;
+                break;
+            }
+            cursor = closingEnd;
+        }
+
+        if (closingStart < 0) {
+            // An unmatched backtick is safer when left untouched: stars after it
+            // may be part of an unfinished code span.
+            return `${result}${transform(text.slice(segmentStart, index))}${text.slice(index)}`;
+        }
+
+        result += transform(text.slice(segmentStart, index));
+        result += text.slice(index, closingStart + delimiterLength);
+        index = closingStart + delimiterLength;
+        segmentStart = index;
+    }
+
+    return result + transform(text.slice(segmentStart));
+}
+
+function stripPlainTextFormattingSegment(text: string, removeUnmatched: boolean): string {
+    let result = text;
+    for (const marker of ["\\*\\*", "**", "\\*", "*"]) {
+        result = stripPairedEmphasisMarkers(result, marker, removeUnmatched);
+    }
+    return result;
+}
+
+export const stripPlainTextFormatting = (
+    text: string,
+    options: { removeUnmatched?: boolean } = {},
+) => stripOutsideCodeSpans(
+    text,
+    segment => stripPlainTextFormattingSegment(segment, options.removeUnmatched ?? false),
 );
+
+export const stripStreamingControlMarkup = (text: string) => text
+    .replace(/\[ACTION:\w+\]\s*/g, "")
+    .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
+    .replace(/\[TRANSLATE:[^\]]*\]\s*/g, "")
+    .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "");
+
+export const stripStreamingMarkup = (
+    text: string,
+    options: { removeUnmatched?: boolean } = {},
+) => stripPlainTextFormatting(stripStreamingControlMarkup(text), options);
 
 export const stripStoredMarkup = (text: string) => stripPlainTextFormatting(
     stripStreamingMarkup(text)
