@@ -1,25 +1,47 @@
 import { describe, expect, it } from "vitest";
-import { getContinueFromRegenerationIndex } from "./chat-continue-from";
+import { getContinueFromCutoffIndex } from "./chat-continue-from";
 import type { ChatPanelMessage } from "./turn-state";
 
 describe("continue from chat message", () => {
     const messages: ChatPanelMessage[] = [
-        { role: "user", text: "今天几号" },
-        { role: "kokoro", text: "今天是 2026 年 9 月 21 日。" },
-        { role: "user", text: "那今天星期几" },
+        { role: "user", text: "first question" },
+        { role: "kokoro", text: "first answer" },
+        { role: "user", text: "second question" },
+        { role: "kokoro", text: "second answer" },
     ];
 
-    it("regenerates the selected user turn so its assistant reply is restored", () => {
-        expect(getContinueFromRegenerationIndex(messages, 0)).toBe(1);
-        expect(getContinueFromRegenerationIndex(messages, 2)).toBe(3);
+    it("keeps the selected user message and its existing assistant reply", () => {
+        expect(getContinueFromCutoffIndex(messages, 0)).toBe(2);
+        expect(getContinueFromCutoffIndex(messages, 2)).toBe(4);
     });
 
-    it("keeps assistant-message continuation as a truncate-only action", () => {
-        expect(getContinueFromRegenerationIndex(messages, 1)).toBeNull();
+    it("keeps only the selected assistant message when starting from an assistant", () => {
+        expect(getContinueFromCutoffIndex(messages, 1)).toBe(2);
+    });
+
+    it("keeps context rows between a user message and its existing answer", () => {
+        const withContext: ChatPanelMessage[] = [
+            { role: "user", text: "look at this image" },
+            { role: "context", text: "vision context" },
+            { role: "kokoro", text: "I can see it" },
+            { role: "user", text: "continue" },
+        ];
+
+        expect(getContinueFromCutoffIndex(withContext, 0)).toBe(3);
+    });
+
+    it("does not preserve a later answer when the selected user has no answer", () => {
+        const unanswered: ChatPanelMessage[] = [
+            { role: "user", text: "unanswered question" },
+            { role: "user", text: "follow-up question" },
+            { role: "kokoro", text: "follow-up answer" },
+        ];
+
+        expect(getContinueFromCutoffIndex(unanswered, 0)).toBe(1);
     });
 
     it("ignores an invalid message index", () => {
-        expect(getContinueFromRegenerationIndex(messages, -1)).toBeNull();
-        expect(getContinueFromRegenerationIndex(messages, messages.length)).toBeNull();
+        expect(getContinueFromCutoffIndex(messages, -1)).toBeNull();
+        expect(getContinueFromCutoffIndex(messages, messages.length)).toBeNull();
     });
 });

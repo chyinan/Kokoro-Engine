@@ -52,7 +52,7 @@ import {
     DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS,
     DEFAULT_BACKEND_PREPARATION_WATCHDOG_TIMEOUT_MS,
 } from "./chat/chat-turn-lifecycle";
-import { getContinueFromRegenerationIndex } from "./chat/chat-continue-from";
+import { getContinueFromCutoffIndex } from "./chat/chat-continue-from";
 import { buildChatMessagesFromConversation } from "./chat-history";
 import {
     computeTargetScrollTop,
@@ -2818,19 +2818,14 @@ export default function ChatPanel({
         if (isBusyRef.current || isStreamingRef.current) return;
 
         const msgs = messagesRef.current;
-        const regenerationIndex = getContinueFromRegenerationIndex(msgs, globalIndex);
-        if (regenerationIndex !== null) {
-            // A user message starts a turn. Regenerate its assistant reply so
-            // continuing from that point does not leave the user message alone.
-            await onRegenerate(regenerationIndex);
-            return;
-        }
+        const cutoffIndex = getContinueFromCutoffIndex(msgs, globalIndex);
+        if (cutoffIndex === null) return;
 
         // 第一次异步操作前捕获会话代次与会话 ID，防止删除期间会话切换导致截断作用到新会话
         const startGeneration = conversationGenerationRef.current;
         const startConversationId = activeConversationIdRef.current;
 
-        const messagesToDelete = msgs.length - globalIndex - 1;
+        const messagesToDelete = msgs.length - cutoffIndex;
         if (messagesToDelete > 0) {
             try {
                 // 先删除数据库，再更新 UI，避免竞态条件
@@ -2844,7 +2839,7 @@ export default function ChatPanel({
                 )) {
                     return;
                 }
-                setMessages(prev => prev.slice(0, globalIndex + 1));
+                setMessages(prev => prev.slice(0, cutoffIndex));
             } catch (e) {
                 console.error("[ChatPanel] Failed to delete messages:", e);
                 if (!isChatSessionCurrent(
@@ -2865,7 +2860,7 @@ export default function ChatPanel({
                 }
             }
         }
-    }, [onRegenerate, resyncConversationMessages, setError, t]);
+    }, [resyncConversationMessages, setError, t]);
 
     const onApproveTool = useCallback(async (globalIndex: number, tool: ToolTraceItem) => {
         if (!canSubmitApproval(tool)) {
