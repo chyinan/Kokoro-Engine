@@ -35,18 +35,78 @@ export interface PendingTurnState {
     needsResync?: boolean;
 }
 
-export const stripStreamingMarkup = (text: string) =>
+function stripPairedEmphasisMarkers(text: string, marker: string): string {
+    let result = text;
+    let searchFrom = 0;
+
+    while (searchFrom < result.length) {
+        const open = result.indexOf(marker, searchFrom);
+        if (open < 0) break;
+
+        const contentStart = open + marker.length;
+        if (marker === "*" && (
+            result[open - 1] === "*"
+            || result[open - 1] === "\\"
+            || result[contentStart] === "*"
+        )) {
+            searchFrom = contentStart;
+            continue;
+        }
+        const close = result.indexOf(marker, contentStart);
+        if (close < 0) break;
+
+        const content = result.slice(contentStart, close);
+        if (!content.trim()) {
+            searchFrom = contentStart;
+            continue;
+        }
+
+        const previous = open > 0 ? result[open - 1] : undefined;
+        const firstContent = content[0];
+        const hasContentBoundaryWhitespace = /^\s|\s$/.test(content);
+        const looksLikeWordOperator = Boolean(
+            previous && firstContent && /[A-Za-z0-9]/.test(previous) && /[A-Za-z0-9]/.test(firstContent),
+        );
+
+        if (hasContentBoundaryWhitespace || looksLikeWordOperator) {
+            searchFrom = contentStart;
+            continue;
+        }
+
+        result = `${result.slice(0, close)}${result.slice(close + marker.length)}`;
+        result = `${result.slice(0, open)}${result.slice(open + marker.length)}`;
+        searchFrom = open;
+    }
+
+    return result;
+}
+
+export const stripPlainTextFormatting = (text: string) =>
+    stripPairedEmphasisMarkers(
+        stripPairedEmphasisMarkers(
+            stripPairedEmphasisMarkers(
+                stripPairedEmphasisMarkers(text, "\\*\\*"),
+                "**",
+            ),
+            "\\*",
+        ),
+        "*",
+    );
+
+export const stripStreamingMarkup = (text: string) => stripPlainTextFormatting(
     text
         .replace(/\[ACTION:\w+\]\s*/g, "")
         .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
         .replace(/\[TRANSLATE:[^\]]*\]\s*/g, "")
-        .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "");
+        .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, ""),
+);
 
-export const stripStoredMarkup = (text: string) =>
+export const stripStoredMarkup = (text: string) => stripPlainTextFormatting(
     stripStreamingMarkup(text)
         .replace(/\[EMOTION:[^\]]*\]/g, "")
         .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-        .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "");
+        .replace(/\[TRANSLATE:[\s\S]*?\]/gi, ""),
+);
 
 export const ensureTurnMessage = (messages: ChatPanelMessage[], turn: PendingTurnState) => {
     if (hasActiveKokoroBubble(messages, turn.messageIndex)) {
