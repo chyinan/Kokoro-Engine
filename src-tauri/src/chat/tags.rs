@@ -63,10 +63,7 @@ pub(crate) fn strip_markdown_emphasis_markers(text: &str) -> String {
     let mut result = text.to_string();
     for marker in [r"\*\*", "**", r"\*", "*"] {
         let mut search_from = 0usize;
-        loop {
-            let Some(open_rel) = result[search_from..].find(marker) else {
-                break;
-            };
+        while let Some(open_rel) = result[search_from..].find(marker) {
             let open = search_from + open_rel;
             let content_start = open + marker.len();
             if marker == "*"
