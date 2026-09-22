@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { getContinueFromCutoffIndex, getExpectedTailMessageId } from "./chat-continue-from";
+import {
+    getChatMessageSnapshot,
+    getContinueFromCutoffIndex,
+    getExpectedTailMessageId,
+    matchesChatMessageSnapshot,
+} from "./chat-continue-from";
 import type { ChatPanelMessage } from "./turn-state";
 
 describe("continue from chat message", () => {
@@ -52,5 +57,22 @@ describe("continue from chat message", () => {
             { role: "context", text: "pending" },
         ])).toBe(12);
         expect(getExpectedTailMessageId(messages)).toBeNull();
+    });
+
+    it("rejects a stale UI snapshot before applying a destructive slice", () => {
+        const snapshot = getChatMessageSnapshot(messages);
+        expect(matchesChatMessageSnapshot(messages, snapshot)).toBe(true);
+        expect(matchesChatMessageSnapshot([
+            ...messages,
+            { role: "user", text: "new message", clientRequestId: "req-new" },
+        ], snapshot)).toBe(false);
+    });
+
+    it("detects edits to an unpersisted message as a history mutation", () => {
+        const snapshot = getChatMessageSnapshot(messages);
+        const changed = messages.map((message, index) => index === 3
+            ? { ...message, text: "changed before delete returns" }
+            : message);
+        expect(matchesChatMessageSnapshot(changed, snapshot)).toBe(false);
     });
 });

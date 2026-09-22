@@ -271,6 +271,67 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
         expect(streamChatMock.mock.calls[1][0].message).toBe("How is the weather?");
     });
 
+    it("blocks send and regenerate while Continue from here is deleting history", async () => {
+        let finishDelete: (() => void) | null = null;
+        vi.mocked(bridge.listConversations).mockResolvedValueOnce([{
+            id: "conv-continue",
+            character_id: "default",
+            title: "Continue test",
+            topic: "",
+            pinned_state: "{}",
+            created_at: "2026-09-22",
+            updated_at: "2026-09-22",
+        }]);
+        loadConversationMock.mockImplementationOnce(async () => ({
+            id: "conv-continue",
+            character_id: "default",
+            title: "Continue test",
+            topic: "",
+            pinned_state: "{}",
+            created_at: "2026-09-22",
+            updated_at: "2026-09-22",
+            messages: [
+                { id: 201, role: "user", content: "first question", created_at: "2026-09-22" },
+                { id: 202, role: "assistant", content: "first answer", created_at: "2026-09-22" },
+                { id: 203, role: "user", content: "second question", created_at: "2026-09-22" },
+                { id: 204, role: "assistant", content: "second answer", created_at: "2026-09-22" },
+            ],
+        }));
+        vi.spyOn(bridge, "deleteLastMessages").mockImplementation(() => new Promise(resolve => {
+            finishDelete = resolve;
+        }));
+
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 8; i++) await Promise.resolve();
+        });
+
+        const continueButtons = container.querySelectorAll<HTMLButtonElement>(
+            'button[title="chat.actions.continue_from"]',
+        );
+        expect(continueButtons.length).toBeGreaterThan(0);
+
+        await act(async () => continueButtons[0]?.click());
+        expect(bridge.deleteLastMessages).toHaveBeenCalledOnce();
+
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        const form = container.querySelector("form") as HTMLFormElement;
+        await act(async () => {
+            setTextareaValue(textarea, "must wait for continue");
+            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            for (let i = 0; i < 3; i++) await Promise.resolve();
+        });
+
+        expect(streamChatMock).not.toHaveBeenCalled();
+        const regenerateButton = container.querySelector<HTMLButtonElement>(
+            'button[title="chat.actions.regenerate"]',
+        );
+        await act(async () => regenerateButton?.click());
+        expect(bridge.deleteLastMessages).toHaveBeenCalledOnce();
+
+        await act(async () => finishDelete?.());
+    });
+
     it("preserves visible messages and reports an error when clearing history fails", async () => {
         await act(async () => {
             root.render(createElement(ChatPanel));

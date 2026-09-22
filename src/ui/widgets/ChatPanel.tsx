@@ -26,12 +26,12 @@ import {
     ensureTurnMessage,
     getApprovalErrorMessage,
     getApprovalRequestId,
+    getStreamingVisibleText,
     getToolEventStateUpdate,
     hasRenderableTurnContent,
     removeTurnMessages,
     stripStoredMarkup,
     stripStreamingControlMarkup,
-    stripStreamingMarkup,
     updateApprovalToolLocally,
     updateTurnMessage,
     type ChatPanelMessage,
@@ -53,7 +53,12 @@ import {
     DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS,
     DEFAULT_BACKEND_PREPARATION_WATCHDOG_TIMEOUT_MS,
 } from "./chat/chat-turn-lifecycle";
-import { getContinueFromCutoffIndex, getExpectedTailMessageId } from "./chat/chat-continue-from";
+import {
+    getChatMessageSnapshot,
+    getContinueFromCutoffIndex,
+    getExpectedTailMessageId,
+    matchesChatMessageSnapshot,
+} from "./chat/chat-continue-from";
 import { buildChatMessagesFromConversation } from "./chat-history";
 import {
     computeTargetScrollTop,
@@ -355,7 +360,11 @@ export default function ChatPanel({
     const isStreamingRef = useRef(false);
     const [isBusy, setIsBusy] = useState(false);
     const isBusyRef = useRef(false);
-    const continueFromInFlightRef = useRef(false);
+    // All operations that can change conversation history share this lock.
+    // Backend CAS protects persisted rows; this lock also covers unpersisted
+    // in-memory messages and prevents stale slice indexes from racing sends,
+    // edits, regenerations, or clear-history.
+    const historyMutationInFlightRef = useRef(false);
     const [isSwitchingConversation, setIsSwitchingConversation] = useState(false);
     const isSwitchingConversationRef = useRef(false);
     const ttsSpeakingRef = useRef(false);
@@ -1832,9 +1841,7 @@ export default function ChatPanel({
                         turn.rawText += delta;
                         rawResponseRef.current = turn.rawText;
 
-                        const cleanStreamingText = stripStreamingMarkup(turn.rawText, {
-                            removeUnmatched: true,
-                        });
+                        const cleanStreamingText = getStreamingVisibleText(turn.rawText);
                         const previousStreamingText = turn.streamingVisibleText ?? "";
                         if (!cleanStreamingText.startsWith(previousStreamingText)) {
                             return;
@@ -2316,83 +2323,89 @@ export default function ChatPanel({
     const handleSend = async (e?: React.FormEvent) => {
         e?.preventDefault();
         if (interactionDisabled) return;
+        if (historyMutationInFlightRef.current) return;
+        historyMutationInFlightRef.current = true;
 
-        // 确保所有事件监听器已就绪，避免因初始化时序差错过 chat-turn-start / finish 事件
-        if (listenersReadyPromiseRef.current) {
-            await Promise.race([
-                listenersReadyPromiseRef.current,
-                new Promise(resolve => setTimeout(resolve, 1500)),
-            ]);
+        try {
+            // 确保所有事件监听器已就绪，避免因初始化时序差错过 chat-turn-start / finish 事件
+            if (listenersReadyPromiseRef.current) {
+                await Promise.race([
+                    listenersReadyPromiseRef.current,
+                    new Promise(resolve => setTimeout(resolve, 1500)),
+                ]);
+            }
+
+            const trimmed = input.trim();
+            const messageImages = visionEnabled ? [...pendingImages] : [];
+            if ((!trimmed && messageImages.length === 0) || isBusy || isBusyRef.current) return;
+            if (!await ensureMemoryModelReady()) return;
+
+            const requestGeneration = conversationGenerationRef.current;
+            const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            latestClientRequestIdRef.current = clientRequestId;
+            pendingTurnRequestRef.current = {
+                clientRequestId,
+                generation: requestGeneration,
+                conversationId: activeConversationIdRef.current,
+                characterId: activeCharacterIdRef.current,
+            };
+            setMessages(prev => [...prev, {
+                role: "user",
+                text: trimmed,
+                images: messageImages.length > 0 ? messageImages : undefined,
+                clientRequestId,
+            }]);
+            const cameraFrame = visionEnabled ? getLatestCameraFrame() : null;
+            const imagesToSend = cameraFrame ? [...messageImages, cameraFrame] : messageImages;
+            clearDraft();
+            startStreaming();
+            setIsThinking(true);
+            userScrolledRef.current = false;
+            savedScrollSnapshotRef.current = null;
+            // Lock out handleScroll until deferredMessages DOM update settles (~200ms)
+            isProgrammaticScrollRef.current = true;
+            setTimeout(() => { isProgrammaticScrollRef.current = false; }, 200);
+            resetReveal();
+            rawResponseRef.current = "";
+            currentTurnRef.current = null;
+
+            const allowImageGen = isGeneratedBackgroundMode();
+
+            await processTurnStreamResult({
+                clientRequestId,
+                requestGeneration,
+                streamChatPromise: streamChat({
+                    message: trimmed || "(image attached)",
+                    allow_image_gen: allowImageGen,
+                    images: imagesToSend.length > 0 ? imagesToSend : undefined,
+                    character_id: getActiveCharacterIdForRequest(),
+                    client_request_id: clientRequestId,
+                    conversation_id: activeConversationIdRef.current ?? undefined,
+                }),
+                onCatchError: () => {
+                    // Save failed request for retry
+                    lastFailedRequestRef.current = { message: trimmed || "(image attached)", images: imagesToSend.length > 0 ? imagesToSend : undefined, allowImageGen };
+
+                    setTimeout(() => {
+                        if (!shouldAppendDelayedChatError(
+                            clientRequestId,
+                            conversationGenerationRef.current,
+                            requestGeneration,
+                            latestClientRequestIdRef.current,
+                        )) {
+                            return;
+                        }
+                        setMessages(prev => [...prev, {
+                            role: "kokoro",
+                            text: t("chat.errors.connection_error"),
+                            isError: true,
+                        }]);
+                    }, 500);
+                },
+            });
+        } finally {
+            historyMutationInFlightRef.current = false;
         }
-
-        const trimmed = input.trim();
-        const messageImages = visionEnabled ? [...pendingImages] : [];
-        if ((!trimmed && messageImages.length === 0) || isBusy || isBusyRef.current) return;
-        if (!await ensureMemoryModelReady()) return;
-
-        const requestGeneration = conversationGenerationRef.current;
-        const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        latestClientRequestIdRef.current = clientRequestId;
-        pendingTurnRequestRef.current = {
-            clientRequestId,
-            generation: requestGeneration,
-            conversationId: activeConversationIdRef.current,
-            characterId: activeCharacterIdRef.current,
-        };
-        setMessages(prev => [...prev, {
-            role: "user",
-            text: trimmed,
-            images: messageImages.length > 0 ? messageImages : undefined,
-            clientRequestId,
-        }]);
-        const cameraFrame = visionEnabled ? getLatestCameraFrame() : null;
-        const imagesToSend = cameraFrame ? [...messageImages, cameraFrame] : messageImages;
-        clearDraft();
-        startStreaming();
-        setIsThinking(true);
-        userScrolledRef.current = false;
-        savedScrollSnapshotRef.current = null;
-        // Lock out handleScroll until deferredMessages DOM update settles (~200ms)
-        isProgrammaticScrollRef.current = true;
-        setTimeout(() => { isProgrammaticScrollRef.current = false; }, 200);
-        resetReveal();
-        rawResponseRef.current = "";
-        currentTurnRef.current = null;
-
-        const allowImageGen = isGeneratedBackgroundMode();
-
-        await processTurnStreamResult({
-            clientRequestId,
-            requestGeneration,
-            streamChatPromise: streamChat({
-                message: trimmed || "(image attached)",
-                allow_image_gen: allowImageGen,
-                images: imagesToSend.length > 0 ? imagesToSend : undefined,
-                character_id: getActiveCharacterIdForRequest(),
-                client_request_id: clientRequestId,
-                conversation_id: activeConversationIdRef.current ?? undefined,
-            }),
-            onCatchError: () => {
-                // Save failed request for retry
-                lastFailedRequestRef.current = { message: trimmed || "(image attached)", images: imagesToSend.length > 0 ? imagesToSend : undefined, allowImageGen };
-
-                setTimeout(() => {
-                    if (!shouldAppendDelayedChatError(
-                        clientRequestId,
-                        conversationGenerationRef.current,
-                        requestGeneration,
-                        latestClientRequestIdRef.current,
-                    )) {
-                        return;
-                    }
-                    setMessages(prev => [...prev, {
-                        role: "kokoro",
-                        text: t("chat.errors.connection_error"),
-                        isError: true,
-                    }]);
-                }, 500);
-            },
-        });
     };
 
     // ── Image upload ───────────────────────────────────────
@@ -2557,13 +2570,14 @@ export default function ChatPanel({
 
     // ── Clear history ──────────────────────────────────────
     const handleClearClick = () => {
-        if (messages.length === 0 || isBusy || isStreaming) return;
+        if (messages.length === 0 || isBusy || isStreaming || historyMutationInFlightRef.current) return;
         setShowClearConfirm(true);
     };
 
     const executeClear = async () => {
         setShowClearConfirm(false);
-        if (isBusyRef.current) return;
+        if (isBusyRef.current || historyMutationInFlightRef.current) return;
+        historyMutationInFlightRef.current = true;
         setIsBusy(true);
         isBusyRef.current = true;
         try {
@@ -2609,6 +2623,7 @@ export default function ChatPanel({
         } finally {
             isBusyRef.current = false;
             setIsBusy(false);
+            historyMutationInFlightRef.current = false;
         }
     };
 
@@ -2628,6 +2643,8 @@ export default function ChatPanel({
 
         const targetMsg = messagesRef.current[globalIndex];
         if (!targetMsg) return;
+        if (historyMutationInFlightRef.current) return;
+        historyMutationInFlightRef.current = true;
 
         const previousText = targetMsg.text;
         const targetId = targetMsg.id;
@@ -2729,11 +2746,16 @@ export default function ChatPanel({
                     console.warn("[ChatPanel] Background re-synchronization after edit failure failed:", err);
                 });
             }
+        } finally {
+            historyMutationInFlightRef.current = false;
         }
     }, [activeCharacterId, t]);
 
     const onRegenerate = useCallback(async (globalIndex: number) => {
-        if (isBusyRef.current || isStreamingRef.current) return;
+        if (isBusyRef.current || isStreamingRef.current || historyMutationInFlightRef.current) return;
+        historyMutationInFlightRef.current = true;
+
+        try {
 
         // 第一次异步操作前捕获会话代次与会话 ID：等待监听器/删除期间若用户切换会话，
         // 后续校验将立即中止，防止删除与重新生成请求作用到新会话上
@@ -2747,6 +2769,7 @@ export default function ChatPanel({
         );
 
         const msgs = messagesRef.current;
+        const messageSnapshot = getChatMessageSnapshot(msgs);
         const expectedTailMessageId = getExpectedTailMessageId(msgs);
         const lastUserIndex = msgs.slice(0, globalIndex).reverse().findIndex(m => m.role === "user");
         if (lastUserIndex === -1) return;
@@ -2785,7 +2808,33 @@ export default function ChatPanel({
         // 删除期间会话可能已切换：立即中止，不截断新会话 UI、不发起请求
         if (!isSessionCurrent()) return;
 
-        setMessages(prev => prev.slice(0, globalIndex));
+        if (!matchesChatMessageSnapshot(messagesRef.current, messageSnapshot)) {
+            console.warn("[ChatPanel] Conversation changed during regenerate deletion; resynchronizing instead of slicing stale UI");
+            if (startConversationId) {
+                void resyncConversationMessages({
+                    conversationId: startConversationId,
+                    startGeneration,
+                    clientRequestId: `resync_regenerate_snapshot_${Date.now()}`,
+                });
+            }
+            return;
+        }
+        let applied = false;
+        setMessages(prev => {
+            if (!matchesChatMessageSnapshot(prev, messageSnapshot)) return prev;
+            applied = true;
+            return prev.slice(0, globalIndex);
+        });
+        if (!applied) {
+            if (startConversationId) {
+                void resyncConversationMessages({
+                    conversationId: startConversationId,
+                    startGeneration,
+                    clientRequestId: `resync_regenerate_snapshot_${Date.now()}`,
+                });
+            }
+            return;
+        }
 
         // 使用入口捕获的会话代次（上方校验已保证与当前一致），恢复下游 stale-turn 防护的效力
         const requestGeneration = startGeneration;
@@ -2807,7 +2856,7 @@ export default function ChatPanel({
 
         const allowImageGen = isGeneratedBackgroundMode();
 
-        void processTurnStreamResult({
+        await processTurnStreamResult({
             clientRequestId,
             requestGeneration,
             streamChatPromise: streamChat({
@@ -2820,12 +2869,14 @@ export default function ChatPanel({
                 conversation_id: activeConversationIdRef.current ?? undefined,
             }),
         });
+        } finally {
+            historyMutationInFlightRef.current = false;
+        }
     }, [ensureMemoryModelReady, processTurnStreamResult, resetReveal, startStreaming, t]);
 
     const onContinueFrom = useCallback(async (globalIndex: number) => {
-        if (isBusyRef.current || isStreamingRef.current) return;
-        if (continueFromInFlightRef.current) return;
-        continueFromInFlightRef.current = true;
+        if (isBusyRef.current || isStreamingRef.current || historyMutationInFlightRef.current) return;
+        historyMutationInFlightRef.current = true;
 
         try {
 
@@ -2836,6 +2887,7 @@ export default function ChatPanel({
         // 第一次异步操作前捕获会话代次与会话 ID，防止删除期间会话切换导致截断作用到新会话
         const startGeneration = conversationGenerationRef.current;
         const startConversationId = activeConversationIdRef.current;
+        const messageSnapshot = getChatMessageSnapshot(msgs);
         const expectedTailMessageId = getExpectedTailMessageId(msgs);
 
         const messagesToDelete = msgs.length - cutoffIndex;
@@ -2852,7 +2904,30 @@ export default function ChatPanel({
                 )) {
                     return;
                 }
-                setMessages(prev => prev.slice(0, cutoffIndex));
+                if (!matchesChatMessageSnapshot(messagesRef.current, messageSnapshot)) {
+                    console.warn("[ChatPanel] Conversation changed during continue deletion; resynchronizing instead of slicing stale UI");
+                    if (startConversationId) {
+                        void resyncConversationMessages({
+                            conversationId: startConversationId,
+                            startGeneration,
+                            clientRequestId: `resync_continue_snapshot_${Date.now()}`,
+                        });
+                    }
+                    return;
+                }
+                let applied = false;
+                setMessages(prev => {
+                    if (!matchesChatMessageSnapshot(prev, messageSnapshot)) return prev;
+                    applied = true;
+                    return prev.slice(0, cutoffIndex);
+                });
+                if (!applied && startConversationId) {
+                    void resyncConversationMessages({
+                        conversationId: startConversationId,
+                        startGeneration,
+                        clientRequestId: `resync_continue_snapshot_${Date.now()}`,
+                    });
+                }
             } catch (e) {
                 console.error("[ChatPanel] Failed to delete messages:", e);
                 if (!isChatSessionCurrent(
@@ -2874,7 +2949,7 @@ export default function ChatPanel({
             }
         }
         } finally {
-            continueFromInFlightRef.current = false;
+            historyMutationInFlightRef.current = false;
         }
     }, [resyncConversationMessages, setError, t]);
 

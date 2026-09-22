@@ -1096,7 +1096,9 @@ async fn generate_bot_reply(
         )));
     }
 
-    let reply = compact_newlines(&strip_control_tags(&all_cleaned_text));
+    let reply = compact_newlines(&strip_markdown_emphasis_markers(&strip_control_tags(
+        &all_cleaned_text,
+    )));
     if reply.is_empty() && all_image_prompts.is_empty() && all_generated_images.is_empty() {
         return Err("No response from AI".to_string());
     }
@@ -1530,7 +1532,10 @@ fn strip_leaked_tags(text: &str) -> String {
             result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
         }
     }
-    strip_markdown_emphasis_markers(result.trim())
+    // Markdown emphasis must be cleaned only after all tool rounds have been
+    // merged; a delimiter can legitimately be opened in one round and closed
+    // in the next.
+    result.trim().to_string()
 }
 
 fn merge_continuation_text(accumulated: &mut String, next: &str) {
@@ -3345,6 +3350,18 @@ mod tests {
         );
 
         assert_eq!(cleaned, "Hello  happy  world");
+    }
+
+    #[test]
+    fn bot_cleans_markdown_only_after_tool_rounds_are_merged() {
+        let mut merged = String::new();
+        for round in ["**hello [TOOL_CALL:get_time|{}]", "world**"] {
+            let (cleaned, _) = parse_tool_call_tags(round);
+            let cleaned = strip_leaked_tags(&cleaned);
+            merge_continuation_text(&mut merged, &cleaned);
+        }
+
+        assert_eq!(strip_markdown_emphasis_markers(&merged), "hello world");
     }
 
     #[test]

@@ -44,3 +44,31 @@ export function getExpectedTailMessageId(
     }
     return null;
 }
+
+export type ChatMessageSnapshot = ReadonlyArray<string>;
+
+/**
+ * Capture the fields that can change the meaning or position of a history
+ * mutation. The snapshot deliberately includes unpersisted messages too:
+ * those are exactly the rows that a backend CAS cannot see.
+ */
+export function getChatMessageSnapshot(
+    messages: ReadonlyArray<ChatPanelMessage>,
+): ChatMessageSnapshot {
+    return messages.map(message => JSON.stringify([
+        message.id ?? null,
+        message.clientRequestId ?? null,
+        message.turnId ?? null,
+        message.role,
+        message.text,
+    ]));
+}
+
+export function matchesChatMessageSnapshot(
+    messages: ReadonlyArray<ChatPanelMessage>,
+    snapshot: ChatMessageSnapshot,
+): boolean {
+    const current = getChatMessageSnapshot(messages);
+    return current.length === snapshot.length
+        && current.every((value, index) => value === snapshot[index]);
+}

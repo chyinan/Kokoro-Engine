@@ -206,6 +206,8 @@ fn looks_like_glob_pattern(text: &str, open: usize, close: usize, marker: &str) 
             .any(|character| matches!(character, '/' | '\\' | '[' | ']' | '{' | '}'))
         || matches!(previous, Some('/' | '\\'))
         || matches!(after_close, Some('/' | '\\'))
+        || (marker == "*" && matches!(previous, Some('.')))
+        || (marker == "*" && matches!(after_close, Some('.')))
 }
 
 /// Strip `[TRANSLATE:...]` tags from text.
@@ -651,6 +653,10 @@ mod tests {
         assert_eq!(
             strip_markdown_emphasis_markers(r"Regex /\*foo\*/ and glob *.config.*"),
             r"Regex /\*foo\*/ and glob *.config.*"
+        );
+        assert_eq!(
+            strip_markdown_emphasis_markers("Use glob foo.*bar* or src/*test*"),
+            "Use glob foo.*bar* or src/*test*"
         );
     }
 

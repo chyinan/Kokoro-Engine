@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
     ensureTurnMessage,
     getApprovalErrorMessage,
+    getStreamingVisibleText,
     stripPlainTextFormatting,
     stripStreamingMarkup,
     updateTurnMessage,
@@ -56,6 +57,8 @@ describe("chat turn state", () => {
             .toBe("Use `*foo*` and `**bar**` literally");
         expect(stripPlainTextFormatting("Regex /\\*foo\\*/ and glob *.config.*"))
             .toBe("Regex /\\*foo\\*/ and glob *.config.*");
+        expect(stripPlainTextFormatting("Use glob foo.*bar* or src/*test*"))
+            .toBe("Use glob foo.*bar* or src/*test*");
     });
 
     it("cleans emphasis markers split across streaming deltas after merging", () => {
@@ -64,12 +67,19 @@ describe("chat turn state", () => {
 
         for (const delta of ["**", "weekday", "**"]) {
             accumulated += delta;
-            const cleaned = stripStreamingMarkup(accumulated, { removeUnmatched: true });
+            const cleaned = getStreamingVisibleText(accumulated);
             expect(cleaned.startsWith(visible)).toBe(true);
             visible += cleaned.slice(visible.length);
         }
 
         expect(visible).toBe("weekday");
+    });
+
+    it("buffers unmatched emphasis without deleting ordinary streaming stars", () => {
+        expect(getStreamingVisibleText("2 * 3")).toBe("2 * 3");
+        expect(getStreamingVisibleText("2*3")).toBe("2*3");
+        expect(getStreamingVisibleText("**unfinished")).toBe("");
+        expect(getStreamingVisibleText("**unfinished**")).toBe("unfinished");
     });
 
     it("creates one assistant message for a turn", () => {

@@ -481,7 +481,9 @@ async fn handle_text(
         )));
     }
 
-    let response = strip_control_tags(&compact_newlines(&all_cleaned_text));
+    let response = strip_markdown_emphasis_markers(&strip_control_tags(&compact_newlines(
+        &all_cleaned_text,
+    )));
     let translation = if all_translations.is_empty() {
         None
     } else {
@@ -992,7 +994,9 @@ async fn handle_photo(
         )));
     }
 
-    let response = strip_control_tags(&compact_newlines(&all_cleaned_text));
+    let response = strip_markdown_emphasis_markers(&strip_control_tags(&compact_newlines(
+        &all_cleaned_text,
+    )));
     let translation = if all_translations.is_empty() {
         None
     } else {
@@ -1380,7 +1384,10 @@ fn strip_leaked_tags(text: &str) -> String {
             result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
         }
     }
-    strip_markdown_emphasis_markers(result.trim())
+    // Markdown emphasis must be cleaned only after all tool rounds have been
+    // merged; a delimiter can legitimately be opened in one round and closed
+    // in the next.
+    result.trim().to_string()
 }
 
 /// Strip control tags that shouldn't appear in Telegram messages:
@@ -1526,6 +1533,23 @@ mod tests {
         assert_eq!(calls[0].name, "get_time");
         assert_eq!(calls[0].args.get("tz"), Some(&"UTC".to_string()));
         assert!(!text.contains("[TOOL_CALL:"));
+    }
+
+    #[test]
+    fn test_tool_round_markdown_is_cleaned_after_merge() {
+        let mut merged = String::new();
+        for round in ["**hello [TOOL_CALL:get_time|{}]", "world**"] {
+            let (cleaned, _) = parse_tool_call_tags(round);
+            let cleaned = strip_leaked_tags(&cleaned);
+            if !cleaned.is_empty() {
+                if !merged.is_empty() {
+                    merged.push(' ');
+                }
+                merged.push_str(&cleaned);
+            }
+        }
+
+        assert_eq!(strip_markdown_emphasis_markers(&merged), "hello world");
     }
 
     #[test]

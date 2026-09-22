@@ -121,6 +121,7 @@ function looksLikeGlobPattern(text: string, open: number, close: number, marker:
         || text[open - 1] === "\\"
         || afterClose === "/"
         || afterClose === "\\"
+        || (marker === "*" && (text[open - 1] === "." || afterClose === "."))
     );
 }
 
@@ -191,6 +192,65 @@ export const stripPlainTextFormatting = (
     segment => stripPlainTextFormattingSegment(segment, options.removeUnmatched ?? false),
 );
 
+function findUnmatchedMarker(text: string, marker: string): number | null {
+    const positions: number[] = [];
+    let searchFrom = 0;
+    while (searchFrom < text.length) {
+        const open = text.indexOf(marker, searchFrom);
+        if (open < 0) break;
+
+        const contentStart = open + marker.length;
+        if (marker === "*" && (
+            text[open - 1] === "*"
+            || text[open - 1] === "\\"
+            || text[contentStart] === "*"
+        )) {
+            searchFrom = contentStart;
+            continue;
+        }
+        positions.push(open);
+        searchFrom = contentStart;
+    }
+    return positions.length % 2 === 1 ? positions[positions.length - 1] ?? null : null;
+}
+
+function isPotentialStreamingEmphasisStart(text: string, open: number, marker: string): boolean {
+    const previous = text[open - 1];
+    const next = text[open + marker.length];
+    if (marker === "*" && (
+        (previous === undefined || /\s/.test(previous))
+        && (next === undefined || /\s/.test(next))
+    )) {
+        return false;
+    }
+
+    // Keep multiplication and exponent-like identifiers visible while their
+    // surrounding text is still streaming.
+    if (previous && next && /[A-Za-z0-9]/.test(previous) && /[A-Za-z0-9]/.test(next)) {
+        return false;
+    }
+    return true;
+}
+
+function findUnmatchedEmphasisStart(text: string): number | null {
+    let offset = 0;
+    let pending: number | null = null;
+    stripOutsideCodeSpans(text, segment => {
+        if (pending === null) {
+            for (const marker of ["\\*\\*", "**", "\\*", "*"]) {
+                const local = findUnmatchedMarker(segment, marker);
+                if (local !== null && isPotentialStreamingEmphasisStart(segment, local, marker)) {
+                    pending = offset + local;
+                    break;
+                }
+            }
+        }
+        offset += segment.length;
+        return segment;
+    });
+    return pending;
+}
+
 export const stripStreamingControlMarkup = (text: string) => text
     .replace(/\[ACTION:\w+\]\s*/g, "")
     .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
@@ -201,6 +261,18 @@ export const stripStreamingMarkup = (
     text: string,
     options: { removeUnmatched?: boolean } = {},
 ) => stripPlainTextFormatting(stripStreamingControlMarkup(text), options);
+
+/**
+ * Return only the stable prefix of a streaming response. An unmatched
+ * emphasis delimiter is buffered instead of being deleted, so legal stars
+ * such as multiplication operators remain visible and can be restored when
+ * the complete response arrives.
+ */
+export const getStreamingVisibleText = (text: string): string => {
+    const cleaned = stripStreamingMarkup(text);
+    const pendingStart = findUnmatchedEmphasisStart(cleaned);
+    return pendingStart === null ? cleaned : cleaned.slice(0, pendingStart);
+};
 
 export const stripStoredMarkup = (text: string) => stripPlainTextFormatting(
     stripStreamingMarkup(text)
