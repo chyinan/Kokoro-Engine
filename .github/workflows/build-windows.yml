@@ -44,6 +44,8 @@ jobs:
         run: npm run build
 
       - name: Build Windows app (x86_64)
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
         run: npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis
 
       - name: List bundle output
