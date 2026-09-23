@@ -91,3 +91,8 @@ debug = 1
 
 [profile.test.package."*"]
 debug = 1
+
+# Release optimization of the application crate made chat turns hang on Windows.
+# Keep dependencies optimized while compiling the app crate without optimizations.
+[profile.release.package.tauri-appkokoro-engine]
+opt-level = 0
