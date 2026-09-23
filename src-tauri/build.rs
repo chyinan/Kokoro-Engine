@@ -9,8 +9,6 @@ use std::path::{Path, PathBuf};
 const ORT_VERSION: &str = "1.23.0";
 
 fn main() {
-    // --- Tauri codegen (must always run) ---
-    tauri_build::build();
     println!("cargo:rerun-if-env-changed=ORT_DYLIB_PATH");
     println!("cargo:rerun-if-env-changed=ORT_LIB_LOCATION");
     println!("cargo:rerun-if-env-changed=ORT_SKIP_DOWNLOAD");
@@ -25,54 +23,50 @@ fn main() {
     // Final destination: next to Cargo.toml so `tauri dev` can find it,
     // and also copied next to the compiled binary for production builds.
     let dest = project_dir.join(lib_name);
-    if dest.exists() {
-        if !is_usable_dylib(&dest) {
-            let _ = fs::remove_file(&dest);
+    if dest.exists() && !is_usable_dylib(&dest) {
+        let _ = fs::remove_file(&dest);
+    }
+
+    if !is_usable_dylib(&dest) {
+        if let Some(existing) = find_env_ort(lib_name) {
+            println!(
+                "cargo:warning=Using ONNX Runtime from {}",
+                existing.display()
+            );
+            fs::copy(&existing, &dest)
+                .expect("failed to copy configured ONNX Runtime library next to Cargo.toml");
+        } else if env_flag("ORT_SKIP_DOWNLOAD") {
+            panic!(
+                "ORT_SKIP_DOWNLOAD is set, but no usable ONNX Runtime library was found. \
+                 Set ORT_DYLIB_PATH or ORT_LIB_LOCATION."
+            );
         } else {
             println!(
-                "cargo:warning=ONNX Runtime already present at {}",
+                "cargo:warning=Downloading ONNX Runtime v{} from GitHub...",
+                ORT_VERSION
+            );
+            fs::create_dir_all(&target_dir).expect("failed to create ort-dist cache dir");
+
+            let archive_path = target_dir.join(archive_filename());
+            if !archive_path.exists() {
+                download(&archive_url, &archive_path);
+            }
+
+            let extracted = extract_lib(&archive_path, &target_dir, lib_name);
+            fs::copy(&extracted, &dest).expect("failed to copy ONNX Runtime lib to project root");
+            println!(
+                "cargo:warning=ONNX Runtime v{} installed to {}",
+                ORT_VERSION,
                 dest.display()
             );
-            copy_to_binary_dir(&dest, lib_name);
-            return;
         }
     }
 
-    if let Some(existing) = find_env_ort(lib_name) {
-        println!(
-            "cargo:warning=Using ONNX Runtime from {}",
-            existing.display()
-        );
-        copy_to_binary_dir(&existing, lib_name);
-        return;
-    }
+    println!("cargo:warning=ONNX Runtime available at {}", dest.display());
 
-    if env_flag("ORT_SKIP_DOWNLOAD") {
-        panic!(
-            "ORT_SKIP_DOWNLOAD is set, but no usable ONNX Runtime library was found. \
-             Set ORT_DYLIB_PATH or ORT_LIB_LOCATION."
-        );
-    }
-
-    println!(
-        "cargo:warning=Downloading ONNX Runtime v{} from GitHub...",
-        ORT_VERSION
-    );
-    fs::create_dir_all(&target_dir).expect("failed to create ort-dist cache dir");
-
-    let archive_path = target_dir.join(archive_filename());
-    if !archive_path.exists() {
-        download(&archive_url, &archive_path);
-    }
-
-    let extracted = extract_lib(&archive_path, &target_dir, lib_name);
-    fs::copy(&extracted, &dest).expect("failed to copy ONNX Runtime lib to project root");
-    println!(
-        "cargo:warning=ONNX Runtime v{} installed to {}",
-        ORT_VERSION,
-        dest.display()
-    );
-
+    // Windows NSIS bundles only configured resources; include the runtime DLL
+    // before Tauri codegen resolves the platform-specific bundle resources.
+    tauri_build::build();
     copy_to_binary_dir(&dest, lib_name);
 }
 
