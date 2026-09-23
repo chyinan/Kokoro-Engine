@@ -80,6 +80,7 @@ describe("ChatPanel edit result session ownership", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     act(() => root.unmount());
     container.remove();
     vi.restoreAllMocks();
@@ -134,6 +135,44 @@ describe("ChatPanel edit result session ownership", () => {
     await act(async () => container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
     expect(bridge.streamChat).toHaveBeenCalledOnce();
     expect(vi.mocked(bridge.streamChat).mock.calls[0][0].conversation_id).toBeUndefined();
+  });
+
+  it("edits a locally sent message by its scoped visible index when the user id handshake is late", async () => {
+    vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockResolvedValue({
+      installed: true, repo_id: "test", download_url: "", install_dir: "", model_path: "", required_files: [], missing_files: [],
+    });
+    vi.spyOn(bridge, "streamChat").mockRejectedValue(new Error("provider failed after user message persistence"));
+    vi.mocked(bridge.editConversationMessage).mockResolvedValue({
+      message_id: 302,
+      updated_content: "edited in A",
+    });
+    vi.useFakeTimers();
+
+    await act(async () => root.render(createElement(ChatPanel)));
+    const input = container.querySelector("textarea");
+    expect(input).not.toBeNull();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(input, "本地直发消息");
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const localMessage = container.querySelectorAll("article")[1];
+    expect(localMessage?.textContent).toContain("本地直发消息");
+    await act(async () => localMessage?.querySelector<HTMLButtonElement>("[data-edit-message]")?.click());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(650);
+    });
+
+    expect(bridge.editConversationMessage).toHaveBeenCalledWith({
+      conversation_id: "conv-A",
+      visible_index: 1,
+      new_content: "edited in A",
+    });
+    expect(container.querySelectorAll("article")[1]?.textContent).toContain("edited in A");
   });
 
   it("does not send a draft after the session changes during send preparation", async () => {

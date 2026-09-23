@@ -2748,6 +2748,7 @@ export default function ChatPanel({
         // 2. 异步持久化到 SQLite 并同步后端 LLM 上下文
         try {
             let messageId = targetMsg.id;
+            let visibleIndex: number | undefined;
             const convId = editConversationId ?? undefined;
             if (!messageId) {
                 // 若刚发送未完成握手，等待极短时间（最多 600ms）确保 ID 到达
@@ -2763,14 +2764,18 @@ export default function ChatPanel({
             }
 
             if (!messageId) {
-                // 坚决禁止在无数据库 message_id 的情况下盲改数据库
-                throw new Error("Message ID not yet synchronized, cannot edit");
+                // 本地直发消息已经有 clientRequestId 且仍处于同一会话时，允许后端
+                // 在该会话的可见消息投影中解析目标；后端会在锁内校验会话归属。
+                if (!convId || !targetClientRequestId) {
+                    throw new Error("Message ID not yet synchronized, cannot edit");
+                }
+                visibleIndex = globalIndex;
             }
 
             if (!isEditSessionCurrent()) return;
             const res = await editConversationMessage({
                 conversation_id: convId,
-                message_id: messageId,
+                ...(messageId ? { message_id: messageId } : { visible_index: visibleIndex }),
                 new_content: trimmed,
             });
             if (!isEditSessionCurrent()) return;
