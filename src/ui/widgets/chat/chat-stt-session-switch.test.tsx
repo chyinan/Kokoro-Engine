@@ -426,6 +426,50 @@ describe("ChatPanel STT session switch draft preservation", () => {
         expect(loadSavedCharacterDraft("char-1")).toBe("Wake-word speech from conv-1");
     });
 
+    it("keeps STT transcription as a draft while Continue is deleting history", async () => {
+        let finishDelete: (() => void) | null = null;
+        vi.mocked(bridge.loadConversation).mockResolvedValueOnce({
+            id: "conv-1",
+            character_id: "char-1",
+            title: "Conversation 1",
+            topic: "",
+            pinned_state: "{}",
+            created_at: "2026-09-23",
+            updated_at: "2026-09-23",
+            messages: [
+                { id: 501, role: "user", content: "first question", created_at: "2026-09-23" },
+                { id: 502, role: "assistant", content: "first answer", created_at: "2026-09-23" },
+                { id: 503, role: "user", content: "second question", created_at: "2026-09-23" },
+                { id: 504, role: "assistant", content: "second answer", created_at: "2026-09-23" },
+            ],
+        } as any);
+        vi.spyOn(bridge, "deleteLastMessages").mockImplementation(() => new Promise(resolve => {
+            finishDelete = resolve;
+        }));
+
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 8; i++) await Promise.resolve();
+        });
+
+        const continueButton = container.querySelector<HTMLButtonElement>(
+            'button[title="chat.actions.continue_from"]',
+        );
+        await act(async () => continueButton?.click());
+        expect(bridge.deleteLastMessages).toHaveBeenCalledOnce();
+
+        await act(async () => {
+            capturedOnFinalTranscription!("Keep this STT draft");
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
+        expect(streamChatMock).not.toHaveBeenCalled();
+        expect(textarea.value).toBe("Keep this STT draft");
+
+        await act(async () => finishDelete?.());
+    });
+
     it("auto-sends correctly when conversation does not switch during mic recording", async () => {
         vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockResolvedValue({ installed: true } as any);
 

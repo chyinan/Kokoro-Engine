@@ -111,23 +111,39 @@ function looksLikeRegexLiteral(text: string, open: number, close: number, marker
 }
 
 function looksLikeGlobPattern(text: string, open: number, close: number, marker: string): boolean {
+    if (marker !== "*") return false;
+
     const content = text.slice(open + marker.length, close);
+    const beforeOpen = text[open - 1];
+    const beforePathSeparator = text[open - 2];
     const afterClose = text[close + marker.length];
+    const afterPathSeparator = text[close + marker.length + 1];
+    const hasPathPrefix = (beforeOpen === "/" || beforeOpen === "\\")
+        && Boolean(beforePathSeparator && !/\s/.test(beforePathSeparator));
+    const hasPathSuffix = (afterClose === "/" || afterClose === "\\")
+        && Boolean(afterPathSeparator && !/\s/.test(afterPathSeparator));
+    const hasPathWildcard = /[/\\]/.test(content) && /[?*]/.test(content);
+    const hasCharacterClassRange = /\[(?:!|\^)?[^\]]*-[^\]]*\]/.test(content);
+
     return (
         content.startsWith(".")
         || content.endsWith(".")
-        || /[/\\[\]{}]/.test(content)
-        || text[open - 1] === "/"
-        || text[open - 1] === "\\"
-        || afterClose === "/"
-        || afterClose === "\\"
-        || (marker === "*" && (text[open - 1] === "." || afterClose === "."))
+        || beforeOpen === "."
+        || afterClose === "."
+        || hasPathPrefix
+        || hasPathSuffix
+        || hasPathWildcard
+        || hasCharacterClassRange
     );
 }
 
-function stripOutsideCodeSpans(text: string, transform: (segment: string) => string): string {
-    let result = "";
-    let segmentStart = 0;
+interface CodeSpanRange {
+    start: number;
+    end: number;
+}
+
+function findCodeSpanRanges(text: string): CodeSpanRange[] {
+    const ranges: CodeSpanRange[] = [];
     let index = 0;
 
     while (index < text.length) {
@@ -162,18 +178,60 @@ function stripOutsideCodeSpans(text: string, transform: (segment: string) => str
         }
 
         if (closingStart < 0) {
-            // An unmatched backtick is safer when left untouched: stars after it
-            // may be part of an unfinished code span.
-            return `${result}${transform(text.slice(segmentStart, index))}${text.slice(index)}`;
+            ranges.push({ start: index, end: text.length });
+            break;
         }
 
-        result += transform(text.slice(segmentStart, index));
-        result += text.slice(index, closingStart + delimiterLength);
-        index = closingStart + delimiterLength;
-        segmentStart = index;
+        const end = closingStart + delimiterLength;
+        ranges.push({ start: index, end });
+        index = end;
     }
 
-    return result + transform(text.slice(segmentStart));
+    return ranges;
+}
+
+function stripOutsideCodeSpans(
+    text: string,
+    transform: (segment: string, sourceOffset: number) => string,
+): string {
+    let result = "";
+    let segmentStart = 0;
+    for (const range of findCodeSpanRanges(text)) {
+        result += transform(text.slice(segmentStart, range.start), segmentStart);
+        result += text.slice(range.start, range.end);
+        segmentStart = range.end;
+    }
+    return result + transform(text.slice(segmentStart), segmentStart);
+}
+
+function stripFormattingAroundCodeSpans(text: string, removeUnmatched: boolean): string {
+    const ranges = findCodeSpanRanges(text);
+    if (ranges.length === 0) {
+        return stripPlainTextFormattingSegment(text, removeUnmatched);
+    }
+
+    let masked = "";
+    let segmentStart = 0;
+    const replacements: Array<{ token: string; source: string }> = [];
+    ranges.forEach((range, index) => {
+        let tokenIndex = index;
+        let token = `\uE000KOKORO_CODE_${tokenIndex}\uE001`;
+        while (text.includes(token) || replacements.some(replacement => replacement.token === token)) {
+            tokenIndex += ranges.length;
+            token = `\uE000KOKORO_CODE_${tokenIndex}\uE001`;
+        }
+        masked += text.slice(segmentStart, range.start);
+        masked += token;
+        replacements.push({ token, source: text.slice(range.start, range.end) });
+        segmentStart = range.end;
+    });
+    masked += text.slice(segmentStart);
+
+    let cleaned = stripPlainTextFormattingSegment(masked, removeUnmatched);
+    for (const { token, source } of replacements) {
+        cleaned = cleaned.replace(token, source);
+    }
+    return cleaned;
 }
 
 function stripPlainTextFormattingSegment(text: string, removeUnmatched: boolean): string {
@@ -187,10 +245,7 @@ function stripPlainTextFormattingSegment(text: string, removeUnmatched: boolean)
 export const stripPlainTextFormatting = (
     text: string,
     options: { removeUnmatched?: boolean } = {},
-) => stripOutsideCodeSpans(
-    text,
-    segment => stripPlainTextFormattingSegment(segment, options.removeUnmatched ?? false),
-);
+) => stripFormattingAroundCodeSpans(text, options.removeUnmatched ?? false);
 
 function findUnmatchedMarker(text: string, marker: string): number | null {
     const positions: number[] = [];
@@ -233,19 +288,17 @@ function isPotentialStreamingEmphasisStart(text: string, open: number, marker: s
 }
 
 function findUnmatchedEmphasisStart(text: string): number | null {
-    let offset = 0;
     let pending: number | null = null;
-    stripOutsideCodeSpans(text, segment => {
+    stripOutsideCodeSpans(text, (segment, sourceOffset) => {
         if (pending === null) {
             for (const marker of ["\\*\\*", "**", "\\*", "*"]) {
                 const local = findUnmatchedMarker(segment, marker);
                 if (local !== null && isPotentialStreamingEmphasisStart(segment, local, marker)) {
-                    pending = offset + local;
+                    pending = sourceOffset + local;
                     break;
                 }
             }
         }
-        offset += segment.length;
         return segment;
     });
     return pending;

@@ -364,7 +364,18 @@ export default function ChatPanel({
     // Backend CAS protects persisted rows; this lock also covers unpersisted
     // in-memory messages and prevents stale slice indexes from racing sends,
     // edits, regenerations, or clear-history.
-    const historyMutationInFlightRef = useRef(false);
+    const historyMutationInFlightRef = useRef<symbol | null>(null);
+    const acquireHistoryMutation = useCallback((): symbol | null => {
+        if (historyMutationInFlightRef.current !== null) return null;
+        const token = Symbol("history-mutation");
+        historyMutationInFlightRef.current = token;
+        return token;
+    }, []);
+    const releaseHistoryMutation = useCallback((token: symbol) => {
+        if (historyMutationInFlightRef.current === token) {
+            historyMutationInFlightRef.current = null;
+        }
+    }, []);
     const [isSwitchingConversation, setIsSwitchingConversation] = useState(false);
     const isSwitchingConversationRef = useRef(false);
     const ttsSpeakingRef = useRef(false);
@@ -1211,13 +1222,13 @@ export default function ChatPanel({
 
         if (sttAutoSend) {
             void (async () => {
+                let historyMutationToken = acquireHistoryMutation();
                 const isSessionCurrent = () =>
                     conversationGenerationRef.current === startGeneration &&
                     activeConversationIdRef.current === startConversationId &&
                     activeCharacterIdRef.current === startCharacterId;
 
-                // 忙碌态/禁用态降级保护：转为填充输入框草稿，绝不并发冲撞
-                if (interactionDisabled || isBusyRef.current) {
+                if (historyMutationToken === null) {
                     if (isSessionCurrent()) {
                         setInput(fullMessage);
                     } else {
@@ -1225,6 +1236,17 @@ export default function ChatPanel({
                     }
                     return;
                 }
+
+                try {
+                    // 忙碌态/禁用态降级保护：转为填充输入框草稿，绝不并发冲撞
+                    if (interactionDisabled || isBusyRef.current) {
+                        if (isSessionCurrent()) {
+                            setInput(fullMessage);
+                        } else {
+                            preserveSttDraft(fullMessage, trimmed);
+                        }
+                        return;
+                    }
 
                 // 确保所有事件监听器已就绪，避免因初始化时序差错过 chat-turn-start / finish 事件
                 if (listenersReadyPromiseRef.current) {
@@ -1290,17 +1312,26 @@ export default function ChatPanel({
 
                 const allowImageGen = isGeneratedBackgroundMode();
 
-                await processTurnStreamResult({
-                    clientRequestId,
-                    requestGeneration,
-                    streamChatPromise: streamChat({
+                    const streamChatPromise = streamChat({
                         message: fullMessage,
                         allow_image_gen: allowImageGen,
                         character_id: getActiveCharacterIdForRequest(),
                         client_request_id: clientRequestId,
                         conversation_id: startConversationId ?? undefined,
-                    }),
-                });
+                    });
+                    releaseHistoryMutation(historyMutationToken);
+                    historyMutationToken = null;
+
+                    await processTurnStreamResult({
+                        clientRequestId,
+                        requestGeneration,
+                        streamChatPromise,
+                    });
+                } finally {
+                    if (historyMutationToken !== null) {
+                        releaseHistoryMutation(historyMutationToken);
+                    }
+                }
             })();
         } else {
             // Fill input box with merged text for user review
@@ -1315,7 +1346,7 @@ export default function ChatPanel({
                 preserveSttDraft(fullMessage, trimmed);
             }
         }
-    }, [clearDraft, ensureMemoryModelReady, interactionDisabled, processTurnStreamResult, resetReveal, setInput, startStreaming, sttAutoSend]);
+    }, [acquireHistoryMutation, clearDraft, ensureMemoryModelReady, interactionDisabled, processTurnStreamResult, releaseHistoryMutation, resetReveal, setInput, startStreaming, sttAutoSend]);
 
     const { state: voiceState, volume: micVolume, partialText: sttPartialText, start: startVoice, stop: stopVoice } = useVoiceInput(handleTranscription);
 
@@ -1638,45 +1669,55 @@ export default function ChatPanel({
                             }).catch(() => {});
                             return;
                         }
-                        if (isBusyRef.current) {
+                        const historyMutationToken = acquireHistoryMutation();
+                        if (historyMutationToken === null || isBusyRef.current) {
                             if (event.payload?.client_request_id) {
                                 emit("pet-chat-rejected", {
                                     client_request_id: event.payload.client_request_id,
                                     reason: "busy",
                                 }).catch(() => {});
                             }
+                            if (historyMutationToken !== null) {
+                                releaseHistoryMutation(historyMutationToken);
+                            }
                             return;
                         }
-                        const text = event.payload.message;
-                        const clientRequestId = event.payload.client_request_id
-                            || `pet_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-                        latestClientRequestIdRef.current = clientRequestId;
-                        pendingTurnRequestRef.current = {
-                            clientRequestId,
-                            generation: conversationGenerationRef.current,
-                            conversationId: activeConversationIdRef.current,
-                            characterId: activeCharacterIdRef.current,
-                        };
-                        rawResponseRef.current = "";
-                        currentTurnRef.current = null;
-                        resetReveal();
-                        setMessages(prev => [...prev, { role: "user", text, clientRequestId }]);
-                        startStreaming();
-                        setIsThinking(true);
-                        userScrolledRef.current = false;
-
-                        startPendingExternalWatchdog(clientRequestId, (customReason) => {
-                            void handleExternalPendingWatchdogExpired(
+                        try {
+                            const text = event.payload.message;
+                            const clientRequestId = event.payload.client_request_id
+                                || `pet_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                            latestClientRequestIdRef.current = clientRequestId;
+                            pendingTurnRequestRef.current = {
                                 clientRequestId,
-                                customReason || "external_pending_turn_watchdog_timeout",
-                                true,
-                            );
-                        });
+                                generation: conversationGenerationRef.current,
+                                conversationId: activeConversationIdRef.current,
+                                characterId: activeCharacterIdRef.current,
+                            };
+                            rawResponseRef.current = "";
+                            currentTurnRef.current = null;
+                            resetReveal();
+                            setMessages(prev => [...prev, { role: "user", text, clientRequestId }]);
+                            startStreaming();
+                            setIsThinking(true);
+                            userScrolledRef.current = false;
 
-                        emit("pet-chat-accepted", {
-                            client_request_id: clientRequestId,
-                            conversation_id: activeConversationIdRef.current ?? undefined,
-                        }).catch(() => {});
+                            startPendingExternalWatchdog(clientRequestId, (customReason) => {
+                                void handleExternalPendingWatchdogExpired(
+                                    clientRequestId,
+                                    customReason || "external_pending_turn_watchdog_timeout",
+                                    true,
+                                );
+                            });
+
+                            emit("pet-chat-accepted", {
+                                client_request_id: clientRequestId,
+                                conversation_id: activeConversationIdRef.current ?? undefined,
+                            }).catch(() => {});
+                        } finally {
+                            // startStreaming synchronously raises isBusyRef; from this point the
+                            // normal busy guard protects the external turn until it completes.
+                            releaseHistoryMutation(historyMutationToken);
+                        }
                     }),
 
                     listen<{ client_request_id?: string; error?: string }>("pet-chat-failed", (event) => {
@@ -2152,15 +2193,18 @@ export default function ChatPanel({
                             && Boolean(window.speechSynthesis?.speaking);
                         if (aborted || isBusyRef.current || ttsSpeakingRef.current || audioPlayer.isPlaying || browserSpeaking) return;
                         void (async () => {
-                            if (!await ensureMemoryModelReady({ silent: true })) {
-                                return;
-                            }
+                            let historyMutationToken = acquireHistoryMutation();
+                            if (historyMutationToken === null) return;
+                            try {
+                                if (!await ensureMemoryModelReady({ silent: true })) {
+                                    return;
+                                }
 
-                            const stillBrowserSpeaking = typeof window !== "undefined"
-                                && Boolean(window.speechSynthesis?.speaking);
-                            if (aborted || isBusyRef.current || ttsSpeakingRef.current || audioPlayer.isPlaying || stillBrowserSpeaking) {
-                                return;
-                            }
+                                const stillBrowserSpeaking = typeof window !== "undefined"
+                                    && Boolean(window.speechSynthesis?.speaking);
+                                if (aborted || isBusyRef.current || ttsSpeakingRef.current || audioPlayer.isPlaying || stillBrowserSpeaking) {
+                                    return;
+                                }
 
                             console.log("[ChatPanel] Proactive trigger:", event.payload);
 
@@ -2183,27 +2227,36 @@ export default function ChatPanel({
                             rawResponseRef.current = "";
                             currentTurnRef.current = null;
 
-                            void processTurnStreamResult({
-                                clientRequestId,
-                                requestGeneration,
-                                streamChatPromise: streamChat({
+                                const streamChatPromise = streamChat({
                                     message: instruction,
                                     hidden: true,
                                     client_request_id: clientRequestId,
                                     character_id: getActiveCharacterIdForRequest(),
                                     conversation_id: activeConversationIdRef.current ?? undefined,
-                                }),
-                                onCatchError: () => {
-                                    // Remove the empty placeholder if one was created by delta handler
-                                    setMessages(prev => {
-                                        const last = prev[prev.length - 1];
-                                        if (last && last.role === "kokoro" && !last.text) {
-                                            return prev.slice(0, -1);
-                                        }
-                                        return prev;
-                                    });
-                                },
-                            });
+                                });
+                                releaseHistoryMutation(historyMutationToken);
+                                historyMutationToken = null;
+
+                                await processTurnStreamResult({
+                                    clientRequestId,
+                                    requestGeneration,
+                                    streamChatPromise,
+                                    onCatchError: () => {
+                                        // Remove the empty placeholder if one was created by delta handler
+                                        setMessages(prev => {
+                                            const last = prev[prev.length - 1];
+                                            if (last && last.role === "kokoro" && !last.text) {
+                                                return prev.slice(0, -1);
+                                            }
+                                            return prev;
+                                        });
+                                    },
+                                });
+                            } finally {
+                                if (historyMutationToken !== null) {
+                                    releaseHistoryMutation(historyMutationToken);
+                                }
+                            }
                         })();
                     }),
 
@@ -2218,45 +2271,53 @@ export default function ChatPanel({
                             }).catch(() => {});
                             return;
                         }
-                        if (isBusyRef.current) {
+                        const historyMutationToken = acquireHistoryMutation();
+                        if (historyMutationToken === null || isBusyRef.current) {
                             if (event.payload?.client_request_id) {
                                 emit("interaction-trigger-rejected", {
                                     client_request_id: event.payload.client_request_id,
                                     reason: "busy",
                                 }).catch(() => {});
                             }
+                            if (historyMutationToken !== null) {
+                                releaseHistoryMutation(historyMutationToken);
+                            }
                             return;
                         }
 
-                        const clientRequestId = event.payload?.client_request_id
-                            || `interaction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-                        latestClientRequestIdRef.current = clientRequestId;
-                        pendingTurnRequestRef.current = {
-                            clientRequestId,
-                            generation: conversationGenerationRef.current,
-                            conversationId: activeConversationIdRef.current,
-                            characterId: activeCharacterIdRef.current,
-                        };
-
-                        startStreaming();
-                        setIsThinking(true);
-                        userScrolledRef.current = false;
-                        resetReveal();
-                        rawResponseRef.current = "";
-                        currentTurnRef.current = null;
-
-                        startPendingExternalWatchdog(clientRequestId, (customReason) => {
-                            void handleExternalPendingWatchdogExpired(
+                        try {
+                            const clientRequestId = event.payload?.client_request_id
+                                || `interaction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                            latestClientRequestIdRef.current = clientRequestId;
+                            pendingTurnRequestRef.current = {
                                 clientRequestId,
-                                customReason || "external_pending_interaction_watchdog_timeout",
-                                false,
-                            );
-                        });
+                                generation: conversationGenerationRef.current,
+                                conversationId: activeConversationIdRef.current,
+                                characterId: activeCharacterIdRef.current,
+                            };
 
-                        emit("interaction-trigger-accepted", {
-                            client_request_id: clientRequestId,
-                            conversation_id: activeConversationIdRef.current ?? undefined,
-                        }).catch(() => {});
+                            startStreaming();
+                            setIsThinking(true);
+                            userScrolledRef.current = false;
+                            resetReveal();
+                            rawResponseRef.current = "";
+                            currentTurnRef.current = null;
+
+                            startPendingExternalWatchdog(clientRequestId, (customReason) => {
+                                void handleExternalPendingWatchdogExpired(
+                                    clientRequestId,
+                                    customReason || "external_pending_interaction_watchdog_timeout",
+                                    false,
+                                );
+                            });
+
+                            emit("interaction-trigger-accepted", {
+                                client_request_id: clientRequestId,
+                                conversation_id: activeConversationIdRef.current ?? undefined,
+                            }).catch(() => {});
+                        } finally {
+                            releaseHistoryMutation(historyMutationToken);
+                        }
                     }),
 
                     listen<{ client_request_id?: string; error?: string }>("interaction-trigger-failed", (event) => {
@@ -2323,10 +2384,18 @@ export default function ChatPanel({
     const handleSend = async (e?: React.FormEvent) => {
         e?.preventDefault();
         if (interactionDisabled) return;
-        if (historyMutationInFlightRef.current) return;
-        historyMutationInFlightRef.current = true;
+        let historyMutationToken = acquireHistoryMutation();
+        if (historyMutationToken === null) return;
 
         try {
+            const startGeneration = conversationGenerationRef.current;
+            const startConversationId = activeConversationIdRef.current;
+            const startCharacterId = activeCharacterIdRef.current;
+            const isSessionCurrent = () =>
+                conversationGenerationRef.current === startGeneration
+                && activeConversationIdRef.current === startConversationId
+                && activeCharacterIdRef.current === startCharacterId;
+
             // 确保所有事件监听器已就绪，避免因初始化时序差错过 chat-turn-start / finish 事件
             if (listenersReadyPromiseRef.current) {
                 await Promise.race([
@@ -2334,20 +2403,22 @@ export default function ChatPanel({
                     new Promise(resolve => setTimeout(resolve, 1500)),
                 ]);
             }
+            if (!isSessionCurrent()) return;
 
             const trimmed = input.trim();
             const messageImages = visionEnabled ? [...pendingImages] : [];
             if ((!trimmed && messageImages.length === 0) || isBusy || isBusyRef.current) return;
             if (!await ensureMemoryModelReady()) return;
+            if (!isSessionCurrent()) return;
 
-            const requestGeneration = conversationGenerationRef.current;
+            const requestGeneration = startGeneration;
             const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
             latestClientRequestIdRef.current = clientRequestId;
             pendingTurnRequestRef.current = {
                 clientRequestId,
                 generation: requestGeneration,
-                conversationId: activeConversationIdRef.current,
-                characterId: activeCharacterIdRef.current,
+                conversationId: startConversationId,
+                characterId: startCharacterId,
             };
             setMessages(prev => [...prev, {
                 role: "user",
@@ -2371,17 +2442,21 @@ export default function ChatPanel({
 
             const allowImageGen = isGeneratedBackgroundMode();
 
+            const streamChatPromise = streamChat({
+                message: trimmed || "(image attached)",
+                allow_image_gen: allowImageGen,
+                images: imagesToSend.length > 0 ? imagesToSend : undefined,
+                character_id: getActiveCharacterIdForRequest(),
+                client_request_id: clientRequestId,
+                conversation_id: startConversationId ?? undefined,
+            });
+            releaseHistoryMutation(historyMutationToken);
+            historyMutationToken = null;
+
             await processTurnStreamResult({
                 clientRequestId,
                 requestGeneration,
-                streamChatPromise: streamChat({
-                    message: trimmed || "(image attached)",
-                    allow_image_gen: allowImageGen,
-                    images: imagesToSend.length > 0 ? imagesToSend : undefined,
-                    character_id: getActiveCharacterIdForRequest(),
-                    client_request_id: clientRequestId,
-                    conversation_id: activeConversationIdRef.current ?? undefined,
-                }),
+                streamChatPromise,
                 onCatchError: () => {
                     // Save failed request for retry
                     lastFailedRequestRef.current = { message: trimmed || "(image attached)", images: imagesToSend.length > 0 ? imagesToSend : undefined, allowImageGen };
@@ -2404,7 +2479,9 @@ export default function ChatPanel({
                 },
             });
         } finally {
-            historyMutationInFlightRef.current = false;
+            if (historyMutationToken !== null) {
+                releaseHistoryMutation(historyMutationToken);
+            }
         }
     };
 
@@ -2570,14 +2647,15 @@ export default function ChatPanel({
 
     // ── Clear history ──────────────────────────────────────
     const handleClearClick = () => {
-        if (messages.length === 0 || isBusy || isStreaming || historyMutationInFlightRef.current) return;
+        if (messages.length === 0 || isBusy || isStreaming || historyMutationInFlightRef.current !== null) return;
         setShowClearConfirm(true);
     };
 
     const executeClear = async () => {
         setShowClearConfirm(false);
-        if (isBusyRef.current || historyMutationInFlightRef.current) return;
-        historyMutationInFlightRef.current = true;
+        if (isBusyRef.current) return;
+        const historyMutationToken = acquireHistoryMutation();
+        if (historyMutationToken === null) return;
         setIsBusy(true);
         isBusyRef.current = true;
         try {
@@ -2623,7 +2701,7 @@ export default function ChatPanel({
         } finally {
             isBusyRef.current = false;
             setIsBusy(false);
-            historyMutationInFlightRef.current = false;
+            releaseHistoryMutation(historyMutationToken);
         }
     };
 
@@ -2643,8 +2721,8 @@ export default function ChatPanel({
 
         const targetMsg = messagesRef.current[globalIndex];
         if (!targetMsg) return;
-        if (historyMutationInFlightRef.current) return;
-        historyMutationInFlightRef.current = true;
+        const historyMutationToken = acquireHistoryMutation();
+        if (historyMutationToken === null) return;
 
         const previousText = targetMsg.text;
         const targetId = targetMsg.id;
@@ -2747,13 +2825,14 @@ export default function ChatPanel({
                 });
             }
         } finally {
-            historyMutationInFlightRef.current = false;
+            releaseHistoryMutation(historyMutationToken);
         }
-    }, [activeCharacterId, t]);
+    }, [acquireHistoryMutation, activeCharacterId, releaseHistoryMutation, t]);
 
     const onRegenerate = useCallback(async (globalIndex: number) => {
-        if (isBusyRef.current || isStreamingRef.current || historyMutationInFlightRef.current) return;
-        historyMutationInFlightRef.current = true;
+        if (isBusyRef.current || isStreamingRef.current) return;
+        let historyMutationToken = acquireHistoryMutation();
+        if (historyMutationToken === null) return;
 
         try {
 
@@ -2819,22 +2898,9 @@ export default function ChatPanel({
             }
             return;
         }
-        let applied = false;
-        setMessages(prev => {
-            if (!matchesChatMessageSnapshot(prev, messageSnapshot)) return prev;
-            applied = true;
-            return prev.slice(0, globalIndex);
-        });
-        if (!applied) {
-            if (startConversationId) {
-                void resyncConversationMessages({
-                    conversationId: startConversationId,
-                    startGeneration,
-                    clientRequestId: `resync_regenerate_snapshot_${Date.now()}`,
-                });
-            }
-            return;
-        }
+        const truncatedMessages = messagesRef.current.slice(0, globalIndex);
+        messagesRef.current = truncatedMessages;
+        setMessages(truncatedMessages);
 
         // 使用入口捕获的会话代次（上方校验已保证与当前一致），恢复下游 stale-turn 防护的效力
         const requestGeneration = startGeneration;
@@ -2856,27 +2922,34 @@ export default function ChatPanel({
 
         const allowImageGen = isGeneratedBackgroundMode();
 
+        const streamChatPromise = streamChat({
+            message: userMsg.text,
+            images: userMsg.images,
+            allow_image_gen: allowImageGen,
+            character_id: getActiveCharacterIdForRequest(),
+            client_request_id: clientRequestId,
+            regenerate: true,
+            conversation_id: activeConversationIdRef.current ?? undefined,
+        });
+        releaseHistoryMutation(historyMutationToken);
+        historyMutationToken = null;
+
         await processTurnStreamResult({
             clientRequestId,
             requestGeneration,
-            streamChatPromise: streamChat({
-                message: userMsg.text,
-                images: userMsg.images,
-                allow_image_gen: allowImageGen,
-                character_id: getActiveCharacterIdForRequest(),
-                client_request_id: clientRequestId,
-                regenerate: true,
-                conversation_id: activeConversationIdRef.current ?? undefined,
-            }),
+            streamChatPromise,
         });
         } finally {
-            historyMutationInFlightRef.current = false;
+            if (historyMutationToken !== null) {
+                releaseHistoryMutation(historyMutationToken);
+            }
         }
-    }, [ensureMemoryModelReady, processTurnStreamResult, resetReveal, startStreaming, t]);
+    }, [acquireHistoryMutation, ensureMemoryModelReady, processTurnStreamResult, releaseHistoryMutation, resetReveal, startStreaming, t]);
 
     const onContinueFrom = useCallback(async (globalIndex: number) => {
-        if (isBusyRef.current || isStreamingRef.current || historyMutationInFlightRef.current) return;
-        historyMutationInFlightRef.current = true;
+        if (isBusyRef.current || isStreamingRef.current) return;
+        const historyMutationToken = acquireHistoryMutation();
+        if (historyMutationToken === null) return;
 
         try {
 
@@ -2915,19 +2988,9 @@ export default function ChatPanel({
                     }
                     return;
                 }
-                let applied = false;
-                setMessages(prev => {
-                    if (!matchesChatMessageSnapshot(prev, messageSnapshot)) return prev;
-                    applied = true;
-                    return prev.slice(0, cutoffIndex);
-                });
-                if (!applied && startConversationId) {
-                    void resyncConversationMessages({
-                        conversationId: startConversationId,
-                        startGeneration,
-                        clientRequestId: `resync_continue_snapshot_${Date.now()}`,
-                    });
-                }
+                const truncatedMessages = messagesRef.current.slice(0, cutoffIndex);
+                messagesRef.current = truncatedMessages;
+                setMessages(truncatedMessages);
             } catch (e) {
                 console.error("[ChatPanel] Failed to delete messages:", e);
                 if (!isChatSessionCurrent(
@@ -2949,9 +3012,9 @@ export default function ChatPanel({
             }
         }
         } finally {
-            historyMutationInFlightRef.current = false;
+            releaseHistoryMutation(historyMutationToken);
         }
-    }, [resyncConversationMessages, setError, t]);
+    }, [acquireHistoryMutation, releaseHistoryMutation, resyncConversationMessages, setError, t]);
 
     const onApproveTool = useCallback(async (globalIndex: number, tool: ToolTraceItem) => {
         if (!canSubmitApproval(tool)) {

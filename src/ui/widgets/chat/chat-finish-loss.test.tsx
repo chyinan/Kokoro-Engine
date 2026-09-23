@@ -314,6 +314,12 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
         await act(async () => continueButtons[0]?.click());
         expect(bridge.deleteLastMessages).toHaveBeenCalledOnce();
 
+        await act(async () => {
+            continueButtons[0]?.click();
+            continueButtons[1]?.click();
+        });
+        expect(bridge.deleteLastMessages).toHaveBeenCalledOnce();
+
         const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
         const form = container.querySelector("form") as HTMLFormElement;
         await act(async () => {
@@ -329,7 +335,66 @@ describe("ChatPanel - dropped chat-turn-finish handling", () => {
         await act(async () => regenerateButton?.click());
         expect(bridge.deleteLastMessages).toHaveBeenCalledOnce();
 
-        await act(async () => finishDelete?.());
+        await act(async () => {
+            finishDelete?.();
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+        await act(async () => {
+            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+        expect(streamChatMock).toHaveBeenCalledOnce();
+    });
+
+    it("starts regeneration after persisted history deletion completes", async () => {
+        vi.mocked(bridge.listConversations).mockResolvedValueOnce([{
+            id: "conv-regenerate",
+            character_id: "default",
+            title: "Regenerate test",
+            topic: "",
+            pinned_state: "{}",
+            created_at: "2026-09-23",
+            updated_at: "2026-09-23",
+        }]);
+        loadConversationMock.mockResolvedValueOnce({
+            id: "conv-regenerate",
+            character_id: "default",
+            title: "Regenerate test",
+            topic: "",
+            pinned_state: "{}",
+            created_at: "2026-09-23",
+            updated_at: "2026-09-23",
+            messages: [
+                { id: 301, role: "user", content: "first question", created_at: "2026-09-23" },
+                { id: 302, role: "assistant", content: "first answer", created_at: "2026-09-23" },
+                { id: 303, role: "user", content: "second question", created_at: "2026-09-23" },
+                { id: 304, role: "assistant", content: "second answer", created_at: "2026-09-23" },
+            ],
+        });
+        vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 8; i++) await Promise.resolve();
+        });
+
+        const regenerateButtons = container.querySelectorAll<HTMLButtonElement>(
+            'button[title="chat.actions.regenerate"]',
+        );
+        expect(regenerateButtons.length).toBe(2);
+
+        await act(async () => {
+            regenerateButtons[1]?.click();
+            for (let i = 0; i < 8; i++) await Promise.resolve();
+        });
+
+        expect(bridge.deleteLastMessages).toHaveBeenCalledWith(1, "conv-regenerate", 304);
+        expect(streamChatMock).toHaveBeenCalledWith(expect.objectContaining({
+            message: "second question",
+            regenerate: true,
+            conversation_id: "conv-regenerate",
+        }));
+        expect(container.textContent).not.toContain("second answer");
     });
 
     it("preserves visible messages and reports an error when clearing history fails", async () => {

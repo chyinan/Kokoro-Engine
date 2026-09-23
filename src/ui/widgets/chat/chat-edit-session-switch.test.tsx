@@ -135,4 +135,25 @@ describe("ChatPanel edit result session ownership", () => {
     expect(bridge.streamChat).toHaveBeenCalledOnce();
     expect(vi.mocked(bridge.streamChat).mock.calls[0][0].conversation_id).toBeUndefined();
   });
+
+  it("does not send a draft after the session changes during send preparation", async () => {
+    vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockResolvedValue({ installed: true } as any);
+    vi.spyOn(bridge, "streamChat").mockImplementation(() => new Promise(() => {}));
+
+    await act(async () => root.render(createElement(ChatPanel)));
+    const input = container.querySelector("textarea");
+    expect(input).not.toBeNull();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(input, "draft from A");
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
+        detail: { runtime: { character_id: "char-1", character_name: "Character" }, target_conversation_id: "conv-B" },
+      }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+    });
+    expect(container.querySelector("article")?.textContent).toContain("original B");
+    expect(bridge.streamChat).not.toHaveBeenCalled();
+  });
 });

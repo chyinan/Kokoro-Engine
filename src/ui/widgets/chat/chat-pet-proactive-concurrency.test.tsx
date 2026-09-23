@@ -239,6 +239,72 @@ describe("ChatPanel Pet & Proactive Turn Concurrency", () => {
         expect(streamChatMock).toHaveBeenCalledTimes(1);
     });
 
+    it("rejects pet, proactive, and interaction sends while Continue is deleting history", async () => {
+        let finishDelete: (() => void) | null = null;
+        vi.mocked(bridge.listConversations).mockResolvedValueOnce([{
+            id: "conv-history-lock",
+            character_id: "default",
+            title: "History lock",
+            topic: "",
+            pinned_state: "{}",
+            created_at: "2026-09-23",
+            updated_at: "2026-09-23",
+        } as any]);
+        loadConversationMock.mockResolvedValueOnce({
+            id: "conv-history-lock",
+            character_id: "default",
+            title: "History lock",
+            topic: "",
+            pinned_state: "{}",
+            created_at: "2026-09-23",
+            updated_at: "2026-09-23",
+            messages: [
+                { id: 401, role: "user", content: "first question", created_at: "2026-09-23" },
+                { id: 402, role: "assistant", content: "first answer", created_at: "2026-09-23" },
+                { id: 403, role: "user", content: "second question", created_at: "2026-09-23" },
+                { id: 404, role: "assistant", content: "second answer", created_at: "2026-09-23" },
+            ],
+        });
+        vi.spyOn(bridge, "deleteLastMessages").mockImplementation(() => new Promise(resolve => {
+            finishDelete = resolve;
+        }));
+
+        await act(async () => {
+            root.render(createElement(ChatPanel));
+            for (let i = 0; i < 8; i++) await Promise.resolve();
+        });
+
+        const continueButton = container.querySelector<HTMLButtonElement>(
+            'button[title="chat.actions.continue_from"]',
+        );
+        await act(async () => continueButton?.click());
+        expect(bridge.deleteLastMessages).toHaveBeenCalledOnce();
+
+        await act(async () => {
+            listeners["pet-chat-start"]?.({
+                payload: { message: "blocked pet", client_request_id: "pet_history_lock" },
+            });
+            listeners["proactive-trigger"]?.({ payload: { instruction: "blocked proactive" } });
+            listeners["interaction-trigger"]?.({
+                payload: { gesture: "tap", client_request_id: "interaction_history_lock" },
+            });
+            for (let i = 0; i < 5; i++) await Promise.resolve();
+        });
+
+        expect(streamChatMock).not.toHaveBeenCalled();
+        expect(container.textContent).not.toContain("blocked pet");
+        expect(eventApi.emit).toHaveBeenCalledWith("pet-chat-rejected", {
+            client_request_id: "pet_history_lock",
+            reason: "busy",
+        });
+        expect(eventApi.emit).toHaveBeenCalledWith("interaction-trigger-rejected", {
+            client_request_id: "interaction_history_lock",
+            reason: "busy",
+        });
+
+        await act(async () => finishDelete?.());
+    });
+
     it("does not allow a late-resolving old request to terminate an active pet turn", async () => {
         await act(async () => {
             root.render(createElement(ChatPanel));

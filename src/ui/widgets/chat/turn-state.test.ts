@@ -55,10 +55,16 @@ describe("chat turn state", () => {
     it("preserves emphasis-like stars inside inline code spans", () => {
         expect(stripPlainTextFormatting("Use `*foo*` and `**bar**` literally"))
             .toBe("Use `*foo*` and `**bar**` literally");
+        expect(stripPlainTextFormatting("Use **`foo`** and **before `*literal*` after**"))
+            .toBe("Use `foo` and before `*literal*` after");
         expect(stripPlainTextFormatting("Regex /\\*foo\\*/ and glob *.config.*"))
             .toBe("Regex /\\*foo\\*/ and glob *.config.*");
         expect(stripPlainTextFormatting("Use glob foo.*bar* or src/*test*"))
             .toBe("Use glob foo.*bar* or src/*test*");
+        expect(stripPlainTextFormatting("Use glob *a/b?* or *[0-9]*"))
+            .toBe("Use glob *a/b?* or *[0-9]*");
+        expect(stripPlainTextFormatting("Markdown *a/b* and *[today]*"))
+            .toBe("Markdown a/b and [today]");
     });
 
     it("cleans emphasis markers split across streaming deltas after merging", () => {
@@ -80,6 +86,10 @@ describe("chat turn state", () => {
         expect(getStreamingVisibleText("2*3")).toBe("2*3");
         expect(getStreamingVisibleText("**unfinished")).toBe("");
         expect(getStreamingVisibleText("**unfinished**")).toBe("unfinished");
+        expect(getStreamingVisibleText("Use `foo` and **unfinished"))
+            .toBe("Use `foo` and ");
+        expect(getStreamingVisibleText("Use `foo` and `bar` then **unfinished"))
+            .toBe("Use `foo` and `bar` then ");
     });
 
     it("creates one assistant message for a turn", () => {
