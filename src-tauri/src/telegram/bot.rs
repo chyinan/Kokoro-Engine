@@ -11,6 +11,7 @@ use crate::ai::memory_event_ingress::{
     MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
+use crate::chat::tags::{merge_continuation_text, strip_markdown_emphasis_markers};
 use crate::imagegen::ImageGenService;
 use crate::llm::messages::{
     assistant_text_message, is_user_message, replace_user_message_with_images, role_text_message,
@@ -413,10 +414,7 @@ async fn handle_text(
             all_translations.push(t);
         }
         if !cleaned.is_empty() {
-            if !all_cleaned_text.is_empty() {
-                all_cleaned_text.push(' ');
-            }
-            all_cleaned_text.push_str(&cleaned);
+            merge_continuation_text(&mut all_cleaned_text, &cleaned);
         }
 
         if tool_calls.is_empty() {
@@ -480,7 +478,9 @@ async fn handle_text(
         )));
     }
 
-    let response = strip_control_tags(&compact_newlines(&all_cleaned_text));
+    let response = strip_markdown_emphasis_markers(&strip_control_tags(&compact_newlines(
+        &all_cleaned_text,
+    )));
     let translation = if all_translations.is_empty() {
         None
     } else {
@@ -924,10 +924,7 @@ async fn handle_photo(
             all_translations.push(t);
         }
         if !cleaned.is_empty() {
-            if !all_cleaned_text.is_empty() {
-                all_cleaned_text.push(' ');
-            }
-            all_cleaned_text.push_str(&cleaned);
+            merge_continuation_text(&mut all_cleaned_text, &cleaned);
         }
 
         if tool_calls.is_empty() {
@@ -991,7 +988,9 @@ async fn handle_photo(
         )));
     }
 
-    let response = strip_control_tags(&compact_newlines(&all_cleaned_text));
+    let response = strip_markdown_emphasis_markers(&strip_control_tags(&compact_newlines(
+        &all_cleaned_text,
+    )));
     let translation = if all_translations.is_empty() {
         None
     } else {
@@ -1379,6 +1378,9 @@ fn strip_leaked_tags(text: &str) -> String {
             result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
         }
     }
+    // Markdown emphasis must be cleaned only after all tool rounds have been
+    // merged; a delimiter can legitimately be opened in one round and closed
+    // in the next.
     result.trim().to_string()
 }
 
@@ -1525,6 +1527,41 @@ mod tests {
         assert_eq!(calls[0].name, "get_time");
         assert_eq!(calls[0].args.get("tz"), Some(&"UTC".to_string()));
         assert!(!text.contains("[TOOL_CALL:"));
+    }
+
+    #[test]
+    fn test_tool_round_markdown_is_cleaned_after_merge() {
+        let mut merged = String::new();
+        for round in ["**hello [TOOL_CALL:get_time|{}]", "world**"] {
+            let (cleaned, _) = parse_tool_call_tags(round);
+            let cleaned = strip_leaked_tags(&cleaned);
+            if !cleaned.is_empty() {
+                merge_continuation_text(&mut merged, &cleaned);
+            }
+        }
+        assert_eq!(strip_markdown_emphasis_markers(&merged), "hello world");
+
+        merged.clear();
+        for round in ["**[TOOL_CALL:get_time|{}]", "answer**。"] {
+            let (cleaned, _) = parse_tool_call_tags(round);
+            let cleaned = strip_leaked_tags(&cleaned);
+            if !cleaned.is_empty() {
+                merge_continuation_text(&mut merged, &cleaned);
+            }
+        }
+
+        assert_eq!(strip_markdown_emphasis_markers(&merged), "answer。");
+
+        merged.clear();
+        for round in ["*[TOOL_CALL:get_time|{}]", "answer*。"] {
+            let (cleaned, _) = parse_tool_call_tags(round);
+            let cleaned = strip_leaked_tags(&cleaned);
+            if !cleaned.is_empty() {
+                merge_continuation_text(&mut merged, &cleaned);
+            }
+        }
+
+        assert_eq!(strip_markdown_emphasis_markers(&merged), "answer。");
     }
 
     #[test]

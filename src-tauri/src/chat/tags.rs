@@ -49,7 +49,202 @@ pub(crate) fn strip_leaked_tags(text: &str) -> String {
             result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
         }
     }
-    result.trim().to_string()
+    strip_markdown_emphasis_markers(result.trim())
+}
+
+/// Remove paired Markdown emphasis delimiters from text rendered as plain text.
+///
+/// The chat UI intentionally does not render Markdown. Some providers still
+/// return escaped or regular emphasis delimiters, such as `\\*\\*today\\*\\*`,
+/// `**today**`, or `*today*`, which would otherwise leak into the visible
+/// conversation. Keep unmatched delimiters and word-like exponent/identifier
+/// forms intact.
+pub(crate) fn strip_markdown_emphasis_markers(text: &str) -> String {
+    let mut masked = String::with_capacity(text.len());
+    let mut replacements: Vec<(String, &str)> = Vec::new();
+    let mut segment_start = 0usize;
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] != b'`' || (index > 0 && bytes[index - 1] == b'\\') {
+            index += 1;
+            continue;
+        }
+
+        let mut opening_end = index + 1;
+        while opening_end < bytes.len() && bytes[opening_end] == b'`' {
+            opening_end += 1;
+        }
+        let delimiter_len = opening_end - index;
+        let mut cursor = opening_end;
+        let mut closing_start = None;
+
+        while cursor < bytes.len() {
+            if bytes[cursor] != b'`' || (cursor > 0 && bytes[cursor - 1] == b'\\') {
+                cursor += 1;
+                continue;
+            }
+
+            let mut closing_end = cursor + 1;
+            while closing_end < bytes.len() && bytes[closing_end] == b'`' {
+                closing_end += 1;
+            }
+            if closing_end - cursor == delimiter_len {
+                closing_start = Some(cursor);
+                break;
+            }
+            cursor = closing_end;
+        }
+
+        let code_end = closing_start
+            .map(|start| start + delimiter_len)
+            .unwrap_or(text.len());
+        let mut token_index = replacements.len();
+        let token = loop {
+            let candidate = format!("\u{e000}KOKORO_CODE_{token_index}\u{e001}");
+            if !text.contains(&candidate)
+                && !replacements.iter().any(|(token, _)| token == &candidate)
+            {
+                break candidate;
+            }
+            token_index += 1;
+        };
+        masked.push_str(&text[segment_start..index]);
+        masked.push_str(&token);
+        replacements.push((token, &text[index..code_end]));
+        index = code_end;
+        segment_start = index;
+
+        if closing_start.is_none() {
+            break;
+        }
+    }
+
+    masked.push_str(&text[segment_start..]);
+    let mut result = strip_markdown_emphasis_segment(&masked);
+    for (token, source) in replacements {
+        result = result.replace(&token, source);
+    }
+    result
+}
+
+fn strip_markdown_emphasis_segment(text: &str) -> String {
+    let mut result = text.to_string();
+    for marker in [r"\*\*", "**", r"\*", "*"] {
+        let mut search_from = 0usize;
+        while let Some(open_rel) = result[search_from..].find(marker) {
+            let open = search_from + open_rel;
+            let content_start = open + marker.len();
+            if marker == "*"
+                && (open > 0
+                    && (result.as_bytes()[open - 1] == b'*'
+                        || result.as_bytes()[open - 1] == b'\\')
+                    || result.as_bytes().get(content_start) == Some(&b'*'))
+            {
+                search_from = content_start;
+                continue;
+            }
+            let Some(close_rel) = result[content_start..].find(marker) else {
+                break;
+            };
+            let close = content_start + close_rel;
+            let content = &result[content_start..close];
+
+            if content.trim().is_empty() {
+                search_from = content_start;
+                continue;
+            }
+
+            if looks_like_regex_literal(&result, open, close, marker)
+                || looks_like_glob_pattern(&result, open, close, marker)
+            {
+                search_from = content_start;
+                continue;
+            }
+
+            let previous = result[..open].chars().next_back();
+            let first_content = content.chars().next();
+            let last_content = content.chars().next_back();
+            let has_content_boundary_whitespace = first_content
+                .map(char::is_whitespace)
+                .unwrap_or(true)
+                || last_content.map(char::is_whitespace).unwrap_or(true);
+            let looks_like_word_operator = previous
+                .zip(first_content)
+                .map(|(left, right)| left.is_ascii_alphanumeric() && right.is_ascii_alphanumeric())
+                .unwrap_or(false);
+            if has_content_boundary_whitespace || looks_like_word_operator {
+                search_from = content_start;
+                continue;
+            }
+
+            result.replace_range(close..close + marker.len(), "");
+            result.replace_range(open..open + marker.len(), "");
+            search_from = open;
+        }
+    }
+    result
+}
+
+fn looks_like_regex_literal(text: &str, open: usize, close: usize, marker: &str) -> bool {
+    let Some(opening_slash) = text[..open].rfind('/') else {
+        return false;
+    };
+    if opening_slash > 0 && text.as_bytes()[opening_slash - 1] == b'\\' {
+        return false;
+    }
+
+    let before_slash = text[..opening_slash].chars().next_back();
+    if before_slash.is_some_and(|character| !character.is_whitespace() && !"([{=:;,!?".contains(character)) {
+        return false;
+    }
+
+    let closing_slash = close + marker.len();
+    if text.as_bytes().get(closing_slash) != Some(&b'/') {
+        return false;
+    }
+
+    !text[opening_slash + 1..closing_slash].contains('\n')
+}
+
+fn looks_like_glob_pattern(text: &str, open: usize, close: usize, marker: &str) -> bool {
+    if marker != "*" {
+        return false;
+    }
+
+    let content_start = open + marker.len();
+    let content = &text[content_start..close];
+    let after_close = text[close + marker.len()..].chars().next();
+    let previous = text[..open].chars().next_back();
+    let before_previous = text[..open].chars().rev().nth(1);
+    let after_separator = text[close + marker.len()..].chars().nth(1);
+    let has_path_prefix = matches!(previous, Some('/' | '\\'))
+        && before_previous.is_some_and(|character| !character.is_whitespace());
+    let has_path_suffix = matches!(after_close, Some('/' | '\\'))
+        && after_separator.is_some_and(|character| !character.is_whitespace());
+    let has_path_wildcard = (content.contains('/') || content.contains('\\'))
+        && (content.contains('?') || content.contains('*'));
+    let has_character_class_range = content
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .map(|value| {
+            value
+                .strip_prefix('!')
+                .or_else(|| value.strip_prefix('^'))
+                .unwrap_or(value)
+                .contains('-')
+        })
+        .unwrap_or(false);
+
+    content.starts_with('.')
+        || content.ends_with('.')
+        || matches!(previous, Some('.'))
+        || matches!(after_close, Some('.'))
+        || has_path_prefix
+        || has_path_suffix
+        || has_path_wildcard
+        || has_character_class_range
 }
 
 /// Strip `[TRANSLATE:...]` tags from text.
@@ -102,11 +297,65 @@ pub(crate) fn merge_continuation_text(accumulated: &mut String, next: &str) {
     if overlap > 0 {
         accumulated.push_str(&next[overlap..]);
     } else {
-        if !accumulated.ends_with(char::is_whitespace) && !next.starts_with(char::is_whitespace) {
+        let continues_open_emphasis = continues_cross_round_emphasis(accumulated, next);
+        if !continues_open_emphasis
+            && !accumulated.ends_with(char::is_whitespace)
+            && !next.starts_with(char::is_whitespace)
+        {
             accumulated.push(' ');
         }
         accumulated.push_str(next);
     }
+}
+
+fn continues_cross_round_emphasis(accumulated: &str, next: &str) -> bool {
+    let accumulated = accumulated.trim_end();
+    [r"\*\*", "**", r"\*", "*"].into_iter().any(|marker| {
+        has_unmatched_trailing_emphasis_marker(accumulated, marker)
+            && contains_closing_emphasis_marker(next, marker)
+    })
+}
+
+fn contains_closing_emphasis_marker(text: &str, marker: &str) -> bool {
+    let mut search_from = 0usize;
+    while let Some(relative) = text[search_from..].find(marker) {
+        let index = search_from + relative;
+        let content_before = text[..index].chars().next_back();
+        let after = text[index + marker.len()..].chars().next();
+        let is_single_unescaped_star = marker == "*"
+            && (text[..index].ends_with(['*', '\\'])
+                || text[index + marker.len()..].starts_with('*'));
+        if !is_single_unescaped_star
+            && content_before.is_some_and(|character| !character.is_whitespace())
+            && after.is_none_or(|character| !character.is_alphanumeric())
+        {
+            return true;
+        }
+        search_from = index + marker.len();
+    }
+    false
+}
+
+fn has_unmatched_trailing_emphasis_marker(text: &str, marker: &str) -> bool {
+    if !text.ends_with(marker) {
+        return false;
+    }
+
+    if marker != "*" {
+        return text.match_indices(marker).count() % 2 == 1;
+    }
+
+    let bytes = text.as_bytes();
+    let standalone_count = bytes
+        .iter()
+        .enumerate()
+        .filter(|(index, byte)| {
+            **byte == b'*'
+                && (*index == 0 || !matches!(bytes[*index - 1], b'*' | b'\\'))
+                && bytes.get(*index + 1) != Some(&b'*')
+        })
+        .count();
+    standalone_count % 2 == 1
 }
 
 /// Extract the content inside `[TRANSLATE:...]` tags, then strip them from text.
@@ -444,6 +693,104 @@ mod tests {
     fn test_strip_leaked_tags_no_tag() {
         let input = "clean text";
         assert_eq!(strip_leaked_tags(input), "clean text");
+    }
+
+    #[test]
+    fn test_strip_markdown_emphasis_markers_for_date_and_weekday_replies() {
+        assert_eq!(
+            strip_markdown_emphasis_markers(r"今天是 \*\*2026年9月21日，星期一\*\*。"),
+            "今天是 2026年9月21日，星期一。"
+        );
+        assert_eq!(
+            strip_markdown_emphasis_markers(r"今天是 **2026年9月21日**，**星期一**。"),
+            "今天是 2026年9月21日，星期一。"
+        );
+    }
+
+    #[test]
+    fn test_strip_markdown_emphasis_markers_handles_multiple_segments_and_punctuation() {
+        assert_eq!(
+            strip_markdown_emphasis_markers(r"\*\*日期\*\*：\*\*2026-09-21\*\*。"),
+            "日期：2026-09-21。"
+        );
+    }
+
+    #[test]
+    fn test_strip_markdown_emphasis_markers_preserves_unmatched_and_word_operator_stars() {
+        assert_eq!(strip_markdown_emphasis_markers(r"unfinished \*\*bold"), r"unfinished \*\*bold");
+        assert_eq!(strip_markdown_emphasis_markers("2**3**"), "2**3**");
+        assert_eq!(strip_markdown_emphasis_markers(r"literal \* star"), r"literal \* star");
+    }
+
+    #[test]
+    fn test_strip_markdown_emphasis_markers_handles_italics_without_harming_math_or_lists() {
+        assert_eq!(
+            strip_markdown_emphasis_markers(r"今天是 \*星期一\*。"),
+            "今天是 星期一。"
+        );
+        assert_eq!(
+            strip_markdown_emphasis_markers("今天是 *星期一*。"),
+            "今天是 星期一。"
+        );
+        assert_eq!(strip_markdown_emphasis_markers("2 * 3 = 6\n* 条目"), "2 * 3 = 6\n* 条目");
+    }
+
+    #[test]
+    fn test_strip_markdown_emphasis_markers_preserves_inline_code() {
+        assert_eq!(
+            strip_markdown_emphasis_markers("请使用 `*foo*` 和 `**bar**` 匹配文件名"),
+            "请使用 `*foo*` 和 `**bar**` 匹配文件名"
+        );
+        assert_eq!(
+            strip_markdown_emphasis_markers("Use **`foo`** and **before `*literal*` after**"),
+            "Use `foo` and before `*literal*` after"
+        );
+        assert_eq!(
+            strip_markdown_emphasis_markers(r"Regex /\*foo\*/ and glob *.config.*"),
+            r"Regex /\*foo\*/ and glob *.config.*"
+        );
+        assert_eq!(
+            strip_markdown_emphasis_markers("Use glob foo.*bar* or src/*test*"),
+            "Use glob foo.*bar* or src/*test*"
+        );
+        assert_eq!(
+            strip_markdown_emphasis_markers("Use glob *a/b?* or *[0-9]*"),
+            "Use glob *a/b?* or *[0-9]*"
+        );
+        assert_eq!(
+            strip_markdown_emphasis_markers("Markdown *a/b* and *[today]*"),
+            "Markdown a/b and [today]"
+        );
+    }
+
+    #[test]
+    fn test_merge_continuation_does_not_split_cross_round_emphasis() {
+        let mut normal = "**hello".to_string();
+        merge_continuation_text(&mut normal, "world**");
+        assert_eq!(normal, "**hello world**");
+        assert_eq!(strip_markdown_emphasis_markers(&normal), "hello world");
+
+        let mut merged = "**".to_string();
+        merge_continuation_text(&mut merged, "answer**。");
+        assert_eq!(merged, "**answer**。");
+        assert_eq!(strip_markdown_emphasis_markers(&merged), "answer。");
+
+        let mut escaped = r"\*\*".to_string();
+        merge_continuation_text(&mut escaped, r"answer\*\*");
+        assert_eq!(strip_markdown_emphasis_markers(&escaped), "answer");
+
+        let mut italic = "*".to_string();
+        merge_continuation_text(&mut italic, "answer*。");
+        assert_eq!(italic, "*answer*。");
+        assert_eq!(strip_markdown_emphasis_markers(&italic), "answer。");
+
+        let mut escaped_italic = r"\*".to_string();
+        merge_continuation_text(&mut escaped_italic, r"answer\*");
+        assert_eq!(strip_markdown_emphasis_markers(&escaped_italic), "answer");
+
+        let mut unfinished = "prefix **".to_string();
+        merge_continuation_text(&mut unfinished, "answer");
+        assert_eq!(unfinished, "prefix ** answer");
     }
 
     #[test]

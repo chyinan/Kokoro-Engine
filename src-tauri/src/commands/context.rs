@@ -616,6 +616,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_delete_last_messages_rejects_stale_expected_tail() {
+        let pool = setup_test_context_db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-tail', 'char-1', 'Tail guard', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        for (role, content) in [("user", "Question"), ("assistant", "Answer")] {
+            sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-tail', ?, ?, NULL, ?)")
+                .bind(role)
+                .bind(content)
+                .bind(&now)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let history = Arc::new(Mutex::new(VecDeque::new()));
+        let current_conv = Arc::new(Mutex::new(Some("conv-tail".to_string())));
+        let ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM conversation_messages WHERE conversation_id = 'conv-tail' ORDER BY id ASC",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let expected_tail = *ids.last().unwrap();
+
+        delete_last_messages_inner_with_expected_tail(
+            1,
+            &pool,
+            &history,
+            &current_conv,
+            2000,
+            None,
+            Some("conv-tail"),
+            &switch_lock(),
+            Some(expected_tail),
+        )
+        .await
+        .unwrap();
+
+        let stale_result = delete_last_messages_inner_with_expected_tail(
+            1,
+            &pool,
+            &history,
+            &current_conv,
+            2000,
+            None,
+            Some("conv-tail"),
+            &switch_lock(),
+            Some(expected_tail),
+        )
+        .await;
+        assert!(matches!(stale_result, Err(KokoroError::Validation(_))));
+
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = 'conv-tail'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 1, "A stale retry must not delete the remaining history");
+    }
+
+    #[tokio::test]
     async fn test_delete_serializes_with_conversation_switch() {
         let pool = setup_test_context_db().await;
         let now = chrono::Utc::now().to_rfc3339();
@@ -956,6 +1025,32 @@ pub async fn delete_last_messages_inner(
     expected_conversation_id: Option<&str>,
     conversation_switch_lock: &Arc<Mutex<()>>,
 ) -> Result<(), KokoroError> {
+    delete_last_messages_inner_with_expected_tail(
+        count,
+        db,
+        history,
+        current_conversation_id,
+        max_chars,
+        memory_history_boundary,
+        expected_conversation_id,
+        conversation_switch_lock,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn delete_last_messages_inner_with_expected_tail(
+    count: usize,
+    db: &sqlx::SqlitePool,
+    history: &Arc<Mutex<VecDeque<crate::ai::context::Message>>>,
+    current_conversation_id: &Arc<Mutex<Option<String>>>,
+    max_chars: usize,
+    memory_history_boundary: Option<&Arc<Mutex<usize>>>,
+    expected_conversation_id: Option<&str>,
+    conversation_switch_lock: &Arc<Mutex<()>>,
+    expected_tail_message_id: Option<i64>,
+) -> Result<(), KokoroError> {
     if count == 0 {
         return Ok(());
     }
@@ -997,6 +1092,21 @@ pub async fn delete_last_messages_inner(
             .filter(|(_, (_, role, metadata))| is_visible_message_raw(role, metadata.as_deref()))
             .map(|(idx, _)| idx)
             .collect();
+
+        if let Some(expected_tail) = expected_tail_message_id {
+            let actual_tail = visible_indices.last().map(|index| rows[*index].0);
+            if actual_tail != Some(expected_tail) {
+                tracing::warn!(
+                    target: "ai",
+                    "Skipping delete_last_messages: expected tail {:?} but current tail is {:?}",
+                    expected_tail,
+                    actual_tail
+                );
+                return Err(KokoroError::Validation(
+                    "Conversation history changed before deletion".to_string(),
+                ));
+            }
+        }
 
         let total_visible = visible_indices.len();
         let ids_to_delete: Vec<i64> = if count >= total_visible {
@@ -1084,10 +1194,11 @@ pub async fn delete_last_messages_inner(
 pub async fn delete_last_messages(
     count: usize,
     expected_conversation_id: Option<String>,
+    expected_tail_message_id: Option<i64>,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
     let max_chars = *state.max_message_chars.lock().await;
-    delete_last_messages_inner(
+    delete_last_messages_inner_with_expected_tail(
         count,
         &state.db,
         &state.history,
@@ -1096,6 +1207,7 @@ pub async fn delete_last_messages(
         Some(&state.memory_history_boundary),
         expected_conversation_id.as_deref(),
         &state.conversation_switch_lock,
+        expected_tail_message_id,
     )
     .await
 }

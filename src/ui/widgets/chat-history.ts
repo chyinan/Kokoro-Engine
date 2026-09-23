@@ -1,4 +1,5 @@
 import type { ConversationMessage, ToolTraceItem } from "../../lib/kokoro-bridge";
+import { stripStoredMarkup } from "./chat/turn-state";
 
 export interface ChatHistoryMessage {
     id?: number;
@@ -128,14 +129,7 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
                 if (translateMatch) translation = translateMatch[1].trim();
             }
 
-            const text = m.content
-                .replace(/\[ACTION:\w+\]\s*/g, "")
-                .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
-                .replace(/\[EMOTION:[^\]]*\]/g, "")
-                .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-                .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "")
-                .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "")
-                .trim();
+            const text = stripStoredMarkup(m.content).trim();
             const pendingTools = turnId ? pendingToolsByTurn.get(turnId) : undefined;
 
             chatMsgs.push({

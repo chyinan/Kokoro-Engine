@@ -27,6 +27,7 @@ export interface PendingTurnState {
     clientRequestId?: string | null;
     messageIndex: number | null;
     rawText: string;
+    streamingVisibleText?: string;
     visibleTextStarted: boolean;
     translation?: string;
     translationPending: boolean;
@@ -35,18 +36,303 @@ export interface PendingTurnState {
     needsResync?: boolean;
 }
 
-export const stripStreamingMarkup = (text: string) =>
-    text
-        .replace(/\[ACTION:\w+\]\s*/g, "")
-        .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
-        .replace(/\[TRANSLATE:[^\]]*\]\s*/g, "")
-        .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "");
+function stripPairedEmphasisMarkers(
+    text: string,
+    marker: string,
+    removeUnmatched: boolean,
+): string {
+    let result = text;
+    let searchFrom = 0;
 
-export const stripStoredMarkup = (text: string) =>
+    while (searchFrom < result.length) {
+        const open = result.indexOf(marker, searchFrom);
+        if (open < 0) break;
+
+        const contentStart = open + marker.length;
+        if (marker === "*" && (
+            result[open - 1] === "*"
+            || result[open - 1] === "\\"
+            || result[contentStart] === "*"
+        )) {
+            searchFrom = contentStart;
+            continue;
+        }
+        const close = result.indexOf(marker, contentStart);
+        if (close < 0) {
+            if (!removeUnmatched) break;
+            result = `${result.slice(0, open)}${result.slice(open + marker.length)}`;
+            searchFrom = open;
+            continue;
+        }
+
+        const content = result.slice(contentStart, close);
+        if (!content.trim()) {
+            searchFrom = contentStart;
+            continue;
+        }
+
+        if (
+            looksLikeRegexLiteral(result, open, close, marker)
+            || looksLikeGlobPattern(result, open, close, marker)
+        ) {
+            searchFrom = contentStart;
+            continue;
+        }
+
+        const previous = open > 0 ? result[open - 1] : undefined;
+        const firstContent = content[0];
+        const hasContentBoundaryWhitespace = /^\s|\s$/.test(content);
+        const looksLikeWordOperator = Boolean(
+            previous && firstContent && /[A-Za-z0-9]/.test(previous) && /[A-Za-z0-9]/.test(firstContent),
+        );
+
+        if (hasContentBoundaryWhitespace || looksLikeWordOperator) {
+            searchFrom = contentStart;
+            continue;
+        }
+
+        result = `${result.slice(0, close)}${result.slice(close + marker.length)}`;
+        result = `${result.slice(0, open)}${result.slice(open + marker.length)}`;
+        searchFrom = open;
+    }
+
+    return result;
+}
+
+function looksLikeRegexLiteral(text: string, open: number, close: number, marker: string): boolean {
+    const openingSlash = text.lastIndexOf("/", open - 1);
+    if (openingSlash < 0 || (openingSlash > 0 && text[openingSlash - 1] === "\\")) return false;
+
+    const beforeSlash = openingSlash > 0 ? text[openingSlash - 1] : undefined;
+    if (beforeSlash && !/[\s([{=:;,!?]/.test(beforeSlash)) return false;
+    if (text[close + marker.length] !== "/") return false;
+
+    return !text.slice(openingSlash + 1, close + marker.length).includes("\n");
+}
+
+function looksLikeGlobPattern(text: string, open: number, close: number, marker: string): boolean {
+    if (marker !== "*") return false;
+
+    const content = text.slice(open + marker.length, close);
+    const beforeOpen = text[open - 1];
+    const beforePathSeparator = text[open - 2];
+    const afterClose = text[close + marker.length];
+    const afterPathSeparator = text[close + marker.length + 1];
+    const hasPathPrefix = (beforeOpen === "/" || beforeOpen === "\\")
+        && Boolean(beforePathSeparator && !/\s/.test(beforePathSeparator));
+    const hasPathSuffix = (afterClose === "/" || afterClose === "\\")
+        && Boolean(afterPathSeparator && !/\s/.test(afterPathSeparator));
+    const hasPathWildcard = /[/\\]/.test(content) && /[?*]/.test(content);
+    const hasCharacterClassRange = /\[(?:!|\^)?[^\]]*-[^\]]*\]/.test(content);
+
+    return (
+        content.startsWith(".")
+        || content.endsWith(".")
+        || beforeOpen === "."
+        || afterClose === "."
+        || hasPathPrefix
+        || hasPathSuffix
+        || hasPathWildcard
+        || hasCharacterClassRange
+    );
+}
+
+interface CodeSpanRange {
+    start: number;
+    end: number;
+}
+
+function findCodeSpanRanges(text: string): CodeSpanRange[] {
+    const ranges: CodeSpanRange[] = [];
+    let index = 0;
+
+    while (index < text.length) {
+        if (text[index] !== "`" || (index > 0 && text[index - 1] === "\\")) {
+            index += 1;
+            continue;
+        }
+
+        let openingEnd = index + 1;
+        while (openingEnd < text.length && text[openingEnd] === "`") {
+            openingEnd += 1;
+        }
+        const delimiterLength = openingEnd - index;
+        let cursor = openingEnd;
+        let closingStart = -1;
+
+        while (cursor < text.length) {
+            if (text[cursor] !== "`" || (cursor > 0 && text[cursor - 1] === "\\")) {
+                cursor += 1;
+                continue;
+            }
+
+            let closingEnd = cursor + 1;
+            while (closingEnd < text.length && text[closingEnd] === "`") {
+                closingEnd += 1;
+            }
+            if (closingEnd - cursor === delimiterLength) {
+                closingStart = cursor;
+                break;
+            }
+            cursor = closingEnd;
+        }
+
+        if (closingStart < 0) {
+            ranges.push({ start: index, end: text.length });
+            break;
+        }
+
+        const end = closingStart + delimiterLength;
+        ranges.push({ start: index, end });
+        index = end;
+    }
+
+    return ranges;
+}
+
+function stripOutsideCodeSpans(
+    text: string,
+    transform: (segment: string, sourceOffset: number) => string,
+): string {
+    let result = "";
+    let segmentStart = 0;
+    for (const range of findCodeSpanRanges(text)) {
+        result += transform(text.slice(segmentStart, range.start), segmentStart);
+        result += text.slice(range.start, range.end);
+        segmentStart = range.end;
+    }
+    return result + transform(text.slice(segmentStart), segmentStart);
+}
+
+function stripFormattingAroundCodeSpans(text: string, removeUnmatched: boolean): string {
+    const ranges = findCodeSpanRanges(text);
+    if (ranges.length === 0) {
+        return stripPlainTextFormattingSegment(text, removeUnmatched);
+    }
+
+    let masked = "";
+    let segmentStart = 0;
+    const replacements: Array<{ token: string; source: string }> = [];
+    ranges.forEach((range, index) => {
+        let tokenIndex = index;
+        let token = `\uE000KOKORO_CODE_${tokenIndex}\uE001`;
+        while (text.includes(token) || replacements.some(replacement => replacement.token === token)) {
+            tokenIndex += ranges.length;
+            token = `\uE000KOKORO_CODE_${tokenIndex}\uE001`;
+        }
+        masked += text.slice(segmentStart, range.start);
+        masked += token;
+        replacements.push({ token, source: text.slice(range.start, range.end) });
+        segmentStart = range.end;
+    });
+    masked += text.slice(segmentStart);
+
+    let cleaned = stripPlainTextFormattingSegment(masked, removeUnmatched);
+    for (const { token, source } of replacements) {
+        cleaned = cleaned.replace(token, source);
+    }
+    return cleaned;
+}
+
+function stripPlainTextFormattingSegment(text: string, removeUnmatched: boolean): string {
+    let result = text;
+    for (const marker of ["\\*\\*", "**", "\\*", "*"]) {
+        result = stripPairedEmphasisMarkers(result, marker, removeUnmatched);
+    }
+    return result;
+}
+
+export const stripPlainTextFormatting = (
+    text: string,
+    options: { removeUnmatched?: boolean } = {},
+) => stripFormattingAroundCodeSpans(text, options.removeUnmatched ?? false);
+
+function findUnmatchedMarker(text: string, marker: string): number | null {
+    const positions: number[] = [];
+    let searchFrom = 0;
+    while (searchFrom < text.length) {
+        const open = text.indexOf(marker, searchFrom);
+        if (open < 0) break;
+
+        const contentStart = open + marker.length;
+        if (marker === "*" && (
+            text[open - 1] === "*"
+            || text[open - 1] === "\\"
+            || text[contentStart] === "*"
+        )) {
+            searchFrom = contentStart;
+            continue;
+        }
+        positions.push(open);
+        searchFrom = contentStart;
+    }
+    return positions.length % 2 === 1 ? positions[positions.length - 1] ?? null : null;
+}
+
+function isPotentialStreamingEmphasisStart(text: string, open: number, marker: string): boolean {
+    const previous = text[open - 1];
+    const next = text[open + marker.length];
+    if (marker === "*" && (
+        (previous === undefined || /\s/.test(previous))
+        && (next === undefined || /\s/.test(next))
+    )) {
+        return false;
+    }
+
+    // Keep multiplication and exponent-like identifiers visible while their
+    // surrounding text is still streaming.
+    if (previous && next && /[A-Za-z0-9]/.test(previous) && /[A-Za-z0-9]/.test(next)) {
+        return false;
+    }
+    return true;
+}
+
+function findUnmatchedEmphasisStart(text: string): number | null {
+    let pending: number | null = null;
+    stripOutsideCodeSpans(text, (segment, sourceOffset) => {
+        if (pending === null) {
+            for (const marker of ["\\*\\*", "**", "\\*", "*"]) {
+                const local = findUnmatchedMarker(segment, marker);
+                if (local !== null && isPotentialStreamingEmphasisStart(segment, local, marker)) {
+                    pending = sourceOffset + local;
+                    break;
+                }
+            }
+        }
+        return segment;
+    });
+    return pending;
+}
+
+export const stripStreamingControlMarkup = (text: string) => text
+    .replace(/\[ACTION:\w+\]\s*/g, "")
+    .replace(/\[TOOL_CALL:[^\]]*\]\s*/g, "")
+    .replace(/\[TRANSLATE:[^\]]*\]\s*/g, "")
+    .replace(/\[\w+\|[^\]]*=[^\]]*\]\s*/g, "");
+
+export const stripStreamingMarkup = (
+    text: string,
+    options: { removeUnmatched?: boolean } = {},
+) => stripPlainTextFormatting(stripStreamingControlMarkup(text), options);
+
+/**
+ * Return only the stable prefix of a streaming response. An unmatched
+ * emphasis delimiter is buffered instead of being deleted, so legal stars
+ * such as multiplication operators remain visible and can be restored when
+ * the complete response arrives.
+ */
+export const getStreamingVisibleText = (text: string): string => {
+    const cleaned = stripStreamingMarkup(text);
+    const pendingStart = findUnmatchedEmphasisStart(cleaned);
+    return pendingStart === null ? cleaned : cleaned.slice(0, pendingStart);
+};
+
+export const stripStoredMarkup = (text: string) => stripPlainTextFormatting(
     stripStreamingMarkup(text)
         .replace(/\[EMOTION:[^\]]*\]/g, "")
         .replace(/\[IMAGE_PROMPT:[^\]]*\]/g, "")
-        .replace(/\[TRANSLATE:[\s\S]*?\]/gi, "");
+        .replace(/\[TRANSLATE:[\s\S]*?\]/gi, ""),
+);
 
 export const ensureTurnMessage = (messages: ChatPanelMessage[], turn: PendingTurnState) => {
     if (hasActiveKokoroBubble(messages, turn.messageIndex)) {

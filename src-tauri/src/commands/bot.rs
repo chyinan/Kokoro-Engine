@@ -8,6 +8,7 @@ use crate::ai::memory_event_ingress::{
     MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
+use crate::chat::tags::{merge_continuation_text, strip_markdown_emphasis_markers};
 use crate::error::KokoroError;
 use crate::imagegen::ImageGenService;
 use crate::llm::messages::{
@@ -1095,7 +1096,9 @@ async fn generate_bot_reply(
         )));
     }
 
-    let reply = compact_newlines(&strip_control_tags(&all_cleaned_text));
+    let reply = compact_newlines(&strip_markdown_emphasis_markers(&strip_control_tags(
+        &all_cleaned_text,
+    )));
     if reply.is_empty() && all_image_prompts.is_empty() && all_generated_images.is_empty() {
         return Err("No response from AI".to_string());
     }
@@ -1529,22 +1532,10 @@ fn strip_leaked_tags(text: &str) -> String {
             result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
         }
     }
+    // Markdown emphasis must be cleaned only after all tool rounds have been
+    // merged; a delimiter can legitimately be opened in one round and closed
+    // in the next.
     result.trim().to_string()
-}
-
-fn merge_continuation_text(accumulated: &mut String, next: &str) {
-    let next = next.trim();
-    if next.is_empty() {
-        return;
-    }
-    if accumulated.is_empty() {
-        accumulated.push_str(next);
-        return;
-    }
-    if !accumulated.ends_with(char::is_whitespace) && !next.starts_with(char::is_whitespace) {
-        accumulated.push(' ');
-    }
-    accumulated.push_str(next);
 }
 
 fn strip_control_tags(text: &str) -> String {
@@ -3344,6 +3335,35 @@ mod tests {
         );
 
         assert_eq!(cleaned, "Hello  happy  world");
+    }
+
+    #[test]
+    fn bot_cleans_markdown_only_after_tool_rounds_are_merged() {
+        let mut merged = String::new();
+        for round in ["**hello [TOOL_CALL:get_time|{}]", "world**"] {
+            let (cleaned, _) = parse_tool_call_tags(round);
+            let cleaned = strip_leaked_tags(&cleaned);
+            merge_continuation_text(&mut merged, &cleaned);
+        }
+        assert_eq!(strip_markdown_emphasis_markers(&merged), "hello world");
+
+        merged.clear();
+        for round in ["**[TOOL_CALL:get_time|{}]", "answer**。"] {
+            let (cleaned, _) = parse_tool_call_tags(round);
+            let cleaned = strip_leaked_tags(&cleaned);
+            merge_continuation_text(&mut merged, &cleaned);
+        }
+
+        assert_eq!(strip_markdown_emphasis_markers(&merged), "answer。");
+
+        merged.clear();
+        for round in ["*[TOOL_CALL:get_time|{}]", "answer*。"] {
+            let (cleaned, _) = parse_tool_call_tags(round);
+            let cleaned = strip_leaked_tags(&cleaned);
+            merge_continuation_text(&mut merged, &cleaned);
+        }
+
+        assert_eq!(strip_markdown_emphasis_markers(&merged), "answer。");
     }
 
     #[test]

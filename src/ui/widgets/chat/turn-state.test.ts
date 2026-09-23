@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
     ensureTurnMessage,
     getApprovalErrorMessage,
+    getStreamingVisibleText,
+    stripPlainTextFormatting,
     stripStreamingMarkup,
     updateTurnMessage,
     type ChatPanelMessage,
@@ -24,6 +26,70 @@ describe("chat turn state", () => {
     it("strips streamed control markup", () => {
         expect(stripStreamingMarkup("hello[TOOL_CALL:get_time|{}]world")).toBe("helloworld");
         expect(stripStreamingMarkup("hello[TRANSLATE:你好]")).toBe("hello");
+    });
+
+    it("strips escaped and regular bold markers from date and weekday replies", () => {
+        expect(stripPlainTextFormatting("今天是 \\*\\*2026年9月21日，星期一\\*\\*。"))
+            .toBe("今天是 2026年9月21日，星期一。");
+        expect(stripPlainTextFormatting("今天是 **2026年9月21日**，**星期一**。"))
+            .toBe("今天是 2026年9月21日，星期一。");
+    });
+
+    it("strips multiple bold segments without removing ordinary stars", () => {
+        expect(stripPlainTextFormatting("\\*\\*日期\\*\\*：\\*\\*2026-09-21\\*\\*。"))
+            .toBe("日期：2026-09-21。");
+        expect(stripPlainTextFormatting("2**3** and unfinished **bold"))
+            .toBe("2**3** and unfinished **bold");
+        expect(stripPlainTextFormatting("**bold**suffix"))
+            .toBe("boldsuffix");
+        expect(stripPlainTextFormatting("今天是 \\*星期一\\*。"))
+            .toBe("今天是 星期一。");
+        expect(stripPlainTextFormatting("今天是 *星期一*。"))
+            .toBe("今天是 星期一。");
+        expect(stripPlainTextFormatting("2 * 3 = 6\n* 条目"))
+            .toBe("2 * 3 = 6\n* 条目");
+        expect(stripPlainTextFormatting("literal \\* star"))
+            .toBe("literal \\* star");
+    });
+
+    it("preserves emphasis-like stars inside inline code spans", () => {
+        expect(stripPlainTextFormatting("Use `*foo*` and `**bar**` literally"))
+            .toBe("Use `*foo*` and `**bar**` literally");
+        expect(stripPlainTextFormatting("Use **`foo`** and **before `*literal*` after**"))
+            .toBe("Use `foo` and before `*literal*` after");
+        expect(stripPlainTextFormatting("Regex /\\*foo\\*/ and glob *.config.*"))
+            .toBe("Regex /\\*foo\\*/ and glob *.config.*");
+        expect(stripPlainTextFormatting("Use glob foo.*bar* or src/*test*"))
+            .toBe("Use glob foo.*bar* or src/*test*");
+        expect(stripPlainTextFormatting("Use glob *a/b?* or *[0-9]*"))
+            .toBe("Use glob *a/b?* or *[0-9]*");
+        expect(stripPlainTextFormatting("Markdown *a/b* and *[today]*"))
+            .toBe("Markdown a/b and [today]");
+    });
+
+    it("cleans emphasis markers split across streaming deltas after merging", () => {
+        let accumulated = "";
+        let visible = "";
+
+        for (const delta of ["**", "weekday", "**"]) {
+            accumulated += delta;
+            const cleaned = getStreamingVisibleText(accumulated);
+            expect(cleaned.startsWith(visible)).toBe(true);
+            visible += cleaned.slice(visible.length);
+        }
+
+        expect(visible).toBe("weekday");
+    });
+
+    it("buffers unmatched emphasis without deleting ordinary streaming stars", () => {
+        expect(getStreamingVisibleText("2 * 3")).toBe("2 * 3");
+        expect(getStreamingVisibleText("2*3")).toBe("2*3");
+        expect(getStreamingVisibleText("**unfinished")).toBe("");
+        expect(getStreamingVisibleText("**unfinished**")).toBe("unfinished");
+        expect(getStreamingVisibleText("Use `foo` and **unfinished"))
+            .toBe("Use `foo` and ");
+        expect(getStreamingVisibleText("Use `foo` and `bar` then **unfinished"))
+            .toBe("Use `foo` and `bar` then ");
     });
 
     it("creates one assistant message for a turn", () => {

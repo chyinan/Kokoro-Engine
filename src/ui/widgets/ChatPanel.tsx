@@ -20,17 +20,18 @@ import {
     shouldIgnoreLegacyChatError,
     shouldSynchronizeOnRuntimeChanged,
 } from "./chat-character-sync-core";
-import { getStreamingRevealText, hasActiveKokoroBubble, shouldRenderTypingIndicator } from "./chat-streaming-state";
+import { hasActiveKokoroBubble, shouldRenderTypingIndicator } from "./chat-streaming-state";
 import {
     canSubmitApproval,
     ensureTurnMessage,
     getApprovalErrorMessage,
     getApprovalRequestId,
+    getStreamingVisibleText,
     getToolEventStateUpdate,
     hasRenderableTurnContent,
     removeTurnMessages,
     stripStoredMarkup,
-    stripStreamingMarkup,
+    stripStreamingControlMarkup,
     updateApprovalToolLocally,
     updateTurnMessage,
     type ChatPanelMessage,
@@ -52,6 +53,12 @@ import {
     DEFAULT_EXTERNAL_PENDING_WATCHDOG_TIMEOUT_MS,
     DEFAULT_BACKEND_PREPARATION_WATCHDOG_TIMEOUT_MS,
 } from "./chat/chat-turn-lifecycle";
+import {
+    getChatMessageSnapshot,
+    getContinueFromCutoffIndex,
+    getExpectedTailMessageId,
+    matchesChatMessageSnapshot,
+} from "./chat/chat-continue-from";
 import { buildChatMessagesFromConversation } from "./chat-history";
 import {
     computeTargetScrollTop,
@@ -353,6 +360,22 @@ export default function ChatPanel({
     const isStreamingRef = useRef(false);
     const [isBusy, setIsBusy] = useState(false);
     const isBusyRef = useRef(false);
+    // All operations that can change conversation history share this lock.
+    // Backend CAS protects persisted rows; this lock also covers unpersisted
+    // in-memory messages and prevents stale slice indexes from racing sends,
+    // edits, regenerations, or clear-history.
+    const historyMutationInFlightRef = useRef<symbol | null>(null);
+    const acquireHistoryMutation = useCallback((): symbol | null => {
+        if (historyMutationInFlightRef.current !== null) return null;
+        const token = Symbol("history-mutation");
+        historyMutationInFlightRef.current = token;
+        return token;
+    }, []);
+    const releaseHistoryMutation = useCallback((token: symbol) => {
+        if (historyMutationInFlightRef.current === token) {
+            historyMutationInFlightRef.current = null;
+        }
+    }, []);
     const [isSwitchingConversation, setIsSwitchingConversation] = useState(false);
     const isSwitchingConversationRef = useRef(false);
     const ttsSpeakingRef = useRef(false);
@@ -1199,13 +1222,13 @@ export default function ChatPanel({
 
         if (sttAutoSend) {
             void (async () => {
+                let historyMutationToken = acquireHistoryMutation();
                 const isSessionCurrent = () =>
                     conversationGenerationRef.current === startGeneration &&
                     activeConversationIdRef.current === startConversationId &&
                     activeCharacterIdRef.current === startCharacterId;
 
-                // 忙碌态/禁用态降级保护：转为填充输入框草稿，绝不并发冲撞
-                if (interactionDisabled || isBusyRef.current) {
+                if (historyMutationToken === null) {
                     if (isSessionCurrent()) {
                         setInput(fullMessage);
                     } else {
@@ -1213,6 +1236,17 @@ export default function ChatPanel({
                     }
                     return;
                 }
+
+                try {
+                    // 忙碌态/禁用态降级保护：转为填充输入框草稿，绝不并发冲撞
+                    if (interactionDisabled || isBusyRef.current) {
+                        if (isSessionCurrent()) {
+                            setInput(fullMessage);
+                        } else {
+                            preserveSttDraft(fullMessage, trimmed);
+                        }
+                        return;
+                    }
 
                 // 确保所有事件监听器已就绪，避免因初始化时序差错过 chat-turn-start / finish 事件
                 if (listenersReadyPromiseRef.current) {
@@ -1278,17 +1312,26 @@ export default function ChatPanel({
 
                 const allowImageGen = isGeneratedBackgroundMode();
 
-                await processTurnStreamResult({
-                    clientRequestId,
-                    requestGeneration,
-                    streamChatPromise: streamChat({
+                    const streamChatPromise = streamChat({
                         message: fullMessage,
                         allow_image_gen: allowImageGen,
                         character_id: getActiveCharacterIdForRequest(),
                         client_request_id: clientRequestId,
                         conversation_id: startConversationId ?? undefined,
-                    }),
-                });
+                    });
+                    releaseHistoryMutation(historyMutationToken);
+                    historyMutationToken = null;
+
+                    await processTurnStreamResult({
+                        clientRequestId,
+                        requestGeneration,
+                        streamChatPromise,
+                    });
+                } finally {
+                    if (historyMutationToken !== null) {
+                        releaseHistoryMutation(historyMutationToken);
+                    }
+                }
             })();
         } else {
             // Fill input box with merged text for user review
@@ -1303,7 +1346,7 @@ export default function ChatPanel({
                 preserveSttDraft(fullMessage, trimmed);
             }
         }
-    }, [clearDraft, ensureMemoryModelReady, interactionDisabled, processTurnStreamResult, resetReveal, setInput, startStreaming, sttAutoSend]);
+    }, [acquireHistoryMutation, clearDraft, ensureMemoryModelReady, interactionDisabled, processTurnStreamResult, releaseHistoryMutation, resetReveal, setInput, startStreaming, sttAutoSend]);
 
     const { state: voiceState, volume: micVolume, partialText: sttPartialText, start: startVoice, stop: stopVoice } = useVoiceInput(handleTranscription);
 
@@ -1626,45 +1669,55 @@ export default function ChatPanel({
                             }).catch(() => {});
                             return;
                         }
-                        if (isBusyRef.current) {
+                        const historyMutationToken = acquireHistoryMutation();
+                        if (historyMutationToken === null || isBusyRef.current) {
                             if (event.payload?.client_request_id) {
                                 emit("pet-chat-rejected", {
                                     client_request_id: event.payload.client_request_id,
                                     reason: "busy",
                                 }).catch(() => {});
                             }
+                            if (historyMutationToken !== null) {
+                                releaseHistoryMutation(historyMutationToken);
+                            }
                             return;
                         }
-                        const text = event.payload.message;
-                        const clientRequestId = event.payload.client_request_id
-                            || `pet_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-                        latestClientRequestIdRef.current = clientRequestId;
-                        pendingTurnRequestRef.current = {
-                            clientRequestId,
-                            generation: conversationGenerationRef.current,
-                            conversationId: activeConversationIdRef.current,
-                            characterId: activeCharacterIdRef.current,
-                        };
-                        rawResponseRef.current = "";
-                        currentTurnRef.current = null;
-                        resetReveal();
-                        setMessages(prev => [...prev, { role: "user", text, clientRequestId }]);
-                        startStreaming();
-                        setIsThinking(true);
-                        userScrolledRef.current = false;
-
-                        startPendingExternalWatchdog(clientRequestId, (customReason) => {
-                            void handleExternalPendingWatchdogExpired(
+                        try {
+                            const text = event.payload.message;
+                            const clientRequestId = event.payload.client_request_id
+                                || `pet_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                            latestClientRequestIdRef.current = clientRequestId;
+                            pendingTurnRequestRef.current = {
                                 clientRequestId,
-                                customReason || "external_pending_turn_watchdog_timeout",
-                                true,
-                            );
-                        });
+                                generation: conversationGenerationRef.current,
+                                conversationId: activeConversationIdRef.current,
+                                characterId: activeCharacterIdRef.current,
+                            };
+                            rawResponseRef.current = "";
+                            currentTurnRef.current = null;
+                            resetReveal();
+                            setMessages(prev => [...prev, { role: "user", text, clientRequestId }]);
+                            startStreaming();
+                            setIsThinking(true);
+                            userScrolledRef.current = false;
 
-                        emit("pet-chat-accepted", {
-                            client_request_id: clientRequestId,
-                            conversation_id: activeConversationIdRef.current ?? undefined,
-                        }).catch(() => {});
+                            startPendingExternalWatchdog(clientRequestId, (customReason) => {
+                                void handleExternalPendingWatchdogExpired(
+                                    clientRequestId,
+                                    customReason || "external_pending_turn_watchdog_timeout",
+                                    true,
+                                );
+                            });
+
+                            emit("pet-chat-accepted", {
+                                client_request_id: clientRequestId,
+                                conversation_id: activeConversationIdRef.current ?? undefined,
+                            }).catch(() => {});
+                        } finally {
+                            // startStreaming synchronously raises isBusyRef; from this point the
+                            // normal busy guard protects the external turn until it completes.
+                            releaseHistoryMutation(historyMutationToken);
+                        }
                     }),
 
                     listen<{ client_request_id?: string; error?: string }>("pet-chat-failed", (event) => {
@@ -1806,6 +1859,7 @@ export default function ChatPanel({
                             clientRequestId: validation.matchedClientRequestId,
                             messageIndex: prevTurn?.messageIndex ?? null,
                             rawText: prevTurn?.rawText ?? "",
+                            streamingVisibleText: prevTurn?.streamingVisibleText ?? "",
                             visibleTextStarted: prevTurn?.visibleTextStarted ?? false,
                             translation: prevTurn?.translation,
                             translationPending: prevTurn?.translationPending ?? false,
@@ -1822,17 +1876,19 @@ export default function ChatPanel({
                         const turn = currentTurnRef.current;
                         if (!turn || turn.turnId !== turn_id || turn.generation !== conversationGenerationRef.current) return;
 
-                        const delta = stripStreamingMarkup(rawDelta);
+                        const delta = stripStreamingControlMarkup(rawDelta);
                         if (!delta) return;
 
                         turn.rawText += delta;
                         rawResponseRef.current = turn.rawText;
 
-                        const revealText = getStreamingRevealText({
-                            accumulatedText: turn.rawText,
-                            delta,
-                            hasVisibleTextStarted: turn.visibleTextStarted,
-                        });
+                        const cleanStreamingText = getStreamingVisibleText(turn.rawText);
+                        const previousStreamingText = turn.streamingVisibleText ?? "";
+                        if (!cleanStreamingText.startsWith(previousStreamingText)) {
+                            return;
+                        }
+                        const revealText = cleanStreamingText.slice(previousStreamingText.length);
+                        turn.streamingVisibleText = cleanStreamingText;
                         if (!revealText) return;
 
                         setIsThinking(false);
@@ -2137,15 +2193,18 @@ export default function ChatPanel({
                             && Boolean(window.speechSynthesis?.speaking);
                         if (aborted || isBusyRef.current || ttsSpeakingRef.current || audioPlayer.isPlaying || browserSpeaking) return;
                         void (async () => {
-                            if (!await ensureMemoryModelReady({ silent: true })) {
-                                return;
-                            }
+                            let historyMutationToken = acquireHistoryMutation();
+                            if (historyMutationToken === null) return;
+                            try {
+                                if (!await ensureMemoryModelReady({ silent: true })) {
+                                    return;
+                                }
 
-                            const stillBrowserSpeaking = typeof window !== "undefined"
-                                && Boolean(window.speechSynthesis?.speaking);
-                            if (aborted || isBusyRef.current || ttsSpeakingRef.current || audioPlayer.isPlaying || stillBrowserSpeaking) {
-                                return;
-                            }
+                                const stillBrowserSpeaking = typeof window !== "undefined"
+                                    && Boolean(window.speechSynthesis?.speaking);
+                                if (aborted || isBusyRef.current || ttsSpeakingRef.current || audioPlayer.isPlaying || stillBrowserSpeaking) {
+                                    return;
+                                }
 
                             console.log("[ChatPanel] Proactive trigger:", event.payload);
 
@@ -2168,27 +2227,36 @@ export default function ChatPanel({
                             rawResponseRef.current = "";
                             currentTurnRef.current = null;
 
-                            void processTurnStreamResult({
-                                clientRequestId,
-                                requestGeneration,
-                                streamChatPromise: streamChat({
+                                const streamChatPromise = streamChat({
                                     message: instruction,
                                     hidden: true,
                                     client_request_id: clientRequestId,
                                     character_id: getActiveCharacterIdForRequest(),
                                     conversation_id: activeConversationIdRef.current ?? undefined,
-                                }),
-                                onCatchError: () => {
-                                    // Remove the empty placeholder if one was created by delta handler
-                                    setMessages(prev => {
-                                        const last = prev[prev.length - 1];
-                                        if (last && last.role === "kokoro" && !last.text) {
-                                            return prev.slice(0, -1);
-                                        }
-                                        return prev;
-                                    });
-                                },
-                            });
+                                });
+                                releaseHistoryMutation(historyMutationToken);
+                                historyMutationToken = null;
+
+                                await processTurnStreamResult({
+                                    clientRequestId,
+                                    requestGeneration,
+                                    streamChatPromise,
+                                    onCatchError: () => {
+                                        // Remove the empty placeholder if one was created by delta handler
+                                        setMessages(prev => {
+                                            const last = prev[prev.length - 1];
+                                            if (last && last.role === "kokoro" && !last.text) {
+                                                return prev.slice(0, -1);
+                                            }
+                                            return prev;
+                                        });
+                                    },
+                                });
+                            } finally {
+                                if (historyMutationToken !== null) {
+                                    releaseHistoryMutation(historyMutationToken);
+                                }
+                            }
                         })();
                     }),
 
@@ -2203,45 +2271,53 @@ export default function ChatPanel({
                             }).catch(() => {});
                             return;
                         }
-                        if (isBusyRef.current) {
+                        const historyMutationToken = acquireHistoryMutation();
+                        if (historyMutationToken === null || isBusyRef.current) {
                             if (event.payload?.client_request_id) {
                                 emit("interaction-trigger-rejected", {
                                     client_request_id: event.payload.client_request_id,
                                     reason: "busy",
                                 }).catch(() => {});
                             }
+                            if (historyMutationToken !== null) {
+                                releaseHistoryMutation(historyMutationToken);
+                            }
                             return;
                         }
 
-                        const clientRequestId = event.payload?.client_request_id
-                            || `interaction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-                        latestClientRequestIdRef.current = clientRequestId;
-                        pendingTurnRequestRef.current = {
-                            clientRequestId,
-                            generation: conversationGenerationRef.current,
-                            conversationId: activeConversationIdRef.current,
-                            characterId: activeCharacterIdRef.current,
-                        };
-
-                        startStreaming();
-                        setIsThinking(true);
-                        userScrolledRef.current = false;
-                        resetReveal();
-                        rawResponseRef.current = "";
-                        currentTurnRef.current = null;
-
-                        startPendingExternalWatchdog(clientRequestId, (customReason) => {
-                            void handleExternalPendingWatchdogExpired(
+                        try {
+                            const clientRequestId = event.payload?.client_request_id
+                                || `interaction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                            latestClientRequestIdRef.current = clientRequestId;
+                            pendingTurnRequestRef.current = {
                                 clientRequestId,
-                                customReason || "external_pending_interaction_watchdog_timeout",
-                                false,
-                            );
-                        });
+                                generation: conversationGenerationRef.current,
+                                conversationId: activeConversationIdRef.current,
+                                characterId: activeCharacterIdRef.current,
+                            };
 
-                        emit("interaction-trigger-accepted", {
-                            client_request_id: clientRequestId,
-                            conversation_id: activeConversationIdRef.current ?? undefined,
-                        }).catch(() => {});
+                            startStreaming();
+                            setIsThinking(true);
+                            userScrolledRef.current = false;
+                            resetReveal();
+                            rawResponseRef.current = "";
+                            currentTurnRef.current = null;
+
+                            startPendingExternalWatchdog(clientRequestId, (customReason) => {
+                                void handleExternalPendingWatchdogExpired(
+                                    clientRequestId,
+                                    customReason || "external_pending_interaction_watchdog_timeout",
+                                    false,
+                                );
+                            });
+
+                            emit("interaction-trigger-accepted", {
+                                client_request_id: clientRequestId,
+                                conversation_id: activeConversationIdRef.current ?? undefined,
+                            }).catch(() => {});
+                        } finally {
+                            releaseHistoryMutation(historyMutationToken);
+                        }
                     }),
 
                     listen<{ client_request_id?: string; error?: string }>("interaction-trigger-failed", (event) => {
@@ -2308,83 +2384,105 @@ export default function ChatPanel({
     const handleSend = async (e?: React.FormEvent) => {
         e?.preventDefault();
         if (interactionDisabled) return;
+        let historyMutationToken = acquireHistoryMutation();
+        if (historyMutationToken === null) return;
 
-        // 确保所有事件监听器已就绪，避免因初始化时序差错过 chat-turn-start / finish 事件
-        if (listenersReadyPromiseRef.current) {
-            await Promise.race([
-                listenersReadyPromiseRef.current,
-                new Promise(resolve => setTimeout(resolve, 1500)),
-            ]);
-        }
+        try {
+            const startGeneration = conversationGenerationRef.current;
+            const startConversationId = activeConversationIdRef.current;
+            const startCharacterId = activeCharacterIdRef.current;
+            const isSessionCurrent = () =>
+                conversationGenerationRef.current === startGeneration
+                && activeConversationIdRef.current === startConversationId
+                && activeCharacterIdRef.current === startCharacterId;
 
-        const trimmed = input.trim();
-        const messageImages = visionEnabled ? [...pendingImages] : [];
-        if ((!trimmed && messageImages.length === 0) || isBusy || isBusyRef.current) return;
-        if (!await ensureMemoryModelReady()) return;
+            // 确保所有事件监听器已就绪，避免因初始化时序差错过 chat-turn-start / finish 事件
+            if (listenersReadyPromiseRef.current) {
+                await Promise.race([
+                    listenersReadyPromiseRef.current,
+                    new Promise(resolve => setTimeout(resolve, 1500)),
+                ]);
+            }
+            if (!isSessionCurrent()) return;
 
-        const requestGeneration = conversationGenerationRef.current;
-        const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        latestClientRequestIdRef.current = clientRequestId;
-        pendingTurnRequestRef.current = {
-            clientRequestId,
-            generation: requestGeneration,
-            conversationId: activeConversationIdRef.current,
-            characterId: activeCharacterIdRef.current,
-        };
-        setMessages(prev => [...prev, {
-            role: "user",
-            text: trimmed,
-            images: messageImages.length > 0 ? messageImages : undefined,
-            clientRequestId,
-        }]);
-        const cameraFrame = visionEnabled ? getLatestCameraFrame() : null;
-        const imagesToSend = cameraFrame ? [...messageImages, cameraFrame] : messageImages;
-        clearDraft();
-        startStreaming();
-        setIsThinking(true);
-        userScrolledRef.current = false;
-        savedScrollSnapshotRef.current = null;
-        // Lock out handleScroll until deferredMessages DOM update settles (~200ms)
-        isProgrammaticScrollRef.current = true;
-        setTimeout(() => { isProgrammaticScrollRef.current = false; }, 200);
-        resetReveal();
-        rawResponseRef.current = "";
-        currentTurnRef.current = null;
+            const trimmed = input.trim();
+            const messageImages = visionEnabled ? [...pendingImages] : [];
+            if ((!trimmed && messageImages.length === 0) || isBusy || isBusyRef.current) return;
+            if (!await ensureMemoryModelReady()) return;
+            if (!isSessionCurrent()) return;
 
-        const allowImageGen = isGeneratedBackgroundMode();
+            const requestGeneration = startGeneration;
+            const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            latestClientRequestIdRef.current = clientRequestId;
+            pendingTurnRequestRef.current = {
+                clientRequestId,
+                generation: requestGeneration,
+                conversationId: startConversationId,
+                characterId: startCharacterId,
+            };
+            setMessages(prev => [...prev, {
+                role: "user",
+                text: trimmed,
+                images: messageImages.length > 0 ? messageImages : undefined,
+                clientRequestId,
+            }]);
+            const cameraFrame = visionEnabled ? getLatestCameraFrame() : null;
+            const imagesToSend = cameraFrame ? [...messageImages, cameraFrame] : messageImages;
+            clearDraft();
+            startStreaming();
+            setIsThinking(true);
+            userScrolledRef.current = false;
+            savedScrollSnapshotRef.current = null;
+            // Lock out handleScroll until deferredMessages DOM update settles (~200ms)
+            isProgrammaticScrollRef.current = true;
+            setTimeout(() => { isProgrammaticScrollRef.current = false; }, 200);
+            resetReveal();
+            rawResponseRef.current = "";
+            currentTurnRef.current = null;
 
-        await processTurnStreamResult({
-            clientRequestId,
-            requestGeneration,
-            streamChatPromise: streamChat({
+            const allowImageGen = isGeneratedBackgroundMode();
+
+            const streamChatPromise = streamChat({
                 message: trimmed || "(image attached)",
                 allow_image_gen: allowImageGen,
                 images: imagesToSend.length > 0 ? imagesToSend : undefined,
                 character_id: getActiveCharacterIdForRequest(),
                 client_request_id: clientRequestId,
-                conversation_id: activeConversationIdRef.current ?? undefined,
-            }),
-            onCatchError: () => {
-                // Save failed request for retry
-                lastFailedRequestRef.current = { message: trimmed || "(image attached)", images: imagesToSend.length > 0 ? imagesToSend : undefined, allowImageGen };
+                conversation_id: startConversationId ?? undefined,
+            });
+            releaseHistoryMutation(historyMutationToken);
+            historyMutationToken = null;
 
-                setTimeout(() => {
-                    if (!shouldAppendDelayedChatError(
-                        clientRequestId,
-                        conversationGenerationRef.current,
-                        requestGeneration,
-                        latestClientRequestIdRef.current,
-                    )) {
-                        return;
-                    }
-                    setMessages(prev => [...prev, {
-                        role: "kokoro",
-                        text: t("chat.errors.connection_error"),
-                        isError: true,
-                    }]);
-                }, 500);
-            },
-        });
+            await processTurnStreamResult({
+                clientRequestId,
+                requestGeneration,
+                streamChatPromise,
+                onCatchError: () => {
+                    // Save failed request for retry
+                    lastFailedRequestRef.current = { message: trimmed || "(image attached)", images: imagesToSend.length > 0 ? imagesToSend : undefined, allowImageGen };
+
+                    setTimeout(() => {
+                        if (!shouldAppendDelayedChatError(
+                            clientRequestId,
+                            conversationGenerationRef.current,
+                            requestGeneration,
+                            latestClientRequestIdRef.current,
+                        )) {
+                            return;
+                        }
+                        setMessages(prev => [...prev, {
+                            role: "kokoro",
+                            text: t("chat.errors.connection_error"),
+                            isError: true,
+                        }]);
+                    }, 500);
+                },
+            });
+        } finally {
+            if (historyMutationToken !== null) {
+                releaseHistoryMutation(historyMutationToken);
+            }
+        }
     };
 
     // ── Image upload ───────────────────────────────────────
@@ -2549,13 +2647,15 @@ export default function ChatPanel({
 
     // ── Clear history ──────────────────────────────────────
     const handleClearClick = () => {
-        if (messages.length === 0 || isBusy || isStreaming) return;
+        if (messages.length === 0 || isBusy || isStreaming || historyMutationInFlightRef.current !== null) return;
         setShowClearConfirm(true);
     };
 
     const executeClear = async () => {
         setShowClearConfirm(false);
         if (isBusyRef.current) return;
+        const historyMutationToken = acquireHistoryMutation();
+        if (historyMutationToken === null) return;
         setIsBusy(true);
         isBusyRef.current = true;
         try {
@@ -2601,6 +2701,7 @@ export default function ChatPanel({
         } finally {
             isBusyRef.current = false;
             setIsBusy(false);
+            releaseHistoryMutation(historyMutationToken);
         }
     };
 
@@ -2620,6 +2721,8 @@ export default function ChatPanel({
 
         const targetMsg = messagesRef.current[globalIndex];
         if (!targetMsg) return;
+        const historyMutationToken = acquireHistoryMutation();
+        if (historyMutationToken === null) return;
 
         const previousText = targetMsg.text;
         const targetId = targetMsg.id;
@@ -2721,11 +2824,17 @@ export default function ChatPanel({
                     console.warn("[ChatPanel] Background re-synchronization after edit failure failed:", err);
                 });
             }
+        } finally {
+            releaseHistoryMutation(historyMutationToken);
         }
-    }, [activeCharacterId, t]);
+    }, [acquireHistoryMutation, activeCharacterId, releaseHistoryMutation, t]);
 
     const onRegenerate = useCallback(async (globalIndex: number) => {
         if (isBusyRef.current || isStreamingRef.current) return;
+        let historyMutationToken = acquireHistoryMutation();
+        if (historyMutationToken === null) return;
+
+        try {
 
         // 第一次异步操作前捕获会话代次与会话 ID：等待监听器/删除期间若用户切换会话，
         // 后续校验将立即中止，防止删除与重新生成请求作用到新会话上
@@ -2739,6 +2848,8 @@ export default function ChatPanel({
         );
 
         const msgs = messagesRef.current;
+        const messageSnapshot = getChatMessageSnapshot(msgs);
+        const expectedTailMessageId = getExpectedTailMessageId(msgs);
         const lastUserIndex = msgs.slice(0, globalIndex).reverse().findIndex(m => m.role === "user");
         if (lastUserIndex === -1) return;
         const userMsgIndex = globalIndex - 1 - lastUserIndex;
@@ -2759,7 +2870,7 @@ export default function ChatPanel({
 
         try {
             // 先删除数据库，再更新 UI，避免竞态条件
-            await deleteLastMessages(messagesToDelete, startConversationId);
+            await deleteLastMessages(messagesToDelete, startConversationId, expectedTailMessageId);
         } catch (e) {
             console.error("[ChatPanel] Failed to delete messages:", e);
             if (!isSessionCurrent()) return;
@@ -2776,7 +2887,20 @@ export default function ChatPanel({
         // 删除期间会话可能已切换：立即中止，不截断新会话 UI、不发起请求
         if (!isSessionCurrent()) return;
 
-        setMessages(prev => prev.slice(0, globalIndex));
+        if (!matchesChatMessageSnapshot(messagesRef.current, messageSnapshot)) {
+            console.warn("[ChatPanel] Conversation changed during regenerate deletion; resynchronizing instead of slicing stale UI");
+            if (startConversationId) {
+                void resyncConversationMessages({
+                    conversationId: startConversationId,
+                    startGeneration,
+                    clientRequestId: `resync_regenerate_snapshot_${Date.now()}`,
+                });
+            }
+            return;
+        }
+        const truncatedMessages = messagesRef.current.slice(0, globalIndex);
+        messagesRef.current = truncatedMessages;
+        setMessages(truncatedMessages);
 
         // 使用入口捕获的会话代次（上方校验已保证与当前一致），恢复下游 stale-turn 防护的效力
         const requestGeneration = startGeneration;
@@ -2798,34 +2922,52 @@ export default function ChatPanel({
 
         const allowImageGen = isGeneratedBackgroundMode();
 
-        void processTurnStreamResult({
+        const streamChatPromise = streamChat({
+            message: userMsg.text,
+            images: userMsg.images,
+            allow_image_gen: allowImageGen,
+            character_id: getActiveCharacterIdForRequest(),
+            client_request_id: clientRequestId,
+            regenerate: true,
+            conversation_id: activeConversationIdRef.current ?? undefined,
+        });
+        releaseHistoryMutation(historyMutationToken);
+        historyMutationToken = null;
+
+        await processTurnStreamResult({
             clientRequestId,
             requestGeneration,
-            streamChatPromise: streamChat({
-                message: userMsg.text,
-                images: userMsg.images,
-                allow_image_gen: allowImageGen,
-                character_id: getActiveCharacterIdForRequest(),
-                client_request_id: clientRequestId,
-                regenerate: true,
-                conversation_id: activeConversationIdRef.current ?? undefined,
-            }),
+            streamChatPromise,
         });
-    }, [ensureMemoryModelReady, processTurnStreamResult, resetReveal, startStreaming, t]);
+        } finally {
+            if (historyMutationToken !== null) {
+                releaseHistoryMutation(historyMutationToken);
+            }
+        }
+    }, [acquireHistoryMutation, ensureMemoryModelReady, processTurnStreamResult, releaseHistoryMutation, resetReveal, startStreaming, t]);
 
     const onContinueFrom = useCallback(async (globalIndex: number) => {
         if (isBusyRef.current || isStreamingRef.current) return;
+        const historyMutationToken = acquireHistoryMutation();
+        if (historyMutationToken === null) return;
+
+        try {
+
+        const msgs = messagesRef.current;
+        const cutoffIndex = getContinueFromCutoffIndex(msgs, globalIndex);
+        if (cutoffIndex === null) return;
 
         // 第一次异步操作前捕获会话代次与会话 ID，防止删除期间会话切换导致截断作用到新会话
         const startGeneration = conversationGenerationRef.current;
         const startConversationId = activeConversationIdRef.current;
+        const messageSnapshot = getChatMessageSnapshot(msgs);
+        const expectedTailMessageId = getExpectedTailMessageId(msgs);
 
-        const msgs = messagesRef.current;
-        const messagesToDelete = msgs.length - globalIndex - 1;
+        const messagesToDelete = msgs.length - cutoffIndex;
         if (messagesToDelete > 0) {
             try {
                 // 先删除数据库，再更新 UI，避免竞态条件
-                await deleteLastMessages(messagesToDelete, startConversationId);
+                await deleteLastMessages(messagesToDelete, startConversationId, expectedTailMessageId);
                 // 删除期间会话已切换：立即中止，不截断新会话 UI
                 if (!isChatSessionCurrent(
                     startGeneration,
@@ -2835,7 +2977,20 @@ export default function ChatPanel({
                 )) {
                     return;
                 }
-                setMessages(prev => prev.slice(0, globalIndex + 1));
+                if (!matchesChatMessageSnapshot(messagesRef.current, messageSnapshot)) {
+                    console.warn("[ChatPanel] Conversation changed during continue deletion; resynchronizing instead of slicing stale UI");
+                    if (startConversationId) {
+                        void resyncConversationMessages({
+                            conversationId: startConversationId,
+                            startGeneration,
+                            clientRequestId: `resync_continue_snapshot_${Date.now()}`,
+                        });
+                    }
+                    return;
+                }
+                const truncatedMessages = messagesRef.current.slice(0, cutoffIndex);
+                messagesRef.current = truncatedMessages;
+                setMessages(truncatedMessages);
             } catch (e) {
                 console.error("[ChatPanel] Failed to delete messages:", e);
                 if (!isChatSessionCurrent(
@@ -2856,7 +3011,10 @@ export default function ChatPanel({
                 }
             }
         }
-    }, [resyncConversationMessages, setError, t]);
+        } finally {
+            releaseHistoryMutation(historyMutationToken);
+        }
+    }, [acquireHistoryMutation, releaseHistoryMutation, resyncConversationMessages, setError, t]);
 
     const onApproveTool = useCallback(async (globalIndex: number, tool: ToolTraceItem) => {
         if (!canSubmitApproval(tool)) {
