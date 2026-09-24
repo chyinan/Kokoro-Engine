@@ -1,3 +1,4 @@
+// pattern: Imperative Shell
 use super::config::ProviderConfig;
 use super::interface::{
     Gender, ProviderCapabilities, TtsEngine, TtsError, TtsParams, TtsProvider, VoiceProfile,
@@ -40,8 +41,7 @@ struct GPTSoVITSRequest {
     ref_audio_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_lang: Option<String>,
+    prompt_lang: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     text_split_method: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,6 +51,19 @@ struct GPTSoVITSRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     speed_factor: f32,
+}
+
+fn non_empty_language(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|language| !language.is_empty())
+        .map(String::from)
+}
+
+fn resolve_prompt_lang(request_lang: Option<&str>, configured_lang: Option<&str>) -> String {
+    non_empty_language(request_lang)
+        .or_else(|| non_empty_language(configured_lang))
+        .unwrap_or_else(|| "zh".to_string())
 }
 
 impl LocalGPTSoVITSProvider {
@@ -90,11 +103,8 @@ impl LocalGPTSoVITSProvider {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let default_prompt_lang = config
-            .extra
-            .get("prompt_lang")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let default_prompt_lang =
+            non_empty_language(config.extra.get("prompt_lang").and_then(|v| v.as_str()));
 
         let default_text_lang = config
             .extra
@@ -275,13 +285,13 @@ impl TtsProvider for LocalGPTSoVITSProvider {
             .map(String::from)
             .or_else(|| self.default_prompt_text.clone());
 
-        let prompt_lang = params
+        let request_prompt_lang = params
             .extra_params
             .as_ref()
             .and_then(|p| p.get("prompt_lang"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| self.default_prompt_lang.clone());
+            .and_then(|v| v.as_str());
+        let prompt_lang =
+            resolve_prompt_lang(request_prompt_lang, self.default_prompt_lang.as_deref());
 
         let text_lang = params
             .extra_params
@@ -333,5 +343,49 @@ impl TtsProvider for LocalGPTSoVITSProvider {
             .await
             .map_err(|e| TtsError::SynthesisFailed(format!("GPT-SoVITS bytes error: {}", e)))?;
         Ok(bytes.to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_prompt_lang, GPTSoVITSRequest};
+
+    #[test]
+    fn missing_prompt_language_defaults_to_chinese() {
+        assert_eq!(resolve_prompt_lang(None, None), "zh");
+    }
+
+    #[test]
+    fn blank_request_language_falls_back_to_configured_language() {
+        assert_eq!(resolve_prompt_lang(Some("  "), Some("en")), "en");
+    }
+
+    #[test]
+    fn request_language_overrides_configured_language() {
+        assert_eq!(resolve_prompt_lang(Some(" ja "), Some("en")), "ja");
+    }
+
+    #[test]
+    fn blank_configured_language_defaults_to_chinese() {
+        assert_eq!(resolve_prompt_lang(None, Some("  ")), "zh");
+    }
+
+    #[test]
+    fn request_body_always_serializes_prompt_language() {
+        let request = GPTSoVITSRequest {
+            text: "hello".to_string(),
+            text_lang: "en".to_string(),
+            ref_audio_path: None,
+            prompt_text: None,
+            prompt_lang: resolve_prompt_lang(None, None),
+            text_split_method: None,
+            top_k: None,
+            top_p: None,
+            temperature: None,
+            speed_factor: 1.0,
+        };
+
+        let serialized = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(serialized["prompt_lang"], "zh");
     }
 }
