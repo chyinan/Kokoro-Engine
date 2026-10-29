@@ -49,6 +49,7 @@ enum WriterCommand {
 struct RealtimeStreamState {
     reader: RealtimeReader,
     cancel: watch::Receiver<bool>,
+    _cancel_guard: Option<watch::Sender<bool>>,
     request_id: String,
     connection_id: String,
     response_id: String,
@@ -179,7 +180,7 @@ impl OpenAIRealtimeTtsProvider {
             let connect = tokio::time::timeout(CONNECTION_TIMEOUT, connect_async(request));
             let result = tokio::select! {
                 changed = cancel.changed() => {
-                    if changed.is_ok() && *cancel.borrow() {
+                    if changed.is_err() || *cancel.borrow() {
                         return Err(TtsError::Cancelled);
                     }
                     continue;
@@ -208,7 +209,7 @@ impl OpenAIRealtimeTtsProvider {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(200)) => {}
                 changed = cancel.changed() => {
-                    if changed.is_ok() && *cancel.borrow() {
+                    if changed.is_err() || *cancel.borrow() {
                         return Err(TtsError::Cancelled);
                     }
                 }
@@ -226,6 +227,7 @@ impl OpenAIRealtimeTtsProvider {
         params: TtsParams,
         request_id: &str,
         mut cancel: watch::Receiver<bool>,
+        cancel_guard: Option<watch::Sender<bool>>,
     ) -> Result<TtsAudioStream, TtsError> {
         if self.api_key.trim().is_empty() {
             return Err(TtsError::ConfigError(
@@ -315,6 +317,7 @@ impl OpenAIRealtimeTtsProvider {
         let stream_state = RealtimeStreamState {
             reader,
             cancel,
+            _cancel_guard: cancel_guard,
             request_id: request_id.to_string(),
             connection_id,
             response_id,
@@ -338,7 +341,7 @@ impl OpenAIRealtimeTtsProvider {
     ) -> Result<Vec<u8>, TtsError> {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let mut stream = self
-            .open_stream(text, params, request_id, cancel_rx)
+            .open_stream(text, params, request_id, cancel_rx, None)
             .await?;
         let mut audio = Vec::new();
         while let Some(chunk) = stream.next().await {
@@ -433,11 +436,13 @@ impl TtsProvider for OpenAIRealtimeTtsProvider {
         text: &str,
         params: TtsParams,
     ) -> Result<TtsAudioStream, TtsError> {
+        let (cancel_tx, cancel_rx) = watch::channel(false);
         self.open_stream(
             text,
             params,
             &Uuid::new_v4().to_string(),
-            watch::channel(false).1,
+            cancel_rx,
+            Some(cancel_tx),
         )
         .await
     }
@@ -449,7 +454,8 @@ impl TtsProvider for OpenAIRealtimeTtsProvider {
         request_id: &str,
         cancel: watch::Receiver<bool>,
     ) -> Result<TtsAudioStream, TtsError> {
-        self.open_stream(text, params, request_id, cancel).await
+        self.open_stream(text, params, request_id, cancel, None)
+            .await
     }
 
     async fn cancel_request(&self, request_id: &str) {
@@ -581,7 +587,7 @@ async fn next_socket_event(
                 return Err(TtsError::Timeout("timed out waiting for a Realtime server event".to_string()));
             }
             changed = cancel.changed() => {
-                if changed.is_ok() && *cancel.borrow() {
+                if changed.is_err() || *cancel.borrow() {
                     return Err(TtsError::Cancelled);
                 }
             }
@@ -621,7 +627,7 @@ async fn next_reader_event(
                 return Err(TtsError::Timeout("Realtime audio stream timed out".to_string()));
             }
             changed = cancel.changed() => {
-                if changed.is_ok() && *cancel.borrow() {
+                if changed.is_err() || *cancel.borrow() {
                     return Err(TtsError::Cancelled);
                 }
             }
@@ -1137,12 +1143,7 @@ mod tests {
             });
 
         let mut stream = provider
-            .synthesize_stream_for_request(
-                text,
-                TtsParams::default(),
-                "req-success",
-                watch::channel(false).1,
-            )
+            .synthesize_stream(text, TtsParams::default())
             .await
             .unwrap();
         let mut chunks = Vec::new();
@@ -1180,13 +1181,9 @@ mod tests {
             .await;
         });
 
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
         let mut stream = provider
-            .synthesize_stream_for_request(
-                text,
-                TtsParams::default(),
-                "req-error",
-                watch::channel(false).1,
-            )
+            .synthesize_stream_for_request(text, TtsParams::default(), "req-error", cancel_rx)
             .await
             .unwrap();
         let error = stream.next().await.unwrap().unwrap_err();
@@ -1215,13 +1212,9 @@ mod tests {
             .await;
         });
 
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
         let mut stream = provider
-            .synthesize_stream_for_request(
-                text,
-                TtsParams::default(),
-                "req-incomplete",
-                watch::channel(false).1,
-            )
+            .synthesize_stream_for_request(text, TtsParams::default(), "req-incomplete", cancel_rx)
             .await
             .unwrap();
         let error = stream.next().await.unwrap().unwrap_err();
@@ -1246,13 +1239,9 @@ mod tests {
             ));
         });
 
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
         let stream = provider
-            .synthesize_stream_for_request(
-                text,
-                TtsParams::default(),
-                "req-cancel",
-                watch::channel(false).1,
-            )
+            .synthesize_stream_for_request(text, TtsParams::default(), "req-cancel", cancel_rx)
             .await
             .unwrap();
         provider.cancel_request("req-cancel").await;
@@ -1281,12 +1270,13 @@ mod tests {
                 .unwrap();
         });
 
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
         let result = provider
             .synthesize_stream_for_request(
                 "This gateway does not support Realtime.",
                 TtsParams::default(),
                 "req-gateway",
-                watch::channel(false).1,
+                cancel_rx,
             )
             .await;
         let error = match result {

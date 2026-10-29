@@ -452,6 +452,7 @@ impl TtsService {
         'sentences: while let Some(result) = sentences.next().await {
             if *cancel.borrow() {
                 cancelled = true;
+                provider.cancel_request(&request_id).await;
                 break;
             }
             match result {
@@ -470,14 +471,18 @@ impl TtsService {
                                     Some(Ok(chunk)) => {
                                         full_audio.extend_from_slice(&chunk.data);
                                         sequence += 1;
-                                        app.emit("tts:audio", TtsAudioEvent {
+                                        if let Err(error) = app.emit("tts:audio", TtsAudioEvent {
                                             request_id: request_id.clone(),
                                             sentence_id,
                                             sequence,
                                             response_id: chunk.response_id,
                                             format: chunk.format.or_else(|| provider_output_format.clone()),
                                             data: chunk.data,
-                                        }).map_err(|error| error.to_string())?;
+                                        }) {
+                                            synthesis_error = Some(format!("failed to deliver TTS audio: {error}"));
+                                            provider.cancel_request(&request_id).await;
+                                            break;
+                                        }
                                     }
                                     Some(Err(TtsError::Cancelled)) => {
                                         cancelled = true;
