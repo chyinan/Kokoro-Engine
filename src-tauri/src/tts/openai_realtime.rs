@@ -766,7 +766,7 @@ async fn next_realtime_chunk(
                 "completed" if state.received_audio_bytes == 0 => Some(TtsError::SynthesisFailed(
                     "Realtime response completed without audio".to_string(),
                 )),
-                "completed" if state.received_audio_bytes % 2 != 0 => {
+                "completed" if !state.received_audio_bytes.is_multiple_of(2) => {
                     Some(TtsError::SynthesisFailed(
                         "Realtime PCM stream ended with an incomplete 16-bit sample".to_string(),
                     ))

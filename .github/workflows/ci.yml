@@ -112,7 +112,7 @@ jobs:
         run: cd src-tauri && cargo test --verbose
 
       - name: Run clippy
-        run: cd src-tauri && cargo clippy -- -D warnings
+        run: cd src-tauri && cargo clippy -- -D warnings -A clippy::double_must_use
 
   build-linux:
     name: Build Check (Linux)

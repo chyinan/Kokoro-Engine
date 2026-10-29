@@ -284,7 +284,7 @@ impl TtsService {
         let cancellation = {
             let active = self.active_request.lock().await;
             active.as_ref().and_then(|current| {
-                if request_id.map_or(true, |id| id == current.request_id) {
+                if request_id.is_none_or(|id| id == current.request_id) {
                     Some(current.cancel.clone())
                 } else {
                     None
@@ -779,7 +779,7 @@ fn cache_variant_hash(provider: &dyn TtsProvider, params: &TtsParams) -> Option<
 /// The non-streaming helper is used by file-oriented integrations. Keep their
 /// audio contract recognizable without changing desktop PCM streaming.
 fn wrap_pcm_s16le_as_wav(pcm: &[u8], sample_rate: u32, channels: u8) -> Result<Vec<u8>, String> {
-    if sample_rate == 0 || channels == 0 || pcm.len() % (usize::from(channels) * 2) != 0 {
+    if sample_rate == 0 || channels == 0 || !pcm.len().is_multiple_of(usize::from(channels) * 2) {
         return Err("Realtime PCM audio has an invalid sample format".to_string());
     }
     let data_len =
