@@ -315,8 +315,11 @@
                 "voice_no_match": "No matching voices",
                 "voice_count_hint": "{{count}} voices loaded. Use search in the dropdown.",
                 "speed": "Speed",
+                "realtime_speed": "Voice Speed (0.25–1.5×)",
                 "pitch": "Pitch",
-                "test": "▶ Test Voice"
+                "test": "▶ Test Voice",
+                "stop_test": "Stop",
+                "ai_generated": "AI-generated speech via OpenAI Realtime. Wording may vary because the model generates audio."
             },
             "manage_providers": {
                 "title": "MANAGE PROVIDERS",
@@ -331,6 +334,8 @@
             },
             "fields": {
                 "api_key": "API Key",
+                "realtime_api_key_hint": "Leave blank to use OPENAI_API_KEY from the environment.",
+                "realtime_endpoint_hint": "This provider requires a Realtime WebSocket gateway; a Speech API-only gateway will fail and will not fall back.",
                 "server_url": "Server URL",
                 "base_url": "Base URL (Optional)",
                 "ref_audio": {
@@ -353,6 +358,9 @@
                 "model_placeholder": "Select or type...",
                 "default_hint": "Leave empty to use server default.",
                 "model_id": "Model ID",
+                "reading_style": "Optional Reading Style",
+                "reading_style_placeholder": "For example: calm and measured delivery",
+                "realtime_style_hint": "Affects vocal delivery only; the built-in instruction still asks the model to read the supplied text without answering or adding content.",
                 "model_path": "Model Path / Config",
                 "project_path": "OmniVoice Project Path",
                 "python_executable": "Python Executable",

@@ -6,6 +6,7 @@ use tauri::{command, AppHandle, State};
 #[derive(serde::Deserialize)]
 pub struct TtsConfig {
     pub provider_id: Option<String>,
+    pub request_id: Option<String>,
     pub voice: Option<String>,
     pub speed: Option<f32>,
     pub pitch: Option<f32>,
@@ -29,9 +30,27 @@ pub async fn synthesize(
     };
 
     state
-        .speak(app, text, config.provider_id, Some(params))
+        .speak(
+            app,
+            text,
+            config.provider_id,
+            Some(params),
+            config
+                .request_id
+                .filter(|request_id| !request_id.trim().is_empty())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        )
         .await
         .map_err(KokoroError::Tts)
+}
+
+#[command]
+pub async fn cancel_tts(
+    state: State<'_, TtsService>,
+    request_id: Option<String>,
+) -> Result<(), KokoroError> {
+    state.cancel_request(request_id.as_deref()).await;
+    Ok(())
 }
 
 #[command]

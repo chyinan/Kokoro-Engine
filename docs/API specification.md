@@ -290,6 +290,7 @@ interface LlmConfig {
 
 ```ts
 interface TtsConfig {
+  request_id?: string;
   provider_id?: string;
   api_key?: string;
   endpoint?: string;
@@ -299,6 +300,13 @@ interface TtsConfig {
   pitch?: number;
   emotion?: string;
 }
+```
+
+```ts
+type TtsAudioFormat =
+  | { codec: "mp3" }
+  | { codec: "wav" }
+  | { codec: "pcm_s16_le"; sample_rate: number; channels: number };
 ```
 
 ### `TtsSystemConfig`
@@ -886,6 +894,7 @@ The tables below list the current IPC commands. The `Bridge` column shows whethe
 | Command | Bridge | Request | Response | Notes |
 |---|---|---|---|---|
 | `synthesize` | `synthesize` | `text: string`, `config: TtsConfig` | `void` | Streams audio through TTS events. |
+| `cancel_tts` | `cancelTts` | `requestId?: string \| null` | `void` | Cancels the matching active TTS request and remote response. |
 | `list_tts_providers` | `listTtsProviders` | none | `ProviderStatus[]` | Lists configured TTS providers. |
 | `list_tts_voices` | `listTtsVoices` | none | `VoiceProfile[]` | Lists available voices. |
 | `get_tts_provider_status` | `getTtsProviderStatus` | `providerId: string` | `ProviderStatus \| null` | Returns one provider's status. |
@@ -1143,10 +1152,12 @@ These commands exist in `src-tauri/src/lib.rs`, but `src/lib/kokoro-bridge.ts` d
 
 | Event | Payload | Emitted by | Bridge wrapper |
 |---|---|---|---|
-| `tts:start` | `{ text: string }` | `tts/manager.rs` | none |
-| `tts:audio` | `{ data: number[] }` | `tts/manager.rs` | none |
-| `tts:end` | `{ text: string }` | `tts/manager.rs` | none |
-| `tts:browser-delegate` | `{ text: string; voice?: string; speed?: number; pitch?: number }` | `tts/manager.rs` | none |
+| `tts:start` | `{ request_id: string; text: string }` | `tts/manager.rs` | none |
+| `tts:audio` | `{ request_id: string; sentence_id: number; sequence: number; response_id?: string; format?: TtsAudioFormat; data: number[] }` | `tts/manager.rs` | none |
+| `tts:end` | `{ request_id: string; text: string; status: "completed" \| "cancelled" \| "error" }` | `tts/manager.rs` | none |
+| `tts:error` | `{ request_id: string; error: string }` | `tts/manager.rs` | none |
+| `tts:browser-delegate` | `{ request_id: string; sentence_id: number; text: string; voice?: string; speed?: number; pitch?: number }` | `tts/manager.rs` | none |
+| `tts:playback-error` | `{ request_id: string; error: string }` | `core/services/tts-service.ts` | `onTtsPlaybackError` |
 
 ### Vision events
 

@@ -25,6 +25,16 @@
             "default_voice": "alloy"
         },
         {
+            "id": "openai_realtime",
+            "provider_type": "openai_realtime",
+            "enabled": false,
+            "api_key_env": "OPENAI_API_KEY",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-realtime-2.1-mini",
+            "default_voice": "marin",
+            "extra": {}
+        },
+        {
             "id": "vits_local",
             "provider_type": "local_vits",
             "enabled": false,

@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 type SetupResult = {
   decodeAudioDataMock: ReturnType<typeof vi.fn>;
   isTypeSupportedMock: ReturnType<typeof vi.fn>;
-  sources: AudioBufferSourceNode[];
+  sources: Array<AudioBufferSourceNode & { start: ReturnType<typeof vi.fn> }>;
+  buffers: Array<AudioBuffer & { channelData: Array<Float32Array> }>;
 };
 
 function setupAudioEnvironment(): SetupResult {
@@ -12,7 +13,8 @@ function setupAudioEnvironment(): SetupResult {
 
   const decodeAudioDataMock = vi.fn().mockResolvedValue({ duration: 1 });
   const isTypeSupportedMock = vi.fn().mockReturnValue(true);
-  const sources: AudioBufferSourceNode[] = [];
+  const sources: Array<AudioBufferSourceNode & { start: ReturnType<typeof vi.fn> }> = [];
+  const buffers: Array<AudioBuffer & { channelData: Array<Float32Array> }> = [];
 
   const analyser = {
     fftSize: 0,
@@ -40,6 +42,7 @@ function setupAudioEnvironment(): SetupResult {
   class MockAudioContext {
     state: AudioContextState = "running";
     sampleRate = 48000;
+    currentTime = 0;
     destination = {};
 
     createAnalyser() {
@@ -61,9 +64,23 @@ function setupAudioEnvironment(): SetupResult {
         start: vi.fn(),
         stop: vi.fn(),
         onended: null,
-      } as unknown as AudioBufferSourceNode;
+      } as unknown as AudioBufferSourceNode & { start: ReturnType<typeof vi.fn> };
       sources.push(source);
       return source;
+    }
+
+    createBuffer(channels: number, length: number, sampleRate: number) {
+      const channelData = Array.from({ length: channels }, () => new Float32Array(length));
+      const buffer = {
+        numberOfChannels: channels,
+        length,
+        sampleRate,
+        duration: length / sampleRate,
+        channelData,
+        getChannelData: (channel: number) => channelData[channel],
+      } as unknown as AudioBuffer & { channelData: Array<Float32Array> };
+      buffers.push(buffer);
+      return buffer;
     }
 
     resume = vi.fn().mockResolvedValue(undefined);
@@ -99,6 +116,7 @@ function setupAudioEnvironment(): SetupResult {
     decodeAudioDataMock,
     isTypeSupportedMock,
     sources,
+    buffers,
   };
 }
 
@@ -236,5 +254,45 @@ describe("AudioStreamManager format routing", () => {
 
     expect(env.decodeAudioDataMock).toHaveBeenCalledTimes(1);
     expect(env.isTypeSupportedMock).not.toHaveBeenCalled();
+  });
+
+  it("routes declared PCM through ordered AudioBuffer scheduling and preserves split samples", async () => {
+    const { AudioStreamManager } = await import("./audio-player");
+    const manager = new AudioStreamManager();
+    const format = { codec: "pcm_s16_le", sample_rate: 24_000, channels: 1 } as const;
+
+    await manager.queueAudio(new Uint8Array([0x01]), format);
+    expect(env.sources).toHaveLength(0);
+    await manager.queueAudio(new Uint8Array([0x00, 0xff, 0x7f]), format);
+
+    expect(env.decodeAudioDataMock).not.toHaveBeenCalled();
+    expect(env.buffers).toHaveLength(1);
+    expect(env.buffers[0].sampleRate).toBe(24_000);
+    expect(env.buffers[0].channelData[0][0]).toBeCloseTo(1 / 32768);
+    expect(env.buffers[0].channelData[0][1]).toBeCloseTo(32767 / 32768);
+    expect(env.sources).toHaveLength(1);
+    expect(env.sources[0].connect).toHaveBeenCalled();
+    expect(env.sources[0].start).toHaveBeenCalledWith(expect.any(Number));
+  });
+
+  it("schedules PCM chunks contiguously and resets mouth analysis after playback drains", async () => {
+    const { AudioStreamManager } = await import("./audio-player");
+    const manager = new AudioStreamManager();
+    const format = { codec: "pcm_s16_le", sample_rate: 24_000, channels: 1 } as const;
+    const analysis = vi.fn();
+    manager.addAmplitudeListener(analysis);
+
+    await manager.queueAudio(new Uint8Array([0x00, 0x00]), format);
+    await manager.queueAudio(new Uint8Array([0x00, 0x00]), format);
+
+    const firstStart = Number(env.sources[0].start.mock.calls[0][0]);
+    const secondStart = Number(env.sources[1].start.mock.calls[0][0]);
+    expect(secondStart).toBeCloseTo(firstStart + 1 / 24_000);
+    manager.finishStream();
+    env.sources[0].onended?.call(env.sources[0], new Event("ended"));
+    expect(manager.isPlaying).toBe(true);
+    env.sources[1].onended?.call(env.sources[1], new Event("ended"));
+    expect(manager.isPlaying).toBe(false);
+    expect(analysis).toHaveBeenLastCalledWith({ amplitude: 0, lowFreqEnergy: 0, highFreqEnergy: 0 });
   });
 });

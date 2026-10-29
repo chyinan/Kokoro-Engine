@@ -9,8 +9,8 @@
 // Reason: This boundary module only declares IPC contracts and delegates side effects to Tauri.
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { ModManifest, TtsConfig, ProviderStatus, VoiceProfile, TtsSystemConfig, ModThemeJson } from "../core/types/mod";
-export type { ModManifest, TtsConfig, ProviderStatus, VoiceProfile, TtsSystemConfig, ModThemeJson };
+import type { ModManifest, TtsAudioFormat, TtsConfig, ProviderStatus, VoiceProfile, TtsSystemConfig, ModThemeJson } from "../core/types/mod";
+export type { ModManifest, TtsAudioFormat, TtsConfig, ProviderStatus, VoiceProfile, TtsSystemConfig, ModThemeJson };
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     try {
@@ -754,8 +754,44 @@ export async function setActiveLive2dModel(modelPath: string | null): Promise<vo
 
 // ── TTS ────────────────────────────────────────────
 
+let latestTtsRequestId: string | null = null;
+
 export async function synthesize(text: string, config: TtsConfig): Promise<void> {
-    return invoke("synthesize", { text, config });
+    const requestId = config.request_id || createTtsRequestId();
+    const replacedRequestId = latestTtsRequestId;
+    latestTtsRequestId = requestId;
+    if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("kokoro-tts-replacing", {
+            detail: { request_id: requestId, replaced_request_id: replacedRequestId },
+        }));
+    }
+    return invoke("synthesize", { text, config: { ...config, request_id: requestId } });
+}
+
+export function getLatestTtsRequestId(): string | null {
+    return latestTtsRequestId;
+}
+
+function createTtsRequestId(): string {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+        return crypto.randomUUID();
+    }
+    return `tts-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+export async function cancelTts(requestId?: string | null): Promise<void> {
+    return invoke("cancel_tts", { requestId: requestId ?? null });
+}
+
+export interface TtsPlaybackErrorEvent {
+    request_id: string;
+    error: string;
+}
+
+export async function onTtsPlaybackError(
+    callback: (event: TtsPlaybackErrorEvent) => void,
+): Promise<UnlistenFn> {
+    return listen<TtsPlaybackErrorEvent>("tts:playback-error", event => callback(event.payload));
 }
 
 export async function listTtsProviders(): Promise<ProviderStatus[]> {

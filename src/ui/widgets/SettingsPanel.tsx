@@ -24,6 +24,7 @@ import { JailbreakTab } from "./settings/JailbreakTab";
 import { BackupTab } from "./settings/BackupTab";
 import PetTab from "./settings/PetTab";
 import AboutTab from "./settings/AboutTab";
+import { normalizeTtsVoice } from "./settings/tts-voice";
 import { useTranslation } from "react-i18next";
 import {
     setUserLanguage,
@@ -219,103 +220,6 @@ function getAppLanguageSelectValue(language: string | undefined) {
 
     const base = normalized.split("-")[0];
     return APP_LANGUAGE_OPTIONS.some(option => option.value === base) ? base : "en";
-}
-
-function getDefaultTtsVoice(providerId: string, voices: VoiceProfile[]): string {
-    if (providerId === "browser") {
-        return "";
-    }
-
-    if (providerId === "openai") {
-        return "alloy";
-    }
-
-    const providerVoice = voices.find(v => v.provider_id === providerId);
-    return providerVoice?.voice_id || "";
-}
-
-function stripProviderVoiceId(providerId: string, voiceId: string): string {
-    return voiceId.startsWith(`${providerId}_`) ? voiceId.slice(providerId.length + 1) : voiceId;
-}
-
-function usesShortTtsVoiceId(providerId: string, ttsConfig?: TtsSystemConfig | null): boolean {
-    const provider = ttsConfig?.providers.find(p => p.id === providerId);
-    return provider?.provider_type === "edge_tts";
-}
-
-function isReferenceCloneTtsProvider(providerId: string, ttsConfig?: TtsSystemConfig | null): boolean {
-    const provider = ttsConfig?.providers.find(p => p.id === providerId);
-    return provider?.provider_type === "gpt_sovits" || provider?.provider_type === "omnivoice";
-}
-
-function normalizeTtsVoice(
-    providerId: string,
-    voice: string,
-    voices: VoiceProfile[],
-    ttsConfig?: TtsSystemConfig | null,
-): string {
-    if (isReferenceCloneTtsProvider(providerId, ttsConfig)) {
-        return "";
-    }
-
-    if (!voice) {
-        if (providerId === "openai") {
-            const provider = ttsConfig?.providers.find(p => p.id === providerId);
-            return provider?.default_voice || "alloy";
-        }
-
-        if (usesShortTtsVoiceId(providerId, ttsConfig)) {
-            const provider = ttsConfig?.providers.find(p => p.id === providerId);
-            if (provider?.default_voice) {
-                return provider.default_voice;
-            }
-            // No default_voice configured — prefer the well-known zh-CN default
-            // that the Rust backend uses, rather than grabbing the first
-            // alphabetical voice (which would be Afrikaans / Arabic / Spanish…).
-            const zhVoice = voices.find(
-                v => v.provider_id === providerId && v.voice_id.includes("zh-CN-XiaoyiNeural")
-            );
-            if (zhVoice) return stripProviderVoiceId(providerId, zhVoice.voice_id);
-            const providerVoice = voices.find(v => v.provider_id === providerId);
-            return providerVoice ? stripProviderVoiceId(providerId, providerVoice.voice_id) : "";
-        }
-
-        return getDefaultTtsVoice(providerId, voices);
-    }
-
-    if (providerId === "browser") {
-        return voice === "browser_default" ? voice : "";
-    }
-
-    if (providerId === "openai") {
-        return voice;
-    }
-
-    const matchesProvider = voices.some(v => {
-        if (v.provider_id !== providerId) return false;
-        if (usesShortTtsVoiceId(providerId, ttsConfig)) {
-            return stripProviderVoiceId(providerId, v.voice_id) === voice;
-        }
-        return v.voice_id === voice;
-    });
-
-    if (matchesProvider) {
-        return voice;
-    }
-
-    if (usesShortTtsVoiceId(providerId, ttsConfig)) {
-        const provider = ttsConfig?.providers.find(p => p.id === providerId);
-        if (provider?.default_voice) {
-            return provider.default_voice;
-        }
-        // Same zh-CN preference as above for the "voice doesn't match" branch.
-        const zhVoice = voices.find(
-            v => v.provider_id === providerId && v.voice_id.includes("zh-CN-XiaoyiNeural")
-        );
-        if (zhVoice) return stripProviderVoiceId(providerId, zhVoice.voice_id);
-    }
-
-    return getDefaultTtsVoice(providerId, voices);
 }
 
 export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabProp, onActiveTabChange, backgroundControls, displayMode, onDisplayModeChange, customModelPath, onCustomModelChange: _onCustomModelChange, gazeTracking: gazeTrackingProp, onGazeTrackingChange, renderFps, onRenderFpsChange, sttConfig: sttConfigProp, voiceInterrupt: _voiceInterruptProp, imageGenConfig: imageGenConfigProp, llmConfig: llmConfigProp, onLlmConfigSaved, visionConfig: visionConfigProp, mcpServers: mcpServersProp, characters: charactersProp, resolveAvatarUrl, initialTelegramStatus, onVisionConfigChange, onActivateCharacter, onCharacterRuntimeChange, onCharactersChanged, onCharacterCatalogChanged, characterToEditId, activeCharacterId }: SettingsPanelProps) {
@@ -894,7 +798,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 providers: localTtsConfig.providers.map((provider) => {
                     if (
                         provider.id === ttsProviderId
-                        && (provider.provider_type === "openai" || provider.provider_type === "edge_tts")
+                        && (provider.provider_type === "openai" || provider.provider_type === "openai_realtime" || provider.provider_type === "edge_tts")
                     ) {
                         return {
                             ...provider,

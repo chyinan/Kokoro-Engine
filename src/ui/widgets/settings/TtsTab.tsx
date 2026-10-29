@@ -11,19 +11,18 @@ import { Trash2, RefreshCw } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { inputClasses, labelClasses, sectionHeadingClasses } from "../../styles/settings-primitives";
 import { Select } from "@/components/ui/select";
-import { getKokoroErrorMessage, synthesize, listGptSovitsModels } from "../../../lib/kokoro-bridge";
+import { getKokoroErrorMessage, synthesize, listGptSovitsModels, onTtsPlaybackError } from "../../../lib/kokoro-bridge";
+import { stripTtsProviderVoiceId as stripProviderVoiceId } from "./tts-voice";
 import type { GptSovitsModels } from "../../../lib/kokoro-bridge";
 import type { ProviderStatus, VoiceProfile, TtsSystemConfig } from "../../../lib/kokoro-bridge";
 import type { ProviderConfigData } from "../../../core/types/mod";
-
-const stripProviderVoiceId = (providerId: string, voiceId: string) =>
-    voiceId.startsWith(`${providerId}_`) ? voiceId.slice(providerId.length + 1) : voiceId;
 
 const isReferenceCloneProviderType = (providerType?: string) =>
     providerType === "gpt_sovits" || providerType === "omnivoice";
 
 const providerTypeLabel = (providerType: string) =>
-    providerType === "omnivoice" ? "OmniVoice" : providerType.replace("_", " ");
+    providerType === "omnivoice" ? "OmniVoice" :
+        providerType === "openai_realtime" ? "OpenAI Realtime TTS" : providerType.replace("_", " ");
 
 const readExtraInputValue = (extra: Record<string, unknown> | undefined, key: string) => {
     const raw = extra?.[key];
@@ -96,10 +95,15 @@ export default function TtsTab({
     const activeProvider = ttsConfig?.providers.find(p => p.id === ttsProviderId);
     const isActiveReferenceCloneProvider = isReferenceCloneProviderType(activeProvider?.provider_type);
     const isActiveOpenAI = activeProvider?.provider_type === "openai";
+    const isActiveRealtime = activeProvider?.provider_type === "openai_realtime";
+    const rawSpeed = Number.parseFloat(ttsSpeed);
+    const realtimeSpeed = Math.min(1.5, Math.max(0.25, Number.isFinite(rawSpeed) ? rawSpeed : 1));
     const activeVoices = voices.filter(v => v.provider_id === ttsProviderId);
     const shouldUseShortVoiceId = useCallback((providerId: string) => {
         const provider = ttsConfig?.providers.find(p => p.id === providerId);
-        return provider?.provider_type === "openai" || provider?.provider_type === "edge_tts";
+        return provider?.provider_type === "openai"
+            || provider?.provider_type === "openai_realtime"
+            || provider?.provider_type === "edge_tts";
     }, [ttsConfig]);
 
     const toVoiceOptionValue = useCallback((providerId: string, voiceId: string) => {
@@ -174,6 +178,21 @@ export default function TtsTab({
         }
     }, [ttsConfig?.providers.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    useEffect(() => {
+        let isMounted = true;
+        let unlisten: (() => void) | null = null;
+        void onTtsPlaybackError(event => {
+            if (isMounted) setTestError(event.error);
+        }).then(unlistenEvent => {
+            if (isMounted) unlisten = unlistenEvent;
+            else unlistenEvent();
+        }).catch(() => {});
+        return () => {
+            isMounted = false;
+            unlisten?.();
+        };
+    }, []);
+
     const addProvider = (type: string) => {
         if (!ttsConfig) return;
 
@@ -190,13 +209,19 @@ export default function TtsTab({
         const newProvider: ProviderConfigData = {
             id: newId,
             provider_type: type,
-            enabled: true,
+            enabled: type !== "openai_realtime",
             api_key: "",
+            ...(type === "openai_realtime" && { api_key_env: "OPENAI_API_KEY" }),
             extra: {},
             // Seed a sensible default voice so normalizeTtsVoice never has to
             // fall back to the first alphabetical entry in the voice list.
             ...(type === "edge_tts" && { default_voice: "zh-CN-XiaoyiNeural" }),
             ...(type === "openai"   && { default_voice: "alloy" }),
+            ...(type === "openai_realtime" && {
+                base_url: "https://api.openai.com/v1",
+                model: "gpt-realtime-2.1-mini",
+                default_voice: "marin",
+            }),
         };
         onTtsConfigChange({
             ...ttsConfig,
@@ -267,7 +292,12 @@ export default function TtsTab({
                     <label className={labelClasses}>{t("settings.tts.active_settings.provider")}</label>
                     <Select
                         value={ttsProviderId}
-                        onChange={onTtsProviderIdChange}
+                        onChange={providerId => {
+                            if (providerId !== ttsProviderId) {
+                                window.dispatchEvent(new Event("kokoro-tts-stop"));
+                            }
+                            onTtsProviderIdChange(providerId);
+                        }}
                         options={
                             providers.length === 0
                                 ? [{ value: "browser", label: t("settings.tts.active_settings.browser") }]
@@ -308,19 +338,23 @@ export default function TtsTab({
 
                 {/* Speed */}
                 <div>
-                    <label className={labelClasses}>{t("settings.tts.active_settings.speed")}</label>
+                    <label className={labelClasses}>
+                        {isActiveRealtime
+                            ? t("settings.tts.active_settings.realtime_speed")
+                            : t("settings.tts.active_settings.speed")}
+                    </label>
                     <div className="flex items-center gap-3">
                         <input
                             type="range"
-                            min="0.5"
-                            max="2.0"
+                            min={isActiveRealtime ? "0.25" : "0.5"}
+                            max={isActiveRealtime ? "1.5" : "2.0"}
                             step="0.1"
-                            value={ttsSpeed}
+                            value={isActiveRealtime ? String(realtimeSpeed) : ttsSpeed}
                             onChange={e => onTtsSpeedChange(e.target.value)}
                             className="flex-1 accent-[var(--color-accent)]"
                         />
                         <span className="text-sm font-mono text-[var(--color-text-secondary)] w-10 text-right">
-                            {ttsSpeed}x
+                            {isActiveRealtime ? realtimeSpeed : ttsSpeed}x
                         </span>
                     </div>
                 </div>
@@ -348,28 +382,42 @@ export default function TtsTab({
 
                 {/* Test Voice Button */}
                 <div className="pt-2">
-                    <button
-                        onClick={() => {
-                            setTestError(null);
-                            void synthesize("Hello! This is a test of the TTS system.", {
-                                provider_id: ttsProviderId || undefined,
-                                voice: ttsVoice || undefined,
-                                speed: parseFloat(ttsSpeed || "1.0"),
-                                pitch: parseFloat(ttsPitch || "1.0"),
-                            }).catch(err => {
-                                console.error("[TTS] Test failed:", err);
-                                setTestError(getKokoroErrorMessage(err));
-                            });
-                        }}
-                        className={clsx(
-                            "w-full py-2.5 rounded-lg text-xs font-heading font-semibold tracking-wider uppercase transition-all",
-                            "border border-[var(--color-accent)]/40 text-[var(--color-accent)]",
-                            "hover:bg-[var(--color-accent)]/10 hover:border-[var(--color-accent)]",
-                            "active:scale-[0.98]"
-                        )}
-                    >
-                        {t("settings.tts.active_settings.test")}
-                    </button>
+                    <div className="flex gap-2">
+                        <button
+                            onClick={() => {
+                                setTestError(null);
+                                void synthesize("Hello! This is a test of the TTS system.", {
+                                    provider_id: ttsProviderId || undefined,
+                                    voice: ttsVoice || undefined,
+                                    speed: parseFloat(ttsSpeed || "1.0"),
+                                    pitch: parseFloat(ttsPitch || "1.0"),
+                                }).catch(err => {
+                                    console.error("[TTS] Test failed:", err);
+                                    setTestError(getKokoroErrorMessage(err));
+                                });
+                            }}
+                            className={clsx(
+                                "flex-1 py-2.5 rounded-lg text-xs font-heading font-semibold tracking-wider uppercase transition-all",
+                                "border border-[var(--color-accent)]/40 text-[var(--color-accent)]",
+                                "hover:bg-[var(--color-accent)]/10 hover:border-[var(--color-accent)]",
+                                "active:scale-[0.98]"
+                            )}
+                        >
+                            {t("settings.tts.active_settings.test")}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => { window.dispatchEvent(new Event("kokoro-tts-stop")); }}
+                            className="px-4 py-2.5 rounded-lg text-xs font-heading font-semibold tracking-wider uppercase border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-error)] hover:border-[var(--color-error)]/50"
+                        >
+                            {t("settings.tts.active_settings.stop_test")}
+                        </button>
+                    </div>
+                    {isActiveRealtime && (
+                        <p className="mt-2 text-[10px] text-[var(--color-text-muted)]">
+                            {t("settings.tts.active_settings.ai_generated")}
+                        </p>
+                    )}
                     {testError && (
                         <p role="alert" className="mt-2 text-xs text-[var(--color-error)]">
                             {testError}
@@ -462,7 +510,7 @@ export default function TtsTab({
                                     >
                                         {/* Common Fields */}
                                         {/* Common API Key Field */}
-                                        {(provider.provider_type === "openai" || provider.provider_type === "azure" || provider.provider_type === "elevenlabs") && (
+                                        {(provider.provider_type === "openai" || provider.provider_type === "openai_realtime" || provider.provider_type === "azure" || provider.provider_type === "elevenlabs") && (
                                             <div>
                                                 <label className={labelClasses}>{t("settings.tts.fields.api_key")}</label>
                                                 <input
@@ -472,11 +520,16 @@ export default function TtsTab({
                                                     placeholder="sk-..."
                                                     className={clsx(inputClasses, "font-mono text-xs")}
                                                 />
+                                                {provider.provider_type === "openai_realtime" && (
+                                                    <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
+                                                        {t("settings.tts.fields.realtime_api_key_hint")}
+                                                    </p>
+                                                )}
                                             </div>
                                         )}
 
                                         {/* Base URL Field */}
-                                        {(provider.provider_type === "openai" || provider.provider_type === "local_vits" || provider.provider_type === "gpt_sovits") && (
+                                        {(provider.provider_type === "openai" || provider.provider_type === "openai_realtime" || provider.provider_type === "local_vits" || provider.provider_type === "gpt_sovits") && (
                                             <div>
                                                 <label className={labelClasses}>
                                                     {(provider.provider_type.includes("local") || provider.provider_type === "gpt_sovits") ? t("settings.tts.fields.server_url") : t("settings.tts.fields.base_url")}
@@ -486,7 +539,8 @@ export default function TtsTab({
                                                     value={provider.base_url || provider.endpoint || ""}
                                                     onChange={e => updateProviderConfig(index, { base_url: e.target.value })}
                                                     placeholder={
-                                                        provider.provider_type === "gpt_sovits" ? "http://127.0.0.1:9880" :
+                                                        provider.provider_type === "openai_realtime" ? "https://api.openai.com/v1" :
+                                                            provider.provider_type === "gpt_sovits" ? "http://127.0.0.1:9880" :
                                                             provider.provider_type.includes("local") ? "http://127.0.0.1:5000" :
                                                                 "https://api.openai.com/v1"
                                                     }
@@ -495,6 +549,11 @@ export default function TtsTab({
                                                 {provider.provider_type === "gpt_sovits" && (
                                                     <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
                                                         Requires running <code className="text-[var(--color-accent)]">api_v2.py</code> separately (not the WebUI)
+                                                    </p>
+                                                )}
+                                                {provider.provider_type === "openai_realtime" && (
+                                                    <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
+                                                        {t("settings.tts.fields.realtime_endpoint_hint")}
                                                     </p>
                                                 )}
                                             </div>
@@ -799,20 +858,20 @@ export default function TtsTab({
                                         )}
 
                                         {/* Model */}
-                                        {(provider.provider_type === "openai" || provider.provider_type === "azure") && (
+                                        {(provider.provider_type === "openai" || provider.provider_type === "openai_realtime" || provider.provider_type === "azure") && (
                                             <div>
                                                 <label className={labelClasses}>{t("settings.tts.fields.model_id")}</label>
                                                 <input
                                                     type="text"
                                                     value={provider.model || ""}
                                                     onChange={e => updateProviderConfig(index, { model: e.target.value })}
-                                                    placeholder="tts-1"
+                                                     placeholder={provider.provider_type === "openai_realtime" ? "gpt-realtime-2.1-mini" : "tts-1"}
                                                     className={clsx(inputClasses, "font-mono text-xs")}
                                                 />
                                             </div>
                                         )}
 
-                                        {(provider.provider_type === "openai" || provider.provider_type === "edge_tts") && (() => {
+                                        {(provider.provider_type === "openai" || provider.provider_type === "openai_realtime" || provider.provider_type === "edge_tts") && (() => {
                                             const isActive = provider.id === ttsProviderId;
                                             const providerVoices = voices.filter(v => v.provider_id === provider.id);
                                             const voiceOptions = getVoiceOptions(provider.id, voices);
@@ -841,7 +900,7 @@ export default function TtsTab({
                                                             }}
                                                             options={voiceOptions}
                                                             searchable={providerVoices.length > 8}
-                                                            placeholder={provider.provider_type === "edge_tts" ? "zh-CN-XiaoyiNeural" : "alloy"}
+                                                            placeholder={provider.provider_type === "edge_tts" ? "zh-CN-XiaoyiNeural" : provider.provider_type === "openai_realtime" ? "marin" : "alloy"}
                                                             searchPlaceholder={t("settings.tts.active_settings.voice_search")}
                                                             emptyMessage={t("settings.tts.active_settings.voice_no_match")}
                                                         />
@@ -853,6 +912,23 @@ export default function TtsTab({
                                                 </div>
                                             );
                                         })()}
+
+                                        {provider.provider_type === "openai_realtime" && (
+                                            <div>
+                                                <label className={labelClasses}>{t("settings.tts.fields.reading_style")}</label>
+                                                <textarea
+                                                    value={typeof provider.extra?.instructions === "string" ? provider.extra.instructions : ""}
+                                                    onChange={e => updateProviderExtra(index, provider, "instructions", e.target.value)}
+                                                    maxLength={1000}
+                                                    rows={3}
+                                                    placeholder={t("settings.tts.fields.reading_style_placeholder")}
+                                                    className={clsx(inputClasses, "text-xs resize-y")}
+                                                />
+                                                <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
+                                                    {t("settings.tts.fields.realtime_style_hint")}
+                                                </p>
+                                            </div>
+                                        )}
 
                                         {/* Model Path (Local) */}
                                         {(provider.provider_type.includes("local")) && (
@@ -881,7 +957,7 @@ export default function TtsTab({
                 {/* Add Provider Dropdown */}
                 <div className="pt-2">
                     <div className="grid grid-cols-2 gap-2">
-                        {["openai", "edge_tts", "local_vits", "gpt_sovits", "omnivoice", "azure", "elevenlabs"].map(type => (
+                        {["openai", "openai_realtime", "edge_tts", "local_vits", "gpt_sovits", "omnivoice", "azure", "elevenlabs"].map(type => (
                             <button
                                 key={type}
                                 onClick={() => addProvider(type)}

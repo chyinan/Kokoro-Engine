@@ -1,12 +1,11 @@
 use super::config::ProviderConfig;
 use super::interface::{
-    Gender, ProviderCapabilities, TtsEngine, TtsError, TtsParams, TtsProvider, VoiceProfile,
+    Gender, ProviderCapabilities, TtsAudioChunk, TtsAudioStream, TtsEngine, TtsError, TtsParams,
+    TtsProvider, VoiceProfile,
 };
 use async_trait::async_trait;
-use futures::Stream;
 use reqwest::Client;
 use serde::Serialize;
-use std::pin::Pin; // Add this
 
 #[derive(Serialize, Clone)]
 struct TtsRequest {
@@ -177,7 +176,7 @@ impl TtsProvider for OpenAITtsProvider {
         &self,
         text: &str,
         params: TtsParams,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>, TtsError>> + Send>>, TtsError> {
+    ) -> Result<TtsAudioStream, TtsError> {
         let url = format!("{}/audio/speech", self.base_url);
         let raw_voice = params.voice.unwrap_or_else(|| self.default_voice.clone());
         let request_body = TtsRequest {
@@ -224,7 +223,11 @@ impl TtsProvider for OpenAITtsProvider {
 
         use futures::StreamExt;
         let stream = response.bytes_stream().map(|chunk_res| match chunk_res {
-            Ok(bytes) => Ok(bytes.to_vec()),
+            Ok(bytes) => Ok(TtsAudioChunk {
+                data: bytes.to_vec(),
+                format: None,
+                response_id: None,
+            }),
             Err(e) => Err(TtsError::SynthesisFailed(format!("Stream error: {}", e))),
         });
 

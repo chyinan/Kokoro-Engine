@@ -10,12 +10,14 @@ pub mod local_vits;
 pub mod manager;
 pub mod omnivoice;
 pub mod openai;
+pub mod openai_realtime;
 pub mod queue;
 pub mod router;
 pub mod voice_registry;
 
 pub use config::{load_config, TtsSystemConfig};
 pub use interface::{
-    Gender, ProviderCapabilities, TtsEngine, TtsError, TtsParams, TtsProvider, VoiceProfile,
+    AudioFormat, Gender, ProviderCapabilities, TtsAudioChunk, TtsAudioStream, TtsEngine, TtsError,
+    TtsParams, TtsProvider, VoiceProfile,
 };
 pub use manager::{ProviderStatus, TtsService};

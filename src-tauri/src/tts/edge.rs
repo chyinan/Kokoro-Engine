@@ -1,12 +1,12 @@
 use super::config::ProviderConfig;
 use super::interface::{
-    Gender, ProviderCapabilities, TtsEngine, TtsError, TtsParams, TtsProvider, VoiceProfile,
+    Gender, ProviderCapabilities, TtsAudioChunk, TtsAudioStream, TtsEngine, TtsError, TtsParams,
+    TtsProvider, VoiceProfile,
 };
 use async_trait::async_trait;
 use edge_tts_rust::{Boundary, EdgeTtsClient, SpeakOptions, SynthesisEvent, Voice};
 use futures::StreamExt;
 use std::collections::HashMap;
-use std::pin::Pin;
 
 const DEFAULT_EDGE_VOICE: &str = "zh-CN-XiaoyiNeural";
 
@@ -119,8 +119,7 @@ impl TtsProvider for EdgeTtsProvider {
         &self,
         text: &str,
         params: TtsParams,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<Vec<u8>, TtsError>> + Send>>, TtsError>
-    {
+    ) -> Result<TtsAudioStream, TtsError> {
         let options = self.build_options(&params);
         let stream = self
             .client
@@ -130,7 +129,11 @@ impl TtsProvider for EdgeTtsProvider {
 
         let audio_stream = stream.filter_map(|event| async move {
             match event {
-                Ok(SynthesisEvent::Audio(chunk)) => Some(Ok(chunk.to_vec())),
+                Ok(SynthesisEvent::Audio(chunk)) => Some(Ok(TtsAudioChunk {
+                    data: chunk.to_vec(),
+                    format: None,
+                    response_id: None,
+                })),
                 Ok(SynthesisEvent::Boundary(_)) => None,
                 Err(err) => Some(Err(map_edge_error(err))),
             }

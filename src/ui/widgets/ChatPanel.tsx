@@ -2172,6 +2172,11 @@ export default function ChatPanel({
                         ttsSpeakingRef.current = true;
                     }),
 
+                    listen<{ request_id: string; error: string }>("tts:playback-error", (event) => {
+                        if (aborted) return;
+                        setError(event.payload.error);
+                    }),
+
                     listen("tts:end", () => {
                         if (aborted) return;
                         ttsSpeakingRef.current = false;

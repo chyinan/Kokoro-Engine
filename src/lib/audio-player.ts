@@ -1,4 +1,5 @@
 // pattern: Imperative Shell
+import type { TtsAudioFormat } from "../core/types/mod";
 
 export interface AudioAnalysis {
     /** RMS volume amplitude (0-1) */
@@ -9,7 +10,9 @@ export interface AudioAnalysis {
     highFreqEnergy: number;
 }
 
-export type AudioContainer = "mp3" | "wav" | "unknown";
+export type AudioContainer = "mp3" | "wav" | "pcm_s16_le" | "unknown";
+
+const MAX_PCM_QUEUED_SECONDS = 8;
 
 export function detectAudioContainer(chunk: Uint8Array): AudioContainer {
     if (chunk.byteLength >= 12) {
@@ -53,10 +56,14 @@ export class AudioStreamManager {
     private streamEnded = false;
     private playbackStarted = false;
     private currentSource: AudioBufferSourceNode | null = null;
+    private pcmSources = new Set<AudioBufferSourceNode>();
+    private pcmRemainder = new Uint8Array(0);
+    private nextPcmStartTime = 0;
     private streamMode: AudioContainer | null = null;
     private _isPlaying = false;
     private analysisListeners: ((data: AudioAnalysis) => void)[] = [];
     private playStateListeners: ((playing: boolean) => void)[] = [];
+    private playbackErrorListeners: ((message: string) => void)[] = [];
     private animationFrameId?: number;
     private analysisActive = false;
     private playbackGeneration = 0;
@@ -89,10 +96,7 @@ export class AudioStreamManager {
         };
 
         this.audioElement.onended = () => {
-            this._isPlaying = false;
-            this.stopAnalysis();
-            this.broadcastAnalysis({ amplitude: 0, lowFreqEnergy: 0, highFreqEnergy: 0 });
-            this.broadcastPlayState(false);
+            this.finishPlaybackState();
         };
     }
 
@@ -102,7 +106,7 @@ export class AudioStreamManager {
         }
     }
 
-    public async queueAudio(data: Uint8Array | number[]) {
+    public async queueAudio(data: Uint8Array | number[], format?: TtsAudioFormat | null) {
         const chunk = data instanceof Uint8Array ? data : new Uint8Array(data);
         if (chunk.byteLength === 0) {
             return;
@@ -113,8 +117,14 @@ export class AudioStreamManager {
         await this.resume();
         if (generation !== this.playbackGeneration) return;
 
+        const declaredMode: AudioContainer | null = format?.codec ?? null;
         if (!this.streamMode) {
-            this.streamMode = detectAudioContainer(chunk);
+            this.streamMode = declaredMode ?? detectAudioContainer(chunk);
+        }
+
+        if (this.streamMode === "pcm_s16_le" && format?.codec === "pcm_s16_le") {
+            await this.queuePcmChunk(chunk, format, generation);
+            return;
         }
 
         if (this.streamMode === "wav") {
@@ -130,6 +140,17 @@ export class AudioStreamManager {
     public finishStream() {
         this.streamEnded = true;
 
+        if (this.streamMode === "pcm_s16_le") {
+            if (this.pcmRemainder.length > 0) {
+                console.warn("[Audio] Dropping an incomplete PCM sample at end of stream");
+                this.pcmRemainder = new Uint8Array(0);
+            }
+            if (this.pcmSources.size === 0) {
+                this.finishPlaybackState();
+            }
+            return;
+        }
+
         if (this.streamMode === "wav") {
             if (!this.currentSource && this.wavQueue.size === 0) {
                 this._isPlaying = false;
@@ -137,6 +158,11 @@ export class AudioStreamManager {
                 this.broadcastAnalysis({ amplitude: 0, lowFreqEnergy: 0, highFreqEnergy: 0 });
                 this.broadcastPlayState(false);
             }
+            return;
+        }
+
+        if (!this.streamMode) {
+            this.finishPlaybackState();
             return;
         }
 
@@ -155,6 +181,13 @@ export class AudioStreamManager {
         this.playStateListeners.push(callback);
         return () => {
             this.playStateListeners = this.playStateListeners.filter(l => l !== callback);
+        };
+    }
+
+    public onPlaybackError(callback: (message: string) => void): () => void {
+        this.playbackErrorListeners.push(callback);
+        return () => {
+            this.playbackErrorListeners = this.playbackErrorListeners.filter(listener => listener !== callback);
         };
     }
 
@@ -192,6 +225,18 @@ export class AudioStreamManager {
             }
             this.currentSource = null;
         }
+
+        for (const source of this.pcmSources) {
+            try {
+                source.stop();
+                source.disconnect();
+            } catch {
+                // Sources may already have ended while the queue is cleared.
+            }
+        }
+        this.pcmSources.clear();
+        this.pcmRemainder = new Uint8Array(0);
+        this.nextPcmStartTime = this.audioContext.currentTime;
 
         this.mediaSource = null;
         this.sourceBuffer = null;
@@ -252,7 +297,92 @@ export class AudioStreamManager {
         } catch (error) {
             if (generation !== this.playbackGeneration) return;
             console.error("[Audio] Failed to decode WAV chunk:", error);
+            this.broadcastPlaybackError("Failed to decode WAV audio.");
             this.stop();
+        }
+    }
+
+    private async queuePcmChunk(
+        chunk: Uint8Array,
+        format: Extract<TtsAudioFormat, { codec: "pcm_s16_le" }>,
+        generation: number,
+    ): Promise<void> {
+        const { sample_rate: sampleRate, channels } = format;
+        if (!Number.isFinite(sampleRate) || sampleRate <= 0 || !Number.isInteger(channels) || channels <= 0) {
+            throw new Error("Invalid PCM audio format metadata");
+        }
+
+        const combined = new Uint8Array(this.pcmRemainder.length + chunk.length);
+        combined.set(this.pcmRemainder);
+        combined.set(chunk, this.pcmRemainder.length);
+        const bytesPerFrame = channels * 2;
+        const completeBytes = combined.length - (combined.length % bytesPerFrame);
+        this.pcmRemainder = combined.slice(completeBytes);
+        if (completeBytes === 0) return;
+
+        const frameCount = completeBytes / bytesPerFrame;
+        const maxFramesPerBuffer = Math.max(1, Math.floor(sampleRate * 2));
+        for (let frameOffset = 0; frameOffset < frameCount; frameOffset += maxFramesPerBuffer) {
+            const segmentFrames = Math.min(maxFramesPerBuffer, frameCount - frameOffset);
+            const segmentDuration = segmentFrames / sampleRate;
+            await this.waitForPcmCapacity(segmentDuration, generation);
+            if (generation !== this.playbackGeneration) return;
+
+            // BufferSource resamples to AudioContext.sampleRate without changing duration or pitch.
+            const buffer = this.audioContext.createBuffer(channels, segmentFrames, sampleRate);
+            const outputChannels = Array.from({ length: channels }, (_, channel) => buffer.getChannelData(channel));
+            for (let frame = 0; frame < segmentFrames; frame++) {
+                for (let channel = 0; channel < channels; channel++) {
+                    const offset = (frameOffset + frame) * bytesPerFrame + channel * 2;
+                    const sample = combined[offset] | (combined[offset + 1] << 8);
+                    const signedSample = sample >= 0x8000 ? sample - 0x10000 : sample;
+                    outputChannels[channel][frame] = signedSample / 32768;
+                }
+            }
+
+            const source = this.audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(this.analyser);
+            const now = this.audioContext.currentTime;
+            const scheduledStart = Math.max(
+                this.nextPcmStartTime,
+                now + (this.pcmSources.size === 0 ? 0.02 : 0),
+            );
+            this.nextPcmStartTime = scheduledStart + segmentDuration;
+            this.pcmSources.add(source);
+            const sourceGeneration = generation;
+            source.onended = () => {
+                if (sourceGeneration !== this.playbackGeneration) return;
+                this.pcmSources.delete(source);
+                if (this.pcmSources.size === 0) {
+                    this.nextPcmStartTime = this.audioContext.currentTime;
+                    if (this.streamEnded) {
+                        this.finishPlaybackState();
+                    } else {
+                        this._isPlaying = false;
+                        this.stopAnalysis();
+                        this.broadcastAnalysis({ amplitude: 0, lowFreqEnergy: 0, highFreqEnergy: 0 });
+                        this.broadcastPlayState(false);
+                    }
+                }
+            };
+
+            source.start(scheduledStart);
+            if (!this._isPlaying) {
+                this._isPlaying = true;
+                this.broadcastPlayState(true);
+            }
+            this.startAnalysis();
+        }
+    }
+
+    private async waitForPcmCapacity(incomingDuration: number, generation: number): Promise<void> {
+        while (generation === this.playbackGeneration) {
+            const queuedSeconds = Math.max(0, this.nextPcmStartTime - this.audioContext.currentTime);
+            if (queuedSeconds + incomingDuration <= MAX_PCM_QUEUED_SECONDS) {
+                return;
+            }
+            await new Promise<void>(resolve => window.setTimeout(resolve, 25));
         }
     }
 
@@ -314,6 +444,7 @@ export class AudioStreamManager {
             this.startPlaybackIfNeeded();
         } catch (error) {
             console.error("[Audio] Failed to append streaming chunk:", error);
+            this.broadcastPlaybackError("Failed to append streaming audio data.");
             this.stop();
         }
     }
@@ -426,5 +557,16 @@ export class AudioStreamManager {
 
     private broadcastPlayState(playing: boolean) {
         this.playStateListeners.forEach(listener => listener(playing));
+    }
+
+    private broadcastPlaybackError(message: string): void {
+        this.playbackErrorListeners.forEach(listener => listener(message));
+    }
+
+    private finishPlaybackState(): void {
+        this._isPlaying = false;
+        this.stopAnalysis();
+        this.broadcastAnalysis({ amplitude: 0, lowFreqEnergy: 0, highFreqEnergy: 0 });
+        this.broadcastPlayState(false);
     }
 }

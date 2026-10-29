@@ -1,6 +1,7 @@
 // ── TTS Types ──────────────────────────────────────────
 
 export interface TtsConfig {
+    request_id?: string;
     provider_id?: string;
     api_key?: string;
     endpoint?: string;
@@ -10,6 +11,11 @@ export interface TtsConfig {
     pitch?: number;
     emotion?: string;
 }
+
+export type TtsAudioFormat =
+    | { codec: "mp3" }
+    | { codec: "wav" }
+    | { codec: "pcm_s16_le"; sample_rate: number; channels: number };
 
 export interface ProviderCapabilities {
     supports_streaming: boolean;

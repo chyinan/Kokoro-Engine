@@ -315,8 +315,11 @@
                 "voice_no_match": "没有匹配的语音",
                 "voice_count_hint": "已加载 {{count}} 个语音，可在下拉框中搜索",
                 "speed": "语速",
+                "realtime_speed": "语音速度（0.25–1.5 倍）",
                 "pitch": "音调",
-                "test": "▶ 测试语音"
+                "test": "▶ 测试语音",
+                "stop_test": "停止",
+                "ai_generated": "由 OpenAI Realtime AI 合成语音；由于模型生成音频，实际措辞可能存在差异。"
             },
             "manage_providers": {
                 "title": "管理服务商",
@@ -331,6 +334,8 @@
             },
             "fields": {
                 "api_key": "API 密钥",
+                "realtime_api_key_hint": "留空时使用环境变量 OPENAI_API_KEY。",
+                "realtime_endpoint_hint": "此服务需要支持 Realtime WebSocket 的网关；仅支持 Speech API 的网关会报错且不会回退。",
                 "server_url": "服务器地址",
                 "base_url": "API 地址 (可选)",
                 "ref_audio": {
@@ -353,6 +358,9 @@
                 "model_placeholder": "选择或输入...",
                 "default_hint": "留空以使用服务器默认值。",
                 "model_id": "模型 ID",
+                "reading_style": "可选朗读风格",
+                "reading_style_placeholder": "例如：平静、从容地朗读",
+                "realtime_style_hint": "仅影响声音表现；内置指令仍要求忠实朗读给定文本，不回答或添加内容。",
                 "model_path": "模型路径 / 配置",
                 "project_path": "OmniVoice 项目路径",
                 "python_executable": "Python 可执行文件",

@@ -4,11 +4,15 @@ use super::cache::{CacheKey, TtsCache};
 use super::cloud_base::CloudTTSProvider;
 use super::config::{ProviderConfig, TtsSystemConfig};
 use super::edge::EdgeTtsProvider;
-use super::interface::{ProviderCapabilities, TtsError, TtsParams, TtsProvider, VoiceProfile};
+use super::interface::{
+    AudioFormat, ProviderCapabilities, TtsAudioChunk, TtsAudioStream, TtsError, TtsParams,
+    TtsProvider, VoiceProfile,
+};
 use super::local_gpt_sovits::LocalGPTSoVITSProvider;
 use super::local_vits::LocalVITSProvider;
 use super::omnivoice::OmniVoiceProvider;
 use super::openai::OpenAITtsProvider;
+use super::openai_realtime::OpenAIRealtimeTtsProvider;
 use super::queue::TtsQueue;
 use super::router::TtsRouter;
 use super::voice_registry::VoiceRegistry;
@@ -17,31 +21,56 @@ use crate::hooks::{HookEvent, HookPayload, HookRuntime, TtsHookPayload};
 use futures::StreamExt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::pin::Pin;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::RwLock;
+use tokio::sync::{watch, Mutex, RwLock};
+
+const MAX_CANCELLED_TTS_REQUESTS: usize = 128;
 
 // ── Tauri Event Payloads ───────────────────────────────
 
 #[derive(Clone, Serialize)]
 struct TtsStartEvent {
+    request_id: String,
     text: String,
 }
 
 #[derive(Clone, Serialize)]
 struct TtsAudioEvent {
+    request_id: String,
+    sentence_id: usize,
+    sequence: u64,
+    response_id: Option<String>,
+    format: Option<AudioFormat>,
     data: Vec<u8>,
 }
 
 #[derive(Clone, Serialize)]
 struct TtsEndEvent {
+    request_id: String,
     text: String,
+    status: TtsFinishStatus,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TtsFinishStatus {
+    Completed,
+    Cancelled,
+    Error,
+}
+
+#[derive(Clone, Serialize)]
+struct TtsErrorEvent {
+    request_id: String,
+    error: String,
 }
 
 #[derive(Clone, Serialize)]
 struct TtsBrowserDelegateEvent {
+    request_id: String,
+    sentence_id: usize,
     text: String,
     voice: Option<String>,
     speed: Option<f32>,
@@ -61,12 +90,19 @@ pub struct ProviderStatus {
 
 #[derive(Clone)]
 pub struct TtsService {
-    providers: Arc<RwLock<HashMap<String, Box<dyn TtsProvider>>>>,
+    providers: Arc<RwLock<HashMap<String, Arc<dyn TtsProvider>>>>,
     default_provider: Arc<RwLock<Option<String>>>,
     voice_registry: Arc<RwLock<VoiceRegistry>>,
     cache: Arc<RwLock<TtsCache>>,
+    active_request: Arc<Mutex<Option<ActiveTtsRequest>>>,
+    cancelled_requests: Arc<Mutex<VecDeque<String>>>,
     _queue: Arc<TtsQueue>,
     cache_enabled: bool,
+}
+
+struct ActiveTtsRequest {
+    request_id: String,
+    cancel: watch::Sender<bool>,
 }
 
 impl Default for TtsService {
@@ -82,6 +118,8 @@ impl TtsService {
             default_provider: Arc::new(RwLock::new(None)),
             voice_registry: Arc::new(RwLock::new(VoiceRegistry::new())),
             cache: Arc::new(RwLock::new(TtsCache::new(500, 3600))),
+            active_request: Arc::new(Mutex::new(None)),
+            cancelled_requests: Arc::new(Mutex::new(VecDeque::new())),
             _queue: Arc::new(TtsQueue::new(3)),
             cache_enabled: true,
         }
@@ -97,6 +135,8 @@ impl TtsService {
                 config.cache.max_entries,
                 config.cache.ttl_secs,
             ))),
+            active_request: Arc::new(Mutex::new(None)),
+            cancelled_requests: Arc::new(Mutex::new(VecDeque::new())),
             _queue: Arc::new(TtsQueue::new(config.queue.max_concurrent)),
             cache_enabled: config.cache.enabled,
         };
@@ -126,30 +166,32 @@ impl TtsService {
     }
 
     /// Build a provider from config.
-    async fn build_provider(config: &ProviderConfig) -> Option<Box<dyn TtsProvider>> {
+    async fn build_provider(config: &ProviderConfig) -> Option<Arc<dyn TtsProvider>> {
         match config.provider_type.as_str() {
             "openai" => {
-                OpenAITtsProvider::from_config(config).map(|p| Box::new(p) as Box<dyn TtsProvider>)
+                OpenAITtsProvider::from_config(config).map(|p| Arc::new(p) as Arc<dyn TtsProvider>)
             }
+            "openai_realtime" => OpenAIRealtimeTtsProvider::from_config(config)
+                .map(|p| Arc::new(p) as Arc<dyn TtsProvider>),
             "edge_tts" => EdgeTtsProvider::from_config(config)
                 .await
-                .map(|p| Box::new(p) as Box<dyn TtsProvider>),
+                .map(|p| Arc::new(p) as Arc<dyn TtsProvider>),
             "browser" => {
-                BrowserTTSProvider::from_config(config).map(|p| Box::new(p) as Box<dyn TtsProvider>)
+                BrowserTTSProvider::from_config(config).map(|p| Arc::new(p) as Arc<dyn TtsProvider>)
             }
             "local_vits" => {
-                LocalVITSProvider::from_config(config).map(|p| Box::new(p) as Box<dyn TtsProvider>)
+                LocalVITSProvider::from_config(config).map(|p| Arc::new(p) as Arc<dyn TtsProvider>)
             }
             "gpt_sovits" => LocalGPTSoVITSProvider::from_config(config)
-                .map(|p| Box::new(p) as Box<dyn TtsProvider>),
+                .map(|p| Arc::new(p) as Arc<dyn TtsProvider>),
             "omnivoice" => {
-                OmniVoiceProvider::from_config(config).map(|p| Box::new(p) as Box<dyn TtsProvider>)
+                OmniVoiceProvider::from_config(config).map(|p| Arc::new(p) as Arc<dyn TtsProvider>)
             }
             "azure" => {
-                AzureTtsProvider::from_config(config).map(|p| Box::new(p) as Box<dyn TtsProvider>)
+                AzureTtsProvider::from_config(config).map(|p| Arc::new(p) as Arc<dyn TtsProvider>)
             }
             "elevenlabs" => CloudTTSProvider::elevenlabs_style(config)
-                .map(|p| Box::new(p) as Box<dyn TtsProvider>),
+                .map(|p| Arc::new(p) as Arc<dyn TtsProvider>),
             other => {
                 tracing::error!(target: "tts", "Unknown provider type: {}", other);
                 None
@@ -158,7 +200,7 @@ impl TtsService {
     }
 
     /// Register a provider and its voices.
-    pub async fn register_provider(&self, provider: Box<dyn TtsProvider>) {
+    pub async fn register_provider(&self, provider: Arc<dyn TtsProvider>) {
         let id = provider.id();
         let voices = provider.voices();
 
@@ -190,20 +232,121 @@ impl TtsService {
         text: String,
         provider_id: Option<String>,
         params: Option<TtsParams>,
+        request_id: String,
     ) -> Result<(), String> {
-        let params = params.unwrap_or_default();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let cancelled_before_start = self.take_cancelled_request(&request_id).await;
+        let previous = {
+            let mut active = self.active_request.lock().await;
+            active.replace(ActiveTtsRequest {
+                request_id: request_id.clone(),
+                cancel: cancel_tx.clone(),
+            })
+        };
+        if let Some(previous) = previous {
+            let _ = previous.cancel.send(true);
+        }
 
+        if cancelled_before_start {
+            let _ = cancel_tx.send(true);
+            let mut active = self.active_request.lock().await;
+            if active
+                .as_ref()
+                .is_some_and(|current| current.request_id == request_id)
+            {
+                *active = None;
+            }
+            return Ok(());
+        }
+
+        let result = self
+            .speak_request(
+                app,
+                text,
+                provider_id,
+                params.unwrap_or_default(),
+                request_id.clone(),
+                cancel_rx,
+            )
+            .await;
+
+        let mut active = self.active_request.lock().await;
+        if active
+            .as_ref()
+            .is_some_and(|current| current.request_id == request_id)
+        {
+            *active = None;
+        }
+        result
+    }
+
+    pub async fn cancel_request(&self, request_id: Option<&str>) -> bool {
+        let cancellation = {
+            let active = self.active_request.lock().await;
+            active.as_ref().and_then(|current| {
+                if request_id.map_or(true, |id| id == current.request_id) {
+                    Some(current.cancel.clone())
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some(cancel) = cancellation {
+            return cancel.send(true).is_ok();
+        }
+
+        let Some(request_id) = request_id else {
+            return false;
+        };
+        let mut cancelled = self.cancelled_requests.lock().await;
+        if !cancelled.iter().any(|id| id == request_id) {
+            if cancelled.len() >= MAX_CANCELLED_TTS_REQUESTS {
+                cancelled.pop_front();
+            }
+            cancelled.push_back(request_id.to_string());
+        }
+        true
+    }
+
+    async fn take_cancelled_request(&self, request_id: &str) -> bool {
+        let mut cancelled = self.cancelled_requests.lock().await;
+        if let Some(index) = cancelled.iter().position(|id| id == request_id) {
+            cancelled.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
+    async fn speak_request(
+        &self,
+        app: AppHandle,
+        text: String,
+        preferred_provider_id: Option<String>,
+        params: TtsParams,
+        request_id: String,
+        mut cancel: watch::Receiver<bool>,
+    ) -> Result<(), String> {
         let hook_runtime = app.try_state::<HookRuntime>();
-
-        // Route to the best provider
         let router = TtsRouter::new(self.providers.clone(), self.default_provider.clone());
         let route = router
             .select_provider(
-                provider_id.as_deref(),
+                preferred_provider_id.as_deref(),
                 params.required_capabilities.as_ref(),
             )
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| error.to_string())?;
+        let provider = self
+            .providers
+            .read()
+            .await
+            .get(&route.provider_id)
+            .cloned()
+            .ok_or_else(|| format!("Provider {} not found", route.provider_id))?;
+
+        if *cancel.borrow() {
+            return Ok(());
+        }
 
         if let Some(hooks) = hook_runtime.as_ref() {
             hooks
@@ -217,40 +360,45 @@ impl TtsService {
                 .await;
         }
 
-        // Emit Start
-        app.emit("tts:start", TtsStartEvent { text: text.clone() })
-            .map_err(|e| e.to_string())?;
+        app.emit(
+            "tts:start",
+            TtsStartEvent {
+                request_id: request_id.clone(),
+                text: text.clone(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
 
-        // Split into sentences for incremental delivery
-        let sentences: Vec<String> = split_sentences(&text)
+        let sentences: Vec<(usize, String)> = split_sentences(&text)
             .into_iter()
-            .map(|s| s.to_string())
-            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .filter(|sentence| !sentence.trim().is_empty())
+            .enumerate()
+            .map(|(index, sentence)| (index + 1, sentence))
             .collect();
-
-        // Pipelined synthesis: Concurrency = 2
-        // We iterate over sentences, map them to async synthesis tasks, and buffer them.
-        // buffered(n) ensures we have at most n tasks running, but yields results IN ORDER.
+        let concurrency = provider.sentence_concurrency().max(1);
+        let provider_id = route.provider_id.clone();
+        let provider_for_stream = provider.clone();
+        let provider_output_format = provider.output_format();
+        let params_for_stream = params.clone();
+        let request_for_stream = request_id.clone();
+        let cancel_template = cancel.clone();
         let service = self.clone();
-        let service_for_cache = self.clone();
-        let app_handle = app.clone();
-        let provider_id_route = route.provider_id.clone();
-        let params_clone = params.clone();
 
-        let mut stream = futures::stream::iter(sentences)
-            .map(move |sentence| {
+        let mut sentences = futures::stream::iter(sentences)
+            .map(move |(sentence_id, sentence)| {
+                let params = params_for_stream.clone();
+                let provider = provider_for_stream.clone();
+                let provider_id = provider_id.clone();
+                let request_id = request_for_stream.clone();
+                let mut sentence_cancel = cancel_template.clone();
                 let service = service.clone();
-                let params = params_clone.clone();
-                let provider_id = provider_id_route.clone();
-
                 async move {
-                    let cache_salt = {
-                        let providers = service.providers.read().await;
-                        let provider = providers
-                            .get(&provider_id)
-                            .ok_or_else(|| format!("Provider {} not found", provider_id))?;
-                        cache_variant_hash(provider.as_ref(), &params)
-                    };
+                    if *sentence_cancel.borrow() {
+                        return Err(TtsError::Cancelled);
+                    }
+
+                    let cache_salt = cache_variant_hash(provider.as_ref(), &params);
                     let voice_id = params.voice.clone().unwrap_or_default();
                     let cache_key = CacheKey::new(
                         &sentence,
@@ -261,131 +409,182 @@ impl TtsService {
                         cache_salt.as_deref(),
                     );
 
-                    // 1. Check cache
                     if service.cache_enabled {
-                        let mut cache = service.cache.write().await;
-                        if let Some(cached_audio) = cache.get(&cache_key) {
-                            let stream = futures::stream::once(async move { Ok(cached_audio) });
+                        let cached = service.cache.write().await.get(&cache_key);
+                        if let Some(audio) = cached {
+                            let chunk = TtsAudioChunk {
+                                data: audio,
+                                format: provider.output_format(),
+                                response_id: None,
+                            };
+                            let stream = futures::stream::once(async move { Ok(chunk) });
                             return Ok((
+                                sentence_id,
                                 sentence,
-                                Some(Box::pin(stream)
-                                    as Pin<
-                                        Box<
-                                            dyn futures::Stream<Item = Result<Vec<u8>, TtsError>>
-                                                + Send,
-                                        >,
-                                    >),
+                                Some(Box::pin(stream) as TtsAudioStream),
                                 None,
-                                Some(cache_key),
                             ));
-                            // (text, stream, delegate, cache_key)
-                            // Note: we pass cache_key even on hit, but we won't overwrite cache.
                         }
                     }
 
-                    // 2. Synthesize
-                    let providers = service.providers.read().await;
-                    let provider = providers
-                        .get(&provider_id)
-                        .ok_or_else(|| format!("Provider {} not found", provider_id))?;
-
-                    match provider.synthesize_stream(&sentence, params.clone()).await {
-                        Ok(stream) => Ok((sentence, Some(stream), None, Some(cache_key))),
-                        Err(TtsError::BrowserDelegate) => {
-                            let evt = TtsBrowserDelegateEvent {
-                                text: sentence.clone(),
-                                voice: params.voice.clone(),
-                                speed: params.speed,
-                                pitch: params.pitch,
-                            };
-                            Ok((sentence, None, Some(evt), None))
-                        }
-                        Err(e) => Err(format!("Synthesis error for '{}': {}", sentence, e)),
+                    let provider_cancel = sentence_cancel.clone();
+                    let stream_result = tokio::select! {
+                        _ = wait_until_cancelled(&mut sentence_cancel) => Err(TtsError::Cancelled),
+                        result = provider.synthesize_stream_for_request(
+                            &sentence,
+                            params.clone(),
+                            &request_id,
+                            provider_cancel,
+                        ) => result,
+                    };
+                    match stream_result {
+                        Ok(stream) => Ok((sentence_id, sentence, Some(stream), Some(cache_key))),
+                        Err(TtsError::BrowserDelegate) => Ok((sentence_id, sentence, None, None)),
+                        Err(error) => Err(error),
                     }
                 }
             })
-            .buffered(2); // Pipeline depth
+            .buffered(concurrency);
 
+        let mut sequence = 0_u64;
         let mut synthesis_error: Option<String> = None;
-
-        // Process results in order
-        while let Some(result) = stream.next().await {
+        let mut cancelled = false;
+        'sentences: while let Some(result) = sentences.next().await {
+            if *cancel.borrow() {
+                cancelled = true;
+                break;
+            }
             match result {
-                Ok((sentence, Some(mut audio_stream), _, cache_key_opt)) => {
+                Ok((sentence_id, _sentence, Some(mut audio_stream), cache_key)) => {
                     let mut full_audio = Vec::new();
-                    let mut failed = false;
-
-                    while let Some(chunk_res) = audio_stream.next().await {
-                        match chunk_res {
-                            Ok(chunk) => {
-                                full_audio.extend_from_slice(&chunk);
-                                app_handle
-                                    .emit("tts:audio", TtsAudioEvent { data: chunk })
-                                    .map_err(|e| e.to_string())?;
-                            }
-                            Err(e) => {
-                                tracing::error!(target: "tts", "Stream error for '{}': {}", sentence, e);
-                                record_tts_error(
-                                    &mut synthesis_error,
-                                    format!("TTS stream error for '{}': {}", sentence, e),
-                                );
-                                failed = true;
+                    loop {
+                        tokio::select! {
+                            _ = wait_until_cancelled(&mut cancel) => {
+                                cancelled = true;
+                                provider.cancel_request(&request_id).await;
                                 break;
                             }
+                            chunk = audio_stream.next() => {
+                                match chunk {
+                                    Some(Ok(chunk)) if chunk.data.is_empty() => continue,
+                                    Some(Ok(chunk)) => {
+                                        full_audio.extend_from_slice(&chunk.data);
+                                        sequence += 1;
+                                        app.emit("tts:audio", TtsAudioEvent {
+                                            request_id: request_id.clone(),
+                                            sentence_id,
+                                            sequence,
+                                            response_id: chunk.response_id,
+                                            format: chunk.format.or_else(|| provider_output_format.clone()),
+                                            data: chunk.data,
+                                        }).map_err(|error| error.to_string())?;
+                                    }
+                                    Some(Err(TtsError::Cancelled)) => {
+                                        cancelled = true;
+                                        provider.cancel_request(&request_id).await;
+                                        break;
+                                    }
+                                    Some(Err(error)) => {
+                                        tracing::warn!(target: "tts", "TTS stream failed: request_id={} sentence_id={} error={}", request_id, sentence_id, error);
+                                        synthesis_error = Some(format!("TTS synthesis failed: {error}"));
+                                        provider.cancel_request(&request_id).await;
+                                        break;
+                                    }
+                                    None => break,
+                                }
+                            }
                         }
                     }
 
-                    // Cache if successful and not already cached
-                    if !failed && !full_audio.is_empty() {
-                        if let Some(key) = cache_key_opt {
-                            if service_for_cache.cache_enabled {
-                                // Only write to cache if it wasn't a hit?
-                                // Actually we don't know if it was a hit inside here unless we track it.
-                                // But overwriting with same data is harmless but wasteful lock.
-                                // We can check if it exists implicitly or just rely on the fact that
-                                // if it was a hit, we just streamed it back.
-                                // Optimization: check if we need to cache.
-                                // Implementation detail: TtsCache::put overwrites.
-                                // Let's just put it.
-                                let mut cache = service_for_cache.cache.write().await;
-                                cache.put(key, full_audio);
+                    if cancelled || synthesis_error.is_some() {
+                        break 'sentences;
+                    }
+                    if !full_audio.is_empty() {
+                        if let Some(key) = cache_key {
+                            if self.cache_enabled {
+                                self.cache.write().await.put(key, full_audio);
                             }
                         }
                     }
                 }
-                Ok((_text, None, Some(delegate_evt), _)) => {
-                    app_handle
-                        .emit("tts:browser-delegate", delegate_evt)
-                        .map_err(|e| e.to_string())?;
+                Ok((sentence_id, sentence, None, None)) => {
+                    app.emit(
+                        "tts:browser-delegate",
+                        TtsBrowserDelegateEvent {
+                            request_id: request_id.clone(),
+                            sentence_id,
+                            text: sentence,
+                            voice: params.voice.clone(),
+                            speed: params.speed,
+                            pitch: params.pitch,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
                 }
-                Ok(_) => {} // Should not happen
-                Err(e) => {
-                    tracing::error!(target: "tts", "{}", e);
-                    record_tts_error(&mut synthesis_error, e);
+                Ok((_, _, None, Some(_))) => {
+                    synthesis_error = Some("TTS provider returned no audio stream".to_string());
+                    break;
+                }
+                Err(TtsError::Cancelled) => {
+                    cancelled = true;
+                    provider.cancel_request(&request_id).await;
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(target: "tts", "TTS synthesis failed: request_id={} error={}", request_id, error);
+                    synthesis_error = Some(format!("TTS synthesis failed: {error}"));
+                    provider.cancel_request(&request_id).await;
+                    break;
                 }
             }
         }
 
-        // Emit End
-        app.emit("tts:end", TtsEndEvent { text: text.clone() })
-            .map_err(|e| e.to_string())?;
+        if *cancel.borrow() {
+            cancelled = true;
+        }
+        let finish_status = if cancelled {
+            TtsFinishStatus::Cancelled
+        } else if synthesis_error.is_some() {
+            TtsFinishStatus::Error
+        } else {
+            TtsFinishStatus::Completed
+        };
+
+        if let Some(error) = synthesis_error.as_ref() {
+            let _ = app.emit(
+                "tts:error",
+                TtsErrorEvent {
+                    request_id: request_id.clone(),
+                    error: error.clone(),
+                },
+            );
+        }
+        app.emit(
+            "tts:end",
+            TtsEndEvent {
+                request_id: request_id.clone(),
+                text: text.clone(),
+                status: finish_status,
+            },
+        )
+        .map_err(|error| error.to_string())?;
 
         if let Some(error) = synthesis_error {
             return Err(error);
         }
-
-        if let Some(hooks) = hook_runtime.as_ref() {
-            hooks
-                .emit_best_effort(
-                    &HookEvent::AfterTtsPlay,
-                    &HookPayload::Tts(TtsHookPayload {
-                        text,
-                        provider_id: Some(route.provider_id.clone()),
-                    }),
-                )
-                .await;
+        if !cancelled {
+            if let Some(hooks) = hook_runtime.as_ref() {
+                hooks
+                    .emit_best_effort(
+                        &HookEvent::AfterTtsPlay,
+                        &HookPayload::Tts(TtsHookPayload {
+                            text,
+                            provider_id: Some(route.provider_id),
+                        }),
+                    )
+                    .await;
+            }
         }
-
         Ok(())
     }
 
@@ -393,7 +592,7 @@ impl TtsService {
 
     /// List all registered provider IDs with their status.
     pub async fn list_providers(&self) -> Vec<ProviderStatus> {
-        let providers = self.providers.read().await;
+        let providers = self.providers.read().await.clone();
         let mut statuses = Vec::new();
         for (id, provider) in providers.iter() {
             statuses.push(ProviderStatus {
@@ -413,21 +612,18 @@ impl TtsService {
 
     /// Get status for a specific provider.
     pub async fn get_provider_status(&self, id: &str) -> Option<ProviderStatus> {
-        let providers = self.providers.read().await;
-        if let Some(provider) = providers.get(id) {
-            Some(ProviderStatus {
-                id: id.to_string(),
-                available: provider.is_available().await,
-                capabilities: provider.capabilities(),
-            })
-        } else {
-            None
-        }
+        let provider = self.providers.read().await.get(id).cloned()?;
+        Some(ProviderStatus {
+            id: id.to_string(),
+            available: provider.is_available().await,
+            capabilities: provider.capabilities(),
+        })
     }
 
     /// Hot-reload: rebuild providers first, then atomically swap runtime state.
     pub async fn reload_from_config(&self, config: &TtsSystemConfig) -> Result<(), TtsError> {
-        let mut new_providers: HashMap<String, Box<dyn TtsProvider>> = HashMap::new();
+        self.cancel_request(None).await;
+        let mut new_providers: HashMap<String, Arc<dyn TtsProvider>> = HashMap::new();
         let mut new_registry = VoiceRegistry::new();
         let mut first_provider_id: Option<String> = None;
 
@@ -519,10 +715,14 @@ impl TtsService {
             .await
             .map_err(|e| e.to_string())?;
 
-        let providers = self.providers.read().await;
-        let provider = providers
+        let provider = self
+            .providers
+            .read()
+            .await
             .get(&route.provider_id)
+            .cloned()
             .ok_or_else(|| format!("Provider {} not found", route.provider_id))?;
+        let output_format = provider.output_format();
 
         let mut stream = provider
             .synthesize_stream(text, params)
@@ -532,11 +732,17 @@ impl TtsService {
         let mut audio = Vec::new();
         while let Some(chunk_res) = stream.next().await {
             match chunk_res {
-                Ok(chunk) => audio.extend_from_slice(&chunk),
+                Ok(chunk) => audio.extend_from_slice(&chunk.data),
                 Err(e) => return Err(format!("TTS stream error: {}", e)),
             }
         }
-        Ok(audio)
+        match output_format {
+            Some(AudioFormat::PcmS16Le {
+                sample_rate,
+                channels,
+            }) => wrap_pcm_s16le_as_wav(&audio, sample_rate, channels),
+            _ => Ok(audio),
+        }
     }
 
     /// Clear the synthesis cache.
@@ -570,6 +776,39 @@ fn cache_variant_hash(provider: &dyn TtsProvider, params: &TtsParams) -> Option<
     Some(format!("{:x}", hasher.finalize()))
 }
 
+/// The non-streaming helper is used by file-oriented integrations. Keep their
+/// audio contract recognizable without changing desktop PCM streaming.
+fn wrap_pcm_s16le_as_wav(pcm: &[u8], sample_rate: u32, channels: u8) -> Result<Vec<u8>, String> {
+    if sample_rate == 0 || channels == 0 || pcm.len() % (usize::from(channels) * 2) != 0 {
+        return Err("Realtime PCM audio has an invalid sample format".to_string());
+    }
+    let data_len =
+        u32::try_from(pcm.len()).map_err(|_| "Realtime audio is too large".to_string())?;
+    let riff_len = data_len
+        .checked_add(36)
+        .ok_or_else(|| "Realtime audio is too large".to_string())?;
+    let block_align = u16::from(channels) * 2;
+    let byte_rate = sample_rate
+        .checked_mul(u32::from(block_align))
+        .ok_or_else(|| "Realtime audio sample rate is too large".to_string())?;
+
+    let mut wav = Vec::with_capacity(pcm.len() + 44);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&riff_len.to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16_u32.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&u16::from(channels).to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&16_u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(pcm);
+    Ok(wav)
+}
+
 fn split_sentences(text: &str) -> Vec<&str> {
     // 支持中英文标点分句
     let mut result = Vec::new();
@@ -597,6 +836,15 @@ fn split_sentences(text: &str) -> Vec<&str> {
     result
 }
 
+async fn wait_until_cancelled(cancel: &mut watch::Receiver<bool>) {
+    while !*cancel.borrow() {
+        if cancel.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
 fn record_tts_error(current: &mut Option<String>, error: String) {
     if current.is_none() {
         *current = Some(error);
@@ -605,7 +853,7 @@ fn record_tts_error(current: &mut Option<String>, error: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::record_tts_error;
+    use super::{record_tts_error, wrap_pcm_s16le_as_wav, TtsService, MAX_CANCELLED_TTS_REQUESTS};
 
     #[test]
     fn records_the_first_synthesis_error_for_the_command_result() {
@@ -614,5 +862,42 @@ mod tests {
         record_tts_error(&mut error, "second sentence failed".to_string());
 
         assert_eq!(error.as_deref(), Some("provider unavailable"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_request_registration_is_remembered_once() {
+        let service = TtsService::new();
+        assert!(service.cancel_request(Some("request-before-start")).await);
+        assert!(service.take_cancelled_request("request-before-start").await);
+        assert!(!service.take_cancelled_request("request-before-start").await);
+    }
+
+    #[tokio::test]
+    async fn pending_cancellations_have_a_fixed_capacity() {
+        let service = TtsService::new();
+        for index in 0..=MAX_CANCELLED_TTS_REQUESTS {
+            assert!(
+                service
+                    .cancel_request(Some(&format!("pending-{index}")))
+                    .await
+            );
+        }
+        let pending = service.cancelled_requests.lock().await;
+        assert_eq!(pending.len(), MAX_CANCELLED_TTS_REQUESTS);
+        assert_eq!(pending.front().map(String::as_str), Some("pending-1"));
+    }
+
+    #[test]
+    fn non_streaming_pcm_adapter_returns_a_wav_for_file_consumers() {
+        let wav = wrap_pcm_s16le_as_wav(&[1, 0, 2, 0], 24_000, 1).unwrap();
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 4);
+        assert_eq!(&wav[44..], &[1, 0, 2, 0]);
+    }
+
+    #[test]
+    fn non_streaming_pcm_adapter_rejects_incomplete_samples() {
+        assert!(wrap_pcm_s16le_as_wav(&[1], 24_000, 1).is_err());
     }
 }

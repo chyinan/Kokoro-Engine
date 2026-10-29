@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 ///   3. Pick the highest-scoring provider
 ///   4. Fallback: default → browser → error
 pub struct TtsRouter {
-    providers: Arc<RwLock<HashMap<String, Box<dyn TtsProvider>>>>,
+    providers: Arc<RwLock<HashMap<String, Arc<dyn TtsProvider>>>>,
     default_provider: Arc<RwLock<Option<String>>>,
 }
 
@@ -24,7 +24,7 @@ pub struct RouteResult {
 
 impl TtsRouter {
     pub fn new(
-        providers: Arc<RwLock<HashMap<String, Box<dyn TtsProvider>>>>,
+        providers: Arc<RwLock<HashMap<String, Arc<dyn TtsProvider>>>>,
         default_provider: Arc<RwLock<Option<String>>>,
     ) -> Self {
         Self {
@@ -39,7 +39,7 @@ impl TtsRouter {
         preferred_id: Option<&str>,
         requested_caps: Option<&ProviderCapabilities>,
     ) -> Result<RouteResult, TtsError> {
-        let providers = self.providers.read().await;
+        let providers = self.providers.read().await.clone();
 
         if providers.is_empty() {
             return Err(TtsError::Unavailable("No TTS providers registered".into()));
@@ -48,16 +48,24 @@ impl TtsRouter {
         // 1. Try preferred provider first
         if let Some(id) = preferred_id {
             if let Some(provider) = providers.get(id) {
-                if provider.is_available().await {
-                    let score = match requested_caps {
-                        Some(caps) => provider.capabilities().match_score(caps),
-                        None => 1.0,
-                    };
-                    return Ok(RouteResult {
-                        provider_id: id.to_string(),
-                        score,
-                    });
+                if !provider.is_available().await {
+                    return Err(TtsError::Unavailable(
+                        provider.unavailable_reason().unwrap_or_else(|| {
+                            format!(
+                            "TTS provider '{}' is unavailable; check its credentials and configuration",
+                            id
+                            )
+                        }),
+                    ));
                 }
+                let score = match requested_caps {
+                    Some(caps) => provider.capabilities().match_score(caps),
+                    None => 1.0,
+                };
+                return Ok(RouteResult {
+                    provider_id: id.to_string(),
+                    score,
+                });
             }
         }
 
@@ -90,8 +98,8 @@ impl TtsRouter {
         }
 
         // 4. Fallback: try the default provider even if it didn't pass availability check
-        let default = self.default_provider.read().await;
-        if let Some(ref default_id) = *default {
+        let default = self.default_provider.read().await.clone();
+        if let Some(ref default_id) = default {
             if providers.contains_key(default_id) {
                 return Ok(RouteResult {
                     provider_id: default_id.clone(),

@@ -130,6 +130,7 @@ pub fn run() {
             commands::context::delete_last_messages,
             commands::context::end_session,
             commands::tts::synthesize,
+            commands::tts::cancel_tts,
             commands::tts::list_tts_providers,
             commands::tts::list_tts_voices,
             commands::tts::get_tts_provider_status,

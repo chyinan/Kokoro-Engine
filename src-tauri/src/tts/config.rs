@@ -251,4 +251,43 @@ mod tests {
         assert!(provider.enabled, "Provider should be enabled");
         assert_eq!(provider.api_key, None, "API key should be None");
     }
+
+    #[test]
+    fn old_provider_json_without_extra_or_realtime_fields_still_loads() {
+        let json = r#"{
+            "providers": [
+                { "id": "openai", "provider_type": "openai", "enabled": false, "model": "tts-1" }
+            ]
+        }"#;
+        let config: TtsSystemConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.providers[0].id, "openai");
+        assert!(config.providers[0].extra.is_empty());
+        assert_eq!(config.providers[0].model.as_deref(), Some("tts-1"));
+    }
+
+    #[test]
+    fn realtime_provider_config_keeps_style_and_disabled_default() {
+        let json = r#"{
+            "default_provider": "browser",
+            "providers": [{
+                "id": "openai_realtime",
+                "provider_type": "openai_realtime",
+                "enabled": false,
+                "api_key_env": "OPENAI_API_KEY",
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-realtime-2.1-mini",
+                "default_voice": "marin",
+                "extra": { "instructions": "Speak calmly", "other": true }
+            }]
+        }"#;
+        let config: TtsSystemConfig = serde_json::from_str(json).unwrap();
+        let provider = &config.providers[0];
+        assert!(!provider.enabled);
+        assert_eq!(config.default_provider.as_deref(), Some("browser"));
+        assert_eq!(provider.extra["instructions"], "Speak calmly");
+        assert_eq!(provider.extra["other"], true);
+
+        let saved = serde_json::to_value(&config).unwrap();
+        assert_eq!(saved["providers"][0]["extra"]["other"], true);
+    }
 }
