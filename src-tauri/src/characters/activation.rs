@@ -840,13 +840,17 @@ fn resolve_library_live2d_reference(
     {
         return None;
     }
-    let models_root = package_root.parent()?.join("live2d_models");
+    let app_data_root = package_root.parent()?;
+    let models_root = app_data_root.join("live2d_models");
     let metadata = fs::symlink_metadata(&models_root).ok()?;
     if asset_metadata_is_redirected(&metadata) || !metadata.is_dir() {
         return None;
     }
+    // Compare canonical paths with each other: Windows canonicalize() adds a
+    // `\\?\` prefix, so comparing this path with `models_root` rejects valid assets.
+    let canonical_app_data = app_data_root.canonicalize().ok()?;
     let canonical_root = models_root.canonicalize().ok()?;
-    if canonical_root != models_root {
+    if canonical_root.parent() != Some(canonical_app_data.as_path()) {
         return None;
     }
     let expected = models_root.join(relative);
