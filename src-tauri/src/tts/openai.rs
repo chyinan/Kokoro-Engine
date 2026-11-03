@@ -5,7 +5,95 @@ use super::interface::{
 };
 use async_trait::async_trait;
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+
+#[derive(Deserialize)]
+struct OpenAIModelList {
+    #[serde(default)]
+    data: Vec<OpenAIModel>,
+}
+
+#[derive(Deserialize)]
+struct OpenAIModel {
+    id: String,
+}
+
+/// Query the models available to an OpenAI speech provider's API key.
+pub async fn list_openai_tts_models(config: &ProviderConfig) -> Result<Vec<String>, TtsError> {
+    let api_key = config
+        .resolve_api_key()
+        .filter(|api_key| !api_key.trim().is_empty())
+        .ok_or_else(|| {
+            TtsError::ConfigError(
+                "OpenAI API key is missing. Add a key or configure OPENAI_API_KEY.".to_string(),
+            )
+        })?;
+
+    if !matches!(config.provider_type.as_str(), "openai" | "openai_realtime") {
+        return Err(TtsError::ConfigError(
+            "model listing is only supported for OpenAI speech providers".to_string(),
+        ));
+    }
+
+    let configured_base_url = if config.provider_type == "openai_realtime" {
+        config.base_url.as_deref().or(config.endpoint.as_deref())
+    } else {
+        config.base_url.as_deref()
+    };
+    let base_url = configured_base_url
+        .filter(|base_url| !base_url.trim().is_empty())
+        .unwrap_or(DEFAULT_OPENAI_BASE_URL)
+        .trim_end_matches('/');
+    let url = format!("{base_url}/models");
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| {
+            TtsError::Unavailable(format!("failed to build OpenAI client: {error}"))
+        })?;
+    let response = client
+        .get(url)
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|error| TtsError::Unavailable(format!("failed to list OpenAI models: {error}")))?;
+
+    if !response.status().is_success() {
+        return Err(TtsError::Unavailable(format!(
+            "OpenAI model list request failed with HTTP {}",
+            response.status()
+        )));
+    }
+
+    let model_list = response
+        .json::<OpenAIModelList>()
+        .await
+        .map_err(|error| TtsError::Unavailable(format!("invalid OpenAI model list: {error}")))?;
+
+    let mut models = model_list
+        .data
+        .into_iter()
+        .map(|model| model.id)
+        .filter(|model_id| match config.provider_type.as_str() {
+            "openai" => {
+                let model_id = model_id.to_ascii_lowercase();
+                model_id.starts_with("tts-") || model_id.contains("-tts")
+            }
+            "openai_realtime" => {
+                let model_id = model_id.to_ascii_lowercase();
+                model_id.contains("realtime")
+                    && !model_id.contains("transcri")
+                    && !model_id.contains("translat")
+            }
+            _ => false,
+        })
+        .collect::<Vec<_>>();
+    models.sort_unstable();
+    models.dedup();
+    Ok(models)
+}
 
 #[derive(Serialize, Clone)]
 struct TtsRequest {
@@ -44,7 +132,9 @@ impl OpenAITtsProvider {
             provider_id,
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
-            model: model.unwrap_or_else(|| "tts-1".to_string()),
+            model: model
+                .filter(|model| !model.trim().is_empty())
+                .unwrap_or_else(|| "tts-1".to_string()),
             default_voice: voice.unwrap_or_else(|| "alloy".to_string()),
         })
     }
@@ -88,18 +178,29 @@ impl TtsProvider for OpenAITtsProvider {
     }
 
     fn voices(&self) -> Vec<VoiceProfile> {
-        // OpenAI's built-in voices
         let voices = vec![
             ("alloy", Gender::Neutral),
+            ("ash", Gender::Neutral),
+            ("ballad", Gender::Neutral),
+            ("coral", Gender::Neutral),
             ("echo", Gender::Male),
             ("fable", Gender::Male),
             ("onyx", Gender::Male),
             ("nova", Gender::Female),
+            ("sage", Gender::Neutral),
             ("shimmer", Gender::Female),
+            ("verse", Gender::Neutral),
+            ("marin", Gender::Neutral),
+            ("cedar", Gender::Neutral),
+        ];
+        let is_legacy_model = matches!(self.model.as_str(), "tts-1" | "tts-1-hd");
+        let legacy_voices = [
+            "alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
         ];
 
         voices
             .into_iter()
+            .filter(|(name, _)| !is_legacy_model || legacy_voices.contains(name))
             .map(|(name, gender)| VoiceProfile {
                 voice_id: format!("{}_{}", self.provider_id, name),
                 name: name.to_string(),

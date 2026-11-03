@@ -802,6 +802,12 @@ export async function listTtsVoices(): Promise<VoiceProfile[]> {
     return invoke<VoiceProfile[]>("list_tts_voices");
 }
 
+export async function listOpenAITtsModels(
+    config: TtsSystemConfig["providers"][number],
+): Promise<Array<string>> {
+    return invoke<Array<string>>("list_openai_tts_models", { config });
+}
+
 export async function getTtsProviderStatus(providerId: string): Promise<ProviderStatus | null> {
     return invoke<ProviderStatus | null>("get_tts_provider_status", { providerId });
 }

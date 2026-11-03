@@ -11,8 +11,8 @@ import { Trash2, RefreshCw } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { inputClasses, labelClasses, sectionHeadingClasses } from "../../styles/settings-primitives";
 import { Select } from "@/components/ui/select";
-import { getKokoroErrorMessage, synthesize, listGptSovitsModels, onTtsPlaybackError } from "../../../lib/kokoro-bridge";
-import { stripTtsProviderVoiceId as stripProviderVoiceId } from "./tts-voice";
+import { getKokoroErrorMessage, synthesize, listGptSovitsModels, listOpenAITtsModels, onTtsPlaybackError } from "../../../lib/kokoro-bridge";
+import { isOpenAITtsModelVoiceSupported, stripTtsProviderVoiceId as stripProviderVoiceId } from "./tts-voice";
 import type { GptSovitsModels } from "../../../lib/kokoro-bridge";
 import type { ProviderStatus, VoiceProfile, TtsSystemConfig } from "../../../lib/kokoro-bridge";
 import type { ProviderConfigData } from "../../../core/types/mod";
@@ -90,6 +90,10 @@ export default function TtsTab({
 }: TtsTabProps) {
     const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
     const [scannedModels, setScannedModels] = useState<Record<string, GptSovitsModels>>({});
+    const [openAITtsModels, setOpenAITtsModels] = useState<Map<string, Array<string>>>(() => new Map());
+    const [loadingModelProviders, setLoadingModelProviders] = useState<Set<string>>(() => new Set());
+    const [modelErrors, setModelErrors] = useState<Map<string, string>>(() => new Map());
+    const [customVoiceProviderId, setCustomVoiceProviderId] = useState<string | null>(null);
     const [testError, setTestError] = useState<string | null>(null);
     const { t } = useTranslation();
     const activeProvider = ttsConfig?.providers.find(p => p.id === ttsProviderId);
@@ -258,6 +262,44 @@ export default function TtsTab({
         }
     };
 
+    const fetchOpenAITtsModels = async (provider: ProviderConfigData): Promise<void> => {
+        setLoadingModelProviders(current => new Set(current).add(provider.id));
+        setModelErrors(current => {
+            const next = new Map(current);
+            next.delete(provider.id);
+            return next;
+        });
+        try {
+            const models = await listOpenAITtsModels(provider);
+            setOpenAITtsModels(current => new Map(current).set(provider.id, models));
+        } catch (error) {
+            setModelErrors(current => new Map(current).set(provider.id, getKokoroErrorMessage(error)));
+        } finally {
+            setLoadingModelProviders(current => {
+                const next = new Set(current);
+                next.delete(provider.id);
+                return next;
+            });
+        }
+    };
+
+    const updateOpenAIModel = (index: number, provider: ProviderConfigData, model: string): void => {
+        const providerUpdate: Partial<ProviderConfigData> = { model };
+        if (provider.provider_type === "openai") {
+            if (provider.id === ttsProviderId && !isOpenAITtsModelVoiceSupported(model, ttsVoice)) {
+                onTtsVoiceChange("alloy");
+                setCustomVoiceProviderId(current => current === provider.id ? null : current);
+            } else if (
+                !isOpenAITtsModelVoiceSupported(model, stripProviderVoiceId(provider.id, provider.default_voice ?? ""))
+                && provider.id !== ttsProviderId
+                && provider.default_voice
+            ) {
+                providerUpdate.default_voice = "alloy";
+            }
+        }
+        updateProviderConfig(index, providerUpdate);
+    };
+
 
     return (
         <div className="space-y-6">
@@ -313,25 +355,56 @@ export default function TtsTab({
                 {!isActiveReferenceCloneProvider && (
                     <div>
                         <label className={labelClasses}>{t("settings.tts.active_settings.voice")}</label>
-                        {isActiveOpenAI ? (
-                            <input
-                                type="text"
-                                value={ttsVoice}
-                                onChange={e => onTtsVoiceChange(e.target.value)}
-                                placeholder="alloy"
-                                className={clsx(inputClasses, "font-mono text-xs")}
-                            />
+                        {isActiveOpenAI && customVoiceProviderId === ttsProviderId ? (
+                            <div className="space-y-2">
+                                <input
+                                    type="text"
+                                    value={ttsVoice}
+                                    onChange={e => onTtsVoiceChange(e.target.value)}
+                                    placeholder={t("settings.tts.active_settings.custom_voice_placeholder")}
+                                    className={clsx(inputClasses, "font-mono text-xs")}
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        if (!activeVoices.some(voice => stripProviderVoiceId(ttsProviderId, voice.voice_id) === ttsVoice)) {
+                                            onTtsVoiceChange("alloy");
+                                        }
+                                        setCustomVoiceProviderId(null);
+                                    }}
+                                    className="text-[10px] text-[var(--color-accent)] hover:underline"
+                                >
+                                    {t("settings.tts.active_settings.built_in_voices")}
+                                </button>
+                            </div>
                         ) : (
                             <div className="space-y-2">
                                 <Select
                                     value={ttsVoice}
-                                    onChange={onTtsVoiceChange}
+                                    onChange={voice => {
+                                        onTtsVoiceChange(voice);
+                                        if (isActiveOpenAI) setCustomVoiceProviderId(null);
+                                    }}
                                     options={activeVoiceOptions}
                                     searchable={isVoiceSearchable}
                                     searchPlaceholder={t("settings.tts.active_settings.voice_search")}
                                     emptyMessage={t("settings.tts.active_settings.voice_no_match")}
                                 />
+                                {isActiveOpenAI && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setCustomVoiceProviderId(ttsProviderId)}
+                                        className="text-[10px] text-[var(--color-accent)] hover:underline"
+                                    >
+                                        {t("settings.tts.active_settings.custom_voice_id")}
+                                    </button>
+                                )}
                             </div>
+                        )}
+                        {(isActiveOpenAI || isActiveRealtime) && (
+                            <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
+                                {t("settings.tts.active_settings.openai_voice_catalog_hint")}
+                            </p>
                         )}
                     </div>
                 )}
@@ -861,13 +934,53 @@ export default function TtsTab({
                                         {(provider.provider_type === "openai" || provider.provider_type === "openai_realtime" || provider.provider_type === "azure") && (
                                             <div>
                                                 <label className={labelClasses}>{t("settings.tts.fields.model_id")}</label>
-                                                <input
-                                                    type="text"
-                                                    value={provider.model || ""}
-                                                    onChange={e => updateProviderConfig(index, { model: e.target.value })}
-                                                     placeholder={provider.provider_type === "openai_realtime" ? "gpt-realtime-2.1-mini" : "tts-1"}
-                                                    className={clsx(inputClasses, "font-mono text-xs")}
-                                                />
+                                                <div className="flex items-center gap-2">
+                                                    <input
+                                                        type="text"
+                                                        list={provider.provider_type === "azure" ? undefined : `tts-models-${provider.id}`}
+                                                        value={provider.model || ""}
+                                                        onChange={e => {
+                                                            if (provider.provider_type === "azure") {
+                                                                updateProviderConfig(index, { model: e.target.value });
+                                                            } else {
+                                                                updateOpenAIModel(index, provider, e.target.value);
+                                                            }
+                                                        }}
+                                                        placeholder={provider.provider_type === "openai_realtime" ? "gpt-realtime-2.1-mini" : "tts-1"}
+                                                        className={clsx(inputClasses, "font-mono text-xs flex-1")}
+                                                    />
+                                                    {provider.provider_type !== "azure" && (
+                                                        <>
+                                                            <datalist id={`tts-models-${provider.id}`}>
+                                                                {(openAITtsModels.get(provider.id) ?? []).map(model => (
+                                                                    <option key={model} value={model} />
+                                                                ))}
+                                                            </datalist>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => { void fetchOpenAITtsModels(provider); }}
+                                                                disabled={loadingModelProviders.has(provider.id)}
+                                                                aria-label={t("settings.tts.fields.fetch_models")}
+                                                                title={t("settings.tts.fields.fetch_models")}
+                                                                className="p-2 rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-accent)] disabled:opacity-50"
+                                                            >
+                                                                <RefreshCw size={14} className={loadingModelProviders.has(provider.id) ? "animate-spin" : ""} />
+                                                            </button>
+                                                        </>
+                                                    )}
+                                                </div>
+                                                {provider.provider_type !== "azure" && (
+                                                    <>
+                                                        <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
+                                                            {t("settings.tts.fields.model_list_hint")}
+                                                        </p>
+                                                        {modelErrors.get(provider.id) && (
+                                                            <p role="alert" className="text-[10px] text-[var(--color-error)] mt-1">
+                                                                {modelErrors.get(provider.id)}
+                                                            </p>
+                                                        )}
+                                                    </>
+                                                )}
                                             </div>
                                         )}
 

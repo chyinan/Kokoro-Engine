@@ -1,5 +1,16 @@
 import type { VoiceProfile, TtsSystemConfig } from "../../../lib/kokoro-bridge";
 
+const NEW_OPENAI_TTS_VOICES = new Set(["ballad", "verse", "marin", "cedar"]);
+
+function isLegacyOpenAITtsModel(model?: string | null): boolean {
+    const normalizedModel = model?.trim();
+    return !normalizedModel || normalizedModel === "tts-1" || normalizedModel === "tts-1-hd";
+}
+
+export function isOpenAITtsModelVoiceSupported(model: string | null | undefined, voice: string): boolean {
+    return !isLegacyOpenAITtsModel(model) || !NEW_OPENAI_TTS_VOICES.has(voice);
+}
+
 function getProviderConfig(providerId: string, ttsConfig?: TtsSystemConfig | null) {
     return ttsConfig?.providers.find(provider => provider.id === providerId);
 }
@@ -29,7 +40,11 @@ function getDefaultTtsVoice(
 
     const provider = getProviderConfig(providerId, ttsConfig);
     if (provider?.provider_type === "openai" || provider?.provider_type === "openai_realtime") {
-        return provider.default_voice || (provider.provider_type === "openai_realtime" ? "marin" : "alloy");
+        const defaultVoice = provider.default_voice || (provider.provider_type === "openai_realtime" ? "marin" : "alloy");
+        const normalizedVoice = stripTtsProviderVoiceId(providerId, defaultVoice);
+        return provider.provider_type === "openai" && !isOpenAITtsModelVoiceSupported(provider.model, normalizedVoice)
+            ? "alloy"
+            : normalizedVoice;
     }
     if (!provider && providerId === "openai") return "alloy";
 
@@ -47,7 +62,7 @@ export function normalizeTtsVoice(
     const provider = getProviderConfig(providerId, ttsConfig);
     if (!voice) {
         if (provider?.provider_type === "openai" || provider?.provider_type === "openai_realtime") {
-            return provider.default_voice || (provider.provider_type === "openai_realtime" ? "marin" : "alloy");
+            return getDefaultTtsVoice(providerId, voices, ttsConfig);
         }
 
         if (usesShortTtsVoiceId(providerId, ttsConfig)) {
@@ -65,7 +80,10 @@ export function normalizeTtsVoice(
 
     if (providerId === "browser") return voice === "browser_default" ? voice : "";
     if (provider?.provider_type === "openai" || provider?.provider_type === "openai_realtime") {
-        return stripTtsProviderVoiceId(providerId, voice);
+        const normalizedVoice = stripTtsProviderVoiceId(providerId, voice);
+        return provider.provider_type === "openai" && !isOpenAITtsModelVoiceSupported(provider.model, normalizedVoice)
+            ? getDefaultTtsVoice(providerId, voices, ttsConfig)
+            : normalizedVoice;
     }
 
     const matchesProvider = voices.some(item => {

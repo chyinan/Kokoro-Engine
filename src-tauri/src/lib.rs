@@ -133,6 +133,7 @@ pub fn run() {
             commands::tts::cancel_tts,
             commands::tts::list_tts_providers,
             commands::tts::list_tts_voices,
+            commands::tts::list_openai_tts_models,
             commands::tts::get_tts_provider_status,
             commands::tts::clear_tts_cache,
             commands::tts::get_tts_config,

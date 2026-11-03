@@ -1,5 +1,5 @@
 use crate::error::KokoroError;
-use crate::tts::config::{save_config, TtsSystemConfig};
+use crate::tts::config::{save_config, ProviderConfig, TtsSystemConfig};
 use crate::tts::{ProviderStatus, TtsParams, TtsService, VoiceProfile};
 use tauri::{command, AppHandle, State};
 
@@ -65,6 +65,13 @@ pub async fn list_tts_voices(
     state: State<'_, TtsService>,
 ) -> Result<Vec<VoiceProfile>, KokoroError> {
     Ok(state.list_voices().await)
+}
+
+#[command]
+pub async fn list_openai_tts_models(config: ProviderConfig) -> Result<Vec<String>, KokoroError> {
+    crate::tts::openai::list_openai_tts_models(&config)
+        .await
+        .map_err(|error| KokoroError::Tts(error.to_string()))
 }
 
 #[command]
