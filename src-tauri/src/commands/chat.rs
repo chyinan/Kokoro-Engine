@@ -2591,6 +2591,9 @@ pub async fn stream_chat(
         memory_target_language,
     } = prepared_turn;
 
+    #[cfg(not(debug_assertions))]
+    let _ = (llm_config, effective_provider_id);
+
     let mut is_newly_created_for_hidden = false;
     let draft_row_id_holder = std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let draft_row_id_for_stream = std::sync::Arc::clone(&draft_row_id_holder);
