@@ -76,12 +76,24 @@ function TypingIndicator() {
 }
 
 // ── Error Toast ────────────────────────────────────────────
-function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+// Claim only when an alert has a mounted renderer. A rejected promise can
+// outlive its composer, leaving the saved diagnostic to announce on reopen.
+function useFailureAnnouncement(requestId: string | undefined): boolean {
+    const [claimedId, setClaimedId] = useState<string>();
+    useLayoutEffect(() => {
+        if (requestId && chatApplication.claimFailureAnnouncement(requestId)) setClaimedId(requestId);
+    }, [requestId]);
+    return requestId !== undefined && claimedId === requestId;
+}
+
+function ErrorToast({ message, requestId, onDismiss }: { message: string; requestId?: string; onDismiss: () => void }) {
+    const claimed = useFailureAnnouncement(requestId);
     useEffect(() => {
         const timer = setTimeout(onDismiss, 4000);
         return () => clearTimeout(timer);
     }, [onDismiss]);
 
+    if (requestId !== undefined && !claimed) return null;
     return (
         <motion.div
             role="alert"
@@ -132,16 +144,18 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
         ? { conversationId, generation, messageId: message.id }
         : undefined;
     const editableTarget = message.failureScope ? undefined : target;
+    const retryTarget = message.failureScope && !message.canRetryFailure ? undefined : target;
+    const announceFailure = useFailureAnnouncement(message.failureScope ? message.clientRequestId : undefined);
     return (
         <ChatMessage
-            message={message}
+            message={message.failureScope ? { ...message, announceError: announceFailure } : message}
             index={globalIndex}
             isStreaming={isStreaming}
             isTranslationExpanded={isTranslationExpanded}
             onToggleTranslation={() => onToggleTranslation(globalIndex)}
             editScope={editableTarget ? JSON.stringify([editableTarget.conversationId, editableTarget.generation, editableTarget.messageId]) : undefined}
             onEdit={editableTarget ? text => onEdit(editableTarget, text) : undefined}
-            onRegenerate={target ? () => onRegenerate(target) : undefined}
+            onRegenerate={retryTarget ? () => onRegenerate(retryTarget) : undefined}
             onContinueFrom={editableTarget ? () => onContinueFrom(editableTarget) : undefined}
             onApproveTool={createToolActionHandler(globalIndex, onApproveTool)}
             onRejectTool={createToolActionHandler(globalIndex, onRejectTool)}
@@ -257,7 +271,7 @@ export default function ChatPanel({
     const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
     const [isDraggingOver, setIsDraggingOver] = useState(false);
     const dragCounterRef = useRef(0);
-    const [error, setError] = useState<string | null>(null);
+    const [error, setError] = useState<string | { message: string; requestId: string } | null>(null);
     const [unreadCount, setUnreadCount] = useState(0);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -310,7 +324,10 @@ export default function ChatPanel({
         };
     }, []);
 
-    const reportError = useCallback((error: unknown) => setError(getAsyncErrorMessage(error)), []);
+    const reportError = useCallback((error: unknown, requestId?: string) => {
+        const message = getAsyncErrorMessage(error);
+        setError(requestId ? { message, requestId } : message);
+    }, []);
     useEffect(() => {
         let mounted = true;
         const unlisten = onChatWarning(warning => {
@@ -353,11 +370,13 @@ export default function ChatPanel({
                 allow_image_gen: readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated",
             });
             if (response.user_message_id != null) finishSubmission(character, clientRequestId, true);
+        } catch (error) {
+            reportError(error, clientRequestId);
         } finally {
             reconcileSubmission(character, clientRequestId);
             submittingRef.current = false;
         }
-    }, [rememberSubmission, finishSubmission, reconcileSubmission]);
+    }, [rememberSubmission, finishSubmission, reconcileSubmission, reportError]);
     const handleTranscription = useCallback((text: string) => {
         const character = sttBaseCharacterIdRef.current ?? activeCharacterIdRef.current;
         const conversation = sttBaseConversationIdRef.current ?? activeConversationIdRef.current;
@@ -841,7 +860,13 @@ export default function ChatPanel({
         try { await chatApplication.edit(target, text); } catch (error) { reportError(error); }
     }, [reportError]);
     const onRegenerate = useCallback(async (target: ChatMessageTarget) => {
-        try { await chatApplication.continueFrom(target, true, { allow_image_gen: readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated" }); } catch (error) { reportError(error); }
+        const requestId = `req_${crypto.randomUUID()}`;
+        try {
+            await chatApplication.continueFrom(target, true, {
+                client_request_id: requestId,
+                allow_image_gen: readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated",
+            });
+        } catch (error) { reportError(error, requestId); }
     }, [reportError]);
     const onContinueFrom = useCallback(async (target: ChatMessageTarget) => {
         try { await chatApplication.continueFrom(target); } catch (error) { reportError(error); }
@@ -1088,7 +1113,12 @@ export default function ChatPanel({
 
             {/* Error toast */}
             <AnimatePresence>
-                {error && <ErrorToast message={error} onDismiss={() => setError(null)} />}
+                {error && <ErrorToast
+                    key={typeof error === "string" ? undefined : error.requestId}
+                    message={typeof error === "string" ? error : error.message}
+                    requestId={typeof error === "string" ? undefined : error.requestId}
+                    onDismiss={() => setError(null)}
+                />}
             </AnimatePresence>
 
             {/* 对话历史侧边栏 */}

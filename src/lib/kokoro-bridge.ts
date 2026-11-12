@@ -291,6 +291,7 @@ export interface ChatRequest {
     client_request_id?: string;
     /** If true, this turn is regenerating an assistant reply for the last user message. */
     regenerate?: boolean;
+    regenerate_user_message_id?: number;
     /** Optional target conversation ID. If specified, backend binds strictly to this conversation. */
     conversation_id?: string | null;
     conversation_generation?: number;

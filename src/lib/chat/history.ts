@@ -113,7 +113,9 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
             const conversation_id = getStringMetadataValue(event ?? null, "conversation_id");
             const turn_id = getStringMetadataValue(event ?? null, "turn_id");
             if (character_id && conversation_id && turn_id) {
-                chatMsgs.push({ id: m.id, role: "kokoro", text: m.content, failureScope: { character_id, conversation_id, turn_id } });
+                const savedUser = meta?.user_message_id;
+                const user_message_id = savedUser === null || typeof savedUser === "number" ? savedUser : undefined;
+                chatMsgs.push({ id: m.id, role: "kokoro", text: m.content, failureScope: { character_id, conversation_id, turn_id, user_message_id } });
                 continue;
             }
         }

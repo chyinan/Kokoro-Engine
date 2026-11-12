@@ -1,6 +1,6 @@
 import type { ChatTurnSnapshot, ChatViewSnapshot } from "../kokoro-bridge";
 import { buildChatMessagesFromConversation } from "./history";
-import { buildToolTraceItem, getToolEventStateUpdate, mergeToolTraceItems, stripStreamingControlMarkup, type ChatPanelMessage, type PendingTurnState } from "./turn-state";
+import { buildToolTraceItem, getToolEventStateUpdate, mergeToolTraceItems, stripStreamingControlMarkup, type ChatFailureScope, type ChatPanelMessage, type PendingTurnState } from "./turn-state";
 
 export const isActiveTurn = (turn: ChatTurnSnapshot) => ["pending", "accepted", "streaming"].includes(turn.status);
 
@@ -40,21 +40,36 @@ export function projectSavedMessages(view: ChatViewSnapshot): ChatPanelMessage[]
   });
 }
 
+function isSelectedFailure(view: ChatViewSnapshot, scope: ChatFailureScope): boolean {
+  return scope.character_id === view.character_id && scope.conversation_id === view.conversation_id;
+}
+
+function findFailureTurn(view: ChatViewSnapshot, scope: ChatFailureScope): ChatTurnSnapshot | undefined {
+  return view.turns.find(turn => turn.status === "error" && turn.turn_id === scope.turn_id
+    && turn.character_id === scope.character_id && turn.conversation_id === scope.conversation_id);
+}
+
+export function findFailurePromptIndex(view: ChatViewSnapshot, messages: readonly ChatPanelMessage[], diagnosticIndex: number): number {
+  const scope = messages[diagnosticIndex]?.failureScope;
+  if (!scope || !isSelectedFailure(view, scope)) return -1;
+  // Older diagnostics can recover their exact prompt from a retained journal entry.
+  const turn = findFailureTurn(view, scope);
+  const userId = scope.user_message_id === undefined ? turn?.user_message_id : scope.user_message_id;
+  if (userId == null || (turn && (turn.hidden || turn.user_message_id !== userId))) return -1;
+  return messages.findIndex((message, index) => index < diagnosticIndex && message.role === "user" && message.id === userId);
+}
+
 export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
   const turns = view.turns.filter(turn => turn.character_id === view.character_id && (!turn.conversation_id || turn.conversation_id === view.conversation_id));
-  // Legacy Mod sends have no composer toast. Keep their live announcement
-  // when saved history replaces the journal's temporary diagnostic.
-  const announcedFailureTurns = new Set(turns.flatMap(turn =>
-    turn.turn_id && turn.conversation_id === view.conversation_id && turn.client_request_id.startsWith("mod_")
-      ? [turn.turn_id] : [],
-  ));
   const shownFailures = new Set<string>();
-  let messages = projectSavedMessages(view).flatMap(message => {
+  let messages = projectSavedMessages(view).flatMap((message, index, saved) => {
     const scope = message.failureScope;
     if (!scope) return [message];
-    if (scope.character_id !== view.character_id || scope.conversation_id !== view.conversation_id || shownFailures.has(scope.turn_id)) return [];
+    if (!isSelectedFailure(view, scope) || shownFailures.has(scope.turn_id)) return [];
     shownFailures.add(scope.turn_id);
-    return [{ ...message, isError: true, announceError: announcedFailureTurns.has(scope.turn_id) }];
+    return [{ ...message, isError: true, announceError: false,
+      clientRequestId: findFailureTurn(view, scope)?.client_request_id,
+      canRetryFailure: findFailurePromptIndex(view, saved, index) >= 0 }];
   });
   const latestTurnByUser = new Map<number, ChatTurnSnapshot>();
   for (const turn of turns) {
@@ -72,7 +87,7 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
       if (promptIndex >= 0) {
         const replyIndex = messages.findIndex(message => message.role === "kokoro" && message.turnId === turn.turn_id);
         messages.splice(Math.max(promptIndex, replyIndex) + 1, 0, {
-          role: "kokoro", text: turn.error, isError: true,
+          role: "kokoro", text: turn.error, isError: true, announceError: false, clientRequestId: turn.client_request_id,
           failureScope: { character_id: view.character_id, conversation_id: turn.conversation_id, turn_id: turn.turn_id },
         });
         shownFailures.add(turn.turn_id);

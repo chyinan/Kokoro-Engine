@@ -5,8 +5,14 @@ import path from "node:path";
 const directory = path.resolve(process.argv[2] ?? "output/playwright/chat-lifecycle");
 fs.mkdirSync(directory, { recursive: true });
 const calls = [];
+let releaseDetachedFailure;
 const server = http.createServer(async (request, response) => {
   if (request.url === "/counts") { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(calls)); return; }
+  if (request.url === "/release-detached-failure" && releaseDetachedFailure) {
+    releaseDetachedFailure();
+    releaseDetachedFailure = undefined;
+    response.writeHead(204); response.end(); return;
+  }
   let raw = ""; for await (const chunk of request) raw += chunk;
   let body; try { body = JSON.parse(raw); } catch { response.writeHead(400); response.end("invalid JSON"); return; }
   if (request.url === "/v1/audio/speech") {
@@ -24,9 +30,15 @@ const server = http.createServer(async (request, response) => {
   save();
   if (name === "provider-failure") { response.writeHead(400, { "content-type": "application/json" }); response.end(JSON.stringify({ error: { message: "controlled failure", type: "invalid_request_error" } })); return; }
   if (name === "legacy-mod-connect-failure" && body.stream === true) { request.socket.destroy(); return; }
-  if (name === "composer-retry-once" && call.streaming && !calls.slice(0, -1).some(previous => previous.name === name && previous.streaming)) {
+  const composerRetry = name === "composer-retry-once" && call.streaming;
+  const composerRound = composerRetry ? calls.filter(previous => previous.name === name && previous.streaming).length : 0;
+  if (name === "detached-composer-failure" && call.streaming) {
+    await new Promise(resolve => { releaseDetachedFailure = resolve; });
+  }
+  if (composerRound === 2 || name === "detached-composer-failure" || name === "hidden-chat-failure") {
     response.writeHead(400, { "content-type": "application/json" });
-    response.end(JSON.stringify({ error: { message: "controlled composer failure", type: "invalid_request_error" } }));
+    const reason = composerRound === 2 ? "controlled composer failure" : `controlled ${name}`;
+    response.end(JSON.stringify({ error: { message: reason, type: "invalid_request_error" } }));
     return;
   }
   if (!body.stream) {
@@ -40,8 +52,8 @@ const server = http.createServer(async (request, response) => {
   const hasTextToolFeedback = body.messages?.some(message => message.role === "system" && message.content?.startsWith?.("[Tool results]"));
   if ((name === "text-tool" || name === "text-tool-only") && !hasTextToolFeedback) {
     chunk({ content: "[TOOL_CALL:get_time]" });
-  } else if (name === "tool" && !call.toolResult) {
-    chunk({ content: "Draft before get_time. " });
+  } else if ((name === "tool" && !call.toolResult) || composerRound === 1) {
+    chunk({ content: composerRound === 1 ? "Partial reply before failure. " : "Draft before get_time. " });
     const tool = call.tools.find(name => name.endsWith("get_time"));
     if (tool) chunk({ tool_calls: [{ index: 0, id: "fixture-tool-call", type: "function", function: { name: tool, arguments: "{}" } }] });
     else chunk({ content: "No get_time tool configured" });

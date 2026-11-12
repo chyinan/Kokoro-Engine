@@ -102,23 +102,24 @@ async fn append_failure_event_jsonl(
 async fn persist_failure_event_to_conversation(
     state: &AIOrchestrator,
     failure_event: &crate::error::FailureEvent,
+    user_message_id: Option<i64>,
 ) -> Result<(), KokoroError> {
-    let conversation_id = match state.current_conversation_id.lock().await.clone() {
-        Some(id) => id,
-        None => return Ok(()),
+    let Some(conversation_id) = failure_event.conversation_id.as_deref() else {
+        return Ok(());
     };
 
     let now = chrono::Utc::now().to_rfc3339();
     let metadata = serde_json::json!({
         "type": "failure_event",
         "event": failure_event,
+        "user_message_id": user_message_id,
     })
     .to_string();
 
     sqlx::query(
         "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)"
     )
-    .bind(&conversation_id)
+    .bind(conversation_id)
     .bind("system")
     .bind(&failure_event.message)
     .bind(&metadata)
@@ -129,7 +130,7 @@ async fn persist_failure_event_to_conversation(
 
     sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
         .bind(&now)
-        .bind(&conversation_id)
+        .bind(conversation_id)
         .execute(&state.db)
         .await
         .map_err(KokoroError::from)?;
@@ -141,11 +142,12 @@ async fn emit_and_persist_failure_event(
     app: &tauri::AppHandle,
     state: &AIOrchestrator,
     failure_event: crate::error::FailureEvent,
+    user_message_id: Option<i64>,
 ) -> Result<(), KokoroError> {
     crate::chat::runtime::emit_chat_event(app, "chat-failure", failure_event.clone()).await
         .map_err(|error| KokoroError::Chat(error.to_string()))?;
 
-    persist_failure_event_to_conversation(state, &failure_event).await?;
+    persist_failure_event_to_conversation(state, &failure_event, user_message_id).await?;
 
     if let Err(error) = append_failure_event_jsonl(&failure_event).await {
         tracing::error!(
@@ -1185,6 +1187,8 @@ pub struct ChatRequest {
     /// If true, this turn is regenerating an assistant reply for the last user message.
     #[serde(default)]
     pub regenerate: bool,
+    /// A failed-turn retry must reuse this user row or abort if history changed.
+    pub regenerate_user_message_id: Option<i64>,
     /// Optional target conversation ID. If specified, backend strictly validates that this request
     /// belongs to this conversation; if unspecified, it binds to the active conversation at entry.
     #[serde(default)]
@@ -2398,6 +2402,31 @@ async fn execute_chat(
 
             let bound_generation = initial_generation;
 
+            let trailing_visible_user = if request.regenerate {
+                if let Some(cid) = current_conv_id.as_deref() {
+                    match resolve_trailing_visible_user_message(&state.db, cid).await {
+                        Ok(res) => res,
+                        Err(e) => {
+                            tracing::warn!(
+                                "[stream_chat] Failed to query trailing visible message for '{}': {}",
+                                cid,
+                                e
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(expected) = request.regenerate_user_message_id {
+                if request.hidden || trailing_visible_user.as_ref().map(|(id, _)| *id) != Some(expected) {
+                    return Err(KokoroError::Validation("Conversation history changed before retry".to_string()));
+                }
+            }
+
             let resolved_conv_id = if let Some(cid) = current_conv_id {
                 Some(cid)
             } else if request.hidden {
@@ -2433,26 +2462,6 @@ async fn execute_chat(
                     crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
                 }
                 Some(new_id)
-            };
-
-            let trailing_visible_user = if request.regenerate {
-                if let Some(ref cid) = resolved_conv_id {
-                    match resolve_trailing_visible_user_message(&state.db, cid).await {
-                        Ok(res) => res,
-                        Err(e) => {
-                            tracing::warn!(
-                                "[stream_chat] Failed to query trailing visible message for '{}': {}",
-                                cid,
-                                e
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
             };
 
             let has_trailing_user = trailing_visible_user.is_some();
@@ -2998,7 +3007,7 @@ async fn execute_chat(
                     Some(char_id.clone()),
                     None,
                 );
-                emit_and_persist_failure_event(&app, &state, failure_event).await?;
+                emit_and_persist_failure_event(&app, &state, failure_event, user_message_id).await?;
                 stream_failure_message = Some(err_msg);
                 stream_failed = true;
                 break;
@@ -3020,7 +3029,7 @@ async fn execute_chat(
                             Some(char_id.clone()),
                             None,
                         );
-                        emit_and_persist_failure_event(&app, &state, failure_event).await?;
+                        emit_and_persist_failure_event(&app, &state, failure_event, user_message_id).await?;
                         stream_failure_message = Some(err_msg);
                         stream_failed = true;
                         break;
@@ -3092,7 +3101,7 @@ async fn execute_chat(
                         Some(char_id.clone()),
                         None,
                     );
-                    emit_and_persist_failure_event(&app, &state, failure_event).await?;
+                    emit_and_persist_failure_event(&app, &state, failure_event, user_message_id).await?;
                     break;
                 }
                 StreamPollResult::StreamEnded => {
@@ -3116,7 +3125,7 @@ async fn execute_chat(
                             Some(char_id.clone()),
                             None,
                         );
-                        emit_and_persist_failure_event(&app, &state, failure_event).await?;
+                        emit_and_persist_failure_event(&app, &state, failure_event, user_message_id).await?;
                     } else {
                         tracing::error!(
                             target: "chat",

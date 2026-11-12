@@ -9,6 +9,7 @@ export interface ChatFailureScope {
     character_id: string;
     conversation_id: string;
     turn_id: string;
+    user_message_id?: number | null;
 }
 
 export interface ChatPanelMessage {
@@ -21,6 +22,7 @@ export interface ChatPanelMessage {
     isError?: boolean;
     announceError?: boolean;
     failureScope?: ChatFailureScope;
+    canRetryFailure?: boolean;
     speechError?: string;
     tools?: ToolTraceItem[];
     capturedAt?: string;

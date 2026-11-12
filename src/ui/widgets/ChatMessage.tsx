@@ -186,6 +186,7 @@ export const ChatMessage = memo(function ChatMessage({
     const [editingText, setEditingText] = useState("");
     const [toolsExpanded, setToolsExpanded] = useState(false);
     const isEditing = editScope !== undefined && editingScope === editScope;
+    const announceError = msg.announceError ?? msg.isError;
 
     const handleStartEdit = () => {
         setEditingScope(editScope);
@@ -320,7 +321,7 @@ export const ChatMessage = memo(function ChatMessage({
                 </div>
             ) : (
                 <>
-                    <div role={(msg.announceError ?? msg.isError) ? "alert" : undefined} className={clsx("whitespace-pre-wrap break-words", msg.isError && "text-red-300")}>
+                    <div key={announceError ? "alert" : "message"} role={announceError ? "alert" : undefined} className={clsx("whitespace-pre-wrap break-words", msg.isError && "text-red-300")}>
                         {msg.text}
                     </div>
 

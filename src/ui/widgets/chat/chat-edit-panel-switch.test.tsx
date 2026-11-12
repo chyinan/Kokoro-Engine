@@ -5,7 +5,8 @@ import { expect, it, vi } from "vitest";
 import { listen, type EventCallback } from "@tauri-apps/api/event";
 import ChatPanel from "../ChatPanel";
 import { chatViewFixture as chat } from "../../../lib/chat/view-test-fixture";
-import { turn } from "../../../lib/chat/__tests__/harness";
+import { deferred, turn } from "../../../lib/chat/__tests__/harness";
+import type { StreamChatResponse } from "../../../lib/kokoro-bridge";
 
 vi.mock("../../../lib/chat/application", async () => ({ chatApplication: (await import("../../../lib/chat/view-test-fixture")).chatViewFixture }));
 vi.mock("@tauri-apps/api/core", async original => ({ ...await original<typeof import("@tauri-apps/api/core")>(), invoke: vi.fn(async () => {}) }));
@@ -122,6 +123,45 @@ it("shows the legacy Mod failure once across the journal and history, scoped to 
 
         await act(async () => chat.set({ character_id: "char-1", generation: 4, messages: [] }));
         expect(reasons()).toEqual([]);
+    } finally {
+        await act(async () => root.unmount());
+        container.remove();
+    }
+});
+
+it.each([false, true])("announces a composer failure once when history arrives first: %s", async historyFirst => {
+    chat.reset();
+    const sending = deferred<StreamChatResponse>();
+    chat.send.mockReturnValueOnce(sending.promise);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const prompt = { id: 1, role: "user", content: "Prompt that failed", created_at: "now" };
+    const alertNodes = () => [...container.querySelectorAll('[role="alert"]')];
+    try {
+        await act(async () => root.render(<ChatPanel />));
+        const input = container.querySelector<HTMLTextAreaElement>("textarea")!;
+        await act(async () => {
+            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, prompt.content);
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+        });
+        await act(async () => { input.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+        const requestId = chat.send.mock.calls[0]?.[0].client_request_id;
+        expect(requestId).toBeDefined();
+        const failed = { ...turn(requestId!, 3, "error"), character_id: "char-1", conversation_id: "conv-1", error: "Wrapped provider error" };
+        const diagnostic = {
+            id: 2, role: "system", content: "Saved provider error", created_at: "now",
+            metadata: JSON.stringify({ type: "failure_event", user_message_id: prompt.id,
+                event: { character_id: failed.character_id, conversation_id: failed.conversation_id, turn_id: failed.turn_id } }),
+        };
+        const save = () => chat.set({ revision: 3, messages: [prompt, diagnostic], turns: [failed] });
+        const reject = () => sending.reject(new Error(failed.error));
+        await act(async () => { (historyFirst ? save : reject)(); });
+        const [firstAlert] = alertNodes();
+        expect(firstAlert?.textContent).toBe(historyFirst ? diagnostic.content : failed.error);
+        await act(async () => { (historyFirst ? reject : save)(); });
+        expect(alertNodes()).toEqual([firstAlert]);
+        expect(container.textContent).toContain(diagnostic.content);
     } finally {
         await act(async () => root.unmount());
         container.remove();

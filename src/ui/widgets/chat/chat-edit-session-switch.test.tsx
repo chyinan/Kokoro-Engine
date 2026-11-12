@@ -213,4 +213,42 @@ describe("application history command session ownership", () => {
     await expect(h.app.continueFrom(answerTarget, true)).rejects.toThrow("tail changed");
     expect(h.io.send).not.toHaveBeenCalled(); expect(projectMessages(h.app.getSnapshot())).toHaveLength(3);
   });
+
+  it("retries a saved failure from its exact prompt after the journal is gone", async () => {
+    const h = harness();
+    const diagnostic = {
+      id: 104, role: "system", content: "second model round failed", created_at: "now",
+      metadata: JSON.stringify({ type: "failure_event", user_message_id: 101,
+        event: { character_id: "character-a", conversation_id: "conversation-a", turn_id: "failed" } }),
+    };
+    // Includes both a partial reply and a nearer but unrelated user row.
+    h.set({ messages: [...messages, diagnostic] });
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot()).find(message => message.id === diagnostic.id)).toMatchObject({ canRetryFailure: true });
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockImplementation(async () => {
+      h.set({ messages: messages.slice(0, 1) });
+    });
+    await h.app.continueFrom({ ...answerTarget, messageId: diagnostic.id }, true);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(3, "conversation-a", diagnostic.id);
+    expect(h.io.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      message: "original A", regenerate: true, regenerate_user_message_id: 101,
+    }));
+  });
+
+  it.each([null, undefined, 999])("cannot retry a failure with no matching prompt (%s)", async userMessageId => {
+    const h = harness();
+    const diagnostic = {
+      id: 104, role: "system", content: "model failed", created_at: "now",
+      metadata: JSON.stringify({ type: "failure_event", user_message_id: userMessageId,
+        event: { character_id: "character-a", conversation_id: "conversation-a", turn_id: "turn_failed" } }),
+    };
+    h.set({ messages: [...messages, diagnostic], turns: userMessageId === null
+      ? [{ ...turn("failed", 2, "error"), hidden: true, user_message_id: null }] : [] });
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot()).find(message => message.id === diagnostic.id)).toMatchObject({ canRetryFailure: false });
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await h.app.continueFrom({ ...answerTarget, messageId: diagnostic.id }, true);
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.io.send).not.toHaveBeenCalled();
+  });
 });

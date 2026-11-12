@@ -3,7 +3,7 @@
 import * as bridge from "../kokoro-bridge";
 import type { ChatRequest, ChatTurnSnapshot, ChatViewSnapshot, ChatViewVersion, StreamChatResponse } from "../kokoro-bridge";
 import { getContinueFromCutoffIndex, getExpectedTailMessageId } from "./history-commands";
-import { isActiveTurn, mergeTurnSnapshot, projectSavedMessages } from "./projection";
+import { findFailurePromptIndex, isActiveTurn, mergeTurnSnapshot, projectSavedMessages } from "./projection";
 
 export interface ChatTransport {
   read(knownVersion?: ChatViewVersion): Promise<ChatViewSnapshot | null>;
@@ -38,10 +38,16 @@ export class ChatApplication {
   private historyEventRevision = 0;
   private restoredRevision = 0;
   private pending = new Map<string, { fingerprint: string; promise: Promise<StreamChatResponse> }>();
+  private announcedFailures = new Set<string>();
   private mutation: Promise<unknown> | null = null;
 
   constructor(private readonly io: ChatTransport = transport) {}
   getSnapshot = () => this.view;
+  claimFailureAnnouncement(requestId: string): boolean {
+    if (this.announcedFailures.has(requestId)) return false;
+    this.announcedFailures.add(requestId);
+    return true;
+  }
   subscribe = (callback: () => void) => {
     this.listeners.add(callback);
     if (this.listeners.size === 1) void this.connect();
@@ -120,6 +126,9 @@ export class ChatApplication {
     const ids = new Set(view.turns.map(turn => turn.client_request_id));
     for (const [id, turn] of this.turns) if (!ids.has(id) && !this.pending.has(id) && turn.revision <= view.revision) this.turns.delete(id);
     for (const turn of view.turns) this.turns = mergeTurnSnapshot(this.turns, turn);
+    for (const id of this.announcedFailures) {
+      if (!this.turns.has(id) && !this.pending.has(id)) this.announcedFailures.delete(id);
+    }
     this.restoredRevision = Math.max(this.restoredRevision, view.revision);
     const { revision, history_revision, generation } = view;
     this.readVersion = { revision, history_revision, generation, busy: view.busy };
@@ -203,13 +212,13 @@ export class ChatApplication {
     // A late response must never clear a selection made while deletion awaited IO.
     return this.mutate(() => bridge.deleteConversation(id));
   }
-  async continueFrom(target: ChatMessageTarget, regenerate = false, options: { allow_image_gen?: boolean } = {}) {
+  async continueFrom(target: ChatMessageTarget, regenerate = false, options: Pick<ChatRequest, "allow_image_gen" | "client_request_id"> = {}) {
     const characterId = this.view.character_id;
     const matchesSelection = (view: ChatViewSnapshot) => view.character_id === characterId
       && view.conversation_id === target.conversationId && view.generation === target.generation;
     if (!matchesSelection(this.view)) return;
 
-    const user = await this.mutate(async () => {
+    const retry = await this.mutate(async () => {
       // A turn can persist rows even if it is cancelled, fails, or its event is missed.
       // A read already in flight may have sampled history before those writes.
       this.readInFlight = undefined;
@@ -218,18 +227,24 @@ export class ChatApplication {
       const messages = projectSavedMessages(view).filter(message => message.id !== undefined);
       const index = messages.findIndex(message => message.id === target.messageId);
       if (index < 0) return;
-      const cutoff = regenerate ? index : getContinueFromCutoffIndex(messages, index);
+      const diagnostic = messages[index].failureScope;
+      if (diagnostic && !regenerate) return;
+      const promptIndex = diagnostic ? findFailurePromptIndex(view, messages, index) : -1;
+      if (diagnostic && promptIndex < 0) return;
+      const cutoff = diagnostic ? promptIndex + 1 : regenerate ? index : getContinueFromCutoffIndex(messages, index);
       if (cutoff === null) return;
-      const user = messages.slice(0, index).reverse().find(message => message.role === "user");
+      const user = diagnostic ? messages[promptIndex] : messages.slice(0, index).reverse().find(message => message.role === "user");
       if (regenerate && !user) return;
       if (messages.length > cutoff) {
         await bridge.deleteLastMessages(messages.length - cutoff, target.conversationId, getExpectedTailMessageId(messages));
       }
-      return user;
+      return user && { user, expectedUserId: diagnostic ? user.id : undefined };
     });
     // A history command must never send into a selection made while it awaited IO.
-    if (regenerate && user && matchesSelection(this.view)) {
-      return this.send({ message: user.text, images: user.images, regenerate: true, character_id: characterId, conversation_id: target.conversationId, conversation_generation: target.generation, ...options });
+    if (regenerate && retry && matchesSelection(this.view)) {
+      return this.send({ message: retry.user.text, images: retry.user.images, regenerate: true,
+        regenerate_user_message_id: retry.expectedUserId, character_id: characterId,
+        conversation_id: target.conversationId, conversation_generation: target.generation, ...options });
     }
   }
 }

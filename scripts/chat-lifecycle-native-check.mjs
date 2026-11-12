@@ -167,32 +167,97 @@ try {
     await waitFor(async () => await prompt.count() === 1 && await prompt.isVisible());
     return { turn, failure, displayedReason: await alert.textContent() };
   });
-  await check("composer failures announce once and the saved diagnostic can retry the same prompt", async () => {
+  await check("composer failures announce once and retry removes a saved partial reply without duplicating the prompt", async () => {
     const message = "[case:composer-retry-once]";
     const input = main.locator("textarea[data-onboarding-id='chat-input']");
     await input.fill(message);
     await input.press("Enter");
     const failed = await waitFor(async () => (await view(main)).turns.find(turn => turn.message === message && turn.status === "error"));
-    const diagnostic = (await view(main)).messages.find(row => {
+    const failedHistory = (await view(main)).messages;
+    const partial = failedHistory.find(row => row.id === failed.assistant_message_id && row.content.includes("Partial reply before failure."));
+    assert(partial, "the first tool round must leave a saved partial reply");
+    const diagnostic = failedHistory.find(row => {
       const metadata = JSON.parse(row.metadata ?? "null");
       return metadata?.type === "failure_event" && metadata.event.turn_id === failed.turn_id;
     });
     assert(diagnostic?.content.includes("controlled composer failure"));
-    const toast = main.getByRole("alert").filter({ hasText: "controlled composer failure" });
+    assert.equal(JSON.parse(diagnostic.metadata).user_message_id, failed.user_message_id);
+    await submit(pet, { message, regenerate: true, regenerate_user_message_id: failed.user_message_id }, "__staleRetry");
+    assert.match((await outcome(pet, "__staleRetry")).error, /Conversation history changed before retry/);
+    assert.deepEqual((await view(main)).messages, failedHistory);
+    const alert = main.getByRole("alert").filter({ hasText: "controlled composer failure" });
     const savedReason = main.getByText(diagnostic.content, { exact: true });
     await savedReason.waitFor({ state: "visible" });
-    await toast.waitFor({ state: "visible" });
-    assert.equal(await toast.count(), 1);
-    assert.equal(await savedReason.evaluate(element => Boolean(element.closest('[role="alert"]'))), false);
+    await alert.waitFor({ state: "visible" });
+    assert.equal(await alert.count(), 1);
     await savedReason.locator("..").getByRole("button").click();
     const recovered = await waitFor(async () => (await view(main)).turns.find(turn =>
       turn.message === message && turn.client_request_id !== failed.client_request_id && turn.status === "completed"));
     const history = (await view(main)).messages;
     assert.equal(recovered.user_message_id, failed.user_message_id);
     assert.equal(history.filter(row => row.role === "user" && row.content === message).length, 1);
-    assert(!history.some(row => row.id === diagnostic.id));
+    assert(!history.some(row => row.id === diagnostic.id || row.id === partial.id));
     assert(history.some(row => row.id === recovered.assistant_message_id && row.content.includes(message)));
     return { failed, recovered };
+  });
+  await check("a hidden failure cannot retry the preceding visible prompt", async () => {
+    const before = await view(main);
+    const requestId = "native_hidden_failure";
+    assert(before.messages.some(row => row.role === "user"));
+    await submit(pet, { message: "[case:hidden-chat-failure]", client_request_id: requestId, hidden: true }, "__hiddenFailure");
+    assert((await outcome(pet, "__hiddenFailure")).error);
+    const state = await view(main);
+    const failed = state.turns.find(turn => turn.client_request_id === requestId);
+    assert.equal(failed.user_message_id, null);
+    const diagnostic = state.messages.find(row => JSON.parse(row.metadata ?? "null")?.event?.turn_id === failed.turn_id);
+    assert(diagnostic?.content.includes("controlled hidden-chat-failure"));
+    assert.equal(JSON.parse(diagnostic.metadata).user_message_id, null);
+    const reason = main.getByText(diagnostic.content, { exact: true });
+    await reason.waitFor({ state: "visible" });
+    assert.equal(await reason.locator("..").getByRole("button").count(), 0);
+    assert.deepEqual(state.messages.filter(row => row.role === "user").map(row => row.id), before.messages.filter(row => row.role === "user").map(row => row.id));
+    return { turn: failed.turn_id, diagnostic: diagnostic.id };
+  });
+  await check("an ordinary composer failure during panel unmount is announced once after reopening", async () => {
+    const name = "detached-composer-failure";
+    const message = `[case:${name}]`;
+    const input = main.locator("textarea[data-onboarding-id='chat-input']");
+    await input.fill(message);
+    await input.press("Enter");
+    await waitFor(async () => (await (await fetch("http://127.0.0.1:19334/counts")).json()).some(call => call.name === name && call.streaming));
+    const setPanelMounted = mounted => main.evaluate(async mounted => {
+      const { registry } = await import("/src/ui/registry/ComponentRegistry.ts");
+      if (!mounted) window.__originalChatPanel = registry.get("ChatPanel");
+      registry.register("ChatPanel", mounted ? window.__originalChatPanel : () => null);
+    }, mounted);
+    await setPanelMounted(false);
+    await input.waitFor({ state: "detached" });
+    try {
+      assert.equal((await fetch("http://127.0.0.1:19334/release-detached-failure")).status, 204);
+      const state = await waitFor(async () => {
+        const current = await view(pet);
+        return current.turns.some(turn => turn.message === message && turn.status === "error") ? current : null;
+      });
+      const failed = state.turns.find(turn => turn.message === message && turn.status === "error");
+      const diagnostic = state.messages.find(row => JSON.parse(row.metadata ?? "null")?.event?.turn_id === failed.turn_id);
+      assert(diagnostic?.content.includes(`controlled ${name}`));
+      assert.equal(await input.count(), 0);
+      await setPanelMounted(true);
+      const reason = main.getByText(diagnostic.content, { exact: true });
+      const alert = main.getByRole("alert").filter({ hasText: `controlled ${name}` });
+      await alert.and(reason).waitFor({ state: "visible" });
+      assert.equal(await alert.count(), 1);
+      assert.equal(await reason.count(), 1);
+
+      await setPanelMounted(false);
+      await input.waitFor({ state: "detached" });
+      await setPanelMounted(true);
+      await reason.waitFor({ state: "visible" });
+      assert.equal(await alert.count(), 0);
+      return { turn: failed.turn_id, diagnostic: diagnostic.id };
+    } finally {
+      if (!await input.count()) await setPanelMounted(true);
+    }
   });
   await check("builtin tool execution and its in-progress assistant draft are shown once", async () => {
     const requestId = "native_tool_rounds";
