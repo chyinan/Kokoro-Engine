@@ -72,7 +72,7 @@ fn required_model_files() -> Vec<&'static str> {
 
 #[cfg(not(test))]
 fn default_model_cache_dir() -> PathBuf {
-    dirs_next::data_dir()
+    crate::utils::paths::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("com.chyin.kokoro")
         .join("models")
@@ -140,7 +140,7 @@ pub(crate) fn model_search_roots() -> Vec<PathBuf> {
         }
     }
 
-    if let Some(app_data) = dirs_next::data_dir() {
+    if let Some(app_data) = crate::utils::paths::data_dir() {
         candidates.push(app_data.join("com.chyin.kokoro"));
     }
 

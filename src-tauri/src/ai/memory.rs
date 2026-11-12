@@ -785,7 +785,7 @@ fn is_retrieval_eval_enabled() -> bool {
 }
 
 pub fn memory_upgrade_config_path() -> std::path::PathBuf {
-    dirs_next::data_dir()
+    crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro")
         .join("memory_upgrade_config.json")

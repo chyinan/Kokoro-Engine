@@ -18,6 +18,7 @@ export type LocalTtsPresetProbe = {
 };
 
 export type CharacterActivationDependencies = {
+  readonly beforeCharacterActivation?: (characterId: string) => Promise<void>;
   readonly prepareCharacterActivation: (
     characterId: string,
     options?: Readonly<{ allowLocalPreset: boolean }>,
@@ -126,6 +127,9 @@ export function createCharacterActivationService(
   }
 
   async function activateNow(characterId: string): Promise<SuccessfulCharacterActivation> {
+    // True selection changes keep their cancellation rule even with no chat UI.
+    // Recovery does not call this intent hook and never cancels an active turn.
+    await dependencies.beforeCharacterActivation?.(characterId);
     let token = await dependencies.prepareCharacterActivation(characterId);
     currentRevision = Math.max(currentRevision, token.revision);
     const snapshot = snapshotFrontendRuntime(dependencies.readFrontendRuntime());

@@ -1,5 +1,6 @@
 import { listen, emit } from "@tauri-apps/api/event";
-import { cancelTts, getLatestTtsRequestId } from "../../lib/kokoro-bridge";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { cancelTts, getLatestTtsRequestId, finishChatPlayback } from "../../lib/kokoro-bridge";
 import type { TtsAudioFormat } from "../../core/types/mod";
 import { audioPlayer } from "../services";
 import { VoiceInterruptService } from "./voice-interrupt-service";
@@ -59,6 +60,7 @@ class BrowserSpeechSynthesis {
     ): void {
         if (!this.synthesis) {
             console.warn("[TTS] SpeechSynthesis not available in this environment");
+            onEnd();
             return;
         }
 
@@ -125,6 +127,9 @@ export class TtsService {
         this.removeStopEventListener?.();
         this.removeReplacementEventListener?.();
         const gen = ++this.generation; // unique id for THIS init() call
+        // A default Any listener receives targeted events in every WebView.
+        // Scope all playback listeners to the selected physical output window.
+        const playbackTarget = { target: getCurrentWindow().label };
 
         console.log(`[TTS] Initializing (gen=${gen})...`);
 
@@ -165,8 +170,11 @@ export class TtsService {
             if (this.generation !== gen) return;
             const requestId = event.payload.request_id ?? getLatestTtsRequestId() ?? "legacy-tts-request";
             const latestRequestId = getLatestTtsRequestId();
-            if (latestRequestId && requestId !== latestRequestId) return;
+            if (!requestId.startsWith("chat_") && latestRequestId && requestId !== latestRequestId) return;
             console.log("[TTS] Started request:", requestId);
+            if (this.activeRequestId && this.activeRequestId !== requestId) {
+                void finishChatPlayback(this.activeRequestId).catch(() => {});
+            }
             this.playbackGeneration++;
             this.activeRequestId = requestId;
             this.isStreamActive = true;
@@ -176,7 +184,7 @@ export class TtsService {
             this.pendingAudioBytes = 0;
             audioPlayer.clearQueue();
             this.browserTTS.cancel();
-        });
+        }, playbackTarget);
         if (this.generation !== gen) { unlistenStart(); return; }
         this.unlistenFunctions.push(unlistenStart);
 
@@ -211,7 +219,7 @@ export class TtsService {
                         this.pendingAudioBytes = Math.max(0, this.pendingAudioBytes - data.length);
                     }
                 });
-        });
+        }, playbackTarget);
         if (this.generation !== gen) { unlistenAudio(); return; }
         this.unlistenFunctions.push(unlistenAudio);
 
@@ -237,7 +245,7 @@ export class TtsService {
                     },
                     () => this.onBrowserUtteranceEnd(requestId, playbackGeneration),
                 );
-            }
+            }, playbackTarget
         );
         if (this.generation !== gen) { unlistenBrowserDelegate(); return; }
         this.unlistenFunctions.push(unlistenBrowserDelegate);
@@ -246,7 +254,7 @@ export class TtsService {
         const unlistenError = await listen<TtsErrorEvent>("tts:error", (event) => {
             if (this.generation !== gen || !this.isCurrentRequest(event.payload.request_id)) return;
             console.warn("[TTS] Synthesis request failed:", event.payload.error);
-        });
+        }, playbackTarget);
         if (this.generation !== gen) { unlistenError(); return; }
         this.unlistenFunctions.push(unlistenError);
 
@@ -262,7 +270,7 @@ export class TtsService {
             this.serverEnded = true;
             audioPlayer.finishStream();
             this.finishIfDrained();
-        });
+        }, playbackTarget);
         if (this.generation !== gen) { unlistenEnd(); return; }
         this.unlistenFunctions.push(unlistenEnd);
     }
@@ -287,6 +295,7 @@ export class TtsService {
     }
 
     async stopPlayback(requestId?: string | null): Promise<void> {
+        if (this.activeRequestId) void finishChatPlayback(this.activeRequestId).catch(() => {});
         const requestIdsToCancel = requestId
             ? [requestId]
             : [...new Set([this.activeRequestId, getLatestTtsRequestId()].filter((id): id is string => Boolean(id)))];
@@ -357,6 +366,7 @@ export class TtsService {
         if (!this.serverEnded || this.browserPending > 0 || audioPlayer.isPlaying || this.browserTTS.isSpeaking) {
             return;
         }
+        if (this.activeRequestId) void finishChatPlayback(this.activeRequestId).catch(() => {});
         this.isStreamActive = false;
         this.serverEnded = false;
         this.activeRequestId = null;

@@ -55,7 +55,7 @@ pub fn handle_mod_request<R: tauri::Runtime>(
             if parent.exists() {
                 parent
             } else {
-                dirs_next::data_dir()
+                crate::utils::paths::data_dir()
                     .unwrap_or_else(|| PathBuf::from("."))
                     .join("com.chyin.kokoro")
                     .join("mods")
@@ -63,7 +63,7 @@ pub fn handle_mod_request<R: tauri::Runtime>(
         }
     };
     #[cfg(not(debug_assertions))]
-    let mods_base = dirs_next::data_dir()
+    let mods_base = crate::utils::paths::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("com.chyin.kokoro")
         .join("mods");

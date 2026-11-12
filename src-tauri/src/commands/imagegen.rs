@@ -21,7 +21,7 @@ pub async fn generate_image(
 
 #[command]
 pub async fn get_imagegen_config() -> Result<ImageGenSystemConfig, KokoroError> {
-    let app_data = dirs_next::data_dir()
+    let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let config_path = app_data.join("imagegen_config.json");
@@ -33,7 +33,7 @@ pub async fn save_imagegen_config(
     state: State<'_, ImageGenService>,
     config: ImageGenSystemConfig,
 ) -> Result<(), KokoroError> {
-    let app_data = dirs_next::data_dir()
+    let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let config_path = app_data.join("imagegen_config.json");

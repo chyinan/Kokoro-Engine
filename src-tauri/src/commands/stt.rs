@@ -30,7 +30,7 @@ pub async fn transcribe_audio(
 /// Automatically merges any missing default providers so the UI always shows all options.
 #[command]
 pub async fn get_stt_config() -> Result<SttConfig, KokoroError> {
-    let app_data = dirs_next::data_dir()
+    let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let config_path = app_data.join("stt_config.json");
@@ -67,7 +67,7 @@ pub async fn save_stt_config(
     state: State<'_, SttService>,
     config: SttConfig,
 ) -> Result<(), KokoroError> {
-    let app_data = dirs_next::data_dir()
+    let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let config_path = app_data.join("stt_config.json");

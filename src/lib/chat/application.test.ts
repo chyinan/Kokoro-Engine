@@ -1,0 +1,146 @@
+// @vitest-environment node
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ChatApplication, emptyChatView, type ChatTransport } from "./application";
+import type { ChatTurnSnapshot, ChatViewSnapshot, StreamChatResponse } from "../kokoro-bridge";
+import { projectMessages } from "./projection";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+function turn(id: string, revision: number, status: ChatTurnSnapshot["status"] = "streaming"): ChatTurnSnapshot {
+  return { revision, client_request_id: id, turn_id: `turn_${id}`, character_id: "character-a", conversation_id: "conversation-a", user_message_id: 1, assistant_message_id: 2, message: "question", images: [], hidden: false, status, text: "answer", translation: null, tools: [], error: null };
+}
+function harness() {
+  let view: ChatViewSnapshot = { ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a", generation: 1 };
+  let callback: (turn: ChatTurnSnapshot) => void = () => {};
+  const io: ChatTransport = {
+    read: vi.fn(async () => structuredClone(view)),
+    listen: vi.fn(async listener => { callback = listener; return vi.fn(); }),
+    send: vi.fn(async request => ({ status: "completed", conversation_id: "conversation-a", client_request_id: request.client_request_id, text: "answer" })),
+    cancel: vi.fn(async () => {}),
+  };
+  const app = new ChatApplication(io);
+  return { app, io, emit: (snapshot: ChatTurnSnapshot) => callback(snapshot), set: (next: Partial<ChatViewSnapshot>) => { view = { ...view, ...next }; } };
+}
+afterEach(() => vi.useRealTimers());
+
+describe("UI-independent chat application", () => {
+  it("submits and obtains the authoritative result without any subscription or React component", async () => {
+    const { app, io } = harness();
+    const result = await app.send({ message: "question", client_request_id: "pet_1" });
+    expect(result.text).toBe("answer");
+    expect(io.listen).not.toHaveBeenCalled();
+    expect(io.send).toHaveBeenCalledOnce();
+  });
+  it("an event before command resolution does not append the persisted assistant twice", async () => {
+    const h = harness();
+    const response = deferred<StreamChatResponse>();
+    vi.mocked(h.io.send).mockReturnValue(response.promise);
+    const stop = h.app.subscribe(() => {});
+    await h.app.refresh();
+    const result = h.app.send({ message: "question", client_request_id: "a" });
+    h.set({ revision: 4, busy: false, turns: [turn("a", 4, "completed")], messages: [
+      { id: 1, role: "user", content: "question", created_at: "now" },
+      { id: 2, role: "assistant", content: "answer", created_at: "now" },
+    ] });
+    h.emit(turn("a", 4, "completed"));
+    response.resolve({ status: "completed", conversation_id: "conversation-a", text: "answer" });
+    await result; await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot()).filter(message => message.role === "kokoro")).toHaveLength(1);
+    expect(h.app.getSnapshot().busy).toBe(false);
+    stop();
+  });
+  it("recovers lost finish for a passive subscriber by reading, without a command promise", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    h.set({ revision: 2, busy: true, turns: [turn("other_window", 2)] });
+    const stop = h.app.subscribe(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.app.getSnapshot().busy).toBe(true);
+    h.set({ revision: 3, busy: false, turns: [turn("other_window", 3, "completed")] });
+    await vi.advanceTimersByTimeAsync(800);
+    expect(h.app.getSnapshot().busy).toBe(false);
+    expect(h.io.send).not.toHaveBeenCalled();
+    stop();
+  });
+  it("ignores duplicate terminal and late active events, including old requests after a newer request starts", async () => {
+    const h = harness();
+    h.set({ revision: 10, busy: true, turns: [turn("old", 6, "completed"), turn("new", 10)] });
+    const stop = h.app.subscribe(() => {}); await h.app.refresh();
+    h.emit(turn("old", 6, "completed")); h.emit(turn("old", 2));
+    expect(h.app.getSnapshot().turns.find(t => t.client_request_id === "old")?.status).toBe("completed");
+    expect(h.app.getSnapshot().turns.find(t => t.client_request_id === "new")?.status).toBe("streaming");
+    expect(h.io.send).not.toHaveBeenCalled(); stop();
+  });
+  it("reconnect restores complete streaming text without replay or cancellation", async () => {
+    const h = harness(); const stop = h.app.subscribe(() => {}); await h.app.refresh(); stop();
+    h.set({ revision: 9, busy: true, turns: [{ ...turn("pet_a", 9), text: "already emitted while disconnected" }] });
+    const stopAgain = h.app.subscribe(() => {}); await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot()).slice(-1)[0]?.text).toBe("already emitted while disconnected");
+    expect(h.io.cancel).not.toHaveBeenCalled(); stopAgain();
+  });
+  it("subscribes before snapshot and rejects a read overtaken by an event", async () => {
+    const h = harness(); const first = deferred<ChatViewSnapshot>();
+    vi.mocked(h.io.read).mockReturnValueOnce(first.promise);
+    const stop = h.app.subscribe(() => {}); await Promise.resolve();
+    expect(h.io.listen).toHaveBeenCalledBefore(vi.mocked(h.io.read));
+    h.set({ revision: 5, turns: [turn("a", 5, "completed")], messages: [{ id: 2, role: "assistant", content: "committed", created_at: "now" }] });
+    h.emit(turn("a", 5, "completed"));
+    first.resolve({ ...emptyChatView, revision: 1, busy: true, turns: [turn("a", 1)] });
+    await h.app.refresh();
+    expect(h.app.getSnapshot().revision).toBe(5);
+    expect(projectMessages(h.app.getSnapshot()).slice(-1)[0]?.text).toBe("committed"); stop();
+  });
+  it("coalesces duplicate logical delivery but forwards conflicting payload to authority", async () => {
+    const h = harness(); const pending = deferred<StreamChatResponse>();
+    vi.mocked(h.io.send).mockReturnValueOnce(pending.promise).mockRejectedValueOnce(new Error("chat_request_conflict"));
+    const request = { message: "one", client_request_id: "same" };
+    const a = h.app.send(request); const b = h.app.send({ ...request });
+    expect(a).toBe(b);
+    await expect(h.app.send({ ...request, message: "different" })).rejects.toThrow("conflict");
+    await h.app.cancel();
+    expect(h.io.cancel).toHaveBeenCalledWith("same", "stopped_by_user");
+    pending.resolve({ status: "cancelled", conversation_id: "conversation-a" }); await a;
+    expect(h.io.send).toHaveBeenCalledTimes(2);
+  });
+  it("cancels immediately by request id before a turn id or event exists", async () => {
+    const h = harness(); const pending = deferred<StreamChatResponse>();
+    vi.mocked(h.io.send).mockReturnValue(pending.promise);
+    const result = h.app.send({ message: "one", client_request_id: "before_ack" });
+    await h.app.cancel();
+    expect(h.io.cancel).toHaveBeenCalledWith("before_ack", "stopped_by_user");
+    pending.resolve({ status: "cancelled", conversation_id: "" }); await result;
+    expect(h.app.getSnapshot().busy).toBe(false);
+  });
+  it.each(["denied IPC", "connection lost", "serialization failed"])("releases provisional state after %s before journal registration", async error => {
+    const h = harness(); vi.mocked(h.io.send).mockRejectedValueOnce(new Error(error));
+    await expect(h.app.send({ message: "one" })).rejects.toThrow(error);
+    await h.app.refresh();
+    expect(h.app.getSnapshot().busy).toBe(false);
+    expect(h.app.getSnapshot().turns).toHaveLength(0);
+    await expect(h.app.send({ message: "retry" })).resolves.toMatchObject({ status: "completed" });
+  });
+  it.each(["completed", "cancelled", "error"] as const)("never resurrects deleted history from a late %s snapshot", async status => {
+    const h = harness(); h.set({ revision: 30, turns: [turn("deleted", 30, status)], messages: [] });
+    await h.app.refresh(); expect(projectMessages(h.app.getSnapshot())).toEqual([]);
+  });
+  it("removes an old active cache entry if authoritative retention has expired", async () => {
+    const h = harness(); h.set({ revision: 1, turns: [turn("old", 1)], busy: true });
+    await h.app.refresh(); h.set({ revision: 999, turns: [turn("recent", 999, "completed")], busy: false });
+    await h.app.refresh(); expect(h.app.getSnapshot().turns.some(t => t.client_request_id === "old")).toBe(false);
+  });
+  it("does not project replies belonging to another character or conversation", async () => {
+    const h = harness(); h.set({ revision: 2, turns: [ { ...turn("old-character", 1), character_id: "other" }, { ...turn("old-conversation", 2), conversation_id: "other" } ] });
+    await h.app.refresh(); expect(projectMessages(h.app.getSnapshot())).toEqual([]);
+  });
+  it("two independent window projections neither execute requests nor synthesize speech on recovery", async () => {
+    const a = harness(), b = harness();
+    const view = { revision: 5, turns: [turn("shared", 5, "completed")], messages: [{ id: 2, role: "assistant", content: "once", created_at: "now" }] };
+    a.set(view); b.set(view); await a.app.refresh(); await b.app.refresh();
+    expect(projectMessages(a.app.getSnapshot())).toEqual(projectMessages(b.app.getSnapshot()));
+    expect(a.io.send).not.toHaveBeenCalled(); expect(b.io.send).not.toHaveBeenCalled();
+  });
+});

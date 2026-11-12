@@ -291,9 +291,12 @@ export interface ChatRequest {
     regenerate?: boolean;
     /** Optional target conversation ID. If specified, backend binds strictly to this conversation. */
     conversation_id?: string | null;
+    conversation_generation?: number;
 }
 
 export interface StreamChatResponse {
+    /** Final canonical text, available even if every event was lost. */
+    text?: string;
     conversation_id: string;
     user_message_id?: number | null;
     assistant_message_id?: number | null;
@@ -303,6 +306,46 @@ export interface StreamChatResponse {
 
 export async function streamChat(request: ChatRequest): Promise<StreamChatResponse> {
     return invoke<StreamChatResponse>("stream_chat", { request });
+}
+
+export interface ChatTurnSnapshot {
+    revision: number;
+    client_request_id: string;
+    turn_id: string | null;
+    character_id: string | null;
+    conversation_id: string | null;
+    user_message_id: number | null;
+    assistant_message_id: number | null;
+    message: string;
+    images: string[];
+    hidden: boolean;
+    status: "pending" | "accepted" | "streaming" | "completed" | "cancelled" | "rejected" | "error";
+    text: string;
+    translation: string | null;
+    tools: ChatTurnToolEvent[];
+    error: string | null;
+}
+export interface ChatViewSnapshot {
+    revision: number;
+    character_id: string;
+    conversation_id: string | null;
+    generation: number;
+    busy: boolean;
+    messages: ConversationMessage[];
+    turns: ChatTurnSnapshot[];
+}
+export function getChatRuntimeSnapshot(): Promise<ChatTurnSnapshot[]> {
+    return invoke("get_chat_runtime_snapshot");
+}
+export function getChatView(): Promise<ChatViewSnapshot> {
+    return invoke("get_chat_view");
+}
+export function onChatRuntimeChanged(callback: (snapshot: ChatTurnSnapshot) => void): Promise<UnlistenFn> {
+    return listen<ChatTurnSnapshot>("chat-runtime-changed", event => callback(event.payload));
+}
+
+export function finishChatPlayback(requestId: string): Promise<void> {
+    return invoke("finish_chat_playback", { requestId });
 }
 
 export async function cancelChatTurn(turnId: string, reason?: string): Promise<void> {

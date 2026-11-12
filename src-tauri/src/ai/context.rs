@@ -1130,7 +1130,7 @@ impl AIOrchestrator {
 
     /// Persist conversation_id to disk for hot-reload recovery.
     pub fn persist_conversation_id(id: Option<&str>) {
-        let app_data = dirs_next::data_dir()
+        let app_data = crate::utils::paths::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("com.chyin.kokoro");
         let _ = std::fs::create_dir_all(&app_data);
@@ -1143,7 +1143,7 @@ impl AIOrchestrator {
 
     /// Persist the active character ID to disk so Telegram can read it.
     pub fn persist_active_character_id(id: &str) {
-        let app_data = dirs_next::data_dir()
+        let app_data = crate::utils::paths::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("com.chyin.kokoro");
         let _ = std::fs::create_dir_all(&app_data);
@@ -1156,7 +1156,7 @@ impl AIOrchestrator {
 
     /// Load the persisted active character ID from disk.
     pub fn load_active_character_id() -> Option<String> {
-        let path = dirs_next::data_dir()
+        let path = crate::utils::paths::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("com.chyin.kokoro")
             .join("active_character_id.json");

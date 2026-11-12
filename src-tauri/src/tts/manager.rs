@@ -327,6 +327,7 @@ impl TtsService {
         request_id: String,
         mut cancel: watch::Receiver<bool>,
     ) -> Result<(), String> {
+        let playback_window = if app.get_webview_window("main").is_some() { "main" } else { "pet" };
         let hook_runtime = app.try_state::<HookRuntime>();
         let router = TtsRouter::new(self.providers.clone(), self.default_provider.clone());
         let route = router
@@ -360,7 +361,8 @@ impl TtsService {
                 .await;
         }
 
-        app.emit(
+        if let Some(runtime) = app.try_state::<Arc<crate::chat::runtime::ChatRuntimeState>>() { runtime.begin_playback(&request_id, playback_window); }
+        app.emit_to(playback_window,
             "tts:start",
             TtsStartEvent {
                 request_id: request_id.clone(),
@@ -471,7 +473,7 @@ impl TtsService {
                                     Some(Ok(chunk)) => {
                                         full_audio.extend_from_slice(&chunk.data);
                                         sequence += 1;
-                                        if let Err(error) = app.emit("tts:audio", TtsAudioEvent {
+                                        if let Err(error) = app.emit_to(playback_window, "tts:audio", TtsAudioEvent {
                                             request_id: request_id.clone(),
                                             sentence_id,
                                             sequence,
@@ -513,7 +515,7 @@ impl TtsService {
                     }
                 }
                 Ok((sentence_id, sentence, None, None)) => {
-                    app.emit(
+                    app.emit_to(playback_window,
                         "tts:browser-delegate",
                         TtsBrowserDelegateEvent {
                             request_id: request_id.clone(),
@@ -556,7 +558,7 @@ impl TtsService {
         };
 
         if let Some(error) = synthesis_error.as_ref() {
-            let _ = app.emit(
+            let _ = app.emit_to(playback_window,
                 "tts:error",
                 TtsErrorEvent {
                     request_id: request_id.clone(),
@@ -564,7 +566,7 @@ impl TtsService {
                 },
             );
         }
-        app.emit(
+        app.emit_to(playback_window,
             "tts:end",
             TtsEndEvent {
                 request_id: request_id.clone(),

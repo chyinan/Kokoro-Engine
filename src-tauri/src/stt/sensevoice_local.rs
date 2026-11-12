@@ -37,7 +37,7 @@ pub struct SenseVoiceLocalDownloadProgress {
 }
 
 pub fn app_data_dir() -> PathBuf {
-    dirs_next::data_dir()
+    crate::utils::paths::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(APP_DIR_NAME)
 }

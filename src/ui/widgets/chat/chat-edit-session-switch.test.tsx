@@ -1,198 +1,87 @@
-// @vitest-environment jsdom
-// pattern: Imperative Shell
-
-import { act, createElement, forwardRef, type ComponentProps, type HTMLAttributes } from "react";
-import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import ChatPanel from "../ChatPanel";
-import type { ChatMessage } from "../ChatMessage";
+// @vitest-environment node
+// History ownership moved from Panel closures to captured application commands.
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as bridge from "../../../lib/kokoro-bridge";
+import { harness, deferred } from "../../../lib/chat/__tests__/harness";
+import { projectMessages } from "../../../lib/chat/projection";
+const messages = [
+  { id: 101, role: "user", content: "original A", created_at: "now" },
+  { id: 102, role: "assistant", content: "answer A", created_at: "now" },
+  { id: 103, role: "user", content: "later A", created_at: "now" },
+];
+afterEach(() => vi.restoreAllMocks());
 
-vi.mock("framer-motion", () => ({
-  motion: {
-    div: forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(({ children, className, onClick }, ref) =>
-      createElement("div", { ref, className, onClick }, children)),
-    button: forwardRef<HTMLButtonElement, ComponentProps<"button">>(
-      ({ children, onClick, disabled, title, "aria-label": ariaLabel }, ref) =>
-        createElement("button", { ref, onClick, disabled, title, "aria-label": ariaLabel }, children)),
-  },
-  AnimatePresence: ({ children }: { children: React.ReactNode }) => children,
-}));
-
-vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
-vi.mock("../../hooks", () => ({
-  VoiceState: { Idle: "idle", Listening: "listening", Processing: "processing", Speaking: "speaking", Error: "error" },
-  useVoiceInput: () => ({ state: "idle", volume: 0, partialText: "", start: vi.fn(), stop: vi.fn() }),
-  useWakeWord: () => ({ state: "idle", isListening: false, start: vi.fn(), stop: vi.fn() }),
-  useTypingReveal: () => ({ pushDelta: vi.fn(), flush: vi.fn(), reset: vi.fn() }),
-}));
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async () => () => {}),
-  emit: vi.fn(async () => {}),
-}));
-vi.mock("../../../core/services", () => ({ audioPlayer: { isPlaying: false } }));
-vi.mock("../ChatMessage", () => ({
-  ChatMessage: ({ message, onEdit }: ComponentProps<typeof ChatMessage>) =>
-    createElement("article", { "data-message-id": "id" in message ? String(message.id) : undefined },
-      createElement("span", null, message.text),
-      createElement("button", { "data-edit-message": true, onClick: () => onEdit("edited in A") }, "Edit")),
-}));
-
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-
-function conversation(id: string): bridge.Conversation {
-  return { id, character_id: "char-1", title: id, topic: "", pinned_state: "{}", created_at: "2026-09-12", updated_at: "2026-09-12" };
-}
-
-describe("ChatPanel edit result session ownership", () => {
-  let container: HTMLDivElement;
-  let root: ReturnType<typeof createRoot>;
-  let finishEdit: (result: bridge.EditConversationMessageResponse) => void;
-
-  beforeEach(() => {
-    localStorage.clear();
-    sessionStorage.clear();
-    localStorage.setItem("kokoro_active_character_id", "char-1");
-    vi.spyOn(bridge, "listConversations").mockResolvedValue([conversation("conv-A"), conversation("conv-B")]);
-    vi.spyOn(bridge, "loadConversation").mockImplementation(async id => ({
-      ...conversation(id),
-      messages: [{ id: id === "conv-A" ? 101 : 201, role: "user", content: id === "conv-A" ? "original A" : "original B", created_at: "2026-09-12" }],
-    }));
-    vi.spyOn(bridge, "editConversationMessage").mockImplementation(() => new Promise(resolve => { finishEdit = resolve; }));
-    vi.spyOn(bridge, "listCharacters").mockResolvedValue([]);
-    vi.spyOn(bridge, "setVisionTextInputFocused").mockResolvedValue(undefined);
-    vi.spyOn(bridge, "cancelChatTurn").mockResolvedValue(undefined);
-    vi.spyOn(bridge, "onChatTurnAcknowledged").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatTurnStart").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatTurnDelta").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatTurnFinish").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatTurnTextComplete").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatError").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatWarning").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatFailure").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatTurnTranslation").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatTurnTool").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onTelegramChatSync").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onVisionObservation").mockResolvedValue(() => {});
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+describe("application history command session ownership", () => {
+  it("cancels a true character switch by request id, but not a same-character runtime update", async () => {
+    const h = harness(); const { turn } = await import("../../../lib/chat/__tests__/harness");
+    h.set({ revision: 2, busy: true, turns: [turn("active", 2)] });
+    await h.app.prepareCharacterSwitch("character-a"); expect(h.io.cancel).not.toHaveBeenCalled();
+    await h.app.prepareCharacterSwitch("character-b"); expect(h.io.cancel).toHaveBeenCalledWith("active", "character_switched");
   });
-
-  afterEach(() => {
-    vi.useRealTimers();
-    act(() => root.unmount());
-    container.remove();
-    vi.restoreAllMocks();
-    localStorage.clear();
-    sessionStorage.clear();
+  it("a delayed delete response cannot clear a newly selected conversation", async () => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    const deletion = deferred<void>(); const remove = vi.spyOn(bridge, "deleteConversation").mockReturnValue(deletion.promise);
+    const clear = vi.spyOn(bridge, "clearHistory").mockResolvedValue(undefined);
+    const running = h.app.deleteConversation("conversation-a");
+    h.set({ conversation_id: "conversation-b", generation: 4, messages: [{ id: 201, role: "user", content: "B", created_at: "now" }] });
+    deletion.resolve(); await running;
+    expect(remove).toHaveBeenCalledWith("conversation-a"); expect(clear).not.toHaveBeenCalled();
+    expect(h.app.getSnapshot().conversation_id).toBe("conversation-b");
+    expect(projectMessages(h.app.getSnapshot())).toMatchObject([{ text: "B" }]);
   });
-
-  it("does not apply a delayed edit response to the same position in another conversation", async () => {
-    await act(async () => root.render(createElement(ChatPanel)));
-    expect(container.querySelector("article")?.textContent).toContain("original A");
-
-    await act(async () => container.querySelector<HTMLButtonElement>("[data-edit-message]")?.click());
-    expect(bridge.editConversationMessage).toHaveBeenCalledWith({
-      conversation_id: "conv-A", message_id: 101, new_content: "edited in A",
-    });
-
-    await act(async () => {
-      window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
-        detail: { runtime: { character_id: "char-1", character_name: "Character" }, target_conversation_id: "conv-B" },
-      }));
-    });
-    expect(container.querySelector("article")?.textContent).toContain("original B");
-    expect(container.querySelector("article")?.getAttribute("data-message-id")).toBe("201");
-
-    await act(async () => finishEdit({ message_id: 101, updated_content: "edited in A" }));
-
-    expect(container.querySelector("article")?.textContent).toContain("original B");
-    expect(container.querySelector("article")?.getAttribute("data-message-id")).toBe("201");
+  it("a delayed edit remains scoped to its original message and never overwrites another selection", async () => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    const edit = deferred<bridge.EditConversationMessageResponse>();
+    const invoke = vi.spyOn(bridge, "editConversationMessage").mockReturnValue(edit.promise);
+    const running = h.app.edit(0, "edited A");
+    expect(invoke).toHaveBeenCalledWith({ conversation_id: "conversation-a", message_id: 101, new_content: "edited A" });
+    h.set({ conversation_id: "conversation-b", generation: 4, messages: [{ id: 201, role: "user", content: "original B", created_at: "now" }] });
+    await h.app.refresh(); edit.resolve({ message_id: 101, updated_content: "edited A" }); await running;
+    expect(projectMessages(h.app.getSnapshot())).toMatchObject([{ id: 201, text: "original B" }]);
   });
-
-  it("sends without the previous conversation id after clearing history", async () => {
-    vi.spyOn(bridge, "clearHistory").mockResolvedValue(undefined);
-    vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockResolvedValue({
-      installed: true, repo_id: "test", download_url: "", install_dir: "", model_path: "", required_files: [], missing_files: [],
-    });
-    vi.spyOn(bridge, "streamChat").mockImplementation(() => new Promise(() => {}));
-    await act(async () => root.render(createElement(ChatPanel)));
-    expect(container.querySelector("article")?.textContent).toContain("original A");
-    await act(async () => container.querySelector<HTMLButtonElement>('[title="chat.actions.clear"]')?.click());
-    const confirm = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "chat.actions.confirm_clear_button");
-    expect(confirm).toBeDefined();
-    await act(async () => confirm?.click());
-    expect(bridge.clearHistory).toHaveBeenCalledOnce();
-    expect(container.querySelector("article")).toBeNull();
-
-    const input = container.querySelector("textarea");
-    expect(input).not.toBeNull();
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(input, "first new message");
-      input?.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await act(async () => container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-    expect(bridge.streamChat).toHaveBeenCalledOnce();
-    expect(vi.mocked(bridge.streamChat).mock.calls[0][0].conversation_id).toBeUndefined();
+  it("clearing restores the authoritative empty selection before a new send", async () => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    vi.spyOn(bridge, "clearHistory").mockImplementation(async () => { h.set({ conversation_id: null, generation: 4, messages: [] }); });
+    await h.app.clear(); expect(projectMessages(h.app.getSnapshot())).toEqual([]);
+    await h.app.send({ message: "new", conversation_id: h.app.getSnapshot().conversation_id ?? undefined });
+    expect(h.io.send).toHaveBeenCalledWith(expect.objectContaining({ conversation_id: undefined }));
   });
-
-  it("edits a locally sent message by its scoped visible index when the user id handshake is late", async () => {
-    vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockResolvedValue({
-      installed: true, repo_id: "test", download_url: "", install_dir: "", model_path: "", required_files: [], missing_files: [],
-    });
-    vi.spyOn(bridge, "streamChat").mockRejectedValue(new Error("provider failed after user message persistence"));
-    vi.mocked(bridge.editConversationMessage).mockResolvedValue({
-      message_id: 302,
-      updated_content: "edited in A",
-    });
-    vi.useFakeTimers();
-
-    await act(async () => root.render(createElement(ChatPanel)));
-    const input = container.querySelector("textarea");
-    expect(input).not.toBeNull();
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(input, "本地直发消息");
-      input?.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await act(async () => container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-
-    const localMessage = container.querySelectorAll("article")[1];
-    expect(localMessage?.textContent).toContain("本地直发消息");
-    await act(async () => localMessage?.querySelector<HTMLButtonElement>("[data-edit-message]")?.click());
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(650);
-    });
-
-    expect(bridge.editConversationMessage).toHaveBeenCalledWith({
-      conversation_id: "conv-A",
-      visible_index: 1,
-      new_content: "edited in A",
-    });
-    expect(container.querySelectorAll("article")[1]?.textContent).toContain("edited in A");
+  it("a failed clear preserves visible history and releases mutation busy state", async () => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    vi.spyOn(bridge, "clearHistory").mockRejectedValue(new Error("database locked"));
+    await expect(h.app.clear()).rejects.toThrow("database locked");
+    expect(projectMessages(h.app.getSnapshot())).toHaveLength(3); expect(h.app.getSnapshot().busy).toBe(false);
   });
-
-  it("does not send a draft after the session changes during send preparation", async () => {
-    vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockResolvedValue({ installed: true } as any);
-    vi.spyOn(bridge, "streamChat").mockImplementation(() => new Promise(() => {}));
-
-    await act(async () => root.render(createElement(ChatPanel)));
-    const input = container.querySelector("textarea");
-    expect(input).not.toBeNull();
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(input, "draft from A");
-      input?.dispatchEvent(new Event("input", { bubbles: true }));
-      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
-        detail: { runtime: { character_id: "char-1", character_name: "Character" }, target_conversation_id: "conv-B" },
-      }));
-      await new Promise(resolve => setTimeout(resolve, 0));
-      for (let i = 0; i < 5; i++) await Promise.resolve();
-    });
-    expect(container.querySelector("article")?.textContent).toContain("original B");
-    expect(bridge.streamChat).not.toHaveBeenCalled();
+  it("blocks send and a second history mutation while continuation deletion is pending", async () => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    const deletion = deferred<void>(); vi.spyOn(bridge, "deleteLastMessages").mockReturnValue(deletion.promise);
+    const running = h.app.continueFrom(1);
+    expect(h.app.getSnapshot().busy).toBe(true);
+    await expect(h.app.send({ message: "overlap" })).rejects.toThrow("history_mutation_busy");
+    await expect(h.app.continueFrom(1, true)).rejects.toThrow("history_mutation_busy");
+    expect(h.io.send).not.toHaveBeenCalled();
+    deletion.resolve(); await running; expect(h.app.getSnapshot().busy).toBe(false);
+  });
+  it("regenerates only after guarded deletion, preserving captured generation and image intent", async () => {
+    const h = harness(); h.set({ messages: messages.slice(0, 2) }); await h.app.refresh();
+    const deletion = deferred<void>(); const remove = vi.spyOn(bridge, "deleteLastMessages").mockReturnValue(deletion.promise);
+    const running = h.app.continueFrom(1, true, { allow_image_gen: true });
+    expect(remove).toHaveBeenCalledWith(1, "conversation-a", 102);
+    expect(h.io.send).not.toHaveBeenCalled();
+    h.set({ messages: messages.slice(0, 1) }); deletion.resolve(); await running;
+    expect(h.io.send).toHaveBeenCalledWith(expect.objectContaining({ message: "original A", regenerate: true, conversation_id: "conversation-a", character_id: "character-a", conversation_generation: 3, allow_image_gen: true }));
+  });
+  it.each(["conversation", "character", "generation"])("does not regenerate after %s changes while deleting", async changed => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    const deletion = deferred<void>(); vi.spyOn(bridge, "deleteLastMessages").mockReturnValue(deletion.promise);
+    const running = h.app.continueFrom(1, true);
+    h.set(changed === "conversation" ? { conversation_id: "conversation-b" } : changed === "character" ? { character_id: "character-b" } : { generation: 5 });
+    deletion.resolve(); await running; expect(h.io.send).not.toHaveBeenCalled();
+  });
+  it("a rejected tail guard never sends regeneration or changes projected history", async () => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    vi.spyOn(bridge, "deleteLastMessages").mockRejectedValue(new Error("tail changed"));
+    await expect(h.app.continueFrom(1, true)).rejects.toThrow("tail changed");
+    expect(h.io.send).not.toHaveBeenCalled(); expect(projectMessages(h.app.getSnapshot())).toHaveLength(3);
   });
 });

@@ -81,3 +81,6 @@ models/
 src-tauri/proptest-regressions/vision/tests/property_tests.txt
 .claude
 .worktrees/
+
+# Isolated native chat acceptance artifacts (WebView profile, logs, test data)
+output/playwright/chat-lifecycle/

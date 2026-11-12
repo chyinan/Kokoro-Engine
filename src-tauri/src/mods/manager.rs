@@ -657,6 +657,13 @@ impl ModManager {
     }
 
     /// Dispatch an engine event to QuickJS listeners (registered via Kokoro.on).
+    /// Chat notifications must never wait for a plugin consumer or a full queue.
+    pub fn try_dispatch_event(&self, event: &str, payload: serde_json::Value) -> Result<(), String> {
+        if !self.runtime_ready() { return Err("Script runtime not ready".into()); }
+        let tx = self.script_tx.as_ref().ok_or("Script runtime sender missing")?;
+        tx.try_send(ScriptCommand::DispatchEvent { event: event.into(), payload }).map_err(|error| error.to_string())
+    }
+
     pub async fn dispatch_event(
         &self,
         event: &str,

@@ -5,6 +5,7 @@ const fakes = vi.hoisted(() => ({
   handlers: new Map<string, (event: { payload: unknown }) => unknown>(),
   playStateCallback: null as ((playing: boolean) => void) | null,
   playing: false,
+  finishChatPlayback: vi.fn().mockResolvedValue(undefined),
   cancelTts: vi.fn().mockResolvedValue(undefined),
   player: {
     clearQueue: vi.fn(), queueAudio: vi.fn(), finishStream: vi.fn(), stop: vi.fn(),
@@ -24,9 +25,11 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
   emit: vi.fn(),
 }));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ label: "pet" }) }));
 vi.mock("../services", () => ({ audioPlayer: fakes.player }));
 vi.mock("../../lib/kokoro-bridge", () => ({
   cancelTts: fakes.cancelTts,
+  finishChatPlayback: fakes.finishChatPlayback,
   getLatestTtsRequestId: vi.fn(() => null),
 }));
 vi.mock("./voice-interrupt-service", () => ({
@@ -61,6 +64,12 @@ describe("review_r09 TTS event lifecycle", () => {
   });
 
   afterEach(() => { service.cleanup(); vi.unstubAllGlobals(); });
+
+  it("subscribes only to its physical window's playback events", async () => {
+    const { listen } = await import("@tauri-apps/api/event");
+    expect(vi.mocked(listen).mock.calls).toHaveLength(5);
+    for (const call of vi.mocked(listen).mock.calls) expect(call[2]).toEqual({ target: "pet" });
+  });
 
   it("keeps earlier browser sentences queued until playback finishes", () => {
     fakes.handlers.get("tts:start")?.({ payload: { text: "First. Second." } });
@@ -120,5 +129,14 @@ describe("review_r09 TTS event lifecycle", () => {
 
     expect(fakes.player.stop).toHaveBeenCalledOnce();
     expect(fakes.cancelTts).toHaveBeenCalledWith("req-stop");
+    expect(fakes.finishChatPlayback).toHaveBeenCalledWith("req-stop");
+  });
+
+  it.each(["cleanup", "interrupt", "replacement"])("releases playback ownership on %s", async reason => {
+    fakes.handlers.get("tts:start")?.({ payload: { request_id: "chat_owned", text: "Playing." } });
+    if (reason === "cleanup") service.cleanup();
+    else if (reason === "interrupt") { fakes.playStateCallback?.(true); fakes.interrupt.callback?.(); }
+    else fakes.handlers.get("tts:start")?.({ payload: { request_id: "chat_replacement", text: "New." } });
+    expect(fakes.finishChatPlayback).toHaveBeenCalledWith("chat_owned");
   });
 });

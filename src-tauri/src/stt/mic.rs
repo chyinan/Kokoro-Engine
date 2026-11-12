@@ -535,7 +535,7 @@ fn create_voice_activity_detector_from_path(
 }
 
 fn ensure_silero_vad_model() -> Result<std::path::PathBuf, String> {
-    let app_data_dir = dirs_next::data_dir()
+    let app_data_dir = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro")
         .join("stt")

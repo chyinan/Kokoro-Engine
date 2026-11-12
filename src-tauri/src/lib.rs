@@ -78,6 +78,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(crate::characters::activation::ActivationCoordinator::default())
+        .manage(Arc::new(crate::chat::runtime::ChatRuntimeState::default()))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -100,6 +101,9 @@ pub fn run() {
             commands::database::init_db,
             commands::database::test_vector_store,
             commands::chat::stream_chat,
+            commands::chat::get_chat_runtime_snapshot,
+            commands::chat::get_chat_view,
+            commands::chat::finish_chat_playback,
             commands::chat::get_context_settings,
             commands::chat::set_context_settings,
             commands::chat::approve_tool_approval,
@@ -314,7 +318,7 @@ pub fn run() {
                     "stage=ai.init.start elapsed_ms={}",
                     startup_begin.elapsed().as_millis()
                 );
-                let app_data_dir = dirs_next::data_dir()
+                let app_data_dir = crate::utils::paths::data_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
                     .join("com.chyin.kokoro");
                 let _ = std::fs::create_dir_all(&app_data_dir);
@@ -492,7 +496,7 @@ pub fn run() {
             );
 
             // Initialize TTS Service from config
-            let app_data = dirs_next::data_dir()
+            let app_data = crate::utils::paths::data_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join("com.chyin.kokoro");
 

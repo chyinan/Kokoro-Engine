@@ -1,3 +1,5 @@
+import { OnboardingChat } from "./features/onboarding/onboarding-chat";
+import { chatApplication, submitChat } from "./lib/chat/application";
 // pattern: Imperative Shell
 
 import { useState, useEffect, useMemo, useSyncExternalStore, useCallback, useRef } from "react";
@@ -231,13 +233,9 @@ import {
   onModUiMessage,
   onModScriptEvent,
   onModUnload,
-  onChatTurnStart,
   onChatTurnDelta,
   onChatTurnFinish,
   onChatCue,
-  streamChat,
-  cancelChatTurn,
-  dispatchModEvent,
   unloadMod,
   loadMod,
   installMod,
@@ -371,20 +369,6 @@ import { modMessageBus } from "./ui/mods/ModMessageBus";
 import { CameraWatcher } from "./features/camera/CameraWatcher";
 import { mapCharacterAvatarUrl } from "./ui/widgets/character-avatar-url";
 import { shouldEnableChatPanel } from "./ui/layout/layout-interaction";
-import {
-  canAccumulateOnboardingTurn,
-  canSettleOnboardingTurn,
-  isOnboardingTurnEvent,
-} from "./features/onboarding/onboarding-turn-correlation";
-import {
-  cancelDeferredOnboardingChat,
-  cancelOnboardingChat as cancelPendingOnboardingChat,
-  releaseOnboardingChatRequest,
-} from "./features/onboarding/onboarding-chat-cancellation";
-import {
-  registerExternalTurn,
-  unregisterExternalTurn,
-} from "./ui/widgets/chat/chat-turn-lifecycle";
 
 let _regSnap = 0;
 const _subscribeFn = (cb: () => void) => {
@@ -462,14 +446,7 @@ function App() {
   const [onboardingDiscoveringModels, setOnboardingDiscoveringModels] = useState(false);
   const [onboardingCharacterError, setOnboardingCharacterError] = useState<string | null>(null);
   const [onboardingSubmittingChat, setOnboardingSubmittingChat] = useState(false);
-  const onboardingChatPendingRef = useRef<{
-    clientRequestId: string;
-    turnId: string | null;
-    reply: string;
-    resolve: (reply: string) => void;
-    reject: (error: Error) => void;
-  } | null>(null);
-  const cancelledOnboardingRequestIdsRef = useRef<Set<string>>(new Set());
+  const onboardingChat = useRef(new OnboardingChat(chatApplication));
   const pendingOnboardingResponseLanguageRef = useRef<string | null>(null);
 
   const [gazeTracking, setGazeTracking] = useState<boolean>(
@@ -667,6 +644,7 @@ function App() {
   const activationServiceRef = useRef<CharacterActivationService | null>(null);
   if (activationServiceRef.current === null) {
     activationServiceRef.current = createCharacterActivationService({
+      beforeCharacterActivation: characterId => chatApplication.prepareCharacterSwitch(characterId),
       prepareCharacterActivation,
       commitCharacterActivation,
       getCommittedCharacterRuntime,
@@ -1035,84 +1013,11 @@ function App() {
     }
   };
 
-  const settleOnboardingChat = (
-    clientRequestId: string,
-    eventTurnId: string | undefined,
-    status: "completed" | "error" | "cancelled",
-    error?: unknown,
-  ): boolean => {
-    const pending = onboardingChatPendingRef.current;
-    if (!pending || !canSettleOnboardingTurn(
-      pending.clientRequestId,
-      pending.turnId,
-      clientRequestId,
-      eventTurnId,
-    )) {
-      return false;
-    }
-
-    onboardingChatPendingRef.current = null;
-    releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
-    unregisterExternalTurn(clientRequestId);
-    setOnboardingSubmittingChat(false);
-    if (status === "completed") {
-      pending.resolve(pending.reply);
-    } else {
-      const message = error === undefined
-        ? `chat turn ${status}`
-        : getKokoroErrorMessage(error);
-      pending.reject(new Error(message));
-    }
-    return true;
-  };
-
   const handleOnboardingChatSubmit = async (message: string): Promise<string> => {
-    if (onboardingChatPendingRef.current) throw new Error("a chat turn is already in progress");
     dispatchOnboardingEvent({ type: "chat-started" });
     setOnboardingSubmittingChat(true);
-    return new Promise<string>((resolve, reject) => {
-      const clientRequestId = `onboarding_${crypto.randomUUID()}`;
-      const unregisterExternal = registerExternalTurn(clientRequestId);
-      onboardingChatPendingRef.current = { clientRequestId, turnId: null, reply: "", resolve, reject };
-      void streamChat({
-        message,
-        character_id: readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || undefined,
-        client_request_id: clientRequestId,
-      }).then((response) => {
-        const responseRequestId = response?.client_request_id;
-        if (responseRequestId && responseRequestId !== clientRequestId) {
-          if (!settleOnboardingChat(
-            clientRequestId,
-            undefined,
-            "error",
-            new Error("chat response request id mismatch"),
-          )) {
-            releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
-            unregisterExternal();
-          }
-          return;
-        }
-
-        const responseStatus = response?.status;
-        const status = responseStatus === undefined || responseStatus === null || responseStatus === "completed"
-          ? "completed"
-          : "error";
-        if (!settleOnboardingChat(
-          clientRequestId,
-          undefined,
-          status,
-          responseStatus ? new Error(`chat turn ${responseStatus}`) : undefined,
-        )) {
-          releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
-          unregisterExternal();
-        }
-      }).catch((error) => {
-        if (!settleOnboardingChat(clientRequestId, undefined, "error", error)) {
-          releaseOnboardingChatRequest(cancelledOnboardingRequestIdsRef.current, clientRequestId);
-          unregisterExternal();
-        }
-      });
-    });
+    try { return await onboardingChat.current.start(message, readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || undefined); }
+    finally { setOnboardingSubmittingChat(false); }
   };
 
   const handleOnboardingFirstReplySucceeded = (reply: string): void => {
@@ -1122,17 +1027,8 @@ function App() {
   };
 
   const cancelOnboardingChat = (): void => {
-    const pending = onboardingChatPendingRef.current;
-    if (pending) {
-      unregisterExternalTurn(pending.clientRequestId);
-    }
-    onboardingChatPendingRef.current = null;
+    onboardingChat.current.dismiss();
     setOnboardingSubmittingChat(false);
-    cancelPendingOnboardingChat(
-      pending,
-      cancelChatTurn,
-      (clientRequestId) => cancelledOnboardingRequestIdsRef.current.add(clientRequestId),
-    );
   };
 
   const refreshMemoryModelStatus = useCallback(async () => {
@@ -1489,39 +1385,11 @@ function App() {
     });
 
     // ── MOD System: Engine event bridge → broadcast to iframes + forward to QuickJS ──
-    const unlistenOnboardingChatStart = onChatTurnStart(({ turn_id, client_request_id }) => {
-      if (cancelDeferredOnboardingChat(
-        cancelledOnboardingRequestIdsRef.current,
-        client_request_id,
-        turn_id,
-        cancelChatTurn,
-      )) {
-        return;
-      }
-      const onboardingPending = onboardingChatPendingRef.current;
-      if (onboardingPending && isOnboardingTurnEvent(onboardingPending.clientRequestId, client_request_id)) {
-        onboardingPending.turnId = turn_id;
-      }
-    });
-
-    const unlistenModChatDelta = onChatTurnDelta(({ turn_id, delta, client_request_id }) => {
-      const onboardingPending = onboardingChatPendingRef.current;
-      if (onboardingPending
-        && canAccumulateOnboardingTurn(
-          onboardingPending.clientRequestId,
-          onboardingPending.turnId,
-          client_request_id,
-          turn_id,
-        )) {
-        if (onboardingPending.turnId === null) onboardingPending.turnId = turn_id;
-        onboardingPending.reply += delta;
-      }
+    const unlistenModChatDelta = onChatTurnDelta(({ turn_id, delta }) => {
       modMessageBus.broadcast({
         type: 'event',
         payload: { name: 'chat-delta', delta, turn_id },
       });
-      // Forward to QuickJS scripts so Kokoro.on('chat', ...) works
-      dispatchModEvent('chat', { delta, turn_id }).catch(() => { });
     });
 
     const unlistenModCue = onChatCue((data) => {
@@ -1529,21 +1397,13 @@ function App() {
         type: 'event',
         payload: { name: 'chat-cue', ...data },
       });
-      dispatchModEvent('cue', data).catch(() => { });
     });
 
-    const unlistenModChatDone = onChatTurnFinish(({ turn_id, status, client_request_id }) => {
-      settleOnboardingChat(
-        client_request_id ?? "",
-        turn_id,
-        status,
-        status === "completed" ? undefined : new Error(`chat turn ${status}`),
-      );
+    const unlistenModChatDone = onChatTurnFinish(({ turn_id, status }) => {
       modMessageBus.broadcast({
         type: 'event',
         payload: { name: 'chat-done', turn_id, status },
       });
-      dispatchModEvent('chat-done', { turn_id, status }).catch(() => { });
     });
 
     // ── MOD System: Script events → broadcast to iframes ──
@@ -1567,13 +1427,11 @@ function App() {
     });
 
     return () => {
-      cancelledOnboardingRequestIdsRef.current.clear();
       ttsService.cleanup();
       unlistenImageGen.then(unlisten => unlisten());
       unlistenChatImageGen.then(unlisten => unlisten());
       unlistenModTheme.then(unlisten => unlisten());
       unlistenModComponents.then(unlisten => unlisten());
-      unlistenOnboardingChatStart.then(unlisten => unlisten());
       unlistenModUiMessage.then(unlisten => unlisten());
       unlistenModChatDelta.then(unlisten => unlisten());
       unlistenModCue.then(unlisten => unlisten());
@@ -1805,22 +1663,12 @@ function App() {
       const message = detail.data.message;
       void (async () => {
         try {
-          const status = memoryModelStatus ?? await refreshMemoryModelStatus();
-          if (!status.installed) {
-            await openMemoryModelDialog();
-            return;
-          }
           const clientRequestId = `mod_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-          const unregister = registerExternalTurn(clientRequestId);
-          try {
-            await streamChat({
+            await submitChat({
               message,
               character_id: readStringSetting(APP_SETTING_KEYS.activeCharacterId, "") || undefined,
               client_request_id: clientRequestId,
             });
-          } finally {
-            unregister();
-          }
         } catch (err) {
           console.error("[App] Mod send_message failed:", err);
         }
