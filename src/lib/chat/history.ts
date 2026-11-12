@@ -57,18 +57,6 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
         const technicalType = typeof meta?.type === "string" ? meta.type : undefined;
         const turnId = typeof meta?.turn_id === "string" ? meta.turn_id : undefined;
 
-        if (m.role === "context") {
-            chatMsgs.push({
-                id: m.id,
-                role: "context",
-                text: m.content,
-                capturedAt: getStringMetadataValue(meta, "captured_at") ?? m.created_at,
-                source: getStringMetadataValue(meta, "source"),
-                turnId,
-            });
-            continue;
-        }
-
         if (m.role === "tool" || technicalType === "tool_result") {
             const toolName = typeof meta?.tool_name === "string"
                 ? meta.tool_name
@@ -116,10 +104,21 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
             continue;
         }
 
+        if (technicalType === "assistant_tool_calls" || technicalType === "translation_instruction") continue;
+
+        if (m.role === "context") {
+            chatMsgs.push({
+                id: m.id,
+                role: "context",
+                text: m.content,
+                capturedAt: getStringMetadataValue(meta, "captured_at") ?? m.created_at,
+                source: getStringMetadataValue(meta, "source"),
+                turnId,
+            });
+            continue;
+        }
+
         if (m.role !== "user") {
-            if (technicalType === "assistant_tool_calls") {
-                continue;
-            }
 
             let translation: string | undefined;
             if (typeof meta?.translation === "string") {

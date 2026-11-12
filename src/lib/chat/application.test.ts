@@ -189,6 +189,31 @@ describe("UI-independent chat application", () => {
     expect(h.app.getSnapshot().revision).toBe(5);
     expect(projectMessages(h.app.getSnapshot()).slice(-1)[0]?.text).toBe("committed"); stop();
   });
+  it("publishes history and the newest streaming text without restarting a slow read for deltas", async () => {
+    const h = harness();
+    const streaming = turn("live", 2);
+    h.set({ revision: 2, busy: true, turns: [streaming] });
+    const stop = h.app.subscribe(() => {});
+    try {
+      const cached = await h.app.refresh();
+      vi.mocked(h.io.read).mockClear();
+      const history = deferred<ChatViewSnapshot>();
+      vi.mocked(h.io.read).mockReturnValueOnce(history.promise);
+      const refresh = h.app.refresh();
+      h.emit({ ...streaming, revision: 3, text: "new text" });
+      h.emit({ ...streaming, revision: 4, text: "newest text" });
+      history.resolve({ ...cached, history_revision: 1, messages: [
+        { id: 1, role: "user", content: "saved question", created_at: "now" },
+      ] });
+
+      const view = await refresh;
+      expect(h.io.read).toHaveBeenCalledOnce();
+      expect(view).toMatchObject({ revision: 2, history_revision: 1, busy: true });
+      expect(projectMessages(view).map(message => message.text)).toEqual(["saved question", "newest text"]);
+    } finally {
+      stop();
+    }
+  });
   it("coalesces duplicate logical delivery but forwards conflicting payload to authority", async () => {
     const h = harness(); const pending = deferred<StreamChatResponse>();
     vi.mocked(h.io.send).mockReturnValueOnce(pending.promise).mockRejectedValueOnce(new Error("chat_request_conflict"));

@@ -66,6 +66,9 @@ it("keeps tool details expanded when the completion event arrives before the sav
         await act(async () => chat.set({ busy: false, turns: [completed] }));
         expect(details()).toBe(toggle);
         expect(container.textContent).toContain("found result");
+        const continueFrom = container.querySelector<HTMLButtonElement>('button[title="chat.actions.continue_from"]');
+        await act(async () => continueFrom!.click());
+        expect(chat.continueFrom).toHaveBeenCalledExactlyOnceWith({ conversationId: "conv-1", generation: 1, messageId: 1 });
 
         await act(async () => chat.set({
             revision: 3,

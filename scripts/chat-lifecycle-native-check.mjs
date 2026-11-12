@@ -182,8 +182,9 @@ try {
       const snapshot = chatApplication.getSnapshot();
       const user = projectMessages(snapshot).find(message => message.role === "user");
       await chatApplication.edit({ conversationId: snapshot.conversation_id, generation: snapshot.generation, messageId: user.id }, "[case:history-regenerated]");
-      const answerIndex = projectMessages(chatApplication.getSnapshot()).findIndex(message => message.role === "kokoro");
-      return chatApplication.continueFrom(answerIndex, true, { allow_image_gen: false });
+      const updated = chatApplication.getSnapshot();
+      const answer = projectMessages(updated).find(message => message.role === "kokoro");
+      return chatApplication.continueFrom({ conversationId: updated.conversation_id, generation: updated.generation, messageId: answer.id }, true, { allow_image_gen: false });
     }); assert.equal(regenerated.status, "completed"); assert.equal(regenerated.conversation_id, target);
     const revised = await view(pet); assert.equal(revised.messages.filter(message => message.role === "user").length, 1);
     assert.equal(revised.messages.filter(message => message.role === "assistant").length, 1);

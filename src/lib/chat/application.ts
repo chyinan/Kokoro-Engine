@@ -3,7 +3,7 @@
 import * as bridge from "../kokoro-bridge";
 import type { ChatRequest, ChatTurnSnapshot, ChatViewSnapshot, ChatViewVersion, StreamChatResponse } from "../kokoro-bridge";
 import { getContinueFromCutoffIndex, getExpectedTailMessageId } from "./history-commands";
-import { isActiveTurn, mergeTurnSnapshot, projectMessages } from "./projection";
+import { isActiveTurn, isTurnAwaitingHistory, mergeTurnSnapshot, projectSavedMessages } from "./projection";
 
 export interface ChatTransport {
   read(knownVersion?: ChatViewVersion): Promise<ChatViewSnapshot | null>;
@@ -11,7 +11,7 @@ export interface ChatTransport {
   send(request: ChatRequest): Promise<StreamChatResponse>;
   cancel(id: string, reason?: string): Promise<void>;
 }
-export interface ChatEditTarget {
+export interface ChatMessageTarget {
   conversationId: string;
   generation: number;
   messageId: number;
@@ -35,7 +35,7 @@ export class ChatApplication {
   private readSequence = 0;
   private readInFlight: { connection: number; conditional: boolean; promise: Promise<ChatViewSnapshot> } | undefined;
   private readVersion: ChatViewVersion | undefined;
-  private eventSequence = 0;
+  private historyEventRevision = 0;
   private restoredRevision = 0;
   private pending = new Map<string, { fingerprint: string; promise: Promise<StreamChatResponse> }>();
   private mutation: Promise<unknown> | null = null;
@@ -60,20 +60,21 @@ export class ChatApplication {
       const stop = await this.io.listen(turn => {
         if (generation !== this.connection || turn.revision <= this.restoredRevision) return;
         const previous = this.turns.get(turn.client_request_id);
-        this.eventSequence++;
-        this.turns = mergeTurnSnapshot(this.turns, turn);
-        this.publish({ ...this.view, turns: [...this.turns.values()], busy: [...this.turns.values()].some(isActiveTurn) || this.mutation !== null });
+        if (previous && turn.revision <= previous.revision) return;
         // Deltas already contain the full streaming projection. Read SQLite only
         // for identity/status changes and periodic missed-event reconciliation.
-        if (!previous || previous.status !== turn.status || previous.conversation_id !== turn.conversation_id
-          || previous.user_message_id !== turn.user_message_id || previous.assistant_message_id !== turn.assistant_message_id) {
-          void this.refresh().catch(() => {});
-        }
+        const historyChanged = !previous || previous.status !== turn.status
+          || previous.character_id !== turn.character_id || previous.conversation_id !== turn.conversation_id
+          || previous.user_message_id !== turn.user_message_id || previous.assistant_message_id !== turn.assistant_message_id;
+        if (historyChanged) this.historyEventRevision = Math.max(this.historyEventRevision, turn.revision);
+        this.turns = mergeTurnSnapshot(this.turns, turn);
+        const turns = [...this.turns.values()];
+        this.publish({ ...this.view, turns, busy: turns.some(isActiveTurn) || this.mutation !== null });
+        if (historyChanged) void this.refresh().catch(() => {});
       });
       if (generation !== this.connection) { stop(); return; }
       this.stop = stop;
-      // Subscribe before reading. A raced event makes refresh retry instead of
-      // allowing an older history snapshot to overwrite the committed outcome.
+      // Subscribe before reading so newer streaming events can be merged into the snapshot.
       await this.refresh();
     } catch {
       // Polling also recovers if the listener or the initial read failed.
@@ -108,17 +109,23 @@ export class ChatApplication {
   }
   private async readView(connection: number, known?: ChatViewVersion): Promise<ChatViewSnapshot> {
     const sequence = ++this.readSequence;
-    const eventsAtStart = this.eventSequence;
+    const historyEventAtStart = this.historyEventRevision;
     const view = await this.io.read(known);
     if (sequence !== this.readSequence || connection !== this.connection || !view) return this.view;
-    if (eventsAtStart !== this.eventSequence && [...this.turns.values()].some(turn => turn.revision > view.revision)) return this.readView(connection);
+    // Streaming deltas merge below. Only a newer history-changing event can
+    // invalidate the SQLite rows that were read alongside the journal.
+    if (this.historyEventRevision > historyEventAtStart && this.historyEventRevision > view.revision) {
+      return this.readView(connection);
+    }
     const ids = new Set(view.turns.map(turn => turn.client_request_id));
     for (const [id, turn] of this.turns) if (!ids.has(id) && !this.pending.has(id) && turn.revision <= view.revision) this.turns.delete(id);
     for (const turn of view.turns) this.turns = mergeTurnSnapshot(this.turns, turn);
     this.restoredRevision = Math.max(this.restoredRevision, view.revision);
-    const { revision, history_revision, generation, busy } = view;
-    this.readVersion = { revision, history_revision, generation, busy };
-    this.publish({ ...view, busy: view.busy || [...this.pending.keys()].some(id => { const turn = this.turns.get(id); return !turn || isActiveTurn(turn); }) || this.mutation !== null, turns: [...this.turns.values()] });
+    const { revision, history_revision, generation } = view;
+    this.readVersion = { revision, history_revision, generation, busy: view.busy };
+    const turns = [...this.turns.values()];
+    const busy = view.busy || turns.some(isActiveTurn) || [...this.pending.keys()].some(id => !this.turns.has(id)) || this.mutation !== null;
+    this.publish({ ...view, busy, turns });
     return this.view;
   }
   send(request: ChatRequest): Promise<StreamChatResponse> {
@@ -164,11 +171,12 @@ export class ChatApplication {
       if (id) await bridge.loadConversation(id); else await bridge.clearHistory();
     });
   }
-  private async mutate(operation: () => Promise<unknown>) {
+  private async mutate<T>(operation: () => Promise<T>): Promise<T> {
     if (this.mutation) throw new Error("history_mutation_busy");
-    this.mutation = operation();
+    const result = operation();
+    this.mutation = result;
     this.publish({ ...this.view, busy: true });
-    try { await this.mutation; } finally {
+    try { return await result; } finally {
       this.mutation = null;
       // History and selection changes do not advance the journal revision.
       // Start a new read so an older response cannot publish after the mutation.
@@ -182,7 +190,7 @@ export class ChatApplication {
       await bridge.clearHistory();
     });
   }
-  async edit(target: ChatEditTarget, content: string) {
+  async edit(target: ChatMessageTarget, content: string) {
     const text = content.trim();
     if (!text || target.conversationId !== this.view.conversation_id || target.generation !== this.view.generation) return;
     return this.mutate(() => bridge.editConversationMessage({
@@ -195,19 +203,32 @@ export class ChatApplication {
     // A late response must never clear a selection made while deletion awaited IO.
     return this.mutate(() => bridge.deleteConversation(id));
   }
-  async continueFrom(index: number, regenerate = false, options: { allow_image_gen?: boolean } = {}) {
-    const view = this.view;
-    const messages = projectMessages(view);
-    const cutoff = regenerate ? index : getContinueFromCutoffIndex(messages, index);
-    if (cutoff === null || !view.conversation_id) return;
-    const user = messages.slice(0, index).reverse().find(message => message.role === "user");
-    if (regenerate && !user) return;
-    await this.mutate(async () => {
-      if (messages.length > cutoff) await bridge.deleteLastMessages(messages.length - cutoff, view.conversation_id, getExpectedTailMessageId(messages));
+  async continueFrom(target: ChatMessageTarget, regenerate = false, options: { allow_image_gen?: boolean } = {}) {
+    const characterId = this.view.character_id;
+    const matchesSelection = (view: ChatViewSnapshot) => view.character_id === characterId
+      && view.conversation_id === target.conversationId && view.generation === target.generation;
+    if (!matchesSelection(this.view)) return;
+
+    const user = await this.mutate(async () => {
+      const awaitingHistory = (view: ChatViewSnapshot) => view.turns.some(turn => isTurnAwaitingHistory(view, turn));
+      if (awaitingHistory(this.view)) await this.refresh();
+      const view = this.view;
+      if (!matchesSelection(view) || awaitingHistory(view)) return;
+      const messages = projectSavedMessages(view).filter(message => message.id !== undefined);
+      const index = messages.findIndex(message => message.id === target.messageId);
+      if (index < 0) return;
+      const cutoff = regenerate ? index : getContinueFromCutoffIndex(messages, index);
+      if (cutoff === null) return;
+      const user = messages.slice(0, index).reverse().find(message => message.role === "user");
+      if (regenerate && !user) return;
+      if (messages.length > cutoff) {
+        await bridge.deleteLastMessages(messages.length - cutoff, target.conversationId, getExpectedTailMessageId(messages));
+      }
+      return user;
     });
     // A history command must never send into a selection made while it awaited IO.
-    if (regenerate && user && this.view.conversation_id === view.conversation_id && this.view.character_id === view.character_id && this.view.generation === view.generation) {
-      return this.send({ message: user.text, images: user.images, regenerate: true, character_id: view.character_id, conversation_id: view.conversation_id, conversation_generation: view.generation, ...options });
+    if (regenerate && user && matchesSelection(this.view)) {
+      return this.send({ message: user.text, images: user.images, regenerate: true, character_id: characterId, conversation_id: target.conversationId, conversation_generation: target.generation, ...options });
     }
   }
 }

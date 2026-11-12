@@ -7,7 +7,7 @@ import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
 import { uploadVisionImage, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
 import type { ToolTraceItem } from "../../lib/kokoro-bridge";
-import { chatApplication, type ChatEditTarget } from "../../lib/chat/application";
+import { chatApplication, type ChatMessageTarget } from "../../lib/chat/application";
 import { projectMessages, isActiveTurn } from "../../lib/chat/projection";
 import { canSubmitApproval, getApprovalRequestId, type ChatPanelMessage } from "../../lib/chat/turn-state";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
@@ -107,9 +107,9 @@ interface MemoizedChatMessageProps {
     isStreaming: boolean;
     isTranslationExpanded: boolean;
     onToggleTranslation: (index: number) => void;
-    onEdit: (target: ChatEditTarget, newText: string) => void;
-    onRegenerate: (index: number) => Promise<void>;
-    onContinueFrom: (index: number) => Promise<void>;
+    onEdit: (target: ChatMessageTarget, newText: string) => void;
+    onRegenerate: (target: ChatMessageTarget) => Promise<void>;
+    onContinueFrom: (target: ChatMessageTarget) => Promise<void>;
     onApproveTool: (index: number, tool: ToolTraceItem) => Promise<void>;
     onRejectTool: (index: number, tool: ToolTraceItem) => Promise<void>;
     onPreviewImage?: (url: string) => void;
@@ -127,7 +127,9 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
     onToggleTranslation, onEdit, onRegenerate, onContinueFrom, onApproveTool, onRejectTool,
     onPreviewImage,
 }: MemoizedChatMessageProps) {
-    const messageId = message.id;
+    const target = conversationId !== null && message.id !== undefined
+        ? { conversationId, generation, messageId: message.id }
+        : undefined;
     return (
         <ChatMessage
             message={message}
@@ -135,11 +137,9 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
             isStreaming={isStreaming}
             isTranslationExpanded={isTranslationExpanded}
             onToggleTranslation={() => onToggleTranslation(globalIndex)}
-            onEdit={conversationId !== null && messageId !== undefined
-                ? text => onEdit({ conversationId, generation, messageId }, text)
-                : undefined}
-            onRegenerate={() => onRegenerate(globalIndex)}
-            onContinueFrom={() => onContinueFrom(globalIndex)}
+            onEdit={target ? text => onEdit(target, text) : undefined}
+            onRegenerate={target ? () => onRegenerate(target) : undefined}
+            onContinueFrom={target ? () => onContinueFrom(target) : undefined}
             onApproveTool={createToolActionHandler(globalIndex, onApproveTool)}
             onRejectTool={createToolActionHandler(globalIndex, onRejectTool)}
             onPreviewImage={onPreviewImage}
@@ -822,14 +822,14 @@ export default function ChatPanel({
     const onToggleTranslation = useCallback((index: number) => {
         setExpandedTranslations(previous => { const next = new Set(previous); if (next.has(index)) next.delete(index); else next.add(index); return next; });
     }, []);
-    const onEdit = useCallback(async (target: ChatEditTarget, text: string) => {
+    const onEdit = useCallback(async (target: ChatMessageTarget, text: string) => {
         try { await chatApplication.edit(target, text); } catch (error) { reportError(error); }
     }, [reportError]);
-    const onRegenerate = useCallback(async (index: number) => {
-        try { await chatApplication.continueFrom(index, true, { allow_image_gen: readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated" }); } catch (error) { reportError(error); }
+    const onRegenerate = useCallback(async (target: ChatMessageTarget) => {
+        try { await chatApplication.continueFrom(target, true, { allow_image_gen: readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated" }); } catch (error) { reportError(error); }
     }, [reportError]);
-    const onContinueFrom = useCallback(async (index: number) => {
-        try { await chatApplication.continueFrom(index); } catch (error) { reportError(error); }
+    const onContinueFrom = useCallback(async (target: ChatMessageTarget) => {
+        try { await chatApplication.continueFrom(target); } catch (error) { reportError(error); }
     }, [reportError]);
     const onApproveTool = useCallback(async (_index: number, tool: ToolTraceItem) => {
         const id = getApprovalRequestId(tool);

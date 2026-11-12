@@ -23,8 +23,8 @@ interface ChatMessageProps {
     isTranslationExpanded: boolean;
     onToggleTranslation: () => void;
     onEdit?: (newText: string) => void;
-    onRegenerate: () => void;
-    onContinueFrom: () => void;
+    onRegenerate?: () => void;
+    onContinueFrom?: () => void;
     onApproveTool: (tool: ToolTraceItem) => void;
     onRejectTool: (tool: ToolTraceItem) => void;
     onPreviewImage?: (url: string) => void;
@@ -320,7 +320,7 @@ export const ChatMessage = memo(function ChatMessage({
                     </div>
 
                     {/* 错误消息的重试按钮 */}
-                    {!isStreaming && msg.isError && (
+                    {!isStreaming && msg.isError && onRegenerate && (
                         <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button
                                 onClick={onRegenerate}
@@ -333,7 +333,7 @@ export const ChatMessage = memo(function ChatMessage({
                     )}
 
                     {/* 悬停显示的操作按钮 */}
-                    {!isStreaming && !msg.isError && msg.role !== "tool" && (
+                    {!isStreaming && !msg.isError && msg.role !== "tool" && onContinueFrom && (
                         <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                             {/* 从这里继续按钮 */}
                             <button
@@ -354,7 +354,7 @@ export const ChatMessage = memo(function ChatMessage({
                             </button>}
 
                             {/* 重新生成按钮（仅 kokoro 消息） */}
-                            {msg.role === "kokoro" && (
+                            {msg.role === "kokoro" && onRegenerate && (
                                 <button
                                     onClick={onRegenerate}
                                     className="p-1.5 rounded-md bg-slate-800/90 backdrop-blur-sm text-slate-400 hover:text-[var(--color-accent)] hover:bg-slate-700/90 transition-colors shadow-lg"

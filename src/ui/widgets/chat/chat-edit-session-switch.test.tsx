@@ -11,6 +11,7 @@ const messages = [
   { id: 103, role: "user", content: "later A", created_at: "now" },
 ];
 const editTarget = { conversationId: "conversation-a", generation: 3, messageId: 101 };
+const answerTarget = { ...editTarget, messageId: 102 };
 afterEach(() => vi.restoreAllMocks());
 
 describe("application history command session ownership", () => {
@@ -102,12 +103,44 @@ describe("application history command session ownership", () => {
   it("blocks send and a second history mutation while continuation deletion is pending", async () => {
     const h = harness(); h.set({ messages }); await h.app.refresh();
     const deletion = deferred<void>(); vi.spyOn(bridge, "deleteLastMessages").mockReturnValue(deletion.promise);
-    const running = h.app.continueFrom(1);
+    const running = h.app.continueFrom(answerTarget);
     expect(h.app.getSnapshot().busy).toBe(true);
     await expect(h.app.send({ message: "overlap" })).rejects.toThrow("history_mutation_busy");
-    await expect(h.app.continueFrom(1, true)).rejects.toThrow("history_mutation_busy");
+    await expect(h.app.continueFrom(answerTarget, true)).rejects.toThrow("history_mutation_busy");
     expect(h.io.send).not.toHaveBeenCalled();
     deletion.resolve(); await running; expect(h.app.getSnapshot().busy).toBe(false);
+  });
+  it.each([false, true])("waits for full history before truncating (selection changes: %s)", async selectionChanges => {
+    const h = harness();
+    const earlier = messages.slice(0, 2);
+    const completed = { ...turn("new", 2, "completed"), user_message_id: 103, assistant_message_id: 104 };
+    const read = deferred<ChatViewSnapshot>();
+    h.set({ revision: 1, messages: earlier });
+    const stop = h.app.subscribe(() => {});
+    try {
+      const cached = await h.app.refresh();
+      vi.mocked(h.io.read).mockReturnValueOnce(read.promise);
+      h.emit(completed);
+      expect(projectMessages(h.app.getSnapshot()).map(message => message.id)).toEqual([101, 102, 104]);
+      const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+      const continuing = h.app.continueFrom(answerTarget);
+
+      expect(remove).not.toHaveBeenCalled();
+      const saved = {
+        ...cached,
+        revision: 2,
+        generation: selectionChanges ? 5 : cached.generation,
+        turns: [completed],
+        messages: [...messages, { id: 104, role: "assistant", content: "new answer", created_at: "now" }],
+      };
+      h.set(saved);
+      read.resolve(saved);
+      await continuing;
+      if (selectionChanges) expect(remove).not.toHaveBeenCalled();
+      else expect(remove).toHaveBeenCalledExactlyOnceWith(2, "conversation-a", 104);
+    } finally {
+      stop();
+    }
   });
   it("regenerates from a restored turn with the selected image and without the original camera frame", async () => {
     const h = harness();
@@ -124,7 +157,7 @@ describe("application history command session ownership", () => {
     await sending;
     const reopened = h.newWindow(); await reopened.refresh();
     const deletion = deferred<void>(); const remove = vi.spyOn(bridge, "deleteLastMessages").mockReturnValue(deletion.promise);
-    const running = reopened.continueFrom(1, true, { allow_image_gen: true });
+    const running = reopened.continueFrom(answerTarget, true, { allow_image_gen: true });
     expect(remove).toHaveBeenCalledWith(1, "conversation-a", 102);
     expect(h.io.send).toHaveBeenCalledOnce();
     h.set({ messages: messages.slice(0, 1) }); deletion.resolve(); await running;
@@ -134,14 +167,14 @@ describe("application history command session ownership", () => {
   it.each(["conversation", "character", "generation"])("does not regenerate after %s changes while deleting", async changed => {
     const h = harness(); h.set({ messages }); await h.app.refresh();
     const deletion = deferred<void>(); vi.spyOn(bridge, "deleteLastMessages").mockReturnValue(deletion.promise);
-    const running = h.app.continueFrom(1, true);
+    const running = h.app.continueFrom(answerTarget, true);
     h.set(changed === "conversation" ? { conversation_id: "conversation-b" } : changed === "character" ? { character_id: "character-b" } : { generation: 5 });
     deletion.resolve(); await running; expect(h.io.send).not.toHaveBeenCalled();
   });
   it("a rejected tail guard never sends regeneration or changes projected history", async () => {
     const h = harness(); h.set({ messages }); await h.app.refresh();
     vi.spyOn(bridge, "deleteLastMessages").mockRejectedValue(new Error("tail changed"));
-    await expect(h.app.continueFrom(1, true)).rejects.toThrow("tail changed");
+    await expect(h.app.continueFrom(answerTarget, true)).rejects.toThrow("tail changed");
     expect(h.io.send).not.toHaveBeenCalled(); expect(projectMessages(h.app.getSnapshot())).toHaveLength(3);
   });
 });
