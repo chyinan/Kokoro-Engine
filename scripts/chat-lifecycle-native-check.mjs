@@ -14,6 +14,11 @@ const report = { startedAt: new Date().toISOString(), model: "controlled localho
 const save = () => fs.writeFileSync(path.join(output, "native-report.json"), JSON.stringify(report, null, 2));
 const view = page => page.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_chat_view"));
 const windows = page => page.evaluate(async () => (await (await import("/node_modules/@tauri-apps/api/webviewWindow.js")).getAllWebviewWindows()).map(window => window.label));
+const setPanelMounted = (page, mounted) => page.evaluate(async mounted => {
+  const { registry } = await import("/src/ui/registry/ComponentRegistry.ts");
+  if (!mounted) window.__originalChatPanel = registry.get("ChatPanel");
+  registry.register("ChatPanel", mounted ? window.__originalChatPanel : () => null);
+}, mounted);
 async function waitFor(test, timeout = 15000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) { const value = await test(); if (value) return value; await new Promise(resolve => setTimeout(resolve, 80)); }
@@ -173,7 +178,8 @@ try {
     await input.fill(message);
     await input.press("Enter");
     const failed = await waitFor(async () => (await view(main)).turns.find(turn => turn.message === message && turn.status === "error"));
-    const failedHistory = (await view(main)).messages;
+    const failedView = await view(main);
+    const failedHistory = failedView.messages;
     const partial = failedHistory.find(row => row.id === failed.assistant_message_id && row.content.includes("Partial reply before failure."));
     assert(partial, "the first tool round must leave a saved partial reply");
     const diagnostic = failedHistory.find(row => {
@@ -182,7 +188,12 @@ try {
     });
     assert(diagnostic?.content.includes("controlled composer failure"));
     assert.equal(JSON.parse(diagnostic.metadata).user_message_id, failed.user_message_id);
-    await submit(pet, { message, regenerate: true, regenerate_user_message_id: failed.user_message_id }, "__staleRetry");
+    const retry = {
+      message, regenerate: true, character_id: failedView.character_id,
+      conversation_id: failedView.conversation_id, conversation_generation: failedView.generation,
+      retry_failure: { diagnostic_message_id: diagnostic.id, expected_tail_message_id: diagnostic.id },
+    };
+    await submit(pet, { ...retry, retry_failure: { ...retry.retry_failure, expected_tail_message_id: partial.id } }, "__staleRetry");
     assert.match((await outcome(pet, "__staleRetry")).error, /Conversation history changed before retry/);
     assert.deepEqual((await view(main)).messages, failedHistory);
     const alert = main.getByRole("alert").filter({ hasText: "controlled composer failure" });
@@ -190,6 +201,14 @@ try {
     await savedReason.waitFor({ state: "visible" });
     await alert.waitFor({ state: "visible" });
     assert.equal(await alert.count(), 1);
+    const blocker = "native_retry_blocker";
+    await submit(pet, { message: "[case:lifecycle-hold-preparation-retry-blocker]", client_request_id: blocker }, "__retryBlocker");
+    await waitFor(async () => (await view(pet)).turns.some(turn => turn.client_request_id === blocker && turn.status === "accepted"));
+    await submit(main, retry, "__busyRetry");
+    assert.match((await outcome(main, "__busyRetry")).error, /chat_turn_busy/);
+    assert.deepEqual((await view(main)).messages, failedHistory);
+    await pet.evaluate(id => window.__TAURI_INTERNALS__.invoke("cancel_chat_turn", { turnId: id }), blocker);
+    assert.equal((await outcome(pet, "__retryBlocker")).result?.status, "cancelled");
     await savedReason.locator("..").getByRole("button").click();
     const recovered = await waitFor(async () => (await view(main)).turns.find(turn =>
       turn.message === message && turn.client_request_id !== failed.client_request_id && turn.status === "completed"));
@@ -225,12 +244,7 @@ try {
     await input.fill(message);
     await input.press("Enter");
     await waitFor(async () => (await (await fetch("http://127.0.0.1:19334/counts")).json()).some(call => call.name === name && call.streaming));
-    const setPanelMounted = mounted => main.evaluate(async mounted => {
-      const { registry } = await import("/src/ui/registry/ComponentRegistry.ts");
-      if (!mounted) window.__originalChatPanel = registry.get("ChatPanel");
-      registry.register("ChatPanel", mounted ? window.__originalChatPanel : () => null);
-    }, mounted);
-    await setPanelMounted(false);
+    await setPanelMounted(main, false);
     await input.waitFor({ state: "detached" });
     try {
       assert.equal((await fetch("http://127.0.0.1:19334/release-detached-failure")).status, 204);
@@ -242,22 +256,77 @@ try {
       const diagnostic = state.messages.find(row => JSON.parse(row.metadata ?? "null")?.event?.turn_id === failed.turn_id);
       assert(diagnostic?.content.includes(`controlled ${name}`));
       assert.equal(await input.count(), 0);
-      await setPanelMounted(true);
+      await setPanelMounted(main, true);
       const reason = main.getByText(diagnostic.content, { exact: true });
       const alert = main.getByRole("alert").filter({ hasText: `controlled ${name}` });
       await alert.and(reason).waitFor({ state: "visible" });
       assert.equal(await alert.count(), 1);
       assert.equal(await reason.count(), 1);
 
-      await setPanelMounted(false);
+      await setPanelMounted(main, false);
       await input.waitFor({ state: "detached" });
-      await setPanelMounted(true);
+      await setPanelMounted(main, true);
       await reason.waitFor({ state: "visible" });
       assert.equal(await alert.count(), 0);
       return { turn: failed.turn_id, diagnostic: diagnostic.id };
     } finally {
-      if (!await input.count()) await setPanelMounted(true);
+      if (!await input.count()) await setPanelMounted(main, true);
     }
+  });
+  await check("a preparation timeout without a saved user or diagnostic announces only on first reopen", async () => {
+    const message = "[case:lifecycle-hold-preparation-timeout]";
+    const input = main.locator("textarea[data-onboarding-id='chat-input']");
+    const before = await view(main);
+    await input.fill(message);
+    await input.press("Enter");
+    await waitFor(async () => (await view(pet)).turns.some(turn => turn.message === message && turn.status === "accepted"));
+    await setPanelMounted(main, false);
+    await input.waitFor({ state: "detached" });
+    try {
+      const failed = await waitFor(async () => (await view(pet)).turns.find(turn => turn.message === message && turn.status === "error"));
+      assert(failed.preparation_timed_out);
+      assert.equal(failed.user_message_id, null);
+      assert.equal(failed.conversation_generation, before.generation);
+      assert.deepEqual((await view(pet)).messages, before.messages);
+      await setPanelMounted(main, true);
+      const reason = main.getByText(failed.error, { exact: true });
+      const alert = main.getByRole("alert").and(reason);
+      await alert.waitFor({ state: "visible" });
+      assert.equal(await reason.count(), 1);
+      await setPanelMounted(main, false);
+      await input.waitFor({ state: "detached" });
+      await setPanelMounted(main, true);
+      await reason.waitFor({ state: "visible" });
+      assert.equal(await alert.count(), 0);
+      return { request: failed.client_request_id, reason: failed.error };
+    } finally {
+      if (!await input.count()) await setPanelMounted(main, true);
+    }
+  });
+  await check("stopping or switching during preparation cancels without a panel error", async () => {
+    const input = main.locator("textarea[data-onboarding-id='chat-input']");
+    const source = await view(main);
+    const cancellation = main.getByRole("alert").filter({ hasText: "turn cancelled by user" });
+    for (const action of ["stop", "switch"]) {
+      const message = `[case:lifecycle-hold-preparation-${action}]`;
+      await input.fill(message);
+      await input.press("Enter");
+      await waitFor(async () => (await view(pet)).turns.some(turn => turn.message === message && turn.status === "accepted"));
+      if (action === "stop") {
+        await main.getByRole("button", { name: /^(停止生成|Stop generation)$/ }).click();
+      } else {
+        await main.getByRole("button", { name: /^(对话记录|Chat History)$/i }).click();
+        await main.getByRole("button", { name: /^(新对话|New Chat)$/ }).click();
+      }
+      const cancelled = await waitFor(async () => (await view(main)).turns.find(turn => turn.message === message && turn.status === "cancelled"));
+      assert.equal(cancelled.error, null);
+      assert.equal(await cancellation.count(), 0);
+    }
+    await waitFor(async () => (await view(main)).conversation_id === null);
+    await main.getByText(/Turn preparation timed out/).waitFor({ state: "detached" });
+    await main.evaluate(async id => (await import("/src/lib/chat/application.ts")).chatApplication.selectConversation(id), source.conversation_id);
+    assert.equal(await cancellation.count(), 0);
+    return { conversation: source.conversation_id };
   });
   await check("builtin tool execution and its in-progress assistant draft are shown once", async () => {
     const requestId = "native_tool_rounds";

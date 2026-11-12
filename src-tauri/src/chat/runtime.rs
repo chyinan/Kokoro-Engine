@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use tokio::sync::watch;
 
+pub(super) const HISTORY_REVISION: &str = "SELECT revision FROM chat_history_revision WHERE id = 1";
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatTurnSnapshot {
     pub revision: u64,
@@ -19,16 +21,22 @@ pub struct ChatTurnSnapshot {
     pub turn_id: Option<String>,
     pub character_id: Option<String>,
     pub conversation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_generation: Option<u64>,
     pub user_message_id: Option<i64>,
     pub assistant_message_id: Option<i64>,
     pub message: String,
     pub images: Vec<String>,
     pub hidden: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub retrying_failure: bool,
     pub status: String,
     pub text: String,
     pub translation: Option<String>,
     pub tools: Vec<Value>,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub preparation_timed_out: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speech_error: Option<String>,
 }
@@ -146,16 +154,19 @@ impl ChatRuntimeState {
                     turn_id: None,
                     character_id: request.character_id.clone(),
                     conversation_id: request.conversation_id.clone(),
+                    conversation_generation: request.conversation_generation,
                     user_message_id: None,
                     assistant_message_id: None,
                     message: request.message.clone(),
                     images: request.images.clone().unwrap_or_default(),
                     hidden: request.hidden,
+                    retrying_failure: request.retry_failure.is_some(),
                     status: "pending".into(),
                     text: String::new(),
                     translation: None,
                     tools: vec![],
                     error: None,
+                    preparation_timed_out: false,
                     speech_error: None,
                 },
                 outcome,
@@ -166,6 +177,35 @@ impl ChatRuntimeState {
 
     pub fn snapshots(&self) -> Vec<ChatTurnSnapshot> {
         self.journal_snapshot().1
+    }
+
+    pub(crate) fn failed_turn_prompt(&self, character: &str, conversation: &str, turn: &str) -> Option<i64> {
+        let journal = self.0.lock().unwrap();
+        journal.entries.values().find_map(|entry| {
+            let snapshot = &entry.snapshot;
+            if snapshot.status == "error" && !snapshot.hidden
+                && snapshot.turn_id.as_deref() == Some(turn)
+                && snapshot.character_id.as_deref() == Some(character)
+                && snapshot.conversation_id.as_deref() == Some(conversation)
+            {
+                snapshot.user_message_id
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn cancelled_response(&self, id: &str) -> Option<StreamChatResponse> {
+        let journal = self.0.lock().unwrap();
+        let snapshot = &journal.entries.get(id)?.snapshot;
+        Some(StreamChatResponse {
+            text: String::new(),
+            conversation_id: snapshot.conversation_id.clone().unwrap_or_default(),
+            user_message_id: snapshot.user_message_id,
+            assistant_message_id: None,
+            client_request_id: Some(id.into()),
+            status: Some("cancelled".into()),
+        })
     }
 
     /// Recovering a draft may race its IPC delivery. If recovery reaches the journal
@@ -249,6 +289,9 @@ impl ChatRuntimeState {
         if let Some(id) = payload.get("conversation_id").and_then(Value::as_str) {
             snapshot.conversation_id = Some(id.into());
         }
+        if let Some(generation) = payload.get("conversation_generation").and_then(Value::as_u64) {
+            snapshot.conversation_generation = Some(generation);
+        }
         if let Some(id) = payload.get("user_message_id").and_then(Value::as_i64) {
             snapshot.user_message_id = Some(id);
         }
@@ -285,6 +328,9 @@ impl ChatRuntimeState {
                     .map(str::to_owned)
             }
             "chat-turn-tool" => snapshot.tools.push(payload.clone()),
+            "chat-turn-finish" if payload.get("stage").and_then(Value::as_str) == Some("preparation_timeout") => {
+                snapshot.preparation_timed_out = true;
+            }
             // Finish is only a notification: the executing task commits its terminal
             // outcome after persistence and cleanup, even if delivery fails.
             _ => {}
@@ -418,7 +464,6 @@ pub async fn get_chat_view(
     runtime: &ChatRuntimeState,
     known_version: Option<ChatViewVersion>,
 ) -> Result<Option<ChatViewSnapshot>, crate::error::KokoroError> {
-    const HISTORY_REVISION: &str = "SELECT revision FROM chat_history_revision WHERE id = 1";
     if let Some(known) = known_version {
         let history_revision = sqlx::query_scalar(HISTORY_REVISION).fetch_one(&state.db).await?;
         let current = ChatViewVersion {

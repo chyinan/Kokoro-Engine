@@ -149,6 +149,7 @@ export class ChatApplication {
         character_id: request.character_id ?? this.view.character_id,
         conversation_id: request.conversation_id ?? this.view.conversation_id,
         message: request.message, images: request.images ?? [], hidden: request.hidden ?? false,
+        retrying_failure: request.retry_failure !== undefined,
         status: "pending", text: "", translation: null, tools: [], error: null,
         user_message_id: null, assistant_message_id: null,
       });
@@ -218,7 +219,21 @@ export class ChatApplication {
       && view.conversation_id === target.conversationId && view.generation === target.generation;
     if (!matchesSelection(this.view)) return;
 
-    const retry = await this.mutate(async () => {
+    const saved = projectSavedMessages(this.view);
+    const diagnosticIndex = saved.findIndex(message => message.id === target.messageId && message.failureScope);
+    if (diagnosticIndex >= 0) {
+      if (!regenerate) return;
+      const prompt = saved[findFailurePromptIndex(this.view, saved, diagnosticIndex)];
+      const tail = getExpectedTailMessageId(saved);
+      if (!prompt || tail === null) return;
+      return this.send({
+        ...options, message: prompt.text, images: prompt.images, regenerate: true,
+        character_id: characterId, conversation_id: target.conversationId, conversation_generation: target.generation,
+        retry_failure: { diagnostic_message_id: target.messageId, expected_tail_message_id: tail },
+      });
+    }
+
+    const user = await this.mutate(async () => {
       // A turn can persist rows even if it is cancelled, fails, or its event is missed.
       // A read already in flight may have sampled history before those writes.
       this.readInFlight = undefined;
@@ -226,24 +241,19 @@ export class ChatApplication {
       if (!matchesSelection(view)) return;
       const messages = projectSavedMessages(view).filter(message => message.id !== undefined);
       const index = messages.findIndex(message => message.id === target.messageId);
-      if (index < 0) return;
-      const diagnostic = messages[index].failureScope;
-      if (diagnostic && !regenerate) return;
-      const promptIndex = diagnostic ? findFailurePromptIndex(view, messages, index) : -1;
-      if (diagnostic && promptIndex < 0) return;
-      const cutoff = diagnostic ? promptIndex + 1 : regenerate ? index : getContinueFromCutoffIndex(messages, index);
+      if (index < 0 || messages[index].failureScope) return;
+      const cutoff = regenerate ? index : getContinueFromCutoffIndex(messages, index);
       if (cutoff === null) return;
-      const user = diagnostic ? messages[promptIndex] : messages.slice(0, index).reverse().find(message => message.role === "user");
+      const user = messages.slice(0, index).reverse().find(message => message.role === "user");
       if (regenerate && !user) return;
       if (messages.length > cutoff) {
         await bridge.deleteLastMessages(messages.length - cutoff, target.conversationId, getExpectedTailMessageId(messages));
       }
-      return user && { user, expectedUserId: diagnostic ? user.id : undefined };
+      return user;
     });
     // A history command must never send into a selection made while it awaited IO.
-    if (regenerate && retry && matchesSelection(this.view)) {
-      return this.send({ message: retry.user.text, images: retry.user.images, regenerate: true,
-        regenerate_user_message_id: retry.expectedUserId, character_id: characterId,
+    if (regenerate && user && matchesSelection(this.view)) {
+      return this.send({ message: user.text, images: user.images, regenerate: true, character_id: characterId,
         conversation_id: target.conversationId, conversation_generation: target.generation, ...options });
     }
   }

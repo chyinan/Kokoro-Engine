@@ -6,6 +6,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { usePetChat, type PetChatState } from "./usePetChat";
 import { chatViewFixture as chat } from "../../lib/chat/view-test-fixture";
 import type { ChatTurnSnapshot } from "../../lib/kokoro-bridge";
+import { deferred } from "../../lib/chat/__tests__/harness";
+import type { StreamChatResponse } from "../../lib/kokoro-bridge";
 vi.mock("../../lib/chat/application", async () => ({ chatApplication: (await import("../../lib/chat/view-test-fixture")).chatViewFixture }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => {}) }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -36,6 +38,26 @@ describe("pet chat display adapter", () => {
   await act(async () => chat.set({ turns: [snapshot()], busy: true }));
   expect(invoke).toHaveBeenCalledWith("update_bubble_text", { text: "complete recovered text" });
   expect(state.isStreaming).toBe(true);
+ });
+ it("keeps the submitted reply selected when the first history read appends older pet turns", async () => {
+  const response = deferred<StreamChatResponse>();
+  chat.send.mockReturnValueOnce(response.promise);
+  let sending!: Promise<void>;
+  await act(async () => { sending = state.sendMessage("new prompt"); });
+  const id = chat.send.mock.calls[0][0].client_request_id!;
+  const pending = { ...snapshot("pending", 0), client_request_id: id, text: "" };
+  const old = { ...snapshot("completed", 5), text: "old reply" };
+  await act(async () => chat.set({ turns: [pending, old], busy: true }));
+  expect(invoke).not.toHaveBeenCalledWith("update_bubble_text", expect.anything());
+  await act(async () => chat.set({ turns: [{ ...pending, status: "streaming", revision: 6, text: "new" }, old] }));
+  await act(async () => {
+   chat.set({ turns: [{ ...pending, status: "completed", revision: 7, text: "new reply" }, old], busy: false });
+   response.resolve({ conversation_id: "conv-1", status: "completed" });
+   await sending;
+  });
+  expect(vi.mocked(invoke).mock.calls.filter(([name]) => name === "update_bubble_text")).toEqual([
+   ["update_bubble_text", { text: "new" }], ["update_bubble_text", { text: "new reply" }],
+  ]);
  });
  it("does not concatenate replayed full snapshots", async () => {
   await act(async () => chat.set({ turns: [snapshot()] }));

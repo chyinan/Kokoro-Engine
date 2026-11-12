@@ -2,7 +2,7 @@ import { useChatTextReveal } from "./chat/use-chat-text-reveal";
 import { listen } from "@tauri-apps/api/event";
 // Display adapter: drafts, voice input, layout and rendering only.
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useDeferredValue, useSyncExternalStore, useMemo, memo, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useIsPresent } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
 import { onChatWarning, uploadVisionImage, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
@@ -53,6 +53,13 @@ function getAsyncErrorMessage(error: unknown): string {
         return (error as { message: string }).message;
     }
     return String(error);
+}
+
+type ChatErrorSelection = { characterId: string; conversationId: string | null; generation: number };
+type ChatRequestError = ChatErrorSelection & { message: string; requestId: string };
+
+function sameChatSelection(left: ChatErrorSelection, right: ChatErrorSelection): boolean {
+    return left.characterId === right.characterId && left.conversationId === right.conversationId && left.generation === right.generation;
 }
 
 function TypingIndicator() {
@@ -145,7 +152,9 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
         : undefined;
     const editableTarget = message.failureScope ? undefined : target;
     const retryTarget = message.failureScope && !message.canRetryFailure ? undefined : target;
-    const announceFailure = useFailureAnnouncement(message.failureScope ? message.clientRequestId : undefined);
+    const isPresent = useIsPresent();
+    const announceFailure = useFailureAnnouncement(isPresent && message.failureScope ? message.clientRequestId : undefined);
+    if (message.failureScope && !isPresent) return null;
     return (
         <ChatMessage
             message={message.failureScope ? { ...message, announceError: announceFailure } : message}
@@ -197,6 +206,7 @@ export default function ChatPanel({
     const isThinking = isStreaming && !activeTurn?.text;
     const [isStopping, setIsStopping] = useState(false);
     const [isSwitchingConversation, setIsSwitchingConversation] = useState(false);
+    const switchingConversation = useRef(false);
     const [collapsed, setCollapsed] = useState(false);
     const [showClearConfirm, setShowClearConfirm] = useState(false);
     const [expandedTranslations, setExpandedTranslations] = useState<Set<number>>(new Set());
@@ -271,7 +281,9 @@ export default function ChatPanel({
     const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
     const [isDraggingOver, setIsDraggingOver] = useState(false);
     const dragCounterRef = useRef(0);
-    const [error, setError] = useState<string | { message: string; requestId: string } | null>(null);
+    const [error, setError] = useState<string | ChatRequestError | null>(null);
+    const currentSelection = { characterId: activeCharacterId, conversationId: activeConversationId, generation: view.generation };
+    const requestError = error && typeof error !== "string" && !isSwitchingConversation && sameChatSelection(error, currentSelection) ? error : null;
     const [unreadCount, setUnreadCount] = useState(0);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -324,9 +336,19 @@ export default function ChatPanel({
         };
     }, []);
 
-    const reportError = useCallback((error: unknown, requestId?: string) => {
-        const message = getAsyncErrorMessage(error);
-        setError(requestId ? { message, requestId } : message);
+    const reportError = useCallback((error: unknown) => setError(getAsyncErrorMessage(error)), []);
+    const reportRequestError = useCallback((error: unknown, requestId: string, origin: ChatErrorSelection) => {
+        const current = chatApplication.getSnapshot();
+        const selected = { characterId: current.character_id, conversationId: current.conversation_id, generation: current.generation };
+        const turn = current.turns.find(turn => turn.client_request_id === requestId);
+        // A first send may create the selected conversation while it is in flight.
+        const createdHere = origin.conversationId === null && selected.conversationId !== null
+            && origin.characterId === selected.characterId && selected.generation === origin.generation + 1
+            && turn?.character_id === selected.characterId && turn.conversation_id === selected.conversationId
+            && turn.conversation_generation === selected.generation;
+        if (!switchingConversation.current && turn?.status !== "cancelled" && (sameChatSelection(origin, selected) || createdHere)) {
+            setError({ ...selected, message: getAsyncErrorMessage(error), requestId });
+        }
     }, []);
     useEffect(() => {
         let mounted = true;
@@ -345,9 +367,11 @@ export default function ChatPanel({
         void chatApplication.cancel().catch(reportError).finally(() => setIsStopping(false));
     }, [reportError]);
     const handleConversationSelection = useCallback(async (id: string | null) => {
+        if (switchingConversation.current) return;
+        switchingConversation.current = true;
         setIsSwitchingConversation(true);
         try { await chatApplication.selectConversation(id); } catch (error) { reportError(error); }
-        finally { setIsSwitchingConversation(false); }
+        finally { switchingConversation.current = false; setIsSwitchingConversation(false); }
     }, [reportError]);
     const handleStartEmptyConversation = useCallback(async () => {
         await handleConversationSelection(null);
@@ -358,6 +382,7 @@ export default function ChatPanel({
         if (submittingRef.current) return;
         const clientRequestId = `req_${crypto.randomUUID()}`;
         const character = activeCharacterIdRef.current;
+        const origin = { characterId: character, conversationId: activeConversationIdRef.current, generation: conversationGenerationRef.current };
         if (!rememberSubmission(clientRequestId, draftText, draftImages)) return;
         submittingRef.current = true;
         try {
@@ -365,18 +390,18 @@ export default function ChatPanel({
                 message: draftText.trim() || "(image attached)",
                 images: draftImages.length ? draftImages : undefined, camera_frame: camera ?? undefined,
                 client_request_id: clientRequestId, character_id: character,
-                conversation_id: activeConversationIdRef.current ?? undefined,
-                conversation_generation: conversationGenerationRef.current,
+                conversation_id: origin.conversationId ?? undefined,
+                conversation_generation: origin.generation,
                 allow_image_gen: readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated",
             });
             if (response.user_message_id != null) finishSubmission(character, clientRequestId, true);
         } catch (error) {
-            reportError(error, clientRequestId);
+            reportRequestError(error, clientRequestId, origin);
         } finally {
             reconcileSubmission(character, clientRequestId);
             submittingRef.current = false;
         }
-    }, [rememberSubmission, finishSubmission, reconcileSubmission, reportError]);
+    }, [rememberSubmission, finishSubmission, reconcileSubmission, reportRequestError]);
     const handleTranscription = useCallback((text: string) => {
         const character = sttBaseCharacterIdRef.current ?? activeCharacterIdRef.current;
         const conversation = sttBaseConversationIdRef.current ?? activeConversationIdRef.current;
@@ -861,13 +886,14 @@ export default function ChatPanel({
     }, [reportError]);
     const onRegenerate = useCallback(async (target: ChatMessageTarget) => {
         const requestId = `req_${crypto.randomUUID()}`;
+        const origin = { characterId: activeCharacterIdRef.current, conversationId: target.conversationId, generation: target.generation };
         try {
             await chatApplication.continueFrom(target, true, {
                 client_request_id: requestId,
                 allow_image_gen: readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated",
             });
-        } catch (error) { reportError(error, requestId); }
-    }, [reportError]);
+        } catch (error) { reportRequestError(error, requestId, origin); }
+    }, [reportRequestError]);
     const onContinueFrom = useCallback(async (target: ChatMessageTarget) => {
         try { await chatApplication.continueFrom(target); } catch (error) { reportError(error); }
     }, [reportError]);
@@ -1113,13 +1139,10 @@ export default function ChatPanel({
 
             {/* Error toast */}
             <AnimatePresence>
-                {error && <ErrorToast
-                    key={typeof error === "string" ? undefined : error.requestId}
-                    message={typeof error === "string" ? error : error.message}
-                    requestId={typeof error === "string" ? undefined : error.requestId}
-                    onDismiss={() => setError(null)}
-                />}
+                {typeof error === "string" && <ErrorToast message={error} onDismiss={() => setError(null)} />}
             </AnimatePresence>
+            {requestError && <ErrorToast key={requestError.requestId} message={requestError.message}
+                requestId={requestError.requestId} onDismiss={() => setError(null)} />}
 
             {/* 对话历史侧边栏 */}
             <ConversationSidebar

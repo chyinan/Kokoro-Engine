@@ -18,6 +18,7 @@ use crate::ai::memory_event_ingress::{
     MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
+use crate::chat::retry::{FailureRetry, FailureRetryPlan};
 use crate::chat::tags::{
     extract_translate_tags, find_safe_emit_boundary, merge_continuation_text,
     merge_round_tool_calls, parse_tool_call_tags, strip_leaked_tags, strip_translate_tags,
@@ -216,7 +217,7 @@ pub struct TurnCancellationState {
     finished_tx: tokio::sync::broadcast::Sender<String>,
 }
 
-const TURN_CANCELLED_BY_USER_MESSAGE: &str = "turn cancelled by user";
+pub(crate) const TURN_CANCELLED_BY_USER_MESSAGE: &str = "turn cancelled by user";
 
 impl Default for TurnCancellationState {
     fn default() -> Self {
@@ -1187,8 +1188,8 @@ pub struct ChatRequest {
     /// If true, this turn is regenerating an assistant reply for the last user message.
     #[serde(default)]
     pub regenerate: bool,
-    /// A failed-turn retry must reuse this user row or abort if history changed.
-    pub regenerate_user_message_id: Option<i64>,
+    /// Validate and truncate the failed turn under this request's execution guard.
+    pub retry_failure: Option<FailureRetry>,
     /// Optional target conversation ID. If specified, backend strictly validates that this request
     /// belongs to this conversation; if unspecified, it binds to the active conversation at entry.
     #[serde(default)]
@@ -2143,6 +2144,7 @@ struct PreparedChatTurn {
     conversation_id: Option<String>,
     user_message_id: Option<i64>,
     bound_generation: u64,
+    retry: Option<FailureRetryPlan>,
     selected_vision_observation: Option<crate::vision::context::VisionObservation>,
     prompt_messages: Vec<crate::ai::context::Message>,
     llm_config: crate::llm::llm_config::LlmConfig,
@@ -2175,11 +2177,17 @@ pub async fn submit_chat(app: tauri::AppHandle, mut request: ChatRequest) -> Res
             let execution = execute_chat(app.clone(), request,
                 app.state(), app.state(), app.state(), app.state(), app.state(),
                 app.state(), app.state(), app.state(), app.state(), app.state());
-            let mut result = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(execution)).await
-                .unwrap_or_else(|_| Err(KokoroError::Chat("chat worker panicked".into())))
-                .map_err(|error| error.to_string());
+            let execution = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(execution)).await
+                .unwrap_or_else(|_| Err(KokoroError::Chat("chat worker panicked".into())));
+            let mut result = match execution {
+                Err(KokoroError::Chat(ref message)) if is_turn_cancelled_error_message(message) =>
+                    runtime.cancelled_response(&request_id).ok_or_else(|| message.clone()),
+                other => other.map_err(|error| error.to_string()),
+            };
             if let Ok(response) = &mut result {
-                if let Some(text) = runtime.turn_text(&request_id) { response.text = text; }
+                if response.status.as_deref() != Some("cancelled") {
+                    if let Some(text) = runtime.turn_text(&request_id) { response.text = text; }
+                }
             }
             if let Some(snapshot) = runtime.complete(&request_id, result) {
                 let _ = app.emit("chat-runtime-changed", snapshot);
@@ -2307,6 +2315,13 @@ async fn execute_chat(
         if request.conversation_generation.is_some_and(|generation| generation != initial_generation) {
             return Err(KokoroError::Chat("Conversation changed while request was in-flight".into()));
         }
+        #[cfg(debug_assertions)]
+        if std::env::var_os("KOKORO_TEST_DATA_ROOT").is_some()
+            && std::env::var_os("KOKORO_CHAT_LIFECYCLE_TEST_PREPARATION").is_some()
+            && request.message.starts_with("[case:lifecycle-hold-preparation-")
+        {
+            std::future::pending::<()>().await;
+        }
         // Keep shared character_id in sync for modules that still read it (heartbeat)
         state.set_character_id(char_id.clone()).await;
 
@@ -2359,7 +2374,7 @@ async fn execute_chat(
         // 2. Update History with User Message under conversation_switch_lock
         let system_provider = llm_state.system_provider().await;
 
-        let (conversation_id, user_message_id, history_snapshot, bound_generation) = {
+        let (conversation_id, user_message_id, history_snapshot, bound_generation, retry) = 'bind: {
             let _switch_guard = state.conversation_switch_lock.lock().await;
             let current_conv_id = state.current_conversation_id.lock().await.clone();
             let current_generation = state.current_conversation_generation();
@@ -2402,6 +2417,17 @@ async fn execute_chat(
 
             let bound_generation = initial_generation;
 
+            if let Some(retry) = &request.retry_failure {
+                let conversation = current_conv_id.as_deref()
+                    .filter(|id| requested_conversation_id.as_deref() == Some(*id))
+                    .filter(|_| request.conversation_generation == Some(current_generation) && request.regenerate && !request.hidden)
+                    .ok_or_else(|| KokoroError::Validation("Invalid failed-turn retry scope".into()))?;
+                let runtime = app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>();
+                let plan = FailureRetryPlan::prepare(&state, &runtime, retry, &char_id, conversation, &request.message).await?;
+                let history = plan.history.iter().cloned().collect();
+                break 'bind (current_conv_id, Some(plan.user_message_id), history, bound_generation, Some(plan));
+            }
+
             let trailing_visible_user = if request.regenerate {
                 if let Some(cid) = current_conv_id.as_deref() {
                     match resolve_trailing_visible_user_message(&state.db, cid).await {
@@ -2421,12 +2447,6 @@ async fn execute_chat(
             } else {
                 None
             };
-            if let Some(expected) = request.regenerate_user_message_id {
-                if request.hidden || trailing_visible_user.as_ref().map(|(id, _)| *id) != Some(expected) {
-                    return Err(KokoroError::Validation("Conversation history changed before retry".to_string()));
-                }
-            }
-
             let resolved_conv_id = if let Some(cid) = current_conv_id {
                 Some(cid)
             } else if request.hidden {
@@ -2532,6 +2552,7 @@ async fn execute_chat(
                 "turn_id": assistant_turn_id,
                 "character_id": char_id,
                 "conversation_id": cid,
+                "conversation_generation": state.current_conversation_generation(),
                 "user_message_id": mid,
             })).await;
 
@@ -2539,7 +2560,7 @@ async fn execute_chat(
             let history_snapshot: Vec<crate::ai::context::Message> =
                 state.history.lock().await.iter().cloned().collect();
 
-            (cid, mid, history_snapshot, bound_generation)
+            (cid, mid, history_snapshot, bound_generation, None)
         };
 
         if let Ok(mut guard) = active_conv_id_for_prep.lock() {
@@ -2664,6 +2685,7 @@ async fn execute_chat(
             conversation_id,
             user_message_id,
             bound_generation,
+            retry,
             selected_vision_observation,
             prompt_messages,
             llm_config,
@@ -2718,6 +2740,7 @@ async fn execute_chat(
                 serde_json::json!({
                     "turn_id": assistant_turn_id,
                     "status": "error",
+                    "stage": "preparation_timeout",
                     "client_request_id": client_request_id,
                     "conversation_id": recorded_conv_id,
                     "assistant_message_id": serde_json::Value::Null,
@@ -2738,6 +2761,7 @@ async fn execute_chat(
         mut conversation_id,
         user_message_id,
         bound_generation,
+        retry,
         selected_vision_observation,
         prompt_messages,
         llm_config,
@@ -2844,6 +2868,11 @@ async fn execute_chat(
             client_request_id
         );
         return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
+    }
+
+    if let Some(retry) = retry {
+        let conversation = conversation_id.as_deref().ok_or_else(|| KokoroError::Validation("Missing retry conversation".into()))?;
+        retry.commit(&state, conversation, bound_generation, cancel_rx.as_ref()).await?;
     }
 
     crate::chat::runtime::emit_chat_event(&app,

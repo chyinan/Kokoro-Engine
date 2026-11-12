@@ -53,9 +53,13 @@ export function findFailurePromptIndex(view: ChatViewSnapshot, messages: readonl
   const scope = messages[diagnosticIndex]?.failureScope;
   if (!scope || !isSelectedFailure(view, scope)) return -1;
   // Older diagnostics can recover their exact prompt from a retained journal entry.
-  const turn = findFailureTurn(view, scope);
-  const userId = scope.user_message_id === undefined ? turn?.user_message_id : scope.user_message_id;
-  if (userId == null || (turn && (turn.hidden || turn.user_message_id !== userId))) return -1;
+  let userId = scope.user_message_id;
+  if (userId === undefined) {
+    const legacyTurn = findFailureTurn(view, scope);
+    if (!legacyTurn || legacyTurn.hidden) return -1;
+    userId = legacyTurn.user_message_id;
+  }
+  if (userId == null) return -1;
   return messages.findIndex((message, index) => index < diagnosticIndex && message.role === "user" && message.id === userId);
 }
 
@@ -78,15 +82,18 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
     if (!previous || replyRevision(turn) > replyRevision(previous)) latestTurnByUser.set(turn.user_message_id, turn);
   }
   for (const turn of turns) {
-    // A legacy Mod has no composer awaiting its rejected promise. Use the
-    // journal until the matching diagnostic row is visible in saved history.
-    if (turn.status === "error" && turn.error && !turn.hidden && turn.client_request_id.startsWith("mod_")
-      && turn.turn_id && turn.conversation_id && turn.conversation_id === view.conversation_id
-      && turn.user_message_id !== null && latestTurnByUser.get(turn.user_message_id) === turn && !shownFailures.has(turn.turn_id)) {
-      const promptIndex = messages.findIndex(message => message.role === "user" && message.id === turn.user_message_id);
-      if (promptIndex >= 0) {
+    // A preparation timeout may have no SQLite diagnostic or even a user row.
+    // Keep it scoped to the selection where preparation took place.
+    const preparationFailure = turn.preparation_timed_out && turn.conversation_generation === view.generation;
+    const legacyFailure = turn.client_request_id.startsWith("mod_") && turn.user_message_id !== null;
+    if (turn.status === "error" && turn.error && !turn.hidden && (preparationFailure || legacyFailure)
+      && turn.turn_id && turn.conversation_id === view.conversation_id && !shownFailures.has(turn.turn_id)) {
+      const promptIndex = turn.user_message_id !== null && latestTurnByUser.get(turn.user_message_id) === turn
+        ? messages.findIndex(message => message.role === "user" && message.id === turn.user_message_id) : -1;
+      if (promptIndex >= 0 || (preparationFailure && turn.user_message_id === null)) {
         const replyIndex = messages.findIndex(message => message.role === "kokoro" && message.turnId === turn.turn_id);
-        messages.splice(Math.max(promptIndex, replyIndex) + 1, 0, {
+        const index = promptIndex >= 0 ? Math.max(promptIndex, replyIndex) + 1 : messages.length;
+        messages.splice(index, 0, {
           role: "kokoro", text: turn.error, isError: true, announceError: false, clientRequestId: turn.client_request_id,
           failureScope: { character_id: view.character_id, conversation_id: turn.conversation_id, turn_id: turn.turn_id },
         });
@@ -98,7 +105,7 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
     // mounted until a snapshot at or beyond that event takes over.
     const live = active || isTurnAwaitingHistory(view, turn);
     if (!live && (turn.status !== "completed" || turn.conversation_id !== view.conversation_id || !turn.tools.length)) continue;
-    if (active && !turn.hidden && !messages.some(message => message.id === turn.user_message_id && turn.user_message_id !== null)) {
+    if (active && !turn.hidden && !turn.retrying_failure && !messages.some(message => message.id === turn.user_message_id && turn.user_message_id !== null)) {
       messages.push({ role: "user", text: turn.message, images: turn.images, clientRequestId: turn.client_request_id });
     }
     const index = messages.findIndex(message => message.role === "kokoro" && (message.turnId === turn.turn_id || (turn.assistant_message_id !== null && message.id === turn.assistant_message_id)));

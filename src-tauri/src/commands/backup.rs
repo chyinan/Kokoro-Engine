@@ -2414,10 +2414,21 @@ async fn insert_skip_conversation_messages(
     let result = sqlx::query(
         "INSERT INTO conversation_messages \
          (id, conversation_id, role, content, metadata, created_at) \
-         SELECT message.id + (SELECT offset FROM temp.backup_skip_message_offset), \
+         SELECT message.id + ids.offset, \
                 message.conversation_id, message.role, message.content, \
-                message.metadata, message.created_at \
+                CASE WHEN message.role = 'system' AND json_valid(message.metadata) THEN \
+                    CASE WHEN json_extract(message.metadata, '$.type') = 'failure_event' \
+                              AND json_type(message.metadata, '$.user_message_id') = 'integer' THEN \
+                        json_set(message.metadata, '$.user_message_id', ( \
+                            SELECT prompt.id + ids.offset FROM import_db.conversation_messages prompt \
+                            WHERE prompt.id = json_extract(message.metadata, '$.user_message_id') \
+                              AND prompt.conversation_id = message.conversation_id \
+                              AND prompt.role = 'user' AND prompt.id < message.id \
+                        )) \
+                    ELSE message.metadata END \
+                ELSE message.metadata END, message.created_at \
          FROM import_db.conversation_messages message \
+         CROSS JOIN temp.backup_skip_message_offset ids \
          INNER JOIN temp.backup_skip_new_conversations scope \
                  ON scope.id = message.conversation_id \
          WHERE EXISTS (SELECT 1 FROM conversations local WHERE local.id = message.conversation_id) \
@@ -5171,15 +5182,24 @@ mod tests {
             .await
             .unwrap();
         for (id, conversation, content) in [
-            (1_i64, "shared-conversation", "stale copy one"),
-            (2, "shared-conversation", "stale copy two"),
-            (3, "new-conversation", "new one"),
-            (4, "new-conversation", "new two"),
+            (90_i64, "shared-conversation", "stale copy one"),
+            (91, "shared-conversation", "stale copy two"),
+            (1, "new-conversation", "earlier prompt"),
+            (3, "new-conversation", "failed prompt"),
         ] {
             sqlx::query("INSERT INTO import_db.conversation_messages (id, conversation_id, role, content, created_at) VALUES (?, ?, 'user', ?, '1')")
                 .bind(id)
                 .bind(conversation)
                 .bind(content)
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+        }
+        for (id, prompt) in [(4_i64, 3_i64), (5, 90)] {
+            sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, 'new-conversation', 'system', 'model failed', ?, '1')")
+                .bind(id)
+                .bind(serde_json::json!({ "type": "failure_event", "user_message_id": prompt,
+                    "event": { "conversation_id": "new-conversation", "character_id": "bob", "turn_id": "turn" } }).to_string())
                 .execute(&mut *connection)
                 .await
                 .unwrap();
@@ -5201,7 +5221,7 @@ mod tests {
         transaction.commit().await.unwrap();
 
         assert_eq!(
-            inserted, 2,
+            inserted, 4,
             "only the new conversation contributes messages"
         );
         let local: Vec<String> = sqlx::query_scalar(
@@ -5212,16 +5232,17 @@ mod tests {
         .unwrap();
         assert_eq!(local, vec!["local one", "local two"]);
 
-        let moved: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT id, content FROM conversation_messages WHERE conversation_id = 'new-conversation' ORDER BY id",
+        let moved: Vec<(i64, String, Option<i64>)> = sqlx::query_as(
+            "SELECT id, content, json_extract(metadata, '$.user_message_id') FROM conversation_messages WHERE conversation_id = 'new-conversation' ORDER BY id",
         )
         .fetch_all(&mut *connection)
         .await
         .unwrap();
         assert_eq!(
             moved,
-            vec![(5_i64, "new one".to_string()), (6, "new two".to_string())],
-            "imported ids must move above every local message id"
+            vec![(3_i64, "earlier prompt".into(), None), (5, "failed prompt".into(), None),
+                 (6, "model failed".into(), Some(5)), (7, "model failed".into(), None)],
+            "the diagnostic must follow its remapped prompt and cannot use a prompt from another conversation"
         );
     }
 

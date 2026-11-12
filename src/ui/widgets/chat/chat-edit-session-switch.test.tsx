@@ -225,13 +225,12 @@ describe("application history command session ownership", () => {
     h.set({ messages: [...messages, diagnostic] });
     await h.app.refresh();
     expect(projectMessages(h.app.getSnapshot()).find(message => message.id === diagnostic.id)).toMatchObject({ canRetryFailure: true });
-    const remove = vi.spyOn(bridge, "deleteLastMessages").mockImplementation(async () => {
-      h.set({ messages: messages.slice(0, 1) });
-    });
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
     await h.app.continueFrom({ ...answerTarget, messageId: diagnostic.id }, true);
-    expect(remove).toHaveBeenCalledExactlyOnceWith(3, "conversation-a", diagnostic.id);
+    expect(remove).not.toHaveBeenCalled();
     expect(h.io.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      message: "original A", regenerate: true, regenerate_user_message_id: 101,
+      message: "original A", regenerate: true, conversation_id: "conversation-a", conversation_generation: 3,
+      retry_failure: { diagnostic_message_id: diagnostic.id, expected_tail_message_id: diagnostic.id },
     }));
   });
 

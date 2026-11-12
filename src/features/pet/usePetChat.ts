@@ -1,21 +1,29 @@
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { chatApplication } from "../../lib/chat/application";
 import { isActiveTurn } from "../../lib/chat/projection";
 import { getKokoroErrorMessage } from "../../lib/kokoro-bridge";
+import type { ChatTurnSnapshot } from "../../lib/kokoro-bridge";
 
 export interface PetChatState {
     isStreaming: boolean;
     sendMessage: (text: string) => Promise<void>;
 }
 
+const replyRevision = (turn: ChatTurnSnapshot) => turn.completion_revision ?? turn.revision;
+
 /** The hook owns bubble presentation only. Admission/execution live in Rust. */
 export function usePetChat(): PetChatState {
     const view = useSyncExternalStore(chatApplication.subscribe, chatApplication.getSnapshot);
     const sending = useRef(false);
+    const [requestId, setRequestId] = useState<string>();
     const lastPresentedRevision = useRef(0);
-    const turn = [...view.turns].reverse().find(item => item.client_request_id.startsWith("pet_"));
-    const revision = turn?.completion_revision ?? turn?.revision ?? 0;
+    const turn = requestId
+        ? view.turns.find(item => item.client_request_id === requestId)
+        : view.turns.reduce<ChatTurnSnapshot | undefined>((latest, item) =>
+            item.client_request_id.startsWith("pet_") && (!latest || replyRevision(item) > replyRevision(latest)) ? item : latest,
+        undefined);
+    const revision = turn ? replyRevision(turn) : 0;
     const text = turn?.text;
     const error = turn?.error;
     const active = turn ? isActiveTurn(turn) : false;
@@ -37,6 +45,7 @@ export function usePetChat(): PetChatState {
         if (!message || sending.current) return;
         sending.current = true;
         const client_request_id = `pet_${crypto.randomUUID()}`;
+        setRequestId(client_request_id);
         void invoke("show_bubble_window", { text: "..." }).catch(() => {});
         try { await chatApplication.send({ message, client_request_id }); }
         catch (error) {

@@ -34,6 +34,7 @@ vi.mock("framer-motion", () => ({
         }),
     },
     AnimatePresence: ({ children }: any) => children,
+    useIsPresent: () => true,
 }));
 
 // Mock react-i18next

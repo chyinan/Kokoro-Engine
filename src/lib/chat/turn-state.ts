@@ -7,7 +7,7 @@ import {
 
 export interface ChatFailureScope {
     character_id: string;
-    conversation_id: string;
+    conversation_id: string | null;
     turn_id: string;
     user_message_id?: number | null;
 }

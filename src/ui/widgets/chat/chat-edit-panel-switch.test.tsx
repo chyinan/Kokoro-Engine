@@ -168,6 +168,37 @@ it.each([false, true])("announces a composer failure once when history arrives f
     }
 });
 
+it.each(["other conversation", "same conversation reselected"])("discards a late composer rejection after switching to %s", async selection => {
+    chat.reset();
+    const sending = deferred<StreamChatResponse>();
+    chat.send.mockReturnValueOnce(sending.promise);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+        await act(async () => root.render(<ChatPanel />));
+        const input = container.querySelector<HTMLTextAreaElement>("textarea")!;
+        await act(async () => {
+            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "Old prompt");
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+        });
+        await act(async () => { input.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+        expect(chat.send).toHaveBeenCalledOnce();
+        await act(async () => chat.set({ conversation_id: "conv-2", generation: 2 }));
+        if (selection === "same conversation reselected") {
+            await act(async () => chat.set({ conversation_id: "conv-1", generation: 3 }));
+        }
+        await act(async () => { sending.reject(new Error("Old conversation failed")); });
+        expect(container.querySelector('[role="alert"]')).toBeNull();
+        expect(container.textContent).not.toContain("Old conversation failed");
+    } finally {
+        await act(async () => root.unmount());
+        localStorage.removeItem("kokoro_chat_submission_char-1");
+        sessionStorage.removeItem("kokoro_chat_submission_char-1");
+        container.remove();
+    }
+});
+
 it("dismisses the old editor when another conversation replaces a message at the same position", async () => {
     chat.reset();
     const first = { id: 101, role: "user", content: "Message A", created_at: "now" };

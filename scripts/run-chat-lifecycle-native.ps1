@@ -28,6 +28,8 @@ if (-not $SkipBuild) {
   if ($LASTEXITCODE -ne 0) { throw 'Isolated native build failed; see build.log' }
 }
 $env:KOKORO_TEST_DATA_ROOT = Join-Path $chatOutput ('data-' + $chatRun)
+$env:KOKORO_CHAT_LIFECYCLE_TEST_PREPARATION = '1'
+$env:KOKORO_CHAT_PREPARATION_TIMEOUT_SECS = '6'
 $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $env:TEMP ('kokoro-chat-validation-' + $chatRun)
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=19333'
 $env:PLAYWRIGHT_MODULE = $PlaywrightModule
