@@ -1,6 +1,6 @@
 //! Application-owned chat journal. A WebView is a subscriber, never the owner.
 use crate::commands::chat::{ChatRequest, StreamChatResponse};
-use crate::mods::manager::ModChatEvents;
+use crate::mods::manager::ModScriptQueue;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -334,8 +334,8 @@ pub async fn emit_chat_event<S: Serialize + Clone>(
                 let _ = app.emit("chat-runtime-changed", snapshot);
             }
         }
-        if let Some(relay) = app.try_state::<ModChatEvents>() {
-            relay.enqueue_chat_event(name, value);
+        if let Some(queue) = app.try_state::<ModScriptQueue>() {
+            queue.enqueue_chat_event(name, value);
         }
     }
     if let Err(error) = app.emit(name, payload) {

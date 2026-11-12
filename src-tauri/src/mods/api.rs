@@ -42,27 +42,10 @@ pub fn register_api(ctx: &Ctx<'_>, event_tx: Sender<ScriptEvent>) -> Result<()> 
     globals.set("Kokoro", kokoro.clone())?;
 
     // ── Kokoro.on(eventName, callback) ──
-    // Stores callbacks in a JS-side registry object (__listeners).
-    // The DispatchEvent ScriptCommand will invoke __dispatch(event, payload).
-    // We build the listener registry in JS for simplicity.
+    // Keep the registry in JS. The script thread gives each callback its own deadline.
     ctx.eval::<(), _>(
         r#"
-        globalThis.__listeners = {};
-        globalThis.__dispatch = function(event, payload) {
-            var cbs = globalThis.__listeners[event];
-            if (!cbs) return;
-            for (var i = 0; i < cbs.length; i++) {
-                try { cbs[i](payload); } catch(e) { Kokoro.log("Listener error: " + e); }
-            }
-        };
-    "#,
-    )?;
-
-    // ── Kokoro.on(eventName, callback) ──
-    // Implemented in JS to avoid Rust closure lifetime issues with rquickjs.
-    // Pushes callbacks into __listeners[eventName], which __dispatch() iterates.
-    ctx.eval::<(), _>(
-        r#"
+        globalThis.__listeners = Object.create(null);
         Kokoro.on = function(eventName, callback) {
             if (!globalThis.__listeners[eventName]) {
                 globalThis.__listeners[eventName] = [];

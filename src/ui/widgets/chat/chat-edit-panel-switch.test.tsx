@@ -2,6 +2,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
+import { listen, type EventCallback } from "@tauri-apps/api/event";
 import ChatPanel from "../ChatPanel";
 import { chatViewFixture as chat } from "../../../lib/chat/view-test-fixture";
 import { turn } from "../../../lib/chat/__tests__/harness";
@@ -12,6 +13,35 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}), e
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+it("shows a backend speech failure without replacing the completed text reply", async () => {
+    chat.reset();
+    chat.set({ messages: [{ id: 1, role: "assistant", content: "Completed answer", created_at: "now" }] });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const unlisten = vi.fn();
+    let onWarning: EventCallback<unknown> | undefined;
+    const mockListen = vi.mocked(listen).mockImplementation(async (event, handler) => {
+        if (event === "chat-warning") {
+            onWarning = handler;
+            return unlisten;
+        }
+        return () => {};
+    });
+    try {
+        await act(async () => root.render(<ChatPanel />));
+        expect(onWarning).toBeDefined();
+        await act(async () => onWarning!({ event: "chat-warning", id: 1, payload: "Speech provider unavailable" }));
+        expect(container.querySelector('[role="alert"]')?.textContent).toBe("Speech provider unavailable");
+        expect(container.textContent).toContain("Completed answer");
+    } finally {
+        await act(async () => root.unmount());
+        mockListen.mockImplementation(async () => () => {});
+        container.remove();
+    }
+    expect(unlisten).toHaveBeenCalledOnce();
+});
 
 it("dismisses the old editor when another conversation replaces a message at the same position", async () => {
     chat.reset();

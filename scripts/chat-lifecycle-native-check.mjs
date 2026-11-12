@@ -292,6 +292,34 @@ try {
     assert(!selection.switched.messages.some(message => message.content.includes("character-switch")));
     assert.equal(selection.result.status, "completed"); return { cancelled, ...selection };
   });
+  await check("a real automatic speech failure appears in the chat panel after text succeeds", async () => {
+    const originalConfig = await main.evaluate(async () => (await import("/src/lib/kokoro-bridge.ts")).getTtsConfig());
+    try {
+      await main.evaluate(async originalConfig => {
+        const bridge = await import("/src/lib/kokoro-bridge.ts");
+        // Replace the provider already bound to this character in the live TTS service.
+        const id = (await bridge.getCommittedCharacterRuntime())?.runtime.tts.provider_id;
+        if (!id) throw new Error("the fixture character must have an automatic speech provider");
+        await bridge.saveTtsConfig({
+          ...originalConfig,
+          providers: [...originalConfig.providers.filter(provider => provider.id !== id), {
+            id, provider_type: "openai", enabled: true, api_key: "controlled-fixture",
+            base_url: "http://127.0.0.1:19334/v1", model: "tts-1", extra: {},
+          }],
+        });
+      }, originalConfig);
+      await submit(main, { message: "[case:speech-failure]", client_request_id: "native_speech_failure" }, "__speechFailure");
+      const result = await outcome(main, "__speechFailure");
+      assert.equal(result.result?.status, "completed");
+      const alert = main.getByRole("alert").filter({ hasText: "controlled speech failure" });
+      await alert.waitFor({ state: "visible", timeout: 10000 });
+      const warning = await alert.textContent();
+      await main.getByText("Controlled reply for [case:speech-failure] completed.", { exact: false }).first().waitFor();
+      return { result, warning };
+    } finally {
+      await main.evaluate(async config => (await import("/src/lib/kokoro-bridge.ts")).saveTtsConfig(config), originalConfig);
+    }
+  });
   await check("destroyed main WebView leaves pet/backend chat fully operational", async () => {
     await submit(main, { message: "[case:sender-destroyed-slow]", client_request_id: "native_sender_destroyed" }, "__destroyedSender");
     await waitFor(async () => (await view(pet)).turns.some(turn => turn.client_request_id === "native_sender_destroyed" && turn.text.length > 0));

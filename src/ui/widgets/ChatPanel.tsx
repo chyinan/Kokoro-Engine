@@ -5,7 +5,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback, useDeferredV
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
-import { uploadVisionImage, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
+import { onChatWarning, uploadVisionImage, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
 import type { ToolTraceItem } from "../../lib/kokoro-bridge";
 import { chatApplication, type ChatMessageTarget } from "../../lib/chat/application";
 import { projectMessages, isActiveTurn } from "../../lib/chat/projection";
@@ -84,6 +84,7 @@ function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => 
 
     return (
         <motion.div
+            role="alert"
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
@@ -309,6 +310,18 @@ export default function ChatPanel({
     }, []);
 
     const reportError = useCallback((error: unknown) => setError(getAsyncErrorMessage(error)), []);
+    useEffect(() => {
+        let mounted = true;
+        const unlisten = onChatWarning(warning => {
+            if (mounted) reportError(warning);
+        });
+        // Registration can finish after the panel closes or is replaced.
+        void unlisten.catch(error => console.warn("[Chat] Warning subscription failed", error));
+        return () => {
+            mounted = false;
+            void unlisten.then(stop => stop(), () => {});
+        };
+    }, [reportError]);
     const handleStopGeneration = useCallback(() => {
         setIsStopping(true);
         void chatApplication.cancel().catch(reportError).finally(() => setIsStopping(false));

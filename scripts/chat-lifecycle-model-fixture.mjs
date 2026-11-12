@@ -9,6 +9,11 @@ const server = http.createServer(async (request, response) => {
   if (request.url === "/counts") { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(calls)); return; }
   let raw = ""; for await (const chunk of request) raw += chunk;
   let body; try { body = JSON.parse(raw); } catch { response.writeHead(400); response.end("invalid JSON"); return; }
+  if (request.url === "/v1/audio/speech") {
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "controlled speech failure", type: "invalid_request_error" } }));
+    return;
+  }
   const user = [...(body.messages ?? [])].reverse().find(message => message.role === "user");
   const content = typeof user?.content === "string" ? user.content : JSON.stringify(user?.content);
   const match = content?.match(/\[case:([^\]]+)\]/);
