@@ -158,13 +158,41 @@ try {
     assert.equal(failure.character_id, scope.character_id);
     assert.equal(failure.conversation_id, scope.conversation_id);
     const alert = main.getByRole("alert").filter({ hasText: failure.message });
-    await alert.waitFor({ state: "visible" });
+    const savedReason = main.getByText(failure.message, { exact: true });
+    await alert.and(savedReason).waitFor({ state: "visible" });
     assert.equal(await alert.count(), 1);
-    assert.equal(await main.getByText(failure.message, { exact: true }).count(), 1);
+    assert.equal(await savedReason.count(), 1);
     assert.equal(state.messages.filter(row => row.role === "user" && row.content === message).length, 1);
     const prompt = main.getByText(message, { exact: true });
     await waitFor(async () => await prompt.count() === 1 && await prompt.isVisible());
     return { turn, failure, displayedReason: await alert.textContent() };
+  });
+  await check("composer failures announce once and the saved diagnostic can retry the same prompt", async () => {
+    const message = "[case:composer-retry-once]";
+    const input = main.locator("textarea[data-onboarding-id='chat-input']");
+    await input.fill(message);
+    await input.press("Enter");
+    const failed = await waitFor(async () => (await view(main)).turns.find(turn => turn.message === message && turn.status === "error"));
+    const diagnostic = (await view(main)).messages.find(row => {
+      const metadata = JSON.parse(row.metadata ?? "null");
+      return metadata?.type === "failure_event" && metadata.event.turn_id === failed.turn_id;
+    });
+    assert(diagnostic?.content.includes("controlled composer failure"));
+    const toast = main.getByRole("alert").filter({ hasText: "controlled composer failure" });
+    const savedReason = main.getByText(diagnostic.content, { exact: true });
+    await savedReason.waitFor({ state: "visible" });
+    await toast.waitFor({ state: "visible" });
+    assert.equal(await toast.count(), 1);
+    assert.equal(await savedReason.evaluate(element => Boolean(element.closest('[role="alert"]'))), false);
+    await savedReason.locator("..").getByRole("button").click();
+    const recovered = await waitFor(async () => (await view(main)).turns.find(turn =>
+      turn.message === message && turn.client_request_id !== failed.client_request_id && turn.status === "completed"));
+    const history = (await view(main)).messages;
+    assert.equal(recovered.user_message_id, failed.user_message_id);
+    assert.equal(history.filter(row => row.role === "user" && row.content === message).length, 1);
+    assert(!history.some(row => row.id === diagnostic.id));
+    assert(history.some(row => row.id === recovered.assistant_message_id && row.content.includes(message)));
+    return { failed, recovered };
   });
   await check("builtin tool execution and its in-progress assistant draft are shown once", async () => {
     const requestId = "native_tool_rounds";

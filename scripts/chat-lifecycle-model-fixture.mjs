@@ -24,6 +24,11 @@ const server = http.createServer(async (request, response) => {
   save();
   if (name === "provider-failure") { response.writeHead(400, { "content-type": "application/json" }); response.end(JSON.stringify({ error: { message: "controlled failure", type: "invalid_request_error" } })); return; }
   if (name === "legacy-mod-connect-failure" && body.stream === true) { request.socket.destroy(); return; }
+  if (name === "composer-retry-once" && call.streaming && !calls.slice(0, -1).some(previous => previous.name === name && previous.streaming)) {
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "controlled composer failure", type: "invalid_request_error" } }));
+    return;
+  }
   if (!body.stream) {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ id: "fixture-system", object: "chat.completion", created: 1, model: "controlled-sse", choices: [{ index: 0, message: { role: "assistant", content: "{\"cues\":[]}" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })); return;

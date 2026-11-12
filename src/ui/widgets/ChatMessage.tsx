@@ -13,6 +13,7 @@ interface ChatMessageProps {
         translation?: string;
         translationPending?: boolean;
         isError?: boolean;
+        announceError?: boolean;
         speechError?: string;
         tools?: ToolTraceItem[];
         capturedAt?: string;
@@ -319,13 +320,13 @@ export const ChatMessage = memo(function ChatMessage({
                 </div>
             ) : (
                 <>
-                    <div role={msg.isError ? "alert" : undefined} className={clsx("whitespace-pre-wrap break-words", msg.isError && "text-red-300")}>
+                    <div role={(msg.announceError ?? msg.isError) ? "alert" : undefined} className={clsx("whitespace-pre-wrap break-words", msg.isError && "text-red-300")}>
                         {msg.text}
                     </div>
 
                     {/* 错误消息的重试按钮 */}
                     {!isStreaming && msg.isError && onRegenerate && (
-                        <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                             <button
                                 onClick={onRegenerate}
                                 className="p-1.5 rounded-md bg-slate-800/90 backdrop-blur-sm text-red-400 hover:text-red-300 hover:bg-slate-700/90 transition-colors shadow-lg"

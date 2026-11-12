@@ -41,16 +41,21 @@ export function projectSavedMessages(view: ChatViewSnapshot): ChatPanelMessage[]
 }
 
 export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
+  const turns = view.turns.filter(turn => turn.character_id === view.character_id && (!turn.conversation_id || turn.conversation_id === view.conversation_id));
+  // Legacy Mod sends have no composer toast. Keep their live announcement
+  // when saved history replaces the journal's temporary diagnostic.
+  const announcedFailureTurns = new Set(turns.flatMap(turn =>
+    turn.turn_id && turn.conversation_id === view.conversation_id && turn.client_request_id.startsWith("mod_")
+      ? [turn.turn_id] : [],
+  ));
   const shownFailures = new Set<string>();
   let messages = projectSavedMessages(view).flatMap(message => {
     const scope = message.failureScope;
     if (!scope) return [message];
     if (scope.character_id !== view.character_id || scope.conversation_id !== view.conversation_id || shownFailures.has(scope.turn_id)) return [];
     shownFailures.add(scope.turn_id);
-    // Diagnostic rows are persisted for history, but aren't editable replies.
-    return [{ ...message, id: undefined, isError: true }];
+    return [{ ...message, isError: true, announceError: announcedFailureTurns.has(scope.turn_id) }];
   });
-  const turns = view.turns.filter(turn => turn.character_id === view.character_id && (!turn.conversation_id || turn.conversation_id === view.conversation_id));
   const latestTurnByUser = new Map<number, ChatTurnSnapshot>();
   for (const turn of turns) {
     if (turn.user_message_id === null) continue;

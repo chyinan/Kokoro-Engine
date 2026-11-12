@@ -101,10 +101,17 @@ it("shows the legacy Mod failure once across the journal and history, scoped to 
         expect(reasons()).toEqual([]);
         await act(async () => chat.set({ turns: [failed] }));
         expect(reasons()).toEqual([failed.error]);
+        expect(container.querySelector('[title="chat.actions.retry"]')).toBeNull();
 
         await act(async () => chat.set({ revision: 3, messages: [prompt, saved] }));
         expect(reasons()).toEqual([failed.error]);
         expect(container.textContent?.match(/Model connection failed/g)).toHaveLength(1);
+        const diagnosticBubble = container.querySelector('[role="alert"]')!.parentElement!;
+        const retry = diagnosticBubble.querySelector<HTMLButtonElement>('[title="chat.actions.retry"]');
+        expect(retry).not.toBeNull();
+        expect(diagnosticBubble.querySelector('[title="chat.actions.edit"], [title="chat.actions.continue_from"]')).toBeNull();
+        await act(async () => retry!.click());
+        expect(chat.continueFrom).toHaveBeenCalledExactlyOnceWith({ conversationId: "conv-1", generation: 1, messageId: saved.id }, true, expect.anything());
 
         // Neither a delayed turn snapshot nor a diagnostic filed under the
         // wrong selection should appear in another conversation or character.

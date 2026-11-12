@@ -131,6 +131,7 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
     const target = conversationId !== null && message.id !== undefined
         ? { conversationId, generation, messageId: message.id }
         : undefined;
+    const editableTarget = message.failureScope ? undefined : target;
     return (
         <ChatMessage
             message={message}
@@ -138,10 +139,10 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
             isStreaming={isStreaming}
             isTranslationExpanded={isTranslationExpanded}
             onToggleTranslation={() => onToggleTranslation(globalIndex)}
-            editScope={target ? JSON.stringify([target.conversationId, target.generation, target.messageId]) : undefined}
-            onEdit={target ? text => onEdit(target, text) : undefined}
+            editScope={editableTarget ? JSON.stringify([editableTarget.conversationId, editableTarget.generation, editableTarget.messageId]) : undefined}
+            onEdit={editableTarget ? text => onEdit(editableTarget, text) : undefined}
             onRegenerate={target ? () => onRegenerate(target) : undefined}
-            onContinueFrom={target ? () => onContinueFrom(target) : undefined}
+            onContinueFrom={editableTarget ? () => onContinueFrom(editableTarget) : undefined}
             onApproveTool={createToolActionHandler(globalIndex, onApproveTool)}
             onRejectTool={createToolActionHandler(globalIndex, onRejectTool)}
             onPreviewImage={onPreviewImage}
