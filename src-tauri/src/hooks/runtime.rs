@@ -10,9 +10,11 @@ use std::sync::{Arc, RwLock};
 pub trait HookHandler: Send + Sync {
     fn id(&self) -> &str;
     fn events(&self) -> &'static [HookEvent];
+    #[must_use = "await or poll this future to run the event hook"]
     async fn handle(&self, event: &HookEvent, payload: &HookPayload)
         -> Result<HookOutcome, String>;
 
+    #[must_use = "await or poll this future to apply the LLM request hook"]
     async fn modify_before_llm_request(
         &self,
         _payload: &mut BeforeLlmRequestPayload,
@@ -20,6 +22,7 @@ pub trait HookHandler: Send + Sync {
         Ok(())
     }
 
+    #[must_use = "await or poll this future to apply the action argument hook"]
     async fn modify_before_action_args(
         &self,
         _payload: &mut BeforeActionArgsPayload,

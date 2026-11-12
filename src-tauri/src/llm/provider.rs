@@ -128,18 +128,21 @@ pub(crate) fn cancellable_unbounded_channel<T>() -> (
 /// Common interface for LLM providers (OpenAI, Ollama, etc.)
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
+    #[must_use = "await or poll this future to request the chat response"]
     async fn chat(
         &self,
         messages: Vec<ChatCompletionRequestMessage>,
         options: Option<LlmParams>,
     ) -> Result<String, String>;
 
+    #[must_use = "await or poll this future to open the chat response stream"]
     async fn chat_stream(
         &self,
         messages: Vec<ChatCompletionRequestMessage>,
         options: Option<LlmParams>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String, String>> + Send>>, String>;
 
+    #[must_use = "await or poll this future to open the chat stream with tools"]
     async fn chat_stream_with_tools(
         &self,
         messages: Vec<ChatCompletionRequestMessage>,
@@ -155,6 +158,7 @@ pub trait LlmProvider: Send + Sync {
         false
     }
 
+    #[must_use = "await or poll this future to request the rich-message chat response"]
     async fn chat_rich(
         &self,
         messages: Vec<LlmChatMessage>,
@@ -170,6 +174,7 @@ pub trait LlmProvider: Send + Sync {
         .await
     }
 
+    #[must_use = "await or poll this future to open the rich-message chat stream"]
     async fn chat_stream_rich(
         &self,
         messages: Vec<LlmChatMessage>,
@@ -187,6 +192,7 @@ pub trait LlmProvider: Send + Sync {
         Ok(Box::pin(stream.map(|item| item.map(LlmStreamEvent::Text))))
     }
 
+    #[must_use = "await or poll this future to open the rich-message chat stream with tools"]
     async fn chat_stream_with_tools_rich(
         &self,
         messages: Vec<LlmChatMessage>,

@@ -173,9 +173,11 @@ pub trait SttEngine: Send + Sync {
     fn id(&self) -> String;
 
     /// Check if the engine is ready/healthy
+    #[must_use = "await or poll this future to check transcription engine availability"]
     async fn is_available(&self) -> bool;
 
     /// Transcribe audio source.
+    #[must_use = "await or poll this future to transcribe the audio"]
     async fn transcribe(
         &self,
         audio: &AudioSource,
