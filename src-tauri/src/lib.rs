@@ -806,7 +806,7 @@ pub fn run() {
                 startup_begin.elapsed().as_millis()
             );
             let mut mod_manager = ModManager::new(mods_path);
-            mod_manager.init(app.handle().clone());
+            app.manage(mod_manager.init(app.handle().clone()));
             app.manage(tokio::sync::Mutex::new(mod_manager));
             tracing::info!(
                 target: "startup",

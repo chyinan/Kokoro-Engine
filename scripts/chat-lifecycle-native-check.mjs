@@ -179,6 +179,31 @@ try {
     assert.match(evidence.reply.tools[0].text, /Current time:/);
     return evidence;
   });
+  await check("text-mode tool-only reply stays visible without a saved assistant or tool row", async () => {
+    const turn = await petSend("text-tool-only");
+    assert.equal(turn.status, "completed");
+    assert.equal(turn.assistant_message_id, null);
+    assert.equal(turn.text, "");
+    const evidence = await main.evaluate(async turn => {
+      const { chatApplication } = await import("/src/lib/chat/application.ts");
+      const { projectMessages } = await import("/src/lib/chat/projection.ts");
+      const state = await chatApplication.refresh();
+      return {
+        revision: state.revision,
+        savedUser: state.messages.find(message => message.id === turn.user_message_id && message.role === "user"),
+        savedReplies: state.messages.filter(message => ["assistant", "tool"].includes(message.role) && message.metadata?.includes(turn.turn_id)),
+        replies: projectMessages(state).filter(message => message.turnId === turn.turn_id && message.role === "kokoro"),
+      };
+    }, turn);
+    assert(evidence.revision >= turn.revision);
+    assert(evidence.savedUser);
+    assert.deepEqual(evidence.savedReplies, []);
+    assert.equal(evidence.replies.length, 1);
+    assert.equal(evidence.replies[0].text, "");
+    assert.equal(evidence.replies[0].tools?.length, 1);
+    assert.match(evidence.replies[0].tools[0].text, /Current time:/);
+    return evidence;
+  });
   await check("history edits reject during generation, switching cancels without cross-writing, regeneration and clear preserve ownership", async () => {
     const source = (await view(pet)).conversation_id;
     await pet.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.clear());
@@ -291,6 +316,7 @@ try {
     assert.equal(calls.filter(call => call.streaming && call.name === "before-cancel").length, 0);
     assert.equal(calls.filter(call => call.streaming && call.name === "tool").length, 2); // tool round + one follow-up
     assert.equal(calls.filter(call => call.streaming && call.name === "text-tool").length, 2);
+    assert.equal(calls.filter(call => call.streaming && call.name === "text-tool-only").length, 2);
     return calls;
   });
   report.completedAt = new Date().toISOString(); save();

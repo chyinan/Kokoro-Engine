@@ -27,14 +27,14 @@ const server = http.createServer(async (request, response) => {
   let closed = false; response.on("close", () => { closed = true; call.closedAt = new Date().toISOString(); save(); });
   chunk({ role: "assistant", content: "" });
   const hasTextToolFeedback = body.messages?.some(message => message.role === "system" && message.content?.startsWith?.("[Tool results]"));
-  if (name === "text-tool" && !hasTextToolFeedback) {
+  if ((name === "text-tool" || name === "text-tool-only") && !hasTextToolFeedback) {
     chunk({ content: "[TOOL_CALL:get_time]" });
   } else if (name === "tool" && !call.toolResult) {
     chunk({ content: "Draft before get_time. " });
     const tool = call.tools.find(name => name.endsWith("get_time"));
     if (tool) chunk({ tool_calls: [{ index: 0, id: "fixture-tool-call", type: "function", function: { name: tool, arguments: "{}" } }] });
     else chunk({ content: "No get_time tool configured" });
-  } else {
+  } else if (name !== "text-tool-only") {
     const chunks = [`Controlled `, `reply `, `for `, `[case:${name}]`, ` completed.`];
     for (const text of chunks) {
       if (closed) break;

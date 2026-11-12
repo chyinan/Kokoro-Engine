@@ -14,6 +14,7 @@ use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, oneshot};
 
 const SCRIPT_EXECUTION_BUDGET: Duration = Duration::from_secs(5);
+const SCRIPT_COMMAND_CAPACITY: usize = 32;
 
 fn install_script_interrupt_handler(runtime: &rquickjs::Runtime) -> Arc<Mutex<Option<Instant>>> {
     let deadline = Arc::new(Mutex::new(None));
@@ -95,6 +96,52 @@ pub enum ScriptCommand {
     /// Invalidate listeners registered by the previously active MOD.
     ResetListeners,
     Shutdown,
+}
+
+/// A single FIFO handoff for chat events. The relay waits for QuickJS capacity
+/// without blocking generation or holding the ModManager lock.
+pub(crate) struct ModChatEvents(mpsc::UnboundedSender<ScriptCommand>);
+
+impl ModChatEvents {
+    fn channel(
+        script_tx: mpsc::Sender<ScriptCommand>,
+    ) -> (Self, impl std::future::Future<Output = ()>) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let forward = async move {
+            while let Some(command) = rx.recv().await {
+                if script_tx.send(command).await.is_err() {
+                    tracing::warn!(target: "mods", "QuickJS disconnected; stopping chat event relay");
+                    break;
+                }
+            }
+        };
+        (Self(tx), forward)
+    }
+
+    pub(crate) fn enqueue_chat_event(&self, name: &str, payload: JsonValue) {
+        let event = match name {
+            "chat-turn-delta" => "chat",
+            "chat-turn-finish" => "chat-done",
+            "chat-cue" => "cue",
+            _ => return,
+        };
+        // The relay stops only when the script runtime is gone.
+        let _ = self.0.send(ScriptCommand::DispatchEvent {
+            event: event.into(),
+            payload,
+        });
+    }
+}
+
+fn dispatch_script_event(context: &rquickjs::Context, event: &str, payload: &JsonValue) {
+    // Double encode so the payload stays a JSON string literal in the script.
+    let event_json = serde_json::to_string(event).unwrap_or_default();
+    let payload_str = serde_json::to_string(payload).unwrap_or_default();
+    let payload_escaped = serde_json::to_string(&payload_str).unwrap_or_default();
+    let code = format!("globalThis.__dispatch({event_json}, JSON.parse({payload_escaped}));");
+    context.with(|ctx| {
+        let _ = ctx.eval::<(), _>(code.as_str());
+    });
 }
 
 /// Payload for the mod:script-event Tauri event
@@ -231,10 +278,15 @@ impl ModManager {
 
     /// Spawn the QuickJS runtime thread and the event relay task.
     /// The event relay forwards ScriptEvents from QuickJS → Tauri event bus.
-    pub fn init<R: tauri::Runtime>(&mut self, app_handle: tauri::AppHandle<R>) {
+    pub(crate) fn init<R: tauri::Runtime>(
+        &mut self,
+        app_handle: tauri::AppHandle<R>,
+    ) -> ModChatEvents {
         self.set_runtime_state(ModRuntimeState::Initializing);
 
-        let (tx, mut rx) = mpsc::channel::<ScriptCommand>(32);
+        let (tx, mut rx) = mpsc::channel::<ScriptCommand>(SCRIPT_COMMAND_CAPACITY);
+        let (chat_events, forward) = ModChatEvents::channel(tx.clone());
+        tauri::async_runtime::spawn(forward);
         self.script_tx = Some(tx);
 
         // Outgoing event channel: QuickJS closures → event relay → Tauri
@@ -285,22 +337,7 @@ impl ModManager {
                         let _ = reply.send(result);
                     }
                     ScriptCommand::DispatchEvent { event, payload } => {
-                        // Call globalThis.__dispatch(event, payload) in QuickJS
-                        ctx.with(|ctx| {
-                            // 使用 serde_json 双重编码确保安全，避免字符串拼接注入
-                            let event_json = serde_json::to_string(&event).unwrap_or_default();
-                            let payload_str = serde_json::to_string(&payload).unwrap_or_default();
-                            // 二次编码：将 JSON 字符串本身编码为 JS 字符串字面量
-                            let payload_escaped =
-                                serde_json::to_string(&payload_str).unwrap_or_default();
-                            let dispatch_code = format!(
-                                "globalThis.__dispatch({}, JSON.parse({}));",
-                                event_json, payload_escaped
-                            );
-                            if let Err(_e) = ctx.eval::<(), _>(dispatch_code.as_str()) {
-                                // Silently ignore — expected when no mods register listeners
-                            }
-                        });
+                        dispatch_script_event(&ctx, &event, &payload);
                     }
                     ScriptCommand::ResetListeners => {
                         ctx.with(|ctx| {
@@ -365,6 +402,7 @@ impl ModManager {
                 );
             }
         });
+        chat_events
     }
 
     pub fn scan_mods(&mut self) -> Vec<ModManifest> {
@@ -657,13 +695,6 @@ impl ModManager {
     }
 
     /// Dispatch an engine event to QuickJS listeners (registered via Kokoro.on).
-    /// Chat notifications must never wait for a plugin consumer or a full queue.
-    pub fn try_dispatch_event(&self, event: &str, payload: serde_json::Value) -> Result<(), String> {
-        if !self.runtime_ready() { return Err("Script runtime not ready".into()); }
-        let tx = self.script_tx.as_ref().ok_or("Script runtime sender missing")?;
-        tx.try_send(ScriptCommand::DispatchEvent { event: event.into(), payload }).map_err(|error| error.to_string())
-    }
-
     pub async fn dispatch_event(
         &self,
         event: &str,
@@ -764,6 +795,89 @@ mod tests {
     use crate::hooks::HookPayload;
     use std::fs;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn chat_events_reach_quickjs_in_order_despite_a_locked_manager_and_full_queue() {
+        let (tx, mut rx) = mpsc::channel(SCRIPT_COMMAND_CAPACITY);
+        let mut manager = ModManager::new("unused");
+        manager.script_tx = Some(tx.clone());
+        manager.set_runtime_state(ModRuntimeState::Running);
+        let manager = tokio::sync::Mutex::new(manager);
+        let (relay, forward) = ModChatEvents::channel(tx.clone());
+        let mut forward = tokio_test::task::spawn(forward);
+        for _ in 0..SCRIPT_COMMAND_CAPACITY {
+            assert!(tx
+                .try_send(ScriptCommand::DispatchEvent {
+                    event: "background".into(),
+                    payload: JsonValue::Null,
+                })
+                .is_ok());
+        }
+        let guard = manager.lock().await;
+        assert_eq!(tx.capacity(), 0);
+
+        relay.enqueue_chat_event("chat-turn-delta", serde_json::json!({"delta": "first"}));
+        relay.enqueue_chat_event("chat-cue", serde_json::json!({"cue": "smile"}));
+        relay.enqueue_chat_event("chat-turn-delta", serde_json::json!({"delta": "second"}));
+        relay.enqueue_chat_event(
+            "chat-turn-finish",
+            serde_json::json!({"status": "completed"}),
+        );
+        // Generation can finish enqueueing before the script thread frees a slot.
+        assert_eq!(tx.capacity(), 0);
+        drop(relay);
+        assert!(
+            forward.poll().is_pending(),
+            "relay must wait on the full queue"
+        );
+
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        context.with(|ctx| {
+            crate::mods::api::register_api(&ctx, event_tx).unwrap();
+            ctx.eval::<(), _>(
+                r#"
+                globalThis.received = [];
+                Kokoro.on('chat', event => received.push(['chat', event.delta]));
+                Kokoro.on('cue', event => received.push(['cue', event.cue]));
+                Kokoro.on('chat-done', event => received.push(['chat-done', event.status]));
+                "#,
+            )
+            .unwrap();
+        });
+        // Resume consumption while the manager is still locked.
+        let receive = async {
+            for _ in 0..(SCRIPT_COMMAND_CAPACITY + 4) {
+                let Some(ScriptCommand::DispatchEvent { event, payload }) = rx.recv().await else {
+                    panic!("expected an event for QuickJS");
+                };
+                dispatch_script_event(&context, &event, &payload);
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(forward, receive);
+        })
+        .await
+        .expect("chat events should survive pressure on the QuickJS queue");
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        drop(guard);
+
+        let received =
+            context.with(|ctx| ctx.eval::<String, _>("JSON.stringify(received)").unwrap());
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&received).unwrap(),
+            serde_json::json!([
+                ["chat", "first"],
+                ["cue", "smile"],
+                ["chat", "second"],
+                ["chat-done", "completed"]
+            ]),
+        );
+    }
 
     /// Helper: create a temp dir with a fake mod inside
     fn setup_temp_mods() -> (TempDir, PathBuf) {

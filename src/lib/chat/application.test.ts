@@ -248,9 +248,17 @@ describe("UI-independent chat application", () => {
     await expect(h.app.send({ message: "retry" })).resolves.toMatchObject({ status: "completed" });
   });
   it.each(["completed", "cancelled", "error"] as const)("never resurrects deleted history from a late %s snapshot", async status => {
-    const deleted = { ...turn("deleted", 30, status), tools: [{ turn_id: "turn_deleted", tool: "lookup", tool_trace_id: "0:0", result: { message: "found" } }] };
+    const deleted = { ...turn("deleted", 30, status), assistant_message_id: null, text: "", tools: [{ turn_id: "turn_deleted", tool: "lookup", tool_trace_id: "0:0", result: { message: "found" } }] };
     const h = harness(); h.set({ revision: 30, turns: [deleted], messages: [] });
     await h.app.refresh(); expect(projectMessages(h.app.getSnapshot())).toEqual([]);
+  });
+  it("does not restore tool-only results once another turn has reused the saved prompt", () => {
+    const old = { ...turn("old", 1, "completed"), assistant_message_id: null, text: "", tools: [{ turn_id: "turn_old", tool: "lookup", tool_trace_id: "0:0", result: { message: "old result" } }] };
+    const newer = turn("new", 2, "completed");
+    const user = { id: 1, role: "user", content: "question", created_at: "now" };
+    const view = { ...emptyChatView, character_id: old.character_id!, conversation_id: old.conversation_id, revision: 2, messages: [user] };
+    expect(projectMessages({ ...view, turns: [old] }).map(message => message.role)).toEqual(["user", "kokoro"]);
+    expect(projectMessages({ ...view, turns: [newer, old] }).map(message => message.role)).toEqual(["user"]);
   });
   it("removes an old active cache entry if authoritative retention has expired", async () => {
     const h = harness(); h.set({ revision: 1, turns: [turn("old", 1)], busy: true });

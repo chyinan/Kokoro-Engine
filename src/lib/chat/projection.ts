@@ -35,6 +35,12 @@ export function projectSavedMessages(view: ChatViewSnapshot): ChatPanelMessage[]
 export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
   let messages = projectSavedMessages(view);
   const turns = view.turns.filter(turn => turn.character_id === view.character_id && (!turn.conversation_id || turn.conversation_id === view.conversation_id));
+  const latestTurnByUser = new Map<number, ChatTurnSnapshot>();
+  for (const turn of turns) {
+    if (turn.user_message_id === null) continue;
+    const previous = latestTurnByUser.get(turn.user_message_id);
+    if (!previous || turn.revision > previous.revision) latestTurnByUser.set(turn.user_message_id, turn);
+  }
   for (const turn of turns) {
     const active = isActiveTurn(turn);
     // Completion can arrive before the history read. Keep the assistant row
@@ -48,11 +54,21 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
     if (!live) {
       // Text-mode results have no saved tool row. Supplement the saved reply
       // with finished journal results and let saved results take precedence.
-      if (index < 0) continue;
-      const saved = messages[index];
       const tools = turn.tools.filter(event => event.approval_status !== "requested")
         .reduce<NonNullable<ChatPanelMessage["tools"]>>((traces, event) => mergeToolTraceItems(traces, buildToolTraceItem(event)), []);
-      messages[index] = { ...saved, tools: (saved.tools ?? []).reduce(mergeToolTraceItems, tools) };
+      if (index >= 0) {
+        const saved = messages[index];
+        messages[index] = { ...saved, tools: (saved.tools ?? []).reduce(mergeToolTraceItems, tools) };
+      } else if (tools.length && !turn.hidden && turn.assistant_message_id === null && turn.user_message_id !== null
+        && !stripStreamingControlMarkup(turn.text).trim() && latestTurnByUser.get(turn.user_message_id) === turn) {
+        // A tool-only reply never had a saved assistant row. Keep its live key
+        // and place it with its saved prompt. Truncation or a newer turn on the
+        // same prompt must not bring back the old result.
+        const userIndex = messages.findIndex(message => message.role === "user" && message.id === turn.user_message_id);
+        if (userIndex >= 0) messages.splice(userIndex + 1, 0, {
+          role: "kokoro", text: "", turnId: turn.turn_id ?? undefined, clientRequestId: turn.client_request_id, tools,
+        });
+      }
       continue;
     }
     const text = stripStreamingControlMarkup(turn.text);

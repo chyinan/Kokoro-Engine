@@ -1,5 +1,6 @@
 //! Application-owned chat journal. A WebView is a subscriber, never the owner.
 use crate::commands::chat::{ChatRequest, StreamChatResponse};
+use crate::mods::manager::ModChatEvents;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -327,27 +328,14 @@ pub async fn emit_chat_event<S: Serialize + Clone>(
     name: &str,
     payload: S,
 ) -> Result<(), tauri::Error> {
-    if let (Some(runtime), Ok(value)) = (
-        app.try_state::<Arc<ChatRuntimeState>>(),
-        serde_json::to_value(&payload),
-    ) {
-        if let Some(snapshot) = runtime.event(name, &value) {
-            let _ = app.emit("chat-runtime-changed", snapshot);
+    if let Ok(value) = serde_json::to_value(&payload) {
+        if let Some(runtime) = app.try_state::<Arc<ChatRuntimeState>>() {
+            if let Some(snapshot) = runtime.event(name, &value) {
+                let _ = app.emit("chat-runtime-changed", snapshot);
+            }
         }
-    }
-    let mod_event = match name {
-        "chat-turn-delta" => Some("chat"),
-        "chat-turn-finish" => Some("chat-done"),
-        "chat-cue" => Some("cue"),
-        _ => None,
-    };
-    if let (Some(event), Some(manager), Ok(value)) = (
-        mod_event,
-        app.try_state::<tokio::sync::Mutex<crate::mods::ModManager>>(),
-        serde_json::to_value(&payload),
-    ) {
-        if let Ok(manager) = manager.try_lock() {
-            let _ = manager.try_dispatch_event(event, value);
+        if let Some(relay) = app.try_state::<ModChatEvents>() {
+            relay.enqueue_chat_event(name, value);
         }
     }
     if let Err(error) = app.emit(name, payload) {

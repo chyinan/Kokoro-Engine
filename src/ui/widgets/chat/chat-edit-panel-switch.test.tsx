@@ -123,6 +123,49 @@ it.each(["native", "text"])("keeps %s tool details open through the streaming dr
     }
 });
 
+it("keeps a text-mode tool-only reply expanded after history catches up", async () => {
+    chat.reset();
+    const user = { id: 1, role: "user", content: "question", created_at: "now" };
+    const streaming = {
+        ...turn("tool-only", 2), character_id: "char-1", conversation_id: "conv-1", text: "",
+        tools: [{ turn_id: "turn_tool-only", tool: "lookup", result: { message: "Tool-only result" }, tool_trace_id: "0:0" }],
+    };
+    chat.set({ revision: 2, busy: true, messages: [user], turns: [streaming] });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const details = () => [...container.querySelectorAll("button")].filter(button => button.textContent?.includes("chat.tools.header"));
+    const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    try {
+        await act(async () => root.render(<ChatPanel />));
+        expect(details()).toHaveLength(1);
+        const [toggle] = details();
+        await act(async () => toggle.click());
+        expect(container.textContent).toContain("Tool-only result");
+
+        const completed = { ...streaming, revision: 3, status: "completed" as const };
+        await act(async () => chat.set({ busy: false, turns: [completed] }));
+        expect(details()[0]).toBe(toggle);
+        expect(container.textContent).toContain("Tool-only result");
+
+        // The saved history has neither an assistant row nor a tool row for this turn.
+        await act(async () => chat.set({ revision: 3, messages: [{ ...user }] }));
+        expect(details()).toHaveLength(1);
+        expect(details()[0]).toBe(toggle);
+        expect(container.textContent).toContain("Tool-only result");
+
+        const next = { id: 2, role: "user", content: "Next question", created_at: "now" };
+        await act(async () => chat.set({ messages: [user, next] }));
+        expect(details()).toHaveLength(1);
+        expect(details()[0]).toBe(toggle);
+        expect(container.textContent).toMatch(/Tool-only result[\s\S]*Next question/);
+    } finally {
+        await act(async () => root.unmount());
+        scrollTo.mockRestore();
+        container.remove();
+    }
+});
+
 it("keeps approved tool details expanded when the first hidden turn creates its conversation", async () => {
     chat.reset();
     const request = {
