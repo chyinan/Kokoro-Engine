@@ -1,4 +1,4 @@
-import type { ToolTraceItem } from "@/lib/kokoro-bridge";
+import type { ChatTurnToolEvent, ToolTraceItem } from "@/lib/kokoro-bridge";
 import {
     hasActiveKokoroBubble,
     hasVisibleAssistantContent,
@@ -372,36 +372,26 @@ export const updateTurnMessage = (
 };
 
 export function mergeToolTraceItems(existing: ReadonlyArray<ToolTraceItem>, incoming: ToolTraceItem): Array<ToolTraceItem> {
-    if (incoming.approvalRequestId) {
-        const targetIndex = existing.findIndex(tool => tool.approvalRequestId === incoming.approvalRequestId);
-        if (targetIndex >= 0) {
-            const next = [...existing];
-            next[targetIndex] = incoming;
-            return next;
-        }
+    const targetIndex = existing.findIndex(tool =>
+        (incoming.toolTraceId && tool.toolTraceId === incoming.toolTraceId)
+        || (incoming.approvalRequestId && tool.approvalRequestId === incoming.approvalRequestId)
+    );
+    if (targetIndex >= 0) {
+        const next = [...existing];
+        next[targetIndex] = incoming;
+        return next;
     }
     return [...existing, incoming];
 }
 
-export function buildToolTraceItem(event: {
-    tool: string;
-    tool_name?: string;
-    tool_id?: string;
-    source?: ToolTraceItem["source"];
-    server_name?: string;
-    needs_feedback?: boolean;
-    permission_level?: ToolTraceItem["permissionLevel"];
-    risk_tags?: ToolTraceItem["riskTags"];
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): ToolTraceItem {
+type ToolEvent = Omit<ChatTurnToolEvent, "turn_id">;
+
+export function buildToolTraceItem(event: ToolEvent): ToolTraceItem {
     const baseTool = {
         tool: event.tool,
         toolName: event.tool_name ?? event.tool,
         toolId: event.tool_id,
+        toolTraceId: event.tool_trace_id,
         source: event.source,
         serverName: event.server_name,
         needsFeedback: event.needs_feedback,
@@ -721,25 +711,11 @@ function setToolPendingResolutionState(messages: Array<ChatPanelMessage>, global
     return updatePendingToolStatus(messages, globalIndex, approvalRequestId, replacement);
 }
 
-function getToolEntryFromEvent(event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): ToolTraceItem {
+function getToolEntryFromEvent(event: ToolEvent): ToolTraceItem {
     return buildToolTraceItem(event);
 }
 
-function updateMessagesForToolEvent(messages: Array<ChatPanelMessage>, event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): Array<ChatPanelMessage> {
+function updateMessagesForToolEvent(messages: Array<ChatPanelMessage>, event: ToolEvent): Array<ChatPanelMessage> {
     const toolEntry = getToolEntryFromEvent(event);
     if (shouldHandleAsApprovalEvent(event)) {
         return resolveApprovalEvent(messages, toolEntry, event);
@@ -747,14 +723,7 @@ function updateMessagesForToolEvent(messages: Array<ChatPanelMessage>, event: {
     return messages;
 }
 
-function updateMessagesForApprovalFallback(messages: Array<ChatPanelMessage>, event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): Array<ChatPanelMessage> {
+function updateMessagesForApprovalFallback(messages: Array<ChatPanelMessage>, event: ToolEvent): Array<ChatPanelMessage> {
     return updateMessagesForToolEvent(messages, event);
 }
 
@@ -777,25 +746,11 @@ function normalizeApprovalToolEntry(tool: ToolTraceItem): ToolTraceItem {
     return tool;
 }
 
-function normalizeApprovalEventToolEntry(event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): ToolTraceItem {
+function normalizeApprovalEventToolEntry(event: ToolEvent): ToolTraceItem {
     return normalizeApprovalToolEntry(buildToolTraceItem(event));
 }
 
-function mergeApprovalEventIntoCurrentTurn(turn: PendingTurnState | null, eventTurnId: string, event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): ToolTraceItem | null {
+function mergeApprovalEventIntoCurrentTurn(turn: PendingTurnState | null, eventTurnId: string, event: ToolEvent): ToolTraceItem | null {
     if (!isLiveTurn(turn, eventTurnId)) {
         return null;
     }
@@ -804,39 +759,18 @@ function mergeApprovalEventIntoCurrentTurn(turn: PendingTurnState | null, eventT
     return toolEntry;
 }
 
-function updateMessagesAfterApprovalMerge(prev: Array<ChatPanelMessage>, turn: PendingTurnState | null, eventTurnId: string, toolEntry: ToolTraceItem | null, event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): Array<ChatPanelMessage> {
+function updateMessagesAfterApprovalMerge(prev: Array<ChatPanelMessage>, turn: PendingTurnState | null, eventTurnId: string, toolEntry: ToolTraceItem | null, event: ToolEvent): Array<ChatPanelMessage> {
     if (toolEntry && isLiveTurn(turn, eventTurnId)) {
         return updateTurnToolsInMessages(prev, turn, toolEntry);
     }
     return updateMessagesForApprovalFallback(prev, event);
 }
 
-function updateUiForToolEvent(prev: Array<ChatPanelMessage>, turn: PendingTurnState | null, eventTurnId: string, event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}): Array<ChatPanelMessage> {
+function updateUiForToolEvent(prev: Array<ChatPanelMessage>, turn: PendingTurnState | null, eventTurnId: string, event: ToolEvent): Array<ChatPanelMessage> {
     const toolEntry = mergeApprovalEventIntoCurrentTurn(turn, eventTurnId, event);
     return updateMessagesAfterApprovalMerge(prev, turn, eventTurnId, toolEntry, event);
 }
 
-export function getToolEventStateUpdate(event: {
-    tool: string;
-    result?: { message: string };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}, turn: PendingTurnState | null, eventTurnId: string) {
+export function getToolEventStateUpdate(event: ToolEvent, turn: PendingTurnState | null, eventTurnId: string) {
     return (prev: Array<ChatPanelMessage>) => updateUiForToolEvent(prev, turn, eventTurnId, event);
 }

@@ -1,6 +1,6 @@
 //! Application-owned chat journal. A WebView is a subscriber, never the owner.
 use crate::commands::chat::{ChatRequest, StreamChatResponse};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -149,6 +149,26 @@ impl ChatRuntimeState {
 
     pub fn snapshots(&self) -> Vec<ChatTurnSnapshot> {
         self.journal_snapshot().1
+    }
+
+    pub fn is_pending_request(&self, character_id: &str, request_id: &str) -> bool {
+        self.0.lock().unwrap().entries.get(request_id).is_some_and(|entry| {
+            entry.snapshot.character_id.as_deref() == Some(character_id)
+                && entry.outcome.borrow().is_none()
+        })
+    }
+
+    fn revision(&self) -> u64 {
+        self.0.lock().unwrap().revision
+    }
+
+    pub fn turn_text(&self, id: &str) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .entries
+            .get(id)
+            .map(|entry| entry.snapshot.text.clone())
     }
 
     pub fn journal_snapshot(&self) -> (u64, Vec<ChatTurnSnapshot>) {
@@ -322,13 +342,20 @@ pub fn get_chat_runtime_snapshot(
     runtime.snapshots()
 }
 
-#[derive(Serialize)]
-pub struct ChatViewSnapshot {
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ChatViewVersion {
     pub revision: u64,
-    pub character_id: String,
-    pub conversation_id: Option<String>,
+    pub history_revision: i64,
     pub generation: u64,
     pub busy: bool,
+}
+
+#[derive(Serialize)]
+pub struct ChatViewSnapshot {
+    #[serde(flatten)]
+    pub version: ChatViewVersion,
+    pub character_id: String,
+    pub conversation_id: Option<String>,
     pub messages: Vec<crate::commands::conversation::ConversationMessage>,
     pub turns: Vec<ChatTurnSnapshot>,
 }
@@ -336,17 +363,35 @@ pub struct ChatViewSnapshot {
 /// Read-only restoration. Unlike load_conversation this never switches selection,
 /// increments its generation, cancels work, or writes anything.
 pub async fn get_chat_view(
-    state: tauri::State<'_, crate::ai::context::AIOrchestrator>,
-    runtime: tauri::State<'_, Arc<ChatRuntimeState>>,
-) -> Result<ChatViewSnapshot, crate::error::KokoroError> {
+    state: &crate::ai::context::AIOrchestrator,
+    runtime: &ChatRuntimeState,
+    known_version: Option<ChatViewVersion>,
+) -> Result<Option<ChatViewSnapshot>, crate::error::KokoroError> {
+    const HISTORY_REVISION: &str = "SELECT revision FROM chat_history_revision WHERE id = 1";
+    if let Some(known) = known_version {
+        let history_revision = sqlx::query_scalar(HISTORY_REVISION).fetch_one(&state.db).await?;
+        let current = ChatViewVersion {
+            history_revision,
+            revision: runtime.revision(),
+            generation: state.current_conversation_generation(),
+            busy: state.is_chat_busy(),
+        };
+        if known == current {
+            return Ok(None);
+        }
+    }
     let _selection = state.conversation_switch_lock.lock().await;
     let character_id = state.character_id.lock().await.clone();
     let conversation_id = state.current_conversation_id.lock().await.clone();
+    // Bind the history stamp to the same SQLite snapshot as the rows. A write
+    // that races this read will still be visible to the next version check.
+    let mut tx = state.db.begin().await?;
+    let history_revision = sqlx::query_scalar(HISTORY_REVISION).fetch_one(&mut *tx).await?;
     let mut messages = vec![];
     if let Some(id) = &conversation_id {
         let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, String)>(
             "SELECT id, role, content, metadata, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC"
-        ).bind(id).fetch_all(&state.db).await?;
+        ).bind(id).fetch_all(&mut *tx).await?;
         messages = rows
             .into_iter()
             .map(|(id, role, content, metadata, created_at)| {
@@ -360,16 +405,20 @@ pub async fn get_chat_view(
             })
             .collect();
     }
+    tx.commit().await?;
     let (revision, turns) = runtime.journal_snapshot();
-    Ok(ChatViewSnapshot {
-        revision,
+    Ok(Some(ChatViewSnapshot {
+        version: ChatViewVersion {
+            revision,
+            history_revision,
+            generation: state.current_conversation_generation(),
+            busy: state.is_chat_busy(),
+        },
         character_id,
         conversation_id,
-        generation: state.current_conversation_generation(),
-        busy: state.is_chat_busy(),
         messages,
         turns,
-    })
+    }))
 }
 
 /// One execution owner schedules speech; restoring a view never synthesizes.
@@ -423,6 +472,59 @@ mod tests {
             status: Some("completed".into()),
         })
     }
+    #[tokio::test]
+    async fn idle_view_check_skips_selection_lock_and_notices_history_changes() {
+        let state = crate::ai::context::AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap();
+        let journal = ChatRuntimeState::default();
+        sqlx::query("INSERT INTO conversations (id, character_id, created_at, updated_at) VALUES ('a', 'default', 'now', 'now')")
+            .execute(&state.db).await.unwrap();
+        *state.current_conversation_id.lock().await = Some("a".into());
+        let initial = get_chat_view(&state, &journal, None).await.unwrap().unwrap();
+
+        // A matched version must return without contending for the selection lock.
+        let guard = state.conversation_switch_lock.lock().await;
+        let idle = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            get_chat_view(&state, &journal, Some(initial.version)),
+        )
+        .await
+        .expect("idle check must not wait for selection")
+        .unwrap();
+        assert!(idle.is_none());
+        drop(guard);
+
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES ('a', 'user', 'original', 'now')")
+            .execute(&state.db).await.unwrap();
+        let added = get_chat_view(&state, &journal, Some(initial.version)).await.unwrap().unwrap();
+        assert_eq!(added.messages[0].content, "original");
+
+        sqlx::query("UPDATE conversation_messages SET content = 'edited' WHERE conversation_id = 'a'")
+            .execute(&state.db).await.unwrap();
+        let edited = get_chat_view(&state, &journal, Some(added.version)).await.unwrap().unwrap();
+        assert_eq!(edited.version.revision, added.version.revision);
+        assert_eq!(edited.messages[0].content, "edited");
+
+        sqlx::query("DELETE FROM conversation_messages WHERE conversation_id = 'a'")
+            .execute(&state.db).await.unwrap();
+        let deleted = get_chat_view(&state, &journal, Some(edited.version)).await.unwrap().unwrap();
+        assert!(deleted.messages.is_empty());
+    }
+
+    #[test]
+    fn one_shot_camera_context_is_absent_from_turn_snapshots() {
+        let journal = ChatRuntimeState::default();
+        let mut with_camera = request("camera");
+        let attachments = vec!["https://example.test/image.png".to_string()];
+        with_camera.images = Some(attachments.clone());
+        with_camera.camera_frame = Some("data:image/jpeg;base64,private-camera-frame".into());
+        journal.begin(&with_camera).unwrap();
+        let snapshot = journal.complete("camera", result("camera")).unwrap();
+        assert_eq!(snapshot.images, attachments);
+        assert!(!serde_json::to_string(&journal.snapshots()).unwrap().contains("private-camera-frame"));
+    }
+
     #[test]
     fn duplicate_delivery_shares_outcome_without_another_execution() {
         let journal = ChatRuntimeState::default();

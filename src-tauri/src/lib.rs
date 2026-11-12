@@ -103,6 +103,7 @@ pub fn run() {
             commands::chat::stream_chat,
             commands::chat::get_chat_runtime_snapshot,
             commands::chat::get_chat_view,
+            commands::chat::get_chat_draft_submission_status,
             commands::chat::finish_chat_playback,
             commands::chat::get_context_settings,
             commands::chat::set_context_settings,

@@ -1,22 +1,28 @@
 // Application commands and a per-subscriber read model. Rust remains authoritative.
 // This module has no React, DOM, localStorage, or display-component dependency.
 import * as bridge from "../kokoro-bridge";
-import type { ChatRequest, ChatTurnSnapshot, ChatViewSnapshot, StreamChatResponse } from "../kokoro-bridge";
+import type { ChatRequest, ChatTurnSnapshot, ChatViewSnapshot, ChatViewVersion, StreamChatResponse } from "../kokoro-bridge";
 import { getContinueFromCutoffIndex, getExpectedTailMessageId } from "./history-commands";
 import { isActiveTurn, mergeTurnSnapshot, projectMessages } from "./projection";
 
 export interface ChatTransport {
-  read(): Promise<ChatViewSnapshot>;
+  read(knownVersion?: ChatViewVersion): Promise<ChatViewSnapshot | null>;
   listen(callback: (turn: ChatTurnSnapshot) => void): Promise<() => void>;
   send(request: ChatRequest): Promise<StreamChatResponse>;
   cancel(id: string, reason?: string): Promise<void>;
 }
+export interface ChatEditTarget {
+  conversationId: string;
+  generation: number;
+  messageId: number;
+}
 const transport: ChatTransport = {
-  read: () => bridge.getChatView(), listen: callback => bridge.onChatRuntimeChanged(callback),
+  read: known => known ? bridge.getChatView(known) : bridge.getChatView(),
+  listen: callback => bridge.onChatRuntimeChanged(callback),
   send: request => bridge.streamChat(request), cancel: (id, reason) => bridge.cancelChatTurn(id, reason),
 };
 export const emptyChatView: ChatViewSnapshot = {
-  revision: 0, character_id: "default", conversation_id: null, generation: 0, busy: false, messages: [], turns: [],
+  revision: 0, history_revision: 0, character_id: "default", conversation_id: null, generation: 0, busy: false, messages: [], turns: [],
 };
 
 export class ChatApplication {
@@ -27,7 +33,8 @@ export class ChatApplication {
   private timer: ReturnType<typeof setInterval> | undefined;
   private connection = 0;
   private readSequence = 0;
-  private readInFlight: { connection: number; promise: Promise<ChatViewSnapshot> } | undefined;
+  private readInFlight: { connection: number; conditional: boolean; promise: Promise<ChatViewSnapshot> } | undefined;
+  private readVersion: ChatViewVersion | undefined;
   private eventSequence = 0;
   private restoredRevision = 0;
   private pending = new Map<string, { fingerprint: string; promise: Promise<StreamChatResponse> }>();
@@ -68,9 +75,12 @@ export class ChatApplication {
       // Subscribe before reading. A raced event makes refresh retry instead of
       // allowing an older history snapshot to overwrite the committed outcome.
       await this.refresh();
-      if (generation === this.connection) this.timer = setInterval(() => { void this.refresh().catch(() => {}); }, 750);
     } catch {
-      if (generation === this.connection) this.timer = setInterval(() => { void this.refresh().catch(() => {}); }, 750);
+      // Polling also recovers if the listener or the initial read failed.
+    } finally {
+      if (generation === this.connection) {
+        this.timer = setInterval(() => { void this.startRead(this.readVersion).catch(() => {}); }, 750);
+      }
     }
   }
   disconnect() {
@@ -78,27 +88,36 @@ export class ChatApplication {
     this.stop?.(); this.stop = undefined;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    this.readVersion = undefined;
     // Detaching a view never cancels a business request.
   }
   refresh(): Promise<ChatViewSnapshot> {
-    if (this.readInFlight?.connection === this.connection) return this.readInFlight.promise;
+    return this.startRead();
+  }
+  private startRead(known?: ChatViewVersion): Promise<ChatViewSnapshot> {
+    const conditional = known !== undefined;
+    if (this.readInFlight?.connection === this.connection && (conditional || !this.readInFlight.conditional)) {
+      return this.readInFlight.promise;
+    }
     const connection = this.connection;
-    const promise = this.readView(connection).finally(() => {
+    const promise = this.readView(connection, known).finally(() => {
       if (this.readInFlight?.promise === promise) this.readInFlight = undefined;
     });
-    this.readInFlight = { connection, promise };
+    this.readInFlight = { connection, conditional, promise };
     return promise;
   }
-  private async readView(connection: number): Promise<ChatViewSnapshot> {
+  private async readView(connection: number, known?: ChatViewVersion): Promise<ChatViewSnapshot> {
     const sequence = ++this.readSequence;
     const eventsAtStart = this.eventSequence;
-    const view = await this.io.read();
-    if (sequence !== this.readSequence || connection !== this.connection) return this.view;
+    const view = await this.io.read(known);
+    if (sequence !== this.readSequence || connection !== this.connection || !view) return this.view;
     if (eventsAtStart !== this.eventSequence && [...this.turns.values()].some(turn => turn.revision > view.revision)) return this.readView(connection);
     const ids = new Set(view.turns.map(turn => turn.client_request_id));
     for (const [id, turn] of this.turns) if (!ids.has(id) && !this.pending.has(id) && turn.revision <= view.revision) this.turns.delete(id);
     for (const turn of view.turns) this.turns = mergeTurnSnapshot(this.turns, turn);
     this.restoredRevision = Math.max(this.restoredRevision, view.revision);
+    const { revision, history_revision, generation, busy } = view;
+    this.readVersion = { revision, history_revision, generation, busy };
     this.publish({ ...view, busy: view.busy || [...this.pending.keys()].some(id => { const turn = this.turns.get(id); return !turn || isActiveTurn(turn); }) || this.mutation !== null, turns: [...this.turns.values()] });
     return this.view;
   }
@@ -163,13 +182,11 @@ export class ChatApplication {
       await bridge.clearHistory();
     });
   }
-  async edit(index: number, content: string) {
-    const view = this.view;
-    const message = projectMessages(view)[index];
-    if (!message || !content.trim() || !view.conversation_id) return;
+  async edit(target: ChatEditTarget, content: string) {
+    const text = content.trim();
+    if (!text || target.conversationId !== this.view.conversation_id || target.generation !== this.view.generation) return;
     return this.mutate(() => bridge.editConversationMessage({
-      conversation_id: view.conversation_id!, new_content: content.trim(),
-      ...(message.id ? { message_id: message.id } : { visible_index: index }),
+      conversation_id: target.conversationId, message_id: target.messageId, new_content: text,
     }));
   }
   async deleteConversation(id: string) {

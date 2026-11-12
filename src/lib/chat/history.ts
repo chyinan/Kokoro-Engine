@@ -81,6 +81,7 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
                 tool: toolName,
                 toolName,
                 toolId: typeof meta?.tool_id === "string" ? meta.tool_id : undefined,
+                toolTraceId: getStringMetadataValue(meta, "tool_trace_id"),
                 text: errorText,
                 isError: m.content.startsWith("Error:"),
                 source: meta?.source === "builtin" || meta?.source === "mcp" ? meta.source : undefined,

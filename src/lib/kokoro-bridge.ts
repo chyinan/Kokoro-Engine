@@ -282,6 +282,8 @@ export interface ChatRequest {
     model?: string;
     allow_image_gen?: boolean;
     images?: string[];
+    /** One-shot camera context, never included in chat snapshots. */
+    camera_frame?: string;
     character_id?: string;
     /** If true, the user instruction is hidden; non-empty assistant replies may still be saved. */
     hidden?: boolean;
@@ -325,20 +327,30 @@ export interface ChatTurnSnapshot {
     tools: ChatTurnToolEvent[];
     error: string | null;
 }
-export interface ChatViewSnapshot {
+export interface ChatViewVersion {
     revision: number;
-    character_id: string;
-    conversation_id: string | null;
+    history_revision: number;
     generation: number;
     busy: boolean;
+}
+export interface ChatViewSnapshot extends ChatViewVersion {
+    character_id: string;
+    conversation_id: string | null;
     messages: ConversationMessage[];
     turns: ChatTurnSnapshot[];
 }
 export function getChatRuntimeSnapshot(): Promise<ChatTurnSnapshot[]> {
     return invoke("get_chat_runtime_snapshot");
 }
-export function getChatView(): Promise<ChatViewSnapshot> {
-    return invoke("get_chat_view");
+export function getChatView(): Promise<ChatViewSnapshot>;
+export function getChatView(knownVersion: ChatViewVersion): Promise<ChatViewSnapshot | null>;
+export function getChatView(knownVersion?: ChatViewVersion): Promise<ChatViewSnapshot | null> {
+    return invoke("get_chat_view", knownVersion ? { knownVersion } : undefined);
+}
+export type ChatDraftSubmissionStatus = "pending" | "persisted" | "unsent";
+
+export function getChatDraftSubmissionStatus(characterId: string, clientRequestId: string): Promise<ChatDraftSubmissionStatus> {
+    return invoke("get_chat_draft_submission_status", { characterId, clientRequestId });
 }
 export function onChatRuntimeChanged(callback: (snapshot: ChatTurnSnapshot) => void): Promise<UnlistenFn> {
     return listen<ChatTurnSnapshot>("chat-runtime-changed", event => callback(event.payload));
@@ -542,6 +554,7 @@ export interface ToolTraceItem {
     tool: string;
     toolName?: string;
     toolId?: string;
+    toolTraceId?: string;
     text: string;
     isError?: boolean;
     source?: "builtin" | "mcp";
@@ -559,6 +572,7 @@ export interface ChatTurnToolEvent {
     tool: string;
     tool_name?: string;
     tool_id?: string;
+    tool_trace_id?: string;
     source?: "builtin" | "mcp";
     server_name?: string;
     needs_feedback?: boolean;

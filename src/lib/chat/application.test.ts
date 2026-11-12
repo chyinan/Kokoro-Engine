@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatApplication, emptyChatView, type ChatTransport } from "./application";
-import type { ChatTurnSnapshot, ChatViewSnapshot, StreamChatResponse } from "../kokoro-bridge";
+import type { ChatTurnSnapshot, ChatViewSnapshot, ChatViewVersion, StreamChatResponse } from "../kokoro-bridge";
 import { projectMessages } from "./projection";
 import { canSubmitApproval } from "./turn-state";
 
@@ -18,7 +18,11 @@ function harness() {
   let view: ChatViewSnapshot = { ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a", generation: 1 };
   let callback: (turn: ChatTurnSnapshot) => void = () => {};
   const io: ChatTransport = {
-    read: vi.fn(async () => structuredClone(view)),
+    read: vi.fn(async (known?: ChatViewVersion) => {
+      const { revision, history_revision, generation, busy } = view;
+      if (known?.revision === revision && known.history_revision === history_revision && known.generation === generation && known.busy === busy) return null;
+      return structuredClone(view);
+    }),
     listen: vi.fn(async listener => { callback = listener; return vi.fn(); }),
     send: vi.fn(async request => ({ status: "completed", conversation_id: "conversation-a", client_request_id: request.client_request_id, text: "answer" })),
     cancel: vi.fn(async () => {}),
@@ -67,6 +71,44 @@ describe("UI-independent chat application", () => {
     expect(h.io.send).not.toHaveBeenCalled();
     stop();
   });
+  it("keeps the same view through idle polls and reloads history after an edit with no journal event", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const message = { id: 1, role: "user", content: "original", created_at: "now" };
+    h.set({ revision: 2, history_revision: 4, messages: [message] });
+    const publish = vi.fn();
+    const stop = h.app.subscribe(publish);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      const restored = h.app.getSnapshot();
+      await vi.advanceTimersByTimeAsync(2250);
+      expect(h.io.read).toHaveBeenCalledTimes(4);
+      expect(h.io.read).toHaveBeenLastCalledWith({ revision: 2, history_revision: 4, generation: 1, busy: false });
+      expect(h.app.getSnapshot()).toBe(restored);
+      expect(publish).toHaveBeenCalledOnce();
+
+      h.set({ history_revision: 5, messages: [{ ...message, content: "edited" }] });
+      await vi.advanceTimersByTimeAsync(750);
+      expect(h.app.getSnapshot().messages[0]?.content).toBe("edited");
+      expect(publish).toHaveBeenCalledTimes(2);
+    } finally { stop(); }
+  });
+  it("an explicit refresh does not wait on or accept a stale conditional poll", async () => {
+    vi.useFakeTimers();
+    const h = harness(); const stop = h.app.subscribe(() => {});
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      const before = h.app.getSnapshot();
+      const poll = deferred<ChatViewSnapshot | null>();
+      vi.mocked(h.io.read).mockReturnValueOnce(poll.promise);
+      await vi.advanceTimersByTimeAsync(750);
+      h.set({ conversation_id: "conversation-b", generation: 2 });
+      expect(await h.app.refresh()).toMatchObject({ conversation_id: "conversation-b", generation: 2 });
+      poll.resolve(before);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.app.getSnapshot().conversation_id).toBe("conversation-b");
+    } finally { stop(); }
+  });
   it("ignores duplicate terminal and late active events, including old requests after a newer request starts", async () => {
     const h = harness();
     h.set({ revision: 10, busy: true, turns: [turn("old", 6, "completed"), turn("new", 10)] });
@@ -94,15 +136,43 @@ describe("UI-independent chat application", () => {
       { id: 1, role: "user", text: "saved question", images },
     ]);
   });
+  it("shows each tool call once while its live result and saved row overlap", () => {
+    const active = turn("a", 2);
+    const result = { turn_id: "turn_a", tool: "lookup", result: { message: "found" } };
+    active.tools = ["0:0", "1:0"].map(tool_trace_id => ({ ...result, tool_trace_id }));
+    const rows = active.tools.map((event, index) => ({
+      id: index + 10, role: "tool", content: "found", created_at: "now",
+      metadata: JSON.stringify({
+        type: "tool_result", turn_id: "turn_a", tool_name: "lookup",
+        tool_call_id: "provider-call", tool_trace_id: event.tool_trace_id,
+      }),
+    }));
+    const view = { ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a" };
+    const tools = (messages: ChatViewSnapshot["messages"], current = active) =>
+      projectMessages({ ...view, messages, turns: [current] }).find(message => message.role === "kokoro")?.tools;
+    const expected = ["0:0", "1:0"].map(toolTraceId => ({ toolTraceId, tool: "lookup", text: "found" }));
+
+    expect(tools(rows.slice(0, 1))).toMatchObject(expected);
+    expect(tools(rows)).toMatchObject(expected);
+    expect(tools([])).toMatchObject(expected);
+    expect(tools(rows, { ...active, status: "completed" })).toMatchObject(expected);
+  });
   it("restores an actionable tool approval from a snapshot before the result is saved", async () => {
     const h = harness();
-    const requested = { turn_id: "turn_a", tool: "test_tool", approval_request_id: "approval_1", approval_status: "requested" as const, deny_kind: "pending_approval" as const, error: "Waiting for approval" };
+    const requested = { turn_id: "turn_a", tool: "test_tool", tool_trace_id: "0:0", approval_request_id: "approval_1", approval_status: "requested" as const, deny_kind: "pending_approval" as const, error: "Waiting for approval" };
     const waiting = { ...turn("a", 1), text: "", tools: [requested] };
     h.set({ revision: 1, busy: true, turns: [waiting] });
     const stop = h.app.subscribe(() => {}); await h.app.refresh();
     const tools = () => projectMessages(h.app.getSnapshot()).find(message => message.role === "kokoro")?.tools ?? [];
     expect(tools().filter(canSubmitApproval)).toMatchObject([{ approvalRequestId: "approval_1" }]);
-    h.emit({ ...waiting, revision: 2, tools: [requested, { turn_id: "turn_a", tool: "test_tool", approval_request_id: "approval_1", approval_status: "approved", result: { message: "done" } }] });
+    const resolved = { ...waiting, revision: 2, tools: [requested, { ...requested, approval_status: "approved" as const, result: { message: "done" } }] };
+    h.emit(resolved);
+    expect(tools()).toMatchObject([{ approvalStatus: "approved", text: "done" }]);
+    h.set({ revision: 2, turns: [resolved], messages: [{
+      id: 3, role: "tool", content: "done", created_at: "now",
+      metadata: JSON.stringify({ type: "tool_result", turn_id: "turn_a", tool_name: "test_tool", tool_trace_id: "0:0" }),
+    }] });
+    await h.app.refresh();
     expect(tools()).toMatchObject([{ approvalStatus: "approved", text: "done" }]);
     expect(tools().some(canSubmitApproval)).toBe(false);
     stop();

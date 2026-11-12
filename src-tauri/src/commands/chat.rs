@@ -1171,6 +1171,8 @@ pub struct ChatRequest {
     pub model: Option<String>,
     pub allow_image_gen: Option<bool>,
     pub images: Option<Vec<String>>,
+    /// One-shot vision context, excluded from the journal and history previews.
+    pub camera_frame: Option<String>,
     pub character_id: Option<String>,
     /// If true, the user instruction is hidden. Non-empty assistant replies may
     /// still be saved, while proactive no-op responses persist nothing.
@@ -1586,23 +1588,11 @@ fn rejected_tool_trace_payload_for_test(
 
 async fn emit_tool_trace_event(
     app: &tauri::AppHandle,
-    turn_id: &str,
-    outcome: &crate::actions::ToolExecutionOutcome,
-) {
-    match &outcome.result {
-        Ok(result) => {
-            let _ = crate::chat::runtime::emit_chat_event(app,
-                "chat-turn-tool",
-                tool_success_payload(outcome, turn_id, result),
-            ).await;
-        }
-        Err(error) => {
-            let _ = crate::chat::runtime::emit_chat_event(app,
-                "chat-turn-tool",
-                tool_error_payload(outcome, turn_id, error),
-            ).await;
-        }
-    }
+    tool_trace_id: &str,
+    mut payload: serde_json::Value,
+) -> Result<(), tauri::Error> {
+    payload["tool_trace_id"] = serde_json::Value::String(tool_trace_id.to_owned());
+    crate::chat::runtime::emit_chat_event(app, "chat-turn-tool", payload).await
 }
 
 async fn execute_single_tool_after_approval(
@@ -1755,6 +1745,7 @@ struct ToolApprovalExecutionContext<'a> {
     tool_settings_state: &'a std::sync::Arc<RwLock<ToolSettings>>,
     character_id: &'a str,
     turn_id: &'a str,
+    tool_trace_id: &'a str,
     cancel_state: &'a TurnCancellationState,
 }
 
@@ -1791,7 +1782,7 @@ async fn wait_for_tool_approval_and_execute(
         return Err(KokoroError::Chat(e));
     }
 
-    crate::chat::runtime::emit_chat_event(ctx.app, "chat-turn-tool", requested_payload)
+    emit_tool_trace_event(ctx.app, ctx.tool_trace_id, requested_payload)
         .await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
@@ -2066,8 +2057,59 @@ pub fn get_chat_runtime_snapshot(runtime: State<'_, Arc<crate::chat::runtime::Ch
 }
 
 #[tauri::command]
-pub async fn get_chat_view(state: State<'_, AIOrchestrator>, runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>) -> Result<crate::chat::runtime::ChatViewSnapshot, KokoroError> {
-    crate::chat::runtime::get_chat_view(state, runtime).await
+pub async fn get_chat_view(
+    state: State<'_, AIOrchestrator>,
+    runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
+    known_version: Option<crate::chat::runtime::ChatViewVersion>,
+) -> Result<Option<crate::chat::runtime::ChatViewSnapshot>, KokoroError> {
+    crate::chat::runtime::get_chat_view(&state, &runtime, known_version).await
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatDraftSubmissionStatus {
+    Pending,
+    Persisted,
+    Unsent,
+}
+
+#[tauri::command]
+pub async fn get_chat_draft_submission_status(
+    state: State<'_, AIOrchestrator>,
+    runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
+    character_id: String,
+    client_request_id: String,
+) -> Result<ChatDraftSubmissionStatus, KokoroError> {
+    chat_draft_submission_status(&state.db, &runtime, &character_id, &client_request_id).await
+}
+
+async fn chat_draft_submission_status(
+    db: &sqlx::SqlitePool,
+    runtime: &crate::chat::runtime::ChatRuntimeState,
+    character_id: &str,
+    client_request_id: &str,
+) -> Result<ChatDraftSubmissionStatus, KokoroError> {
+    if runtime.is_pending_request(character_id, client_request_id) {
+        return Ok(ChatDraftSubmissionStatus::Pending);
+    }
+    let persisted: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM conversation_messages AS message
+            JOIN conversations AS conversation ON conversation.id = message.conversation_id
+            WHERE conversation.character_id = ? AND message.role = 'user' AND message.metadata IS NOT NULL
+              AND (CASE WHEN json_valid(message.metadata)
+                        THEN json_extract(message.metadata, '$.client_request_id') END) = ?
+        )",
+    )
+    .bind(character_id)
+    .bind(client_request_id)
+    .fetch_one(db)
+    .await?;
+    Ok(if persisted {
+        ChatDraftSubmissionStatus::Persisted
+    } else {
+        ChatDraftSubmissionStatus::Unsent
+    })
 }
 
 // ── Stream Chat Command ────────────────────────────────────
@@ -2133,7 +2175,7 @@ pub async fn submit_chat(app: tauri::AppHandle, mut request: ChatRequest) -> Res
                 .unwrap_or_else(|_| Err(KokoroError::Chat("chat worker panicked".into())))
                 .map_err(|error| error.to_string());
             if let Ok(response) = &mut result {
-                if let Some(snapshot) = runtime.snapshots().into_iter().find(|turn| turn.client_request_id == request_id) { response.text = snapshot.text; }
+                if let Some(text) = runtime.turn_text(&request_id) { response.text = text; }
             }
             if let Some(snapshot) = runtime.complete(&request_id, result) {
                 let _ = app.emit("chat-runtime-changed", snapshot);
@@ -2437,7 +2479,7 @@ async fn execute_chat(
                     .add_message_with_metadata_for_conversation_locked(
                         "user".to_string(),
                         request.message.clone(),
-                        None,
+                        Some(serde_json::json!({ "client_request_id": client_request_id }).to_string()),
                         &char_id,
                         active_conv_id,
                         Some(system_provider.clone()),
@@ -2824,36 +2866,32 @@ async fn execute_chat(
         }
     }
 
-    // Attach images to the last user message if present
-    if let Some(images) = &request.images {
-        if !images.is_empty() {
-            // Find the last message with role "user"
-            if let Some(last_user_msg) = client_messages
-                .iter_mut()
-                .rfind(|m| crate::llm::messages::is_user_message(&m.message))
-            {
-                let text_content = extract_message_text(&last_user_msg.message);
+    // Attach the selected images and one-shot camera context to the current user message.
+    let images = request.images.as_deref().unwrap_or_default();
+    let camera_frame = request.camera_frame.take();
+    let image_count = images.len() + usize::from(camera_frame.is_some());
+    if image_count > 0 {
+        if let Some(last_user_msg) = client_messages
+            .iter_mut()
+            .rfind(|m| crate::llm::messages::is_user_message(&m.message))
+        {
+            let text_content = extract_message_text(&last_user_msg.message);
+            let mut processed_images = Vec::with_capacity(image_count);
 
-                // Process images: convert local URLs to base64
-                let mut processed_images = Vec::with_capacity(images.len());
+            if !images.is_empty() {
                 let vision_server_guard = vision_server.lock().await;
                 let port = vision_server_guard.port;
                 let upload_dir = vision_server_guard.upload_dir.clone();
                 drop(vision_server_guard);
-
                 for img_url in images {
                     let mut final_url = img_url.clone();
-                    // Check if local
                     if img_url.contains(&format!("http://127.0.0.1:{}", port)) {
-                        // Extract filename
                         if let Some(filename) = img_url.split("/vision/").nth(1) {
                             let file_path = upload_dir.join(filename);
                             if let Ok(file_content) = tokio::fs::read(&file_path).await {
-                                // Convert to base64
                                 use base64::Engine as _;
                                 let b64 =
                                     base64::engine::general_purpose::STANDARD.encode(&file_content);
-                                // Detect mime type
                                 let mime = crate::vision::server::detect_image_mime(&file_content)
                                     .unwrap_or("image/png".to_string());
                                 final_url = format!("data:{};base64,{}", mime, b64);
@@ -2862,16 +2900,16 @@ async fn execute_chat(
                     }
                     processed_images.push(final_url);
                 }
-
-                // Create multimodal content
-                replace_user_message_with_images(
-                    &mut last_user_msg.message,
-                    text_content,
-                    processed_images,
-                )
-                .map_err(KokoroError::Chat)?;
-                tracing::info!(target: "chat", "[Chat] Attached {} images to user message", images.len());
             }
+
+            processed_images.extend(camera_frame);
+            replace_user_message_with_images(
+                &mut last_user_msg.message,
+                text_content,
+                processed_images,
+            )
+            .map_err(KokoroError::Chat)?;
+            tracing::info!(target: "chat", "[Chat] Attached {} images to user message", image_count);
         }
     }
 
@@ -3342,7 +3380,9 @@ async fn execute_chat(
             .any(|outcome| outcome.needs_feedback);
         let has_native_tool_calls = tool_calls.iter().any(|tc| tc.tool_call_id.is_some());
 
-        for outcome in execution_outcomes {
+        for (index, outcome) in execution_outcomes.into_iter().enumerate() {
+            // Scope the trace to this turn. Providers can omit or reuse their call IDs.
+            let tool_trace_id = format!("{round}:{index}");
             ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
                 .await
                 .map_err(KokoroError::Chat)?;
@@ -3388,6 +3428,7 @@ async fn execute_chat(
                         tool_settings_state: &tool_settings_state.inner().clone(),
                         character_id: &char_id,
                         turn_id: &assistant_turn_id,
+                        tool_trace_id: &tool_trace_id,
                         cancel_state: cancel_state.inner().as_ref(),
                     };
                     let (resolved_result, resolved_payload) = wait_for_tool_approval_and_execute(
@@ -3407,7 +3448,7 @@ async fn execute_chat(
                     ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
                         .await
                         .map_err(KokoroError::Chat)?;
-                    crate::chat::runtime::emit_chat_event(&app, "chat-turn-tool", resolved_payload).await
+                    emit_tool_trace_event(&app, &tool_trace_id, resolved_payload).await
                         .map_err(|e| KokoroError::Chat(e.to_string()))?;
                     ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
                         .await
@@ -3415,14 +3456,16 @@ async fn execute_chat(
                     resolved_result
                 } else {
                     tracing::error!(target: "tools", "[ToolCall] {} failed: {}", outcome.tool_name(), error);
-                    emit_tool_trace_event(&app, &assistant_turn_id, &outcome).await;
+                    let payload = tool_error_payload(&outcome, &assistant_turn_id, error);
+                    let _ = emit_tool_trace_event(&app, &tool_trace_id, payload).await;
                     outcome.result.clone()
                 }
             } else {
                 if let Ok(success) = &outcome.result {
                     tracing::info!(target: "tools", "[ToolCall] {} => {}", outcome.tool_name(), success.message);
+                    let payload = tool_success_payload(&outcome, &assistant_turn_id, success);
+                    let _ = emit_tool_trace_event(&app, &tool_trace_id, payload).await;
                 }
-                emit_tool_trace_event(&app, &assistant_turn_id, &outcome).await;
                 outcome.result.clone()
             };
 
@@ -3452,10 +3495,9 @@ async fn execute_chat(
                 };
                 let tool_result_msg = tool_result_message(tool_call_id.clone(), message_text);
                 tool_result_messages.push(tool_result_msg.clone());
-                persisted_native_tool_results.push((
-                    tool_metadata_value(&outcome, tool_call_id, &assistant_turn_id),
-                    tool_result_msg,
-                ));
+                let mut metadata = tool_metadata_value(&outcome, tool_call_id, &assistant_turn_id);
+                metadata["tool_trace_id"] = serde_json::Value::String(tool_trace_id);
+                persisted_native_tool_results.push((metadata, tool_result_msg));
             }
         }
 
@@ -6058,6 +6100,45 @@ mod tests {
 
         // 11. Ambient caller without target, initial A, cleared -> invalid!
         assert!(!check(None, Some("conv-A"), None, 1, 2));
+    }
+
+    #[tokio::test]
+    async fn draft_submission_recovery_uses_the_saved_request_after_runtime_restart() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        let db = &state.db;
+        let runtime = crate::chat::runtime::ChatRuntimeState::default();
+        let request: ChatRequest = serde_json::from_value(serde_json::json!({
+            "message": "same text", "character_id": "char-a", "client_request_id": "draft-1"
+        })).unwrap();
+        runtime.begin(&request).unwrap();
+        assert_eq!(
+            chat_draft_submission_status(db, &runtime, "char-a", "draft-1").await.unwrap(),
+            ChatDraftSubmissionStatus::Pending,
+        );
+
+        sqlx::query("INSERT INTO conversations (id, character_id, created_at, updated_at) VALUES ('conv-a', 'char-a', 'now', 'now')")
+            .execute(db).await.unwrap();
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-a', 'user', 'same text', 'legacy malformed metadata', 'now')")
+            .execute(db).await.unwrap();
+        state.add_message_with_metadata_for_conversation(
+            "user".into(), request.message,
+            Some(serde_json::json!({ "client_request_id": "draft-1" }).to_string()),
+            "char-a", Some("conv-a"), None,
+        ).await.unwrap();
+
+        let restarted = crate::chat::runtime::ChatRuntimeState::default();
+        assert_eq!(
+            chat_draft_submission_status(db, &restarted, "char-a", "draft-1").await.unwrap(),
+            ChatDraftSubmissionStatus::Persisted,
+        );
+        assert_eq!(
+            chat_draft_submission_status(db, &restarted, "char-b", "draft-1").await.unwrap(),
+            ChatDraftSubmissionStatus::Unsent,
+        );
+        assert_eq!(
+            chat_draft_submission_status(db, &restarted, "char-a", "draft-2").await.unwrap(),
+            ChatDraftSubmissionStatus::Unsent,
+        );
     }
 
     #[tokio::test]

@@ -22,7 +22,7 @@ interface ChatMessageProps {
     isStreaming: boolean;
     isTranslationExpanded: boolean;
     onToggleTranslation: () => void;
-    onEdit: (newText: string) => void;
+    onEdit?: (newText: string) => void;
     onRegenerate: () => void;
     onContinueFrom: () => void;
     onApproveTool: (tool: ToolTraceItem) => void;
@@ -189,7 +189,7 @@ export const ChatMessage = memo(function ChatMessage({
 
     const handleSaveEdit = () => {
         if (!editingText.trim()) return;
-        onEdit(editingText);
+        onEdit?.(editingText);
         setIsEditing(false);
     };
 
@@ -345,13 +345,13 @@ export const ChatMessage = memo(function ChatMessage({
                             </button>
 
                             {/* 编辑按钮 */}
-                            <button
+                            {onEdit && <button
                                 onClick={handleStartEdit}
                                 className="p-1.5 rounded-md bg-slate-800/90 backdrop-blur-sm text-slate-400 hover:text-[var(--color-accent)] hover:bg-slate-700/90 transition-colors shadow-lg"
                                 title={t("chat.actions.edit")}
                             >
                                 <Edit2 size={12} strokeWidth={1.5} />
-                            </button>
+                            </button>}
 
                             {/* 重新生成按钮（仅 kokoro 消息） */}
                             {msg.role === "kokoro" && (

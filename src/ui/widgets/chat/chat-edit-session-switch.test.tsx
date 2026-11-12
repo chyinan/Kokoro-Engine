@@ -10,6 +10,7 @@ const messages = [
   { id: 102, role: "assistant", content: "answer A", created_at: "now" },
   { id: 103, role: "user", content: "later A", created_at: "now" },
 ];
+const editTarget = { conversationId: "conversation-a", generation: 3, messageId: 101 };
 afterEach(() => vi.restoreAllMocks());
 
 describe("application history command session ownership", () => {
@@ -34,11 +35,22 @@ describe("application history command session ownership", () => {
     const h = harness(); h.set({ messages }); await h.app.refresh();
     const edit = deferred<bridge.EditConversationMessageResponse>();
     const invoke = vi.spyOn(bridge, "editConversationMessage").mockReturnValue(edit.promise);
-    const running = h.app.edit(0, "edited A");
+    const running = h.app.edit(editTarget, "edited A");
     expect(invoke).toHaveBeenCalledWith({ conversation_id: "conversation-a", message_id: 101, new_content: "edited A" });
     h.set({ conversation_id: "conversation-b", generation: 4, messages: [{ id: 201, role: "user", content: "original B", created_at: "now" }] });
     await h.app.refresh(); edit.resolve({ message_id: 101, updated_content: "edited A" }); await running;
     expect(projectMessages(h.app.getSnapshot())).toMatchObject([{ id: 201, text: "original B" }]);
+  });
+  it("drops a stale save after switching away and after returning to the same conversation", async () => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    const invoke = vi.spyOn(bridge, "editConversationMessage").mockResolvedValue({ message_id: 101, updated_content: "edited A" });
+    h.set({ conversation_id: "conversation-b", generation: 4, messages: [{ ...messages[0], id: 201, content: "original B" }] });
+    await h.app.refresh();
+    await h.app.edit(editTarget, "edited A");
+    h.set({ conversation_id: "conversation-a", generation: 5, messages });
+    await h.app.refresh();
+    await h.app.edit(editTarget, "edited A");
+    expect(invoke).not.toHaveBeenCalled();
   });
   it("reads edited history even while a pre-edit poll is still in flight", async () => {
     const h = harness(); h.set({ messages });
@@ -50,7 +62,7 @@ describe("application history command session ownership", () => {
       h.set({ messages: [{ ...messages[0], content: "edited A" }, ...messages.slice(1)] });
       return { message_id: 101, updated_content: "edited A" };
     });
-    const editing = h.app.edit(0, "edited A");
+    const editing = h.app.edit(editTarget, "edited A");
     await vi.waitFor(() => expect(h.io.read).toHaveBeenCalledTimes(3));
     await editing;
     stale.resolve(before); await poll;
@@ -97,17 +109,27 @@ describe("application history command session ownership", () => {
     expect(h.io.send).not.toHaveBeenCalled();
     deletion.resolve(); await running; expect(h.app.getSnapshot().busy).toBe(false);
   });
-  it("regenerates after guarded deletion with the original images restored from a completed turn", async () => {
+  it("regenerates from a restored turn with the selected image and without the original camera frame", async () => {
     const h = harness();
     const images = ["http://127.0.0.1:1234/vision/test.png"];
+    const cameraFrame = "data:image/jpeg;base64,Y2FtZXJh";
+    await h.app.refresh();
+    const completion = h.pending();
+    const sending = h.app.send({ message: "original A", images, camera_frame: cameraFrame, client_request_id: "image-turn" });
+    expect(projectMessages(h.app.getSnapshot())).toEqual([
+      { role: "user", text: "original A", images, clientRequestId: "image-turn" },
+    ]);
     h.set({ revision: 2, messages: messages.slice(0, 2), turns: [{ ...turn("image-turn", 2, "completed"), user_message_id: 101, images }] });
+    completion.resolve({ status: "completed", conversation_id: "conversation-a", text: "answer A" });
+    await sending;
     const reopened = h.newWindow(); await reopened.refresh();
     const deletion = deferred<void>(); const remove = vi.spyOn(bridge, "deleteLastMessages").mockReturnValue(deletion.promise);
     const running = reopened.continueFrom(1, true, { allow_image_gen: true });
     expect(remove).toHaveBeenCalledWith(1, "conversation-a", 102);
-    expect(h.io.send).not.toHaveBeenCalled();
+    expect(h.io.send).toHaveBeenCalledOnce();
     h.set({ messages: messages.slice(0, 1) }); deletion.resolve(); await running;
-    expect(h.io.send).toHaveBeenCalledWith(expect.objectContaining({ message: "original A", images, regenerate: true, conversation_id: "conversation-a", character_id: "character-a", conversation_generation: 3, allow_image_gen: true }));
+    expect(h.io.send).toHaveBeenNthCalledWith(2, expect.objectContaining({ message: "original A", images, regenerate: true, conversation_id: "conversation-a", character_id: "character-a", conversation_generation: 3, allow_image_gen: true }));
+    expect(vi.mocked(h.io.send).mock.lastCall?.[0]).not.toHaveProperty("camera_frame");
   });
   it.each(["conversation", "character", "generation"])("does not regenerate after %s changes while deleting", async changed => {
     const h = harness(); h.set({ messages }); await h.app.refresh();

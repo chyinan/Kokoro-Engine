@@ -272,7 +272,15 @@ export function useCharacterChatDraft(
         }
         // Keep text and attachments added while the request was waiting to bind.
         if (textMatches) setInput("");
-        if (images.length) setPendingImages(previous => previous.filter(url => !images.includes(url)));
+        if (images.length) setPendingImages(previous => {
+            const sent = [...images];
+            return previous.filter(url => {
+                const index = sent.indexOf(url);
+                if (index < 0) return true;
+                sent.splice(index, 1);
+                return false;
+            });
+        });
         flushDraft();
     }, [clearDraft, flushDraft, setInput, setPendingImages]);
 

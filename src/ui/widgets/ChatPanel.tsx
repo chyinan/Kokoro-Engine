@@ -7,7 +7,7 @@ import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
 import { uploadVisionImage, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
 import type { ToolTraceItem } from "../../lib/kokoro-bridge";
-import { chatApplication } from "../../lib/chat/application";
+import { chatApplication, type ChatEditTarget } from "../../lib/chat/application";
 import { projectMessages, isActiveTurn } from "../../lib/chat/projection";
 import { canSubmitApproval, getApprovalRequestId, type ChatPanelMessage } from "../../lib/chat/turn-state";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
@@ -21,6 +21,7 @@ import { computeTargetScrollTop, isScrollAtBottom, computeAnchoredScrollTop, typ
 import { computeResizedInputHeight, loadSavedChatInputHeight, saveChatInputHeight, toggleChatInputResetHeight } from "./chat/chat-input-layout";
 import { combineDraftWithTranscription, saveCharacterDraft } from "./chat/chat-draft-layout";
 import { useCharacterChatDraft } from "./chat/use-character-draft";
+import { useChatDraftSubmission } from "./chat/use-chat-draft-submission";
 import { getChatPanelInteractionProps } from "../layout/layout-interaction";
 import { APP_SETTING_KEYS, readBooleanSetting, readJsonSetting, readStringSetting } from "../../lib/app-settings";
 type ChatMessage = ChatPanelMessage;
@@ -100,11 +101,13 @@ function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => 
 // ── MemoizedChatMessage wrapper ───────────────────────────
 interface MemoizedChatMessageProps {
     message: ChatMessage;
+    conversationId: string | null;
+    generation: number;
     globalIndex: number;
     isStreaming: boolean;
     isTranslationExpanded: boolean;
     onToggleTranslation: (index: number) => void;
-    onEdit: (index: number, newText: string) => void;
+    onEdit: (target: ChatEditTarget, newText: string) => void;
     onRegenerate: (index: number) => Promise<void>;
     onContinueFrom: (index: number) => Promise<void>;
     onApproveTool: (index: number, tool: ToolTraceItem) => Promise<void>;
@@ -120,10 +123,11 @@ function createToolActionHandler<TArgs extends Array<unknown>>(
 }
 
 const MemoizedChatMessage = memo(function MemoizedChatMessage({
-    message, globalIndex, isStreaming, isTranslationExpanded,
+    message, conversationId, generation, globalIndex, isStreaming, isTranslationExpanded,
     onToggleTranslation, onEdit, onRegenerate, onContinueFrom, onApproveTool, onRejectTool,
     onPreviewImage,
 }: MemoizedChatMessageProps) {
+    const messageId = message.id;
     return (
         <ChatMessage
             message={message}
@@ -131,7 +135,9 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
             isStreaming={isStreaming}
             isTranslationExpanded={isTranslationExpanded}
             onToggleTranslation={() => onToggleTranslation(globalIndex)}
-            onEdit={(text) => onEdit(globalIndex, text)}
+            onEdit={conversationId !== null && messageId !== undefined
+                ? text => onEdit({ conversationId, generation, messageId }, text)
+                : undefined}
             onRegenerate={() => onRegenerate(globalIndex)}
             onContinueFrom={() => onContinueFrom(globalIndex)}
             onApproveTool={createToolActionHandler(globalIndex, onApproveTool)}
@@ -168,7 +174,6 @@ export default function ChatPanel({
     activeCharacterIdRef.current = activeCharacterId;
     activeConversationIdRef.current = activeConversationId;
     conversationGenerationRef.current = view.generation;
-    const isBusy = view.busy;
     const activeTurn = view.turns.find(turn => isActiveTurn(turn) && turn.character_id === activeCharacterId);
     const messages = useChatTextReveal(projectedMessages, activeTurn?.turn_id);
     const isStreaming = Boolean(activeTurn);
@@ -178,7 +183,11 @@ export default function ChatPanel({
     const [collapsed, setCollapsed] = useState(false);
     const [showClearConfirm, setShowClearConfirm] = useState(false);
     const [expandedTranslations, setExpandedTranslations] = useState<Set<number>>(new Set());
-    const deferredMessages = useDeferredValue(messages);
+    const messageList = useMemo(() => ({ messages, conversationId: activeConversationId, generation: view.generation }), [messages, activeConversationId, view.generation]);
+    const deferredList = useDeferredValue(messageList);
+    // Defer updates within a conversation, but never show old rows under a new selection.
+    const deferredMessages = deferredList.conversationId === activeConversationId && deferredList.generation === view.generation
+        ? deferredList.messages : messages;
     const [visibleCount, setVisibleCount] = useState(20);
     const [showScrollBottom, setShowScrollBottom] = useState(false);
     const [hasNewMessagesBelow, setHasNewMessagesBelow] = useState(false);
@@ -186,6 +195,8 @@ export default function ChatPanel({
     const prevScrollHeightRef = useRef(0);
     const prevScrollTopRef = useRef(0);
     const { input, setInput, pendingImages, setPendingImages, consumeSentDraft, flushDraft, clearDraftImages, getImageDraftContext, appendPendingImage } = useCharacterChatDraft(activeCharacterId);
+    const { recoveringDraft, rememberSubmission, finishSubmission } = useChatDraftSubmission(activeCharacterId, view.turns, flushDraft, consumeSentDraft);
+    const isBusy = view.busy || recoveringDraft;
     const inputRef = useRef(input);
     inputRef.current = input;
     const sttBaseDraftRef = useRef<string | null>(null);
@@ -316,32 +327,21 @@ export default function ChatPanel({
         submittingRef.current = true;
         const clientRequestId = `req_${crypto.randomUUID()}`;
         const character = activeCharacterIdRef.current;
-        const images = camera ? [...draftImages, camera] : draftImages;
-        let consumed = false;
-        const consume = () => {
-            if (consumed) return;
-            consumed = true;
-            consumeSentDraft(character, draftText, draftImages);
-        };
-        // Acknowledgement is earlier than persistence. Keep the draft until this
-        // request actually has a saved user row, even if another window wins admission.
-        const stop = chatApplication.subscribe(() => {
-            if (!consumed && chatApplication.getSnapshot().turns.some(turn => turn.client_request_id === clientRequestId && turn.user_message_id != null)) consume();
-        });
+        rememberSubmission(clientRequestId, draftText, draftImages);
         try {
             const response = await chatApplication.send({
-                message: draftText.trim() || "(image attached)", images: images.length ? images : undefined,
+                message: draftText.trim() || "(image attached)",
+                images: draftImages.length ? draftImages : undefined, camera_frame: camera ?? undefined,
                 client_request_id: clientRequestId, character_id: character,
                 conversation_id: activeConversationIdRef.current ?? undefined,
                 conversation_generation: conversationGenerationRef.current,
                 allow_image_gen: readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated",
             });
-            if (response.user_message_id != null) consume();
+            if (response.user_message_id != null) finishSubmission(character, clientRequestId, true);
         } finally {
-            stop();
             submittingRef.current = false;
         }
-    }, [consumeSentDraft]);
+    }, [rememberSubmission, finishSubmission]);
     const handleTranscription = useCallback((text: string) => {
         const character = sttBaseCharacterIdRef.current ?? activeCharacterIdRef.current;
         const conversation = sttBaseConversationIdRef.current ?? activeConversationIdRef.current;
@@ -353,7 +353,7 @@ export default function ChatPanel({
         sttBaseGenerationRef.current = null;
         const fullMessage = combineDraftWithTranscription(base, text.trim());
         const current = character === activeCharacterIdRef.current && conversation === activeConversationIdRef.current && generation === conversationGenerationRef.current;
-        if (!current || !sttAutoSend || interactionDisabled || submittingRef.current || chatApplication.getSnapshot().busy || !text.trim()) {
+        if (!current || !sttAutoSend || interactionDisabled || recoveringDraft || submittingRef.current || chatApplication.getSnapshot().busy || !text.trim()) {
             if (character !== activeCharacterIdRef.current) saveCharacterDraft(character, fullMessage);
             else {
                 setInput(previous => {
@@ -365,9 +365,8 @@ export default function ChatPanel({
             return;
         }
         setInput(fullMessage);
-        flushDraft();
         void sendDraft(fullMessage).catch(reportError);
-    }, [sttAutoSend, interactionDisabled, setInput, flushDraft, sendDraft, reportError]);
+    }, [sttAutoSend, interactionDisabled, recoveringDraft, setInput, sendDraft, reportError]);
     const { state: voiceState, volume: micVolume, partialText: sttPartialText, start: startVoice, stop: stopVoice } = useVoiceInput(handleTranscription);
 
     // Refs to avoid stale closures in the voice-interrupt-stt listener
@@ -644,10 +643,11 @@ export default function ChatPanel({
 
     const handleSend = async (event?: React.FormEvent) => {
         event?.preventDefault();
-        if (interactionDisabled || submittingRef.current) return;
-        const images = visionEnabled ? [...pendingImages] : [];
+        if (interactionDisabled || recoveringDraft || submittingRef.current) return;
+        const sendWithVision = readBooleanSetting(APP_SETTING_KEYS.visionEnabled, false);
+        const images = sendWithVision ? [...pendingImages] : [];
         if (!input.trim() && !images.length) return;
-        const camera = visionEnabled ? getLatestCameraFrame() : null;
+        const camera = sendWithVision ? getLatestCameraFrame() : null;
         userScrolledRef.current = false;
         savedScrollSnapshotRef.current = null;
         try { await sendDraft(input, images, camera); }
@@ -821,8 +821,8 @@ export default function ChatPanel({
     const onToggleTranslation = useCallback((index: number) => {
         setExpandedTranslations(previous => { const next = new Set(previous); if (next.has(index)) next.delete(index); else next.add(index); return next; });
     }, []);
-    const onEdit = useCallback(async (index: number, text: string) => {
-        try { await chatApplication.edit(index, text); } catch (error) { reportError(error); }
+    const onEdit = useCallback(async (target: ChatEditTarget, text: string) => {
+        try { await chatApplication.edit(target, text); } catch (error) { reportError(error); }
     }, [reportError]);
     const onRegenerate = useCallback(async (index: number) => {
         try { await chatApplication.continueFrom(index, true, { allow_image_gen: readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated" }); } catch (error) { reportError(error); }
@@ -993,7 +993,7 @@ export default function ChatPanel({
     // ════════════════════════════════════════════════════════�?
     // Expanded state �?full chat panel
     // ════════════════════════════════════════════════════════�?
-    const hasSendableImages = visionEnabled && pendingImages.length > 0;
+    const hasSendableImages = !recoveringDraft && visionEnabled && pendingImages.length > 0;
     const panelResizeMaxWidth = getChatPanelResizeMaxWidth(minWidth);
     const panelResizeValue = Math.min(Math.max(Math.round(width), minWidth), panelResizeMaxWidth);
 
@@ -1209,8 +1209,10 @@ export default function ChatPanel({
                         const globalIndex = Math.max(0, deferredMessages.length - visibleCount) + i;
                         return (
                             <MemoizedChatMessage
-                                key={`${globalIndex}-${msg.role}`}
+                                key={JSON.stringify([activeConversationId, view.generation, msg.id ?? `${globalIndex}-${msg.role}`])}
                                 message={msg}
+                                conversationId={activeConversationId}
+                                generation={view.generation}
                                 globalIndex={globalIndex}
                                 isStreaming={isBusy}
                                 isTranslationExpanded={expandedTranslations.has(globalIndex)}
@@ -1319,7 +1321,7 @@ export default function ChatPanel({
                 >
                     <textarea
                         ref={textareaRef}
-                        value={input}
+                        value={recoveringDraft ? "" : input}
                         onChange={(e) => setInput(e.target.value)}
                         onPaste={handlePaste}
                         onKeyDown={(e) => {
