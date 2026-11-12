@@ -61,9 +61,13 @@
 - character_id、conversation_id 与 conversation_generation 在受理流程校验并冻结。generation 防止 A→B→A 或清空后的旧请求重新写入。
 - 状态是 pending → accepted → streaming → completed/cancelled/error/rejected；终态单次提交，重复终态和迟到旧事件不再改写。
 - 用户消息写入 SQLite 时，在同一 conversation_switch_lock 内发布 chat-turn-bound，恢复不会在保存行旁边再加一条 optimistic 用户消息。
+- 主面板在请求绑定已保存的用户消息后才清除已发送的草稿。受理失败时，文字和待发送图片仍可重试。
+- 待审批工具事件先写入 journal，订阅者在工具结果入库前即可恢复批准和拒绝操作。
 - 先订阅再读取；完整快照按 revision 合并，读被事件超越时重新校验。连接世代阻止退订前的旧读取覆盖新连接。
 - 同一连接合并并行读取。普通 delta 直接替换流式投影，不对每个 token 读取全部历史；身份/状态改变与 750ms 补偿读取负责恢复。
+- 历史或会话选择操作完成后重新读取，操作前发起的旧读取不能覆盖结果，即使 journal revision 未变化。
 - 终态快照不向历史追加行，删除/编辑后的旧 finish 不能复活消息。共享 turn_id 的 context 与 tool 信息不会被助手文字投影或逐字动画覆盖。
+- 临时图片按用户消息 ID 补入仍存在的历史行，供预览和重生成使用，仍受 journal 保留范围及临时上传文件的清理周期限制。
 - 最近至多 256 个完整 turn 快照保留；淘汰后的请求指纹与原结果在本进程保留，避免旧 ID 再执行。该幂等表不跨应用重启，也不是无限持久化队列；长时间运行时结果表会随逻辑请求数量增长。
 
 ## C02/C05/C06/C07：真实原生验证

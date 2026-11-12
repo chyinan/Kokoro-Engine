@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatApplication, emptyChatView, type ChatTransport } from "./application";
 import type { ChatTurnSnapshot, ChatViewSnapshot, StreamChatResponse } from "../kokoro-bridge";
 import { projectMessages } from "./projection";
+import { canSubmitApproval } from "./turn-state";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -81,6 +82,30 @@ describe("UI-independent chat application", () => {
     const stopAgain = h.app.subscribe(() => {}); await h.app.refresh();
     expect(projectMessages(h.app.getSnapshot()).slice(-1)[0]?.text).toBe("already emitted while disconnected");
     expect(h.io.cancel).not.toHaveBeenCalled(); stopAgain();
+  });
+  it("keeps the attachment preview when an optimistic message is bound to a saved row", async () => {
+    const h = harness(); const images = ["http://127.0.0.1:1234/vision/test.png"];
+    h.set({ revision: 1, turns: [{ ...turn("image", 1), user_message_id: null, images }] });
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot())[0]).toMatchObject({ role: "user", images });
+    h.set({ revision: 2, turns: [{ ...turn("image", 2), images }], messages: [{ id: 1, role: "user", content: "saved question", created_at: "now" }] });
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot()).filter(message => message.role === "user")).toEqual([
+      { id: 1, role: "user", text: "saved question", images },
+    ]);
+  });
+  it("restores an actionable tool approval from a snapshot before the result is saved", async () => {
+    const h = harness();
+    const requested = { turn_id: "turn_a", tool: "test_tool", approval_request_id: "approval_1", approval_status: "requested" as const, deny_kind: "pending_approval" as const, error: "Waiting for approval" };
+    const waiting = { ...turn("a", 1), text: "", tools: [requested] };
+    h.set({ revision: 1, busy: true, turns: [waiting] });
+    const stop = h.app.subscribe(() => {}); await h.app.refresh();
+    const tools = () => projectMessages(h.app.getSnapshot()).find(message => message.role === "kokoro")?.tools ?? [];
+    expect(tools().filter(canSubmitApproval)).toMatchObject([{ approvalRequestId: "approval_1" }]);
+    h.emit({ ...waiting, revision: 2, tools: [requested, { turn_id: "turn_a", tool: "test_tool", approval_request_id: "approval_1", approval_status: "approved", result: { message: "done" } }] });
+    expect(tools()).toMatchObject([{ approvalStatus: "approved", text: "done" }]);
+    expect(tools().some(canSubmitApproval)).toBe(false);
+    stop();
   });
   it("subscribes before snapshot and rejects a read overtaken by an event", async () => {
     const h = harness(); const first = deferred<ChatViewSnapshot>();

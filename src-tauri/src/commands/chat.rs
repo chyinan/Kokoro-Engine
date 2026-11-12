@@ -1791,8 +1791,8 @@ async fn wait_for_tool_approval_and_execute(
         return Err(KokoroError::Chat(e));
     }
 
-    ctx.app
-        .emit("chat-turn-tool", requested_payload.clone())
+    crate::chat::runtime::emit_chat_event(ctx.app, "chat-turn-tool", requested_payload)
+        .await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
     let decision = wait_for_tool_approval_decision(

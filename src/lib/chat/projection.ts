@@ -13,10 +13,21 @@ export function mergeTurnSnapshot(turns: ReadonlyMap<string, ChatTurnSnapshot>, 
 
 export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
   let messages: ChatPanelMessage[] = buildChatMessagesFromConversation(view.messages);
-  // Terminal snapshots are deliberately never appended: SQLite owns completed
-  // history, including edits/deletions. An old finish cannot resurrect a row.
-  for (const turn of view.turns.filter(isActiveTurn)) {
-    if (turn.character_id !== view.character_id || (turn.conversation_id && turn.conversation_id !== view.conversation_id)) continue;
+  const turns = view.turns.filter(turn => turn.character_id === view.character_id && (!turn.conversation_id || turn.conversation_id === view.conversation_id));
+  // The journal holds temporary attachments. Even after completion, associate
+  // them with the saved user row without restoring deleted rows or old text.
+  const imagesByMessage = new Map<number, string[]>();
+  for (const turn of turns) {
+    if (!turn.hidden && turn.conversation_id === view.conversation_id && turn.user_message_id !== null && turn.images.length) {
+      imagesByMessage.set(turn.user_message_id, turn.images);
+    }
+  }
+  messages = messages.map(message => {
+    const images = message.role === "user" && message.id !== undefined ? imagesByMessage.get(message.id) : undefined;
+    return images ? { ...message, images } : message;
+  });
+  // Only active turns can add rows beyond those in SQLite.
+  for (const turn of turns.filter(isActiveTurn)) {
     if (!turn.hidden && !messages.some(message => message.id === turn.user_message_id && turn.user_message_id !== null)) {
       messages.push({ role: "user", text: turn.message, images: turn.images, clientRequestId: turn.client_request_id });
     }

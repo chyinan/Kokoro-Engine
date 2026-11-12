@@ -6,9 +6,10 @@ import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import ChatPanel from "../ChatPanel";
 import { chatViewFixture as chat } from "../../../lib/chat/view-test-fixture";
+import { deferred, turn } from "../../../lib/chat/__tests__/harness";
 vi.mock("../../../lib/chat/application", async () => ({ chatApplication: (await import("../../../lib/chat/view-test-fixture")).chatViewFixture }));
 vi.mock("../../../lib/kokoro-bridge", async original => ({ ...(await original<typeof import("../../../lib/kokoro-bridge")>()), setVisionTextInputFocused: vi.fn(async () => {}) }));
-import { loadSavedCharacterDraft } from "./chat-draft-layout";
+import { loadSavedCharacterDraft, loadSavedCharacterDraftImages, saveCharacterDraft, saveCharacterDraftImages } from "./chat-draft-layout";
 
 // Mock framer-motion
 vi.mock("framer-motion", () => ({
@@ -75,7 +76,7 @@ vi.mock("../../../core/services", () => ({
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-describe("ChatPanel STT session switch draft preservation", () => {
+describe("ChatPanel draft preservation", () => {
     let container: HTMLDivElement;
     let root: ReturnType<typeof createRoot>;
     beforeEach(async () => {
@@ -92,9 +93,56 @@ describe("ChatPanel STT session switch draft preservation", () => {
         expect(mic).not.toBeNull(); act(() => mic!.click());
     }
     async function finish(text: string) { await act(async () => capturedOnFinalTranscription?.(text)); }
+    const draftText = "  draft with an image  ";
+    const draftImage = "data:image/png;base64,iVBORw0KGgo=";
+    async function loadImageDraft() {
+        saveCharacterDraft("draft-character", draftText);
+        saveCharacterDraftImages("draft-character", [draftImage]);
+        localStorage.setItem("kokoro_vision_enabled", "true");
+        await act(async () => {
+            chat.set({ character_id: "draft-character" });
+            window.dispatchEvent(new Event("kokoro-vision-settings-changed"));
+        });
+    }
+    async function send() {
+        const button = container.querySelector<HTMLButtonElement>('button[aria-label="Send message"]');
+        expect(button).not.toBeNull();
+        await act(async () => button!.click());
+    }
+    it("keeps the unsent text and image when another window wins admission", async () => {
+        await loadImageDraft();
+        chat.send.mockRejectedValueOnce({ code: "Chat", message: "chat_turn_busy: A chat turn is already in progress" });
+        await send();
+        expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({ message: draftText.trim(), images: [draftImage] }));
+        expect(container.querySelector("textarea")?.value).toBe(draftText);
+        expect(container.querySelector('img[alt="pending"]')?.getAttribute("src")).toBe(draftImage);
+        expect(loadSavedCharacterDraft("draft-character")).toBe(draftText);
+        expect(loadSavedCharacterDraftImages("draft-character")).toEqual([draftImage]);
+    });
+    it("clears a submitted draft at persistence, before the generation finishes", async () => {
+        await loadImageDraft();
+        const response = deferred<Awaited<ReturnType<typeof chat.send>>>();
+        chat.send.mockImplementationOnce(() => response.promise);
+        await send();
+        const requestId = chat.send.mock.lastCall?.[0].client_request_id;
+        expect(requestId).toBeTruthy();
+        const accepted = { ...turn(requestId!, 2, "accepted"), character_id: "draft-character", conversation_id: "conv-1", user_message_id: null, images: [draftImage] };
+        await act(async () => chat.set({ revision: 2, busy: true, turns: [accepted] }));
+        expect(container.querySelector("textarea")?.value).toBe(draftText);
+        await act(async () => chat.set({ revision: 3, turns: [{ ...accepted, revision: 3, user_message_id: 10 }] }));
+        expect(container.querySelector("textarea")?.value).toBe("");
+        expect(loadSavedCharacterDraftImages("draft-character")).toEqual([]);
+        await act(async () => response.resolve({ conversation_id: "conv-1", status: "completed", text: "reply" }));
+    });
     it("auto-sends through the application when the recording session stays current", async () => {
         record(); await finish("spoken words");
         expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({ message: "spoken words", character_id: "char-1", conversation_id: "conv-1" }));
+    });
+    it("keeps an auto-sent transcription in the input if admission fails", async () => {
+        chat.send.mockRejectedValueOnce(new Error("chat_turn_busy"));
+        record(); await finish("spoken words");
+        expect(container.querySelector("textarea")?.value).toBe("spoken words");
+        expect(loadSavedCharacterDraft("char-1")).toBe("spoken words");
     });
     it.each(["conv-2", null])("preserves transcription and its saved draft after same-character switch to %s", async conversation_id => {
         record(); await act(async () => chat.set({ conversation_id, generation: 2 })); await finish("belongs to the old session");

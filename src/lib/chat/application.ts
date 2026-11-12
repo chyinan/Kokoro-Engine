@@ -140,15 +140,22 @@ export class ChatApplication {
     if (view.character_id !== characterId) await this.cancel(undefined, "character_switched");
   }
   async selectConversation(id: string | null) {
-    await this.cancel(undefined, "conversation_switched");
-    if (id) await bridge.loadConversation(id); else await bridge.clearHistory();
-    await this.refresh();
+    return this.mutate(async () => {
+      await this.cancel(undefined, "conversation_switched");
+      if (id) await bridge.loadConversation(id); else await bridge.clearHistory();
+    });
   }
   private async mutate(operation: () => Promise<unknown>) {
     if (this.mutation) throw new Error("history_mutation_busy");
     this.mutation = operation();
     this.publish({ ...this.view, busy: true });
-    try { await this.mutation; } finally { this.mutation = null; await this.refresh(); }
+    try { await this.mutation; } finally {
+      this.mutation = null;
+      // History and selection changes do not advance the journal revision.
+      // Start a new read so an older response cannot publish after the mutation.
+      this.readInFlight = undefined;
+      await this.refresh();
+    }
   }
   async clear() {
     return this.mutate(async () => {

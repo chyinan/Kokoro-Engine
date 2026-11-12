@@ -185,7 +185,7 @@ export default function ChatPanel({
     const isPrependingRef = useRef(false);
     const prevScrollHeightRef = useRef(0);
     const prevScrollTopRef = useRef(0);
-    const { input, setInput, pendingImages, setPendingImages, clearDraft, clearDraftImages, getImageDraftContext, appendPendingImage } = useCharacterChatDraft(activeCharacterId);
+    const { input, setInput, pendingImages, setPendingImages, consumeSentDraft, flushDraft, clearDraftImages, getImageDraftContext, appendPendingImage } = useCharacterChatDraft(activeCharacterId);
     const inputRef = useRef(input);
     inputRef.current = input;
     const sttBaseDraftRef = useRef<string | null>(null);
@@ -310,14 +310,38 @@ export default function ChatPanel({
         await handleConversationSelection(null);
         return true;
     }, [handleConversationSelection]);
-    const sendDraft = useCallback(async (message: string, images?: string[], clientRequestId?: string) => {
-        await chatApplication.send({
-            message, images, client_request_id: clientRequestId, character_id: activeCharacterIdRef.current,
-            conversation_id: activeConversationIdRef.current ?? undefined,
-            conversation_generation: conversationGenerationRef.current,
-            allow_image_gen: readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated",
+    const submittingRef = useRef(false);
+    const sendDraft = useCallback(async (draftText: string, draftImages: string[] = [], camera: string | null = null) => {
+        if (submittingRef.current) return;
+        submittingRef.current = true;
+        const clientRequestId = `req_${crypto.randomUUID()}`;
+        const character = activeCharacterIdRef.current;
+        const images = camera ? [...draftImages, camera] : draftImages;
+        let consumed = false;
+        const consume = () => {
+            if (consumed) return;
+            consumed = true;
+            consumeSentDraft(character, draftText, draftImages);
+        };
+        // Acknowledgement is earlier than persistence. Keep the draft until this
+        // request actually has a saved user row, even if another window wins admission.
+        const stop = chatApplication.subscribe(() => {
+            if (!consumed && chatApplication.getSnapshot().turns.some(turn => turn.client_request_id === clientRequestId && turn.user_message_id != null)) consume();
         });
-    }, []);
+        try {
+            const response = await chatApplication.send({
+                message: draftText.trim() || "(image attached)", images: images.length ? images : undefined,
+                client_request_id: clientRequestId, character_id: character,
+                conversation_id: activeConversationIdRef.current ?? undefined,
+                conversation_generation: conversationGenerationRef.current,
+                allow_image_gen: readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated",
+            });
+            if (response.user_message_id != null) consume();
+        } finally {
+            stop();
+            submittingRef.current = false;
+        }
+    }, [consumeSentDraft]);
     const handleTranscription = useCallback((text: string) => {
         const character = sttBaseCharacterIdRef.current ?? activeCharacterIdRef.current;
         const conversation = sttBaseConversationIdRef.current ?? activeConversationIdRef.current;
@@ -329,7 +353,7 @@ export default function ChatPanel({
         sttBaseGenerationRef.current = null;
         const fullMessage = combineDraftWithTranscription(base, text.trim());
         const current = character === activeCharacterIdRef.current && conversation === activeConversationIdRef.current && generation === conversationGenerationRef.current;
-        if (!current || !sttAutoSend || interactionDisabled || chatApplication.getSnapshot().busy || !text.trim()) {
+        if (!current || !sttAutoSend || interactionDisabled || submittingRef.current || chatApplication.getSnapshot().busy || !text.trim()) {
             if (character !== activeCharacterIdRef.current) saveCharacterDraft(character, fullMessage);
             else {
                 setInput(previous => {
@@ -340,9 +364,10 @@ export default function ChatPanel({
             }
             return;
         }
-        clearDraft();
-        void sendDraft(fullMessage).catch(error => { saveCharacterDraft(character, fullMessage); reportError(error); });
-    }, [sttAutoSend, interactionDisabled, clearDraft, setInput, sendDraft, reportError]);
+        setInput(fullMessage);
+        flushDraft();
+        void sendDraft(fullMessage).catch(reportError);
+    }, [sttAutoSend, interactionDisabled, setInput, flushDraft, sendDraft, reportError]);
     const { state: voiceState, volume: micVolume, partialText: sttPartialText, start: startVoice, stop: stopVoice } = useVoiceInput(handleTranscription);
 
     // Refs to avoid stale closures in the voice-interrupt-stt listener
@@ -617,27 +642,16 @@ export default function ChatPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [messages.length]);
 
-    // Sync messages ref for use in event callbacks (avoids stale closure)
-    const submittingRef = useRef<string | null>(null);
-    useEffect(() => {
-        if (view.turns.some(turn => turn.client_request_id === submittingRef.current && !isActiveTurn(turn))) submittingRef.current = null;
-    }, [view.turns]);
     const handleSend = async (event?: React.FormEvent) => {
         event?.preventDefault();
         if (interactionDisabled || submittingRef.current) return;
-        const text = input.trim();
         const images = visionEnabled ? [...pendingImages] : [];
-        if (!text && !images.length) return;
+        if (!input.trim() && !images.length) return;
         const camera = visionEnabled ? getLatestCameraFrame() : null;
-        if (camera) images.push(camera);
-        const requestId = `req_${crypto.randomUUID()}`;
-        submittingRef.current = requestId;
-        clearDraft();
         userScrolledRef.current = false;
         savedScrollSnapshotRef.current = null;
-        try { await sendDraft(text || "(image attached)", images.length ? images : undefined, requestId); }
+        try { await sendDraft(input, images, camera); }
         catch (error) { reportError(error); }
-        finally { if (submittingRef.current === requestId) submittingRef.current = null; }
     };
     const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
         if (!visionEnabled) return;
