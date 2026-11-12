@@ -80,6 +80,47 @@ it("restores a speech failure on its saved reply after reopening and never recre
     }
 });
 
+it("shows the legacy Mod failure once across the journal and history, scoped to its conversation and character", async () => {
+    chat.reset();
+    const prompt = { id: 1, role: "user", content: "Mod prompt", created_at: "now" };
+    const failed = {
+        ...turn("mod_connection", 3, "error"), character_id: "char-1", conversation_id: "conv-1",
+        user_message_id: prompt.id, error: "Model connection failed", completion_revision: 3,
+    };
+    const diagnostic = (id: number, event: object) => ({
+        id, role: "system", content: failed.error, created_at: "now", metadata: JSON.stringify({ type: "failure_event", event }),
+    });
+    const saved = diagnostic(2, { turn_id: failed.turn_id, character_id: failed.character_id, conversation_id: failed.conversation_id });
+    chat.set({ revision: 2, messages: [prompt] });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const reasons = () => [...container.querySelectorAll('[role="alert"]')].map(node => node.textContent);
+    try {
+        await act(async () => root.render(<ChatPanel />));
+        expect(reasons()).toEqual([]);
+        await act(async () => chat.set({ turns: [failed] }));
+        expect(reasons()).toEqual([failed.error]);
+
+        await act(async () => chat.set({ revision: 3, messages: [prompt, saved] }));
+        expect(reasons()).toEqual([failed.error]);
+        expect(container.textContent?.match(/Model connection failed/g)).toHaveLength(1);
+
+        // Neither a delayed turn snapshot nor a diagnostic filed under the
+        // wrong selection should appear in another conversation or character.
+        await act(async () => chat.set({ conversation_id: "conv-2", generation: 2 }));
+        expect(reasons()).toEqual([]);
+        await act(async () => chat.set({ character_id: "char-2", conversation_id: "conv-1", generation: 3 }));
+        expect(reasons()).toEqual([]);
+
+        await act(async () => chat.set({ character_id: "char-1", generation: 4, messages: [] }));
+        expect(reasons()).toEqual([]);
+    } finally {
+        await act(async () => root.unmount());
+        container.remove();
+    }
+});
+
 it("dismisses the old editor when another conversation replaces a message at the same position", async () => {
     chat.reset();
     const first = { id: 101, role: "user", content: "Message A", created_at: "now" };

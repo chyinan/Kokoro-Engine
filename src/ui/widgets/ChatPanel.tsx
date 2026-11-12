@@ -1224,7 +1224,9 @@ export default function ChatPanel({
                         const globalIndex = Math.max(0, deferredMessages.length - visibleCount) + i;
                         return (
                             <MemoizedChatMessage
-                                key={msg.role === "kokoro" && msg.turnId
+                                key={msg.failureScope
+                                    ? JSON.stringify([activeCharacterId, activeConversationId, msg.failureScope.turn_id, "failure"])
+                                    : msg.role === "kokoro" && msg.turnId
                                     ? JSON.stringify([activeCharacterId, msg.turnId])
                                     : JSON.stringify([activeConversationId, view.generation, msg.id ?? `${globalIndex}-${msg.role}`])}
                                 message={msg}

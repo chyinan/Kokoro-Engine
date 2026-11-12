@@ -1,5 +1,5 @@
 import type { ConversationMessage, ToolTraceItem } from "../kokoro-bridge";
-import { stripStoredMarkup } from "./turn-state";
+import { stripStoredMarkup, type ChatFailureScope } from "./turn-state";
 
 export interface ChatHistoryMessage {
     id?: number;
@@ -11,6 +11,7 @@ export interface ChatHistoryMessage {
     capturedAt?: string;
     source?: string;
     turnId?: string;
+    failureScope?: ChatFailureScope;
 }
 
 function getStringMetadataValue(meta: Record<string, unknown> | null, key: string): string | undefined {
@@ -105,6 +106,17 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
         }
 
         if (technicalType === "assistant_tool_calls" || technicalType === "translation_instruction") continue;
+
+        if (m.role === "system" && technicalType === "failure_event") {
+            const event = meta?.event as Record<string, unknown> | null | undefined;
+            const character_id = getStringMetadataValue(event ?? null, "character_id");
+            const conversation_id = getStringMetadataValue(event ?? null, "conversation_id");
+            const turn_id = getStringMetadataValue(event ?? null, "turn_id");
+            if (character_id && conversation_id && turn_id) {
+                chatMsgs.push({ id: m.id, role: "kokoro", text: m.content, failureScope: { character_id, conversation_id, turn_id } });
+                continue;
+            }
+        }
 
         if (m.role === "context") {
             chatMsgs.push({

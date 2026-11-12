@@ -319,7 +319,7 @@ export const ChatMessage = memo(function ChatMessage({
                 </div>
             ) : (
                 <>
-                    <div className="whitespace-pre-wrap break-words">
+                    <div role={msg.isError ? "alert" : undefined} className={clsx("whitespace-pre-wrap break-words", msg.isError && "text-red-300")}>
                         {msg.text}
                     </div>
 

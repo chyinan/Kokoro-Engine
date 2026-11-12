@@ -41,7 +41,15 @@ export function projectSavedMessages(view: ChatViewSnapshot): ChatPanelMessage[]
 }
 
 export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
-  let messages = projectSavedMessages(view);
+  const shownFailures = new Set<string>();
+  let messages = projectSavedMessages(view).flatMap(message => {
+    const scope = message.failureScope;
+    if (!scope) return [message];
+    if (scope.character_id !== view.character_id || scope.conversation_id !== view.conversation_id || shownFailures.has(scope.turn_id)) return [];
+    shownFailures.add(scope.turn_id);
+    // Diagnostic rows are persisted for history, but aren't editable replies.
+    return [{ ...message, id: undefined, isError: true }];
+  });
   const turns = view.turns.filter(turn => turn.character_id === view.character_id && (!turn.conversation_id || turn.conversation_id === view.conversation_id));
   const latestTurnByUser = new Map<number, ChatTurnSnapshot>();
   for (const turn of turns) {
@@ -50,6 +58,21 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
     if (!previous || replyRevision(turn) > replyRevision(previous)) latestTurnByUser.set(turn.user_message_id, turn);
   }
   for (const turn of turns) {
+    // A legacy Mod has no composer awaiting its rejected promise. Use the
+    // journal until the matching diagnostic row is visible in saved history.
+    if (turn.status === "error" && turn.error && !turn.hidden && turn.client_request_id.startsWith("mod_")
+      && turn.turn_id && turn.conversation_id && turn.conversation_id === view.conversation_id
+      && turn.user_message_id !== null && latestTurnByUser.get(turn.user_message_id) === turn && !shownFailures.has(turn.turn_id)) {
+      const promptIndex = messages.findIndex(message => message.role === "user" && message.id === turn.user_message_id);
+      if (promptIndex >= 0) {
+        const replyIndex = messages.findIndex(message => message.role === "kokoro" && message.turnId === turn.turn_id);
+        messages.splice(Math.max(promptIndex, replyIndex) + 1, 0, {
+          role: "kokoro", text: turn.error, isError: true,
+          failureScope: { character_id: view.character_id, conversation_id: turn.conversation_id, turn_id: turn.turn_id },
+        });
+        shownFailures.add(turn.turn_id);
+      }
+    }
     const active = isActiveTurn(turn);
     // Completion can arrive before the history read. Keep the assistant row
     // mounted until a snapshot at or beyond that event takes over.

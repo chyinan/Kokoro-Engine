@@ -5,6 +5,12 @@ import {
     shouldRevealLiveTurnToolTrace,
 } from "./streaming-state";
 
+export interface ChatFailureScope {
+    character_id: string;
+    conversation_id: string;
+    turn_id: string;
+}
+
 export interface ChatPanelMessage {
     id?: number;
     role: "user" | "kokoro" | "tool" | "context";
@@ -13,6 +19,7 @@ export interface ChatPanelMessage {
     translation?: string;
     translationPending?: boolean;
     isError?: boolean;
+    failureScope?: ChatFailureScope;
     speechError?: string;
     tools?: ToolTraceItem[];
     capturedAt?: string;

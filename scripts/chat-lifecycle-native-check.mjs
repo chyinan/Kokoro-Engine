@@ -135,6 +135,37 @@ try {
     const state = await view(pet); assert.equal(state.busy, false);
     const retry = await petSend("after-failure"); assert.equal(retry.status, "completed"); return { result, retry };
   });
+  await check("a legacy Mod send shows its model connection failure in the selected chat", async () => {
+    const message = "[case:legacy-mod-connect-failure]";
+    const scope = await view(main);
+    await main.evaluate(message => {
+      // Same host entry used by legacy Mod actions; bypass the chat composer.
+      document.dispatchEvent(new CustomEvent("kokoro:mod-action", {
+        detail: { componentId: "legacy-mod-fixture", action: "send_message", data: { message } },
+      }));
+    }, message);
+    const state = await waitFor(async () => {
+      const current = await view(main);
+      return current.turns.some(turn => turn.message === message && turn.status === "error") ? current : null;
+    });
+    const turn = state.turns.find(turn => turn.message === message && turn.status === "error");
+    assert.match(turn.client_request_id, /^mod_/);
+    assert.equal(turn.character_id, scope.character_id);
+    assert.equal(turn.conversation_id, scope.conversation_id);
+    const failure = state.messages.map(row => JSON.parse(row.metadata ?? "null"))
+      .find(metadata => metadata?.type === "failure_event" && metadata.event.turn_id === turn.turn_id)?.event;
+    assert.equal(failure?.stage, "stream_connect");
+    assert.equal(failure.character_id, scope.character_id);
+    assert.equal(failure.conversation_id, scope.conversation_id);
+    const alert = main.getByRole("alert").filter({ hasText: failure.message });
+    await alert.waitFor({ state: "visible" });
+    assert.equal(await alert.count(), 1);
+    assert.equal(await main.getByText(failure.message, { exact: true }).count(), 1);
+    assert.equal(state.messages.filter(row => row.role === "user" && row.content === message).length, 1);
+    const prompt = main.getByText(message, { exact: true });
+    await waitFor(async () => await prompt.count() === 1 && await prompt.isVisible());
+    return { turn, failure, displayedReason: await alert.textContent() };
+  });
   await check("builtin tool execution and its in-progress assistant draft are shown once", async () => {
     const requestId = "native_tool_rounds";
     await submit(pet, { message: "[case:tool]", client_request_id: requestId }, "__toolRounds");
