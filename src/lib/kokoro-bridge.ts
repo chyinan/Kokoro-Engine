@@ -312,6 +312,7 @@ export async function streamChat(request: ChatRequest): Promise<StreamChatRespon
 
 export interface ChatTurnSnapshot {
     revision: number;
+    completion_revision?: number;
     client_request_id: string;
     turn_id: string | null;
     character_id: string | null;
@@ -326,6 +327,7 @@ export interface ChatTurnSnapshot {
     translation: string | null;
     tools: ChatTurnToolEvent[];
     error: string | null;
+    speech_error?: string;
 }
 export interface ChatViewVersion {
     revision: number;

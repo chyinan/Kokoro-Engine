@@ -4339,10 +4339,9 @@ async fn execute_chat(
         Ok(assistant_message_id) => {
             if assistant_message_id.is_some() {
                 if let Some(speech) = speech {
-                    let text = app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>().snapshots()
-                        .into_iter().find(|turn| turn.client_request_id == client_request_id)
-                        .map(|turn| turn.text).unwrap_or_default();
-                    crate::chat::runtime::speak_completed_turn(app.clone(), assistant_turn_id.clone(), text, speech);
+                    let text = app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>()
+                        .turn_text(&client_request_id).unwrap_or_default();
+                    crate::chat::runtime::speak_completed_turn(app.clone(), client_request_id, assistant_turn_id.clone(), text, speech);
                 }
             }
             Ok(StreamChatResponse {

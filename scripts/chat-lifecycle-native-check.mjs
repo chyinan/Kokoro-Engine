@@ -292,7 +292,7 @@ try {
     assert(!selection.switched.messages.some(message => message.content.includes("character-switch")));
     assert.equal(selection.result.status, "completed"); return { cancelled, ...selection };
   });
-  await check("a real automatic speech failure appears in the chat panel after text succeeds", async () => {
+  await check("remounting the chat panel recovers a real speech failure and the saved text", async () => {
     const originalConfig = await main.evaluate(async () => (await import("/src/lib/kokoro-bridge.ts")).getTtsConfig());
     try {
       await main.evaluate(async originalConfig => {
@@ -308,9 +308,25 @@ try {
           }],
         });
       }, originalConfig);
-      await submit(main, { message: "[case:speech-failure]", client_request_id: "native_speech_failure" }, "__speechFailure");
-      const result = await outcome(main, "__speechFailure");
+      const input = main.locator("textarea[data-onboarding-id='chat-input']");
+      await main.evaluate(async () => {
+        const { registry } = await import("/src/ui/registry/ComponentRegistry.ts");
+        window.__originalChatPanel = registry.get("ChatPanel");
+        registry.register("ChatPanel", () => null);
+      });
+      await input.waitFor({ state: "detached" });
+      await submit(pet, { message: "[case:speech-failure]", client_request_id: "native_speech_failure" }, "__speechFailure");
+      const result = await outcome(pet, "__speechFailure");
       assert.equal(result.result?.status, "completed");
+      const failedTurn = await waitFor(async () => (await view(pet)).turns.find(turn =>
+        turn.client_request_id === "native_speech_failure" && turn.speech_error?.includes("controlled speech failure")));
+      assert.equal(failedTurn.status, "completed");
+      assert.equal(await input.count(), 0);
+      await main.evaluate(async () => {
+        const { registry } = await import("/src/ui/registry/ComponentRegistry.ts");
+        registry.register("ChatPanel", window.__originalChatPanel);
+      });
+      await input.waitFor({ state: "visible" });
       const alert = main.getByRole("alert").filter({ hasText: "controlled speech failure" });
       await alert.waitFor({ state: "visible", timeout: 10000 });
       const warning = await alert.textContent();

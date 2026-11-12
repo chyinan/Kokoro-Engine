@@ -881,8 +881,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_queue_and_slow_listeners_do_not_block_chat_or_lose_completions() {
+    async fn full_queue_and_slow_listeners_do_not_block_chat_or_lose_final_text() {
+        use crate::chat::runtime::{relay_chat_event, ChatRuntimeState};
+
         let (queue, mut rx) = ModScriptQueue::channel();
+        let journal = ChatRuntimeState::default();
+        for id in ["first-done", "second-done"] {
+            let request = serde_json::from_value(
+                serde_json::json!({"client_request_id": id, "message": "question"}),
+            )
+            .unwrap();
+            journal.begin(&request).unwrap();
+        }
+        let relay = |name, payload| relay_chat_event(Some(&journal), Some(&queue), name, payload);
+        relay(
+            "chat-turn-start",
+            serde_json::json!({"client_request_id": "first-done", "turn_id": "first-done"}),
+        );
         let mut manager = ModManager::new("unused");
         manager.scripts = Some(queue.clone());
         let manager = tokio::sync::Mutex::new(manager);
@@ -903,27 +918,35 @@ mod tests {
             Kokoro.on('chat-done', event => {
                 if (event.turn_id === 'first-done') slow();
             });
-            Kokoro.on('chat-done', event => received.push(event.turn_id));
+            Kokoro.on('chat-done', event => received.push([event.turn_id, event.text]));
         "#,
         );
 
         queue.enqueue_chat_event("chat-turn-delta", serde_json::json!({"delta": "slow"}));
         queue.enqueue_chat_event("chat-cue", serde_json::json!({"cue": "smile"}));
-        queue.enqueue_chat_event("chat-turn-delta", serde_json::json!({"delta": "second"}));
+        relay(
+            "chat-turn-delta",
+            serde_json::json!({"turn_id": "first-done", "delta": "second"}),
+        );
         for _ in 3..SCRIPT_EVENT_CAPACITY {
             queue.enqueue_chat_event("chat-turn-delta", serde_json::json!({"delta": "filler"}));
         }
-        queue.enqueue_chat_event(
-            "chat-turn-finish",
-            serde_json::json!({"turn_id": "first-done"}),
-        );
         for _ in 0..(SCRIPT_EVENT_CAPACITY * 4) {
-            queue.enqueue_chat_event("chat-turn-delta", serde_json::json!({"delta": "overflow"}));
+            relay(
+                "chat-turn-delta",
+                serde_json::json!({"turn_id": "first-done", "delta": " overflow"}),
+            );
         }
-        queue.enqueue_chat_event(
-            "chat-turn-finish",
-            serde_json::json!({"turn_id": "second-done"}),
+        relay(
+            "chat-turn-text-complete",
+            serde_json::json!({"turn_id": "first-done", "text": "second fragment with the final suffix\n完整的答复"}),
         );
+        for id in ["first-done", "second-done"] {
+            relay(
+                "chat-turn-finish",
+                serde_json::json!({"client_request_id": id, "turn_id": id, "status": "completed"}),
+            );
+        }
 
         // Production finishes enqueueing while the manager is locked and the
         // consumer has not freed a single slot. Only the two completions bypass the limit.
@@ -933,7 +956,15 @@ mod tests {
         }
         assert_eq!(
             received(&context),
-            serde_json::json!(["smile", "second", "first-done", "second-done"]),
+            serde_json::json!([
+                "smile",
+                "second",
+                [
+                    "first-done",
+                    "second fragment with the final suffix\n完整的答复"
+                ],
+                ["second-done", ""]
+            ]),
         );
         assert_eq!(queue.event_slots.available_permits(), SCRIPT_EVENT_CAPACITY);
     }

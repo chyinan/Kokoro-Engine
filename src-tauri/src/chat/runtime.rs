@@ -12,6 +12,9 @@ use tokio::sync::watch;
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatTurnSnapshot {
     pub revision: u64,
+    // Later speech updates must not make the reply look newer than its history.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_revision: Option<u64>,
     pub client_request_id: String,
     pub turn_id: Option<String>,
     pub character_id: Option<String>,
@@ -26,6 +29,8 @@ pub struct ChatTurnSnapshot {
     pub translation: Option<String>,
     pub tools: Vec<Value>,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speech_error: Option<String>,
 }
 
 type Outcome = Result<StreamChatResponse, String>;
@@ -118,7 +123,7 @@ impl ChatRuntimeState {
                 .entries
                 .iter()
                 .filter(|(_, e)| e.outcome.borrow().is_some())
-                .min_by_key(|(_, e)| e.snapshot.revision)
+                .min_by_key(|(_, e)| e.snapshot.completion_revision)
                 .map(|(id, _)| id.clone());
             if let Some(id) = oldest {
                 if let Some(entry) = journal.entries.remove(&id) {
@@ -136,6 +141,7 @@ impl ChatRuntimeState {
                 fingerprint,
                 snapshot: ChatTurnSnapshot {
                     revision,
+                    completion_revision: None,
                     client_request_id: id.into(),
                     turn_id: None,
                     character_id: request.character_id.clone(),
@@ -150,6 +156,7 @@ impl ChatRuntimeState {
                     translation: None,
                     tools: vec![],
                     error: None,
+                    speech_error: None,
                 },
                 outcome,
             },
@@ -199,7 +206,7 @@ impl ChatRuntimeState {
             .values()
             .map(|e| e.snapshot.clone())
             .collect();
-        snapshots.sort_by_key(|s| s.revision);
+        snapshots.sort_by_key(|s| s.completion_revision.unwrap_or(s.revision));
         (journal.revision, snapshots)
     }
 
@@ -294,6 +301,7 @@ impl ChatRuntimeState {
         let revision = journal.revision;
         let entry = journal.entries.get_mut(id)?;
         entry.snapshot.revision = revision;
+        entry.snapshot.completion_revision = Some(revision);
         match &result {
             Ok(response) => {
                 entry.snapshot.status = response
@@ -320,6 +328,39 @@ impl ChatRuntimeState {
         entry.outcome.send_replace(Some(result));
         Some(entry.snapshot.clone())
     }
+
+    fn record_speech_error(&self, id: &str, error: String) -> Option<ChatTurnSnapshot> {
+        let mut journal = self.0.lock().unwrap();
+        journal.entries.get(id)?;
+        journal.revision += 1;
+        let revision = journal.revision;
+        let snapshot = &mut journal.entries.get_mut(id)?.snapshot;
+        snapshot.revision = revision;
+        snapshot.speech_error = Some(error);
+        Some(snapshot.clone())
+    }
+}
+
+/// Mod completions carry the authoritative text even if streaming fragments
+/// were shed. Only the Mod payload is enriched; WebView events stay unchanged.
+pub(crate) fn relay_chat_event(
+    runtime: Option<&ChatRuntimeState>,
+    queue: Option<&ModScriptQueue>,
+    name: &str,
+    mut payload: Value,
+) -> Option<ChatTurnSnapshot> {
+    let snapshot = runtime.and_then(|runtime| runtime.event(name, &payload));
+    if let Some(queue) = queue {
+        if name == "chat-turn-finish"
+            && payload.get("status").and_then(Value::as_str) == Some("completed")
+        {
+            if let Some(snapshot) = &snapshot {
+                payload["text"] = Value::String(snapshot.text.clone());
+            }
+        }
+        queue.enqueue_chat_event(name, payload);
+    }
+    snapshot
 }
 
 /// Journal first, notify second. No subscriber or closed window can fail a turn.
@@ -329,13 +370,15 @@ pub async fn emit_chat_event<S: Serialize + Clone>(
     payload: S,
 ) -> Result<(), tauri::Error> {
     if let Ok(value) = serde_json::to_value(&payload) {
-        if let Some(runtime) = app.try_state::<Arc<ChatRuntimeState>>() {
-            if let Some(snapshot) = runtime.event(name, &value) {
-                let _ = app.emit("chat-runtime-changed", snapshot);
-            }
-        }
-        if let Some(queue) = app.try_state::<ModScriptQueue>() {
-            queue.enqueue_chat_event(name, value);
+        let runtime = app.try_state::<Arc<ChatRuntimeState>>();
+        let queue = app.try_state::<ModScriptQueue>();
+        if let Some(snapshot) = relay_chat_event(
+            runtime.as_ref().map(|state| state.inner().as_ref()),
+            queue.as_ref().map(|state| state.inner()),
+            name,
+            value,
+        ) {
+            let _ = app.emit("chat-runtime-changed", snapshot);
         }
     }
     if let Err(error) = app.emit(name, payload) {
@@ -434,6 +477,7 @@ pub async fn get_chat_view(
 /// One execution owner schedules speech; restoring a view never synthesizes.
 pub fn speak_completed_turn(
     app: tauri::AppHandle,
+    client_request_id: String,
     turn_id: String,
     text: String,
     speech: crate::characters::activation::ResolvedTts,
@@ -461,7 +505,12 @@ pub fn speak_completed_turn(
             crate::commands::tts::synthesize(app.clone(), app.state(), text, config).await
         {
             tracing::warn!(target: "tts", "chat auto speech failed: {error}");
-            let _ = app.emit("chat-warning", error.to_string());
+            let runtime = app.state::<Arc<ChatRuntimeState>>();
+            if let Some(snapshot) =
+                runtime.record_speech_error(&client_request_id, error.to_string())
+            {
+                let _ = app.emit("chat-runtime-changed", snapshot);
+            }
         }
     });
 }
@@ -582,6 +631,38 @@ mod tests {
         assert_eq!(before.revision, after.revision);
         assert_eq!(after.text, "full text");
         assert_eq!(after.status, "completed");
+    }
+    #[test]
+    fn speech_failure_is_recoverable_on_either_side_of_chat_completion() {
+        for failure_first in [true, false] {
+            let journal = ChatRuntimeState::default();
+            let (_, outcome) = journal.begin(&request("a")).unwrap();
+            journal.event(
+                "chat-turn-text-complete",
+                &serde_json::json!({"client_request_id":"a", "text":"answer"}),
+            );
+            let record_failure = || {
+                journal
+                    .record_speech_error("a", "speech failed".into())
+                    .unwrap()
+            };
+            if failure_first {
+                assert_eq!(record_failure().status, "pending");
+            }
+            let completed = journal.complete("a", result("a")).unwrap();
+            if !failure_first {
+                assert!(record_failure().revision > completed.revision);
+            }
+
+            let snapshot = journal.snapshots().pop().unwrap();
+            assert_eq!(snapshot.speech_error.as_deref(), Some("speech failed"));
+            assert_eq!(snapshot.completion_revision, Some(completed.revision));
+            assert_eq!(snapshot.status, "completed");
+            assert_eq!(snapshot.text, "answer");
+            assert_eq!(snapshot.assistant_message_id, Some(2));
+            assert!(snapshot.error.is_none());
+            assert_eq!(*outcome.borrow(), Some(result("a")));
+        }
     }
     #[test]
     fn late_subscriber_gets_complete_text_and_identity_without_replaying_events() {

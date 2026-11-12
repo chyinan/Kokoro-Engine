@@ -13,6 +13,7 @@ export interface ChatPanelMessage {
     translation?: string;
     translationPending?: boolean;
     isError?: boolean;
+    speechError?: string;
     tools?: ToolTraceItem[];
     capturedAt?: string;
     source?: string;

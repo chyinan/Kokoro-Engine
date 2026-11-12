@@ -1,7 +1,7 @@
 import { useState, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench, Eye, Maximize2 } from "lucide-react";
+import { AlertCircle, Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench, Eye, Maximize2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ToolTraceItem } from "../../lib/kokoro-bridge";
 
@@ -13,6 +13,7 @@ interface ChatMessageProps {
         translation?: string;
         translationPending?: boolean;
         isError?: boolean;
+        speechError?: string;
         tools?: ToolTraceItem[];
         capturedAt?: string;
         source?: string;
@@ -369,6 +370,15 @@ export const ChatMessage = memo(function ChatMessage({
                         </div>
                     )}
                 </>
+            )}
+
+            {!isEditing && msg.speechError && (
+                <div role="alert" className="mt-2 flex items-start gap-1.5 text-xs text-red-300">
+                    <AlertCircle size={12} className="mt-0.5 shrink-0" />
+                    <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                        {t("chat.speech_failed", { error: msg.speechError })}
+                    </span>
+                </div>
             )}
 
             {!isEditing && msg.role === "kokoro" && msg.translationPending && !msg.translation && (

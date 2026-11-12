@@ -1127,6 +1127,7 @@
         }
     },
     "chat": {
+        "speech_failed": "이 답변을 읽어 주지 못했습니다: {{error}}",
         "status": {
             "streaming": "생성 중",
             "chat": "채팅"

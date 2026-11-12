@@ -1127,6 +1127,7 @@
         }
     },
     "chat": {
+        "speech_failed": "この返信を読み上げられませんでした：{{error}}",
         "status": {
             "streaming": "生成中",
             "chat": "チャット"

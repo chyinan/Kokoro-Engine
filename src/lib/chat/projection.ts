@@ -4,8 +4,10 @@ import { buildToolTraceItem, getToolEventStateUpdate, mergeToolTraceItems, strip
 
 export const isActiveTurn = (turn: ChatTurnSnapshot) => ["pending", "accepted", "streaming"].includes(turn.status);
 
+const replyRevision = (turn: ChatTurnSnapshot) => turn.completion_revision ?? turn.revision;
+
 function isTurnAwaitingHistory(view: ChatViewSnapshot, turn: ChatTurnSnapshot): boolean {
-  return turn.status === "completed" && turn.revision > view.revision && turn.character_id === view.character_id
+  return turn.status === "completed" && replyRevision(turn) > view.revision && turn.character_id === view.character_id
     && turn.conversation_id !== null && turn.conversation_id === view.conversation_id;
 }
 
@@ -20,15 +22,21 @@ export function projectSavedMessages(view: ChatViewSnapshot): ChatPanelMessage[]
   // The journal holds temporary attachments. Even after completion, associate
   // them with the saved user row without restoring deleted rows or old text.
   const imagesByMessage = new Map<number, string[]>();
+  const speechErrorsByMessage = new Map<number, string>();
   for (const turn of view.turns) {
-    if (!turn.hidden && turn.character_id === view.character_id && turn.conversation_id === view.conversation_id
-      && turn.user_message_id !== null && turn.images.length) {
+    if (turn.character_id !== view.character_id || turn.conversation_id !== view.conversation_id) continue;
+    if (!turn.hidden && turn.user_message_id !== null && turn.images.length) {
       imagesByMessage.set(turn.user_message_id, turn.images);
+    }
+    if (turn.status === "completed" && turn.assistant_message_id !== null && turn.speech_error) {
+      speechErrorsByMessage.set(turn.assistant_message_id, turn.speech_error);
     }
   }
   return buildChatMessagesFromConversation(view.messages).map(message => {
-    const images = message.role === "user" && message.id !== undefined ? imagesByMessage.get(message.id) : undefined;
-    return images ? { ...message, images } : message;
+    if (message.id === undefined) return message;
+    const images = message.role === "user" ? imagesByMessage.get(message.id) : undefined;
+    const speechError = message.role === "kokoro" ? speechErrorsByMessage.get(message.id) : undefined;
+    return images ? { ...message, images } : speechError ? { ...message, speechError } : message;
   });
 }
 
@@ -39,7 +47,7 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
   for (const turn of turns) {
     if (turn.user_message_id === null) continue;
     const previous = latestTurnByUser.get(turn.user_message_id);
-    if (!previous || turn.revision > previous.revision) latestTurnByUser.set(turn.user_message_id, turn);
+    if (!previous || replyRevision(turn) > replyRevision(previous)) latestTurnByUser.set(turn.user_message_id, turn);
   }
   for (const turn of turns) {
     const active = isActiveTurn(turn);
@@ -78,6 +86,7 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
       clientRequestId: turn.client_request_id, id: turn.assistant_message_id ?? undefined,
       translation: turn.translation ?? undefined,
       tools: index >= 0 ? messages[index].tools : undefined,
+      speechError: index >= 0 ? messages[index].speechError : undefined,
     };
     const messageIndex = index >= 0 ? index : messages.length;
     if (index >= 0) messages[index] = assistant; else messages.push(assistant);

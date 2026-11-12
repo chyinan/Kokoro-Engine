@@ -1136,6 +1136,7 @@
         }
     },
     "chat": {
+        "speech_failed": "Could not read this reply aloud: {{error}}",
         "status": {
             "streaming": "STREAMING",
             "chat": "CHAT"

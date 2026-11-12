@@ -42,6 +42,16 @@ describe("pet chat display adapter", () => {
   await act(async () => chat.set({ turns: [snapshot()] }));
   expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "update_bubble_text")).toHaveLength(1);
  });
+ it("a late speech failure does not replay the reply or restart its hide timer", async () => {
+  vi.useFakeTimers();
+  const completed = { ...snapshot("completed"), completion_revision: 2 };
+  await act(async () => chat.set({ turns: [completed] }));
+  await act(async () => vi.advanceTimersByTimeAsync(4000));
+  await act(async () => chat.set({ turns: [{ ...completed, revision: 3, speech_error: "Speech failed" }] }));
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "update_bubble_text")).toHaveLength(1);
+  await act(async () => vi.advanceTimersByTimeAsync(1000));
+  expect(invoke).toHaveBeenCalledWith("hide_bubble_window");
+ });
  it("does not present another entry's reply as a pet request", async () => {
   await act(async () => chat.set({ turns: [{ ...snapshot(), client_request_id: "interaction_a" }] }));
   expect(invoke).not.toHaveBeenCalledWith("update_bubble_text", expect.anything());

@@ -14,7 +14,7 @@ vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => k
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-it("shows a backend speech failure without replacing the completed text reply", async () => {
+it("shows a transient backend warning without replacing the completed text reply", async () => {
     chat.reset();
     chat.set({ messages: [{ id: 1, role: "assistant", content: "Completed answer", created_at: "now" }] });
     const container = document.createElement("div");
@@ -41,6 +41,43 @@ it("shows a backend speech failure without replacing the completed text reply", 
         container.remove();
     }
     expect(unlisten).toHaveBeenCalledOnce();
+});
+
+it("restores a speech failure on its saved reply after reopening and never recreates a removed reply", async () => {
+    chat.reset();
+    const message = { id: 2, role: "assistant", content: "Completed answer", created_at: "now" };
+    const completed = {
+        ...turn("speech", 2, "completed"), character_id: "char-1", conversation_id: "conv-1",
+        assistant_message_id: message.id, completion_revision: 2,
+    };
+    chat.set({ revision: 2, messages: [message], turns: [completed] });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const warning = () => container.querySelector('[role="alert"]');
+    try {
+        await act(async () => root.render(<ChatPanel />));
+        expect(warning()).toBeNull();
+        await act(async () => root.render(null));
+        expect(container.textContent).toBe("");
+
+        const failedSpeech = { ...completed, revision: 3, speech_error: "Speech provider unavailable" };
+        chat.set({ turns: [failedSpeech] });
+        await act(async () => root.render(<ChatPanel />));
+        expect(warning()?.textContent).toBe("chat.speech_failed");
+        expect(container.textContent).toContain("Completed answer");
+
+        await act(async () => chat.set({ conversation_id: "conv-2", generation: 2, messages: [{ ...message, id: 3, content: "Other answer" }] }));
+        expect(warning()).toBeNull();
+        expect(container.textContent).toContain("Other answer");
+
+        await act(async () => chat.set({ conversation_id: "conv-1", generation: 3, messages: [] }));
+        expect(warning()).toBeNull();
+        expect(container.textContent).not.toContain("answer");
+    } finally {
+        await act(async () => root.unmount());
+        container.remove();
+    }
 });
 
 it("dismisses the old editor when another conversation replaces a message at the same position", async () => {

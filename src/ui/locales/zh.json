@@ -1136,6 +1136,7 @@
         }
     },
     "chat": {
+        "speech_failed": "未能朗读这条回复：{{error}}",
         "status": {
             "streaming": "生成中",
             "chat": "对话"

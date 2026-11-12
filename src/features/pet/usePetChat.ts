@@ -15,19 +15,23 @@ export function usePetChat(): PetChatState {
     const sending = useRef(false);
     const lastPresentedRevision = useRef(0);
     const turn = [...view.turns].reverse().find(item => item.client_request_id.startsWith("pet_"));
+    const revision = turn?.completion_revision ?? turn?.revision ?? 0;
+    const text = turn?.text;
+    const error = turn?.error;
+    const active = turn ? isActiveTurn(turn) : false;
     useEffect(() => {
-        if (!turn || turn.revision <= lastPresentedRevision.current) return;
-        lastPresentedRevision.current = turn.revision;
-        if (turn.text) {
-            void invoke("update_bubble_text", { text: turn.text }).catch(() => invoke("show_bubble_window", { text: turn.text })).catch(() => {});
-        } else if (turn.error) {
-            void invoke("show_bubble_window", { text: turn.error }).catch(() => {});
+        if (revision <= lastPresentedRevision.current) return;
+        lastPresentedRevision.current = revision;
+        if (text) {
+            void invoke("update_bubble_text", { text }).catch(() => invoke("show_bubble_window", { text })).catch(() => {});
+        } else if (error) {
+            void invoke("show_bubble_window", { text: error }).catch(() => {});
         }
-        if (!isActiveTurn(turn)) {
+        if (!active) {
             const timer = setTimeout(() => { void invoke("hide_bubble_window").catch(() => {}); }, 5000);
             return () => clearTimeout(timer);
         }
-    }, [turn]);
+    }, [revision, text, error, active]);
     const sendMessage = async (text: string) => {
         const message = text.trim();
         if (!message || sending.current) return;

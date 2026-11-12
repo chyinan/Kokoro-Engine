@@ -1127,6 +1127,7 @@
         }
     },
     "chat": {
+        "speech_failed": "無法朗讀這則回覆：{{error}}",
         "status": {
             "streaming": "生成中",
             "chat": "對話"
