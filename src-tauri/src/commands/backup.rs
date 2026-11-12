@@ -5182,7 +5182,7 @@ mod tests {
             .await
             .unwrap();
         for (id, conversation, content) in [
-            (90_i64, "shared-conversation", "stale copy one"),
+            (2_i64, "shared-conversation", "stale copy one"),
             (91, "shared-conversation", "stale copy two"),
             (1, "new-conversation", "earlier prompt"),
             (3, "new-conversation", "failed prompt"),
@@ -5195,7 +5195,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        for (id, prompt) in [(4_i64, 3_i64), (5, 90)] {
+        for (id, prompt) in [(4_i64, 3_i64), (5, 2)] {
             sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, 'new-conversation', 'system', 'model failed', ?, '1')")
                 .bind(id)
                 .bind(serde_json::json!({ "type": "failure_event", "user_message_id": prompt,

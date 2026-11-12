@@ -328,6 +328,60 @@ try {
     assert.equal(await cancellation.count(), 0);
     return { conversation: source.conversation_id };
   });
+  await check("first-send preparation timeout follows the new selection before the user row exists", async () => {
+    const message = "[case:lifecycle-hold-preparation-after-selection]";
+    const select = id => main.evaluate(async id => (await import("/src/lib/chat/application.ts")).chatApplication.selectConversation(id), id);
+    const input = main.locator("textarea[data-onboarding-id='chat-input']");
+    const source = (await view(main)).conversation_id;
+    await select(null);
+    const empty = await view(main);
+    assert.equal(empty.conversation_id, null);
+    let detached = false;
+    try {
+      await input.fill(message);
+      await input.press("Enter");
+      // The fixture holds the selection lock. Only the journal can be read
+      // until preparation times out and the lock is released.
+      const scoped = await waitFor(async () => {
+        const turns = await pet.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_chat_runtime_snapshot"));
+        return turns.find(turn => turn.message === message && turn.status === "accepted" && turn.conversation_id);
+      });
+      assert.equal(scoped.conversation_generation, empty.generation + 1);
+      assert.equal(scoped.user_message_id, null);
+      await setPanelMounted(main, false);
+      detached = true;
+      await input.waitFor({ state: "detached" });
+      const failed = await waitFor(async () => {
+        const state = await view(pet);
+        const turn = state.turns.find(turn => turn.client_request_id === scoped.client_request_id && turn.status === "error");
+        if (!turn) return null;
+        assert.equal(state.conversation_id, scoped.conversation_id);
+        assert.equal(state.generation, scoped.conversation_generation);
+        assert.equal(turn.conversation_id, state.conversation_id);
+        assert.equal(turn.conversation_generation, state.generation);
+        assert.equal(turn.user_message_id, null);
+        assert.equal(state.messages.length, 0);
+        return turn;
+      });
+      await setPanelMounted(main, true);
+      detached = false;
+      const reason = main.getByText(failed.error, { exact: true });
+      const alert = main.getByRole("alert").and(reason);
+      await alert.waitFor({ state: "visible" });
+      assert.equal(await reason.count(), 1);
+      await setPanelMounted(main, false);
+      detached = true;
+      await input.waitFor({ state: "detached" });
+      await setPanelMounted(main, true);
+      detached = false;
+      await reason.waitFor({ state: "visible" });
+      assert.equal(await alert.count(), 0);
+      return { conversation: scoped.conversation_id, generation: scoped.conversation_generation };
+    } finally {
+      if (detached) await setPanelMounted(main, true);
+      await select(source);
+    }
+  });
   await check("builtin tool execution and its in-progress assistant draft are shown once", async () => {
     const requestId = "native_tool_rounds";
     await submit(pet, { message: "[case:tool]", client_request_id: requestId }, "__toolRounds");

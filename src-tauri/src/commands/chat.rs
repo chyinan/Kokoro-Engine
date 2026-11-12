@@ -2316,9 +2316,16 @@ async fn execute_chat(
             return Err(KokoroError::Chat("Conversation changed while request was in-flight".into()));
         }
         #[cfg(debug_assertions)]
-        if std::env::var_os("KOKORO_TEST_DATA_ROOT").is_some()
+        let lifecycle_hold = if std::env::var_os("KOKORO_TEST_DATA_ROOT").is_some()
             && std::env::var_os("KOKORO_CHAT_LIFECYCLE_TEST_PREPARATION").is_some()
-            && request.message.starts_with("[case:lifecycle-hold-preparation-")
+        {
+            request.message.strip_prefix("[case:lifecycle-hold-preparation-")
+                .and_then(|phase| phase.strip_suffix(']'))
+        } else {
+            None
+        };
+        #[cfg(debug_assertions)]
+        if lifecycle_hold.is_some_and(|phase| phase != "after-selection")
         {
             std::future::pending::<()>().await;
         }
@@ -2478,8 +2485,23 @@ async fn execute_chat(
 
                 *state.current_conversation_id.lock().await = Some(new_id.clone());
                 state.bump_conversation_generation();
+                // Selection changes before the cancellable user-row write. A
+                // timeout in that gap belongs to the newly selected conversation.
+                if let Ok(mut recorded) = active_conv_id_for_prep.lock() {
+                    *recorded = Some(new_id.clone());
+                }
+                let _ = crate::chat::runtime::emit_chat_event(&app, "chat-turn-scope", serde_json::json!({
+                    "client_request_id": client_request_id,
+                    "turn_id": assistant_turn_id,
+                    "conversation_id": new_id,
+                    "conversation_generation": state.current_conversation_generation(),
+                })).await;
                 if state.persist_conversation_selection {
                     crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
+                }
+                #[cfg(debug_assertions)]
+                if lifecycle_hold == Some("after-selection") {
+                    std::future::pending::<()>().await;
                 }
                 Some(new_id)
             };
