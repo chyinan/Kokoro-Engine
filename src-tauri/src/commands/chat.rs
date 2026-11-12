@@ -3191,7 +3191,7 @@ async fn execute_chat(
                             None => {
                                 if let Some(ref cid) = conversation_id {
                                     match state
-                                        .persist_streaming_draft(cid, &draft_content)
+                                        .persist_streaming_draft(cid, &draft_content, &assistant_turn_id)
                                         .await
                                     {
                                         Ok(id) => {
@@ -3294,7 +3294,7 @@ async fn execute_chat(
                         // First round: insert draft row
                         if let Some(ref cid) = conversation_id {
                             match state
-                                .persist_streaming_draft(cid, &draft_content)
+                                .persist_streaming_draft(cid, &draft_content, &assistant_turn_id)
                                 .await
                             {
                                 Ok(id) => {
@@ -7200,7 +7200,7 @@ mod tests {
 
         // And a draft row representing Round 2's partial text before timeout
         let draft_id = state
-            .persist_streaming_draft(cid, "Partial text in round 2 before timeout...")
+            .persist_streaming_draft(cid, "Partial text in round 2 before timeout...", turn_id)
             .await
             .unwrap();
 

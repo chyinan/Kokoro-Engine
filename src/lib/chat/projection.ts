@@ -4,7 +4,7 @@ import { getToolEventStateUpdate, stripStreamingControlMarkup, type ChatPanelMes
 
 export const isActiveTurn = (turn: ChatTurnSnapshot) => ["pending", "accepted", "streaming"].includes(turn.status);
 
-export function isTurnAwaitingHistory(view: ChatViewSnapshot, turn: ChatTurnSnapshot): boolean {
+function isTurnAwaitingHistory(view: ChatViewSnapshot, turn: ChatTurnSnapshot): boolean {
   return turn.status === "completed" && turn.revision > view.revision && turn.character_id === view.character_id
     && turn.conversation_id !== null && turn.conversation_id === view.conversation_id;
 }

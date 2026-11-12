@@ -1165,18 +1165,21 @@ impl AIOrchestrator {
         v["character_id"].as_str().map(|s| s.to_string())
     }
 
-    /// Insert a streaming assistant draft into the DB for a specific conversation. Returns the row id for later update.
+    /// Insert the draft with its turn identity so history and live views can merge it.
     pub async fn persist_streaming_draft(
         &self,
         conversation_id: &str,
         content: &str,
+        turn_id: &str,
     ) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
+        let metadata = serde_json::json!({ "turn_id": turn_id, "streaming_draft": true });
         let result = sqlx::query(
-            "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, 'assistant', ?, NULL, ?)"
+            "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, 'assistant', ?, ?, ?)"
         )
         .bind(conversation_id)
         .bind(content)
+        .bind(metadata.to_string())
         .bind(&now)
         .execute(&self.db)
         .await?;
@@ -1184,14 +1187,14 @@ impl AIOrchestrator {
         Ok(result.last_insert_rowid())
     }
 
-    /// Update a streaming draft row with final content and metadata.
+    /// Update the draft content, preserving its identity until final metadata is supplied.
     pub async fn update_streaming_draft(
         &self,
         row_id: i64,
         content: &str,
         metadata: Option<&str>,
     ) -> Result<()> {
-        sqlx::query("UPDATE conversation_messages SET content = ?, metadata = ? WHERE id = ?")
+        sqlx::query("UPDATE conversation_messages SET content = ?, metadata = COALESCE(?, metadata) WHERE id = ?")
             .bind(content)
             .bind(metadata)
             .bind(row_id)
@@ -1222,14 +1225,12 @@ impl AIOrchestrator {
     /// Delete the DB rows left behind by a cancelled or failed chat turn:
     /// - rows whose metadata carries the turn's `turn_id` and a technical `type`
     ///   (`assistant_tool_calls` | `tool_result`);
-    /// - `extra_row_ids` whose metadata is still NULL (unfinalized streaming drafts).
+    /// - unfinalized assistant drafts in `extra_row_ids` matching the turn, including
+    ///   legacy drafts whose metadata is NULL.
     ///
-    /// A row passed via `extra_row_ids` with non-NULL metadata (e.g. a finalized
-    /// assistant message) or belonging to a different conversation is never removed,
-    /// so a fully generated answer or another conversation's message cannot be
-    /// deleted through this path. All deletes run atomically in a single transaction
-    /// with conditional matching (`conversation_id` and `metadata IS NULL`). When the
-    /// turn's conversation is still the active one and rows were deleted, the in-memory
+    /// Draft deletes check conversation, role, and metadata in the same statement
+    /// so a finalized answer or another conversation's message is preserved. When the
+    /// turn's conversation is still active and rows were deleted, the in-memory
     /// history is resynced from the authoritative DB rows so technical rows cannot leak
     /// into the next turn's prompt composition. Returns the number of actually deleted rows.
     pub async fn delete_turn_artifacts(
@@ -1290,14 +1291,16 @@ impl AIOrchestrator {
             .collect();
 
         for row_id in unique_extra_ids {
-            // Only unfinalized drafts (metadata still NULL) belonging to this conversation
-            // may be removed by id. An atomic conditional DELETE prevents check-then-delete
-            // race conditions with concurrent finalization and blocks cross-conversation leakage.
             let result = sqlx::query(
-                "DELETE FROM conversation_messages WHERE id = ? AND conversation_id = ? AND metadata IS NULL",
+                "DELETE FROM conversation_messages
+                 WHERE id = ? AND conversation_id = ? AND role = 'assistant'
+                   AND (metadata IS NULL OR CASE WHEN json_valid(metadata) THEN
+                       json_type(metadata, '$.streaming_draft') = 'true'
+                       AND json_extract(metadata, '$.turn_id') = ? END)",
             )
             .bind(row_id)
             .bind(conversation_id)
+            .bind(turn_id)
             .execute(&mut *tx)
             .await?;
             total_deleted += result.rows_affected() as usize;
@@ -2232,15 +2235,14 @@ mod tests {
         insert_test_conversation(&orchestrator, "conv-1").await;
         *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
 
-        // Insert a draft row that has been finalized (metadata is non-NULL)
-        let finalized_row_id = insert_conversation_row(
-            &orchestrator,
-            "conv-1",
-            "assistant",
-            "final answer",
-            Some(r#"{"turn_id":"turn-a","model":"gpt"}"#),
-        )
-        .await;
+        let finalized_row_id = orchestrator
+            .persist_streaming_draft("conv-1", "partial answer", "turn-a")
+            .await
+            .unwrap();
+        orchestrator
+            .update_streaming_draft(finalized_row_id, "final answer", Some(r#"{"turn_id":"turn-a"}"#))
+            .await
+            .unwrap();
 
         let deleted = orchestrator
             .delete_turn_artifacts("conv-1", "turn-a", &[finalized_row_id])
@@ -2260,9 +2262,10 @@ mod tests {
         insert_test_conversation(&orchestrator, "conv-1").await;
         *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
 
-        let draft_id =
-            insert_conversation_row(&orchestrator, "conv-1", "assistant", "draft message", None)
-                .await;
+        let draft_id = orchestrator
+            .persist_streaming_draft("conv-1", "draft message", "turn-a")
+            .await
+            .unwrap();
         let tool_id = insert_conversation_row(
             &orchestrator,
             "conv-1",
@@ -3310,7 +3313,7 @@ mod tests {
             .unwrap();
 
         let row_id = orchestrator
-            .persist_streaming_draft("conv-A", "draft chunk 1")
+            .persist_streaming_draft("conv-A", "draft chunk 1", "turn-a")
             .await
             .expect("persist_streaming_draft should succeed");
         assert!(row_id > 0);
@@ -3318,15 +3321,23 @@ mod tests {
         // Global current_conversation_id must remain None!
         assert_eq!(*orchestrator.current_conversation_id.lock().await, None);
 
-        // Verify message was inserted into conv-A
-        let (role, content): (String, String) =
-            sqlx::query_as("SELECT role, content FROM conversation_messages WHERE id = ?")
-                .bind(row_id)
-                .fetch_one(&orchestrator.db)
-                .await
-                .unwrap();
+        orchestrator
+            .update_streaming_draft(row_id, "draft chunk 2", None)
+            .await
+            .unwrap();
+        let (role, content, metadata): (String, String, String) = sqlx::query_as(
+            "SELECT role, content, metadata FROM conversation_messages WHERE id = ? AND conversation_id = 'conv-A'",
+        )
+        .bind(row_id)
+        .fetch_one(&orchestrator.db)
+        .await
+        .unwrap();
         assert_eq!(role, "assistant");
-        assert_eq!(content, "draft chunk 1");
+        assert_eq!(content, "draft chunk 2");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&metadata).unwrap(),
+            serde_json::json!({ "turn_id": "turn-a", "streaming_draft": true })
+        );
     }
 
     #[tokio::test]

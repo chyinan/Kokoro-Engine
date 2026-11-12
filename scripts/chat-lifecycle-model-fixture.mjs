@@ -27,6 +27,7 @@ const server = http.createServer(async (request, response) => {
   let closed = false; response.on("close", () => { closed = true; call.closedAt = new Date().toISOString(); save(); });
   chunk({ role: "assistant", content: "" });
   if (name === "tool" && !call.toolResult) {
+    chunk({ content: "Draft before get_time. " });
     const tool = call.tools.find(name => name.endsWith("get_time"));
     if (tool) chunk({ tool_calls: [{ index: 0, id: "fixture-tool-call", type: "function", function: { name: tool, arguments: "{}" } }] });
     else chunk({ content: "No get_time tool configured" });
@@ -35,7 +36,7 @@ const server = http.createServer(async (request, response) => {
     for (const text of chunks) {
       if (closed) break;
       chunk({ content: text });
-      await new Promise(resolve => setTimeout(resolve, name.includes("slow") || name.includes("cancel") ? 500 : 160));
+      await new Promise(resolve => setTimeout(resolve, name === "tool" || name.includes("slow") || name.includes("cancel") ? 500 : 160));
     }
   }
   if (!closed) { response.write("data: [DONE]\n\n"); response.end(); call.completed = true; save(); }

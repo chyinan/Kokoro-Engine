@@ -41,7 +41,7 @@ it("dismisses the old editor when another conversation replaces a message at the
     }
 });
 
-it("keeps tool details expanded when the completion event arrives before the saved history", async () => {
+it("shows one reply and keeps tool details open through the streaming draft and saved history", async () => {
     chat.reset();
     const snapshot = {
         ...turn("search", 2), character_id: "char-1", conversation_id: "conv-1",
@@ -60,6 +60,15 @@ it("keeps tool details expanded when the completion event arrives before the sav
         const toggle = details();
         expect(toggle).toBeDefined();
         await act(async () => toggle!.click());
+        expect(container.textContent).toContain("found result");
+
+        // SQLite can already have the first round's draft while the journal is still streaming.
+        await act(async () => chat.set({ messages: [user, {
+            id: 3, role: "assistant", content: "first-round draft", created_at: "now",
+            metadata: JSON.stringify({ turn_id: snapshot.turn_id, streaming_draft: true }),
+        }] }));
+        expect(container.textContent).not.toContain("first-round draft");
+        expect(details()).toBe(toggle);
         expect(container.textContent).toContain("found result");
 
         // A terminal event updates the turn while the cached history is unchanged.

@@ -9,8 +9,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const output = path.resolve(process.argv[2] ?? "output/playwright/chat-lifecycle");
 const browser = await chromium.connectOverCDP("http://127.0.0.1:19333");
 const context = browser.contexts()[0];
-const pet = context.pages().find(page => page.url().includes("pet.html"));
-assert(pet, "isolated pet WebView must exist");
+const pet = await waitFor(() => context.pages().find(page => page.url().includes("pet.html")));
 const report = { startedAt: new Date().toISOString(), model: "controlled localhost SSE fixture", checks: [] };
 const save = () => fs.writeFileSync(path.join(output, "native-report.json"), JSON.stringify(report, null, 2));
 const view = page => page.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_chat_view"));
@@ -136,10 +135,29 @@ try {
     const state = await view(pet); assert.equal(state.busy, false);
     const retry = await petSend("after-failure"); assert.equal(retry.status, "completed"); return { result, retry };
   });
-  await check("builtin tool execution and history remain single-owned", async () => {
-    const turn = await petSend("tool"); assert.equal(turn.status, "completed");
-    const state = await view(pet); const tools = state.messages.filter(message => message.role === "tool" && message.metadata?.includes(turn.turn_id));
-    assert.equal(tools.length, 1); return { turn, tools };
+  await check("builtin tool execution and its in-progress assistant draft are shown once", async () => {
+    const requestId = "native_tool_rounds";
+    await submit(pet, { message: "[case:tool]", client_request_id: requestId }, "__toolRounds");
+    const during = await waitFor(() => main.evaluate(async requestId => {
+      const { chatApplication } = await import("/src/lib/chat/application.ts");
+      const { projectMessages } = await import("/src/lib/chat/projection.ts");
+      const state = await chatApplication.refresh();
+      const turn = state.turns.find(turn => turn.client_request_id === requestId && turn.status === "streaming" && turn.tools.length);
+      const draft = state.messages.find(message => message.role === "assistant" && message.content.trim() === "Draft before get_time.");
+      if (!turn || !draft) return null;
+      const replies = projectMessages(state).filter(message => message.role === "kokoro" && message.text.includes(draft.content.trim()));
+      return { draft, turn, replies };
+    }, requestId));
+    assert.equal(during.replies.length, 1);
+    assert.equal(during.replies[0].turnId, during.turn.turn_id);
+    assert.equal(during.replies[0].tools.length, 1);
+    const result = await outcome(pet, "__toolRounds");
+    assert.equal(result.result?.status, "completed");
+    assert.equal(result.result.assistant_message_id, during.draft.id);
+    const state = await view(pet);
+    const turn = state.turns.find(turn => turn.client_request_id === requestId);
+    const tools = state.messages.filter(message => message.role === "tool" && message.metadata?.includes(turn.turn_id));
+    assert.equal(tools.length, 1); return { during, turn, tools };
   });
   await check("history edits reject during generation, switching cancels without cross-writing, regeneration and clear preserve ownership", async () => {
     const source = (await view(pet)).conversation_id;

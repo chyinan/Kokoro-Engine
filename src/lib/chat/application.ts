@@ -3,7 +3,7 @@
 import * as bridge from "../kokoro-bridge";
 import type { ChatRequest, ChatTurnSnapshot, ChatViewSnapshot, ChatViewVersion, StreamChatResponse } from "../kokoro-bridge";
 import { getContinueFromCutoffIndex, getExpectedTailMessageId } from "./history-commands";
-import { isActiveTurn, isTurnAwaitingHistory, mergeTurnSnapshot, projectSavedMessages } from "./projection";
+import { isActiveTurn, mergeTurnSnapshot, projectSavedMessages } from "./projection";
 
 export interface ChatTransport {
   read(knownVersion?: ChatViewVersion): Promise<ChatViewSnapshot | null>;
@@ -210,10 +210,11 @@ export class ChatApplication {
     if (!matchesSelection(this.view)) return;
 
     const user = await this.mutate(async () => {
-      const awaitingHistory = (view: ChatViewSnapshot) => view.turns.some(turn => isTurnAwaitingHistory(view, turn));
-      if (awaitingHistory(this.view)) await this.refresh();
-      const view = this.view;
-      if (!matchesSelection(view) || awaitingHistory(view)) return;
+      // A turn can persist rows even if it is cancelled, fails, or its event is missed.
+      // A read already in flight may have sampled history before those writes.
+      this.readInFlight = undefined;
+      const view = await this.refresh();
+      if (!matchesSelection(view)) return;
       const messages = projectSavedMessages(view).filter(message => message.id !== undefined);
       const index = messages.findIndex(message => message.id === target.messageId);
       if (index < 0) return;
