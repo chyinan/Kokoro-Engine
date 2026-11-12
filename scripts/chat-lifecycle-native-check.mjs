@@ -159,6 +159,26 @@ try {
     const tools = state.messages.filter(message => message.role === "tool" && message.metadata?.includes(turn.turn_id));
     assert.equal(tools.length, 1); return { during, turn, tools };
   });
+  await check("text-mode tool result remains visible after the saved history takes over", async () => {
+    const turn = await petSend("text-tool");
+    assert.equal(turn.status, "completed");
+    assert.equal(turn.tools.length, 1);
+    const evidence = await main.evaluate(async turn => {
+      const { chatApplication } = await import("/src/lib/chat/application.ts");
+      const { projectMessages } = await import("/src/lib/chat/projection.ts");
+      const state = await chatApplication.refresh();
+      return {
+        revision: state.revision,
+        savedToolCount: state.messages.filter(message => message.role === "tool" && message.metadata?.includes(turn.turn_id)).length,
+        reply: projectMessages(state).find(message => message.id === turn.assistant_message_id),
+      };
+    }, turn);
+    assert(evidence.revision >= turn.revision);
+    assert.equal(evidence.savedToolCount, 0);
+    assert.equal(evidence.reply?.tools?.length, 1);
+    assert.match(evidence.reply.tools[0].text, /Current time:/);
+    return evidence;
+  });
   await check("history edits reject during generation, switching cancels without cross-writing, regeneration and clear preserve ownership", async () => {
     const source = (await view(pet)).conversation_id;
     await pet.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.clear());
@@ -270,6 +290,7 @@ try {
     for (const name of ["pet-only", "remount-slow", "concurrent-slow", "duplicate-slow", "main-hidden", "sender-destroyed-slow", "main-destroyed"]) assert.equal(calls.filter(call => call.streaming && call.name === name).length, 1, name);
     assert.equal(calls.filter(call => call.streaming && call.name === "before-cancel").length, 0);
     assert.equal(calls.filter(call => call.streaming && call.name === "tool").length, 2); // tool round + one follow-up
+    assert.equal(calls.filter(call => call.streaming && call.name === "text-tool").length, 2);
     return calls;
   });
   report.completedAt = new Date().toISOString(); save();

@@ -41,7 +41,30 @@ it("dismisses the old editor when another conversation replaces a message at the
     }
 });
 
-it("shows one reply and keeps tool details open through the streaming draft and saved history", async () => {
+it("dismisses an assistant editor when the same row is reloaded under a new generation", async () => {
+    chat.reset();
+    chat.set({ messages: [{ id: 101, role: "assistant", content: "Original answer", created_at: "now", metadata: '{"turn_id":"turn_a"}' }] });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const button = (action: string) => container.querySelector<HTMLButtonElement>(`button[title="chat.actions.${action}"]`);
+    try {
+        await act(async () => root.render(<ChatPanel />));
+        await act(async () => button("edit")!.click());
+        expect(button("save")).not.toBeNull();
+
+        await act(async () => chat.set({ generation: 2 }));
+        expect(button("save")).toBeNull();
+        await act(async () => button("edit")!.click());
+        await act(async () => button("save")!.click());
+        expect(chat.edit).toHaveBeenCalledExactlyOnceWith({ conversationId: "conv-1", generation: 2, messageId: 101 }, "Original answer");
+    } finally {
+        await act(async () => root.unmount());
+        container.remove();
+    }
+});
+
+it.each(["native", "text"])("keeps %s tool details open through the streaming draft and saved history", async mode => {
     chat.reset();
     const snapshot = {
         ...turn("search", 2), character_id: "char-1", conversation_id: "conv-1",
@@ -79,19 +102,75 @@ it("shows one reply and keeps tool details open through the streaming draft and 
         await act(async () => continueFrom!.click());
         expect(chat.continueFrom).toHaveBeenCalledExactlyOnceWith({ conversationId: "conv-1", generation: 1, messageId: 1 });
 
+        const savedToolRows = mode === "native" ? [{
+            id: 2, role: "tool", content: "saved result", created_at: "now",
+            metadata: JSON.stringify({ turn_id: snapshot.turn_id, tool_name: "search", tool_trace_id: "0:0" }),
+        }] : [];
         await act(async () => chat.set({
             revision: 3,
-            messages: [user, {
-                id: 2, role: "tool", content: "saved result", created_at: "now",
-                metadata: JSON.stringify({ turn_id: snapshot.turn_id, tool_name: "search", tool_trace_id: "0:0" }),
-            }, {
+            messages: [user, ...savedToolRows, {
                 id: 3, role: "assistant", content: "answer", created_at: "now",
                 metadata: JSON.stringify({ turn_id: snapshot.turn_id }),
             }],
         }));
         expect(details()).toBe(toggle);
-        expect(container.textContent).toContain("saved result");
-        expect(container.textContent).not.toContain("found result");
+        expect(container.textContent).toContain(mode === "native" ? "saved result" : "found result");
+        if (mode === "native") expect(container.textContent).not.toContain("found result");
+    } finally {
+        await act(async () => root.unmount());
+        scrollTo.mockRestore();
+        container.remove();
+    }
+});
+
+it("keeps approved tool details expanded when the first hidden turn creates its conversation", async () => {
+    chat.reset();
+    const request = {
+        turn_id: "turn_hidden", tool: "lookup", tool_trace_id: "0:0", approval_request_id: "approval-1",
+        approval_status: "requested" as const, deny_kind: "pending_approval" as const, error: "Waiting for approval",
+    };
+    const pending = {
+        ...turn("hidden", 2), character_id: "char-1", conversation_id: null, hidden: true,
+        user_message_id: null, text: "", tools: [request],
+    };
+    chat.set({ conversation_id: null, revision: 2, busy: true, turns: [pending] });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const details = () => [...container.querySelectorAll("button")].filter(button => button.textContent?.includes("chat.tools.header"));
+    const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    try {
+        await act(async () => root.render(<ChatPanel />));
+        const [toggle] = details();
+        await act(async () => toggle.click());
+        expect(container.textContent).toContain("Waiting for approval");
+
+        const approved = { ...request, approval_status: "approved" as const, error: undefined, deny_kind: undefined, result: { message: "Approved tool result" } };
+        const resolved = { ...pending, revision: 3, tools: [request, approved] };
+        await act(async () => chat.set({ turns: [resolved] }));
+        expect(container.textContent).toContain("Approved tool result");
+
+        const savedTool = {
+            id: 7, role: "tool", content: "Approved tool result", created_at: "now",
+            metadata: JSON.stringify({ turn_id: pending.turn_id, tool_name: "lookup", tool_trace_id: "0:0" }),
+        };
+        // SQLite publishes the new selection while the streaming turn is still unbound in the journal.
+        await act(async () => chat.set({
+            conversation_id: "new-conversation", generation: 2, revision: 3, messages: [savedTool],
+        }));
+        expect(details()).toHaveLength(1);
+        expect(details()[0]).toBe(toggle);
+        expect(container.textContent).toContain("Approved tool result");
+
+        const completed = { ...resolved, conversation_id: "new-conversation", status: "completed" as const, revision: 4, text: "Finished", assistant_message_id: 8 };
+        await act(async () => chat.set({ turns: [completed], busy: false }));
+        await act(async () => chat.set({ revision: 4, messages: [savedTool, {
+            id: 8, role: "assistant", content: "Finished", created_at: "now",
+            metadata: JSON.stringify({ turn_id: pending.turn_id }),
+        }] }));
+        expect(details()).toHaveLength(1);
+        expect(details()[0]).toBe(toggle);
+        expect(container.textContent).toContain("Approved tool result");
     } finally {
         await act(async () => root.unmount());
         scrollTo.mockRestore();

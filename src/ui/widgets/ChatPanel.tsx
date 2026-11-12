@@ -137,6 +137,7 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
             isStreaming={isStreaming}
             isTranslationExpanded={isTranslationExpanded}
             onToggleTranslation={() => onToggleTranslation(globalIndex)}
+            editScope={target ? JSON.stringify([target.conversationId, target.generation, target.messageId]) : undefined}
             onEdit={target ? text => onEdit(target, text) : undefined}
             onRegenerate={target ? () => onRegenerate(target) : undefined}
             onContinueFrom={target ? () => onContinueFrom(target) : undefined}
@@ -1210,9 +1211,9 @@ export default function ChatPanel({
                         const globalIndex = Math.max(0, deferredMessages.length - visibleCount) + i;
                         return (
                             <MemoizedChatMessage
-                                key={JSON.stringify([activeConversationId, view.generation,
-                                    msg.role === "kokoro" && msg.turnId ? `turn:${msg.turnId}` : msg.id ?? `${globalIndex}-${msg.role}`,
-                                ])}
+                                key={msg.role === "kokoro" && msg.turnId
+                                    ? JSON.stringify([activeCharacterId, msg.turnId])
+                                    : JSON.stringify([activeConversationId, view.generation, msg.id ?? `${globalIndex}-${msg.role}`])}
                                 message={msg}
                                 conversationId={activeConversationId}
                                 generation={view.generation}

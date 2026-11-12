@@ -156,6 +156,10 @@ describe("UI-independent chat application", () => {
     expect(tools(rows)).toMatchObject(expected);
     expect(tools([])).toMatchObject(expected);
     expect(tools(rows, { ...active, status: "completed" })).toMatchObject(expected);
+    // A completed mixed turn keeps the text-mode result and uses the saved native result.
+    expect(tools([{ ...rows[0], content: "saved result" }], { ...active, revision: 0, status: "completed" })).toMatchObject([
+      { ...expected[0], text: "saved result" }, expected[1],
+    ]);
   });
   it("restores an actionable tool approval from a snapshot before the result is saved", async () => {
     const h = harness();
@@ -244,7 +248,8 @@ describe("UI-independent chat application", () => {
     await expect(h.app.send({ message: "retry" })).resolves.toMatchObject({ status: "completed" });
   });
   it.each(["completed", "cancelled", "error"] as const)("never resurrects deleted history from a late %s snapshot", async status => {
-    const h = harness(); h.set({ revision: 30, turns: [turn("deleted", 30, status)], messages: [] });
+    const deleted = { ...turn("deleted", 30, status), tools: [{ turn_id: "turn_deleted", tool: "lookup", tool_trace_id: "0:0", result: { message: "found" } }] };
+    const h = harness(); h.set({ revision: 30, turns: [deleted], messages: [] });
     await h.app.refresh(); expect(projectMessages(h.app.getSnapshot())).toEqual([]);
   });
   it("removes an old active cache entry if authoritative retention has expired", async () => {

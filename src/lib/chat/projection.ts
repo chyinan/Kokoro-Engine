@@ -1,6 +1,6 @@
 import type { ChatTurnSnapshot, ChatViewSnapshot } from "../kokoro-bridge";
 import { buildChatMessagesFromConversation } from "./history";
-import { getToolEventStateUpdate, stripStreamingControlMarkup, type ChatPanelMessage, type PendingTurnState } from "./turn-state";
+import { buildToolTraceItem, getToolEventStateUpdate, mergeToolTraceItems, stripStreamingControlMarkup, type ChatPanelMessage, type PendingTurnState } from "./turn-state";
 
 export const isActiveTurn = (turn: ChatTurnSnapshot) => ["pending", "accepted", "streaming"].includes(turn.status);
 
@@ -39,11 +39,22 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
     const active = isActiveTurn(turn);
     // Completion can arrive before the history read. Keep the assistant row
     // mounted until a snapshot at or beyond that event takes over.
-    if (!active && !isTurnAwaitingHistory(view, turn)) continue;
+    const live = active || isTurnAwaitingHistory(view, turn);
+    if (!live && (turn.status !== "completed" || turn.conversation_id !== view.conversation_id || !turn.tools.length)) continue;
     if (active && !turn.hidden && !messages.some(message => message.id === turn.user_message_id && turn.user_message_id !== null)) {
       messages.push({ role: "user", text: turn.message, images: turn.images, clientRequestId: turn.client_request_id });
     }
     const index = messages.findIndex(message => message.role === "kokoro" && (message.turnId === turn.turn_id || (turn.assistant_message_id !== null && message.id === turn.assistant_message_id)));
+    if (!live) {
+      // Text-mode results have no saved tool row. Supplement the saved reply
+      // with finished journal results and let saved results take precedence.
+      if (index < 0) continue;
+      const saved = messages[index];
+      const tools = turn.tools.filter(event => event.approval_status !== "requested")
+        .reduce<NonNullable<ChatPanelMessage["tools"]>>((traces, event) => mergeToolTraceItems(traces, buildToolTraceItem(event)), []);
+      messages[index] = { ...saved, tools: (saved.tools ?? []).reduce(mergeToolTraceItems, tools) };
+      continue;
+    }
     const text = stripStreamingControlMarkup(turn.text);
     if (!text && !turn.tools.length) continue;
     const assistant: ChatPanelMessage = {

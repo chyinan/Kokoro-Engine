@@ -22,6 +22,7 @@ interface ChatMessageProps {
     isStreaming: boolean;
     isTranslationExpanded: boolean;
     onToggleTranslation: () => void;
+    editScope?: string;
     onEdit?: (newText: string) => void;
     onRegenerate?: () => void;
     onContinueFrom?: () => void;
@@ -170,6 +171,7 @@ export const ChatMessage = memo(function ChatMessage({
     isStreaming,
     isTranslationExpanded,
     onToggleTranslation,
+    editScope,
     onEdit,
     onRegenerate,
     onContinueFrom,
@@ -178,23 +180,24 @@ export const ChatMessage = memo(function ChatMessage({
     onPreviewImage,
 }: ChatMessageProps) {
     const { t } = useTranslation();
-    const [isEditing, setIsEditing] = useState(false);
+    const [editingScope, setEditingScope] = useState<string>();
     const [editingText, setEditingText] = useState("");
     const [toolsExpanded, setToolsExpanded] = useState(false);
+    const isEditing = editScope !== undefined && editingScope === editScope;
 
     const handleStartEdit = () => {
-        setIsEditing(true);
+        setEditingScope(editScope);
         setEditingText(msg.text);
     };
 
     const handleSaveEdit = () => {
-        if (!editingText.trim()) return;
+        if (!isEditing || !editingText.trim()) return;
         onEdit?.(editingText);
-        setIsEditing(false);
+        setEditingScope(undefined);
     };
 
     const handleCancelEdit = () => {
-        setIsEditing(false);
+        setEditingScope(undefined);
         setEditingText("");
     };
 
