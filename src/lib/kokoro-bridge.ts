@@ -349,8 +349,8 @@ export function getChatView(knownVersion?: ChatViewVersion): Promise<ChatViewSna
 }
 export type ChatDraftSubmissionStatus = "pending" | "persisted" | "unsent";
 
-export function getChatDraftSubmissionStatus(characterId: string, clientRequestId: string): Promise<ChatDraftSubmissionStatus> {
-    return invoke("get_chat_draft_submission_status", { characterId, clientRequestId });
+export function recoverChatDraftSubmission(characterId: string, clientRequestId: string): Promise<ChatDraftSubmissionStatus> {
+    return invoke("recover_chat_draft_submission", { characterId, clientRequestId });
 }
 export function onChatRuntimeChanged(callback: (snapshot: ChatTurnSnapshot) => void): Promise<UnlistenFn> {
     return listen<ChatTurnSnapshot>("chat-runtime-changed", event => callback(event.payload));
@@ -1500,6 +1500,7 @@ export interface LoadedConversation {
 
 export interface EditConversationMessageRequest {
     conversation_id?: string;
+    conversation_generation?: number;
     message_id?: number;
     visible_index?: number;
     new_content: string;

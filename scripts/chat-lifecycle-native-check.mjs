@@ -152,7 +152,7 @@ try {
     const rejections = await pet.evaluate(async () => {
       const bridge = await import("/src/lib/kokoro-bridge.ts"); const current = await bridge.getChatView();
       const operations = [
-        () => bridge.editConversationMessage({ conversation_id: current.conversation_id, message_id: current.messages.find(message => message.role === "user").id, new_content: "must not persist" }),
+        () => bridge.editConversationMessage({ conversation_id: current.conversation_id, conversation_generation: current.generation, message_id: current.messages.find(message => message.role === "user").id, new_content: "must not persist" }),
         () => bridge.deleteLastMessages(1, current.conversation_id),
         () => bridge.createConversation(),
       ];
@@ -164,11 +164,24 @@ try {
     const cancelled = await outcome(pet, "__historySwitch"); assert(cancelled.error?.includes("cancelled") || cancelled.result?.status === "cancelled");
     const switched = await view(pet); assert.equal(switched.conversation_id, target);
     assert(!switched.messages.some(message => message.content.includes("history-switch")));
+    const staleEdit = await pet.evaluate(async ({ source, target, generation, messageId }) => {
+      const bridge = await import("/src/lib/kokoro-bridge.ts");
+      await bridge.loadConversation(source);
+      await bridge.loadConversation(target);
+      try {
+        await bridge.editConversationMessage({ conversation_id: target, conversation_generation: generation, message_id: messageId, new_content: "must not persist" });
+      } catch (error) {
+        return bridge.getKokoroErrorMessage(error);
+      }
+    }, { source, target, generation: switched.generation, messageId: switched.messages.find(message => message.role === "user").id });
+    assert.match(staleEdit, /Conversation changed/);
+    assert.deepEqual((await view(pet)).messages, switched.messages);
     const regenerated = await pet.evaluate(async () => {
       const { chatApplication } = await import("/src/lib/chat/application.ts");
       const { projectMessages } = await import("/src/lib/chat/projection.ts"); await chatApplication.refresh();
-      const messages = projectMessages(chatApplication.getSnapshot()); const userIndex = messages.findIndex(message => message.role === "user");
-      await chatApplication.edit(userIndex, "[case:history-regenerated]");
+      const snapshot = chatApplication.getSnapshot();
+      const user = projectMessages(snapshot).find(message => message.role === "user");
+      await chatApplication.edit({ conversationId: snapshot.conversation_id, generation: snapshot.generation, messageId: user.id }, "[case:history-regenerated]");
       const answerIndex = projectMessages(chatApplication.getSnapshot()).findIndex(message => message.role === "kokoro");
       return chatApplication.continueFrom(answerIndex, true, { allow_image_gen: false });
     }); assert.equal(regenerated.status, "completed"); assert.equal(regenerated.conversation_id, target);
@@ -178,7 +191,7 @@ try {
     assert.equal((await view(pet)).conversation_id, target);
     await pet.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.clear());
     const cleared = await view(pet); assert.equal(cleared.conversation_id, null); assert.deepEqual(cleared.messages, []);
-    return { source, target, rejections, cancelled, regenerated, revisedMessageIds: revised.messages.map(message => message.id), clearedGeneration: cleared.generation };
+    return { source, target, rejections, cancelled, staleEdit, regenerated, revisedMessageIds: revised.messages.map(message => message.id), clearedGeneration: cleared.generation };
   });
   await check("hidden main window does not block pet generation", async () => {
     await main.evaluate(async () => (await import("/node_modules/@tauri-apps/api/window.js")).getCurrentWindow().hide());

@@ -3,7 +3,7 @@ use crate::commands::chat::{ChatRequest, StreamChatResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use tokio::sync::watch;
@@ -38,6 +38,7 @@ struct Journal {
     revision: u64,
     entries: HashMap<String, Entry>,
     retired: HashMap<String, (String, Outcome)>,
+    abandoned_drafts: HashMap<String, HashSet<String>>,
 }
 #[derive(Default)]
 pub struct ChatRuntimeState(
@@ -82,6 +83,14 @@ impl ChatRuntimeState {
             Sha256::digest(serde_json::to_vec(request).map_err(|e| e.to_string())?)
         );
         let mut journal = self.0.lock().unwrap();
+        if request.character_id.as_ref().is_some_and(|character| {
+            journal
+                .abandoned_drafts
+                .get(character)
+                .is_some_and(|ids| ids.contains(id))
+        }) {
+            return Err("chat_draft_abandoned: the draft was restored before admission".into());
+        }
         if let Some((original, result)) = journal.retired.get(id) {
             if original != &fingerprint {
                 return Err(
@@ -151,11 +160,22 @@ impl ChatRuntimeState {
         self.journal_snapshot().1
     }
 
-    pub fn is_pending_request(&self, character_id: &str, request_id: &str) -> bool {
-        self.0.lock().unwrap().entries.get(request_id).is_some_and(|entry| {
-            entry.snapshot.character_id.as_deref() == Some(character_id)
-                && entry.outcome.borrow().is_none()
-        })
+    /// Recovering a draft may race its IPC delivery. If recovery reaches the journal
+    /// first, close admission for that ID before the composer can send a new request.
+    pub fn recover_draft_admission(&self, character_id: &str, request_id: &str) -> bool {
+        let mut journal = self.0.lock().unwrap();
+        if let Some(entry) = journal.entries.get(request_id) {
+            return entry.snapshot.character_id.as_deref() == Some(character_id)
+                && entry.outcome.borrow().is_none();
+        }
+        if !journal.retired.contains_key(request_id) {
+            journal
+                .abandoned_drafts
+                .entry(character_id.into())
+                .or_default()
+                .insert(request_id.into());
+        }
+        false
     }
 
     fn revision(&self) -> u64 {

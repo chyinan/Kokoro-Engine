@@ -186,7 +186,8 @@ export class ChatApplication {
     const text = content.trim();
     if (!text || target.conversationId !== this.view.conversation_id || target.generation !== this.view.generation) return;
     return this.mutate(() => bridge.editConversationMessage({
-      conversation_id: target.conversationId, message_id: target.messageId, new_content: text,
+      conversation_id: target.conversationId, conversation_generation: target.generation,
+      message_id: target.messageId, new_content: text,
     }));
   }
   async deleteConversation(id: string) {

@@ -36,7 +36,7 @@ describe("application history command session ownership", () => {
     const edit = deferred<bridge.EditConversationMessageResponse>();
     const invoke = vi.spyOn(bridge, "editConversationMessage").mockReturnValue(edit.promise);
     const running = h.app.edit(editTarget, "edited A");
-    expect(invoke).toHaveBeenCalledWith({ conversation_id: "conversation-a", message_id: 101, new_content: "edited A" });
+    expect(invoke).toHaveBeenCalledWith({ conversation_id: "conversation-a", conversation_generation: 3, message_id: 101, new_content: "edited A" });
     h.set({ conversation_id: "conversation-b", generation: 4, messages: [{ id: 201, role: "user", content: "original B", created_at: "now" }] });
     await h.app.refresh(); edit.resolve({ message_id: 101, updated_content: "edited A" }); await running;
     expect(projectMessages(h.app.getSnapshot())).toMatchObject([{ id: 201, text: "original B" }]);

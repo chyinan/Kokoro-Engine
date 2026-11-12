@@ -2074,24 +2074,22 @@ pub enum ChatDraftSubmissionStatus {
 }
 
 #[tauri::command]
-pub async fn get_chat_draft_submission_status(
+pub async fn recover_chat_draft_submission(
     state: State<'_, AIOrchestrator>,
     runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
     character_id: String,
     client_request_id: String,
 ) -> Result<ChatDraftSubmissionStatus, KokoroError> {
-    chat_draft_submission_status(&state.db, &runtime, &character_id, &client_request_id).await
+    recover_chat_draft_submission_inner(&state.db, &runtime, &character_id, &client_request_id).await
 }
 
-async fn chat_draft_submission_status(
+async fn recover_chat_draft_submission_inner(
     db: &sqlx::SqlitePool,
     runtime: &crate::chat::runtime::ChatRuntimeState,
     character_id: &str,
     client_request_id: &str,
 ) -> Result<ChatDraftSubmissionStatus, KokoroError> {
-    if runtime.is_pending_request(character_id, client_request_id) {
-        return Ok(ChatDraftSubmissionStatus::Pending);
-    }
+    let pending = runtime.recover_draft_admission(character_id, client_request_id);
     let persisted: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1 FROM conversation_messages AS message
@@ -2107,6 +2105,8 @@ async fn chat_draft_submission_status(
     .await?;
     Ok(if persisted {
         ChatDraftSubmissionStatus::Persisted
+    } else if pending {
+        ChatDraftSubmissionStatus::Pending
     } else {
         ChatDraftSubmissionStatus::Unsent
     })
@@ -6103,6 +6103,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn draft_recovery_fences_late_admission_before_allowing_resend() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        let runtime = crate::chat::runtime::ChatRuntimeState::default();
+        let mut request: ChatRequest = serde_json::from_value(serde_json::json!({
+            "message": "draft", "character_id": "char-a", "client_request_id": "closed-window"
+        })).unwrap();
+
+        assert_eq!(
+            recover_chat_draft_submission_inner(&state.db, &runtime, "char-a", "closed-window").await.unwrap(),
+            ChatDraftSubmissionStatus::Unsent,
+        );
+        assert!(matches!(runtime.begin(&request), Err(error) if error.starts_with("chat_draft_abandoned:")));
+        assert!(runtime.snapshots().is_empty());
+
+        request.client_request_id = Some("resend".into());
+        assert!(runtime.begin(&request).unwrap().0);
+        assert_eq!(
+            recover_chat_draft_submission_inner(&state.db, &runtime, "char-a", "resend").await.unwrap(),
+            ChatDraftSubmissionStatus::Pending,
+        );
+        assert!(!runtime.begin(&request).unwrap().0);
+        runtime.complete("resend", Err("chat_turn_busy".into())).unwrap();
+        assert_eq!(
+            recover_chat_draft_submission_inner(&state.db, &runtime, "char-a", "resend").await.unwrap(),
+            ChatDraftSubmissionStatus::Unsent,
+        );
+    }
+
+    #[tokio::test]
     async fn draft_submission_recovery_uses_the_saved_request_after_runtime_restart() {
         let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
         let db = &state.db;
@@ -6112,7 +6141,7 @@ mod tests {
         })).unwrap();
         runtime.begin(&request).unwrap();
         assert_eq!(
-            chat_draft_submission_status(db, &runtime, "char-a", "draft-1").await.unwrap(),
+            recover_chat_draft_submission_inner(db, &runtime, "char-a", "draft-1").await.unwrap(),
             ChatDraftSubmissionStatus::Pending,
         );
 
@@ -6128,15 +6157,15 @@ mod tests {
 
         let restarted = crate::chat::runtime::ChatRuntimeState::default();
         assert_eq!(
-            chat_draft_submission_status(db, &restarted, "char-a", "draft-1").await.unwrap(),
+            recover_chat_draft_submission_inner(db, &restarted, "char-a", "draft-1").await.unwrap(),
             ChatDraftSubmissionStatus::Persisted,
         );
         assert_eq!(
-            chat_draft_submission_status(db, &restarted, "char-b", "draft-1").await.unwrap(),
+            recover_chat_draft_submission_inner(db, &restarted, "char-b", "draft-1").await.unwrap(),
             ChatDraftSubmissionStatus::Unsent,
         );
         assert_eq!(
-            chat_draft_submission_status(db, &restarted, "char-a", "draft-2").await.unwrap(),
+            recover_chat_draft_submission_inner(db, &restarted, "char-a", "draft-2").await.unwrap(),
             ChatDraftSubmissionStatus::Unsent,
         );
     }

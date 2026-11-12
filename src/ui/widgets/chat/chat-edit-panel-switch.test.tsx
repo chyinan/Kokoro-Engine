@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import ChatPanel from "../ChatPanel";
 import { chatViewFixture as chat } from "../../../lib/chat/view-test-fixture";
+import { turn } from "../../../lib/chat/__tests__/harness";
 
 vi.mock("../../../lib/chat/application", async () => ({ chatApplication: (await import("../../../lib/chat/view-test-fixture")).chatViewFixture }));
 vi.mock("@tauri-apps/api/core", async original => ({ ...await original<typeof import("@tauri-apps/api/core")>(), invoke: vi.fn(async () => {}) }));
@@ -36,6 +37,43 @@ it("dismisses the old editor when another conversation replaces a message at the
         expect(chat.edit).toHaveBeenCalledExactlyOnceWith({ conversationId: "conv-2", generation: 2, messageId: 201 }, "Message B");
     } finally {
         await act(async () => root.unmount());
+        container.remove();
+    }
+});
+
+it("keeps the same turn's tool details expanded when its assistant row is saved", async () => {
+    chat.reset();
+    const snapshot = {
+        ...turn("search", 2), character_id: "char-1", conversation_id: "conv-1",
+        tools: [{ turn_id: "turn_search", tool: "search", result: { message: "found result" }, tool_trace_id: "0:0" }],
+    };
+    const user = { id: 1, role: "user", content: "question", created_at: "now" };
+    chat.set({ busy: true, messages: [user], turns: [snapshot] });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const details = () => [...container.querySelectorAll("button")].find(button => button.textContent?.includes("chat.tools.header"));
+    const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    try {
+        await act(async () => root.render(<ChatPanel />));
+        await act(async () => details()!.click());
+        expect(container.textContent).toContain("found result");
+
+        await act(async () => chat.set({
+            busy: false, turns: [{ ...snapshot, status: "completed", assistant_message_id: 3 }],
+            messages: [user, {
+                id: 2, role: "tool", content: "found result", created_at: "now",
+                metadata: JSON.stringify({ turn_id: snapshot.turn_id, tool_name: "search", tool_trace_id: "0:0" }),
+            }, {
+                id: 3, role: "assistant", content: "answer", created_at: "now",
+                metadata: JSON.stringify({ turn_id: snapshot.turn_id }),
+            }],
+        }));
+        expect(container.textContent).toContain("found result");
+        expect(details()).toBeDefined();
+    } finally {
+        await act(async () => root.unmount());
+        scrollTo.mockRestore();
         container.remove();
     }
 });

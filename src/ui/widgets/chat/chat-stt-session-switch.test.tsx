@@ -6,14 +6,14 @@ import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import ChatPanel from "../ChatPanel";
 import { chatViewFixture as chat } from "../../../lib/chat/view-test-fixture";
-import { getChatDraftSubmissionStatus, type ChatDraftSubmissionStatus } from "../../../lib/kokoro-bridge";
+import { recoverChatDraftSubmission, type ChatDraftSubmissionStatus } from "../../../lib/kokoro-bridge";
 import { deferred, turn } from "../../../lib/chat/__tests__/harness";
 import { setLatestCameraFrame } from "../../../lib/camera-frame-cache";
 vi.mock("../../../lib/chat/application", async () => ({ chatApplication: (await import("../../../lib/chat/view-test-fixture")).chatViewFixture }));
 vi.mock("../../../lib/kokoro-bridge", async original => ({
     ...(await original<typeof import("../../../lib/kokoro-bridge")>()),
     setVisionTextInputFocused: vi.fn(async () => {}),
-    getChatDraftSubmissionStatus: vi.fn(),
+    recoverChatDraftSubmission: vi.fn(),
 }));
 import { loadSavedCharacterDraft, loadSavedCharacterDraftImages, saveCharacterDraft, saveCharacterDraftImages } from "./chat-draft-layout";
 
@@ -87,14 +87,14 @@ describe("ChatPanel draft preservation", () => {
     let root: ReturnType<typeof createRoot>;
     beforeEach(async () => {
         vi.clearAllMocks(); chat.reset(); localStorage.clear(); sessionStorage.clear();
-        vi.mocked(getChatDraftSubmissionStatus).mockReset().mockResolvedValue("unsent");
+        vi.mocked(recoverChatDraftSubmission).mockReset().mockResolvedValue("unsent");
         localStorage.setItem("kokoro_stt_enabled", "true");
         localStorage.setItem("kokoro_stt_auto_send", "true");
         capturedOnFinalTranscription = null; capturedOnWakeWordDetected = null; voiceInputState = "idle";
         container = document.createElement("div"); document.body.append(container); root = createRoot(container);
         await act(async () => root.render(createElement(ChatPanel)));
     });
-    afterEach(() => { setLatestCameraFrame(null); act(() => root.unmount()); container.remove(); });
+    afterEach(() => { setLatestCameraFrame(null); act(() => root.unmount()); vi.useRealTimers(); container.remove(); });
     function record() {
         const mic = container.querySelector<HTMLButtonElement>('button[aria-label="chat.input.mic.title.idle"]');
         expect(mic).not.toBeNull(); act(() => mic!.click());
@@ -174,10 +174,10 @@ describe("ChatPanel draft preservation", () => {
         sessionStorage.clear();
         chat.set({ turns: [], messages: [{ id: 10, role: "user", content: draftText.trim(), created_at: "now" }] });
         const recovery = deferred<ChatDraftSubmissionStatus>();
-        vi.mocked(getChatDraftSubmissionStatus).mockReturnValueOnce(recovery.promise);
+        vi.mocked(recoverChatDraftSubmission).mockReturnValueOnce(recovery.promise);
 
         await act(async () => root.render(createElement(ChatPanel)));
-        expect(getChatDraftSubmissionStatus).toHaveBeenCalledWith("draft-character", requestId);
+        expect(recoverChatDraftSubmission).toHaveBeenCalledWith("draft-character", requestId);
         expect(container.querySelector("textarea")?.value).toBe("");
         await act(async () => recovery.resolve("persisted"));
         expect(container.querySelector("textarea")?.value).toBe("");
@@ -186,7 +186,7 @@ describe("ChatPanel draft preservation", () => {
     });
     it("clears the sent attachment when the reopened window sees the request bind", async () => {
         const requestId = await closeWhileSending();
-        vi.mocked(getChatDraftSubmissionStatus).mockResolvedValueOnce("pending");
+        vi.mocked(recoverChatDraftSubmission).mockResolvedValueOnce("pending");
         await act(async () => root.render(createElement(ChatPanel)));
         expect(container.querySelector("textarea")?.value).toBe("");
         expect(container.querySelector('img[alt="pending"]')).toBeNull();
@@ -200,7 +200,7 @@ describe("ChatPanel draft preservation", () => {
         const newImage = "data:image/png;base64,bmV3";
         saveCharacterDraft("draft-character", "new unsent text");
         saveCharacterDraftImages("draft-character", [draftImage, newImage]);
-        vi.mocked(getChatDraftSubmissionStatus).mockResolvedValueOnce("persisted");
+        vi.mocked(recoverChatDraftSubmission).mockResolvedValueOnce("persisted");
 
         await act(async () => root.render(createElement(ChatPanel)));
         expect(container.querySelector("textarea")?.value).toBe("new unsent text");
@@ -208,12 +208,53 @@ describe("ChatPanel draft preservation", () => {
     });
     it("restores a submitted draft if its request ends before saving the user message", async () => {
         const requestId = await closeWhileSending();
-        vi.mocked(getChatDraftSubmissionStatus).mockResolvedValueOnce("pending");
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        vi.mocked(recoverChatDraftSubmission).mockResolvedValueOnce("pending");
         await act(async () => root.render(createElement(ChatPanel)));
 
         await act(async () => chat.set({ turns: [{ ...turn(requestId, 3, "error"), character_id: "draft-character", user_message_id: null }] }));
+        await act(async () => vi.advanceTimersByTimeAsync(750));
         expect(container.querySelector("textarea")?.value).toBe(draftText);
         expect(container.querySelector('img[alt="pending"]')?.getAttribute("src")).toBe(draftImage);
+    });
+    it("clears an unsent marker before allowing the recovered draft to be submitted again", async () => {
+        const requestId = await closeWhileSending();
+        const recovery = deferred<ChatDraftSubmissionStatus>();
+        vi.mocked(recoverChatDraftSubmission).mockReturnValueOnce(recovery.promise);
+        await act(async () => root.render(createElement(ChatPanel)));
+        expect(container.querySelector("textarea")?.disabled).toBe(true);
+        expect(chat.send).toHaveBeenCalledOnce();
+
+        await act(async () => recovery.resolve("unsent"));
+        expect(container.querySelector("textarea")?.value).toBe(draftText);
+        expect(container.querySelector('img[alt="pending"]')?.getAttribute("src")).toBe(draftImage);
+        expect(localStorage.getItem("kokoro_chat_submission_draft-character")).toBeNull();
+        expect(sessionStorage.getItem("kokoro_chat_submission_draft-character")).toBeNull();
+        await act(async () => root.unmount());
+        root = createRoot(container);
+        await act(async () => root.render(createElement(ChatPanel)));
+        expect(recoverChatDraftSubmission).toHaveBeenCalledExactlyOnceWith("draft-character", requestId);
+        expect(container.querySelector("textarea")?.disabled).toBe(false);
+
+        await send();
+        expect(chat.send).toHaveBeenCalledTimes(2);
+        expect(chat.send.mock.lastCall?.[0].client_request_id).not.toBe(requestId);
+    });
+    it("keeps the composer blocked through a failed lookup and recovers persistence without a turn event", async () => {
+        await closeWhileSending();
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        vi.mocked(recoverChatDraftSubmission)
+            .mockRejectedValueOnce(new Error("database temporarily unavailable"))
+            .mockResolvedValueOnce("pending")
+            .mockResolvedValueOnce("persisted");
+        await act(async () => root.render(createElement(ChatPanel)));
+        expect(container.querySelector("textarea")?.disabled).toBe(true);
+        await act(async () => vi.advanceTimersByTimeAsync(750));
+        expect(container.querySelector("textarea")?.disabled).toBe(true);
+        await act(async () => vi.advanceTimersByTimeAsync(750));
+        expect(container.querySelector("textarea")?.disabled).toBe(false);
+        expect(loadSavedCharacterDraft("draft-character")).toBe("");
+        expect(chat.send).toHaveBeenCalledOnce();
     });
     it("auto-sends through the application when the recording session stays current", async () => {
         record(); await finish("spoken words");

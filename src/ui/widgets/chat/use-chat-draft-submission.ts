@@ -1,5 +1,5 @@
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
-import { getChatDraftSubmissionStatus, type ChatTurnSnapshot } from "../../../lib/kokoro-bridge";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { recoverChatDraftSubmission, type ChatTurnSnapshot } from "../../../lib/kokoro-bridge";
 import { isActiveTurn } from "../../../lib/chat/projection";
 
 interface DraftSubmission {
@@ -49,6 +49,7 @@ export function useChatDraftSubmission(
     const [recoveringDraft, setRecoveringDraft] = useState(() => readStoredSubmission(characterId) !== null);
 
     const rememberSubmission = useCallback((requestId: string, text: string, images: string[]) => {
+        if (current.current?.characterId === characterId) return false;
         flushDraft();
         current.current = { characterId, requestId, text, images };
         const key = submissionKey(characterId);
@@ -59,46 +60,67 @@ export function useChatDraftSubmission(
         } catch {
             // Storage failures still allow the live panel to consume the draft.
         }
+        return true;
     }, [characterId, flushDraft]);
 
     const finishSubmission = useCallback((owner: string, requestId: string, persisted: boolean) => {
         const submission = current.current;
         if (submission?.characterId !== owner || submission.requestId !== requestId) return;
-        if (persisted) consumeSentDraft(owner, submission.text, submission.images);
+        const stored = readStoredSubmission(owner);
+        if (persisted && (!stored || stored.requestId === requestId)) {
+            consumeSentDraft(owner, submission.text, submission.images);
+        }
         current.current = null;
         setRecoveringDraft(false);
         try {
             const key = submissionKey(owner);
-            localStorage.removeItem(key);
-            sessionStorage.removeItem(key);
+            if (stored?.requestId === requestId) localStorage.removeItem(key);
+            const savedImages = JSON.parse(sessionStorage.getItem(key) ?? "null");
+            if (savedImages?.requestId === requestId) sessionStorage.removeItem(key);
         } catch {
             // Draft persistence is best effort when storage is unavailable.
         }
     }, [consumeSentDraft]);
 
-    const checkSubmission = useCallback(async (submission: DraftSubmission, terminal: boolean) => {
-        const { characterId, requestId } = submission;
-        try {
-            const status = await getChatDraftSubmissionStatus(characterId, requestId);
-            if (current.current !== submission) return;
-            if (status === "persisted" || (terminal && status === "unsent")) {
-                finishSubmission(characterId, requestId, status === "persisted");
-            } else if (status === "unsent") {
-                // Keep watching the request in case admission races the lookup.
-                setRecoveringDraft(false);
-            }
-        } catch {
-            if (current.current === submission) setRecoveringDraft(false);
+    const reconcileSubmission = useCallback((owner: string, requestId: string) => {
+        if (current.current?.characterId === owner && current.current.requestId === requestId) {
+            setRecoveringDraft(true);
         }
-    }, [finishSubmission]);
+    }, []);
 
     useLayoutEffect(() => {
         const submission = readStoredSubmission(characterId);
         current.current = submission;
         setRecoveringDraft(submission !== null);
-        if (submission) void checkSubmission(submission, false);
         return () => { current.current = null; };
-    }, [characterId, checkSubmission]);
+    }, [characterId]);
+
+    useEffect(() => {
+        const submission = current.current;
+        if (!recoveringDraft || !submission || submission.characterId !== characterId) return;
+        const { requestId } = submission;
+        let stopped = false;
+        let retry: ReturnType<typeof setTimeout> | undefined;
+        async function check() {
+            if (stopped || current.current !== submission) return;
+            try {
+                const status = await recoverChatDraftSubmission(characterId, requestId);
+                if (stopped || current.current !== submission) return;
+                if (status !== "pending") {
+                    finishSubmission(characterId, requestId, status === "persisted");
+                    return;
+                }
+            } catch {
+                // A failed lookup cannot tell us whether admission or persistence won.
+            }
+            if (!stopped && current.current === submission) retry = setTimeout(check, 750);
+        }
+        void check();
+        return () => {
+            stopped = true;
+            clearTimeout(retry);
+        };
+    }, [characterId, recoveringDraft, finishSubmission]);
 
     useLayoutEffect(() => {
         const submission = current.current;
@@ -107,9 +129,9 @@ export function useChatDraftSubmission(
         if (turn?.user_message_id != null) {
             finishSubmission(submission.characterId, submission.requestId, true);
         } else if (turn && !isActiveTurn(turn)) {
-            void checkSubmission(submission, true);
+            reconcileSubmission(submission.characterId, submission.requestId);
         }
-    }, [turns, characterId, checkSubmission, finishSubmission]);
+    }, [turns, characterId, reconcileSubmission, finishSubmission]);
 
-    return { recoveringDraft, rememberSubmission, finishSubmission };
+    return { recoveringDraft, rememberSubmission, finishSubmission, reconcileSubmission };
 }
