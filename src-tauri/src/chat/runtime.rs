@@ -403,6 +403,9 @@ pub async fn get_chat_view(
     let _selection = state.conversation_switch_lock.lock().await;
     let character_id = state.character_id.lock().await.clone();
     let conversation_id = state.current_conversation_id.lock().await.clone();
+    // Capture the journal before SQLite so any completed turn included in this
+    // revision has already persisted its history before the read starts.
+    let (revision, turns) = runtime.journal_snapshot();
     // Bind the history stamp to the same SQLite snapshot as the rows. A write
     // that races this read will still be visible to the next version check.
     let mut tx = state.db.begin().await?;
@@ -426,7 +429,6 @@ pub async fn get_chat_view(
             .collect();
     }
     tx.commit().await?;
-    let (revision, turns) = runtime.journal_snapshot();
     Ok(Some(ChatViewSnapshot {
         version: ChatViewVersion {
             revision,

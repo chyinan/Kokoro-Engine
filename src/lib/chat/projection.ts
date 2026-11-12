@@ -26,9 +26,14 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
     const images = message.role === "user" && message.id !== undefined ? imagesByMessage.get(message.id) : undefined;
     return images ? { ...message, images } : message;
   });
-  // Only active turns can add rows beyond those in SQLite.
-  for (const turn of turns.filter(isActiveTurn)) {
-    if (!turn.hidden && !messages.some(message => message.id === turn.user_message_id && turn.user_message_id !== null)) {
+  for (const turn of turns) {
+    const active = isActiveTurn(turn);
+    // Completion can arrive before the history read. Keep the assistant row
+    // mounted until a snapshot at or beyond that event takes over.
+    const awaitingHistory = turn.status === "completed" && turn.revision > view.revision
+      && turn.conversation_id !== null && turn.conversation_id === view.conversation_id;
+    if (!active && !awaitingHistory) continue;
+    if (active && !turn.hidden && !messages.some(message => message.id === turn.user_message_id && turn.user_message_id !== null)) {
       messages.push({ role: "user", text: turn.message, images: turn.images, clientRequestId: turn.client_request_id });
     }
     const index = messages.findIndex(message => message.role === "kokoro" && (message.turnId === turn.turn_id || (turn.assistant_message_id !== null && message.id === turn.assistant_message_id)));

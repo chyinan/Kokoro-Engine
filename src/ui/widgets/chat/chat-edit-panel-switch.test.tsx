@@ -41,14 +41,15 @@ it("dismisses the old editor when another conversation replaces a message at the
     }
 });
 
-it("keeps the same turn's tool details expanded when its assistant row is saved", async () => {
+it("keeps tool details expanded when the completion event arrives before the saved history", async () => {
     chat.reset();
     const snapshot = {
         ...turn("search", 2), character_id: "char-1", conversation_id: "conv-1",
         tools: [{ turn_id: "turn_search", tool: "search", result: { message: "found result" }, tool_trace_id: "0:0" }],
     };
     const user = { id: 1, role: "user", content: "question", created_at: "now" };
-    chat.set({ busy: true, messages: [user], turns: [snapshot] });
+    chat.set({ revision: 2, busy: true, messages: [user], turns: [snapshot] });
+    const completed = { ...snapshot, revision: 3, status: "completed" as const, assistant_message_id: 3 };
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -56,21 +57,29 @@ it("keeps the same turn's tool details expanded when its assistant row is saved"
     const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
     try {
         await act(async () => root.render(<ChatPanel />));
-        await act(async () => details()!.click());
+        const toggle = details();
+        expect(toggle).toBeDefined();
+        await act(async () => toggle!.click());
+        expect(container.textContent).toContain("found result");
+
+        // A terminal event updates the turn while the cached history is unchanged.
+        await act(async () => chat.set({ busy: false, turns: [completed] }));
+        expect(details()).toBe(toggle);
         expect(container.textContent).toContain("found result");
 
         await act(async () => chat.set({
-            busy: false, turns: [{ ...snapshot, status: "completed", assistant_message_id: 3 }],
+            revision: 3,
             messages: [user, {
-                id: 2, role: "tool", content: "found result", created_at: "now",
+                id: 2, role: "tool", content: "saved result", created_at: "now",
                 metadata: JSON.stringify({ turn_id: snapshot.turn_id, tool_name: "search", tool_trace_id: "0:0" }),
             }, {
                 id: 3, role: "assistant", content: "answer", created_at: "now",
                 metadata: JSON.stringify({ turn_id: snapshot.turn_id }),
             }],
         }));
-        expect(container.textContent).toContain("found result");
-        expect(details()).toBeDefined();
+        expect(details()).toBe(toggle);
+        expect(container.textContent).toContain("saved result");
+        expect(container.textContent).not.toContain("found result");
     } finally {
         await act(async () => root.unmount());
         scrollTo.mockRestore();
