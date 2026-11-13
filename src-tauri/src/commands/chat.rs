@@ -2175,6 +2175,10 @@ pub async fn stream_chat(app: tauri::AppHandle, request: ChatRequest) -> Result<
 }
 
 pub async fn submit_chat(app: tauri::AppHandle, mut request: ChatRequest) -> Result<StreamChatResponse, KokoroError> {
+    // Own the gate through journal completion, including before the worker is
+    // polled. Import must not invalidate a turn which can still write or finish.
+    let database_operation_guard = crate::ai::context::try_acquire_database_operation_read_guard()
+        .map_err(|error| KokoroError::Chat(error.into()))?;
     ensure_client_request_id(&mut request.client_request_id);
     let request_id = request.client_request_id.clone().unwrap();
     let runtime = app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>().inner().clone();
@@ -2182,6 +2186,7 @@ pub async fn submit_chat(app: tauri::AppHandle, mut request: ChatRequest) -> Res
     if created {
         let execution_app = app.clone();
         tauri::async_runtime::spawn(async move {
+            let _database_operation_guard = database_operation_guard;
             let app = execution_app;
             // Catch panics as an explicit terminal error, so reconnect never leaves
             // a request permanently pending after a worker failure.

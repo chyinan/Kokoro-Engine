@@ -265,6 +265,22 @@ describe("UI-independent chat application", () => {
     await h.app.refresh(); h.set({ revision: 999, turns: [turn("recent", 999, "completed")], busy: false });
     await h.app.refresh(); expect(h.app.getSnapshot().turns.some(t => t.client_request_id === "old")).toBe(false);
   });
+  it("drops retained images after import invalidates the journal even when message IDs are reused", async () => {
+    const h = harness();
+    const old = { ...turn("device-a", 8, "completed"), images: ["device-a-image"] };
+    h.set({ revision: 8, turns: [old], messages: [{ id: 1, role: "user", content: "device A", created_at: "now" }] });
+    const stop = h.app.subscribe(() => {});
+    try {
+      await h.app.refresh();
+      expect(projectMessages(h.app.getSnapshot())[0].images).toEqual(["device-a-image"]);
+      h.set({ revision: 9, history_revision: 2, turns: [], messages: [{
+        id: 1, role: "user", content: "device B", created_at: "now", metadata: JSON.stringify({ client_request_id: "device-b" }),
+      }] });
+      await h.app.refresh();
+      h.emit(old); // A queued pre-import event cannot restore the retired attachment.
+      expect(projectMessages(h.app.getSnapshot())).toEqual([{ id: 1, role: "user", text: "device B" }]);
+    } finally { stop(); }
+  });
   it("does not project replies belonging to another character or conversation", async () => {
     const h = harness(); h.set({ revision: 2, turns: [ { ...turn("old-character", 1), character_id: "other" }, { ...turn("old-conversation", 2), conversation_id: "other" } ] });
     await h.app.refresh(); expect(projectMessages(h.app.getSnapshot())).toEqual([]);

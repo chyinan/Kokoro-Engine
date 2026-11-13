@@ -172,3 +172,27 @@ launcher 默认重新编译隔离 debug app、创建全新数据根/profile、�
 - 01-pet-only.png、02-main-restored.png、03-remounted.png、04-no-main.png。
 - app.stdout.log、native-check.log 与根目录 .chat-* 检查日志；clippy-baseline.json 保留修复前状态，clippy-fix-evidence.json 记录当前严格通过及 29 行属性修改。
 - docs-before-clippy-fix.md、evidence-sha256-before-clippy-fix.json 保留上一轮文档和证据清单；当前 evidence-sha256.json 包含更新后的报告与本轮证据。
+
+## PR #30 第二轮场景修复（2026-11-14，JST）
+
+针对 b6ff2637 的五项反馈，本轮修复了手势 busy 拒绝前已发布 idle 时的重试唤醒、桌宠点击时的角色/会话/generation 绑定、备份角色合并后的失败事件归属、导入后旧 journal 的附件关联，以及准入失败气泡的五秒清理。手势重试沿用 500ms 冷却，销毁后停止；后续气泡会撤销旧清理计时器。
+
+失败事件只在原角色、原会话、system/failure_event 类型及有效 turn ID 全部匹配时重映射，不放宽投影或重试的作用域检查。数据库导入提交后，在独占数据库门控内使 journal 失效并提升 revision；旧请求 ID 保留为拒绝再次执行的墓碑。应用任务从 journal 注册到完成均持有数据库读门控，读取快照也通过该门控，避免导入夹在数据库写入与 journal 完成之间，或把新数据库行与旧 journal 组合。
+
+本轮实际验证：
+
+| 命令/场景 | 结果 |
+| --- | --- |
+| `npm test -- --exclude scripts/tauri.test.mjs` | 88 文件、915 项通过；排除的是仍未纳入提交的本地启动器测试 |
+| `npm run build` | TypeScript 与前端构建通过；保留既有大 chunk 提示 |
+| `npm run check:ipc` | 176 个 invoke 命令已注册 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib` | 972 项通过，无忽略 |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings` | 通过，无 lint 豁免 |
+| `scripts/run-chat-lifecycle-native.ps1 -PlaywrightModule <模块绝对路径>` | 重新构建后的真实 Tauri/WebView2 + localhost SSE 全部 38 场景通过；链接仍有既有 LNK4098 提示 |
+| `python scripts/audit-chat-lifecycle-db.py` | integrity=ok，外键违规为空，27 个场景/角色/消息类型分组 |
+
+新增受控测试使用真实 ChatApplication/InteractionService 复现 idle-before-busy 顺序；React 测试覆盖角色、同角色会话及 ABA generation 变化、空会话绑定、错误气泡超时与后续请求隔离。Rust 测试通过实际 Skip/Overwrite 导入 SQL 合并失败诊断，并调用 RegenerationPlan 验证其可重试及外来角色仍被拒绝；前端缓存测试确认导入失效后相同整数 ID 的新消息不会获得旧图片，迟到事件也不会恢复附件。
+
+新增三个原生场景直接操作桌宠 UI 并延迟准入，在主窗口切换角色或会话后验证拒绝和气泡隐藏；另外真实导出 SQLite 备份、制造相同消息 ID/不同内容及 request ID 的分叉，在聊天仍 streaming 时覆盖导入，验证导入等待聊天结束、journal 失效、WebView 重载后旧图片不会附到导入消息。最终报告为 `output/playwright/chat-lifecycle/native-report.json`，隔离运行 ID 为 `20261114-005929`；本轮单元/构建日志保存为同目录 `pr30-review-repair-{frontend,build,rust,clippy}.log`。
+
+原生复跑发现并修正了两项验收条件：普通测试点击前需等待角色快照渲染；备份入口先前未采用隔离测试数据根，导致导出包没有测试数据库。后者现仅在 debug 且显式设置 KOKORO_TEST_DATA_ROOT 时复用现有隔离根，release 路径不变。修正后重新构建并完整复跑上述 38 场景。Skip/Overwrite 角色合并的完整原生 UI 路径未单独复跑，其证据来自 Rust 实际 SQL 与重试验证；真实云模型及外部语音/MCP/图像服务仍不在本轮验证范围。

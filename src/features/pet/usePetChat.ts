@@ -19,6 +19,20 @@ export function usePetChat(): PetChatState {
     const [request, setRequest] = useState<{ id: string; characterId: string }>();
     const requestId = request?.characterId === view.character_id ? request.id : undefined;
     const presentation = useRef<{ id: string; revision: number; shown: boolean }>(undefined);
+    const hideTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+    const bubbleVersion = useRef(0);
+    const clearHideTimer = () => {
+        ++bubbleVersion.current;
+        clearTimeout(hideTimer.current);
+        hideTimer.current = undefined;
+    };
+    const scheduleHide = () => {
+        clearHideTimer();
+        const version = bubbleVersion.current;
+        hideTimer.current = setTimeout(() => {
+            if (bubbleVersion.current === version) void invoke("hide_bubble_window").catch(() => {});
+        }, 5000);
+    };
     const scope = useRef(0);
     useEffect(() => {
         ++scope.current;
@@ -26,6 +40,7 @@ export function usePetChat(): PetChatState {
         setRequest(undefined);
         return () => {
             ++scope.current;
+            clearHideTimer();
             void invoke("hide_bubble_window").catch(() => {});
         };
     }, [view.character_id]);
@@ -47,6 +62,7 @@ export function usePetChat(): PetChatState {
         // view has followed, but must never reopen an old journal entry.
         if (!active && replyRequestId !== requestId && previous?.id !== replyRequestId) return;
         if (previous?.id === replyRequestId && revision <= previous.revision) return;
+        clearHideTimer();
         const shown = previous?.id === replyRequestId && previous.shown;
         presentation.current = { id: replyRequestId, revision, shown };
         if (text) {
@@ -66,8 +82,7 @@ export function usePetChat(): PetChatState {
             void invoke("show_bubble_window", { text: error }).catch(() => {});
         }
         if (!active) {
-            const timer = setTimeout(() => { void invoke("hide_bubble_window").catch(() => {}); }, 5000);
-            return () => clearTimeout(timer);
+            scheduleHide();
         }
     }, [revision, replyRequestId, requestId, text, error, active, view.character_id]);
     const sendMessage = async (text: string) => {
@@ -75,13 +90,19 @@ export function usePetChat(): PetChatState {
         if (!message || sending.current) return;
         sending.current = true;
         const sendingScope = scope.current;
+        clearHideTimer();
         const client_request_id = `pet_${crypto.randomUUID()}`;
         setRequest({ id: client_request_id, characterId: view.character_id });
         void invoke("show_bubble_window", { text: "..." }).catch(() => {});
-        try { await chatApplication.send({ message, client_request_id }); }
+        try {
+            await chatApplication.send({ message, client_request_id,
+                character_id: view.character_id, conversation_id: view.conversation_id ?? undefined,
+                conversation_generation: view.generation });
+        }
         catch (error) {
             if (scope.current === sendingScope && chatApplication.getSnapshot().character_id === view.character_id) {
                 void invoke("show_bubble_window", { text: getKokoroErrorMessage(error) }).catch(() => {});
+                scheduleHide();
             }
         } finally { sending.current = false; }
     };

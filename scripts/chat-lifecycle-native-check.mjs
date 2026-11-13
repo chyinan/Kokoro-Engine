@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { execFileSync } from "node:child_process";
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const output = path.resolve(process.argv[2] ?? "output/playwright/chat-lifecycle");
@@ -39,6 +40,12 @@ async function submit(page, request, key) {
 }
 const outcome = (page, key) => waitFor(() => page.evaluate(key => window[key]?.pending ? null : window[key], key));
 async function startPetChat(name) {
+  // Ordinary fixture sends wait for the visible scope after an IPC selection.
+  // The delayed-admission cases below deliberately switch only after the click.
+  await pet.evaluate(async () => {
+    await (await import("/src/lib/chat/application.ts")).chatApplication.refresh();
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
   const input = pet.getByPlaceholder("说点什么...");
   await waitFor(async () => {
     if (await input.isVisible()) return true;
@@ -69,7 +76,7 @@ try {
   }); save();
   await check("pet UI sends before any main WebView or ChatPanel has existed", async () => {
     assert(!(await windows(pet)).includes("main"));
-    const turn = await petSend("pet-only"); assert.equal(turn.status, "completed");
+    const turn = await petSend("pet-only"); assert.equal(turn.status, "completed", JSON.stringify(turn));
     const state = await view(pet); assert(state.messages.some(message => message.role === "assistant" && message.content.includes("pet-only")));
     assert(!(await windows(pet)).includes("main"));
     await pet.screenshot({ path: path.join(output, "01-pet-only.png") });
@@ -883,6 +890,46 @@ try {
     assert(!selection.switched.messages.some(message => message.content.includes("character-switch")));
     assert.equal(selection.result.status, "completed"); return { cancelled, ...selection };
   });
+  for (const kind of ["character", "conversation"]) await check(`pet UI binds its clicked ${kind} scope before delayed admission`, async () => {
+    await pet.evaluate(async () => {
+      const { chatApplication } = await import("/src/lib/chat/application.ts");
+      await chatApplication.refresh();
+      const send = chatApplication.send.bind(chatApplication);
+      chatApplication.send = async request => {
+        chatApplication.send = send;
+        window.__capturedPetRequest = request;
+        await new Promise(resolve => { window.__releasePetScope = resolve; });
+        try { const result = await send(request); window.__petScopeOutcome = { result }; return result; }
+        catch (error) { window.__petScopeOutcome = { error }; throw error; }
+      };
+    });
+    const before = await view(pet);
+    await startPetChat(`stale-pet-${kind}`);
+    const request = await waitFor(() => pet.evaluate(() => window.__capturedPetRequest));
+    assert.equal(request.character_id, before.character_id);
+    assert.equal(request.conversation_generation, before.generation);
+    assert.equal(request.conversation_id ?? null, before.conversation_id);
+    await main.evaluate(async kind => {
+      const bridge = await import("/src/lib/kokoro-bridge.ts");
+      if (kind === "character") await bridge.commitCharacterActivation(await bridge.prepareCharacterActivation("chat-validation-other"));
+      else await bridge.clearHistory();
+    }, kind);
+    await pet.evaluate(() => window.__releasePetScope());
+    const outcome = await waitFor(() => pet.evaluate(() => window.__petScopeOutcome));
+    assert.match(JSON.stringify(outcome.error), kind === "character" ? /Character changed/ : /Conversation changed/);
+    assert(!(await view(pet)).messages.some(row => row.content === request.message));
+    if (kind === "conversation") {
+      const bubble = await waitFor(() => context.pages().find(page => page.url().includes("bubble.html")));
+      await waitFor(async () => !(await bubble.evaluate(async () => (await import("/node_modules/@tauri-apps/api/window.js")).getCurrentWindow().isVisible())), 8000);
+    }
+    await main.evaluate(async before => {
+      const bridge = await import("/src/lib/kokoro-bridge.ts");
+      await bridge.commitCharacterActivation(await bridge.prepareCharacterActivation(before.character_id));
+      if (before.conversation_id) await bridge.loadConversation(before.conversation_id);
+    }, before);
+    await pet.evaluate(() => { delete window.__capturedPetRequest; delete window.__petScopeOutcome; delete window.__releasePetScope; });
+    return { before: { character_id: before.character_id, conversation_id: before.conversation_id, generation: before.generation }, request, outcome };
+  });
   for (const { name, reason, remount } of [
     { name: "speech-failure", reason: "controlled speech failure", remount: true },
     { name: "decode-failure", reason: "Failed to decode WAV audio.", remount: true },
@@ -979,6 +1026,52 @@ try {
     assert.equal(calls.filter(call => call.streaming && call.name === "text-tool-only").length, 2);
     assert.equal(calls.filter(call => call.streaming && call.name === "native-tool-only").length, 2);
     return calls;
+  });
+  await check("overwrite import and WebView reload cannot attach old journal images to reused message IDs", async () => {
+    const image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j7p8AAAAASUVORK5CYII=";
+    await submit(pet, { message: "[case:before-overwrite-image]", client_request_id: "native_import_image", images: [image] }, "__importImage");
+    const original = await outcome(pet, "__importImage");
+    assert.equal(original.result?.status, "completed");
+    const before = await view(pet);
+    assert(before.turns.some(turn => turn.client_request_id === "native_import_image" && turn.images.length === 1));
+    const archive = path.join(output, "overwrite-source.zip");
+    const fork = path.join(output, "overwrite-fork.zip");
+    await pet.evaluate(exportPath => window.__TAURI_INTERNALS__.invoke("export_data", { exportPath, options: { include_character_resources: false } }), archive);
+    execFileSync("python", ["-c", `
+import json, sqlite3, sys, tempfile, zipfile
+from pathlib import Path
+with tempfile.TemporaryDirectory() as folder:
+    with zipfile.ZipFile(sys.argv[1]) as source:
+        db = Path(folder) / 'fork.db'
+        db.write_bytes(source.read('kokoro.db'))
+        connection = sqlite3.connect(db)
+        connection.execute('UPDATE conversation_messages SET content = ?, metadata = ? WHERE id = ?', ('message from device B', json.dumps({'client_request_id':'device-b-request'}), int(sys.argv[3])))
+        connection.commit()
+        connection.close()
+        with zipfile.ZipFile(sys.argv[2], 'w') as target:
+            for name in source.namelist():
+                target.writestr(name, db.read_bytes() if name == 'kokoro.db' else source.read(name))
+`, archive, fork, String(original.result.user_message_id)]);
+    await submit(pet, { message: "[case:import-running-slow]", client_request_id: "native_import_running" }, "__importRunning");
+    await waitFor(async () => (await view(pet)).turns.some(turn => turn.client_request_id === "native_import_running" && turn.status === "streaming"));
+    const imported = await pet.evaluate(filePath => window.__TAURI_INTERNALS__.invoke("import_data", { filePath, options: {
+      import_database: true, import_configs: false, conflict_strategy: "overwrite", character_merges: [], ignored_characters: [],
+    } }), fork);
+    const finishedBeforeImport = await outcome(pet, "__importRunning");
+    assert.equal(finishedBeforeImport.result?.status, "completed");
+    const after = await view(pet);
+    assert.equal(after.turns.length, 0);
+    assert(after.revision > before.revision);
+    assert.equal(after.messages.find(row => row.id === original.result.user_message_id)?.content, "message from device B");
+    await pet.reload();
+    await pet.waitForFunction(() => Boolean(window.__TAURI_INTERNALS__));
+    const projected = await pet.evaluate(async () => {
+      const { chatApplication } = await import("/src/lib/chat/application.ts");
+      const { projectMessages } = await import("/src/lib/chat/projection.ts");
+      await chatApplication.refresh(); return projectMessages(chatApplication.getSnapshot());
+    });
+    assert.equal(projected.find(row => row.id === original.result.user_message_id)?.images, undefined);
+    return { original, finishedBeforeImport, imported, revisionBefore: before.revision, revisionAfter: after.revision, projected };
   });
   report.completedAt = new Date().toISOString(); save();
 } finally { await browser.close(); }

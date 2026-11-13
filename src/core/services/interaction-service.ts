@@ -64,6 +64,7 @@ export class InteractionService {
 
     private pendingGesture: { gesture: GestureEvent; controller: ControllerProxy } | null = null;
     private activeClientRequestId: string | null = null;
+    private retryTimer: ReturnType<typeof setTimeout> | null = null;
     private unlisten: (() => void) | null = null;
 
     constructor() {
@@ -138,6 +139,14 @@ export class InteractionService {
             else console.error("[InteractionService] Failed to trigger LLM:", error);
         } finally {
             if (this.activeClientRequestId === clientRequestId) this.activeClientRequestId = null;
+            // The idle notification can precede this request's busy rejection.
+            // Yield with the normal cooldown so stale idle snapshots cannot spin.
+            if (this.unlisten && this.pendingGesture && !chatApplication.getSnapshot().busy && !this.retryTimer) {
+                this.retryTimer = setTimeout(() => {
+                    this.retryTimer = null;
+                    this.processPendingGesture();
+                }, this.cooldownMs);
+            }
         }
         this.broadcast(event);
         return event;
@@ -167,7 +176,9 @@ export class InteractionService {
     }
 
     private processPendingGesture(): void {
-        if (!this.pendingGesture) return;
+        if (!this.unlisten || !this.pendingGesture || this.activeClientRequestId || chatApplication.getSnapshot().busy) return;
+        if (this.retryTimer) clearTimeout(this.retryTimer);
+        this.retryTimer = null;
         const { gesture, controller } = this.pendingGesture;
         this.pendingGesture = null;
         this.sendGestureToLLM(gesture, controller);
@@ -187,6 +198,8 @@ export class InteractionService {
         this.unlisten?.();
         this.unlisten = null;
         this.pendingGesture = null;
+        if (this.retryTimer) clearTimeout(this.retryTimer);
+        this.retryTimer = null;
     }
 
     private broadcast(event: InteractionEvent): void {

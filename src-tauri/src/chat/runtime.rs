@@ -61,6 +61,24 @@ pub struct ChatRuntimeState(
 );
 
 impl ChatRuntimeState {
+    /// The caller holds the exclusive database gate after a successful import.
+    /// Keep request tombstones so duplicate delivery cannot execute old intent
+    /// against a different database, and keep revisions monotonic for subscribers.
+    pub(crate) fn invalidate_imported_history(&self) {
+        let mut journal = self.0.lock().unwrap();
+        let replaced = Err("chat_history_replaced: backup imported; send a new request".to_string());
+        for (id, entry) in std::mem::take(&mut journal.entries) {
+            entry.outcome.send_replace(Some(replaced.clone()));
+            journal.retired.insert(id, (entry.fingerprint, replaced.clone()));
+        }
+        for (_, outcome) in journal.retired.values_mut() {
+            *outcome = replaced.clone();
+        }
+        journal.revision += 1;
+        drop(journal);
+        *self.1.lock().unwrap() = None;
+    }
+
     pub fn begin_playback(&self, request: &str, window: &str) {
         *self.1.lock().unwrap() = Some((request.into(), window.into(), std::time::Instant::now()));
     }
@@ -486,6 +504,7 @@ pub async fn get_chat_view(
     runtime: &ChatRuntimeState,
     known_version: Option<ChatViewVersion>,
 ) -> Result<Option<ChatViewSnapshot>, crate::error::KokoroError> {
+    let _database_operation_guard = crate::ai::context::acquire_database_operation_read_guard().await;
     if let Some(known) = known_version {
         let history_revision = sqlx::query_scalar(HISTORY_REVISION).fetch_one(&state.db).await?;
         let current = ChatViewVersion {
@@ -652,6 +671,41 @@ mod tests {
         let snapshot = journal.complete("camera", result("camera")).unwrap();
         assert_eq!(snapshot.images, attachments);
         assert!(!serde_json::to_string(&journal.snapshots()).unwrap().contains("private-camera-frame"));
+    }
+
+    #[tokio::test]
+    async fn imported_history_drops_old_attachments_and_invalidates_cached_views() {
+        let state = crate::ai::context::AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        let journal = ChatRuntimeState::default();
+        sqlx::query("INSERT INTO conversations (id, character_id, created_at, updated_at) VALUES ('a', 'default', 'now', 'now')")
+            .execute(&state.db).await.unwrap();
+        *state.current_conversation_id.lock().await = Some("a".into());
+        sqlx::query("INSERT INTO conversation_messages (id, conversation_id, role, content, metadata, created_at) VALUES (1, 'a', 'user', 'device A', '{\"client_request_id\":\"a\"}', 'now')")
+            .execute(&state.db).await.unwrap();
+        let mut original = request("a"); original.images = Some(vec!["device-a-image".into()]);
+        journal.begin(&original).unwrap();
+        journal.complete("a", result("a"));
+        let before = get_chat_view(&state, &journal, None).await.unwrap().unwrap();
+        assert_eq!(before.turns[0].images, vec!["device-a-image"]);
+        {
+            // This fixture owns its isolated state; production import holds the
+            // global write gate, which must not interfere with parallel tests.
+            let mut tx = state.db.begin().await.unwrap();
+            sqlx::query("DELETE FROM conversation_messages").execute(&mut *tx).await.unwrap();
+            sqlx::query("INSERT INTO conversation_messages (id, conversation_id, role, content, metadata, created_at) VALUES (1, 'a', 'user', 'device B', '{\"client_request_id\":\"b\"}', 'now')")
+                .execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+            journal.invalidate_imported_history();
+        }
+        let after = get_chat_view(&state, &journal, Some(before.version)).await.unwrap().unwrap();
+        assert!(after.version.revision > before.version.revision);
+        assert_eq!(after.messages[0].content, "device B");
+        assert!(after.turns.is_empty());
+        let (created, old) = journal.begin(&original).unwrap();
+        assert!(!created, "import must not make old IDs executable again");
+        assert!(old.borrow().as_ref().unwrap().as_ref().unwrap_err().contains("chat_history_replaced"));
+        assert!(journal.complete("a", result("a")).is_none());
+        assert!(journal.begin(&request("new-intent")).unwrap().0);
     }
 
     #[test]

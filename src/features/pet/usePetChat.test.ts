@@ -26,7 +26,7 @@ describe("pet chat display adapter", () => {
  afterEach(() => { act(() => root.unmount()); container.remove(); vi.useRealTimers(); });
  it("submits directly without ChatPanel or an acceptance handshake", async () => {
   await act(async () => state.sendMessage("  hello  "));
-  expect(chat.send).toHaveBeenCalledWith({ message: "hello", client_request_id: expect.stringMatching(/^pet_/) });
+  expect(chat.send).toHaveBeenCalledWith({ message: "hello", client_request_id: expect.stringMatching(/^pet_/), character_id: "char-1", conversation_id: "conv-1", conversation_generation: 1 });
   expect(invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything());
  });
  it("coalesces duplicate clicks while the same user intent is in flight", async () => {
@@ -168,6 +168,47 @@ describe("pet chat display adapter", () => {
   await act(async () => state.sendMessage("two")); expect(chat.send).toHaveBeenCalledTimes(2);
  });
  it("ignores empty input", async () => { await state.sendMessage("  "); expect(chat.send).not.toHaveBeenCalled(); });
+ it.each([
+  { character_id: "char-2", conversation_id: "conv-2", generation: 2 },
+  { character_id: "char-1", conversation_id: "conv-2", generation: 2 },
+  { character_id: "char-1", conversation_id: "conv-1", generation: 3 },
+ ])("binds a click to its rendered scope when selection changes before React renders: %j", async next => {
+  const send = state.sendMessage;
+  await act(async () => { chat.set(next); await send("for the visible character"); });
+  expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({
+   character_id: "char-1", conversation_id: "conv-1", conversation_generation: 1,
+  }));
+ });
+ it("binds an empty conversation to its selection generation", async () => {
+  await act(async () => chat.set({ conversation_id: null, generation: 4 }));
+  await act(async () => state.sendMessage("new conversation"));
+  expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({
+   character_id: "char-1", conversation_id: undefined, conversation_generation: 4,
+  }));
+ });
+ it("expires a pre-admission error after five seconds", async () => {
+  vi.useFakeTimers(); chat.send.mockRejectedValueOnce(new Error("chat_turn_busy"));
+  await act(async () => state.sendMessage("one"));
+  await act(async () => vi.advanceTimersByTimeAsync(4999));
+  expect(invoke).not.toHaveBeenCalledWith("hide_bubble_window");
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(invoke).toHaveBeenLastCalledWith("hide_bubble_window");
+ });
+ it("an old error timer cannot hide a subsequent pending request", async () => {
+  vi.useFakeTimers(); chat.send.mockRejectedValueOnce(new Error("chat_turn_busy"));
+  await act(async () => state.sendMessage("one"));
+  await act(async () => vi.advanceTimersByTimeAsync(4000));
+  const response = deferred<StreamChatResponse>(); chat.send.mockReturnValueOnce(response.promise);
+  let sending!: Promise<void>;
+  await act(async () => { sending = state.sendMessage("two"); });
+  await act(async () => vi.advanceTimersByTimeAsync(2000));
+  expect(invoke).not.toHaveBeenCalledWith("hide_bubble_window");
+  await act(async () => { response.reject(new Error("second failure")); await sending; });
+  await act(async () => vi.advanceTimersByTimeAsync(4999));
+  expect(invoke).not.toHaveBeenCalledWith("hide_bubble_window");
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(invoke).toHaveBeenLastCalledWith("hide_bubble_window");
+ });
  it("preserves structured backend rejection text in the bubble", async () => {
   chat.send.mockRejectedValueOnce({ code: "Chat", message: "chat_turn_busy: active request" });
   await act(async () => state.sendMessage("one"));
