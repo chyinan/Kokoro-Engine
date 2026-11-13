@@ -17,6 +17,7 @@ use super::queue::TtsQueue;
 use super::router::TtsRouter;
 use super::voice_registry::VoiceRegistry;
 
+use crate::chat::runtime::ChatRuntimeState;
 use crate::hooks::{HookEvent, HookPayload, HookRuntime, TtsHookPayload};
 use futures::StreamExt;
 use serde::Serialize;
@@ -94,8 +95,7 @@ pub struct TtsService {
     default_provider: Arc<RwLock<Option<String>>>,
     voice_registry: Arc<RwLock<VoiceRegistry>>,
     cache: Arc<RwLock<TtsCache>>,
-    active_request: Arc<Mutex<Option<ActiveTtsRequest>>>,
-    cancelled_requests: Arc<Mutex<VecDeque<String>>>,
+    requests: Arc<Mutex<TtsRequests>>,
     _queue: Arc<TtsQueue>,
     cache_enabled: bool,
 }
@@ -103,6 +103,12 @@ pub struct TtsService {
 struct ActiveTtsRequest {
     request_id: String,
     cancel: watch::Sender<bool>,
+}
+
+#[derive(Default)]
+struct TtsRequests {
+    active: Option<ActiveTtsRequest>,
+    cancelled: VecDeque<String>,
 }
 
 impl Default for TtsService {
@@ -118,8 +124,7 @@ impl TtsService {
             default_provider: Arc::new(RwLock::new(None)),
             voice_registry: Arc::new(RwLock::new(VoiceRegistry::new())),
             cache: Arc::new(RwLock::new(TtsCache::new(500, 3600))),
-            active_request: Arc::new(Mutex::new(None)),
-            cancelled_requests: Arc::new(Mutex::new(VecDeque::new())),
+            requests: Arc::new(Mutex::new(TtsRequests::default())),
             _queue: Arc::new(TtsQueue::new(3)),
             cache_enabled: true,
         }
@@ -135,8 +140,7 @@ impl TtsService {
                 config.cache.max_entries,
                 config.cache.ttl_secs,
             ))),
-            active_request: Arc::new(Mutex::new(None)),
-            cancelled_requests: Arc::new(Mutex::new(VecDeque::new())),
+            requests: Arc::new(Mutex::new(TtsRequests::default())),
             _queue: Arc::new(TtsQueue::new(config.queue.max_concurrent)),
             cache_enabled: config.cache.enabled,
         };
@@ -234,30 +238,9 @@ impl TtsService {
         params: Option<TtsParams>,
         request_id: String,
     ) -> Result<(), String> {
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        let cancelled_before_start = self.take_cancelled_request(&request_id).await;
-        let previous = {
-            let mut active = self.active_request.lock().await;
-            active.replace(ActiveTtsRequest {
-                request_id: request_id.clone(),
-                cancel: cancel_tx.clone(),
-            })
-        };
-        if let Some(previous) = previous {
-            let _ = previous.cancel.send(true);
-        }
-
-        if cancelled_before_start {
-            let _ = cancel_tx.send(true);
-            let mut active = self.active_request.lock().await;
-            if active
-                .as_ref()
-                .is_some_and(|current| current.request_id == request_id)
-            {
-                *active = None;
-            }
+        let Some(cancel) = self.register_request(&request_id).await else {
             return Ok(());
-        }
+        };
 
         let result = self
             .speak_request(
@@ -265,57 +248,89 @@ impl TtsService {
                 text,
                 provider_id,
                 params.unwrap_or_default(),
-                request_id.clone(),
-                cancel_rx,
+                request_id,
+                &cancel,
             )
             .await;
 
-        let mut active = self.active_request.lock().await;
-        if active
+        let mut requests = self.requests.lock().await;
+        if requests
+            .active
             .as_ref()
-            .is_some_and(|current| current.request_id == request_id)
+            .is_some_and(|current| current.cancel.same_channel(&cancel))
         {
-            *active = None;
+            requests.active = None;
         }
         result
     }
 
     pub async fn cancel_request(&self, request_id: Option<&str>) -> bool {
-        let cancellation = {
-            let active = self.active_request.lock().await;
-            active.as_ref().and_then(|current| {
-                if request_id.is_none_or(|id| id == current.request_id) {
-                    Some(current.cancel.clone())
-                } else {
-                    None
-                }
-            })
-        };
-        if let Some(cancel) = cancellation {
-            return cancel.send(true).is_ok();
+        let mut requests = self.requests.lock().await;
+        if let Some(current) = requests
+            .active
+            .as_ref()
+            .filter(|current| request_id.is_none_or(|id| id == current.request_id))
+        {
+            current.cancel.send_replace(true);
+            return true;
         }
 
         let Some(request_id) = request_id else {
             return false;
         };
-        let mut cancelled = self.cancelled_requests.lock().await;
-        if !cancelled.iter().any(|id| id == request_id) {
-            if cancelled.len() >= MAX_CANCELLED_TTS_REQUESTS {
-                cancelled.pop_front();
+        if !requests.cancelled.iter().any(|id| id == request_id) {
+            if requests.cancelled.len() >= MAX_CANCELLED_TTS_REQUESTS {
+                requests.cancelled.pop_front();
             }
-            cancelled.push_back(request_id.to_string());
+            requests.cancelled.push_back(request_id.to_string());
         }
         true
     }
 
-    async fn take_cancelled_request(&self, request_id: &str) -> bool {
-        let mut cancelled = self.cancelled_requests.lock().await;
-        if let Some(index) = cancelled.iter().position(|id| id == request_id) {
-            cancelled.remove(index);
-            true
-        } else {
-            false
+    async fn register_request(&self, request_id: &str) -> Option<watch::Sender<bool>> {
+        let mut requests = self.requests.lock().await;
+        if let Some(index) = requests.cancelled.iter().position(|id| id == request_id) {
+            requests.cancelled.remove(index);
+            return None;
         }
+
+        let cancel = watch::Sender::new(false);
+        if let Some(previous) = requests.active.replace(ActiveTtsRequest {
+            request_id: request_id.to_owned(),
+            cancel: cancel.clone(),
+        }) {
+            previous.cancel.send_replace(true);
+        }
+        Some(cancel)
+    }
+
+    async fn publish_playback_start(
+        &self,
+        cancel: &watch::Sender<bool>,
+        window: &str,
+        runtime: Option<&ChatRuntimeState>,
+        emit_start: impl FnOnce(&str) -> Result<(), String>,
+    ) -> Result<bool, String> {
+        let requests = self.requests.lock().await;
+        let Some(current) = requests
+            .active
+            .as_ref()
+            .filter(|current| current.cancel.same_channel(cancel) && !*cancel.borrow())
+        else {
+            return Ok(false);
+        };
+        let request_id = &current.request_id;
+        // A replacement or cancellation must wait until ownership and tts:start are published.
+        if let Some(runtime) = runtime {
+            runtime.begin_playback(request_id, window);
+        }
+        if let Err(error) = emit_start(request_id) {
+            if let Some(runtime) = runtime {
+                runtime.finish_playback(request_id, window, None);
+            }
+            return Err(error);
+        }
+        Ok(true)
     }
 
     async fn speak_request(
@@ -325,8 +340,9 @@ impl TtsService {
         preferred_provider_id: Option<String>,
         params: TtsParams,
         request_id: String,
-        mut cancel: watch::Receiver<bool>,
+        cancellation: &watch::Sender<bool>,
     ) -> Result<(), String> {
+        let mut cancel = cancellation.subscribe();
         let playback_window = if app.get_webview_window("main").is_some() { "main" } else { "pet" };
         let hook_runtime = app.try_state::<HookRuntime>();
         let router = TtsRouter::new(self.providers.clone(), self.default_provider.clone());
@@ -361,15 +377,28 @@ impl TtsService {
                 .await;
         }
 
-        if let Some(runtime) = app.try_state::<Arc<crate::chat::runtime::ChatRuntimeState>>() { runtime.begin_playback(&request_id, playback_window); }
-        app.emit_to(playback_window,
-            "tts:start",
-            TtsStartEvent {
-                request_id: request_id.clone(),
-                text: text.clone(),
-            },
-        )
-        .map_err(|error| error.to_string())?;
+        let runtime = app.try_state::<Arc<ChatRuntimeState>>();
+        if !self
+            .publish_playback_start(
+                cancellation,
+                playback_window,
+                runtime.as_ref().map(|state| state.inner().as_ref()),
+                |request_id| {
+                    app.emit_to(
+                        playback_window,
+                        "tts:start",
+                        TtsStartEvent {
+                            request_id: request_id.to_owned(),
+                            text: text.clone(),
+                        },
+                    )
+                    .map_err(|error| error.to_string())
+                },
+            )
+            .await?
+        {
+            return Ok(());
+        }
 
         let sentences: Vec<(usize, String)> = split_sentences(&text)
             .into_iter()
@@ -860,7 +889,10 @@ fn record_tts_error(current: &mut Option<String>, error: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{record_tts_error, wrap_pcm_s16le_as_wav, TtsService, MAX_CANCELLED_TTS_REQUESTS};
+    use super::{
+        record_tts_error, wrap_pcm_s16le_as_wav, ChatRuntimeState, TtsService,
+        MAX_CANCELLED_TTS_REQUESTS,
+    };
 
     #[test]
     fn records_the_first_synthesis_error_for_the_command_result() {
@@ -874,9 +906,18 @@ mod tests {
     #[tokio::test]
     async fn cancellation_before_request_registration_is_remembered_once() {
         let service = TtsService::new();
+        let current = service.register_request("current").await.unwrap();
         assert!(service.cancel_request(Some("request-before-start")).await);
-        assert!(service.take_cancelled_request("request-before-start").await);
-        assert!(!service.take_cancelled_request("request-before-start").await);
+        assert!(service
+            .register_request("request-before-start")
+            .await
+            .is_none());
+        assert!(!*current.borrow());
+        assert!(service
+            .register_request("request-before-start")
+            .await
+            .is_some());
+        assert!(*current.borrow());
     }
 
     #[tokio::test]
@@ -889,9 +930,82 @@ mod tests {
                     .await
             );
         }
-        let pending = service.cancelled_requests.lock().await;
+        let requests = service.requests.lock().await;
+        let pending = &requests.cancelled;
         assert_eq!(pending.len(), MAX_CANCELLED_TTS_REQUESTS);
         assert_eq!(pending.front().map(String::as_str), Some("pending-1"));
+    }
+
+    #[tokio::test]
+    async fn a_replaced_request_cannot_publish_start_after_the_replacement_starts() {
+        let service = TtsService::new();
+        let runtime = ChatRuntimeState::default();
+        for (client_id, turn_id) in [("old", "old-turn"), ("new", "new-turn")] {
+            let request = serde_json::from_value(serde_json::json!({
+                "message": "reply", "client_request_id": client_id,
+            }))
+            .unwrap();
+            runtime.begin(&request).unwrap();
+            runtime
+                .event(
+                    "chat-turn-start",
+                    &serde_json::json!({"client_request_id": client_id, "turn_id": turn_id}),
+                )
+                .unwrap();
+        }
+
+        let (old_paused, wait_for_old) = tokio::sync::oneshot::channel();
+        let (new_started, wait_for_new) = tokio::sync::oneshot::channel();
+        let (mut old_start, mut new_start) = (None, None);
+        tokio::join!(
+            async {
+                let old = service.register_request("chat_old-turn").await.unwrap();
+                assert!(!*old.borrow());
+                old_paused.send(()).unwrap();
+                wait_for_new.await.unwrap();
+                assert!(!service
+                    .publish_playback_start(&old, "main", Some(&runtime), |id| {
+                        old_start = Some(id.to_owned());
+                        Ok(())
+                    })
+                    .await
+                    .unwrap());
+            },
+            async {
+                wait_for_old.await.unwrap();
+                let new = service.register_request("chat_new-turn").await.unwrap();
+                assert!(service
+                    .publish_playback_start(&new, "main", Some(&runtime), |id| {
+                        new_start = Some(id.to_owned());
+                        Ok(())
+                    })
+                    .await
+                    .unwrap());
+                new_started.send(()).unwrap();
+            }
+        );
+        assert_eq!(new_start.as_deref(), Some("chat_new-turn"));
+        assert!(old_start.is_none());
+        assert!(runtime
+            .finish_playback("chat_old-turn", "main", Some("late error".into()))
+            .is_none());
+        let owner = runtime
+            .finish_playback("chat_new-turn", "main", Some("output failed".into()))
+            .unwrap();
+        assert_eq!(owner.client_request_id, "new");
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_registration_prevents_start() {
+        let service = TtsService::new();
+        let request = service.register_request("chat_cancelled").await.unwrap();
+        assert!(service.cancel_request(Some("chat_cancelled")).await);
+        assert!(!service
+            .publish_playback_start(&request, "main", None, |_| {
+                panic!("cancelled request must not publish start")
+            })
+            .await
+            .unwrap());
     }
 
     #[test]
