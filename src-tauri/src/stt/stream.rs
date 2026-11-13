@@ -46,6 +46,13 @@ impl AudioBuffer {
         }
     }
 
+    pub(crate) fn discard(&self) -> Result<(), String> {
+        let mut stream = self.state.lock().map_err(|_| "Failed to lock audio buffer")?;
+        stream.samples.clear();
+        stream.time_offset_seconds = 0.0;
+        Ok(())
+    }
+
     pub fn append_samples<I>(&self, chunk: I) -> Result<(), String>
     where
         I: IntoIterator<Item = f32>,
@@ -155,13 +162,7 @@ pub async fn prune_audio_buffer(
 /// Discard current buffer without transcribing.
 #[tauri::command]
 pub async fn discard_audio_stream(state: State<'_, AudioBuffer>) -> Result<(), String> {
-    let mut stream = state
-        .state
-        .lock()
-        .map_err(|_| "Failed to lock audio buffer")?;
-    stream.samples.clear();
-    stream.time_offset_seconds = 0.0;
-    Ok(())
+    state.discard()
 }
 
 /// Helper function to encapsulate transcription logic

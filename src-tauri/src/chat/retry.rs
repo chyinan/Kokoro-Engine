@@ -34,7 +34,7 @@ pub(crate) struct RegenerationPlan {
     revision: i64,
 }
 
-pub(super) async fn conversation_message_revision(
+pub(crate) async fn conversation_message_revision(
     connection: &mut SqliteConnection,
     conversation_id: &str,
 ) -> Result<Option<i64>, sqlx::Error> {

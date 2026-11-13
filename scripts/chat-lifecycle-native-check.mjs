@@ -576,6 +576,7 @@ try {
   await check("regeneration rejects a pet turn completed between the click and the history read", async () => {
     const original = await petSend("regenerate-before-pet");
     assert.equal(original.status, "completed");
+    await main.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.refresh());
     const answer = main.getByText("Controlled reply for [case:regenerate-before-pet] completed.", { exact: true });
     const regenerate = answer.locator("..").getByRole("button", { name: /^(重新生成|Regenerate)$/ });
     await regenerate.waitFor();
@@ -610,6 +611,68 @@ try {
     assert.deepEqual((await view(main)).messages, saved.messages);
     await main.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.clear());
     return { original, newer };
+  });
+  await check("continue from here preserves a pet turn that completes while history refresh is pending", async () => {
+    const original = await petSend("continue-before-pet");
+    const earlier = await petSend("continue-existing-tail");
+    assert.equal(earlier.status, "completed");
+    await main.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.refresh());
+    const answer = main.getByText("Controlled reply for [case:continue-before-pet] completed.", { exact: true });
+    const continueHere = answer.locator("..").getByRole("button", { name: /^(从这里继续|Continue from here)$/ });
+    await main.getByText("Controlled reply for [case:continue-existing-tail] completed.", { exact: true }).waitFor();
+    await continueHere.waitFor();
+    await main.evaluate(async () => {
+      const { chatApplication } = await import("/src/lib/chat/application.ts");
+      const continueFrom = chatApplication.continueFrom;
+      chatApplication.continueFrom = async function (target) {
+        this.continueFrom = continueFrom;
+        const refresh = this.refresh;
+        this.refresh = async function () {
+          this.refresh = refresh;
+          await new Promise(resolve => { window.__releaseContinueHistoryRead = resolve; });
+          return refresh.call(this);
+        };
+        return continueFrom.call(this, target);
+      };
+    });
+    await continueHere.click();
+    await waitFor(() => main.evaluate(() => typeof window.__releaseContinueHistoryRead === "function"));
+    const newer = await petSend("continue-pet-won");
+    assert.equal(newer.status, "completed");
+    const saved = await view(pet);
+    assert(saved.messages.some(row => row.id === original.assistant_message_id));
+    assert(saved.messages.some(row => row.id === newer.assistant_message_id));
+    await main.evaluate(() => window.__releaseContinueHistoryRead());
+    await main.getByText("Conversation history changed before deletion", { exact: true }).waitFor();
+    assert.deepEqual((await view(pet)).messages, saved.messages);
+    // A new click after the refreshed history is visible can explicitly
+    // truncate the now-known tail through the real versioned deletion IPC.
+    await main.getByText("Controlled reply for [case:continue-pet-won] completed.", { exact: true }).waitFor();
+    await continueHere.click();
+    await waitFor(async () => {
+      const state = await view(pet);
+      return state.messages.at(-1)?.id === original.assistant_message_id && state;
+    });
+    await main.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.clear());
+    return { original, earlier, newer };
+  });
+  await check("the native interrupt start refuses capture while a pet request holds the chat lock", async () => {
+    const blocker = "native_voice_interrupt_pet";
+    await submit(pet, {
+      message: "[case:lifecycle-hold-preparation-voice-interrupt]", client_request_id: blocker,
+    }, "__voiceInterruptPet");
+    const active = await waitFor(async () => {
+      const state = await view(pet);
+      return state.busy && state.turns.find(turn => turn.client_request_id === blocker && turn.status === "accepted");
+    });
+    const started = await main.evaluate(async () => {
+      const { startNativeMic } = await import("/src/lib/kokoro-bridge.ts");
+      return startNativeMic(true, true);
+    });
+    assert.equal(started, false);
+    await pet.evaluate(id => window.__TAURI_INTERNALS__.invoke("cancel_chat_turn", { turnId: id }), blocker);
+    assert.equal((await outcome(pet, "__voiceInterruptPet")).result?.status, "cancelled");
+    return { request: active.client_request_id, started };
   });
   await check("a failed regeneration keeps the original cutoff through repeated retries", async () => {
     const original = await petSend("retry-regeneration-boundary");

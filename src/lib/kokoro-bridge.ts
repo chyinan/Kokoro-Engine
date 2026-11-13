@@ -173,11 +173,13 @@ export async function deleteLastMessages(
     count: number,
     expectedConversationId?: string | null,
     expectedTailMessageId?: number | null,
+    expectedHistory?: { generation: number; historyRevision: number; keepThroughId: number },
 ): Promise<void> {
     return invoke("delete_last_messages", {
         count,
         expectedConversationId: expectedConversationId ?? null,
         expectedTailMessageId: expectedTailMessageId ?? null,
+        expectedHistory: expectedHistory ?? null,
     });
 }
 
@@ -374,6 +376,10 @@ export async function cancelChatTurn(turnId: string, reason?: string): Promise<v
 
 export async function isChatBusy(): Promise<boolean> {
     return invoke<boolean>("is_chat_busy");
+}
+
+export function startNativeMic(autoStopOnSilence: boolean, onlyWhenChatIdle: boolean): Promise<boolean> {
+    return invoke("start_native_mic", { autoStopOnSilence, onlyWhenChatIdle });
 }
 
 export function isChatTurnBusyError(error: unknown): boolean {

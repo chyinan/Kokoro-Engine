@@ -288,7 +288,7 @@ it.each(["native", "text"])("keeps %s tool details open through the streaming dr
         expect(container.textContent).toContain("found result");
         const continueFrom = container.querySelector<HTMLButtonElement>('button[title="chat.actions.continue_from"]');
         await act(async () => continueFrom!.click());
-        expect(chat.continueFrom).toHaveBeenCalledExactlyOnceWith({ conversationId: "conv-1", generation: 1, messageId: 1 });
+        expect(chat.continueFrom).toHaveBeenCalledExactlyOnceWith({ conversationId: "conv-1", generation: 1, messageId: 1, historyRevision: 0 });
 
         const savedToolRows = mode === "native" ? [{
             id: 2, role: "tool", content: "saved result", created_at: "now",

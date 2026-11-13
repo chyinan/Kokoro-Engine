@@ -105,11 +105,13 @@ pub async fn start_native_mic(
     app: AppHandle,
     mic_state: State<'_, NativeMicState>,
     auto_stop_on_silence: Option<bool>,
-) -> Result<(), KokoroError> {
+    only_when_chat_idle: Option<bool>,
+) -> Result<bool, KokoroError> {
     crate::stt::mic::start_native_mic_with_options(
         &app,
         mic_state.inner(),
         auto_stop_on_silence.unwrap_or(false),
+        only_when_chat_idle.unwrap_or(false),
     )
     .map_err(KokoroError::Stt)
 }

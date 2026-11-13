@@ -168,7 +168,7 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
             editScope={editableTarget ? JSON.stringify([editableTarget.conversationId, editableTarget.generation, editableTarget.messageId]) : undefined}
             onEdit={editableTarget ? text => onEdit(editableTarget, text) : undefined}
             onRegenerate={retryTarget ? () => onRegenerate(retryTarget) : undefined}
-            onContinueFrom={editableTarget ? () => onContinueFrom(editableTarget) : undefined}
+            onContinueFrom={editableTarget ? () => onContinueFrom({ ...editableTarget, historyRevision }) : undefined}
             onApproveTool={createToolActionHandler(globalIndex, onApproveTool)}
             onRejectTool={createToolActionHandler(globalIndex, onRejectTool)}
             onPreviewImage={onPreviewImage}
@@ -460,17 +460,32 @@ export default function ChatPanel({
     }, []);
 
     useEffect(() => {
+        let mounted = true;
         const unlisten = listen("voice-interrupt-stt", () => {
-            if (chatApplication.getSnapshot().busy || submittingRef.current
-                || !readBooleanSetting(APP_SETTING_KEYS.sttEnabled, false)
-                || !readBooleanSetting(APP_SETTING_KEYS.sttAutoSend, false)) return;
-            sttBaseDraftRef.current = inputRef.current;
-            sttBaseCharacterIdRef.current = activeCharacterIdRef.current;
-            sttBaseConversationIdRef.current = activeConversationIdRef.current;
-            sttBaseGenerationRef.current = conversationGenerationRef.current;
-            startVoiceRef.current({ autoStopOnSilence: true });
+            const { character_id, conversation_id, generation } = chatApplication.getSnapshot();
+            const isAllowed = () => {
+                const current = chatApplication.getSnapshot();
+                return mounted && !current.busy && !submittingRef.current
+                    && current.character_id === character_id && current.conversation_id === conversation_id
+                    && current.generation === generation
+                    && readBooleanSetting(APP_SETTING_KEYS.sttEnabled, false)
+                    && readBooleanSetting(APP_SETTING_KEYS.sttAutoSend, false);
+            };
+            if (!isAllowed()) return;
+            void startVoiceRef.current({
+                autoStopOnSilence: true,
+                voiceInterrupt: {
+                    isAllowed,
+                    onStarted: () => {
+                        sttBaseDraftRef.current = inputRef.current;
+                        sttBaseCharacterIdRef.current = character_id;
+                        sttBaseConversationIdRef.current = conversation_id;
+                        sttBaseGenerationRef.current = generation;
+                    },
+                },
+            });
         });
-        return () => { void unlisten.then(stop => stop()); };
+        return () => { mounted = false; void unlisten.then(stop => stop()); };
     }, []);
 
     // Wake word detection — starts main STT when keyword is heard

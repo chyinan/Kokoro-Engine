@@ -2534,7 +2534,7 @@ async fn execute_chat(
                         observation,
                         &char_id,
                         active_conv_id,
-                        None,
+                        Some(&assistant_turn_id),
                     )
                     .await;
                 }

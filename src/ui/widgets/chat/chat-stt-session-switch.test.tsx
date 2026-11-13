@@ -124,7 +124,14 @@ describe("ChatPanel draft preservation", () => {
 
         await act(async () => chat.set({ busy: false }));
         interrupt();
-        expect(startVoice).toHaveBeenCalledExactlyOnceWith({ autoStopOnSilence: true });
+        expect(startVoice).toHaveBeenCalledExactlyOnceWith({
+            autoStopOnSilence: true,
+            voiceInterrupt: { isAllowed: expect.any(Function), onStarted: expect.any(Function) },
+        });
+        const { isAllowed } = startVoice.mock.lastCall![0].voiceInterrupt;
+        expect(isAllowed()).toBe(true);
+        localStorage.setItem("kokoro_stt_auto_send", "false");
+        expect(isAllowed()).toBe(false);
     });
     const draftText = "  draft with an image  ";
     const draftImage = "data:image/png;base64,iVBORw0KGgo=";

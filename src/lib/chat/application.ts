@@ -2,7 +2,7 @@
 // This module has no React, DOM, localStorage, or display-component dependency.
 import * as bridge from "../kokoro-bridge";
 import type { ChatRequest, ChatTurnSnapshot, ChatViewSnapshot, ChatViewVersion, StreamChatResponse } from "../kokoro-bridge";
-import { getContinueFromCutoffIndex, getExpectedTailMessageId } from "./history-commands";
+import { canTruncateRefreshedHistory, getContinueFromCutoffIndex, getContinueFromRowBoundary, getExpectedTailMessageId } from "./history-commands";
 import { findFailurePromptIndex, isActiveTurn, mergeTurnSnapshot, projectSavedMessages } from "./projection";
 
 export interface ChatTransport {
@@ -223,8 +223,10 @@ export class ChatApplication {
     if (!matchesSelection(this.view)) return;
 
     const cached = this.view;
-    if (regenerate && target.historyRevision !== undefined
-      && target.historyRevision !== cached.conversation_history_revision) throw changedHistory();
+    const staleDeletion = () => new Error("Conversation history changed before deletion");
+    if (target.historyRevision !== undefined && target.historyRevision !== cached.conversation_history_revision) {
+      throw regenerate ? changedHistory() : staleDeletion();
+    }
     const saved = projectSavedMessages(cached);
     const diagnosticIndex = saved.findIndex(message => message.id === target.messageId && message.failureScope);
     if (diagnosticIndex >= 0) {
@@ -271,13 +273,19 @@ export class ChatApplication {
       this.readInFlight = undefined;
       const view = await this.refresh();
       if (!matchesSelection(view)) return;
+      if (!canTruncateRefreshedHistory(cached, view)) throw staleDeletion();
       const messages = projectSavedMessages(view).filter(message => message.id !== undefined);
       const index = messages.findIndex(message => message.id === target.messageId);
       if (index < 0 || messages[index].failureScope) return;
       const cutoff = getContinueFromCutoffIndex(messages, index);
       if (cutoff === null) return;
-      if (messages.length > cutoff) {
-        await bridge.deleteLastMessages(messages.length - cutoff, target.conversationId, getExpectedTailMessageId(messages));
+      const keptId = messages[cutoff - 1]?.id;
+      if (keptId === undefined || view.conversation_history_revision === null) return;
+      const keepThroughId = getContinueFromRowBoundary(view.messages, keptId);
+      if (view.messages.some(row => row.id !== undefined && row.id > keepThroughId)) {
+        await bridge.deleteLastMessages(messages.length - cutoff, target.conversationId, getExpectedTailMessageId(messages), {
+          generation: target.generation, historyRevision: view.conversation_history_revision, keepThroughId,
+        });
       }
     });
   }

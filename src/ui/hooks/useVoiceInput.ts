@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isTauriEnvironment } from "../../utils/env";
+import { startNativeMic } from "../../lib/kokoro-bridge";
 
 const SNAPSHOT_INTERVAL = 2000; // 2s: ultra-fast provisional feedback
 const FLUSH_WINDOW = 25000;      // 25s: force commit
@@ -58,6 +59,8 @@ export function useVoiceInput(
     const snapshotTimer = useRef<number | null>(null);
     const lastFlushTime = useRef<number>(0);
     const isRunning = useRef(false);
+    const starting = useRef(false);
+    const mounted = useRef(false);
 
     // VAD auto-stop state
     const autoStopRef = useRef(false);
@@ -185,8 +188,7 @@ export function useVoiceInput(
         processor.current = proc;
     }, [processAudioChunk]);
 
-    const startNativeCapture = useCallback(async () => {
-        captureTransport.current = "native";
+    const startNativeCapture = useCallback(async (onlyWhenChatIdle: boolean, canStart?: () => boolean) => {
         try {
             nativeAutoStopUnlisten.current = await listen("stt:mic-auto-stop", () => {
                 if (!isRunning.current || !autoStopRef.current) return;
@@ -202,10 +204,16 @@ export function useVoiceInput(
                             : 0;
                 setVolume(nextVolume);
             });
-            await invoke("start_native_mic", { autoStopOnSilence: autoStopRef.current });
+            if (mounted.current && (!canStart || canStart())) {
+                if (await startNativeMic(autoStopRef.current, onlyWhenChatIdle)) {
+                    captureTransport.current = "native";
+                    return true;
+                }
+            }
+            await cleanupNativeCapture();
+            return false;
         } catch (error) {
             await cleanupNativeCapture();
-            captureTransport.current = null;
             throw error;
         }
     }, [cleanupNativeCapture]);
@@ -275,26 +283,44 @@ export function useVoiceInput(
 
     // ── Start/Stop Control ────────────────────────────────────────────
 
-    const start = useCallback(async (opts?: { autoStopOnSilence?: boolean }) => {
-        if (state !== VoiceState.Idle) return;
-        const shouldAutoStop = opts?.autoStopOnSilence ?? false;
-        autoStopRef.current = shouldAutoStop;
+    const start = useCallback(async (opts?: {
+        autoStopOnSilence?: boolean;
+        voiceInterrupt?: { isAllowed: () => boolean; onStarted: () => void };
+    }) => {
+        if (state !== VoiceState.Idle || starting.current || isRunning.current) return;
+        const interrupt = opts?.voiceInterrupt;
+        starting.current = true;
+        autoStopRef.current = opts?.autoStopOnSilence ?? false;
 
         try {
-            await invoke("discard_audio_stream");
-
-            if (isTauriEnvironment()) {
-                try {
-                    await startNativeCapture();
-                } catch (nativeError) {
-                    console.warn("[STT] Native mic start failed, falling back to WebRTC:", nativeError);
+            if (interrupt) {
+                // Desktop interrupt capture needs the backend admission check at
+                // stream start. WebRTC cannot share that lock.
+                if (!isTauriEnvironment() || !interrupt.isAllowed()
+                    || !await startNativeCapture(true, interrupt.isAllowed)) return;
+            } else {
+                await invoke("discard_audio_stream");
+                if (!mounted.current) return;
+                if (isTauriEnvironment()) {
+                    try {
+                        if (!await startNativeCapture(false)) return;
+                    } catch (nativeError) {
+                        if (!mounted.current) return;
+                        console.warn("[STT] Native mic start failed, falling back to WebRTC:", nativeError);
+                        await startWebCapture();
+                    }
+                } else {
                     await startWebCapture();
                 }
-            } else {
-                await startWebCapture();
+            }
+            if (!mounted.current || (interrupt && !interrupt.isAllowed())) {
+                await stopCapture();
+                captureTransport.current = null;
+                return;
             }
 
             // Reset State
+            interrupt?.onStarted();
             isRunning.current = true;
             lastFlushTime.current = Date.now();
             speechDetected.current = false;
@@ -314,6 +340,8 @@ export function useVoiceInput(
             // state was not handled by stop(), so a denied permission or a
             // missing device permanently locked the microphone button.
             setState(VoiceState.Idle);
+        } finally {
+            starting.current = false;
         }
     }, [state, performSnapshot, startNativeCapture, startWebCapture, stopCapture]);
 
@@ -372,7 +400,9 @@ export function useVoiceInput(
 
     // Cleanup on unmount
     useEffect(() => {
+        mounted.current = true;
         return () => {
+            mounted.current = false;
             if (isRunning.current) {
                 stopRef.current?.();
             } else {

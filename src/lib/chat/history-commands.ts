@@ -1,3 +1,5 @@
+import type { ChatViewSnapshot, ConversationMessage } from "../kokoro-bridge";
+import { isActiveTurn } from "./projection";
 import type { ChatPanelMessage } from "./turn-state";
 
 /**
@@ -43,6 +45,87 @@ export function getExpectedTailMessageId(
         if (typeof id === "number") return id;
     }
     return null;
+}
+
+function rowMetadata(row: ConversationMessage): { client_request_id?: string; turn_id?: string; type?: string;
+    event?: { turn_id?: string }; streaming_draft?: boolean } | null {
+    try {
+        return row.metadata ? JSON.parse(row.metadata) : null;
+    } catch {
+        return null;
+    }
+}
+
+// Streaming drafts can be assigned an ID before their final tool results.
+// Keep those results with the reply when they precede the next turn.
+export function getContinueFromRowBoundary(rows: ConversationMessage[], keptId: number): number {
+    const keptIndex = rows.findIndex(row => row.id === keptId);
+    if (keptIndex < 0) return keptId;
+    const turnId = rowMetadata(rows[keptIndex])?.turn_id;
+    if (!turnId) return keptId;
+    let boundary = keptId;
+    for (const row of rows.slice(keptIndex + 1)) {
+        const meta = rowMetadata(row);
+        if (row.id === undefined || meta?.turn_id !== turnId
+            || !(row.role === "tool" || meta.type === "assistant_tool_calls" || meta.type === "tool_result")) break;
+        boundary = row.id;
+    }
+    return boundary;
+}
+
+/**
+ * The click includes saved rows and terminal events the panel already knows
+ * about. A refresh may reconcile those turns, but must not silently include
+ * another window's new messages in a destructive operation.
+ */
+export function canTruncateRefreshedHistory(before: ChatViewSnapshot, after: ChatViewSnapshot): boolean {
+    // A previously active turn may already have persisted its draft in the
+    // cached rows, even if its terminal event has not reached this window.
+    if ([before, after].some(view => view.turns.some(turn => isActiveTurn(turn)
+        && (turn.character_id === null || turn.character_id === view.character_id)
+        && (turn.conversation_id === null || turn.conversation_id === view.conversation_id)))) return false;
+    const clickRevision = before.turns.reduce((revision, turn) => Math.max(revision, turn.revision), before.revision);
+    // The backend samples the journal before reading SQLite. A turn may
+    // already have rows in the clicked snapshot but only appear in the
+    // journal after the click. Preserve it even if the rows did not change.
+    const finishedAtClick = new Set(before.turns.filter(turn =>
+        turn.status === "completed" || turn.status === "cancelled" || turn.status === "error"
+    ).map(turn => turn.client_request_id));
+    if (after.turns.some(turn => turn.character_id === before.character_id
+        && turn.conversation_id === before.conversation_id
+        && !finishedAtClick.has(turn.client_request_id)
+        && (turn.completion_revision ?? turn.revision) > clickRevision
+        && (turn.status === "completed" || turn.status === "cancelled" || turn.status === "error")
+        && (turn.user_message_id !== null || turn.assistant_message_id !== null || turn.tools.length > 0))) return false;
+    const terminal = before.turns.filter(turn =>
+        (turn.status === "completed" || turn.status === "cancelled" || turn.status === "error")
+        && turn.character_id === before.character_id && turn.conversation_id === before.conversation_id
+        && (turn.completion_revision ?? turn.revision) > before.revision);
+    if (terminal.some(turn => (turn.completion_revision ?? turn.revision) > after.revision)) return false;
+    if (before.conversation_history_revision === after.conversation_history_revision) return true;
+    if (!terminal.length) return false;
+
+    const requestIds = new Set(terminal.map(turn => turn.client_request_id));
+    const turnIds = new Set(terminal.flatMap(turn => turn.turn_id ? [turn.turn_id] : []));
+    const belongsToFinishedTurn = (row: ConversationMessage) => {
+        const meta = rowMetadata(row);
+        return (meta?.client_request_id !== undefined && requestIds.has(meta.client_request_id))
+            || (meta?.turn_id !== undefined && turnIds.has(meta.turn_id))
+            || (meta?.type === "failure_event" && meta.event?.turn_id !== undefined && turnIds.has(meta.event.turn_id));
+    };
+    const rows = new Map(after.messages.map(row => [row.id, row]));
+    for (const previous of before.messages) {
+        const current = rows.get(previous.id);
+        rows.delete(previous.id);
+        if (!current) {
+            if (!belongsToFinishedTurn(previous)) return false;
+        } else if (previous.role !== current.role || previous.content !== current.content
+            || previous.metadata !== current.metadata || previous.created_at !== current.created_at) {
+            if (!belongsToFinishedTurn(previous) || !belongsToFinishedTurn(current)
+                || rowMetadata(previous)?.streaming_draft !== true) return false;
+        }
+    }
+    return [...rows.values()].every(belongsToFinishedTurn);
 }
 
 export type ChatMessageSnapshot = ReadonlyArray<string>;

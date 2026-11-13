@@ -12,6 +12,11 @@ const messages = [
 ];
 const editTarget = { conversationId: "conversation-a", generation: 3, messageId: 101 };
 const answerTarget = { ...editTarget, messageId: 102 };
+const persistedTurnMessages = [
+  ...messages.slice(0, 2),
+  { ...messages[2], metadata: '{"client_request_id":"new"}' },
+  { id: 104, role: "assistant", content: "new answer", created_at: "now", metadata: '{"turn_id":"turn_new"}' },
+];
 afterEach(() => vi.restoreAllMocks());
 
 describe("application history command session ownership", () => {
@@ -132,14 +137,15 @@ describe("application history command session ownership", () => {
         revision: 2,
         generation: selectionChanges ? 5 : cached.generation,
         turns: [completed],
-        messages: [...messages, { id: 104, role: "assistant", content: "new answer", created_at: "now" }],
+        conversation_history_revision: 3,
+        messages: persistedTurnMessages,
       };
       h.set(saved);
       read.resolve(saved);
       stale.resolve(cached);
       await continuing;
       if (selectionChanges) expect(remove).not.toHaveBeenCalled();
-      else expect(remove).toHaveBeenCalledExactlyOnceWith(2, "conversation-a", 104);
+      else expect(remove).toHaveBeenCalledExactlyOnceWith(2, "conversation-a", 104, { generation: 3, historyRevision: 3, keepThroughId: 102 });
     } finally {
       stop();
     }
@@ -163,19 +169,84 @@ describe("application history command session ownership", () => {
       const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
       const continuing = h.app.continueFrom(answerTarget);
       const savedMessages = status === "error"
-        ? [...messages, { id: 104, role: "assistant", content: "partial answer", created_at: "now" }]
-        : messages;
-      const saved = { ...cached, revision: 3, busy: false, messages: savedMessages, turns: [terminal] };
+        ? [...persistedTurnMessages.slice(0, 3), { ...persistedTurnMessages[3], content: "partial answer" }]
+        : persistedTurnMessages.slice(0, 3);
+      const saved = { ...cached, revision: 3, conversation_history_revision: 4, busy: false, messages: savedMessages, turns: [terminal] };
       h.set(saved);
       stale.resolve(cached);
       await refreshing;
       expect(remove).not.toHaveBeenCalled();
       read.resolve(saved);
       await continuing;
-      expect(remove).toHaveBeenCalledExactlyOnceWith(count, "conversation-a", tail);
+      expect(remove).toHaveBeenCalledExactlyOnceWith(count, "conversation-a", tail, { generation: 3, historyRevision: 4, keepThroughId: 102 });
     } finally {
       stop();
     }
+  });
+  it.each([false, true])("preserves a later pet turn completed during the click's history read (hidden: %s)", async hidden => {
+    const h = harness();
+    const earlier = messages.slice(0, 2);
+    h.set({ messages: earlier, revision: 1 });
+    const stop = h.app.subscribe(() => {});
+    try {
+      const cached = await h.app.refresh();
+      const terminal = { ...turn("new", 2, "completed"), completion_revision: 2, user_message_id: 103, assistant_message_id: 104 };
+      const pet = { ...turn("pet", 4, "completed"), completion_revision: 4, hidden, user_message_id: hidden ? null : 105, assistant_message_id: 106 };
+      const stale = deferred<ChatViewSnapshot>();
+      const read = deferred<ChatViewSnapshot>();
+      vi.mocked(h.io.read).mockReturnValueOnce(stale.promise).mockReturnValueOnce(read.promise);
+      h.emit(terminal);
+      const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+      const continuing = h.app.continueFrom(answerTarget);
+      const rejected = expect(continuing).rejects.toThrow("Conversation history changed before deletion");
+      const saved = {
+        ...cached, revision: 4, conversation_history_revision: 5, turns: [terminal, pet],
+        messages: [
+          ...persistedTurnMessages,
+          ...(hidden ? [] : [{ id: 105, role: "user", content: "pet prompt", created_at: "now", metadata: '{"client_request_id":"pet"}' }]),
+          { id: 106, role: "assistant", content: "pet reply", created_at: "now", metadata: '{"turn_id":"turn_pet"}' },
+        ],
+      };
+      h.set(saved);
+      h.emit(pet);
+      read.resolve(saved);
+      stale.resolve(cached);
+      await rejected;
+      expect(remove).not.toHaveBeenCalled();
+      expect(h.app.getSnapshot().messages).toEqual(saved.messages);
+    } finally {
+      stop();
+    }
+  });
+  it("does not truncate a pet reply already in SQLite when its terminal event arrives after the click", async () => {
+    const h = harness();
+    const pet = { ...turn("pet", 3, "completed"), completion_revision: 3, hidden: true, user_message_id: null, assistant_message_id: 103 };
+    h.set({
+      revision: 1,
+      messages: [...messages.slice(0, 2), { ...messages[2], role: "assistant", metadata: '{"turn_id":"turn_pet"}' }],
+    });
+    await h.app.refresh();
+    const read = deferred<ChatViewSnapshot>();
+    vi.mocked(h.io.read).mockReturnValueOnce(read.promise);
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    const continuing = h.app.continueFrom(answerTarget);
+    const saved = { ...h.app.getSnapshot(), busy: false, revision: 3, turns: [pet] };
+    h.set(saved);
+    read.resolve(saved);
+    await expect(continuing).rejects.toThrow("Conversation history changed before deletion");
+    expect(remove).not.toHaveBeenCalled();
+  });
+  it("keeps trailing tool results owned by the retained reply and drops later tool-only rows", async () => {
+    const h = harness();
+    const tool = { id: 103, role: "tool", content: "kept result", metadata: '{"turn_id":"kept"}', created_at: "now" };
+    h.set({ messages: [
+      messages[0], { ...messages[1], metadata: '{"turn_id":"kept"}' }, tool,
+      { ...tool, id: 104, content: "later result", metadata: '{"turn_id":"later"}' },
+    ] });
+    await h.app.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await h.app.continueFrom(answerTarget);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(0, "conversation-a", 102, { generation: 3, historyRevision: 1, keepThroughId: 103 });
   });
   it("regenerates from a restored turn with the selected image and without the original camera frame", async () => {
     const h = harness();
