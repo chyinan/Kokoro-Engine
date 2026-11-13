@@ -237,3 +237,29 @@ launcher 默认重新编译隔离 debug app、创建全新数据根/profile、�
 | `git diff --check` | 通过 |
 
 日志为 `output/playwright/chat-lifecycle/pr30-pending-import-{red,targeted,frontend,build,ipc}.log`。本补丁只修改前端和验证文档，未重复 Rust 测试，也未重跑真实 Tauri/WebView2 场景；`native-report.json` 的 38 项通过仍是运行 `20261114-005929` 的历史证据，不覆盖本次 IPC 交错修复。该交错由真实 ChatApplication/projection 模块和受控延迟 transport 验证，未将模拟 transport 描述为新的原生验收。
+
+## PR #30 重复 JSON 键解析边界修复（2026-11-14，JST）
+
+对 `b4cdffa2` 的独立复审发现：SQLite JSON1 读取/修改第一个重复键，而 Rust `serde_json::Value` 和前端 `JSON.parse` 使用最后一个。原会话属于 remote、原诊断的最终角色字段为 default 时，重复键仍可绕过原始归属校验，在合并后取得错误显示和重试资格；Skip 的 prompt/boundary 引用也可能仅改写首键，留下消费者实际使用的旧 ID。
+
+导入现先通过现有 serde_json 解释相关 metadata，再将其规范化为无重复键的 JSON，只有这些已解释行可以进入后续 JSON1 归属和引用改写。合并仅扫描原始待合并会话的 system 行；Skip 仅扫描将实际复制的新会话技术行，包含 failure_event、invalid_failure_event、assistant_tool_calls 和 tool_result。处理复用当前事务，每批最多读取 256 行，不将整份备份 metadata 一次载入内存；保留原消息行、正文及按消费者解释的 event 和引用，Skip 继续使用既有规则重映射整数引用。
+
+对于作用域或整数引用即将改变的 system 行，如果 metadata 原文可能是对象但 serde 无法解释，则明确拒绝导入并回滚。包括 `1e400`、孤立代理项、超过解析器深度限制的对象，以及截断对象；不能依赖 JSON1 的 `json_valid` 推断 JavaScript 一定解析失败。该保守拒绝也适用于无法确认安全的畸形对象。普通非 JSON 旧文本、null 和不相关 metadata 保持原样；可解析的大 u64 和有限指数值保留其现有消费者语义。不受本次导入影响的会话不因这种歧义被拒绝。没有新增依赖或放宽重试校验。
+
+正式回归在旧生产代码上先得到四项预期失败：Skip/Overwrite 各一项真实 RegenerationPlan 授权失败、无角色合并的 Skip 重复引用失败、歧义对象未拒绝失败。新增矩阵覆盖重复 type/event/character_id/conversation_id/turn_id/prompt/boundary、有效末键、原始无效/已隔离诊断、无效或超范围引用、legacy 数值、畸形与深层对象、原行保留及失败事务回滚。
+
+本轮最终代码实际验证：
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib commands::backup::tests` | 44 项通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib` | 981 项通过，无忽略；保留既有 LNK4098 提示 |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings` | 通过，无 lint 豁免 |
+| `npm test -- --exclude scripts/tauri.test.mjs` | 88 文件、927 项通过 |
+| `npm run build` | TypeScript 与 Vite 通过；保留既有 chunk 提示 |
+| `npm run check:ipc` | 176 个 invoke 命令已注册 |
+| `git diff --check -- src-tauri/src/commands/backup.rs docs/chat-lifecycle-refactor.md` | 通过 |
+
+日志为 `output/playwright/chat-lifecycle/pr30-json-semantics-{red-rust,red-boundaries,targeted-rust,rust,clippy,frontend,build,ipc}.log`。
+
+本补丁只修改备份导入 Rust 代码、测试和本节文档，未重跑真实 Tauri/WebView2；原生 38 场景与数据库审计仍为 `20261114-005929` 的历史证据，不覆盖本次解析边界修复。此边界由实际导入 SQL、Rust 消费者和 RegenerationPlan 回归验证，未连接真实云模型或外部语音/MCP/图像服务。

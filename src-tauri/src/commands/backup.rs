@@ -2115,6 +2115,105 @@ async fn remove_imported_character(
     Ok(removed)
 }
 
+/// Give JSON1 the same interpretation as the Rust/JavaScript consumers before
+/// it changes ownership or integer references. JSON1 otherwise reads/writes the
+/// first duplicate key, whereas serde_json and JSON.parse retain the last one.
+async fn prepare_import_message_metadata(
+    connection: &mut SqliteConnection,
+    merges: &[CharacterMerge],
+) -> Result<bool, KokoroError> {
+    sqlx::query("DROP TABLE IF EXISTS temp.backup_import_json_messages")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("CREATE TEMP TABLE backup_import_json_messages (id INTEGER PRIMARY KEY)")
+        .execute(&mut *connection)
+        .await?;
+    if !import_table_exists(connection, "conversation_messages").await? {
+        return Ok(false);
+    }
+    let columns = table_columns(connection, Some("import_db"), "conversation_messages").await?;
+    if !["id", "conversation_id", "role", "metadata"]
+        .iter()
+        .all(|column| columns.contains(*column))
+    {
+        return Ok(false);
+    }
+    let merged_characters = serde_json::to_string(
+        &merges
+            .iter()
+            .map(|merge| merge.imported_id.trim())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| KokoroError::Internal(error.to_string()))?;
+    let select = if merges.is_empty() {
+        "SELECT message.id, message.role, message.metadata FROM import_db.conversation_messages message \
+         INNER JOIN temp.backup_skip_new_conversations scope ON scope.id = message.conversation_id \
+         WHERE (? IS NULL OR message.id > ?) AND message.metadata IS NOT NULL \
+           AND message.role IN ('system', 'assistant', 'tool') ORDER BY message.id LIMIT 256"
+    } else {
+        "SELECT message.id, message.role, message.metadata FROM import_db.conversation_messages message \
+         INNER JOIN import_db.conversations conversation ON conversation.id = message.conversation_id \
+         WHERE (? IS NULL OR message.id > ?) AND message.metadata IS NOT NULL \
+           AND message.role = 'system' \
+           AND conversation.character_id IN (SELECT value FROM json_each(?)) ORDER BY message.id LIMIT 256"
+    };
+    let mut after_id: Option<i64> = None;
+    loop {
+        // Bound additional memory, and visit only rows this operation can change.
+        let mut query = sqlx::query_as::<_, (i64, String, String)>(select)
+            .bind(after_id)
+            .bind(after_id);
+        if !merges.is_empty() {
+            query = query.bind(&merged_characters);
+        }
+        let rows = query.fetch_all(&mut *connection).await?;
+        if rows.is_empty() {
+            break;
+        }
+        for (id, role, raw) in rows {
+            after_id = Some(id);
+            let metadata = match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    if role == "system" && raw.trim_start().starts_with('{') {
+                        // JSON.parse accepts numbers/surrogates/deep objects
+                        // rejected by serde or JSON1. Keeping such a diagnostic
+                        // raw could authenticate it after ownership or IDs move.
+                        // Reject ambiguous objects; non-object legacy metadata
+                        // cannot acquire a failure scope in either consumer.
+                        return Err(KokoroError::Validation(format!(
+                            "Cannot safely interpret backup message {id} metadata before rewriting its scope or references: {error}"
+                        )));
+                    }
+                    continue; // Malformed/legacy metadata stays byte-for-byte intact.
+                }
+            };
+            let kind = metadata.get("type").and_then(serde_json::Value::as_str);
+            if !matches!(
+                (role.as_str(), kind),
+                ("system", Some("failure_event" | "invalid_failure_event"))
+                    | ("assistant", Some("assistant_tool_calls"))
+                    | ("tool", Some("tool_result"))
+            ) {
+                continue;
+            }
+            let normalized = metadata.to_string();
+            if normalized != raw {
+                sqlx::query("UPDATE import_db.conversation_messages SET metadata = ? WHERE id = ?")
+                    .bind(normalized)
+                    .bind(id)
+                    .execute(&mut *connection)
+                    .await?;
+            }
+            sqlx::query("INSERT INTO temp.backup_import_json_messages (id) VALUES (?)")
+                .bind(id)
+                .execute(&mut *connection)
+                .await?;
+        }
+    }
+    Ok(true)
+}
+
 /// Route every row of the listed imported characters to its local target.
 ///
 /// Runs inside the import transaction before any row is copied, so the merge is
@@ -2124,10 +2223,9 @@ async fn apply_import_character_merges(
     merges: &[CharacterMerge],
 ) -> Result<Vec<(String, u64)>, KokoroError> {
     let mut remapped = Vec::new();
-    let has_failure_metadata = import_table_exists(connection, "conversation_messages").await?
+    let has_failure_metadata = !merges.is_empty()
         && import_table_exists(connection, "conversations").await?
-        && table_columns(connection, Some("import_db"), "conversation_messages")
-            .await?.contains("metadata");
+        && prepare_import_message_metadata(connection, merges).await?;
     if has_failure_metadata {
         // Finish validation against the original owners for every merge before
         // changing any owner. A target can itself be a later merge source.
@@ -2137,7 +2235,8 @@ async fn apply_import_character_merges(
             sqlx::query(
                 "UPDATE import_db.conversation_messages AS message \
                  SET metadata = json_set(metadata, '$.type', 'invalid_failure_event') \
-                 WHERE message.role = 'system' AND CASE WHEN json_valid(metadata) THEN \
+                 WHERE message.role = 'system' AND CASE WHEN EXISTS ( \
+                     SELECT 1 FROM temp.backup_import_json_messages parsed WHERE parsed.id = message.id) THEN \
                      json_extract(metadata, '$.type') = 'failure_event' \
                      AND NOT COALESCE( \
                          json_extract(metadata, '$.event.character_id') = ? \
@@ -2163,7 +2262,8 @@ async fn apply_import_character_merges(
             sqlx::query(
                 "UPDATE import_db.conversation_messages AS message \
                  SET metadata = json_set(metadata, '$.event.character_id', ?) \
-                 WHERE message.role = 'system' AND CASE WHEN json_valid(metadata) THEN \
+                 WHERE message.role = 'system' AND CASE WHEN EXISTS ( \
+                     SELECT 1 FROM temp.backup_import_json_messages parsed WHERE parsed.id = message.id) THEN \
                      json_extract(metadata, '$.type') = 'failure_event' \
                      AND json_extract(metadata, '$.event.character_id') = ? \
                      AND json_extract(metadata, '$.event.conversation_id') = message.conversation_id \
@@ -2470,12 +2570,15 @@ async fn insert_skip_conversation_messages(
         return Ok(0);
     }
 
+    // Skip also shifts references when there is no character merge. Never let
+    // JSON1 reinterpret a duplicate key or rewrite an unparseable legacy value.
+    prepare_import_message_metadata(connection, &[]).await?;
     let result = sqlx::query(
         "INSERT INTO conversation_messages \
          (id, conversation_id, role, content, metadata, created_at) \
          SELECT message.id + ids.offset, \
                 message.conversation_id, message.role, message.content, \
-                CASE WHEN json_valid(message.metadata) THEN \
+                CASE WHEN EXISTS (SELECT 1 FROM temp.backup_import_json_messages parsed WHERE parsed.id = message.id) THEN \
                     CASE WHEN json_type(message.metadata, '$.user_message_id') = 'integer' \
                               AND ((message.role = 'system' AND json_extract(message.metadata, '$.type') IN ('failure_event', 'invalid_failure_event')) \
                                 OR (message.role = 'assistant' AND json_extract(message.metadata, '$.type') = 'assistant_tool_calls') \
@@ -4220,6 +4323,440 @@ pub async fn import_data(
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn check_duplicate_failure_metadata(overwrite: bool) {
+        use crate::chat::retry::{FailureRetry, Regeneration, RegenerationPlan};
+        use crate::chat::runtime::ChatRuntimeState;
+        use crate::commands::context::is_visible_message_raw;
+
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        let mut connection = state.db.acquire().await.unwrap();
+        sqlx::query("INSERT INTO conversations (id, character_id, created_at, updated_at) VALUES ('local', 'default', '1', '1')")
+            .execute(&mut *connection).await.unwrap();
+        sqlx::query("INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (100, 'local', 'user', 'local prompt', '1')")
+            .execute(&mut *connection).await.unwrap();
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        create_import_conversation_tables(&mut connection).await;
+        // All consumers interpret the last duplicate key. Test both formerly
+        // foreign diagnostics and valid diagnostics hidden by the first key.
+        let cases = [
+            (
+                "foreign-character",
+                r#""type":"failure_event","event":{"character_id":"remote","character_id":"default","conversation_id":"$c","turn_id":"t"}"#,
+                false,
+            ),
+            (
+                "foreign-type",
+                r#""type":"failure_event","type":"failure_event","event":{"character_id":"default","conversation_id":"$c","turn_id":"t"}"#,
+                false,
+            ),
+            (
+                "foreign-event",
+                r#""type":"failure_event","event":{"character_id":"remote","conversation_id":"$c","turn_id":"t"},"event":{"character_id":"default","conversation_id":"$c","turn_id":"t"}"#,
+                false,
+            ),
+            (
+                "foreign-conversation",
+                r#""type":"failure_event","event":{"character_id":"remote","conversation_id":"$c","conversation_id":"foreign","turn_id":"t"}"#,
+                false,
+            ),
+            (
+                "empty-turn",
+                r#""type":"failure_event","event":{"character_id":"remote","conversation_id":"$c","turn_id":"t","turn_id":""}"#,
+                false,
+            ),
+            (
+                "already-invalid",
+                r#""type":"failure_event","type":"invalid_failure_event","event":{"character_id":"default","conversation_id":"$c","turn_id":"t"}"#,
+                false,
+            ),
+            (
+                "valid-character",
+                r#""type":"failure_event","event":{"character_id":"default","character_id":"remote","conversation_id":"$c","turn_id":"t"}"#,
+                true,
+            ),
+            (
+                "valid-type",
+                r#""type":"invalid_failure_event","type":"failure_event","event":{"character_id":"remote","conversation_id":"$c","turn_id":"t"}"#,
+                true,
+            ),
+            (
+                "valid-event",
+                r#""type":"failure_event","event":{"character_id":"default","conversation_id":"foreign","turn_id":""},"event":{"character_id":"remote","conversation_id":"$c","turn_id":"t"}"#,
+                true,
+            ),
+            (
+                "valid-conversation",
+                r#""type":"failure_event","event":{"character_id":"remote","conversation_id":"foreign","conversation_id":"$c","turn_id":"t"}"#,
+                true,
+            ),
+            (
+                "valid-turn",
+                r#""type":"failure_event","event":{"character_id":"remote","conversation_id":"$c","turn_id":"","turn_id":"t"}"#,
+                true,
+            ),
+            (
+                "valid-references",
+                r#""type":"failure_event","event":{"character_id":"remote","conversation_id":"$c","turn_id":"t"},"user_message_id":999,"keep_through_message_id":999"#,
+                true,
+            ),
+            (
+                "legacy-large-number",
+                r#""type":"failure_event","event":{"character_id":"remote","conversation_id":"$c","turn_id":"t"},"legacy":18446744073709551615,"large":1e100"#,
+                true,
+            ),
+        ];
+        let mut originals = Vec::new();
+        for (index, (conversation, fields, _)) in cases.iter().enumerate() {
+            let prompt = (index * 2 + 1) as i64;
+            let raw = format!(
+                "{{{},\"user_message_id\":{prompt},\"keep_through_message_id\":{prompt}}}",
+                fields.replace("$c", conversation)
+            );
+            originals.push(serde_json::from_str::<serde_json::Value>(&raw).unwrap());
+            sqlx::query("INSERT INTO import_db.conversations VALUES (?, 'remote')")
+                .bind(conversation)
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, ?, 'user', 'failed prompt', NULL, '1')")
+                .bind(prompt).bind(conversation).execute(&mut *connection).await.unwrap();
+            sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, ?, 'system', 'original diagnostic', ?, '1')")
+                .bind(prompt + 1).bind(conversation).bind(raw).execute(&mut *connection).await.unwrap();
+        }
+        for (id, conversation, owner, raw) in [
+            (90, "malformed", "remote", "invalid json"),
+            (
+                91,
+                "local",
+                "default",
+                r#"{"type":"failure_event","extra":1e400}"#,
+            ),
+        ] {
+            sqlx::query("INSERT INTO import_db.conversations VALUES (?, ?)")
+                .bind(conversation)
+                .bind(owner)
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, ?, 'system', 'legacy metadata', ?, '1')")
+                .bind(id).bind(conversation).bind(raw).execute(&mut *connection).await.unwrap();
+        }
+        let mut tx = connection.begin().await.unwrap();
+        apply_import_character_merges(
+            &mut tx,
+            &[CharacterMerge {
+                imported_id: "remote".into(),
+                target_id: "default".into(),
+            }],
+        )
+        .await
+        .unwrap();
+        if overwrite {
+            sqlx::query("DELETE FROM conversation_messages")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM conversations")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        } else {
+            prepare_skip_conversation_scope(&mut tx).await.unwrap();
+        }
+        sqlx::query("INSERT OR IGNORE INTO conversations (id, character_id, created_at, updated_at) SELECT id, character_id, '1', '1' FROM import_db.conversations")
+            .execute(&mut *tx).await.unwrap();
+        if overwrite {
+            sqlx::query(
+                "INSERT INTO conversation_messages SELECT * FROM import_db.conversation_messages",
+            )
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        } else {
+            insert_skip_conversation_messages(&mut tx).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+        drop(connection);
+        for (index, (conversation, _, valid)) in cases.iter().enumerate() {
+            let rows: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
+                "SELECT id, role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id")
+                .bind(conversation).fetch_all(&state.db).await.unwrap();
+            assert_eq!(rows.len(), 2, "preserve original rows: {conversation}");
+            assert_eq!(rows[1].2, "original diagnostic");
+            let revision = crate::chat::retry::conversation_message_revision(
+                &mut *state.db.acquire().await.unwrap(),
+                conversation,
+            )
+            .await
+            .unwrap();
+            let tail = rows
+                .iter()
+                .rev()
+                .find(|(_, role, _, meta)| is_visible_message_raw(role, meta.as_deref()))
+                .unwrap()
+                .0;
+            let retry = FailureRetry {
+                diagnostic_message_id: rows[1].0,
+                expected_tail_message_id: tail,
+                expected_history_revision: revision,
+            };
+            let runtime = ChatRuntimeState::default();
+            let plan = RegenerationPlan::prepare(
+                &state,
+                &runtime,
+                Regeneration::Failure(&retry),
+                "default",
+                conversation,
+                "failed prompt",
+            )
+            .await;
+            assert_eq!(
+                plan.is_ok(),
+                *valid,
+                "duplicate JSON changed retry authority: {conversation}, overwrite={overwrite}"
+            );
+            if let Ok(plan) = plan {
+                assert_eq!(plan.user_message_id, rows[0].0);
+            }
+            assert_eq!(
+                tail,
+                if *valid { rows[1].0 } else { rows[0].0 },
+                "visible tail: {conversation}"
+            );
+            let actual: serde_json::Value =
+                serde_json::from_str(rows[1].3.as_deref().unwrap()).unwrap();
+            let mut expected = originals[index].clone();
+            if *valid {
+                expected["event"]["character_id"] = "default".into();
+            } else {
+                expected["type"] = "invalid_failure_event".into();
+            }
+            expected["user_message_id"] = rows[0].0.into();
+            expected["keep_through_message_id"] = rows[0].0.into();
+            assert_eq!(
+                actual, expected,
+                "preserve interpreted metadata and references: {conversation}"
+            );
+        }
+        let mut unchanged = vec![("malformed", "invalid json")];
+        if overwrite {
+            unchanged.push(("local", r#"{"type":"failure_event","extra":1e400}"#));
+        }
+        for (conversation, expected) in unchanged {
+            let raw: String = sqlx::query_scalar(
+                "SELECT metadata FROM conversation_messages WHERE conversation_id = ?",
+            )
+            .bind(conversation)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(raw, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_failure_metadata_skip_uses_consumer_json_semantics() {
+        check_duplicate_failure_metadata(false).await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_failure_metadata_overwrite_uses_consumer_json_semantics() {
+        check_duplicate_failure_metadata(true).await;
+    }
+
+    #[tokio::test]
+    async fn ambiguous_failure_metadata_rejects_scope_or_reference_changes() {
+        let cases = [
+            (r#""extra":1e400"#.to_string(), true),
+            (r#""extra":1e400,"extra":1"#.to_string(), true),
+            (r#""extra":"\ud800""#.to_string(), true),
+            (
+                format!("\"extra\":{}0{}", "[".repeat(1100), "]".repeat(1100)),
+                false,
+            ),
+            (r#""extra":"#.to_string(), false),
+        ];
+        for (extra, sqlite_accepts) in cases {
+            for merge in [false, true] {
+                let pool = SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect("sqlite::memory:")
+                    .await
+                    .unwrap();
+                let mut connection = pool.acquire().await.unwrap();
+                create_conversation_tables(&mut connection).await;
+                sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+                    .execute(&mut *connection)
+                    .await
+                    .unwrap();
+                create_import_conversation_tables(&mut connection).await;
+                sqlx::query("INSERT INTO import_db.conversations VALUES ('ambiguous', 'remote')")
+                    .execute(&mut *connection)
+                    .await
+                    .unwrap();
+                let raw = format!("{{\"type\":\"failure_event\",\"event\":{{\"character_id\":\"default\",\"conversation_id\":\"ambiguous\",\"turn_id\":\"t\"}},{extra}}}");
+                assert!(serde_json::from_str::<serde_json::Value>(&raw).is_err());
+                let sqlite_valid: bool = sqlx::query_scalar("SELECT json_valid(?)")
+                    .bind(&raw)
+                    .fetch_one(&mut *connection)
+                    .await
+                    .unwrap();
+                assert_eq!(sqlite_valid, sqlite_accepts);
+                sqlx::query("INSERT INTO import_db.conversation_messages VALUES (1, 'ambiguous', 'system', 'original diagnostic', ?, '1')")
+                .bind(&raw).execute(&mut *connection).await.unwrap();
+                let mut tx = connection.begin().await.unwrap();
+                let result = if merge {
+                    apply_import_character_merges(
+                        &mut tx,
+                        &[CharacterMerge {
+                            imported_id: "remote".into(),
+                            target_id: "default".into(),
+                        }],
+                    )
+                    .await
+                    .map(|_| ())
+                } else {
+                    prepare_skip_conversation_scope(&mut tx).await.unwrap();
+                    sqlx::query("INSERT INTO conversations SELECT * FROM import_db.conversations")
+                        .execute(&mut *tx)
+                        .await
+                        .unwrap();
+                    insert_skip_conversation_messages(&mut tx).await.map(|_| ())
+                };
+                assert!(
+                    result.is_err(),
+                    "ambiguous JSON must not gain the target's frontend failure scope: {extra}"
+                );
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Cannot safely interpret backup message"));
+                tx.rollback().await.unwrap();
+                let local_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
+                    .fetch_one(&mut *connection)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    local_rows, 0,
+                    "failed import rolls back copied conversations"
+                );
+                let owner: String =
+                    sqlx::query_scalar("SELECT character_id FROM import_db.conversations")
+                        .fetch_one(&mut *connection)
+                        .await
+                        .unwrap();
+                let metadata: String =
+                    sqlx::query_scalar("SELECT metadata FROM import_db.conversation_messages")
+                        .fetch_one(&mut *connection)
+                        .await
+                        .unwrap();
+                assert_eq!(owner, "remote");
+                assert_eq!(metadata, raw, "failed import preserves the original bytes");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn skip_metadata_uses_last_reference_keys_without_a_character_merge() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        create_conversation_tables(&mut connection).await;
+        sqlx::query("INSERT INTO conversations VALUES ('local', 'default')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO conversation_messages VALUES (100, 'local', 'user', 'local prompt', NULL, '1')").execute(&mut *connection).await.unwrap();
+        sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        create_import_conversation_tables(&mut connection).await;
+        sqlx::query("INSERT INTO import_db.conversations VALUES ('imported', 'default')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO import_db.conversation_messages VALUES (1, 'imported', 'user', 'prompt', NULL, '1')").execute(&mut *connection).await.unwrap();
+        for (id, role, kind) in [
+            (2, "system", "failure_event"),
+            (3, "assistant", "assistant_tool_calls"),
+            (4, "tool", "tool_result"),
+        ] {
+            let raw = format!("{{\"type\":\"other\",\"type\":\"{kind}\",\"user_message_id\":999,\"user_message_id\":1,\"keep_through_message_id\":999,\"keep_through_message_id\":1}}");
+            sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, 'imported', ?, 'technical row', ?, '1')")
+                .bind(id).bind(role).bind(raw).execute(&mut *connection).await.unwrap();
+        }
+        let untouched = ["invalid json", "null", "{}"];
+        for (index, raw) in untouched.iter().enumerate() {
+            sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, 'imported', 'system', 'legacy', ?, '1')")
+                .bind(index as i64 + 5).bind(raw).execute(&mut *connection).await.unwrap();
+        }
+        let invalid_references = ["999", "18446744073709551615", "-9223372036854775809", "1.0"];
+        for (index, reference) in invalid_references.iter().enumerate() {
+            let raw = format!(
+                "{{\"type\":\"failure_event\",\"user_message_id\":1,\"user_message_id\":{reference}}}"
+            );
+            sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, 'imported', 'system', 'invalid reference', ?, '1')")
+                .bind(index as i64 + 20).bind(raw).execute(&mut *connection).await.unwrap();
+        }
+        let mut tx = connection.begin().await.unwrap();
+        prepare_skip_conversation_scope(&mut tx).await.unwrap();
+        sqlx::query("INSERT INTO conversations SELECT * FROM import_db.conversations")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        insert_skip_conversation_messages(&mut tx).await.unwrap();
+        tx.commit().await.unwrap();
+        for id in 102..=104 {
+            let raw: String =
+                sqlx::query_scalar("SELECT metadata FROM conversation_messages WHERE id = ?")
+                    .bind(id)
+                    .fetch_one(&mut *connection)
+                    .await
+                    .unwrap();
+            let meta: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(
+                meta["user_message_id"], 101,
+                "last duplicate reference must shift: {id}"
+            );
+            assert_eq!(
+                meta["keep_through_message_id"],
+                if id == 102 { 101 } else { 1 }
+            );
+        }
+        for (index, expected) in untouched.iter().enumerate() {
+            let raw: String =
+                sqlx::query_scalar("SELECT metadata FROM conversation_messages WHERE id = ?")
+                    .bind(index as i64 + 105)
+                    .fetch_one(&mut *connection)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                &raw, expected,
+                "uninterpretable or unrelated legacy metadata stays unchanged"
+            );
+        }
+        for (index, _) in invalid_references.iter().enumerate() {
+            let raw: String =
+                sqlx::query_scalar("SELECT metadata FROM conversation_messages WHERE id = ?")
+                    .bind(index as i64 + 120)
+                    .fetch_one(&mut *connection)
+                    .await
+                    .unwrap();
+            let meta: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert!(
+                meta["user_message_id"].as_i64().is_none(),
+                "invalid last reference must not become a local prompt: {raw}"
+            );
+        }
+    }
 
     async fn check_merged_failure_original_scope(chain: Option<bool>) {
         use crate::chat::retry::{FailureRetry, Regeneration, RegenerationPlan};
