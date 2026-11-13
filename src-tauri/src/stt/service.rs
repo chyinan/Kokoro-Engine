@@ -1,11 +1,15 @@
 //! STT Service — manages providers and routes transcription requests.
 
-use super::config::{SttConfig, SttProviderConfig};
+use super::config::{
+    default_providers_pub, load_config, save_config, SttConfig, SttProviderConfig,
+};
 use super::interface::{AudioSource, SttEngine, SttError, TranscriptionResult};
 use super::openai::OpenAIWhisperProvider;
 use super::sensevoice::SenseVoiceProvider;
 use super::sensevoice_local::SenseVoiceLocalProvider;
 use super::whisper_cpp::WhisperCppProvider;
+use crate::error::KokoroError;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -105,8 +109,6 @@ impl SttService {
     ) -> Result<TranscriptionResult, SttError> {
         let config = self.config.read().await;
         let config_language = config.language.clone();
-        let active_id = config.active_provider.clone();
-        drop(config);
 
         let language = language_override.map(|s| s.to_string()).or(config_language);
 
@@ -116,13 +118,14 @@ impl SttService {
             // Find the active provider
             providers
                 .iter()
-                .find(|p| p.id() == active_id)
+                .find(|p| p.id() == config.active_provider)
                 .or_else(|| providers.first())
                 .cloned()
                 .ok_or_else(|| {
                     SttError::ProviderNotFound("No STT providers configured".to_string())
                 })?
         };
+        drop(config);
 
         // Lock is released here, so we can await safely without blocking
         provider.transcribe(audio, language.as_deref()).await
@@ -133,8 +136,46 @@ impl SttService {
         self.config.read().await.clone()
     }
 
-    /// Hot-reload: rebuild providers first, then atomically swap runtime state.
-    pub async fn reload_from_config(&self, config: &SttConfig) -> Result<(), SttError> {
+    /// Merge missing defaults without letting a stale disk read overwrite a save.
+    pub async fn load_config_with_defaults(&self, path: &Path) -> SttConfig {
+        let _config = self.config.write().await;
+        let mut config = load_config(path);
+        let mut changed = false;
+        for provider in default_providers_pub() {
+            if !config.providers.iter().any(|p| p.id == provider.id) {
+                config.providers.push(provider);
+                changed = true;
+            }
+        }
+        if changed {
+            if let Err(error) = save_config(path, &config) {
+                tracing::warn!(target: "stt", "Failed to persist merged default STT providers: {error}");
+            }
+        }
+        config
+    }
+
+    /// Called on the native mic worker. A settings commit and the actual
+    /// interrupt start must observe one another, even after slow device setup.
+    pub(crate) fn with_interrupt_enabled(
+        &self,
+        start: impl FnOnce() -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        let config = self.config.blocking_read();
+        if config.auto_send
+            && config
+                .providers
+                .iter()
+                .any(|provider| provider.id == config.active_provider && provider.enabled)
+        {
+            start()
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Prepare providers before committing the settings to disk and runtime.
+    pub async fn save_and_reload(&self, path: &Path, config: SttConfig) -> Result<(), KokoroError> {
         let mut new_providers: Vec<Arc<dyn SttEngine>> = Vec::new();
 
         for provider_cfg in &config.providers {
@@ -145,26 +186,22 @@ impl SttService {
             }
         }
 
-        if new_providers.is_empty() {
+        if new_providers.is_empty() && config.providers.iter().any(|provider| provider.enabled) {
             tracing::error!(
                 target: "stt",
                 "Reload skipped: no valid providers built; keeping existing runtime providers"
             );
-            return Err(SttError::ConfigError(
-                "no valid STT providers built from config; runtime providers unchanged".to_string(),
-            ));
+            return Err(
+                SttError::ConfigError("no valid STT providers built from config".into()).into(),
+            );
         }
 
-        {
-            let mut providers = self.providers.write().await;
-            *providers = new_providers;
-            tracing::info!(target: "stt", "Reloaded with {} provider(s)", providers.len());
-        }
-
-        {
-            let mut cfg = self.config.write().await;
-            *cfg = config.clone();
-        }
+        let mut current_config = self.config.write().await;
+        let mut providers = self.providers.write().await;
+        save_config(path, &config)?;
+        *providers = new_providers;
+        *current_config = config;
+        tracing::info!(target: "stt", "Reloaded with {} provider(s)", providers.len());
 
         Ok(())
     }

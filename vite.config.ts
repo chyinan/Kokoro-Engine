@@ -31,8 +31,8 @@ export default defineConfig(async () => ({
       }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. ignore Rust build files and the isolated desktop test database/config.
+      ignored: ["**/src-tauri/**", "**/output/playwright/chat-lifecycle/**"],
     },
   },
   build: {

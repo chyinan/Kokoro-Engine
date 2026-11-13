@@ -1048,7 +1048,10 @@ pub async fn get_memory_enabled(state: State<'_, AIOrchestrator>) -> Result<bool
 #[tauri::command]
 pub async fn clear_history(state: State<'_, AIOrchestrator>) -> Result<(), KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state.try_acquire_chat_turn("history_mutation").map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
 
     state.clear_history().await;
     Ok(())
@@ -1289,7 +1292,10 @@ pub async fn delete_last_messages(
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state.try_acquire_chat_turn("history_mutation").map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
 
     let max_chars = *state.max_message_chars.lock().await;
     delete_last_messages_inner_with_expected_tail(
@@ -1322,7 +1328,10 @@ pub async fn end_session(
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state.try_acquire_chat_turn("history_mutation").map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
     if !state.is_memory_enabled() {
         state.clear_history().await;
         return Ok(());

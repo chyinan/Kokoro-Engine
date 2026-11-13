@@ -2264,6 +2264,7 @@ async fn execute_chat(
 
     let _turn_execution_guard = state
         .try_acquire_chat_turn(&client_request_id)
+        .await
         .map_err(KokoroError::Chat)?;
 
     let speech = app.state::<crate::characters::activation::ActivationCoordinator>()
@@ -3573,6 +3574,7 @@ async fn execute_chat(
                 tool_result_messages.push(tool_result_msg.clone());
                 let mut metadata = tool_metadata_value(&outcome, tool_call_id, &assistant_turn_id);
                 metadata["tool_trace_id"] = serde_json::Value::String(tool_trace_id);
+                metadata["user_message_id"] = serde_json::json!(user_message_id);
                 persisted_native_tool_results.push((metadata, tool_result_msg));
             }
         }
@@ -3581,6 +3583,7 @@ async fn execute_chat(
             let mut assistant_tool_call_metadata_value = serde_json::json!({
                 "type": "assistant_tool_calls",
                 "turn_id": assistant_turn_id,
+                "user_message_id": user_message_id,
                 "tool_calls": continuation_tool_calls,
             });
             if !round_reasoning_content.trim().is_empty() {
@@ -6998,12 +7001,14 @@ mod tests {
         // Turn 1 acquires lock
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
         // Concurrent Turn 2 while turn 1 is active must fail with chat_turn_busy
         let busy_err = orchestrator
             .try_acquire_chat_turn("req-2")
+            .await
             .expect_err("turn 2 must be rejected while turn 1 is active");
         assert!(busy_err.contains("chat_turn_busy"));
 
@@ -7058,6 +7063,7 @@ mod tests {
         // Turn 2 can now acquire lock and proceed without chat_turn_busy!
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-2")
+            .await
             .expect("turn 2 must succeed after turn 1 was cancelled");
         assert_eq!(guard2.context().unwrap().client_request_id, "req-2");
         assert!(orchestrator.is_chat_busy());
@@ -7075,12 +7081,14 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-timeout-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
         // Concurrent Turn 2 is rejected
         let busy_err = orchestrator
             .try_acquire_chat_turn("req-timeout-2")
+            .await
             .expect_err("must be rejected while busy");
         assert!(busy_err.contains("chat_turn_busy"));
 
@@ -7124,6 +7132,7 @@ mod tests {
         // Subsequent request succeeds
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-timeout-2")
+            .await
             .expect("subsequent request must acquire lock after timeout");
         assert_eq!(guard2.context().unwrap().client_request_id, "req-timeout-2");
         drop(guard2);
@@ -7316,12 +7325,14 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-tool-cancel-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
         // Concurrent Turn 2 is rejected
         let busy_err = orchestrator
             .try_acquire_chat_turn("req-tool-cancel-2")
+            .await
             .expect_err("must be rejected while busy");
         assert!(busy_err.contains("chat_turn_busy"));
 
@@ -7383,6 +7394,7 @@ mod tests {
         // Subsequent chat request succeeds immediately without chat_turn_busy!
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-tool-cancel-2")
+            .await
             .expect("turn 2 must succeed after tool execution was cancelled");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7405,6 +7417,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-after-action-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -7453,6 +7466,7 @@ mod tests {
 
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-after-action-2")
+            .await
             .expect("turn 2 must succeed after after-action hook was cancelled");
         assert_eq!(guard2.context().unwrap().client_request_id, "req-after-action-2");
         drop(guard2);
@@ -7469,12 +7483,14 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-tool-timeout-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
         // Concurrent Turn 2 is rejected
         let busy_err = orchestrator
             .try_acquire_chat_turn("req-tool-timeout-2")
+            .await
             .expect_err("must be rejected while busy");
         assert!(busy_err.contains("chat_turn_busy"));
 
@@ -7509,6 +7525,7 @@ mod tests {
         // Subsequent request succeeds
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-tool-timeout-2")
+            .await
             .expect("subsequent request must acquire lock after tool timeout");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7599,12 +7616,14 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-prompt-timeout-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
         // Concurrent request rejected while turn 1 is active
         let busy_err = orchestrator
             .try_acquire_chat_turn("req-prompt-timeout-2")
+            .await
             .expect_err("must be rejected while busy");
         assert!(busy_err.contains("chat_turn_busy"));
 
@@ -7646,6 +7665,7 @@ mod tests {
         // Turn 2 succeeds immediately
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-prompt-timeout-2")
+            .await
             .expect("turn 2 must succeed after prompt composition timed out");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7668,6 +7688,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-prompt-cancel-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -7719,6 +7740,7 @@ mod tests {
 
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-prompt-cancel-2")
+            .await
             .expect("turn 2 must succeed after prompt composition was cancelled");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7736,6 +7758,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-hook-timeout-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -7775,6 +7798,7 @@ mod tests {
 
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-hook-timeout-2")
+            .await
             .expect("turn 2 must acquire lock after hook timeout");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7792,6 +7816,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-best-effort-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -7823,6 +7848,7 @@ mod tests {
 
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-best-effort-2")
+            .await
             .expect("turn 2 must acquire lock after previous turn completed");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7842,12 +7868,14 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-fallback-timeout-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
         // Concurrent Turn 2 while turn 1 is active must fail with chat_turn_busy
         let busy_err = orchestrator
             .try_acquire_chat_turn("req-fallback-timeout-2")
+            .await
             .expect_err("turn 2 must be rejected while turn 1 is active");
         assert!(busy_err.contains("chat_turn_busy"));
 
@@ -7898,6 +7926,7 @@ mod tests {
         // Subsequent chat request can now acquire lock and proceed without chat_turn_busy!
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-fallback-timeout-2")
+            .await
             .expect("turn 2 must succeed after turn 1 fallback timeout");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7917,6 +7946,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-fallback-cancel-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -7973,6 +8003,7 @@ mod tests {
         // Subsequent request succeeds immediately!
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-fallback-cancel-2")
+            .await
             .expect("subsequent turn must acquire lock after fallback cancellation");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7995,6 +8026,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-prep-sysprov-cancel-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -8052,6 +8084,7 @@ mod tests {
         // Turn 2 succeeds immediately without chat_turn_busy
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-prep-sysprov-cancel-2")
+            .await
             .expect("turn 2 must succeed after preparation was cancelled");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -8069,6 +8102,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-prep-timeout-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -8109,6 +8143,7 @@ mod tests {
         // Turn 2 succeeds immediately
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-prep-timeout-2")
+            .await
             .expect("turn 2 must succeed after preparation timed out");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -8131,6 +8166,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-prep-convlock-cancel-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -8185,6 +8221,7 @@ mod tests {
 
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-prep-convlock-cancel-2")
+            .await
             .expect("turn 2 must succeed after turn 1 cancelled");
         drop(guard2);
         assert!(!orchestrator.is_chat_busy());

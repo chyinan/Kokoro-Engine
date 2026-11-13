@@ -484,7 +484,9 @@ pub struct AIOrchestrator {
     /// Concurrency gate to block chat turns during character activation and recovery.
     pub activation_gate: Arc<ActivationGate>,
     /// Global lock ensuring only one chat turn (stream_chat) executes on this orchestrator at a time.
-    pub chat_turn_lock: Arc<tokio::sync::Mutex<Option<ActiveChatTurnContext>>>,
+    chat_turn_lock: Arc<Mutex<Option<ActiveChatTurnContext>>>,
+    /// Serializes chat admission with the instant an interrupt opens the mic.
+    chat_admission: Mutex<()>,
 }
 
 impl AIOrchestrator {
@@ -565,6 +567,7 @@ impl AIOrchestrator {
             runtime_degraded: Arc::new(Mutex::new(None)),
             activation_gate: Arc::new(ActivationGate::default()),
             chat_turn_lock: Arc::new(tokio::sync::Mutex::new(None)),
+            chat_admission: Mutex::new(()),
         })
     }
 
@@ -603,6 +606,7 @@ impl AIOrchestrator {
             runtime_degraded: self.runtime_degraded.clone(),
             activation_gate: self.activation_gate.clone(),
             chat_turn_lock: Arc::new(tokio::sync::Mutex::new(None)),
+            chat_admission: Mutex::new(()),
         }
     }
 
@@ -639,10 +643,13 @@ impl AIOrchestrator {
         Ok(guard)
     }
 
-    pub fn try_acquire_chat_turn(
+    pub async fn try_acquire_chat_turn(
         &self,
         client_request_id: &str,
     ) -> Result<ChatTurnExecutionGuard, String> {
+        // Wait only for a mic start already in progress. A running chat still
+        // rejects concurrent turns immediately, as before.
+        let _admission = self.chat_admission.lock().await;
         let mut guard = self
             .chat_turn_lock
             .clone()
@@ -657,6 +664,20 @@ impl AIOrchestrator {
 
     pub fn is_chat_busy(&self) -> bool {
         self.chat_turn_lock.try_lock().is_err()
+    }
+
+    /// Called from the microphone worker after device/VAD preparation.
+    pub(crate) fn start_if_chat_idle(
+        &self,
+        start: impl FnOnce() -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        let Ok(_admission) = self.chat_admission.try_lock() else {
+            return Ok(false);
+        };
+        if self.is_chat_busy() {
+            return Ok(false);
+        }
+        start()
     }
 
     pub fn is_activating(&self) -> bool {
@@ -3531,6 +3552,7 @@ mod tests {
         // First turn acquires lock successfully
         let guard1 = orchestrator
             .try_acquire_chat_turn("req_1")
+            .await
             .expect("first turn should acquire lock");
         assert!(orchestrator.is_chat_busy());
         assert_eq!(guard1.context().unwrap().client_request_id, "req_1");
@@ -3538,6 +3560,7 @@ mod tests {
         // Concurrent turn while guard1 is held must be rejected immediately
         let err = orchestrator
             .try_acquire_chat_turn("req_2")
+            .await
             .expect_err("second turn must fail while first is active");
         assert!(err.contains("chat_turn_busy"));
 
@@ -3548,6 +3571,7 @@ mod tests {
         // Subsequent turn can now acquire cleanly
         let guard2 = orchestrator
             .try_acquire_chat_turn("req_3")
+            .await
             .expect("subsequent turn should acquire lock after release");
         assert!(orchestrator.is_chat_busy());
         assert_eq!(guard2.context().unwrap().client_request_id, "req_3");

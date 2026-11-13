@@ -48,7 +48,7 @@ export function getExpectedTailMessageId(
 }
 
 function rowMetadata(row: ConversationMessage): { client_request_id?: string; turn_id?: string; type?: string;
-    event?: { turn_id?: string }; streaming_draft?: boolean } | null {
+    event?: { turn_id?: string }; streaming_draft?: boolean; user_message_id?: number | null } | null {
     try {
         return row.metadata ? JSON.parse(row.metadata) : null;
     } catch {
@@ -56,18 +56,45 @@ function rowMetadata(row: ConversationMessage): { client_request_id?: string; tu
     }
 }
 
+function isToolRow(row: ConversationMessage, type?: string): boolean {
+    return row.role === "tool" || type === "assistant_tool_calls" || type === "tool_result";
+}
+
 // Streaming drafts can be assigned an ID before their final tool results.
 // Keep those results with the reply when they precede the next turn.
-export function getContinueFromRowBoundary(rows: ConversationMessage[], keptId: number): number {
+export function getContinueFromRowBoundary(view: ChatViewSnapshot, selectedId: number, keptId: number): number {
+    const rows = view.messages;
     const keptIndex = rows.findIndex(row => row.id === keptId);
     if (keptIndex < 0) return keptId;
-    const turnId = rowMetadata(rows[keptIndex])?.turn_id;
-    if (!turnId) return keptId;
-    let boundary = keptId;
-    for (const row of rows.slice(keptIndex + 1)) {
+    let boundaryIndex = keptIndex;
+    let turnId = rowMetadata(rows[keptIndex])?.turn_id;
+    const selectedIndex = rows.findIndex(row => row.id === selectedId);
+    if (rows[selectedIndex]?.role === "user") {
+        // A tool-only reply is represented by its technical rows. There is no
+        // assistant message ID for the visible history cutoff to retain.
+        const next = rows[selectedIndex + 1];
+        const meta = next && rowMetadata(next);
+        if (next && meta?.turn_id && isToolRow(next, meta.type)) {
+            const owner = view.turns.find(turn => turn.turn_id === meta.turn_id
+                && turn.character_id === view.character_id && turn.conversation_id === view.conversation_id);
+            // Old rows lack an explicit owner. Use the journal when it still
+            // has the turn, then fall back to the adjacent prompt.
+            const belongsToPrompt = meta.user_message_id !== undefined
+                ? meta.user_message_id === selectedId
+                : !owner || (!owner.hidden && owner.user_message_id === selectedId);
+            const keptTurn = turnId ?? rowMetadata(rows[keptIndex])?.event?.turn_id;
+            if (belongsToPrompt && keptTurn !== meta.turn_id) {
+                boundaryIndex = selectedIndex;
+                turnId = meta.turn_id;
+            }
+        }
+    }
+    let boundary = rows[boundaryIndex].id ?? keptId;
+    if (!turnId) return boundary;
+    for (const row of rows.slice(boundaryIndex + 1)) {
         const meta = rowMetadata(row);
         if (row.id === undefined || meta?.turn_id !== turnId
-            || !(row.role === "tool" || meta.type === "assistant_tool_calls" || meta.type === "tool_result")) break;
+            || !isToolRow(row, meta.type)) break;
         boundary = row.id;
     }
     return boundary;

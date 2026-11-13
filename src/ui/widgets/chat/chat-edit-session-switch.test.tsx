@@ -248,6 +248,42 @@ describe("application history command session ownership", () => {
     await h.app.continueFrom(answerTarget);
     expect(remove).toHaveBeenCalledExactlyOnceWith(0, "conversation-a", 102, { generation: 3, historyRevision: 1, keepThroughId: 103 });
   });
+  it.each(["persisted owner", "journal owner", "legacy rows"])(
+    "continues from a prompt with only native tool results (%s)", async ownership => {
+      const h = harness();
+      const owner = ownership === "persisted owner" ? { user_message_id: 101 } : {};
+      const toolOnly = { ...turn("tool_only", 2, "completed"), text: "", user_message_id: 101 };
+      const ownedRows = [
+        { ...messages[1], content: "", metadata: JSON.stringify({ type: "assistant_tool_calls", turn_id: toolOnly.turn_id, ...owner }) },
+        { ...messages[2], role: "tool", content: "kept result", metadata: JSON.stringify({ type: "tool_result", turn_id: toolOnly.turn_id, ...owner }) },
+      ];
+      h.set({
+        revision: 2,
+        messages: [messages[0], ...ownedRows, { ...messages[1], id: 104, content: "later hidden reply", metadata: '{"turn_id":"turn_hidden"}' }],
+        turns: ownership === "journal owner" ? [toolOnly] : [],
+      });
+      await h.app.refresh();
+      const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+      await h.app.continueFrom(editTarget);
+      expect(remove).toHaveBeenCalledExactlyOnceWith(1, "conversation-a", 104, { generation: 3, historyRevision: 1, keepThroughId: 103 });
+    },
+  );
+  it.each([true, false])("does not retain a hidden tool-only turn after an unanswered prompt (saved owner: %s)", async savedOwner => {
+    const h = harness();
+    const hidden = { ...turn("hidden", 2, "completed"), text: "", hidden: true, user_message_id: null };
+    h.set({
+      revision: 2,
+      messages: [messages[0],
+        { ...messages[1], content: "", metadata: JSON.stringify({ type: "assistant_tool_calls", turn_id: hidden.turn_id, ...(savedOwner ? { user_message_id: null } : {}) }) },
+        { ...messages[2], role: "tool", content: "later result", metadata: JSON.stringify({ turn_id: hidden.turn_id }) },
+      ],
+      turns: savedOwner ? [] : [hidden],
+    });
+    await h.app.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await h.app.continueFrom(editTarget);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(0, "conversation-a", 101, { generation: 3, historyRevision: 1, keepThroughId: 101 });
+  });
   it("regenerates from a restored turn with the selected image and without the original camera frame", async () => {
     const h = harness();
     const images = ["http://127.0.0.1:1234/vision/test.png"];

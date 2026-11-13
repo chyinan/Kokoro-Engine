@@ -268,7 +268,7 @@ mod tests {
             expected_tail_message_id: 3,
             expected_history_revision: Some(3),
         };
-        let _turn = state.try_acquire_chat_turn("retry").unwrap();
+        let _turn = state.try_acquire_chat_turn("retry").await.unwrap();
         let prepare = |request| {
             RegenerationPlan::prepare(
                 &state,
@@ -301,7 +301,7 @@ mod tests {
         assert_eq!(plan.prompt_history("question").len(), 1);
         // Webhook chat uses an isolated execution guard with a shared database.
         let external = state.fork_with_isolated_history().await;
-        let _external_turn = external.try_acquire_chat_turn("webhook").unwrap();
+        let _external_turn = external.try_acquire_chat_turn("webhook").await.unwrap();
         let (_, external_id) = external
             .add_message_with_metadata_for_conversation(
                 "user".into(),

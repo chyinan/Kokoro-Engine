@@ -656,23 +656,73 @@ try {
     await main.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.clear());
     return { original, earlier, newer };
   });
-  await check("the native interrupt start refuses capture while a pet request holds the chat lock", async () => {
-    const blocker = "native_voice_interrupt_pet";
-    await submit(pet, {
-      message: "[case:lifecycle-hold-preparation-voice-interrupt]", client_request_id: blocker,
-    }, "__voiceInterruptPet");
-    const active = await waitFor(async () => {
-      const state = await view(pet);
-      return state.busy && state.turns.find(turn => turn.client_request_id === blocker && turn.status === "accepted");
+  await check("continue from a native tool-only prompt preserves its saved tool exchange", async () => {
+    const source = (await view(pet)).conversation_id;
+    const select = conversation => main.evaluate(async id => {
+      const { chatApplication } = await import("/src/lib/chat/application.ts");
+      await chatApplication.selectConversation(id);
+    }, conversation);
+    await main.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.clear());
+    try {
+      const toolOnly = await petSend("native-tool-only");
+      assert.equal(toolOnly.status, "completed");
+      assert.equal(toolOnly.assistant_message_id, null);
+      const owned = (await view(pet)).messages.filter(row => JSON.parse(row.metadata ?? "{}")?.turn_id === toolOnly.turn_id);
+      assert.deepEqual(owned.map(row => row.role), ["assistant", "tool"]);
+      assert(owned.every(row => JSON.parse(row.metadata).user_message_id === toolOnly.user_message_id));
+      assert.equal((await petSend("after-native-tool-only")).status, "completed");
+      await main.getByText("Controlled reply for [case:after-native-tool-only] completed.", { exact: true }).waitFor();
+      const prompt = main.getByText("[case:native-tool-only]", { exact: true });
+      await prompt.locator("..").getByRole("button", { name: /^(从这里继续|Continue from here)$/ }).click();
+      const retained = await waitFor(async () => {
+        const state = await view(pet);
+        return state.messages.at(-1)?.id === owned.at(-1).id && state.messages;
+      });
+      assert.deepEqual(retained.map(row => row.id), [toolOnly.user_message_id, ...owned.map(row => row.id)]);
+      return { toolOnly, retained };
+    } finally {
+      await select(source);
+    }
+  });
+  await check("native interrupt IPC checks both backend auto-send and a pet chat holding execution", async () => {
+    const previous = await main.evaluate(async () => {
+      const { getSttConfig } = await import("/src/lib/kokoro-bridge.ts");
+      return getSttConfig();
     });
-    const started = await main.evaluate(async () => {
+    const saveStt = config => main.evaluate(async settings => {
+      const { saveSttConfig } = await import("/src/lib/kokoro-bridge.ts");
+      await saveSttConfig(settings);
+    }, config);
+    const startMic = () => main.evaluate(async () => {
       const { startNativeMic } = await import("/src/lib/kokoro-bridge.ts");
       return startNativeMic(true, true);
     });
-    assert.equal(started, false);
-    await pet.evaluate(id => window.__TAURI_INTERNALS__.invoke("cancel_chat_turn", { turnId: id }), blocker);
-    assert.equal((await outcome(pet, "__voiceInterruptPet")).result?.status, "cancelled");
-    return { request: active.client_request_id, started };
+    const config = { ...previous, active_provider: "whisper_cpp", providers: previous.providers.map(provider => ({
+      ...provider, enabled: provider.id === "whisper_cpp",
+    })) };
+    try {
+      await saveStt({ ...config, auto_send: false });
+      assert.equal((await view(pet)).busy, false);
+      const disabled = await startMic();
+      assert.equal(disabled, false);
+
+      await saveStt({ ...config, auto_send: true });
+      const blocker = "native_voice_interrupt_pet";
+      await submit(pet, {
+        message: "[case:lifecycle-hold-preparation-voice-interrupt]", client_request_id: blocker,
+      }, "__voiceInterruptPet");
+      const active = await waitFor(async () => {
+        const state = await view(pet);
+        return state.busy && state.turns.find(turn => turn.client_request_id === blocker && turn.status === "accepted");
+      });
+      const busy = await startMic();
+      assert.equal(busy, false);
+      await pet.evaluate(id => window.__TAURI_INTERNALS__.invoke("cancel_chat_turn", { turnId: id }), blocker);
+      assert.equal((await outcome(pet, "__voiceInterruptPet")).result?.status, "cancelled");
+      return { request: active.client_request_id, disabled, busy };
+    } finally {
+      await saveStt(previous);
+    }
   });
   await check("a failed regeneration keeps the original cutoff through repeated retries", async () => {
     const original = await petSend("retry-regeneration-boundary");
@@ -817,6 +867,7 @@ try {
     assert.equal(calls.filter(call => call.streaming && call.name === "tool").length, 2); // tool round + one follow-up
     assert.equal(calls.filter(call => call.streaming && call.name === "text-tool").length, 2);
     assert.equal(calls.filter(call => call.streaming && call.name === "text-tool-only").length, 2);
+    assert.equal(calls.filter(call => call.streaming && call.name === "native-tool-only").length, 2);
     return calls;
   });
   report.completedAt = new Date().toISOString(); save();

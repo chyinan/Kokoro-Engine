@@ -281,9 +281,10 @@ export class ChatApplication {
       if (cutoff === null) return;
       const keptId = messages[cutoff - 1]?.id;
       if (keptId === undefined || view.conversation_history_revision === null) return;
-      const keepThroughId = getContinueFromRowBoundary(view.messages, keptId);
+      const keepThroughId = getContinueFromRowBoundary(view, target.messageId, keptId);
       if (view.messages.some(row => row.id !== undefined && row.id > keepThroughId)) {
-        await bridge.deleteLastMessages(messages.length - cutoff, target.conversationId, getExpectedTailMessageId(messages), {
+        const count = messages.filter(message => message.id !== undefined && message.id > keepThroughId).length;
+        await bridge.deleteLastMessages(count, target.conversationId, getExpectedTailMessageId(messages), {
           generation: target.generation, historyRevision: view.conversation_history_revision, keepThroughId,
         });
       }

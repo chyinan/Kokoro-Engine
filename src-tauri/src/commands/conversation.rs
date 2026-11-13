@@ -215,7 +215,10 @@ pub async fn load_conversation(
     state: State<'_, AIOrchestrator>,
 ) -> Result<LoadedConversation, KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state.try_acquire_chat_turn("history_mutation").map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
 
     let max_chars = *state.max_message_chars.lock().await;
     load_conversation_inner(
@@ -297,7 +300,10 @@ pub async fn delete_conversation(
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state.try_acquire_chat_turn("history_mutation").map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
 
     delete_conversation_inner(
         request,
@@ -333,7 +339,10 @@ pub async fn list_character_ids(
 #[tauri::command]
 pub async fn create_conversation(state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state.try_acquire_chat_turn("history_mutation").map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
     state.clear_history().await;
     Ok(String::new())
 }
@@ -582,7 +591,10 @@ pub async fn edit_conversation_message(
     state: State<'_, AIOrchestrator>,
 ) -> Result<EditConversationMessageResponse, KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state.try_acquire_chat_turn("history_mutation").map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
 
     let max_chars = *state.max_message_chars.lock().await;
     edit_conversation_message_inner(
