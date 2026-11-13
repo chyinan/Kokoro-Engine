@@ -60,44 +60,80 @@ function isToolRow(row: ConversationMessage, type?: string): boolean {
     return row.role === "tool" || type === "assistant_tool_calls" || type === "tool_result";
 }
 
-// Streaming drafts can be assigned an ID before their final tool results.
-// Keep those results with the reply when they precede the next turn.
-export function getContinueFromRowBoundary(view: ChatViewSnapshot, selectedId: number, keptId: number): number {
-    const rows = view.messages;
-    const keptIndex = rows.findIndex(row => row.id === keptId);
-    if (keptIndex < 0) return keptId;
-    let boundaryIndex = keptIndex;
-    let turnId = rowMetadata(rows[keptIndex])?.turn_id;
-    const selectedIndex = rows.findIndex(row => row.id === selectedId);
-    if (rows[selectedIndex]?.role === "user") {
-        // A tool-only reply is represented by its technical rows. There is no
-        // assistant message ID for the visible history cutoff to retain.
-        const next = rows[selectedIndex + 1];
-        const meta = next && rowMetadata(next);
-        if (next && meta?.turn_id && isToolRow(next, meta.type)) {
-            const owner = view.turns.find(turn => turn.turn_id === meta.turn_id
-                && turn.character_id === view.character_id && turn.conversation_id === view.conversation_id);
-            // Old rows lack an explicit owner. Use the journal when it still
-            // has the turn, then fall back to the adjacent prompt.
-            const belongsToPrompt = meta.user_message_id !== undefined
-                ? meta.user_message_id === selectedId
-                : !owner || (!owner.hidden && owner.user_message_id === selectedId);
-            const keptTurn = turnId ?? rowMetadata(rows[keptIndex])?.event?.turn_id;
-            if (belongsToPrompt && keptTurn !== meta.turn_id) {
-                boundaryIndex = selectedIndex;
-                turnId = meta.turn_id;
+// A suffix deletion is safe only if it can keep the selected tool exchange
+// without also keeping intervening rows from a different turn.
+export function getContinueFromRowBoundary(view: ChatViewSnapshot, selectedId: number, keptId: number): number | null {
+    const selectedIndex = view.messages.findIndex(row => row.id === selectedId);
+    const selected = view.messages[selectedIndex];
+    if (!selected) return null;
+    const rows = view.messages.map(row => {
+        const meta = rowMetadata(row);
+        return { row, turnId: meta?.turn_id ?? meta?.event?.turn_id, promptId: meta?.user_message_id,
+            tool: isToolRow(row, meta?.type) };
+    });
+    const toolTurns = new Set<string>();
+    const toolOwners = new Map<string, Set<number>>();
+    const recordToolOwner = (turnId: string, promptId: number | null) => {
+        const owners = toolOwners.get(turnId) ?? new Set<number>();
+        if (promptId !== null) owners.add(promptId);
+        toolOwners.set(turnId, owners);
+    };
+    for (const turn of view.turns) {
+        if (turn.turn_id && turn.character_id === view.character_id && turn.conversation_id === view.conversation_id) {
+            recordToolOwner(turn.turn_id, turn.hidden ? null : turn.user_message_id);
+        }
+    }
+    for (const { tool, turnId, promptId } of rows) {
+        if (!tool || !turnId) continue;
+        toolTurns.add(turnId);
+        if (promptId !== undefined) recordToolOwner(turnId, promptId);
+    }
+
+    if (selected.role === "user") {
+        const adjacent = rows[selectedIndex + 1];
+        if (adjacent?.tool && adjacent.turnId && !toolOwners.has(adjacent.turnId)) {
+            // Legacy tool rows without saved or journal ownership use adjacency.
+            recordToolOwner(adjacent.turnId, selectedId);
+        }
+    }
+    const selectedTurn = selected.role === "assistant" ? rows[selectedIndex].turnId : undefined;
+    const ownsToolTurn = (turnId: string | undefined) =>
+        turnId !== undefined && toolTurns.has(turnId)
+        && (selected.role === "user" ? toolOwners.get(turnId)?.has(selectedId) === true : turnId === selectedTurn);
+    let boundary = -1;
+    for (let index = selectedIndex + 1; index < rows.length; index += 1) {
+        const entry = rows[index];
+        if (ownsToolTurn(entry.turnId) && (selected.role === "user" || entry.tool)) boundary = index;
+    }
+    if (boundary >= 0 && rows.slice(selectedIndex + 1, boundary + 1).some(({ turnId }) => !ownsToolTurn(turnId))) {
+        return null;
+    }
+    if (boundary < 0 && keptId !== selectedId) {
+        // Legacy replies may link their tool rows only by turn ID. Preserve
+        // the trailing rows of the reply already chosen by the visible cutoff.
+        const keptIndex = rows.findIndex(({ row }) => row.id === keptId);
+        const keptTurn = rows[keptIndex]?.row.role === "assistant" ? rows[keptIndex].turnId : undefined;
+        if (keptTurn) {
+            for (let index = keptIndex + 1; index < rows.length; index += 1) {
+                const entry = rows[index];
+                if (entry.turnId !== keptTurn || !entry.tool) break;
+                boundary = index;
             }
         }
     }
-    let boundary = rows[boundaryIndex].id ?? keptId;
-    if (!turnId) return boundary;
-    for (const row of rows.slice(boundaryIndex + 1)) {
-        const meta = rowMetadata(row);
-        if (row.id === undefined || meta?.turn_id !== turnId
-            || !isToolRow(row, meta.type)) break;
-        boundary = row.id;
-    }
-    return boundary;
+    const cutoff = boundary >= 0 ? rows[boundary].row.id : keptId;
+    if (cutoff === undefined) return null;
+    // Selecting the interleaved message itself can also split an earlier
+    // tool exchange whose prompt, assistant reply or tool rows remain.
+    const keptToolTurns = new Set(rows.flatMap(({ row, tool, turnId }) =>
+        turnId && toolTurns.has(turnId) && (tool || row.role === "assistant")
+            && row.id !== undefined && row.id <= cutoff ? [turnId] : []));
+    const cutsEarlierTurn = rows.some(({ row, turnId }) => {
+        if (!turnId || !toolTurns.has(turnId) || row.id === undefined || row.id <= cutoff) return false;
+        const owners = toolOwners.get(turnId);
+        return keptToolTurns.has(turnId) || (owners !== undefined && [...owners].some(id => id <= cutoff));
+    });
+    return cutsEarlierTurn ? null : cutoff;
 }
 
 /**

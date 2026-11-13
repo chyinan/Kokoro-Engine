@@ -914,8 +914,16 @@ export default function ChatPanel({
         } catch (error) { reportRequestError(error, requestId, origin); }
     }, [reportRequestError]);
     const onContinueFrom = useCallback(async (target: ChatMessageTarget) => {
-        try { await chatApplication.continueFrom(target); } catch (error) { reportError(error); }
-    }, [reportError]);
+        try {
+            await chatApplication.continueFrom(target);
+        } catch (error) {
+            if (error instanceof Error && error.message === "history_turns_interleaved") {
+                setError(t("chat.errors.history_turns_interleaved"));
+            } else {
+                reportError(error);
+            }
+        }
+    }, [reportError, t]);
     const onApproveTool = useCallback(async (_index: number, tool: ToolTraceItem) => {
         const id = getApprovalRequestId(tool);
         if (canSubmitApproval(tool) && id) try { await chatApplication.approveTool(id); } catch (error) { reportError(error); }

@@ -2416,15 +2416,18 @@ async fn insert_skip_conversation_messages(
          (id, conversation_id, role, content, metadata, created_at) \
          SELECT message.id + ids.offset, \
                 message.conversation_id, message.role, message.content, \
-                CASE WHEN message.role = 'system' AND json_valid(message.metadata) THEN \
-                    CASE WHEN json_extract(message.metadata, '$.type') = 'failure_event' \
-                              AND json_type(message.metadata, '$.user_message_id') = 'integer' THEN \
+                CASE WHEN json_valid(message.metadata) THEN \
+                    CASE WHEN json_type(message.metadata, '$.user_message_id') = 'integer' \
+                              AND ((message.role = 'system' AND json_extract(message.metadata, '$.type') = 'failure_event') \
+                                OR (message.role = 'assistant' AND json_extract(message.metadata, '$.type') = 'assistant_tool_calls') \
+                                OR (message.role = 'tool' AND json_extract(message.metadata, '$.type') = 'tool_result')) THEN \
                         json_set(message.metadata, '$.user_message_id', ( \
                             SELECT prompt.id + ids.offset FROM import_db.conversation_messages prompt \
                             WHERE prompt.id = json_extract(message.metadata, '$.user_message_id') \
                               AND prompt.conversation_id = message.conversation_id \
                               AND prompt.role = 'user' AND prompt.id < message.id \
-                        ), CASE WHEN json_type(message.metadata, '$.keep_through_message_id') = 'integer' \
+                        ), CASE WHEN message.role = 'system' \
+                                  AND json_type(message.metadata, '$.keep_through_message_id') = 'integer' \
                                 THEN '$.keep_through_message_id' END, ( \
                             SELECT boundary.id + ids.offset FROM import_db.conversation_messages boundary \
                             WHERE boundary.id = json_extract(message.metadata, '$.keep_through_message_id') \
@@ -5219,6 +5222,34 @@ mod tests {
                 .await
                 .unwrap();
         }
+        for (id, role, kind, prompt) in [
+            (9_i64, "assistant", "assistant_tool_calls", serde_json::json!(3)),
+            (10, "tool", "tool_result", serde_json::json!(3)),
+            (11, "tool", "tool_result", serde_json::json!(2)),
+            (12, "tool", "tool_result", serde_json::json!(4)),
+            (13, "tool", "tool_result", serde_json::json!(14)),
+            (15, "tool", "tool_result", serde_json::Value::Null),
+        ] {
+            let metadata = serde_json::json!({
+                "type": kind, "user_message_id": prompt, "turn_id": "tool-turn"
+            });
+            sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, 'new-conversation', ?, ?, ?, '1')")
+                .bind(id)
+                .bind(role)
+                .bind(kind)
+                .bind(metadata.to_string())
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            r#"INSERT INTO import_db.conversation_messages VALUES
+             (14, 'new-conversation', 'user', 'later prompt', NULL, '1'),
+             (16, 'new-conversation', 'tool', 'legacy result', '{"type":"tool_result","turn_id":"legacy"}', '1')"#,
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
 
         let new_conversations = prepare_skip_conversation_scope(&mut connection)
             .await
@@ -5236,7 +5267,7 @@ mod tests {
         transaction.commit().await.unwrap();
 
         assert_eq!(
-            inserted, 7,
+            inserted, 15,
             "only the new conversation contributes messages"
         );
         let local: Vec<String> = sqlx::query_scalar(
@@ -5250,7 +5281,7 @@ mod tests {
         let moved: Vec<(i64, String, Option<i64>, Option<String>, Option<i64>)> = sqlx::query_as(
             "SELECT id, content, json_extract(metadata, '$.user_message_id'), \
                     json_type(metadata, '$.keep_through_message_id'), json_extract(metadata, '$.keep_through_message_id') \
-             FROM conversation_messages WHERE conversation_id = 'new-conversation' ORDER BY id",
+             FROM conversation_messages WHERE conversation_id = 'new-conversation' AND id <= 10 ORDER BY id",
         )
         .fetch_all(&mut *connection)
         .await
@@ -5267,6 +5298,28 @@ mod tests {
                 (10, "model failed".into(), None, None, None),
             ],
             "import must remap same-conversation IDs, invalidate foreign IDs, and preserve legacy diagnostics"
+        );
+        let tools: Vec<(i64, String, String, Option<String>, Option<i64>)> = sqlx::query_as(
+            "SELECT id, role, json_extract(metadata, '$.turn_id'), \
+                    json_type(metadata, '$.user_message_id'), json_extract(metadata, '$.user_message_id') \
+             FROM conversation_messages WHERE conversation_id = 'new-conversation' AND id > 10 \
+                 AND role IN ('assistant', 'tool') ORDER BY id",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(
+            tools,
+            vec![
+                (11, "assistant".into(), "tool-turn".into(), Some("integer".into()), Some(5)),
+                (12, "tool".into(), "tool-turn".into(), Some("integer".into()), Some(5)),
+                (13, "tool".into(), "tool-turn".into(), Some("null".into()), None),
+                (14, "tool".into(), "tool-turn".into(), Some("null".into()), None),
+                (15, "tool".into(), "tool-turn".into(), Some("null".into()), None),
+                (17, "tool".into(), "tool-turn".into(), Some("null".into()), None),
+                (18, "tool".into(), "legacy".into(), None, None),
+            ],
+            "tool rows must point to their remapped earlier user or explicitly have no owner"
         );
     }
 

@@ -1166,6 +1166,7 @@
             "new_messages": "New Messages ↓"
         },
         "errors": {
+            "history_turns_interleaved": "Messages from different turns are interleaved. Continuing here could remove part of a reply.",
             "image_too_large": "Image too large (max 5MB)",
             "only_images": "Only image files are supported",
             "upload_failed": "Failed to upload image",

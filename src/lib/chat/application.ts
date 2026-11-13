@@ -282,6 +282,7 @@ export class ChatApplication {
       const keptId = messages[cutoff - 1]?.id;
       if (keptId === undefined || view.conversation_history_revision === null) return;
       const keepThroughId = getContinueFromRowBoundary(view, target.messageId, keptId);
+      if (keepThroughId === null) throw new Error("history_turns_interleaved");
       if (view.messages.some(row => row.id !== undefined && row.id > keepThroughId)) {
         const count = messages.filter(message => message.id !== undefined && message.id > keepThroughId).length;
         await bridge.deleteLastMessages(count, target.conversationId, getExpectedTailMessageId(messages), {

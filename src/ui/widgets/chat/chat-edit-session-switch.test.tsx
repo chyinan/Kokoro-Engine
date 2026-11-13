@@ -236,7 +236,7 @@ describe("application history command session ownership", () => {
     await expect(continuing).rejects.toThrow("Conversation history changed before deletion");
     expect(remove).not.toHaveBeenCalled();
   });
-  it("keeps trailing tool results owned by the retained reply and drops later tool-only rows", async () => {
+  it.each([editTarget, answerTarget])("keeps trailing legacy tool results for the retained reply (selected $messageId)", async target => {
     const h = harness();
     const tool = { id: 103, role: "tool", content: "kept result", metadata: '{"turn_id":"kept"}', created_at: "now" };
     h.set({ messages: [
@@ -245,7 +245,7 @@ describe("application history command session ownership", () => {
     ] });
     await h.app.refresh();
     const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
-    await h.app.continueFrom(answerTarget);
+    await h.app.continueFrom(target);
     expect(remove).toHaveBeenCalledExactlyOnceWith(0, "conversation-a", 102, { generation: 3, historyRevision: 1, keepThroughId: 103 });
   });
   it.each(["persisted owner", "journal owner", "legacy rows"])(
@@ -283,6 +283,75 @@ describe("application history command session ownership", () => {
     const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
     await h.app.continueFrom(editTarget);
     expect(remove).toHaveBeenCalledExactlyOnceWith(0, "conversation-a", 101, { generation: 3, historyRevision: 1, keepThroughId: 101 });
+  });
+  it.each([
+    { selected: "desktop prompt", selectedId: 101, telegramId: 102, callId: 103 },
+    { selected: "desktop prompt with a saved draft", selectedId: 101, telegramId: 103, callId: 104, replyId: 102 },
+    { selected: "desktop reply", selectedId: 102, telegramId: 103, callId: 104, replyId: 102 },
+    { selected: "interleaved Telegram prompt", selectedId: 103, telegramId: 103, callId: 102, telegramAnswerId: 104 },
+    { selected: "interleaved Telegram reply", selectedId: 104, telegramId: 103, callId: 102, telegramAnswerId: 104 },
+  ])("refuses to split a desktop tool exchange when continuing from the $selected", async ({
+    selectedId, telegramId, callId, replyId, telegramAnswerId = 106,
+  }) => {
+    const h = harness();
+    // Telegram writes a plain user row into the same history while the desktop
+    // turn is generating. Only the native tool rows record their prompt ID.
+    const rows = [
+      messages[0],
+      { id: telegramId, role: "user", content: "Telegram question", created_at: "now" },
+      { id: callId, role: "assistant", content: "", created_at: "now",
+        metadata: '{"type":"assistant_tool_calls","turn_id":"desktop","user_message_id":101}' },
+      { id: 105, role: "tool", content: "desktop tool result", created_at: "now",
+        metadata: '{"type":"tool_result","turn_id":"desktop","user_message_id":101}' },
+      { id: telegramAnswerId, role: "assistant", content: "Telegram answer", created_at: "now" },
+    ];
+    if (replyId !== undefined) {
+      rows.push({ id: replyId, role: "assistant", content: "desktop answer", created_at: "now",
+        metadata: '{"turn_id":"desktop"}' });
+    }
+    rows.sort((left, right) => left.id - right.id);
+    h.set({ messages: rows });
+    await h.app.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await expect(h.app.continueFrom({ ...editTarget, messageId: selectedId })).rejects.toThrow("history_turns_interleaved");
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.app.getSnapshot()).toMatchObject({ busy: false, messages: rows });
+  });
+  it("keeps an entire desktop tool exchange when Telegram writes after it", async () => {
+    const h = harness();
+    h.set({ messages: [
+      messages[0],
+      { ...messages[1], metadata: '{"turn_id":"desktop"}' },
+      { id: 103, role: "assistant", content: "", created_at: "now",
+        metadata: '{"type":"assistant_tool_calls","turn_id":"desktop","user_message_id":101}' },
+      { id: 104, role: "tool", content: "desktop tool result", created_at: "now",
+        metadata: '{"type":"tool_result","turn_id":"desktop","user_message_id":101}' },
+      { id: 105, role: "user", content: "Telegram question", created_at: "now" },
+      { id: 106, role: "assistant", content: "Telegram answer", created_at: "now" },
+    ] });
+    await h.app.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await h.app.continueFrom(editTarget);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(2, "conversation-a", 106, {
+      generation: 3, historyRevision: 1, keepThroughId: 104,
+    });
+  });
+  it("can continue from a vision context row before its own tool turn", async () => {
+    const h = harness();
+    h.set({ messages: [
+      { id: 100, role: "context", content: "camera context", created_at: "now", metadata: '{"turn_id":"desktop"}' },
+      messages[0],
+      { id: 102, role: "assistant", content: "", created_at: "now",
+        metadata: '{"type":"assistant_tool_calls","turn_id":"desktop","user_message_id":101}' },
+      { id: 103, role: "tool", content: "desktop tool result", created_at: "now",
+        metadata: '{"type":"tool_result","turn_id":"desktop","user_message_id":101}' },
+    ] });
+    await h.app.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await h.app.continueFrom({ ...editTarget, messageId: 100 });
+    expect(remove).toHaveBeenCalledExactlyOnceWith(1, "conversation-a", 101, {
+      generation: 3, historyRevision: 1, keepThroughId: 100,
+    });
   });
   it("regenerates from a restored turn with the selected image and without the original camera frame", async () => {
     const h = harness();

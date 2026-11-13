@@ -1157,6 +1157,7 @@
             "new_messages": "새 메시지 ↓"
         },
         "errors": {
+            "history_turns_interleaved": "서로 다른 대화 차례의 메시지가 섞여 있습니다. 여기서 계속하면 답변의 일부가 삭제될 수 있습니다.",
             "image_too_large": "이미지가 너무 큽니다 (최대 5MB)",
             "only_images": "이미지 파일만 지원됩니다",
             "upload_failed": "이미지 업로드 실패",
