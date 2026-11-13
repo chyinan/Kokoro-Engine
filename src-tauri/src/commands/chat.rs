@@ -345,10 +345,7 @@ impl TurnCancellationState {
                 return v.reason.is_some();
             }
         }
-        if inner.tombstones.contains_key(turn_id) {
-            return true;
-        }
-        false
+        inner.tombstones.contains_key(turn_id)
     }
 
     async fn has_turn(&self, turn_id: &str) -> bool {
