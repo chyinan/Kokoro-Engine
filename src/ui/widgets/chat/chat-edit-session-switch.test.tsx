@@ -191,27 +191,39 @@ describe("application history command session ownership", () => {
     completion.resolve({ status: "completed", conversation_id: "conversation-a", text: "answer A" });
     await sending;
     const reopened = h.newWindow(); await reopened.refresh();
-    const deletion = deferred<void>(); const remove = vi.spyOn(bridge, "deleteLastMessages").mockReturnValue(deletion.promise);
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    const replacement = h.pending();
     const running = reopened.continueFrom(answerTarget, true, { allow_image_gen: true });
-    await vi.waitFor(() => expect(remove).toHaveBeenCalledWith(1, "conversation-a", 102));
-    expect(h.io.send).toHaveBeenCalledOnce();
-    h.set({ messages: messages.slice(0, 1) }); deletion.resolve(); await running;
-    expect(h.io.send).toHaveBeenNthCalledWith(2, expect.objectContaining({ message: "original A", images, regenerate: true, conversation_id: "conversation-a", character_id: "character-a", conversation_generation: 3, allow_image_gen: true }));
+    await vi.waitFor(() => expect(h.io.send).toHaveBeenCalledTimes(2));
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.io.send).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      message: "original A", images, regenerate: true, conversation_id: "conversation-a",
+      character_id: "character-a", conversation_generation: 3, allow_image_gen: true,
+      regenerate_reply: { assistant_message_id: 102, expected_tail_message_id: 102, expected_history_revision: 1 },
+    }));
     expect(vi.mocked(h.io.send).mock.lastCall?.[0]).not.toHaveProperty("camera_frame");
+    expect(projectMessages(reopened.getSnapshot()).map(message => message.id)).toEqual([101, 102]);
+    replacement.resolve({ status: "completed", conversation_id: "conversation-a", text: "answer B" });
+    await running;
   });
-  it.each(["conversation", "character", "generation"])("does not regenerate after %s changes while deleting", async changed => {
+  it.each([{ conversation_id: "conversation-b" }, { character_id: "character-b" }, { generation: 5 }])("does not regenerate if the selection changes during the history read to %o", async selection => {
     const h = harness(); h.set({ messages }); await h.app.refresh();
-    const deletion = deferred<void>(); const remove = vi.spyOn(bridge, "deleteLastMessages").mockReturnValue(deletion.promise);
+    const read = deferred<ChatViewSnapshot>();
+    vi.mocked(h.io.read).mockReturnValueOnce(read.promise);
     const running = h.app.continueFrom(answerTarget, true);
-    await vi.waitFor(() => expect(remove).toHaveBeenCalledOnce());
-    h.set(changed === "conversation" ? { conversation_id: "conversation-b" } : changed === "character" ? { character_id: "character-b" } : { generation: 5 });
-    deletion.resolve(); await running; expect(h.io.send).not.toHaveBeenCalled();
+    h.set(selection);
+    read.resolve({ ...h.app.getSnapshot(), ...selection });
+    await running;
+    expect(h.io.send).not.toHaveBeenCalled();
   });
-  it("a rejected tail guard never sends regeneration or changes projected history", async () => {
+  it.each(["chat_turn_busy", "Conversation history changed before retry"])("leaves the saved reply visible when regeneration is rejected with %s", async error => {
     const h = harness(); h.set({ messages }); await h.app.refresh();
-    vi.spyOn(bridge, "deleteLastMessages").mockRejectedValue(new Error("tail changed"));
-    await expect(h.app.continueFrom(answerTarget, true)).rejects.toThrow("tail changed");
-    expect(h.io.send).not.toHaveBeenCalled(); expect(projectMessages(h.app.getSnapshot())).toHaveLength(3);
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    vi.mocked(h.io.send).mockRejectedValueOnce(new Error(error));
+    await expect(h.app.continueFrom(answerTarget, true)).rejects.toThrow(error);
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.io.send).toHaveBeenCalledOnce();
+    expect(projectMessages(h.app.getSnapshot()).map(message => message.id)).toEqual([101, 102, 103]);
   });
 
   it("retries a saved failure from its exact prompt after the journal is gone", async () => {
@@ -230,7 +242,7 @@ describe("application history command session ownership", () => {
     expect(remove).not.toHaveBeenCalled();
     expect(h.io.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       message: "original A", regenerate: true, conversation_id: "conversation-a", conversation_generation: 3,
-      retry_failure: { diagnostic_message_id: diagnostic.id, expected_tail_message_id: diagnostic.id },
+      retry_failure: { diagnostic_message_id: diagnostic.id, expected_tail_message_id: diagnostic.id, expected_history_revision: 1 },
     }));
   });
 

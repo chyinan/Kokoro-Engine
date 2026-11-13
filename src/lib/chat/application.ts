@@ -22,7 +22,8 @@ const transport: ChatTransport = {
   send: request => bridge.streamChat(request), cancel: (id, reason) => bridge.cancelChatTurn(id, reason),
 };
 export const emptyChatView: ChatViewSnapshot = {
-  revision: 0, history_revision: 0, character_id: "default", conversation_id: null, generation: 0, busy: false, messages: [], turns: [],
+  revision: 0, history_revision: 0, character_id: "default", conversation_id: null,
+  conversation_history_revision: null, generation: 0, busy: false, messages: [], turns: [],
 };
 
 export class ChatApplication {
@@ -149,7 +150,7 @@ export class ChatApplication {
         character_id: request.character_id ?? this.view.character_id,
         conversation_id: request.conversation_id ?? this.view.conversation_id,
         message: request.message, images: request.images ?? [], hidden: request.hidden ?? false,
-        retrying_failure: request.retry_failure !== undefined,
+        reusing_saved_prompt: request.retry_failure !== undefined || request.regenerate_reply !== undefined,
         status: "pending", text: "", translation: null, tools: [], error: null,
         user_message_id: null, assistant_message_id: null,
       });
@@ -219,21 +220,47 @@ export class ChatApplication {
       && view.conversation_id === target.conversationId && view.generation === target.generation;
     if (!matchesSelection(this.view)) return;
 
-    const saved = projectSavedMessages(this.view);
+    const cached = this.view;
+    const saved = projectSavedMessages(cached);
     const diagnosticIndex = saved.findIndex(message => message.id === target.messageId && message.failureScope);
     if (diagnosticIndex >= 0) {
       if (!regenerate) return;
-      const prompt = saved[findFailurePromptIndex(this.view, saved, diagnosticIndex)];
+      const prompt = saved[findFailurePromptIndex(cached, saved, diagnosticIndex)];
       const tail = getExpectedTailMessageId(saved);
-      if (!prompt || tail === null) return;
+      if (!prompt || tail === null || cached.conversation_history_revision === null) return;
       return this.send({
         ...options, message: prompt.text, images: prompt.images, regenerate: true,
         character_id: characterId, conversation_id: target.conversationId, conversation_generation: target.generation,
-        retry_failure: { diagnostic_message_id: target.messageId, expected_tail_message_id: tail },
+        retry_failure: {
+          diagnostic_message_id: target.messageId, expected_tail_message_id: tail,
+          expected_history_revision: cached.conversation_history_revision,
+        },
       });
     }
 
-    const user = await this.mutate(async () => {
+    if (regenerate) {
+      if (this.mutation) throw new Error("history_mutation_busy");
+      // A terminal event can arrive before its history is visible.
+      this.readInFlight = undefined;
+      const view = await this.refresh();
+      if (!matchesSelection(view)) return;
+      const saved = projectSavedMessages(view);
+      const index = saved.findIndex(message => message.id === target.messageId);
+      const selected = saved[index];
+      const revision = view.conversation_history_revision;
+      const tail = getExpectedTailMessageId(saved);
+      if (selected?.role !== "kokoro" || selected.failureScope || tail === null || revision === null) return;
+      const prompt = saved.slice(0, index).reverse().find(message => message.role === "user");
+      if (!prompt) return;
+      return this.send({
+        ...options, message: prompt.text, images: prompt.images, regenerate: true,
+        character_id: characterId, conversation_id: target.conversationId, conversation_generation: target.generation,
+        regenerate_reply: {
+          assistant_message_id: target.messageId, expected_tail_message_id: tail, expected_history_revision: revision,
+        },
+      });
+    }
+    return this.mutate(async () => {
       // A turn can persist rows even if it is cancelled, fails, or its event is missed.
       // A read already in flight may have sampled history before those writes.
       this.readInFlight = undefined;
@@ -242,20 +269,12 @@ export class ChatApplication {
       const messages = projectSavedMessages(view).filter(message => message.id !== undefined);
       const index = messages.findIndex(message => message.id === target.messageId);
       if (index < 0 || messages[index].failureScope) return;
-      const cutoff = regenerate ? index : getContinueFromCutoffIndex(messages, index);
+      const cutoff = getContinueFromCutoffIndex(messages, index);
       if (cutoff === null) return;
-      const user = messages.slice(0, index).reverse().find(message => message.role === "user");
-      if (regenerate && !user) return;
       if (messages.length > cutoff) {
         await bridge.deleteLastMessages(messages.length - cutoff, target.conversationId, getExpectedTailMessageId(messages));
       }
-      return user;
     });
-    // A history command must never send into a selection made while it awaited IO.
-    if (regenerate && user && matchesSelection(this.view)) {
-      return this.send({ message: user.text, images: user.images, regenerate: true, character_id: characterId,
-        conversation_id: target.conversationId, conversation_generation: target.generation, ...options });
-    }
   }
 }
 

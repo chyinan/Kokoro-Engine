@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use tokio::sync::watch;
 
-pub(super) const HISTORY_REVISION: &str = "SELECT revision FROM chat_history_revision WHERE id = 1";
+const HISTORY_REVISION: &str = "SELECT revision FROM chat_history_revision WHERE id = 1";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatTurnSnapshot {
@@ -29,7 +29,7 @@ pub struct ChatTurnSnapshot {
     pub images: Vec<String>,
     pub hidden: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub retrying_failure: bool,
+    pub reusing_saved_prompt: bool,
     pub status: String,
     pub text: String,
     pub translation: Option<String>,
@@ -160,7 +160,7 @@ impl ChatRuntimeState {
                     message: request.message.clone(),
                     images: request.images.clone().unwrap_or_default(),
                     hidden: request.hidden,
-                    retrying_failure: request.retry_failure.is_some(),
+                    reusing_saved_prompt: request.retry_failure.is_some() || request.regenerate_reply.is_some(),
                     status: "pending".into(),
                     text: String::new(),
                     translation: None,
@@ -453,6 +453,7 @@ pub struct ChatViewSnapshot {
     pub version: ChatViewVersion,
     pub character_id: String,
     pub conversation_id: Option<String>,
+    pub conversation_history_revision: Option<i64>,
     pub messages: Vec<crate::commands::conversation::ConversationMessage>,
     pub turns: Vec<ChatTurnSnapshot>,
 }
@@ -487,7 +488,9 @@ pub async fn get_chat_view(
     let mut tx = state.db.begin().await?;
     let history_revision = sqlx::query_scalar(HISTORY_REVISION).fetch_one(&mut *tx).await?;
     let mut messages = vec![];
+    let mut conversation_history_revision = None;
     if let Some(id) = &conversation_id {
+        conversation_history_revision = super::retry::conversation_message_revision(&mut tx, id).await?;
         let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, String)>(
             "SELECT id, role, content, metadata, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC"
         ).bind(id).fetch_all(&mut *tx).await?;
@@ -514,6 +517,7 @@ pub async fn get_chat_view(
         },
         character_id,
         conversation_id,
+        conversation_history_revision,
         messages,
         turns,
     }))

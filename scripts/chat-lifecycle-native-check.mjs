@@ -451,7 +451,7 @@ try {
     assert.match(evidence.replies[0].tools[0].text, /Current time:/);
     return evidence;
   });
-  await check("history edits reject during generation, switching cancels without cross-writing, regeneration and clear preserve ownership", async () => {
+  await check("history edits reject during generation and switching cancels without cross-writing", async () => {
     const source = (await view(pet)).conversation_id;
     await pet.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.clear());
     const targetTurn = await petSend("history-target"); assert.equal(targetTurn.status, "completed");
@@ -486,7 +486,13 @@ try {
     }, { source, target, generation: switched.generation, messageId: switched.messages.find(message => message.role === "user").id });
     assert.match(staleEdit, /Conversation changed/);
     assert.deepEqual((await view(pet)).messages, switched.messages);
-    const regenerated = await pet.evaluate(async () => {
+    await pet.evaluate(async source => (await import("/src/lib/chat/application.ts")).chatApplication.deleteConversation(source), source);
+    assert.equal((await view(pet)).conversation_id, target);
+    return { source, target, rejections, cancelled, staleEdit };
+  });
+  await check("ordinary regeneration and pet chat cannot steal admission from each other", async () => {
+    const target = (await view(main)).conversation_id;
+    const { answerId, originalPromptId } = await main.evaluate(async () => {
       const { chatApplication } = await import("/src/lib/chat/application.ts");
       const { projectMessages } = await import("/src/lib/chat/projection.ts"); await chatApplication.refresh();
       const snapshot = chatApplication.getSnapshot();
@@ -494,15 +500,74 @@ try {
       await chatApplication.edit({ conversationId: snapshot.conversation_id, generation: snapshot.generation, messageId: user.id }, "[case:history-regenerated]");
       const updated = chatApplication.getSnapshot();
       const answer = projectMessages(updated).find(message => message.role === "kokoro");
-      return chatApplication.continueFrom({ conversationId: updated.conversation_id, generation: updated.generation, messageId: answer.id }, true, { allow_image_gen: false });
-    }); assert.equal(regenerated.status, "completed"); assert.equal(regenerated.conversation_id, target);
+      return { answerId: answer.id, originalPromptId: user.id };
+    });
+    const historyBeforeRegeneration = (await view(main)).messages;
+    assert(historyBeforeRegeneration.some(message => message.id === answerId && message.role === "assistant"));
+    const startRegeneration = () => main.evaluate(async answerId => {
+      const { chatApplication } = await import("/src/lib/chat/application.ts");
+      const { getKokoroErrorMessage } = await import("/src/lib/kokoro-bridge.ts");
+      await chatApplication.refresh();
+      const current = chatApplication.getSnapshot();
+      window.__regeneration = { pending: true };
+      chatApplication.continueFrom({
+        conversationId: current.conversation_id, generation: current.generation, messageId: answerId,
+      }, true, { allow_image_gen: false }).then(
+        result => { window.__regeneration = { result }; },
+        error => { window.__regeneration = { error: getKokoroErrorMessage(error) }; },
+      );
+    }, answerId);
+    // Pause just before the main window's submit IPC, where the old split
+    // flow had already deleted the answer and released the backend guard.
+    await main.evaluate(async () => {
+      const { chatApplication } = await import("/src/lib/chat/application.ts");
+      const send = chatApplication.send;
+      chatApplication.send = async function (request) {
+        if (request.message === "[case:history-regenerated]") {
+          this.send = send;
+          await new Promise(resolve => { window.__releaseRegenerationSubmit = resolve; });
+        }
+        return send.call(this, request);
+      };
+    });
+    await startRegeneration();
+    await waitFor(() => main.evaluate(() => typeof window.__releaseRegenerationSubmit === "function"));
+    assert.deepEqual((await view(main)).messages, historyBeforeRegeneration);
+    const blocker = "native_regenerate_pet_first";
+    await submit(pet, {
+      message: "[case:lifecycle-hold-preparation-regenerate-blocker]", client_request_id: blocker,
+    }, "__regeneratePetFirst");
+    await waitFor(async () => (await view(pet)).turns.some(turn => turn.client_request_id === blocker && turn.status === "accepted"));
+    await main.evaluate(() => window.__releaseRegenerationSubmit());
+    assert.match((await outcome(main, "__regeneration")).error, /chat_turn_busy/);
+    assert.deepEqual((await view(main)).messages, historyBeforeRegeneration);
+    await pet.evaluate(id => window.__TAURI_INTERNALS__.invoke("cancel_chat_turn", { turnId: id }), blocker);
+    assert.equal((await outcome(pet, "__regeneratePetFirst")).result?.status, "cancelled");
+
+    // Submit from the main window, then compete from the pet as soon as the
+    // replacement owns execution and the old answer has been truncated.
+    await startRegeneration();
+    await waitFor(async () => {
+      const state = await view(pet);
+      return state.turns.some(turn => turn.message === "[case:history-regenerated]" && turn.status === "streaming")
+        && !state.messages.some(message => message.id === answerId);
+    });
+    await submit(pet, {
+      message: "[case:pet-during-regeneration]", client_request_id: "native_regenerate_pet_second",
+    }, "__regeneratePetSecond");
+    assert.match((await outcome(pet, "__regeneratePetSecond")).error, /chat_turn_busy/);
+    await waitFor(async () => (await fetch("http://127.0.0.1:19334/release-regeneration")).status === 204);
+    const { result: regenerated } = await outcome(main, "__regeneration");
+    assert.equal(regenerated?.status, "completed");
+    assert.equal(regenerated.conversation_id, target);
+    assert.equal(regenerated.user_message_id, originalPromptId);
+    assert.notEqual(regenerated.assistant_message_id, answerId);
     const revised = await view(pet); assert.equal(revised.messages.filter(message => message.role === "user").length, 1);
     assert.equal(revised.messages.filter(message => message.role === "assistant").length, 1);
-    await pet.evaluate(async source => (await import("/src/lib/chat/application.ts")).chatApplication.deleteConversation(source), source);
-    assert.equal((await view(pet)).conversation_id, target);
+    assert(revised.messages.some(message => message.id === regenerated.assistant_message_id && message.content.includes("[case:history-regenerated]")));
     await pet.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.clear());
     const cleared = await view(pet); assert.equal(cleared.conversation_id, null); assert.deepEqual(cleared.messages, []);
-    return { source, target, rejections, cancelled, staleEdit, regenerated, revisedMessageIds: revised.messages.map(message => message.id), clearedGeneration: cleared.generation };
+    return { target, answerId, regenerated, revisedMessageIds: revised.messages.map(message => message.id), clearedGeneration: cleared.generation };
   });
   await check("hidden main window does not block pet generation", async () => {
     await main.evaluate(async () => (await import("/node_modules/@tauri-apps/api/window.js")).getCurrentWindow().hide());

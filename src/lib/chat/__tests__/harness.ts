@@ -12,7 +12,7 @@ export function turn(id: string, revision: number, status: ChatTurnSnapshot["sta
   return { revision, client_request_id: id, turn_id: `turn_${id}`, character_id: "character-a", conversation_id: "conversation-a", user_message_id: 1, assistant_message_id: null, message: "question", images: [], hidden: false, status, text: "answer", translation: null, tools: [], error: null };
 }
 export function harness() {
-  let view: ChatViewSnapshot = { ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a", generation: 3 };
+  let view: ChatViewSnapshot = { ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a", conversation_history_revision: 1, generation: 3 };
   const callbacks = new Set<(snapshot: ChatTurnSnapshot) => void>();
   const io: ChatTransport = {
     read: vi.fn(async () => structuredClone(view)),

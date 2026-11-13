@@ -291,7 +291,8 @@ export interface ChatRequest {
     client_request_id?: string;
     /** If true, this turn is regenerating an assistant reply for the last user message. */
     regenerate?: boolean;
-    retry_failure?: { diagnostic_message_id: number; expected_tail_message_id: number };
+    retry_failure?: { diagnostic_message_id: number; expected_tail_message_id: number; expected_history_revision?: number };
+    regenerate_reply?: { assistant_message_id: number; expected_tail_message_id: number; expected_history_revision: number };
     /** Optional target conversation ID. If specified, backend binds strictly to this conversation. */
     conversation_id?: string | null;
     conversation_generation?: number;
@@ -324,7 +325,7 @@ export interface ChatTurnSnapshot {
     message: string;
     images: string[];
     hidden: boolean;
-    retrying_failure?: boolean;
+    reusing_saved_prompt?: boolean;
     status: "pending" | "accepted" | "streaming" | "completed" | "cancelled" | "rejected" | "error";
     text: string;
     translation: string | null;
@@ -342,6 +343,7 @@ export interface ChatViewVersion {
 export interface ChatViewSnapshot extends ChatViewVersion {
     character_id: string;
     conversation_id: string | null;
+    conversation_history_revision: number | null;
     messages: ConversationMessage[];
     turns: ChatTurnSnapshot[];
 }

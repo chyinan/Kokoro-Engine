@@ -105,7 +105,7 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
     // mounted until a snapshot at or beyond that event takes over.
     const live = active || isTurnAwaitingHistory(view, turn);
     if (!live && (turn.status !== "completed" || turn.conversation_id !== view.conversation_id || !turn.tools.length)) continue;
-    if (active && !turn.hidden && !turn.retrying_failure && !messages.some(message => message.id === turn.user_message_id && turn.user_message_id !== null)) {
+    if (active && !turn.hidden && !turn.reusing_saved_prompt && !messages.some(message => message.id === turn.user_message_id && turn.user_message_id !== null)) {
       messages.push({ role: "user", text: turn.message, images: turn.images, clientRequestId: turn.client_request_id });
     }
     const index = messages.findIndex(message => message.role === "kokoro" && (message.turnId === turn.turn_id || (turn.assistant_message_id !== null && message.id === turn.assistant_message_id)));

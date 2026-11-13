@@ -18,7 +18,7 @@ use crate::ai::memory_event_ingress::{
     MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
-use crate::chat::retry::{FailureRetry, FailureRetryPlan};
+use crate::chat::retry::{FailureRetry, Regeneration, RegenerationPlan, ReplyRegeneration};
 use crate::chat::tags::{
     extract_translate_tags, find_safe_emit_boundary, merge_continuation_text,
     merge_round_tool_calls, parse_tool_call_tags, strip_leaked_tags, strip_translate_tags,
@@ -1190,6 +1190,8 @@ pub struct ChatRequest {
     pub regenerate: bool,
     /// Validate and truncate the failed turn under this request's execution guard.
     pub retry_failure: Option<FailureRetry>,
+    /// Validate and replace a saved assistant reply under the same execution guard.
+    pub regenerate_reply: Option<ReplyRegeneration>,
     /// Optional target conversation ID. If specified, backend strictly validates that this request
     /// belongs to this conversation; if unspecified, it binds to the active conversation at entry.
     #[serde(default)]
@@ -2144,7 +2146,7 @@ struct PreparedChatTurn {
     conversation_id: Option<String>,
     user_message_id: Option<i64>,
     bound_generation: u64,
-    retry: Option<FailureRetryPlan>,
+    regeneration: Option<RegenerationPlan>,
     selected_vision_observation: Option<crate::vision::context::VisionObservation>,
     prompt_messages: Vec<crate::ai::context::Message>,
     llm_config: crate::llm::llm_config::LlmConfig,
@@ -2381,7 +2383,7 @@ async fn execute_chat(
         // 2. Update History with User Message under conversation_switch_lock
         let system_provider = llm_state.system_provider().await;
 
-        let (conversation_id, user_message_id, history_snapshot, bound_generation, retry) = 'bind: {
+        let (conversation_id, user_message_id, history_snapshot, bound_generation, regeneration) = 'bind: {
             let _switch_guard = state.conversation_switch_lock.lock().await;
             let current_conv_id = state.current_conversation_id.lock().await.clone();
             let current_generation = state.current_conversation_generation();
@@ -2424,14 +2426,20 @@ async fn execute_chat(
 
             let bound_generation = initial_generation;
 
-            if let Some(retry) = &request.retry_failure {
+            let regeneration = match (&request.retry_failure, &request.regenerate_reply) {
+                (Some(retry), None) => Some(Regeneration::Failure(retry)),
+                (None, Some(reply)) => Some(Regeneration::Reply(reply)),
+                (None, None) => None,
+                (Some(_), Some(_)) => return Err(KokoroError::Validation("Conflicting regeneration targets".into())),
+            };
+            if let Some(regeneration) = regeneration {
                 let conversation = current_conv_id.as_deref()
                     .filter(|id| requested_conversation_id.as_deref() == Some(*id))
                     .filter(|_| request.conversation_generation == Some(current_generation) && request.regenerate && !request.hidden)
-                    .ok_or_else(|| KokoroError::Validation("Invalid failed-turn retry scope".into()))?;
+                    .ok_or_else(|| KokoroError::Validation("Invalid regeneration scope".into()))?;
                 let runtime = app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>();
-                let plan = FailureRetryPlan::prepare(&state, &runtime, retry, &char_id, conversation, &request.message).await?;
-                let history = plan.history.iter().cloned().collect();
+                let plan = RegenerationPlan::prepare(&state, &runtime, regeneration, &char_id, conversation, &request.message).await?;
+                let history = plan.prompt_history(&request.message);
                 break 'bind (current_conv_id, Some(plan.user_message_id), history, bound_generation, Some(plan));
             }
 
@@ -2707,7 +2715,7 @@ async fn execute_chat(
             conversation_id,
             user_message_id,
             bound_generation,
-            retry,
+            regeneration,
             selected_vision_observation,
             prompt_messages,
             llm_config,
@@ -2783,7 +2791,7 @@ async fn execute_chat(
         mut conversation_id,
         user_message_id,
         bound_generation,
-        retry,
+        regeneration,
         selected_vision_observation,
         prompt_messages,
         llm_config,
@@ -2892,9 +2900,9 @@ async fn execute_chat(
         return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
     }
 
-    if let Some(retry) = retry {
-        let conversation = conversation_id.as_deref().ok_or_else(|| KokoroError::Validation("Missing retry conversation".into()))?;
-        retry.commit(&state, conversation, bound_generation, cancel_rx.as_ref()).await?;
+    if let Some(regeneration) = regeneration {
+        let conversation = conversation_id.as_deref().ok_or_else(|| KokoroError::Validation("Missing regeneration conversation".into()))?;
+        regeneration.commit(&state, conversation, bound_generation, cancel_rx.as_ref()).await?;
     }
 
     crate::chat::runtime::emit_chat_event(&app,

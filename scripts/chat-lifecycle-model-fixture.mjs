@@ -6,11 +6,17 @@ const directory = path.resolve(process.argv[2] ?? "output/playwright/chat-lifecy
 fs.mkdirSync(directory, { recursive: true });
 const calls = [];
 let releaseDetachedFailure;
+let releaseRegeneration;
 const server = http.createServer(async (request, response) => {
   if (request.url === "/counts") { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(calls)); return; }
   if (request.url === "/release-detached-failure" && releaseDetachedFailure) {
     releaseDetachedFailure();
     releaseDetachedFailure = undefined;
+    response.writeHead(204); response.end(); return;
+  }
+  if (request.url === "/release-regeneration" && releaseRegeneration) {
+    releaseRegeneration();
+    releaseRegeneration = undefined;
     response.writeHead(204); response.end(); return;
   }
   let raw = ""; for await (const chunk of request) raw += chunk;
@@ -49,6 +55,12 @@ const server = http.createServer(async (request, response) => {
   const chunk = delta => response.write(`data: ${JSON.stringify({ id: `fixture-${call.index}`, object: "chat.completion.chunk", created: 1, model: "controlled-sse", choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
   let closed = false; response.on("close", () => { closed = true; call.closedAt = new Date().toISOString(); save(); });
   chunk({ role: "assistant", content: "" });
+  if (name === "history-regenerated") {
+    await new Promise(resolve => {
+      releaseRegeneration = resolve;
+      response.once("close", resolve);
+    });
+  }
   const hasTextToolFeedback = body.messages?.some(message => message.role === "system" && message.content?.startsWith?.("[Tool results]"));
   if ((name === "text-tool" || name === "text-tool-only") && !hasTextToolFeedback) {
     chunk({ content: "[TOOL_CALL:get_time]" });

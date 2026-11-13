@@ -494,9 +494,8 @@ impl AIOrchestrator {
         Self::with_connect_options(options).await
     }
 
-    /// Test-only constructor that can disable SQLite foreign key enforcement
-    /// so failure paths (orphan inserts, missing parent tables) can be
-    /// exercised deterministically. Production always runs with FK ON.
+    /// Test-only constructor for exercising orphan inserts with SQLite foreign
+    /// keys disabled. Production always runs with FK ON.
     #[cfg(test)]
     async fn new_for_tests_with_foreign_keys(db_url: &str, fk_on: bool) -> Result<Self> {
         let options = sqlx::sqlite::SqliteConnectOptions::from_str(db_url)?
@@ -3122,18 +3121,18 @@ mod tests {
 
     #[tokio::test]
     async fn persist_message_propagates_conversation_metadata_update_failure() {
-        // FK enforcement is disabled so the message INSERT succeeds even
-        // though the conversations table is gone; only the metadata UPDATE
-        // fails, which is exactly the error path this test targets.
-        let orchestrator =
-            AIOrchestrator::new_for_tests_with_foreign_keys("sqlite::memory:", false)
-                .await
-                .expect("FK-off test orchestrator should build");
+        let orchestrator = setup_test_orchestrator().await;
         insert_test_conversation(&orchestrator, "conv-err").await;
-        sqlx::query("DROP TABLE conversations")
-            .execute(&orchestrator.db)
-            .await
-            .unwrap();
+        // Fail the metadata update after the message insert and its history
+        // revision trigger have succeeded inside the same transaction.
+        sqlx::query(
+            "CREATE TRIGGER reject_conversation_metadata_update
+             BEFORE UPDATE OF title, updated_at ON conversations
+             BEGIN SELECT RAISE(ABORT, 'test metadata update failure'); END",
+        )
+        .execute(&orchestrator.db)
+        .await
+        .unwrap();
 
         let err = orchestrator
             .add_message_with_metadata_for_conversation(
@@ -3164,6 +3163,13 @@ mod tests {
             orphan_count, 0,
             "failed transaction must roll back the message row"
         );
+        let revision: i64 = sqlx::query_scalar(
+            "SELECT message_revision FROM conversations WHERE id = 'conv-err'",
+        )
+        .fetch_one(&orchestrator.db)
+        .await
+        .unwrap();
+        assert_eq!(revision, 0, "the history revision must roll back too");
     }
 
     #[tokio::test]
