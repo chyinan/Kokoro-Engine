@@ -188,7 +188,7 @@ pub async fn load_conversation_inner(
                 .and_then(|value| value.as_str());
             if matches!(
                 technical_type,
-                Some("assistant_tool_calls") | Some("translation_instruction")
+                Some("assistant_tool_calls") | Some("translation_instruction") | Some("invalid_failure_event")
             ) {
                 return None;
             }
@@ -486,25 +486,7 @@ pub async fn edit_conversation_message_inner(
 
         let visible_rows: Vec<i64> = rows
             .into_iter()
-            .filter(|(_, role, meta)| {
-                if role == "tool" {
-                    return false;
-                }
-                let technical_type = meta
-                    .as_deref()
-                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                    .and_then(|v| {
-                        v.get("type")
-                            .and_then(|t| t.as_str())
-                            .map(|s| s.to_string())
-                    });
-                !matches!(
-                    technical_type.as_deref(),
-                    Some("assistant_tool_calls")
-                        | Some("translation_instruction")
-                        | Some("tool_result")
-                )
-            })
+            .filter(|(_, role, meta)| super::context::is_visible_message_raw(role, meta.as_deref()))
             .map(|(id, _, _)| id)
             .collect();
 

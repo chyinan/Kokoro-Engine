@@ -12,6 +12,17 @@ function createMessage(overrides: Partial<ConversationMessage>): ConversationMes
 }
 
 describe("buildChatMessagesFromConversation", () => {
+    it("keeps invalid imported failure diagnostics out of visible history", () => {
+        const chatMessages = buildChatMessagesFromConversation([
+            createMessage({ id: 1, role: "user", content: "saved prompt" }),
+            createMessage({ id: 2, role: "system", content: "foreign diagnostic", metadata: JSON.stringify({
+                type: "invalid_failure_event", user_message_id: 1, keep_through_message_id: 1,
+                event: { character_id: "default", conversation_id: "imported", turn_id: "foreign-turn" },
+            }) }),
+        ]);
+        expect(chatMessages).toEqual([{ id: 1, role: "user", text: "saved prompt" }]);
+    });
+
     it("trims stored assistant text during history replay", () => {
         const chatMessages = buildChatMessagesFromConversation([
             createMessage({ role: "assistant", content: "  saved reply  " }),

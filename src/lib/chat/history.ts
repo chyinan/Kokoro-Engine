@@ -105,7 +105,7 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
             continue;
         }
 
-        if (technicalType === "assistant_tool_calls" || technicalType === "translation_instruction") continue;
+        if (technicalType === "assistant_tool_calls" || technicalType === "translation_instruction" || technicalType === "invalid_failure_event") continue;
 
         if (m.role === "system" && technicalType === "failure_event") {
             const event = meta?.event as Record<string, unknown> | null | undefined;

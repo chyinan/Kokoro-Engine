@@ -2579,6 +2579,7 @@ impl MemoryManager {
                     | Some("tool_result")
                     | Some("translation_instruction")
                     | Some("vision_observation")
+                    | Some("invalid_failure_event")
             ) {
                 continue;
             }
@@ -5043,6 +5044,25 @@ mod tests {
             content, "original memory",
             "failed proposal approval must rollback its earlier writes"
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_imported_failures_never_enter_database_summary_transcripts() {
+        let pool = setup_test_pool().await;
+        let manager = MemoryManager::new(pool.clone());
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('invalid-summary', 'character-a', 'summary', '1', '1')")
+            .execute(&pool).await.unwrap();
+        let mut last_visible = 0;
+        for index in 0..8 {
+            last_visible = sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES ('invalid-summary', 'user', ?, '1')")
+                .bind(format!("message-{index}")).execute(&pool).await.unwrap().last_insert_rowid();
+            sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('invalid-summary', 'system', 'foreign diagnostic', '{\"type\":\"invalid_failure_event\"}', '1')")
+                .execute(&pool).await.unwrap();
+        }
+        let task = manager.get_conversation_summary_task("invalid-summary", "character-a").await.unwrap().unwrap();
+        assert_eq!(task.end_message_id, last_visible);
+        assert!(task.transcript.contains("message-7"));
+        assert!(!task.transcript.contains("foreign diagnostic"));
     }
 
     #[tokio::test]

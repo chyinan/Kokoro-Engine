@@ -2007,21 +2007,7 @@ pub(crate) async fn resolve_trailing_visible_user_message(
     .await?;
 
     for (id, role, content, metadata) in rows {
-        if role == "tool" {
-            continue;
-        }
-        let technical_type = metadata
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .and_then(|v| {
-                v.get("type")
-                    .and_then(|t| t.as_str())
-                    .map(|s| s.to_string())
-            });
-        if matches!(
-            technical_type.as_deref(),
-            Some("assistant_tool_calls") | Some("translation_instruction") | Some("tool_result")
-        ) {
+        if !super::context::is_visible_message_raw(&role, metadata.as_deref()) {
             continue;
         }
 

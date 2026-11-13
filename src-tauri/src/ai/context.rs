@@ -88,10 +88,12 @@ pub fn is_vision_context_message(message: &Message) -> bool {
 
 pub fn is_memory_candidate_message(message: &Message) -> bool {
     !is_vision_context_message(message)
+        && message.metadata.as_ref().and_then(|meta| meta.get("type")).and_then(|kind| kind.as_str())
+            != Some("invalid_failure_event")
 }
 
 pub fn is_summary_candidate_message(message: &Message) -> bool {
-    !is_vision_context_message(message)
+    is_memory_candidate_message(message)
 }
 
 fn latest_vision_context_index(messages: &[Message]) -> Option<usize> {
@@ -110,7 +112,7 @@ fn should_include_message_for_llm_history(
         .and_then(|meta| meta.get("type"))
         .and_then(|value| value.as_str());
 
-    if matches!(technical_type, Some("translation_instruction")) {
+    if matches!(technical_type, Some("translation_instruction") | Some("invalid_failure_event")) {
         return false;
     }
 
@@ -1950,6 +1952,28 @@ impl AIOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn invalid_imported_failures_never_enter_model_or_memory_context() {
+        let message = Message {
+            role: "system".into(), content: "foreign diagnostic".into(),
+            metadata: Some(serde_json::json!({ "type": "invalid_failure_event" })),
+        };
+        assert!(!is_memory_candidate_message(&message));
+        assert!(!is_summary_candidate_message(&message));
+        assert!(!should_include_message_for_llm_history(&message, 0, None, "full"));
+        let ordinary = Message { role: "user".into(), content: "saved prompt".into(), metadata: None };
+        assert!(is_memory_candidate_message(&ordinary));
+        assert!(is_summary_candidate_message(&ordinary));
+        assert!(should_include_message_for_llm_history(&ordinary, 0, None, "full"));
+        let orchestrator = setup_test_orchestrator().await;
+        orchestrator.set_memory_enabled(false).await;
+        orchestrator.push_history_message(ordinary).await;
+        orchestrator.push_history_message(message).await;
+        let (prompt, _) = orchestrator.compose_prompt("hello", false, None, true, "default").await.unwrap();
+        assert!(prompt.iter().any(|message| message.content == "saved prompt"));
+        assert!(prompt.iter().all(|message| message.content != "foreign diagnostic"));
+    }
 
     async fn setup_test_orchestrator() -> AIOrchestrator {
         AIOrchestrator::new("sqlite::memory:")

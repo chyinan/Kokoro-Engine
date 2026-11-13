@@ -1060,7 +1060,7 @@ pub async fn clear_history(state: State<'_, AIOrchestrator>) -> Result<(), Kokor
 /// 判断消息是否为前端/用户视角的可见消息。
 /// 不可见技术消息包括：
 /// 1. `role == "tool"`
-/// 2. `metadata.type` 为 `"assistant_tool_calls" | "tool_result" | "translation_instruction"`
+/// 2. `metadata.type` 为 `"assistant_tool_calls" | "tool_result" | "translation_instruction" | "invalid_failure_event"`
 pub fn is_visible_message_meta(role: &str, meta: Option<&serde_json::Value>) -> bool {
     if role == "tool" {
         return false;
@@ -1068,7 +1068,7 @@ pub fn is_visible_message_meta(role: &str, meta: Option<&serde_json::Value>) -> 
     let technical_type = meta.and_then(|v| v.get("type")).and_then(|t| t.as_str());
     !matches!(
         technical_type,
-        Some("assistant_tool_calls") | Some("translation_instruction") | Some("tool_result")
+        Some("assistant_tool_calls") | Some("translation_instruction") | Some("tool_result") | Some("invalid_failure_event")
     )
 }
 

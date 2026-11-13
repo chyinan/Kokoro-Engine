@@ -196,3 +196,24 @@ launcher 默认重新编译隔离 debug app、创建全新数据根/profile、�
 新增三个原生场景直接操作桌宠 UI 并延迟准入，在主窗口切换角色或会话后验证拒绝和气泡隐藏；另外真实导出 SQLite 备份、制造相同消息 ID/不同内容及 request ID 的分叉，在聊天仍 streaming 时覆盖导入，验证导入等待聊天结束、journal 失效、WebView 重载后旧图片不会附到导入消息。最终报告为 `output/playwright/chat-lifecycle/native-report.json`，隔离运行 ID 为 `20261114-005929`；本轮单元/构建日志保存为同目录 `pr30-review-repair-{frontend,build,rust,clippy}.log`。
 
 原生复跑发现并修正了两项验收条件：普通测试点击前需等待角色快照渲染；备份入口先前未采用隔离测试数据根，导致导出包没有测试数据库。后者现仅在 debug 且显式设置 KOKORO_TEST_DATA_ROOT 时复用现有隔离根，release 路径不变。修正后重新构建并完整复跑上述 38 场景。Skip/Overwrite 角色合并的完整原生 UI 路径未单独复跑，其证据来自 Rust 实际 SQL 与重试验证；真实云模型及外部语音/MCP/图像服务仍不在本轮验证范围。
+
+## PR #30 原始失败诊断归属补充修复（2026-11-14，JST）
+
+对 `68d7c652` 的独立复审发现：当导入会话原角色为 remote，而外来 failure_event 已填写合并目标 default 时，跳过 metadata 改写仍不安全；会话改到 default 后，原本不匹配的诊断会自然获得重试资格。多个合并的目标兼作后续来源时也存在同类问题。
+
+本轮先增加回归并在旧生产代码上运行。单次及正向链式合并的 Rust 回归明确失败于 `foreign diagnostic gained retry authority: target-alias`，反向链式回归失败于无效诊断成为可见尾行；前端回归确认未知技术类型会回落成普通回复。随后将处理分为两阶段：先对全部待合并角色按原始会话归属校验，再改写角色。原本无效的 system/failure_event 仅将类型改为 `invalid_failure_event`，保留消息 ID、正文、原 event 与 prompt/boundary 引用，后续映射不能重新认证这些行。Skip 仍按原规则重映射其整数引用。Rust 重试保留既有 `type == failure_event` 校验。
+
+新技术类型从前端历史、后端可见尾行/索引、LLM 历史、记忆候选和两种摘要输入中过滤；尾行与编辑索引复用已有可见性判定。回归通过实际 Skip/Overwrite SQL 复制并调用 RegenerationPlan，覆盖目标角色伪归属、外来角色/会话、空 turn、合法诊断、正反链式映射、无效尾诊断不阻挡前面的合法重试，以及原行和引用保留。另验证实际 prompt 组装和数据库摘要 transcript 不含无效诊断。
+
+本轮实际复跑：
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib merged_failure_` | 3 项通过，每项覆盖 Skip/Overwrite |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib` | 977 项通过，无忽略；保留既有 LNK4098 提示 |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings` | 通过，无 lint 豁免 |
+| `npm test -- --exclude scripts/tauri.test.mjs` | 88 文件、916 项通过 |
+| `npm run build` | TypeScript 与前端构建通过；保留既有大 chunk 提示 |
+| `npm run check:ipc` | 176 个 invoke 命令已注册 |
+
+日志位于忽略目录 `output/playwright/chat-lifecycle/pr30-origin-scope-{red-rust,red-frontend,targeted-rust,rust,frontend,build,clippy}.log`。本轮没有重跑真实 Tauri/WebView2 38 场景，也没有将上一轮原生报告作为本补丁的复跑证据；该归属边界由实际导入 SQL、Rust 重试、前端历史和上下文测试验证。未连接真实云模型或外部语音/MCP/图像服务。
