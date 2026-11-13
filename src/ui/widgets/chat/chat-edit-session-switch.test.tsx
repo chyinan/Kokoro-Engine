@@ -216,6 +216,32 @@ describe("application history command session ownership", () => {
     await running;
     expect(h.io.send).not.toHaveBeenCalled();
   });
+  it("rejects regeneration when a pet turn finishes after the click and before the history read", async () => {
+    const h = harness();
+    h.set({ messages: messages.slice(0, 2) });
+    const before = await h.app.refresh();
+    const read = deferred<ChatViewSnapshot>();
+    vi.mocked(h.io.read).mockReturnValueOnce(read.promise);
+    const running = h.app.continueFrom(answerTarget, true);
+    const after = {
+      ...before, busy: false, revision: 2, conversation_history_revision: 3,
+      messages: [...messages, { id: 104, role: "assistant", content: "pet reply", created_at: "now" }],
+    };
+    h.set(after);
+    read.resolve(after);
+
+    await expect(running).rejects.toThrow("Conversation history changed before retry");
+    expect(h.io.send).not.toHaveBeenCalled();
+    expect(projectMessages(h.app.getSnapshot()).map(message => message.id)).toEqual([101, 102, 103, 104]);
+  });
+  it("rejects a regeneration click on a rendered history older than the application snapshot", async () => {
+    const h = harness();
+    h.set({ messages, conversation_history_revision: 2 });
+    await h.app.refresh();
+
+    await expect(h.app.continueFrom({ ...answerTarget, historyRevision: 1 }, true)).rejects.toThrow("Conversation history changed before retry");
+    expect(h.io.send).not.toHaveBeenCalled();
+  });
   it.each(["chat_turn_busy", "Conversation history changed before retry"])("leaves the saved reply visible when regeneration is rejected with %s", async error => {
     const h = harness(); h.set({ messages }); await h.app.refresh();
     const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);

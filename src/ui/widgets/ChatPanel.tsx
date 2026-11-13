@@ -123,6 +123,7 @@ interface MemoizedChatMessageProps {
     message: ChatMessage;
     conversationId: string | null;
     generation: number;
+    historyRevision: number | null;
     globalIndex: number;
     isStreaming: boolean;
     isTranslationExpanded: boolean;
@@ -143,7 +144,7 @@ function createToolActionHandler<TArgs extends Array<unknown>>(
 }
 
 const MemoizedChatMessage = memo(function MemoizedChatMessage({
-    message, conversationId, generation, globalIndex, isStreaming, isTranslationExpanded,
+    message, conversationId, generation, historyRevision, globalIndex, isStreaming, isTranslationExpanded,
     onToggleTranslation, onEdit, onRegenerate, onContinueFrom, onApproveTool, onRejectTool,
     onPreviewImage,
 }: MemoizedChatMessageProps) {
@@ -151,7 +152,9 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
         ? { conversationId, generation, messageId: message.id }
         : undefined;
     const editableTarget = message.failureScope ? undefined : target;
-    const retryTarget = message.failureScope && !message.canRetryFailure ? undefined : target;
+    const retryTarget = target && (!message.failureScope || message.canRetryFailure)
+        ? { ...target, historyRevision }
+        : undefined;
     const isPresent = useIsPresent();
     const announceFailure = useFailureAnnouncement(isPresent && message.failureScope ? message.clientRequestId : undefined);
     if (message.failureScope && !isPresent) return null;
@@ -210,11 +213,14 @@ export default function ChatPanel({
     const [collapsed, setCollapsed] = useState(false);
     const [showClearConfirm, setShowClearConfirm] = useState(false);
     const [expandedTranslations, setExpandedTranslations] = useState<Set<number>>(new Set());
-    const messageList = useMemo(() => ({ messages, conversationId: activeConversationId, generation: view.generation }), [messages, activeConversationId, view.generation]);
+    const messageList = useMemo(() => ({
+        messages, conversationId: activeConversationId, generation: view.generation, historyRevision: view.conversation_history_revision,
+    }), [messages, activeConversationId, view.generation, view.conversation_history_revision]);
     const deferredList = useDeferredValue(messageList);
     // Defer updates within a conversation, but never show old rows under a new selection.
-    const deferredMessages = deferredList.conversationId === activeConversationId && deferredList.generation === view.generation
-        ? deferredList.messages : messages;
+    const { messages: deferredMessages, historyRevision: displayedHistoryRevision } =
+        deferredList.conversationId === activeConversationId && deferredList.generation === view.generation
+            ? deferredList : messageList;
     const [visibleCount, setVisibleCount] = useState(20);
     const [showScrollBottom, setShowScrollBottom] = useState(false);
     const [hasNewMessagesBelow, setHasNewMessagesBelow] = useState(false);
@@ -429,13 +435,9 @@ export default function ChatPanel({
     }, [sttAutoSend, interactionDisabled, recoveringDraft, setInput, sendDraft, reportError]);
     const { state: voiceState, volume: micVolume, partialText: sttPartialText, start: startVoice, stop: stopVoice } = useVoiceInput(handleTranscription);
 
-    // Refs to avoid stale closures in the voice-interrupt-stt listener
+    // Keep the voice input callback current for the Tauri listener.
     const startVoiceRef = useRef(startVoice);
-    const sttAutoSendRef = useRef(sttAutoSend);
-    const sttEnabledRef = useRef(sttEnabled);
     useEffect(() => { startVoiceRef.current = startVoice; }, [startVoice]);
-    useEffect(() => { sttAutoSendRef.current = sttAutoSend; }, [sttAutoSend]);
-    useEffect(() => { sttEnabledRef.current = sttEnabled; }, [sttEnabled]);
 
     useEffect(() => {
         const syncTextInputFocus = () => {
@@ -459,7 +461,9 @@ export default function ChatPanel({
 
     useEffect(() => {
         const unlisten = listen("voice-interrupt-stt", () => {
-            if (!sttEnabledRef.current) return;
+            if (chatApplication.getSnapshot().busy || submittingRef.current
+                || !readBooleanSetting(APP_SETTING_KEYS.sttEnabled, false)
+                || !readBooleanSetting(APP_SETTING_KEYS.sttAutoSend, false)) return;
             sttBaseDraftRef.current = inputRef.current;
             sttBaseCharacterIdRef.current = activeCharacterIdRef.current;
             sttBaseConversationIdRef.current = activeConversationIdRef.current;
@@ -1286,6 +1290,7 @@ export default function ChatPanel({
                                 message={msg}
                                 conversationId={activeConversationId}
                                 generation={view.generation}
+                                historyRevision={displayedHistoryRevision}
                                 globalIndex={globalIndex}
                                 isStreaming={isBusy}
                                 isTranslationExpanded={expandedTranslations.has(globalIndex)}

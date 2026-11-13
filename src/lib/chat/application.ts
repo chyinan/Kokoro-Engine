@@ -15,6 +15,7 @@ export interface ChatMessageTarget {
   conversationId: string;
   generation: number;
   messageId: number;
+  historyRevision?: number | null;
 }
 const transport: ChatTransport = {
   read: known => known ? bridge.getChatView(known) : bridge.getChatView(),
@@ -25,6 +26,7 @@ export const emptyChatView: ChatViewSnapshot = {
   revision: 0, history_revision: 0, character_id: "default", conversation_id: null,
   conversation_history_revision: null, generation: 0, busy: false, messages: [], turns: [],
 };
+const changedHistory = () => new Error("Conversation history changed before retry");
 
 export class ChatApplication {
   private view = emptyChatView;
@@ -221,6 +223,8 @@ export class ChatApplication {
     if (!matchesSelection(this.view)) return;
 
     const cached = this.view;
+    if (regenerate && target.historyRevision !== undefined
+      && target.historyRevision !== cached.conversation_history_revision) throw changedHistory();
     const saved = projectSavedMessages(cached);
     const diagnosticIndex = saved.findIndex(message => message.id === target.messageId && message.failureScope);
     if (diagnosticIndex >= 0) {
@@ -240,16 +244,17 @@ export class ChatApplication {
 
     if (regenerate) {
       if (this.mutation) throw new Error("history_mutation_busy");
-      // A terminal event can arrive before its history is visible.
+      // Check for newer writes without adopting them into the requested truncation.
       this.readInFlight = undefined;
       const view = await this.refresh();
       if (!matchesSelection(view)) return;
-      const saved = projectSavedMessages(view);
+      const revision = cached.conversation_history_revision;
+      if (revision !== view.conversation_history_revision) throw changedHistory();
       const index = saved.findIndex(message => message.id === target.messageId);
       const selected = saved[index];
-      const revision = view.conversation_history_revision;
       const tail = getExpectedTailMessageId(saved);
-      if (selected?.role !== "kokoro" || selected.failureScope || tail === null || revision === null) return;
+      if (!selected) throw changedHistory();
+      if (selected.role !== "kokoro" || selected.failureScope || tail === null || revision === null) return;
       const prompt = saved.slice(0, index).reverse().find(message => message.role === "user");
       if (!prompt) return;
       return this.send({

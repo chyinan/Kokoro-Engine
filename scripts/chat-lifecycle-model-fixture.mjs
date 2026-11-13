@@ -38,12 +38,16 @@ const server = http.createServer(async (request, response) => {
   if (name === "legacy-mod-connect-failure" && body.stream === true) { request.socket.destroy(); return; }
   const composerRetry = name === "composer-retry-once" && call.streaming;
   const composerRound = composerRetry ? calls.filter(previous => previous.name === name && previous.streaming).length : 0;
+  const regenerationRound = name === "retry-regeneration-boundary" && call.streaming
+    ? calls.filter(previous => previous.name === name && previous.streaming).length : 0;
   if (name === "detached-composer-failure" && call.streaming) {
     await new Promise(resolve => { releaseDetachedFailure = resolve; });
   }
-  if (composerRound === 2 || name === "detached-composer-failure" || name === "hidden-chat-failure") {
+  if (composerRound === 2 || regenerationRound === 2 || regenerationRound === 3
+    || name === "detached-composer-failure" || name === "hidden-chat-failure") {
     response.writeHead(400, { "content-type": "application/json" });
-    const reason = composerRound === 2 ? "controlled composer failure" : `controlled ${name}`;
+    const reason = composerRound === 2 ? "controlled composer failure"
+      : regenerationRound ? `controlled regeneration failure ${regenerationRound}` : `controlled ${name}`;
     response.end(JSON.stringify({ error: { message: reason, type: "invalid_request_error" } }));
     return;
   }

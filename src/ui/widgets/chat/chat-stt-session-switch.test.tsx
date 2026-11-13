@@ -9,6 +9,7 @@ import { chatViewFixture as chat } from "../../../lib/chat/view-test-fixture";
 import { recoverChatDraftSubmission, type ChatDraftSubmissionStatus } from "../../../lib/kokoro-bridge";
 import { deferred, turn } from "../../../lib/chat/__tests__/harness";
 import { setLatestCameraFrame } from "../../../lib/camera-frame-cache";
+import { listen } from "@tauri-apps/api/event";
 vi.mock("../../../lib/chat/application", async () => ({ chatApplication: (await import("../../../lib/chat/view-test-fixture")).chatViewFixture }));
 vi.mock("../../../lib/kokoro-bridge", async original => ({
     ...(await original<typeof import("../../../lib/kokoro-bridge")>()),
@@ -45,6 +46,7 @@ vi.mock("react-i18next", () => ({
 let capturedOnFinalTranscription: ((text: string) => void) | null = null;
 let capturedOnWakeWordDetected: ((text?: string) => void) | null = null;
 let voiceInputState = "idle";
+const startVoice = vi.fn();
 
 // Mock hooks
 vi.mock("../../hooks", () => ({
@@ -55,7 +57,7 @@ vi.mock("../../hooks", () => ({
             state: voiceInputState,
             volume: 0,
             partialText: "",
-            start: vi.fn(),
+            start: startVoice,
             stop: vi.fn(),
         };
     },
@@ -101,6 +103,29 @@ describe("ChatPanel draft preservation", () => {
         expect(mic).not.toBeNull(); act(() => mic!.click());
     }
     async function finish(text: string) { await act(async () => capturedOnFinalTranscription?.(text)); }
+    it("starts voice interrupt recognition only when idle with STT and auto-send enabled", async () => {
+        const listener = vi.mocked(listen).mock.calls.find(([name]) => name === "voice-interrupt-stt")?.[1];
+        expect(listener).toBeDefined();
+        const interrupt = () => act(() => listener!({ event: "voice-interrupt-stt", id: 1, payload: undefined }));
+
+        localStorage.setItem("kokoro_stt_auto_send", "false");
+        interrupt();
+        expect(startVoice).not.toHaveBeenCalled();
+
+        localStorage.setItem("kokoro_stt_auto_send", "true");
+        localStorage.setItem("kokoro_stt_enabled", "false");
+        interrupt();
+        expect(startVoice).not.toHaveBeenCalled();
+
+        localStorage.setItem("kokoro_stt_enabled", "true");
+        await act(async () => chat.set({ busy: true }));
+        interrupt();
+        expect(startVoice).not.toHaveBeenCalled();
+
+        await act(async () => chat.set({ busy: false }));
+        interrupt();
+        expect(startVoice).toHaveBeenCalledExactlyOnceWith({ autoStopOnSilence: true });
+    });
     const draftText = "  draft with an image  ";
     const draftImage = "data:image/png;base64,iVBORw0KGgo=";
     async function loadImageDraft() {

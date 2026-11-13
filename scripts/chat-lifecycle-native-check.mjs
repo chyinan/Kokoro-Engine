@@ -39,8 +39,12 @@ async function submit(page, request, key) {
 }
 const outcome = (page, key) => waitFor(() => page.evaluate(key => window[key]?.pending ? null : window[key], key));
 async function petSend(name) {
-  await pet.evaluate(async () => { const event = await import("/node_modules/@tauri-apps/api/event.js"); await event.emitTo("pet", "toggle-chat-input"); });
-  const input = pet.getByPlaceholder("说点什么..."); await input.waitFor({ state: "visible" });
+  const input = pet.getByPlaceholder("说点什么...");
+  await waitFor(async () => {
+    if (await input.isVisible()) return true;
+    await pet.evaluate(async () => { const event = await import("/node_modules/@tauri-apps/api/event.js"); await event.emitTo("pet", "toggle-chat-input"); });
+    return false;
+  });
   await input.fill(`[case:${name}]`); await input.press("Enter");
   return waitFor(async () => { const state = await view(pet); return state.turns.find(turn => turn.message === `[case:${name}]` && ["completed", "cancelled", "error", "rejected"].includes(turn.status)); });
 }
@@ -568,6 +572,83 @@ try {
     await pet.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.clear());
     const cleared = await view(pet); assert.equal(cleared.conversation_id, null); assert.deepEqual(cleared.messages, []);
     return { target, answerId, regenerated, revisedMessageIds: revised.messages.map(message => message.id), clearedGeneration: cleared.generation };
+  });
+  await check("regeneration rejects a pet turn completed between the click and the history read", async () => {
+    const original = await petSend("regenerate-before-pet");
+    assert.equal(original.status, "completed");
+    const answer = main.getByText("Controlled reply for [case:regenerate-before-pet] completed.", { exact: true });
+    const regenerate = answer.locator("..").getByRole("button", { name: /^(重新生成|Regenerate)$/ });
+    await regenerate.waitFor();
+    await main.evaluate(async () => {
+      const { chatApplication } = await import("/src/lib/chat/application.ts");
+      const { getKokoroErrorMessage } = await import("/src/lib/kokoro-bridge.ts");
+      const continueFrom = chatApplication.continueFrom;
+      chatApplication.continueFrom = async function (target, ...options) {
+        this.continueFrom = continueFrom;
+        const refresh = this.refresh;
+        this.refresh = async function () {
+          this.refresh = refresh;
+          await new Promise(resolve => { window.__releaseHistoryRead = resolve; });
+          return refresh.call(this);
+        };
+        try {
+          return await continueFrom.call(this, target, ...options);
+        } catch (error) {
+          window.__staleRegenerationError = getKokoroErrorMessage(error);
+          throw error;
+        }
+      };
+    });
+    await regenerate.click();
+    await waitFor(() => main.evaluate(() => typeof window.__releaseHistoryRead === "function"));
+    const newer = await petSend("regenerate-pet-won");
+    assert.equal(newer.status, "completed");
+    const saved = await view(main);
+    assert(saved.messages.some(row => row.id === newer.assistant_message_id));
+    await main.evaluate(() => window.__releaseHistoryRead());
+    assert.match(await waitFor(() => main.evaluate(() => window.__staleRegenerationError)), /Conversation history changed before retry/);
+    assert.deepEqual((await view(main)).messages, saved.messages);
+    await main.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.clear());
+    return { original, newer };
+  });
+  await check("a failed regeneration keeps the original cutoff through repeated retries", async () => {
+    const original = await petSend("retry-regeneration-boundary");
+    assert.equal(original.status, "completed");
+    await submit(pet, {
+      message: "[case:regenerate-hidden-reply]", client_request_id: "native_regenerate_hidden_reply", hidden: true,
+    }, "__regenerateHiddenReply");
+    const { result: hidden } = await outcome(pet, "__regenerateHiddenReply");
+    assert.equal(hidden?.status, "completed");
+    const answer = main.getByText("Controlled reply for [case:regenerate-hidden-reply] completed.", { exact: true });
+    await answer.locator("..").getByRole("button", { name: /^(重新生成|Regenerate)$/ }).click();
+    const removedIds = [hidden.assistant_message_id];
+    for (const round of [2, 3]) {
+      const reason = `controlled regeneration failure ${round}`;
+      const { diagnostic, history } = await waitFor(async () => {
+        const state = await view(main);
+        const diagnostic = state.messages.find(row => row.role === "system" && row.content.includes(reason));
+        return !state.busy && diagnostic && { diagnostic, history: state.messages };
+      });
+      const metadata = JSON.parse(diagnostic.metadata);
+      assert.equal(metadata.user_message_id, original.user_message_id);
+      assert.equal(metadata.keep_through_message_id, original.assistant_message_id);
+      assert(history.some(row => row.id === original.assistant_message_id));
+      assert(!history.some(row => removedIds.includes(row.id)));
+      removedIds.push(diagnostic.id);
+      await main.getByText(diagnostic.content, { exact: true }).locator("..").getByRole("button").click();
+    }
+    const final = await waitFor(async () => {
+      const state = await view(main);
+      const turn = state.turns.find(turn => turn.reusing_saved_prompt && turn.user_message_id === original.user_message_id
+        && turn.status === "completed");
+      return !state.busy && turn && state;
+    });
+    assert.deepEqual(final.messages.filter(row => row.role === "user").map(row => row.id), [original.user_message_id]);
+    assert.equal(final.messages.filter(row => row.role === "assistant").length, 2);
+    assert(final.messages.some(row => row.id === original.assistant_message_id));
+    assert(!final.messages.some(row => removedIds.includes(row.id)));
+    await main.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.clear());
+    return { original, hidden, finalMessageIds: final.messages.map(row => row.id) };
   });
   await check("hidden main window does not block pet generation", async () => {
     await main.evaluate(async () => (await import("/node_modules/@tauri-apps/api/window.js")).getCurrentWindow().hide());

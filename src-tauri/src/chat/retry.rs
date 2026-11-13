@@ -29,7 +29,7 @@ pub(crate) enum Regeneration<'a> {
 
 pub(crate) struct RegenerationPlan {
     pub user_message_id: i64,
-    keep_through_message_id: i64,
+    pub keep_through_message_id: i64,
     history: VecDeque<Message>,
     revision: i64,
 }
@@ -95,9 +95,7 @@ impl RegenerationPlan {
 
             let (user, keep) = match regeneration {
                 Regeneration::Failure(retry) => {
-                    let prompt =
-                        Self::failure_prompt(&rows, runtime, retry, character_id, conversation_id)?;
-                    (prompt, prompt)
+                    Self::failure_boundary(&rows, runtime, retry, character_id, conversation_id)?
                 }
                 Regeneration::Reply(reply) => {
                     if !visible
@@ -142,13 +140,13 @@ impl RegenerationPlan {
         })
     }
 
-    fn failure_prompt(
+    fn failure_boundary(
         rows: &[HistoryRow],
         runtime: &ChatRuntimeState,
         retry: &FailureRetry,
         character_id: &str,
         conversation_id: &str,
-    ) -> Result<i64, KokoroError> {
+    ) -> Result<(i64, i64), KokoroError> {
         let metadata = rows
             .iter()
             .find(|(id, role, _, _)| *id == retry.diagnostic_message_id && role == "system")
@@ -167,12 +165,24 @@ impl RegenerationPlan {
         {
             return Err(changed_history());
         }
-        match metadata.get("user_message_id") {
+        let prompt = match metadata.get("user_message_id") {
             Some(id) => id.as_i64(),
             None => runtime.failed_turn_prompt(character_id, conversation_id, turn_id),
         }
         .filter(|id| *id < retry.diagnostic_message_id)
-        .ok_or_else(changed_history)
+        .ok_or_else(changed_history)?;
+        let Some(boundary) = metadata.get("keep_through_message_id") else {
+            return Ok((prompt, prompt));
+        };
+        let keep = boundary.as_i64().ok_or_else(changed_history)?;
+        if keep < prompt || keep >= retry.diagnostic_message_id
+            || !rows.iter().any(|(id, role, _, metadata)| {
+                *id == keep && is_visible_message_raw(role, metadata.as_deref())
+            })
+        {
+            return Err(changed_history());
+        }
+        Ok((prompt, keep))
     }
 
     pub(crate) fn prompt_history(&self, message: &str) -> Vec<Message> {

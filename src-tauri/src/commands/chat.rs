@@ -104,18 +104,22 @@ async fn persist_failure_event_to_conversation(
     state: &AIOrchestrator,
     failure_event: &crate::error::FailureEvent,
     user_message_id: Option<i64>,
+    keep_through_message_id: Option<i64>,
 ) -> Result<(), KokoroError> {
     let Some(conversation_id) = failure_event.conversation_id.as_deref() else {
         return Ok(());
     };
 
     let now = chrono::Utc::now().to_rfc3339();
-    let metadata = serde_json::json!({
+    let mut metadata = serde_json::json!({
         "type": "failure_event",
         "event": failure_event,
         "user_message_id": user_message_id,
-    })
-    .to_string();
+    });
+    if let Some(id) = keep_through_message_id {
+        metadata["keep_through_message_id"] = id.into();
+    }
+    let metadata = metadata.to_string();
 
     sqlx::query(
         "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)"
@@ -144,11 +148,12 @@ async fn emit_and_persist_failure_event(
     state: &AIOrchestrator,
     failure_event: crate::error::FailureEvent,
     user_message_id: Option<i64>,
+    keep_through_message_id: Option<i64>,
 ) -> Result<(), KokoroError> {
     crate::chat::runtime::emit_chat_event(app, "chat-failure", failure_event.clone()).await
         .map_err(|error| KokoroError::Chat(error.to_string()))?;
 
-    persist_failure_event_to_conversation(state, &failure_event, user_message_id).await?;
+    persist_failure_event_to_conversation(state, &failure_event, user_message_id, keep_through_message_id).await?;
 
     if let Err(error) = append_failure_event_jsonl(&failure_event).await {
         tracing::error!(
@@ -2900,6 +2905,9 @@ async fn execute_chat(
         return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
     }
 
+    let keep_through_message_id = regeneration.as_ref()
+        .filter(|plan| plan.keep_through_message_id != plan.user_message_id)
+        .map(|plan| plan.keep_through_message_id);
     if let Some(regeneration) = regeneration {
         let conversation = conversation_id.as_deref().ok_or_else(|| KokoroError::Validation("Missing regeneration conversation".into()))?;
         regeneration.commit(&state, conversation, bound_generation, cancel_rx.as_ref()).await?;
@@ -3066,7 +3074,7 @@ async fn execute_chat(
                     Some(char_id.clone()),
                     None,
                 );
-                emit_and_persist_failure_event(&app, &state, failure_event, user_message_id).await?;
+                emit_and_persist_failure_event(&app, &state, failure_event, user_message_id, keep_through_message_id).await?;
                 stream_failure_message = Some(err_msg);
                 stream_failed = true;
                 break;
@@ -3088,7 +3096,7 @@ async fn execute_chat(
                             Some(char_id.clone()),
                             None,
                         );
-                        emit_and_persist_failure_event(&app, &state, failure_event, user_message_id).await?;
+                        emit_and_persist_failure_event(&app, &state, failure_event, user_message_id, keep_through_message_id).await?;
                         stream_failure_message = Some(err_msg);
                         stream_failed = true;
                         break;
@@ -3160,7 +3168,7 @@ async fn execute_chat(
                         Some(char_id.clone()),
                         None,
                     );
-                    emit_and_persist_failure_event(&app, &state, failure_event, user_message_id).await?;
+                    emit_and_persist_failure_event(&app, &state, failure_event, user_message_id, keep_through_message_id).await?;
                     break;
                 }
                 StreamPollResult::StreamEnded => {
@@ -3184,7 +3192,7 @@ async fn execute_chat(
                             Some(char_id.clone()),
                             None,
                         );
-                        emit_and_persist_failure_event(&app, &state, failure_event, user_message_id).await?;
+                        emit_and_persist_failure_event(&app, &state, failure_event, user_message_id, keep_through_message_id).await?;
                     } else {
                         tracing::error!(
                             target: "chat",

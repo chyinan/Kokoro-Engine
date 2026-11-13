@@ -2424,6 +2424,13 @@ async fn insert_skip_conversation_messages(
                             WHERE prompt.id = json_extract(message.metadata, '$.user_message_id') \
                               AND prompt.conversation_id = message.conversation_id \
                               AND prompt.role = 'user' AND prompt.id < message.id \
+                        ), CASE WHEN json_type(message.metadata, '$.keep_through_message_id') = 'integer' \
+                                THEN '$.keep_through_message_id' END, ( \
+                            SELECT boundary.id + ids.offset FROM import_db.conversation_messages boundary \
+                            WHERE boundary.id = json_extract(message.metadata, '$.keep_through_message_id') \
+                              AND boundary.conversation_id = message.conversation_id \
+                              AND boundary.id >= json_extract(message.metadata, '$.user_message_id') \
+                              AND boundary.id < message.id \
                         )) \
                     ELSE message.metadata END \
                 ELSE message.metadata END, message.created_at \
@@ -5195,11 +5202,19 @@ mod tests {
                 .await
                 .unwrap();
         }
-        for (id, prompt) in [(4_i64, 3_i64), (5, 2)] {
+        sqlx::query("INSERT INTO import_db.conversation_messages VALUES (4, 'new-conversation', 'assistant', 'kept reply', NULL, '1')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        for (id, prompt, boundary) in [(5_i64, 3_i64, Some(4)), (6, 3, Some(91)), (7, 3, None), (8, 2, None)] {
+            let mut metadata = serde_json::json!({ "type": "failure_event", "user_message_id": prompt,
+                "event": { "conversation_id": "new-conversation", "character_id": "bob", "turn_id": "turn" } });
+            if let Some(boundary) = boundary {
+                metadata["keep_through_message_id"] = boundary.into();
+            }
             sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, 'new-conversation', 'system', 'model failed', ?, '1')")
                 .bind(id)
-                .bind(serde_json::json!({ "type": "failure_event", "user_message_id": prompt,
-                    "event": { "conversation_id": "new-conversation", "character_id": "bob", "turn_id": "turn" } }).to_string())
+                .bind(metadata.to_string())
                 .execute(&mut *connection)
                 .await
                 .unwrap();
@@ -5221,7 +5236,7 @@ mod tests {
         transaction.commit().await.unwrap();
 
         assert_eq!(
-            inserted, 4,
+            inserted, 7,
             "only the new conversation contributes messages"
         );
         let local: Vec<String> = sqlx::query_scalar(
@@ -5232,17 +5247,26 @@ mod tests {
         .unwrap();
         assert_eq!(local, vec!["local one", "local two"]);
 
-        let moved: Vec<(i64, String, Option<i64>)> = sqlx::query_as(
-            "SELECT id, content, json_extract(metadata, '$.user_message_id') FROM conversation_messages WHERE conversation_id = 'new-conversation' ORDER BY id",
+        let moved: Vec<(i64, String, Option<i64>, Option<String>, Option<i64>)> = sqlx::query_as(
+            "SELECT id, content, json_extract(metadata, '$.user_message_id'), \
+                    json_type(metadata, '$.keep_through_message_id'), json_extract(metadata, '$.keep_through_message_id') \
+             FROM conversation_messages WHERE conversation_id = 'new-conversation' ORDER BY id",
         )
         .fetch_all(&mut *connection)
         .await
         .unwrap();
         assert_eq!(
             moved,
-            vec![(3_i64, "earlier prompt".into(), None), (5, "failed prompt".into(), None),
-                 (6, "model failed".into(), Some(5)), (7, "model failed".into(), None)],
-            "the diagnostic must follow its remapped prompt and cannot use a prompt from another conversation"
+            vec![
+                (3, "earlier prompt".into(), None, None, None),
+                (5, "failed prompt".into(), None, None, None),
+                (6, "kept reply".into(), None, None, None),
+                (7, "model failed".into(), Some(5), Some("integer".into()), Some(6)),
+                (8, "model failed".into(), Some(5), Some("null".into()), None),
+                (9, "model failed".into(), Some(5), None, None),
+                (10, "model failed".into(), None, None, None),
+            ],
+            "import must remap same-conversation IDs, invalidate foreign IDs, and preserve legacy diagnostics"
         );
     }
 
