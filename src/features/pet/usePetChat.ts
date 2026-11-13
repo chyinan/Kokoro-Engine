@@ -18,12 +18,14 @@ export function usePetChat(): PetChatState {
     const sending = useRef(false);
     const [requestId, setRequestId] = useState<string>();
     const lastPresentedRevision = useRef(0);
+    const presentedRequest = useRef<string>(undefined);
     const turn = requestId
         ? view.turns.find(item => item.client_request_id === requestId)
         : view.turns.reduce<ChatTurnSnapshot | undefined>((latest, item) =>
             item.client_request_id.startsWith("pet_") && (!latest || replyRevision(item) > replyRevision(latest)) ? item : latest,
         undefined);
     const revision = turn ? replyRevision(turn) : 0;
+    const replyRequestId = turn?.client_request_id;
     const text = turn?.text;
     const error = turn?.error;
     const active = turn ? isActiveTurn(turn) : false;
@@ -31,7 +33,13 @@ export function usePetChat(): PetChatState {
         if (revision <= lastPresentedRevision.current) return;
         lastPresentedRevision.current = revision;
         if (text) {
-            void invoke("update_bubble_text", { text }).catch(() => invoke("show_bubble_window", { text })).catch(() => {});
+            // A recreated pet may find its old bubble window hidden.
+            if (!requestId && presentedRequest.current !== replyRequestId) {
+                void invoke("show_bubble_window", { text }).catch(() => {});
+            } else {
+                void invoke("update_bubble_text", { text }).catch(() => invoke("show_bubble_window", { text })).catch(() => {});
+            }
+            presentedRequest.current = replyRequestId;
         } else if (error) {
             void invoke("show_bubble_window", { text: error }).catch(() => {});
         }
@@ -39,7 +47,7 @@ export function usePetChat(): PetChatState {
             const timer = setTimeout(() => { void invoke("hide_bubble_window").catch(() => {}); }, 5000);
             return () => clearTimeout(timer);
         }
-    }, [revision, text, error, active]);
+    }, [revision, replyRequestId, requestId, text, error, active]);
     const sendMessage = async (text: string) => {
         const message = text.trim();
         if (!message || sending.current) return;

@@ -34,10 +34,19 @@ describe("pet chat display adapter", () => {
   let first!: Promise<void>; await act(async () => { first = state.sendMessage("one"); void state.sendMessage("one"); });
   expect(chat.send).toHaveBeenCalledOnce(); done({ status: "completed" }); await first;
  });
- it("renders complete text for a late joining view", async () => {
+ it("shows the recovered reply on remount and updates the same bubble on later snapshots", async () => {
   await act(async () => chat.set({ turns: [snapshot()], busy: true }));
-  expect(invoke).toHaveBeenCalledWith("update_bubble_text", { text: "complete recovered text" });
+  act(() => root.unmount());
+  vi.mocked(invoke).mockClear();
+  root = createRoot(container);
+  await act(async () => root.render(createElement(Harness)));
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" });
   expect(state.isStreaming).toBe(true);
+  await act(async () => chat.set({ turns: [{ ...snapshot("completed", 3), text: "final recovered text" }], busy: false }));
+  expect(vi.mocked(invoke).mock.calls).toEqual([
+   ["show_bubble_window", { text: "complete recovered text" }],
+   ["update_bubble_text", { text: "final recovered text" }],
+  ]);
  });
  it("keeps the submitted reply selected when the first history read appends older pet turns", async () => {
   const response = deferred<StreamChatResponse>();
@@ -62,7 +71,7 @@ describe("pet chat display adapter", () => {
  it("does not concatenate replayed full snapshots", async () => {
   await act(async () => chat.set({ turns: [snapshot()] }));
   await act(async () => chat.set({ turns: [snapshot()] }));
-  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "update_bubble_text")).toHaveLength(1);
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" });
  });
  it("a late speech failure does not replay the reply or restart its hide timer", async () => {
   vi.useFakeTimers();
@@ -70,13 +79,13 @@ describe("pet chat display adapter", () => {
   await act(async () => chat.set({ turns: [completed] }));
   await act(async () => vi.advanceTimersByTimeAsync(4000));
   await act(async () => chat.set({ turns: [{ ...completed, revision: 3, speech_error: "Speech failed" }] }));
-  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "update_bubble_text")).toHaveLength(1);
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" });
   await act(async () => vi.advanceTimersByTimeAsync(1000));
   expect(invoke).toHaveBeenCalledWith("hide_bubble_window");
  });
  it("does not present another entry's reply as a pet request", async () => {
   await act(async () => chat.set({ turns: [{ ...snapshot(), client_request_id: "interaction_a" }] }));
-  expect(invoke).not.toHaveBeenCalledWith("update_bubble_text", expect.anything());
+  expect(invoke).not.toHaveBeenCalled();
  });
  it.each(["completed", "cancelled", "error"] as const)("settles %s from recovered state without waiting for finish", async status => {
   vi.useFakeTimers(); await act(async () => chat.set({ turns: [snapshot(status)], busy: false }));

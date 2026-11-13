@@ -9,7 +9,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const output = path.resolve(process.argv[2] ?? "output/playwright/chat-lifecycle");
 const browser = await chromium.connectOverCDP("http://127.0.0.1:19333");
 const context = browser.contexts()[0];
-const pet = await waitFor(() => context.pages().find(page => page.url().includes("pet.html")));
+let pet = await waitFor(() => context.pages().find(page => page.url().includes("pet.html")));
 const report = { startedAt: new Date().toISOString(), model: "controlled localhost SSE fixture", checks: [] };
 const save = () => fs.writeFileSync(path.join(output, "native-report.json"), JSON.stringify(report, null, 2));
 const view = page => page.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_chat_view"));
@@ -38,7 +38,7 @@ async function submit(page, request, key) {
   }, { request, key });
 }
 const outcome = (page, key) => waitFor(() => page.evaluate(key => window[key]?.pending ? null : window[key], key));
-async function petSend(name) {
+async function startPetChat(name) {
   const input = pet.getByPlaceholder("说点什么...");
   await waitFor(async () => {
     if (await input.isVisible()) return true;
@@ -46,6 +46,9 @@ async function petSend(name) {
     return false;
   });
   await input.fill(`[case:${name}]`); await input.press("Enter");
+}
+async function petSend(name) {
+  await startPetChat(name);
   return waitFor(async () => { const state = await view(pet); return state.turns.find(turn => turn.message === `[case:${name}]` && ["completed", "cancelled", "error", "rejected"].includes(turn.status)); });
 }
 try {
@@ -79,6 +82,38 @@ try {
   });
   const main = await waitFor(() => context.pages().find(page => !page.url().includes("pet.html") && !page.url().includes("bubble.html") && page.url().includes("1420")));
   await main.locator("textarea[data-onboarding-id='chat-input']").waitFor({ state: "visible", timeout: 20000 });
+  await check("reopening the pet restores the visible bubble for an active reply", async () => {
+    const message = "[case:pet-restore]";
+    const partial = `Controlled reply for ${message}`;
+    await startPetChat("pet-restore");
+    const bubble = await waitFor(() => context.pages().find(page => page.url().includes("bubble.html")));
+    const isBubbleVisible = () => bubble.evaluate(async () =>
+      (await import("/node_modules/@tauri-apps/api/window.js")).getCurrentWindow().isVisible());
+    try {
+      await bubble.getByText(partial, { exact: true }).waitFor();
+      assert(await isBubbleVisible());
+      const active = await waitFor(async () => (await view(main)).turns.find(turn =>
+        turn.message === message && turn.status === "streaming" && turn.text === partial));
+      const oldPet = pet;
+      await oldPet.evaluate(async () =>
+        (await import("/node_modules/@tauri-apps/api/window.js")).getCurrentWindow().destroy()).catch(() => {});
+      await waitFor(async () => !(await windows(main)).includes("pet"));
+      await waitFor(async () => !(await isBubbleVisible()));
+      await main.evaluate(() => window.__TAURI_INTERNALS__.invoke("show_pet_window"));
+      pet = await waitFor(() => context.pages().find(page => page !== oldPet && page.url().includes("pet.html")));
+      await waitFor(isBubbleVisible);
+      await bubble.getByText(partial, { exact: true }).waitFor({ state: "visible" });
+      assert((await view(pet)).turns.some(turn => turn.client_request_id === active.client_request_id && turn.status === "streaming"));
+    } finally {
+      assert.equal((await fetch("http://127.0.0.1:19334/release-pet-restore", { method: "POST" })).status, 204);
+    }
+    const final = `${partial} completed.`;
+    await bubble.getByText(final, { exact: true }).waitFor({ state: "visible" });
+    assert(await isBubbleVisible());
+    const saved = await waitFor(async () => (await view(main)).messages.find(row =>
+      row.role === "assistant" && row.content === final));
+    return { reply: saved.content, assistantMessageId: saved.id };
+  });
   for (const page of [main, pet]) await page.evaluate(async () => {
     window.__nativeTts = [];
     const { listen } = await import("/node_modules/@tauri-apps/api/event.js");
@@ -887,7 +922,7 @@ try {
     assert(report.ttsPet.some(item => item.event === "tts:start")); return starts;
   });
   await check("controlled model call counters prove no replay or parallel model generation", async () => {
-    for (const name of ["pet-only", "remount-slow", "concurrent-slow", "duplicate-slow", "main-hidden", "sender-destroyed-slow", "main-destroyed"]) assert.equal(calls.filter(call => call.streaming && call.name === name).length, 1, name);
+    for (const name of ["pet-only", "pet-restore", "remount-slow", "concurrent-slow", "duplicate-slow", "main-hidden", "sender-destroyed-slow", "main-destroyed"]) assert.equal(calls.filter(call => call.streaming && call.name === name).length, 1, name);
     assert.equal(calls.filter(call => call.streaming && call.name === "before-cancel").length, 0);
     assert.equal(calls.filter(call => call.streaming && call.name === "tool").length, 2); // tool round + one follow-up
     assert.equal(calls.filter(call => call.streaming && call.name === "text-tool").length, 2);

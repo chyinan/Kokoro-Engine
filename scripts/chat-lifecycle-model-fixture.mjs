@@ -7,6 +7,7 @@ fs.mkdirSync(directory, { recursive: true });
 const calls = [];
 let releaseDetachedFailure;
 let releaseRegeneration;
+let releasePetRestore;
 const server = http.createServer(async (request, response) => {
   if (request.url === "/counts") { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(calls)); return; }
   if (request.url === "/release-detached-failure" && releaseDetachedFailure) {
@@ -17,6 +18,11 @@ const server = http.createServer(async (request, response) => {
   if (request.url === "/release-regeneration" && releaseRegeneration) {
     releaseRegeneration();
     releaseRegeneration = undefined;
+    response.writeHead(204); response.end(); return;
+  }
+  if (request.url === "/release-pet-restore" && releasePetRestore) {
+    releasePetRestore();
+    releasePetRestore = undefined;
     response.writeHead(204); response.end(); return;
   }
   let raw = ""; for await (const chunk of request) raw += chunk;
@@ -88,6 +94,13 @@ const server = http.createServer(async (request, response) => {
     const tool = call.tools.find(name => name.endsWith("get_time"));
     if (tool) chunk({ tool_calls: [{ index: 0, id: "fixture-tool-call", type: "function", function: { name: tool, arguments: "{}" } }] });
     else chunk({ content: "No get_time tool configured" });
+  } else if (name === "pet-restore") {
+    await new Promise(resolve => {
+      releasePetRestore = resolve;
+      response.once("close", resolve);
+      chunk({ content: `Controlled reply for [case:${name}]` });
+    });
+    if (!closed) chunk({ content: " completed." });
   } else if (!["text-tool-only", "native-tool-only"].includes(name)) {
     const chunks = [`Controlled `, `reply `, `for `, `[case:${name}]`, ` completed.`];
     for (const text of chunks) {
