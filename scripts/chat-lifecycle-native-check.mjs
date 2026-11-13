@@ -834,20 +834,34 @@ try {
       await submit(pet, { message: `[case:${name}]`, client_request_id: requestId }, "__speechFailure");
       const result = await outcome(pet, "__speechFailure");
       assert.equal(result.result?.status, "completed");
-      const failedTurn = await waitFor(async () => (await view(pet)).turns.find(turn =>
-        turn.client_request_id === requestId && turn.speech_error?.includes(reason)));
+      const assistantId = result.result.assistant_message_id;
+      assert(Number.isSafeInteger(assistantId), "completed chat must return a saved assistant ID");
+      const expectedText = `Controlled reply for [case:${name}] completed.`;
+      const savedView = await waitFor(async () => {
+        const snapshot = await view(pet);
+        const failedTurn = snapshot.turns.find(turn =>
+          turn.client_request_id === requestId && turn.speech_error?.includes(reason));
+        return failedTurn && { snapshot, failedTurn };
+      });
+      const { snapshot, failedTurn } = savedView;
       assert.equal(failedTurn.status, "completed");
+      assert.equal(failedTurn.assistant_message_id, assistantId);
+      assert.equal(snapshot.conversation_id, result.result.conversation_id);
+      const savedReply = snapshot.messages.find(message => message.id === assistantId);
+      assert.equal(savedReply?.role, "assistant");
+      assert.equal(savedReply.content, expectedText);
       if (remount) {
         assert.equal(await input.count(), 0);
         await setPanelMounted(main, true);
       }
       await input.waitFor({ state: "visible" });
-      const alert = main.getByRole("alert").filter({ hasText: reason });
+      const reply = main.locator(`[data-chat-message-id="${assistantId}"]`);
+      await reply.getByText(expectedText, { exact: true }).waitFor({ state: "visible" });
+      const alert = reply.getByRole("alert").filter({ hasText: reason });
       await alert.waitFor({ state: "visible", timeout: 10000 });
-      assert.equal(await alert.count(), 1);
+      assert.equal(await main.getByRole("alert").filter({ hasText: reason }).count(), 1);
       const warning = await alert.textContent();
-      await main.getByText(`Controlled reply for [case:${name}] completed.`, { exact: false }).first().waitFor();
-      return { result, warning };
+      return { result, savedReply, warning };
     } finally {
       if (!remount) await main.evaluate(() => window.__restoreAudioStart?.());
       await main.evaluate(async config => (await import("/src/lib/kokoro-bridge.ts")).saveTtsConfig(config), originalConfig);

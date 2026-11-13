@@ -256,13 +256,14 @@ export class TtsService {
         const unlistenEnd = await listen<TtsEndEvent>("tts:end", async (event) => {
             if (this.generation !== gen) return;
             if (!this.isCurrentRequest(event.payload.request_id)) return;
-            const playbackGeneration = this.playbackGeneration;
-            await this.audioEventQueue;
-            if (playbackGeneration !== this.playbackGeneration || !this.isCurrentRequest(event.payload.request_id)) return;
             if (event.payload.status === "cancelled") {
+                // Invalidate pending audio before it can report an error for this cancelled request.
                 await this.stopPlayback(event.payload.request_id ?? this.activeRequestId);
                 return;
             }
+            const playbackGeneration = this.playbackGeneration;
+            await this.audioEventQueue;
+            if (playbackGeneration !== this.playbackGeneration || !this.isCurrentRequest(event.payload.request_id)) return;
             this.serverEnded = true;
             audioPlayer.finishStream();
             this.finishIfDrained();

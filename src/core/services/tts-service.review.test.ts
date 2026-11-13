@@ -104,8 +104,36 @@ describe("review_r09 TTS event lifecycle", () => {
 
     fakes.handlers.get("tts:audio")?.({ payload: { request_id: "req-old", data: [1, 2] } });
     fakes.handlers.get("tts:end")?.({ payload: { request_id: "req-old", text: "Old request.", status: "completed" } });
+    fakes.handlers.get("tts:end")?.({ payload: { request_id: "req-old", text: "Old request.", status: "cancelled" } });
 
     expect(fakes.player.queueAudio).not.toHaveBeenCalled();
+    expect(fakes.player.finishStream).not.toHaveBeenCalled();
+    expect(fakes.player.stop).not.toHaveBeenCalled();
+  });
+
+  it("stops on cancellation before a pending audio failure can be reported", async () => {
+    const { emit } = await import("@tauri-apps/api/event");
+    const requestId = "chat_cancelled";
+    let rejectAudio!: (error: Error) => void;
+    fakes.player.queueAudio.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+      rejectAudio = reject;
+    }));
+    fakes.handlers.get("tts:start")?.({ payload: { request_id: requestId } });
+    fakes.handlers.get("tts:audio")?.({ payload: { request_id: requestId, data: [1, 2, 3] } });
+    await Promise.resolve();
+    expect(fakes.player.queueAudio).toHaveBeenCalledOnce();
+
+    const cancelled = fakes.handlers.get("tts:end")?.({ payload: { request_id: requestId, status: "cancelled" } });
+    // The replacement has not started and the old audio is still pending.
+    const stoppedImmediately = fakes.player.stop.mock.calls.length;
+    rejectAudio(new Error("Old audio failed after cancellation"));
+    await cancelled;
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    expect(emit).not.toHaveBeenCalled();
+    expect(fakes.finishChatPlayback).toHaveBeenCalledExactlyOnceWith(requestId);
+    expect(stoppedImmediately).toBe(1);
+    expect(fakes.player.stop).toHaveBeenCalledOnce();
     expect(fakes.player.finishStream).not.toHaveBeenCalled();
   });
 
