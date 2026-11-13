@@ -42,9 +42,13 @@ describe("pet chat display adapter", () => {
   await act(async () => root.render(createElement(Harness)));
   expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" });
   expect(state.isStreaming).toBe(true);
-  await act(async () => chat.set({ turns: [{ ...snapshot("completed", 3), text: "final recovered text" }], busy: false }));
+  await act(async () => chat.set({ turns: [{ ...snapshot("streaming", 3), text: "intermediate recovered text" }] }));
+  expect(invoke).toHaveBeenLastCalledWith("update_bubble_text", { text: "intermediate recovered text" });
+  expect(state.isStreaming).toBe(true);
+  await act(async () => chat.set({ turns: [{ ...snapshot("completed", 4), text: "final recovered text" }], busy: false }));
   expect(vi.mocked(invoke).mock.calls).toEqual([
    ["show_bubble_window", { text: "complete recovered text" }],
+   ["update_bubble_text", { text: "intermediate recovered text" }],
    ["update_bubble_text", { text: "final recovered text" }],
   ]);
  });
@@ -75,11 +79,12 @@ describe("pet chat display adapter", () => {
  });
  it("a late speech failure does not replay the reply or restart its hide timer", async () => {
   vi.useFakeTimers();
-  const completed = { ...snapshot("completed"), completion_revision: 2 };
+  await act(async () => chat.set({ turns: [snapshot()] }));
+  const completed = { ...snapshot("completed", 3), completion_revision: 3 };
   await act(async () => chat.set({ turns: [completed] }));
   await act(async () => vi.advanceTimersByTimeAsync(4000));
-  await act(async () => chat.set({ turns: [{ ...completed, revision: 3, speech_error: "Speech failed" }] }));
-  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" });
+  await act(async () => chat.set({ turns: [{ ...completed, revision: 4, speech_error: "Speech failed" }] }));
+  expect(vi.mocked(invoke).mock.calls).toHaveLength(2);
   await act(async () => vi.advanceTimersByTimeAsync(1000));
   expect(invoke).toHaveBeenCalledWith("hide_bubble_window");
  });
@@ -90,7 +95,65 @@ describe("pet chat display adapter", () => {
  it.each(["completed", "cancelled", "error"] as const)("settles %s from recovered state without waiting for finish", async status => {
   vi.useFakeTimers(); await act(async () => chat.set({ turns: [snapshot(status)], busy: false }));
   expect(state.isStreaming).toBe(false); await act(async () => vi.advanceTimersByTimeAsync(5000));
-  expect(invoke).toHaveBeenCalledWith("hide_bubble_window");
+  expect(invoke).not.toHaveBeenCalled();
+ });
+ it("keeps an expired reply hidden after unmount and reopen", async () => {
+  vi.useFakeTimers();
+  await act(async () => chat.set({ turns: [snapshot()], busy: true }));
+  await act(async () => chat.set({ turns: [snapshot("completed", 3)], busy: false }));
+  await act(async () => vi.advanceTimersByTimeAsync(5000));
+  expect(invoke).toHaveBeenLastCalledWith("hide_bubble_window");
+  act(() => root.unmount());
+  vi.mocked(invoke).mockClear();
+  root = createRoot(container);
+  await act(async () => root.render(createElement(Harness)));
+  await act(async () => chat.set({ turns: [{ ...snapshot("completed", 4), completion_revision: 3, speech_error: "late failure" }] }));
+  await act(async () => vi.advanceTimersByTimeAsync(6000));
+  expect(invoke).not.toHaveBeenCalled();
+  expect(chat.send).not.toHaveBeenCalled();
+ });
+ it("hides the former character's reply and follows the new character", async () => {
+  const old = snapshot();
+  await act(async () => chat.set({ turns: [old], busy: true }));
+  vi.mocked(invoke).mockClear();
+  await act(async () => chat.set({ character_id: "char-2" }));
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("hide_bubble_window");
+  const current = { ...snapshot("streaming", 3), character_id: "char-2", client_request_id: "pet_b", text: "new character reply" };
+  await act(async () => chat.set({ turns: [old, current] }));
+  expect(invoke).toHaveBeenLastCalledWith("show_bubble_window", { text: "new character reply" });
+  await act(async () => chat.set({ turns: [{ ...old, revision: 5, text: "late foreign text" }, current] }));
+  expect(vi.mocked(invoke).mock.calls).toHaveLength(2);
+ });
+ it("ignores a foreign active reply on reopen even when it is newer", async () => {
+  await act(async () => chat.set({ character_id: "char-2", turns: [snapshot()] }));
+  act(() => root.unmount());
+  vi.mocked(invoke).mockClear();
+  root = createRoot(container);
+  await act(async () => root.render(createElement(Harness)));
+  expect(invoke).not.toHaveBeenCalled();
+ });
+ it("does not reopen a foreign bubble when its delayed update fails after switching away and back", async () => {
+  await act(async () => chat.set({ turns: [snapshot()], busy: true }));
+  const update = deferred<void>();
+  vi.mocked(invoke).mockImplementationOnce(() => update.promise);
+  await act(async () => chat.set({ turns: [snapshot("streaming", 3)] }));
+  await act(async () => chat.set({ character_id: "char-2", turns: [snapshot("completed", 4)] }));
+  await act(async () => chat.set({ character_id: "char-1" }));
+  vi.mocked(invoke).mockClear();
+  await act(async () => update.reject(new Error("bubble was destroyed")));
+  expect(invoke).not.toHaveBeenCalled();
+ });
+ it("suppresses a rejected send after switching character and releases the old request selection", async () => {
+  const response = deferred<StreamChatResponse>();
+  chat.send.mockReturnValueOnce(response.promise);
+  let sending!: Promise<void>;
+  await act(async () => { sending = state.sendMessage("old character question"); });
+  await act(async () => chat.set({ character_id: "char-2" }));
+  vi.mocked(invoke).mockClear();
+  await act(async () => { response.reject(new Error("old character failure")); await sending; });
+  expect(invoke).not.toHaveBeenCalled();
+  await act(async () => chat.set({ turns: [{ ...snapshot(), character_id: "char-2" }] }));
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" });
  });
  it("unmount does not cancel an in-flight business request", async () => {
   await act(async () => chat.set({ turns: [snapshot()], busy: true }));

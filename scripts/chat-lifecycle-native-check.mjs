@@ -89,6 +89,7 @@ try {
     const bubble = await waitFor(() => context.pages().find(page => page.url().includes("bubble.html")));
     const isBubbleVisible = () => bubble.evaluate(async () =>
       (await import("/node_modules/@tauri-apps/api/window.js")).getCurrentWindow().isVisible());
+    const intermediate = `${partial} continues after reopening`;
     try {
       await bubble.getByText(partial, { exact: true }).waitFor();
       assert(await isBubbleVisible());
@@ -99,20 +100,69 @@ try {
         (await import("/node_modules/@tauri-apps/api/window.js")).getCurrentWindow().destroy()).catch(() => {});
       await waitFor(async () => !(await windows(main)).includes("pet"));
       await waitFor(async () => !(await isBubbleVisible()));
+      // Replace the retained DOM text so recovery must republish the snapshot.
+      await main.evaluate(() => window.__TAURI_INTERNALS__.invoke("update_bubble_text", { text: "stale bubble sentinel" }));
+      await bubble.getByText("stale bubble sentinel", { exact: true }).waitFor();
       await main.evaluate(() => window.__TAURI_INTERNALS__.invoke("show_pet_window"));
       pet = await waitFor(() => context.pages().find(page => page !== oldPet && page.url().includes("pet.html")));
       await waitFor(isBubbleVisible);
       await bubble.getByText(partial, { exact: true }).waitFor({ state: "visible" });
       assert((await view(pet)).turns.some(turn => turn.client_request_id === active.client_request_id && turn.status === "streaming"));
-    } finally {
       assert.equal((await fetch("http://127.0.0.1:19334/release-pet-restore", { method: "POST" })).status, 204);
+      await bubble.getByText(intermediate, { exact: true }).waitFor({ state: "visible" });
+      assert(await isBubbleVisible());
+      const streaming = (await view(pet)).turns.find(turn => turn.client_request_id === active.client_request_id);
+      assert.equal(streaming.status, "streaming");
+      assert.equal(streaming.text, intermediate);
+      assert(!(await view(pet)).messages.some(row => row.role === "assistant" && row.content.includes(message)));
+    } finally {
+      await fetch("http://127.0.0.1:19334/finish-pet-restore", { method: "POST" });
     }
-    const final = `${partial} completed.`;
+    const final = `${intermediate} completed.`;
     await bubble.getByText(final, { exact: true }).waitFor({ state: "visible" });
     assert(await isBubbleVisible());
     const saved = await waitFor(async () => (await view(main)).messages.find(row =>
       row.role === "assistant" && row.content === final));
     return { reply: saved.content, assistantMessageId: saved.id };
+  });
+  await check("expired pet replies stay hidden on reopen and after character changes", async () => {
+    const bubble = context.pages().find(page => page.url().includes("bubble.html"));
+    const isBubbleVisible = () => bubble.evaluate(async () =>
+      (await import("/node_modules/@tauri-apps/api/window.js")).getCurrentWindow().isVisible());
+    await waitFor(async () => !(await isBubbleVisible()));
+    async function reopenPet() {
+      const oldPet = pet;
+      await oldPet.evaluate(async () =>
+        (await import("/node_modules/@tauri-apps/api/window.js")).getCurrentWindow().destroy()).catch(() => {});
+      await waitFor(async () => !(await windows(main)).includes("pet"));
+      await main.evaluate(() => window.__TAURI_INTERNALS__.invoke("show_pet_window"));
+      pet = await waitFor(() => context.pages().find(page => page !== oldPet && page.url().includes("pet.html")));
+      await pet.waitForFunction(async () => {
+        const { chatApplication } = await import("/src/lib/chat/application.ts");
+        return chatApplication.getSnapshot().turns.some(turn => turn.message === "[case:pet-restore]");
+      });
+      await pet.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(await isBubbleVisible(), false);
+    }
+    await reopenPet();
+    const original = (await view(main)).character_id;
+    try {
+      await main.evaluate(async () => {
+        const bridge = await import("/src/lib/kokoro-bridge.ts");
+        await bridge.createCharacter({ id: "pet-bubble-other", name: "Other pet", persona: "Bubble isolation test", user_nickname: "Tester", source_format: "manual", created_at: 1, updated_at: 1, runtime_profile_json: JSON.stringify({ proactive_enabled: false }) });
+        await bridge.commitCharacterActivation(await bridge.prepareCharacterActivation("pet-bubble-other"));
+      });
+      await reopenPet();
+      const restored = await view(pet);
+      assert.equal(restored.character_id, "pet-bubble-other");
+      assert(restored.turns.some(turn => turn.message === "[case:pet-restore]" && turn.character_id === original));
+      return { selectedCharacter: restored.character_id, bubbleVisible: await isBubbleVisible() };
+    } finally {
+      await main.evaluate(async id => {
+        const bridge = await import("/src/lib/kokoro-bridge.ts");
+        await bridge.commitCharacterActivation(await bridge.prepareCharacterActivation(id));
+      }, original);
+    }
   });
   for (const page of [main, pet]) await page.evaluate(async () => {
     window.__nativeTts = [];

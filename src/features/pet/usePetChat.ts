@@ -16,12 +16,23 @@ const replyRevision = (turn: ChatTurnSnapshot) => turn.completion_revision ?? tu
 export function usePetChat(): PetChatState {
     const view = useSyncExternalStore(chatApplication.subscribe, chatApplication.getSnapshot);
     const sending = useRef(false);
-    const [requestId, setRequestId] = useState<string>();
-    const lastPresentedRevision = useRef(0);
-    const presentedRequest = useRef<string>(undefined);
+    const [request, setRequest] = useState<{ id: string; characterId: string }>();
+    const requestId = request?.characterId === view.character_id ? request.id : undefined;
+    const presentation = useRef<{ id: string; revision: number; shown: boolean }>(undefined);
+    const scope = useRef(0);
+    useEffect(() => {
+        ++scope.current;
+        presentation.current = undefined;
+        setRequest(undefined);
+        return () => {
+            ++scope.current;
+            void invoke("hide_bubble_window").catch(() => {});
+        };
+    }, [view.character_id]);
+    const turns = view.turns.filter(item => item.character_id === view.character_id);
     const turn = requestId
-        ? view.turns.find(item => item.client_request_id === requestId)
-        : view.turns.reduce<ChatTurnSnapshot | undefined>((latest, item) =>
+        ? turns.find(item => item.client_request_id === requestId)
+        : turns.reduce<ChatTurnSnapshot | undefined>((latest, item) =>
             item.client_request_id.startsWith("pet_") && (!latest || replyRevision(item) > replyRevision(latest)) ? item : latest,
         undefined);
     const revision = turn ? replyRevision(turn) : 0;
@@ -30,16 +41,27 @@ export function usePetChat(): PetChatState {
     const error = turn?.error;
     const active = turn ? isActiveTurn(turn) : false;
     useEffect(() => {
-        if (revision <= lastPresentedRevision.current) return;
-        lastPresentedRevision.current = revision;
+        if (!replyRequestId) return;
+        const previous = presentation.current;
+        // Restore active work only. A terminal snapshot may update a reply this
+        // view has followed, but must never reopen an old journal entry.
+        if (!active && replyRequestId !== requestId && previous?.id !== replyRequestId) return;
+        if (previous?.id === replyRequestId && revision <= previous.revision) return;
+        const shown = previous?.id === replyRequestId && previous.shown;
+        presentation.current = { id: replyRequestId, revision, shown };
         if (text) {
             // A recreated pet may find its old bubble window hidden.
-            if (!requestId && presentedRequest.current !== replyRequestId) {
+            if (!requestId && !shown) {
                 void invoke("show_bubble_window", { text }).catch(() => {});
             } else {
-                void invoke("update_bubble_text", { text }).catch(() => invoke("show_bubble_window", { text })).catch(() => {});
+                const presentingScope = scope.current;
+                void invoke("update_bubble_text", { text }).catch(() => {
+                    if (scope.current === presentingScope && chatApplication.getSnapshot().character_id === view.character_id) {
+                        return invoke("show_bubble_window", { text });
+                    }
+                }).catch(() => {});
             }
-            presentedRequest.current = replyRequestId;
+            presentation.current.shown = true;
         } else if (error) {
             void invoke("show_bubble_window", { text: error }).catch(() => {});
         }
@@ -47,17 +69,20 @@ export function usePetChat(): PetChatState {
             const timer = setTimeout(() => { void invoke("hide_bubble_window").catch(() => {}); }, 5000);
             return () => clearTimeout(timer);
         }
-    }, [revision, replyRequestId, requestId, text, error, active]);
+    }, [revision, replyRequestId, requestId, text, error, active, view.character_id]);
     const sendMessage = async (text: string) => {
         const message = text.trim();
         if (!message || sending.current) return;
         sending.current = true;
+        const sendingScope = scope.current;
         const client_request_id = `pet_${crypto.randomUUID()}`;
-        setRequestId(client_request_id);
+        setRequest({ id: client_request_id, characterId: view.character_id });
         void invoke("show_bubble_window", { text: "..." }).catch(() => {});
         try { await chatApplication.send({ message, client_request_id }); }
         catch (error) {
-            void invoke("show_bubble_window", { text: getKokoroErrorMessage(error) }).catch(() => {});
+            if (scope.current === sendingScope && chatApplication.getSnapshot().character_id === view.character_id) {
+                void invoke("show_bubble_window", { text: getKokoroErrorMessage(error) }).catch(() => {});
+            }
         } finally { sending.current = false; }
     };
     return { isStreaming: view.busy, sendMessage };

@@ -8,6 +8,7 @@ const calls = [];
 let releaseDetachedFailure;
 let releaseRegeneration;
 let releasePetRestore;
+let finishPetRestore;
 const server = http.createServer(async (request, response) => {
   if (request.url === "/counts") { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(calls)); return; }
   if (request.url === "/release-detached-failure" && releaseDetachedFailure) {
@@ -23,6 +24,11 @@ const server = http.createServer(async (request, response) => {
   if (request.url === "/release-pet-restore" && releasePetRestore) {
     releasePetRestore();
     releasePetRestore = undefined;
+    response.writeHead(204); response.end(); return;
+  }
+  if (request.url === "/finish-pet-restore" && finishPetRestore) {
+    finishPetRestore();
+    finishPetRestore = undefined;
     response.writeHead(204); response.end(); return;
   }
   let raw = ""; for await (const chunk of request) raw += chunk;
@@ -100,6 +106,13 @@ const server = http.createServer(async (request, response) => {
       response.once("close", resolve);
       chunk({ content: `Controlled reply for [case:${name}]` });
     });
+    if (!closed) {
+      await new Promise(resolve => {
+        finishPetRestore = resolve;
+        response.once("close", resolve);
+        chunk({ content: " continues after reopening" });
+      });
+    }
     if (!closed) chunk({ content: " completed." });
   } else if (!["text-tool-only", "native-tool-only"].includes(name)) {
     const chunks = [`Controlled `, `reply `, `for `, `[case:${name}]`, ` completed.`];
