@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 type SetupResult = {
   decodeAudioDataMock: ReturnType<typeof vi.fn>;
   isTypeSupportedMock: ReturnType<typeof vi.fn>;
+  playMock: ReturnType<typeof vi.fn>;
+  openMediaSource: () => void;
   sources: Array<AudioBufferSourceNode & { start: ReturnType<typeof vi.fn> }>;
   buffers: Array<AudioBuffer & { channelData: Array<Float32Array> }>;
 };
@@ -13,6 +15,8 @@ function setupAudioEnvironment(): SetupResult {
 
   const decodeAudioDataMock = vi.fn().mockResolvedValue({ duration: 1 });
   const isTypeSupportedMock = vi.fn().mockReturnValue(true);
+  const playMock = vi.fn().mockResolvedValue(undefined);
+  let onSourceOpen: (() => void) | undefined;
   const sources: Array<AudioBufferSourceNode & { start: ReturnType<typeof vi.fn> }> = [];
   const buffers: Array<AudioBuffer & { channelData: Array<Float32Array> }> = [];
 
@@ -33,7 +37,7 @@ function setupAudioEnvironment(): SetupResult {
     onplay: (() => void) | null = null;
     onpause: (() => void) | null = null;
     onended: (() => void) | null = null;
-    play = vi.fn().mockResolvedValue(undefined);
+    play = playMock;
     pause = vi.fn();
     removeAttribute = vi.fn();
     load = vi.fn();
@@ -97,7 +101,9 @@ function setupAudioEnvironment(): SetupResult {
   class MockMediaSource {
     static isTypeSupported = isTypeSupportedMock;
     readyState: ReadyState = "open";
-    addEventListener = vi.fn();
+    addEventListener = vi.fn((event: string, handler: () => void) => {
+      if (event === "sourceopen") onSourceOpen = handler;
+    });
     addSourceBuffer = vi.fn(() => new MockSourceBuffer() as unknown as SourceBuffer);
     endOfStream = vi.fn();
   }
@@ -115,6 +121,8 @@ function setupAudioEnvironment(): SetupResult {
   return {
     decodeAudioDataMock,
     isTypeSupportedMock,
+    playMock,
+    openMediaSource: () => onSourceOpen?.(),
     sources,
     buffers,
   };
@@ -254,6 +262,45 @@ describe("AudioStreamManager format routing", () => {
 
     expect(env.decodeAudioDataMock).toHaveBeenCalledTimes(1);
     expect(env.isTypeSupportedMock).not.toHaveBeenCalled();
+  });
+
+  it("reports a WAV decode failure and clears the stream", async () => {
+    const { AudioStreamManager } = await import("./audio-player");
+    const manager = new AudioStreamManager();
+    const onError = vi.fn();
+    manager.onPlaybackError(onError);
+    env.decodeAudioDataMock.mockRejectedValueOnce(new Error("Invalid WAV"));
+    await manager.queueAudio(wavChunk);
+    expect(onError).toHaveBeenCalledExactlyOnceWith("Failed to decode WAV audio.");
+    expect(manager.isPlaying).toBe(false);
+    expect(env.sources).toHaveLength(0);
+  });
+
+  it.each([false, true])("handles a rejected media play promise after synthesis (stream replaced: %s)", async replaced => {
+    const { AudioStreamManager } = await import("./audio-player");
+    const manager = new AudioStreamManager();
+    const onError = vi.fn();
+    manager.onPlaybackError(onError);
+    let rejectPlay!: (error: Error) => void;
+    env.playMock.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectPlay = reject; }));
+    await manager.queueAudio([0x49, 0x44, 0x33]);
+    manager.finishStream();
+    expect(manager.hasPendingMediaPlayback).toBe(true);
+    env.openMediaSource();
+    if (replaced) {
+      manager.clearQueue();
+      await manager.queueAudio(wavChunk);
+    }
+    rejectPlay(new Error("Audio output failed"));
+    await Promise.resolve();
+    if (replaced) {
+      expect(onError).not.toHaveBeenCalled();
+      expect(manager.isPlaying).toBe(true);
+    } else {
+      expect(onError).toHaveBeenCalledExactlyOnceWith("Audio output failed");
+      expect(manager.isPlaying).toBe(false);
+      expect(manager.hasPendingMediaPlayback).toBe(false);
+    }
   });
 
   it("routes declared PCM through ordered AudioBuffer scheduling and preserves split samples", async () => {

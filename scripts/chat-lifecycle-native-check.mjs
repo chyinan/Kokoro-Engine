@@ -798,7 +798,11 @@ try {
     assert(!selection.switched.messages.some(message => message.content.includes("character-switch")));
     assert.equal(selection.result.status, "completed"); return { cancelled, ...selection };
   });
-  await check("remounting the chat panel recovers a real speech failure and the saved text", async () => {
+  for (const { name, reason, remount } of [
+    { name: "speech-failure", reason: "controlled speech failure", remount: true },
+    { name: "decode-failure", reason: "Failed to decode WAV audio.", remount: true },
+    { name: "playback-failure", reason: "Controlled audio output failure", remount: false },
+  ]) await check(`the chat panel shows ${name} alongside the saved text`, async () => {
     const originalConfig = await main.evaluate(async () => (await import("/src/lib/kokoro-bridge.ts")).getTtsConfig());
     try {
       await main.evaluate(async originalConfig => {
@@ -815,30 +819,37 @@ try {
         });
       }, originalConfig);
       const input = main.locator("textarea[data-onboarding-id='chat-input']");
-      await main.evaluate(async () => {
-        const { registry } = await import("/src/ui/registry/ComponentRegistry.ts");
-        window.__originalChatPanel = registry.get("ChatPanel");
-        registry.register("ChatPanel", () => null);
-      });
-      await input.waitFor({ state: "detached" });
-      await submit(pet, { message: "[case:speech-failure]", client_request_id: "native_speech_failure" }, "__speechFailure");
+      if (remount) {
+        await setPanelMounted(main, false);
+        await input.waitFor({ state: "detached" });
+      } else {
+        await main.evaluate(reason => {
+          const prototype = AudioBufferSourceNode.prototype;
+          const originalStart = prototype.start;
+          window.__restoreAudioStart = () => { prototype.start = originalStart; };
+          prototype.start = () => { throw new DOMException(reason, "InvalidStateError"); };
+        }, reason);
+      }
+      const requestId = `native_${name}`;
+      await submit(pet, { message: `[case:${name}]`, client_request_id: requestId }, "__speechFailure");
       const result = await outcome(pet, "__speechFailure");
       assert.equal(result.result?.status, "completed");
       const failedTurn = await waitFor(async () => (await view(pet)).turns.find(turn =>
-        turn.client_request_id === "native_speech_failure" && turn.speech_error?.includes("controlled speech failure")));
+        turn.client_request_id === requestId && turn.speech_error?.includes(reason)));
       assert.equal(failedTurn.status, "completed");
-      assert.equal(await input.count(), 0);
-      await main.evaluate(async () => {
-        const { registry } = await import("/src/ui/registry/ComponentRegistry.ts");
-        registry.register("ChatPanel", window.__originalChatPanel);
-      });
+      if (remount) {
+        assert.equal(await input.count(), 0);
+        await setPanelMounted(main, true);
+      }
       await input.waitFor({ state: "visible" });
-      const alert = main.getByRole("alert").filter({ hasText: "controlled speech failure" });
+      const alert = main.getByRole("alert").filter({ hasText: reason });
       await alert.waitFor({ state: "visible", timeout: 10000 });
+      assert.equal(await alert.count(), 1);
       const warning = await alert.textContent();
-      await main.getByText("Controlled reply for [case:speech-failure] completed.", { exact: false }).first().waitFor();
+      await main.getByText(`Controlled reply for [case:${name}] completed.`, { exact: false }).first().waitFor();
       return { result, warning };
     } finally {
+      if (!remount) await main.evaluate(() => window.__restoreAudioStart?.());
       await main.evaluate(async config => (await import("/src/lib/kokoro-bridge.ts")).saveTtsConfig(config), originalConfig);
     }
   });

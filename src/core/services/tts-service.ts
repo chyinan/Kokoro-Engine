@@ -57,10 +57,10 @@ class BrowserSpeechSynthesis {
         pitch: number | null | undefined,
         onStart: () => void,
         onEnd: () => void,
+        onError: (message: string) => void,
     ): void {
         if (!this.synthesis) {
-            console.warn("[TTS] SpeechSynthesis not available in this environment");
-            onEnd();
+            onError("Browser speech playback is unavailable.");
             return;
         }
 
@@ -70,7 +70,7 @@ class BrowserSpeechSynthesis {
         if (pitch != null) utterance.pitch = pitch;
         utterance.onstart = onStart;
         utterance.onend = onEnd;
-        utterance.onerror = onEnd;
+        utterance.onerror = event => onError(`Browser speech playback failed: ${event.error}`);
 
         // Try to find the requested voice
         if (voice) {
@@ -143,11 +143,7 @@ export class TtsService {
             }
         });
         this.removePlaybackErrorListener = audioPlayer.onPlaybackError(message => {
-            const requestId = this.activeRequestId;
-            if (!requestId) return;
-            void Promise.resolve(emit("tts:playback-error", { request_id: requestId, error: message }))
-                .catch(error => console.warn("[TTS] Failed to report playback error:", error));
-            void this.stopPlayback(requestId);
+            this.failPlayback(this.activeRequestId, this.playbackGeneration, message);
         });
         if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
             const stopPlayback = () => { void this.stopPlayback(); };
@@ -195,8 +191,7 @@ export class TtsService {
             const { data, format } = event.payload;
             this.pendingAudioBytes += data.length;
             if (this.pendingAudioBytes > MAX_PENDING_TTS_AUDIO_BYTES) {
-                console.warn("[TTS] Buffered audio exceeded the playback limit; cancelling the request");
-                void this.stopPlayback(event.payload.request_id ?? this.activeRequestId);
+                this.failPlayback(this.activeRequestId, playbackGeneration, "Buffered audio exceeded the playback limit.");
                 return;
             }
             this.audioEventQueue = this.audioEventQueue
@@ -206,13 +201,8 @@ export class TtsService {
                     await audioPlayer.queueAudio(data, format);
                 })
                 .catch(error => {
-                    if (!this.isCurrentRequest(event.payload.request_id)) return;
-                    console.warn("[TTS] Audio playback failed:", error);
-                    void Promise.resolve(emit("tts:playback-error", {
-                        request_id: event.payload.request_id ?? this.activeRequestId ?? "",
-                        error: error instanceof Error ? error.message : String(error),
-                    })).catch(reportError => console.warn("[TTS] Failed to report playback error:", reportError));
-                    void this.stopPlayback(event.payload.request_id ?? this.activeRequestId);
+                    this.failPlayback(event.payload.request_id ?? this.activeRequestId, playbackGeneration,
+                        error instanceof Error ? error.message : String(error));
                 })
                 .finally(() => {
                     if (playbackGeneration === this.playbackGeneration) {
@@ -232,19 +222,24 @@ export class TtsService {
                 const requestId = this.activeRequestId;
                 const playbackGeneration = this.playbackGeneration;
                 this.browserPending++;
-                this.browserTTS.speak(
-                    text,
-                    voice,
-                    speed,
-                    pitch,
-                    () => {
-                        if (requestId && this.isCurrentRequest(requestId)
-                            && playbackGeneration === this.playbackGeneration) {
-                            this.startVoiceInterrupt();
-                        }
-                    },
-                    () => this.onBrowserUtteranceEnd(requestId, playbackGeneration),
-                );
+                try {
+                    this.browserTTS.speak(
+                        text,
+                        voice,
+                        speed,
+                        pitch,
+                        () => {
+                            if (requestId && this.isCurrentRequest(requestId)
+                                && playbackGeneration === this.playbackGeneration) {
+                                this.startVoiceInterrupt();
+                            }
+                        },
+                        () => this.onBrowserUtteranceEnd(requestId, playbackGeneration),
+                        message => this.failPlayback(requestId, playbackGeneration, message),
+                    );
+                } catch (error) {
+                    this.failPlayback(requestId, playbackGeneration, error instanceof Error ? error.message : String(error));
+                }
             }, playbackTarget
         );
         if (this.generation !== gen) { unlistenBrowserDelegate(); return; }
@@ -261,8 +256,9 @@ export class TtsService {
         const unlistenEnd = await listen<TtsEndEvent>("tts:end", async (event) => {
             if (this.generation !== gen) return;
             if (!this.isCurrentRequest(event.payload.request_id)) return;
+            const playbackGeneration = this.playbackGeneration;
             await this.audioEventQueue;
-            if (!this.isCurrentRequest(event.payload.request_id)) return;
+            if (playbackGeneration !== this.playbackGeneration || !this.isCurrentRequest(event.payload.request_id)) return;
             if (event.payload.status === "cancelled") {
                 await this.stopPlayback(event.payload.request_id ?? this.activeRequestId);
                 return;
@@ -294,8 +290,23 @@ export class TtsService {
         void this.stopPlayback();
     }
 
-    async stopPlayback(requestId?: string | null): Promise<void> {
-        if (this.activeRequestId) void finishChatPlayback(this.activeRequestId).catch(() => {});
+    private failPlayback(requestId: string | null, generation: number, message: string): void {
+        if (!requestId || generation !== this.playbackGeneration || !this.isCurrentRequest(requestId)) return;
+        void this.stopPlayback(requestId, message);
+        // Settings previews also use this event to report errors.
+        void Promise.resolve(emit("tts:playback-error", { request_id: requestId, error: message }))
+            .catch(error => console.warn("[TTS] Failed to report playback error:", error));
+    }
+
+    async stopPlayback(requestId?: string | null, error?: string): Promise<void> {
+        if (this.activeRequestId) {
+            const finishing = error === undefined
+                ? finishChatPlayback(this.activeRequestId)
+                : finishChatPlayback(this.activeRequestId, error);
+            void finishing.catch(reportError => {
+                if (error) console.warn("[TTS] Failed to record playback error:", reportError);
+            });
+        }
         const requestIdsToCancel = requestId
             ? [requestId]
             : [...new Set([this.activeRequestId, getLatestTtsRequestId()].filter((id): id is string => Boolean(id)))];
@@ -363,7 +374,8 @@ export class TtsService {
     }
 
     private finishIfDrained(): void {
-        if (!this.serverEnded || this.browserPending > 0 || audioPlayer.isPlaying || this.browserTTS.isSpeaking) {
+        if (!this.serverEnded || this.browserPending > 0 || audioPlayer.isPlaying
+            || audioPlayer.hasPendingMediaPlayback || this.browserTTS.isSpeaking) {
             return;
         }
         if (this.activeRequestId) void finishChatPlayback(this.activeRequestId).catch(() => {});

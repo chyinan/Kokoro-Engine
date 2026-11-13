@@ -22,6 +22,19 @@ const server = http.createServer(async (request, response) => {
   let raw = ""; for await (const chunk of request) raw += chunk;
   let body; try { body = JSON.parse(raw); } catch { response.writeHead(400); response.end("invalid JSON"); return; }
   if (request.url === "/v1/audio/speech") {
+    if (body.input?.includes("[case:decode-failure]")) {
+      // A successful response carrying an invalid WAV payload.
+      response.writeHead(200, { "content-type": "audio/wav" });
+      response.end(Buffer.from("524946462400000057415645", "hex"));
+      return;
+    }
+    if (body.input?.includes("[case:playback-failure]")) {
+      // Valid mono, 16-bit PCM WAV with 16 silent samples.
+      const header = Buffer.from("524946464400000057415645666d74201000000001000100803e0000007d0000020010006461746120000000", "hex");
+      response.writeHead(200, { "content-type": "audio/wav" });
+      response.end(Buffer.concat([header, Buffer.alloc(32)]));
+      return;
+    }
     response.writeHead(400, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: { message: "controlled speech failure", type: "invalid_request_error" } }));
     return;

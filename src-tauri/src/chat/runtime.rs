@@ -64,14 +64,29 @@ impl ChatRuntimeState {
     pub fn begin_playback(&self, request: &str, window: &str) {
         *self.1.lock().unwrap() = Some((request.into(), window.into(), std::time::Instant::now()));
     }
-    pub fn finish_playback(&self, request: &str, window: &str) {
-        let mut playback = self.1.lock().unwrap();
-        if playback
-            .as_ref()
-            .is_some_and(|(id, owner, _)| id == request && owner == window)
+    pub fn finish_playback(
+        &self,
+        request: &str,
+        window: &str,
+        error: Option<String>,
+    ) -> Option<ChatTurnSnapshot> {
         {
+            let mut playback = self.1.lock().unwrap();
+            if !playback
+                .as_ref()
+                .is_some_and(|(id, owner, _)| id == request && owner == window)
+            {
+                return None;
+            }
             *playback = None;
         }
+        let error = error?;
+        let turn_id = request.strip_prefix("chat_")?;
+        let mut journal = self.0.lock().unwrap();
+        let client_id = journal.entries.iter().find_map(|(id, entry)| {
+            (entry.snapshot.turn_id.as_deref() == Some(turn_id)).then(|| id.clone())
+        })?;
+        Self::update_speech_error(&mut journal, &client_id, error)
     }
     pub fn is_playing(&self, app: &tauri::AppHandle) -> bool {
         self.1
@@ -377,7 +392,13 @@ impl ChatRuntimeState {
 
     fn record_speech_error(&self, id: &str, error: String) -> Option<ChatTurnSnapshot> {
         let mut journal = self.0.lock().unwrap();
-        journal.entries.get(id)?;
+        Self::update_speech_error(&mut journal, id, error)
+    }
+
+    fn update_speech_error(journal: &mut Journal, id: &str, error: String) -> Option<ChatTurnSnapshot> {
+        if journal.entries.get(id)?.snapshot.speech_error.is_some() {
+            return None;
+        }
         journal.revision += 1;
         let revision = journal.revision;
         let snapshot = &mut journal.entries.get_mut(id)?.snapshot;
@@ -711,6 +732,45 @@ mod tests {
             assert_eq!(snapshot.assistant_message_id, Some(2));
             assert!(snapshot.error.is_none());
             assert_eq!(*outcome.borrow(), Some(result("a")));
+        }
+    }
+    #[test]
+    fn playback_failure_is_recorded_once_for_the_reply_owned_by_the_output_window() {
+        for failure_first in [true, false] {
+            let runtime = ChatRuntimeState::default();
+            runtime.begin(&request("other-client")).unwrap();
+            runtime.begin(&request("speech-client")).unwrap();
+            runtime.event(
+                "chat-turn-text-complete",
+                &serde_json::json!({"client_request_id":"speech-client", "turn_id":"spoken-turn", "text":"answer"}),
+            );
+            let complete = || runtime.complete("speech-client", result("speech-client")).unwrap();
+            let mut completed = (!failure_first).then(complete);
+
+            runtime.begin_playback("chat_spoken-turn", "pet");
+            let error = || Some("Audio could not be decoded".into());
+            assert!(runtime.finish_playback("chat_spoken-turn", "main", error()).is_none());
+            assert!(runtime.finish_playback("chat_old-turn", "pet", error()).is_none());
+            let failed = runtime.finish_playback("chat_spoken-turn", "pet", error()).unwrap();
+            assert!(runtime.finish_playback("chat_spoken-turn", "pet", error()).is_none());
+            if let Some(completed) = &completed {
+                assert!(failed.revision > completed.revision);
+            } else {
+                completed = Some(complete());
+            }
+            let turns = runtime.snapshots();
+            let reply = turns.iter().find(|turn| turn.client_request_id == "speech-client").unwrap();
+            assert_eq!(reply.speech_error.as_deref(), Some("Audio could not be decoded"));
+            assert_eq!(reply.completion_revision, completed.unwrap().completion_revision);
+            assert_eq!(reply.status, "completed");
+            assert_eq!(reply.text, "answer");
+            assert_eq!(reply.assistant_message_id, Some(2));
+            assert!(reply.error.is_none());
+            assert!(turns.iter().find(|turn| turn.client_request_id == "other-client").unwrap().speech_error.is_none());
+
+            runtime.begin_playback("preview", "main");
+            assert!(runtime.finish_playback("preview", "main", error()).is_none());
+            assert!(runtime.1.lock().unwrap().is_none());
         }
     }
     #[test]

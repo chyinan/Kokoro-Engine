@@ -2059,8 +2059,15 @@ pub(crate) fn resolve_turn_user_message_id(
 }
 
 #[tauri::command]
-pub fn finish_chat_playback(window: tauri::Window, request_id: String, runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>) {
-    runtime.finish_playback(&request_id, window.label());
+pub fn finish_chat_playback(
+    window: tauri::Window,
+    request_id: String,
+    error: Option<String>,
+    runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
+) {
+    if let Some(snapshot) = runtime.finish_playback(&request_id, window.label(), error) {
+        let _ = window.app_handle().emit("chat-runtime-changed", snapshot);
+    }
 }
 
 #[tauri::command]

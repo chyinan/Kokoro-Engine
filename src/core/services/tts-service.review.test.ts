@@ -4,17 +4,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const fakes = vi.hoisted(() => ({
   handlers: new Map<string, (event: { payload: unknown }) => unknown>(),
   playStateCallback: null as ((playing: boolean) => void) | null,
+  playbackErrorCallback: null as ((error: string) => void) | null,
   playing: false,
+  pendingMedia: false,
   finishChatPlayback: vi.fn().mockResolvedValue(undefined),
   cancelTts: vi.fn().mockResolvedValue(undefined),
   player: {
     clearQueue: vi.fn(), queueAudio: vi.fn(), finishStream: vi.fn(), stop: vi.fn(),
-    onPlaybackError: vi.fn(() => () => {}),
+    onPlaybackError: vi.fn((callback: (error: string) => void) => {
+      fakes.playbackErrorCallback = callback;
+      return () => { fakes.playbackErrorCallback = null; };
+    }),
     onPlayStateChange: vi.fn((callback: (playing: boolean) => void) => {
       fakes.playStateCallback = callback;
       return () => { fakes.playStateCallback = null; };
     }),
     get isPlaying() { return fakes.playing; },
+    get hasPendingMediaPlayback() { return fakes.pendingMedia; },
   },
   interrupt: { callback: null as (() => void) | null },
 }));
@@ -43,6 +49,7 @@ vi.mock("./voice-interrupt-service", () => ({
 describe("review_r09 TTS event lifecycle", () => {
   let service: import("./tts-service").TtsService;
   let speechQueue: Array<string>;
+  let utterances: Array<{ text: string; onerror: (event: { error: string }) => void }>;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -50,10 +57,12 @@ describe("review_r09 TTS event lifecycle", () => {
     fakes.handlers.clear();
     fakes.playStateCallback = null;
     fakes.playing = false;
+    fakes.pendingMedia = false;
     speechQueue = [];
+    utterances = [];
     vi.stubGlobal("window", { speechSynthesis: {
       cancel: () => { speechQueue = []; },
-      speak: (utterance: { text: string }) => { speechQueue.push(utterance.text); },
+      speak: (utterance: typeof utterances[number]) => { speechQueue.push(utterance.text); utterances.push(utterance); },
       getVoices: () => [],
     } });
     vi.stubGlobal("SpeechSynthesisUtterance", class { constructor(public text: string) {} });
@@ -130,6 +139,43 @@ describe("review_r09 TTS event lifecycle", () => {
     expect(fakes.player.stop).toHaveBeenCalledOnce();
     expect(fakes.cancelTts).toHaveBeenCalledWith("req-stop");
     expect(fakes.finishChatPlayback).toHaveBeenCalledWith("req-stop");
+  });
+
+  it.each(["decode callback", "queued audio rejection", "media startup after synthesis", "browser speech error"])(
+    "reports %s for the active chat playback and stops it once", async source => {
+      const { emit } = await import("@tauri-apps/api/event");
+      const requestId = "chat_failed";
+      const error = source === "browser speech error" ? "Browser speech playback failed: audio-hardware" : "Controlled playback failure";
+      fakes.handlers.get("tts:start")?.({ payload: { request_id: requestId } });
+      if (source === "media startup after synthesis") {
+        fakes.pendingMedia = true;
+        await fakes.handlers.get("tts:end")?.({ payload: { request_id: requestId, status: "completed" } });
+        expect(fakes.finishChatPlayback).not.toHaveBeenCalled();
+      }
+      if (source === "queued audio rejection") {
+        fakes.player.queueAudio.mockRejectedValueOnce(new Error(error));
+        fakes.handlers.get("tts:audio")?.({ payload: { request_id: requestId, data: [1, 2, 3] } });
+      } else if (source === "browser speech error") {
+        fakes.handlers.get("tts:browser-delegate")?.({ payload: { request_id: requestId, text: "Reply" } });
+        utterances[0].onerror({ error: "audio-hardware" });
+      } else {
+        fakes.playbackErrorCallback?.(error);
+      }
+      await vi.waitFor(() => expect(fakes.finishChatPlayback).toHaveBeenCalledExactlyOnceWith(requestId, error));
+      fakes.playbackErrorCallback?.("Second error after stopping");
+      expect(emit).toHaveBeenCalledExactlyOnceWith("tts:playback-error", { request_id: requestId, error });
+      expect(fakes.cancelTts).toHaveBeenCalledExactlyOnceWith(requestId);
+      expect(fakes.player.stop).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("ignores browser errors delivered after an utterance is replaced", async () => {
+    fakes.handlers.get("tts:start")?.({ payload: { request_id: "chat_old" } });
+    fakes.handlers.get("tts:browser-delegate")?.({ payload: { request_id: "chat_old", text: "Old reply" } });
+    fakes.handlers.get("tts:start")?.({ payload: { request_id: "chat_new" } });
+    utterances[0].onerror({ error: "interrupted" });
+    expect(fakes.finishChatPlayback).toHaveBeenCalledExactlyOnceWith("chat_old");
+    expect(fakes.cancelTts).not.toHaveBeenCalled();
   });
 
   it.each(["cleanup", "interrupt", "replacement"])("releases playback ownership on %s", async reason => {

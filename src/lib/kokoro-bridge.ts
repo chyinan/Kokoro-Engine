@@ -366,8 +366,8 @@ export function onChatRuntimeChanged(callback: (snapshot: ChatTurnSnapshot) => v
     return listen<ChatTurnSnapshot>("chat-runtime-changed", event => callback(event.payload));
 }
 
-export function finishChatPlayback(requestId: string): Promise<void> {
-    return invoke("finish_chat_playback", { requestId });
+export function finishChatPlayback(requestId: string, error?: string): Promise<void> {
+    return invoke("finish_chat_playback", { requestId, error });
 }
 
 export async function cancelChatTurn(turnId: string, reason?: string): Promise<void> {
