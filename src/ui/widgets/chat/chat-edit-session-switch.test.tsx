@@ -317,7 +317,46 @@ describe("application history command session ownership", () => {
     expect(remove).not.toHaveBeenCalled();
     expect(h.app.getSnapshot()).toMatchObject({ busy: false, messages: rows });
   });
-  it("keeps an entire desktop tool exchange when Telegram writes after it", async () => {
+  it.each([
+    { ordering: "desktop reply before its tools", replyId: 103, callId: 104, resultId: 105 },
+    { ordering: "desktop reply after its tools", replyId: 105, callId: 103, resultId: 104 },
+    { ordering: "desktop reply with only journal ownership", replyId: 103 },
+    { ordering: "desktop reply linked by journal message ID", replyId: 103, omitTurnId: true },
+  ])("preserves the Telegram reply when the candidate is a $ordering", async ({
+    replyId, callId, resultId, omitTurnId,
+  }) => {
+    const h = harness();
+    const desktop = { ...turn("desktop", 2, "completed"), user_message_id: 101, assistant_message_id: replyId };
+    const telegramAnswer = { id: 106, role: "assistant", content: "Telegram answer", created_at: "now" };
+    const rows = [
+      messages[0],
+      { id: 102, role: "user", content: "Telegram question", created_at: "now" },
+      { id: replyId, role: "assistant", content: "desktop answer", created_at: "now",
+        metadata: omitTurnId ? undefined : JSON.stringify({ turn_id: desktop.turn_id }) },
+      telegramAnswer,
+    ];
+    if (callId !== undefined && resultId !== undefined) {
+      rows.push(
+        { id: callId, role: "assistant", content: "", created_at: "now",
+          metadata: JSON.stringify({ type: "assistant_tool_calls", turn_id: desktop.turn_id, user_message_id: 101 }) },
+        { id: resultId, role: "tool", content: "desktop tool result", created_at: "now",
+          metadata: JSON.stringify({ type: "tool_result", turn_id: desktop.turn_id, user_message_id: 101 }) },
+      );
+    }
+    rows.sort((left, right) => left.id - right.id);
+    h.set({ messages: rows, revision: 2, turns: callId === undefined ? [desktop] : [] });
+    await h.app.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await expect(h.app.continueFrom({ ...editTarget, messageId: 102 })).rejects.toThrow("history_turns_interleaved");
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.app.getSnapshot()).toMatchObject({ busy: false, messages: rows });
+  });
+  it.each([
+    { messageId: 101, count: 3, keepThroughId: 104 },
+    { messageId: 105, count: 1, keepThroughId: 106 },
+  ])("continues from $messageId when Telegram writes after the desktop tool exchange", async ({
+    messageId, count, keepThroughId,
+  }) => {
     const h = harness();
     h.set({ messages: [
       messages[0],
@@ -328,12 +367,13 @@ describe("application history command session ownership", () => {
         metadata: '{"type":"tool_result","turn_id":"desktop","user_message_id":101}' },
       { id: 105, role: "user", content: "Telegram question", created_at: "now" },
       { id: 106, role: "assistant", content: "Telegram answer", created_at: "now" },
+      { id: 107, role: "user", content: "later question", created_at: "now" },
     ] });
     await h.app.refresh();
     const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
-    await h.app.continueFrom(editTarget);
-    expect(remove).toHaveBeenCalledExactlyOnceWith(2, "conversation-a", 106, {
-      generation: 3, historyRevision: 1, keepThroughId: 104,
+    await h.app.continueFrom({ ...editTarget, messageId });
+    expect(remove).toHaveBeenCalledExactlyOnceWith(count, "conversation-a", 107, {
+      generation: 3, historyRevision: 1, keepThroughId,
     });
   });
   it("can continue from a vision context row before its own tool turn", async () => {

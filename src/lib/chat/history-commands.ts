@@ -71,6 +71,8 @@ export function getContinueFromRowBoundary(view: ChatViewSnapshot, selectedId: n
         return { row, turnId: meta?.turn_id ?? meta?.event?.turn_id, promptId: meta?.user_message_id,
             tool: isToolRow(row, meta?.type) };
     });
+    const turns = view.turns.filter(turn => turn.character_id === view.character_id
+        && turn.conversation_id === view.conversation_id);
     const toolTurns = new Set<string>();
     const toolOwners = new Map<string, Set<number>>();
     const recordToolOwner = (turnId: string, promptId: number | null) => {
@@ -78,8 +80,8 @@ export function getContinueFromRowBoundary(view: ChatViewSnapshot, selectedId: n
         if (promptId !== null) owners.add(promptId);
         toolOwners.set(turnId, owners);
     };
-    for (const turn of view.turns) {
-        if (turn.turn_id && turn.character_id === view.character_id && turn.conversation_id === view.conversation_id) {
+    for (const turn of turns) {
+        if (turn.turn_id) {
             recordToolOwner(turn.turn_id, turn.hidden ? null : turn.user_message_id);
         }
     }
@@ -89,7 +91,16 @@ export function getContinueFromRowBoundary(view: ChatViewSnapshot, selectedId: n
         if (promptId !== undefined) recordToolOwner(turnId, promptId);
     }
 
+    const keptIndex = keptId === selectedId ? -1 : rows.findIndex(({ row }) => row.id === keptId);
+    const keptTurn = rows[keptIndex]?.row.role === "assistant" ? rows[keptIndex].turnId : undefined;
     if (selected.role === "user") {
+        if (keptIndex >= 0) {
+            // The first visible reply after this prompt may belong to an earlier turn.
+            const owners = keptTurn ? toolOwners.get(keptTurn) : undefined;
+            if ((owners && [...owners].some(id => id !== selectedId)) || turns.some(turn =>
+                turn.assistant_message_id === keptId && !turn.hidden
+                && turn.user_message_id !== null && turn.user_message_id !== selectedId)) return null;
+        }
         const adjacent = rows[selectedIndex + 1];
         if (adjacent?.tool && adjacent.turnId && !toolOwners.has(adjacent.turnId)) {
             // Legacy tool rows without saved or journal ownership use adjacency.
@@ -108,17 +119,13 @@ export function getContinueFromRowBoundary(view: ChatViewSnapshot, selectedId: n
     if (boundary >= 0 && rows.slice(selectedIndex + 1, boundary + 1).some(({ turnId }) => !ownsToolTurn(turnId))) {
         return null;
     }
-    if (boundary < 0 && keptId !== selectedId) {
+    if (boundary < 0 && keptTurn) {
         // Legacy replies may link their tool rows only by turn ID. Preserve
         // the trailing rows of the reply already chosen by the visible cutoff.
-        const keptIndex = rows.findIndex(({ row }) => row.id === keptId);
-        const keptTurn = rows[keptIndex]?.row.role === "assistant" ? rows[keptIndex].turnId : undefined;
-        if (keptTurn) {
-            for (let index = keptIndex + 1; index < rows.length; index += 1) {
-                const entry = rows[index];
-                if (entry.turnId !== keptTurn || !entry.tool) break;
-                boundary = index;
-            }
+        for (let index = keptIndex + 1; index < rows.length; index += 1) {
+            const entry = rows[index];
+            if (entry.turnId !== keptTurn || !entry.tool) break;
+            boundary = index;
         }
     }
     const cutoff = boundary >= 0 ? rows[boundary].row.id : keptId;
