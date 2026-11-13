@@ -130,7 +130,7 @@ describe("UI-independent chat application", () => {
     h.set({ revision: 1, turns: [{ ...turn("image", 1), user_message_id: null, images }] });
     await h.app.refresh();
     expect(projectMessages(h.app.getSnapshot())[0]).toMatchObject({ role: "user", images });
-    h.set({ revision: 2, turns: [{ ...turn("image", 2), images }], messages: [{ id: 1, role: "user", content: "saved question", created_at: "now" }] });
+    h.set({ revision: 2, turns: [{ ...turn("image", 2), images }], messages: [{ id: 1, role: "user", content: "saved question", created_at: "now", metadata: JSON.stringify({ client_request_id: "image" }) }] });
     await h.app.refresh();
     expect(projectMessages(h.app.getSnapshot()).filter(message => message.role === "user")).toEqual([
       { id: 1, role: "user", text: "saved question", images },
@@ -268,7 +268,7 @@ describe("UI-independent chat application", () => {
   it("drops retained images after import invalidates the journal even when message IDs are reused", async () => {
     const h = harness();
     const old = { ...turn("device-a", 8, "completed"), images: ["device-a-image"] };
-    h.set({ revision: 8, turns: [old], messages: [{ id: 1, role: "user", content: "device A", created_at: "now" }] });
+    h.set({ revision: 8, turns: [old], messages: [{ id: 1, role: "user", content: "device A", created_at: "now", metadata: JSON.stringify({ client_request_id: "device-a" }) }] });
     const stop = h.app.subscribe(() => {});
     try {
       await h.app.refresh();
@@ -280,6 +280,92 @@ describe("UI-independent chat application", () => {
       h.emit(old); // A queued pre-import event cannot restore the retired attachment.
       expect(projectMessages(h.app.getSnapshot())).toEqual([{ id: 1, role: "user", text: "device B" }]);
     } finally { stop(); }
+  });
+  it.each(["resolve", "reject"] as const)("retires imported history before the sender's delayed IPC %s, without reviving its images", async outcome => {
+    const h = harness();
+    const response = deferred<StreamChatResponse>();
+    vi.mocked(h.io.send).mockReturnValueOnce(response.promise);
+    const stop = h.app.subscribe(() => {});
+    await h.app.refresh();
+    const sent = h.app.send({ message: "device A", client_request_id: "device-a", images: ["device-a-image"] });
+    const old = { ...turn("device-a", 8, "completed"), images: ["device-a-image"] };
+    try {
+      h.set({ revision: 8, turns: [old], messages: [{ id: 1, role: "user", content: "device A", created_at: "now", metadata: JSON.stringify({ client_request_id: "device-a" }) }] });
+      await h.app.refresh();
+      expect(projectMessages(h.app.getSnapshot())[0].images).toEqual(["device-a-image"]);
+      // The worker has released its database gate. Import and the new snapshot
+      // can finish before the sender's IPC response reaches JavaScript.
+      h.set({ revision: 9, history_revision: 2, turns: [], messages: [{ id: 1, role: "user", content: "device B", created_at: "now", metadata: JSON.stringify({ client_request_id: "device-b" }) }] });
+      await h.app.refresh();
+      expect(h.app.getSnapshot().turns).toEqual([]);
+      const expected = [{ id: 1, role: "user", text: "device B" }];
+      expect(projectMessages(h.app.getSnapshot())).toEqual(expected);
+      h.emit({ ...old, status: "streaming", revision: 7 });
+      h.emit(old);
+      expect(projectMessages(h.app.getSnapshot())).toEqual(expected);
+      if (outcome === "resolve") {
+        response.resolve({ status: "completed", conversation_id: "conversation-a" });
+        await sent;
+      } else {
+        response.reject(new Error("chat_history_replaced"));
+        await expect(sent).rejects.toThrow("chat_history_replaced");
+      }
+      await h.app.refresh();
+      h.emit(old);
+      expect(h.app.getSnapshot().turns).toEqual([]);
+      expect(projectMessages(h.app.getSnapshot())).toEqual(expected);
+      expect(h.app.getSnapshot().busy).toBe(false);
+      // A new request attached to the imported row still restores normally.
+      h.set({ revision: 10, turns: [{ ...turn("device-b", 10, "completed"), images: ["device-b-image"] }] });
+      await h.app.refresh();
+      expect(projectMessages(h.app.getSnapshot())).toEqual([{ ...expected[0], images: ["device-b-image"] }]);
+    } finally {
+      response.resolve({ status: "completed", conversation_id: "conversation-a" });
+      await sent.catch(() => {});
+      stop();
+    }
+  });
+  it("preserves a truly unregistered optimistic request across a newer empty journal snapshot", async () => {
+    const h = harness(); const response = deferred<StreamChatResponse>();
+    vi.mocked(h.io.send).mockReturnValueOnce(response.promise);
+    await h.app.refresh();
+    const sent = h.app.send({ message: "waiting for admission", client_request_id: "unregistered", images: ["draft-image"] });
+    try {
+      h.set({ revision: 9, turns: [] });
+      await h.app.refresh();
+      expect(h.app.getSnapshot().turns).toMatchObject([{ revision: 0, client_request_id: "unregistered", status: "pending" }]);
+      expect(projectMessages(h.app.getSnapshot())).toEqual([{ role: "user", text: "waiting for admission", images: ["draft-image"], clientRequestId: "unregistered" }]);
+    } finally {
+      response.resolve({ status: "completed", conversation_id: "conversation-a" });
+      await sent;
+    }
+  });
+  it("preserves an event newer than an empty journal snapshot", async () => {
+    const h = harness();
+    const streaming = turn("newer", 8);
+    h.set({ revision: 8, turns: [streaming], busy: true });
+    const stop = h.app.subscribe(() => {});
+    try {
+      const cached = await h.app.refresh();
+      const read = deferred<ChatViewSnapshot>();
+      vi.mocked(h.io.read).mockReturnValueOnce(read.promise);
+      const refresh = h.app.refresh();
+      h.emit({ ...streaming, revision: 10, text: "newer event" });
+      read.resolve({ ...cached, revision: 9, turns: [] });
+      await refresh;
+      expect(h.app.getSnapshot().turns).toMatchObject([{ revision: 10, text: "newer event" }]);
+    } finally { stop(); }
+  });
+  it.each([undefined, "invalid json", "null", "{}", '{"client_request_id":1}', '{"client_request_id":"device-b"}'])("does not attach journal images without the saved request identity: %s", metadata => {
+    const old = { ...turn("device-a", 8, "completed"), images: ["device-a-image"] };
+    const view = { ...emptyChatView, revision: 8, character_id: "character-a", conversation_id: "conversation-a", turns: [old], messages: [{ id: 1, role: "user", content: "saved prompt", created_at: "now", metadata }] };
+    expect(projectMessages(view)).toEqual([{ id: 1, role: "user", text: "saved prompt" }]);
+  });
+  it("restores images only from their saved request, including while a retry reuses that prompt", () => {
+    const original = { ...turn("original", 8, "completed"), images: ["original-image"] };
+    const retry = { ...turn("retry", 9, "completed"), reusing_saved_prompt: true, images: ["unrelated-image"] };
+    const view = { ...emptyChatView, revision: 9, character_id: "character-a", conversation_id: "conversation-a", turns: [original, retry], messages: [{ id: 1, role: "user", content: "saved prompt", created_at: "now", metadata: JSON.stringify({ client_request_id: "original" }) }] };
+    expect(projectMessages(view)).toEqual([{ id: 1, role: "user", text: "saved prompt", images: ["original-image"] }]);
   });
   it("does not project replies belonging to another character or conversation", async () => {
     const h = harness(); h.set({ revision: 2, turns: [ { ...turn("old-character", 1), character_id: "other" }, { ...turn("old-conversation", 2), conversation_id: "other" } ] });

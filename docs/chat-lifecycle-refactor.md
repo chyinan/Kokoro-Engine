@@ -217,3 +217,23 @@ launcher 默认重新编译隔离 debug app、创建全新数据根/profile、�
 | `npm run check:ipc` | 176 个 invoke 命令已注册 |
 
 日志位于忽略目录 `output/playwright/chat-lifecycle/pr30-origin-scope-{red-rust,red-frontend,targeted-rust,rust,frontend,build,clippy}.log`。本轮没有重跑真实 Tauri/WebView2 38 场景，也没有将上一轮原生报告作为本补丁的复跑证据；该归属边界由实际导入 SQL、Rust 重试、前端历史和上下文测试验证。未连接真实云模型或外部语音/MCP/图像服务。
+
+## PR #30 导入快照早于发送 IPC 结果的补充修复（2026-11-14，JST）
+
+对 `28b802ba` 的独立复审确认了剩余窗口：Rust worker 已完成并释放数据库门控，但发送结果尚未抵达 JavaScript；此时覆盖导入和新历史快照可以先完成。前端此前因请求仍在 pending map 而保留旧 turn，使复用整数消息 ID、但 `client_request_id` 不同的新行仍显示旧图片。
+
+正式回归先在旧生产代码上运行，得到 9 项预期失败。修复后，权威快照可淘汰已经登记且 revision 不高于快照的旧 turn，不受其 IPC Promise 是否结束影响；revision 为 0 的未登记乐观请求和比快照更新的事件仍保留。保存行的临时图片还必须与该行 metadata 中的 `client_request_id` 精确匹配。缺少此字段、字段类型无效或 metadata 损坏的旧行保留正文，但不再仅凭整数 ID 恢复进程 journal 图片。当前生产保存用户消息时会写入该字段，正常附件恢复与携图重新生成通过回归验证。
+
+回归覆盖延迟成功和失败结果及其 finally 刷新、导入后迟到的旧 streaming/completed 事件、新请求的合法图片、原始请求附件与复用 prompt 的 retry 区分，以及乐观请求和较新事件的保留。既有附件恢复 fixture 补齐了生产实际写入的请求 metadata。
+
+本轮实际复跑：
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm test -- src/lib/chat/application.test.ts src/ui/widgets/chat/chat-edit-session-switch.test.tsx` | 2 文件、83 项通过；修复前同命令为 9 失败、74 通过 |
+| `npm test -- --exclude scripts/tauri.test.mjs` | 88 文件、927 项通过；排除仍未纳入提交的本地启动器测试 |
+| `npm run build` | TypeScript 与 Vite 构建通过；保留既有混合导入和大 chunk 提示 |
+| `npm run check:ipc` | 176 个 invoke 命令已注册 |
+| `git diff --check` | 通过 |
+
+日志为 `output/playwright/chat-lifecycle/pr30-pending-import-{red,targeted,frontend,build,ipc}.log`。本补丁只修改前端和验证文档，未重复 Rust 测试，也未重跑真实 Tauri/WebView2 场景；`native-report.json` 的 38 项通过仍是运行 `20261114-005929` 的历史证据，不覆盖本次 IPC 交错修复。该交错由真实 ChatApplication/projection 模块和受控延迟 transport 验证，未将模拟 transport 描述为新的原生验收。

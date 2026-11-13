@@ -23,9 +23,18 @@ export function projectSavedMessages(view: ChatViewSnapshot): ChatPanelMessage[]
   // them with the saved user row without restoring deleted rows or old text.
   const imagesByMessage = new Map<number, string[]>();
   const speechErrorsByMessage = new Map<number, string>();
+  const savedRequests = new Map<number, string>();
+  for (const message of view.messages) {
+    if (message.role !== "user" || message.id === undefined || !message.metadata) continue;
+    try {
+      const requestId: unknown = JSON.parse(message.metadata)?.client_request_id;
+      if (typeof requestId === "string" && requestId.trim()) savedRequests.set(message.id, requestId);
+    } catch { /* Legacy or malformed metadata cannot prove attachment ownership. */ }
+  }
   for (const turn of view.turns) {
     if (turn.character_id !== view.character_id || turn.conversation_id !== view.conversation_id) continue;
-    if (!turn.hidden && turn.user_message_id !== null && turn.images.length) {
+    if (!turn.hidden && turn.user_message_id !== null && turn.images.length
+      && savedRequests.get(turn.user_message_id) === turn.client_request_id) {
       imagesByMessage.set(turn.user_message_id, turn.images);
     }
     if (turn.status === "completed" && turn.assistant_message_id !== null && turn.speech_error) {

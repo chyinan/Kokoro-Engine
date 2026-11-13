@@ -403,7 +403,7 @@ describe("application history command session ownership", () => {
     expect(projectMessages(h.app.getSnapshot())).toEqual([
       { role: "user", text: "original A", images, clientRequestId: "image-turn" },
     ]);
-    h.set({ revision: 2, messages: messages.slice(0, 2), turns: [{ ...turn("image-turn", 2, "completed"), user_message_id: 101, images }] });
+    h.set({ revision: 2, messages: [{ ...messages[0], metadata: JSON.stringify({ client_request_id: "image-turn" }) }, messages[1]], turns: [{ ...turn("image-turn", 2, "completed"), user_message_id: 101, images }] });
     completion.resolve({ status: "completed", conversation_id: "conversation-a", text: "answer A" });
     await sending;
     const reopened = h.newWindow(); await reopened.refresh();

@@ -127,7 +127,12 @@ export class ChatApplication {
       return this.readView(connection);
     }
     const ids = new Set(view.turns.map(turn => turn.client_request_id));
-    for (const [id, turn] of this.turns) if (!ids.has(id) && !this.pending.has(id) && turn.revision <= view.revision) this.turns.delete(id);
+    for (const [id, turn] of this.turns) {
+      // An unresolved IPC result only protects an unregistered optimistic turn.
+      // Import can retire a registered turn before that result reaches this view.
+      const awaitingRegistration = turn.revision === 0 && this.pending.has(id);
+      if (!ids.has(id) && !awaitingRegistration && turn.revision <= view.revision) this.turns.delete(id);
+    }
     for (const turn of view.turns) this.turns = mergeTurnSnapshot(this.turns, turn);
     for (const id of this.announcedFailures) {
       if (!this.turns.has(id) && !this.pending.has(id)) this.announcedFailures.delete(id);
