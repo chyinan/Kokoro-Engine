@@ -1187,20 +1187,32 @@ impl Serialize for ChatAudioInput {
     }
 }
 
-fn tool_only_completion_notice(language: &str) -> String {
+fn tool_completion_notice_from_catalog(catalog: &str) -> Result<String, KokoroError> {
+    let read_notice = |json: &str| {
+        let catalog: serde_json::Value = serde_json::from_str(json).ok()?;
+        catalog["chat"]["tool_only_completion"]
+            .as_str()
+            .filter(|notice| !notice.trim().is_empty())
+            .map(str::to_owned)
+    };
+    // A missing translation must not panic after tools have already executed.
+    read_notice(catalog)
+        .or_else(|| read_notice(include_str!("../../../src/ui/locales/en.json")))
+        .ok_or_else(|| KokoroError::Llm("Tool completion notice unavailable".into()))
+}
+
+fn tool_only_completion_notice(language: &str) -> Result<String, KokoroError> {
     let catalog = match language.trim().to_lowercase().as_str() {
-        "zh" | "zh-cn" | "中文" | "简体中文" => include_str!("../../../src/ui/locales/zh.json"),
+        "zh" | "zh-cn" | "中文" | "简体中文" => {
+            include_str!("../../../src/ui/locales/zh.json")
+        }
         "zh-tw" | "zh-hk" | "繁體中文" => include_str!("../../../src/ui/locales/zh-TW.json"),
         "ja" | "ja-jp" | "日本語" => include_str!("../../../src/ui/locales/ja.json"),
         "ko" | "ko-kr" | "한국어" => include_str!("../../../src/ui/locales/ko.json"),
         "ru" | "ru-ru" | "русский" => include_str!("../../../src/ui/locales/ru.json"),
         _ => include_str!("../../../src/ui/locales/en.json"),
     };
-    let catalog: serde_json::Value = serde_json::from_str(catalog).expect("bundled locale JSON");
-    catalog["chat"]["tool_only_completion"]
-        .as_str()
-        .expect("bundled tool completion notice")
-        .to_owned()
+    tool_completion_notice_from_catalog(catalog)
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -3926,7 +3938,7 @@ async fn execute_chat(
         }
         // Tool results may contain internal data intended only for the model.
         // Persist a deliverable completion notice without disclosing or rerunning them.
-        full_response = tool_only_completion_notice(&memory_target_language);
+        full_response = tool_only_completion_notice(&memory_target_language)?;
     }
     if request.hidden && is_proactive_noop_response(&full_response) {
         if let Some(row_id) = draft_row_id {
@@ -4547,6 +4559,69 @@ mod tests {
         MemoryEventType,
     };
     use crate::hooks::HookPayload;
+
+    #[test]
+    fn tool_completion_notice_exists_for_every_supported_language() {
+        for (languages, catalog) in [
+            (
+                &["en", "English"][..],
+                include_str!("../../../src/ui/locales/en.json"),
+            ),
+            (
+                &["zh", "zh-CN", "中文", "简体中文"][..],
+                include_str!("../../../src/ui/locales/zh.json"),
+            ),
+            (
+                &["zh-TW", "zh-HK", "繁體中文"][..],
+                include_str!("../../../src/ui/locales/zh-TW.json"),
+            ),
+            (
+                &["ja", "ja-JP", "日本語"][..],
+                include_str!("../../../src/ui/locales/ja.json"),
+            ),
+            (
+                &["ko", "ko-KR", "한국어"][..],
+                include_str!("../../../src/ui/locales/ko.json"),
+            ),
+            (
+                &["ru", "ru-RU", "Русский"][..],
+                include_str!("../../../src/ui/locales/ru.json"),
+            ),
+        ] {
+            let catalog: serde_json::Value = serde_json::from_str(catalog).unwrap();
+            let expected = catalog["chat"]["tool_only_completion"]
+                .as_str()
+                .filter(|notice| !notice.trim().is_empty())
+                .expect("every supported locale needs the root chat completion notice");
+            for language in languages {
+                assert_eq!(
+                    tool_only_completion_notice(language).unwrap(),
+                    expected,
+                    "{language}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tool_completion_notice_falls_back_when_a_translation_is_missing_or_malformed() {
+        let expected = tool_only_completion_notice("English").unwrap();
+        for catalog in [
+            "{",
+            "{}",
+            r#"{"chat":{"tool_only_completion":null}}"#,
+            r#"{"chat":{"tool_only_completion":"  "}}"#,
+        ] {
+            assert_eq!(
+                tool_completion_notice_from_catalog(catalog).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            tool_only_completion_notice("unsupported language").unwrap(),
+            expected
+        );
+    }
 
     /// 验证 StreamChatResponse 序列化及向前兼容性（当缺少 assistant_message_id/client_request_id/status 时默认解析为 None）。
     #[test]

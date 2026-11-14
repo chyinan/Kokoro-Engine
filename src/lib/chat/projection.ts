@@ -4,8 +4,12 @@ import { buildToolTraceItem, getToolEventStateUpdate, mergeToolTraceItems, strip
 
 export const isActiveTurn = (turn: ChatTurnSnapshot) => ["pending", "accepted", "streaming"].includes(turn.status);
 
+function turnHasSelectedConversation(view: ChatViewSnapshot, turn: ChatTurnSnapshot): boolean {
+  return turn.character_id === view.character_id && turn.conversation_id === view.conversation_id;
+}
+
 export function turnMatchesView(view: ChatViewSnapshot, turn: ChatTurnSnapshot): boolean {
-  return turn.character_id === view.character_id && turn.conversation_id === view.conversation_id
+  return turnHasSelectedConversation(view, turn)
     && (turn.conversation_generation === undefined || turn.conversation_generation === view.generation);
 }
 
@@ -78,7 +82,10 @@ export function findFailurePromptIndex(view: ChatViewSnapshot, messages: readonl
 }
 
 export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
-  const turns = view.turns.filter(turn => turnMatchesView(view, turn));
+  const conversationTurns = view.turns.filter(turn => turnHasSelectedConversation(view, turn));
+  // Loading a conversation advances its generation. Finished tool results still
+  // belong to its saved history, while live and failed turns remain selection-scoped.
+  const turns = conversationTurns.filter(turn => turn.status === "completed" || turnMatchesView(view, turn));
   const shownFailures = new Set<string>();
   let messages = projectSavedMessages(view).flatMap((message, index, saved) => {
     const scope = message.failureScope;
@@ -90,7 +97,7 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
       canRetryFailure: findFailurePromptIndex(view, saved, index) >= 0 }];
   });
   const latestTurnByUser = new Map<number, ChatTurnSnapshot>();
-  for (const turn of turns) {
+  for (const turn of conversationTurns) {
     if (turn.user_message_id === null) continue;
     const previous = latestTurnByUser.get(turn.user_message_id);
     if (!previous || replyRevision(turn) > replyRevision(previous)) latestTurnByUser.set(turn.user_message_id, turn);
@@ -117,7 +124,7 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
     const active = isActiveTurn(turn);
     // Completion can arrive before the history read. Keep the assistant row
     // mounted until a snapshot at or beyond that event takes over.
-    const live = active || isTurnAwaitingHistory(view, turn);
+    const live = active || (turnMatchesView(view, turn) && isTurnAwaitingHistory(view, turn));
     if (!live && (turn.status !== "completed" || turn.conversation_id !== view.conversation_id || !turn.tools.length)) continue;
     if (active && !turn.hidden && !turn.reusing_saved_prompt && !messages.some(message => message.id === turn.user_message_id && turn.user_message_id !== null)) {
       messages.push({ role: "user", text: turn.message, images: turn.images, clientRequestId: turn.client_request_id });

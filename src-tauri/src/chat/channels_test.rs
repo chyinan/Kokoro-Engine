@@ -685,22 +685,44 @@ async fn verify_external_tool_only_replies(
     let settings = app.state::<Arc<RwLock<ToolSettings>>>();
     let previous = settings.read().await.max_tool_rounds;
     settings.write().await.max_tool_rounds = 1;
-    let db = &app.state::<AIOrchestrator>().db;
-    for (index, text) in ["[tool-only]", "[native-tool-only]"]
-        .into_iter()
-        .enumerate()
+    let state = app.state::<AIOrchestrator>();
+    let db = &state.db;
+    let previous_language = state.response_language.lock().await.clone();
+    for (index, (language, text)) in [
+        ("English", "[tool-only]"),
+        ("English", "[native-tool-only]"),
+        ("Русский", "[tool-only]"),
+        ("Русский", "[native-tool-only]"),
+    ]
+    .into_iter()
+    .enumerate()
     {
+        *state.response_language.lock().await = language.into();
+        let request_id = format!("{language}:{text}");
         let before = executions.load(Ordering::Relaxed);
         let calls = provider.prompts.lock().unwrap().len();
-        let first = webhook(app, text, text, text, None).await;
+        let first = webhook(app, &request_id, &request_id, text, None).await;
         assert_eq!(first.0, 200);
         let notice = first.1["reply"].as_str().unwrap();
         assert!(!notice.is_empty());
+        let catalog: Value = serde_json::from_str(if language == "Русский" {
+            include_str!("../../../src/ui/locales/ru.json")
+        } else {
+            include_str!("../../../src/ui/locales/en.json")
+        })
+        .unwrap();
+        assert_eq!(
+            notice,
+            catalog["chat"]["tool_only_completion"].as_str().unwrap()
+        );
         assert!(
             !notice.contains("sentinel executed"),
             "Do not expose model-only tool output"
         );
-        assert_eq!(webhook(app, text, text, text, None).await, first);
+        assert_eq!(
+            webhook(app, &request_id, &request_id, text, None).await,
+            first
+        );
         assert_eq!(executions.load(Ordering::Relaxed), before + 1);
         assert_eq!(provider.prompts.lock().unwrap().len(), calls + 1);
         let saved: String = sqlx::query_scalar("SELECT content FROM conversation_messages WHERE role = 'assistant' ORDER BY id DESC LIMIT 1")
@@ -711,7 +733,8 @@ async fn verify_external_tool_only_replies(
         let submit = || {
             submit_message(
                 app,
-                ChatId(100),
+                // Keep each language/tool-mode fixture free of earlier tool history.
+                ChatId(100 + index as i64),
                 100 + index as i32,
                 text,
                 vec![],
@@ -729,6 +752,7 @@ async fn verify_external_tool_only_replies(
         assert_eq!(executions.load(Ordering::Relaxed), before + 2);
         assert_eq!(provider.prompts.lock().unwrap().len(), calls + 2);
     }
+    *state.response_language.lock().await = previous_language;
     settings.write().await.max_tool_rounds = previous;
 }
 

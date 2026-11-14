@@ -181,6 +181,77 @@ describe("UI-independent chat application", () => {
     expect(tools().some(canSubmitApproval)).toBe(false);
     stop();
   });
+  it.each([false, true])("keeps completed tool results when revisiting a conversation with text=%s", async withText => {
+    const h = harness();
+    const completed = {
+      ...turn("finished", 4, "completed"), conversation_generation: 1,
+      assistant_message_id: withText ? 2 : null, text: withText ? "answer" : "",
+      tools: [{ turn_id: "turn_finished", tool: "lookup", tool_trace_id: "0:0", result: { message: "found" } }],
+    };
+    const messages = [
+      { id: 1, role: "user", content: "question", created_at: "now" },
+      ...(withText ? [{ id: 2, role: "assistant", content: "answer", created_at: "now" }] : []),
+    ];
+    h.set({ revision: 4, generation: 1, messages, turns: [completed] });
+    await h.app.refresh();
+    const original = projectMessages(h.app.getSnapshot());
+    expect(original).toMatchObject([
+      { role: "user", text: "question" },
+      { role: "kokoro", text: withText ? "answer" : "", tools: [{ tool: "lookup", text: "found" }] },
+    ]);
+
+    // Each load_conversation advances generation, even when returning to the same ID.
+    h.set({ conversation_id: "conversation-b", generation: 2, messages: [] });
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot())).toEqual([]);
+    h.set({ conversation_id: "conversation-a", generation: 3, messages });
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot())).toEqual(original);
+  });
+  it.each(["pending", "accepted", "streaming", "error", "cancelled"] as const)("does not revive or cancel an old-generation %s turn on revisit", async status => {
+    const h = harness();
+    const previous = {
+      ...turn("mod_previous", 4, status), conversation_generation: 1,
+      assistant_message_id: null, preparation_timed_out: true, error: "old failure",
+      tools: [{ turn_id: "turn_mod_previous", tool: "lookup", tool_trace_id: "0:0", result: { message: "old result" } }],
+    };
+    h.set({ revision: 4, generation: 3, turns: [previous], messages: [{ id: 1, role: "user", content: "question", created_at: "now" }] });
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot())).toEqual([{ id: 1, role: "user", text: "question" }]);
+    await h.app.cancel();
+    expect(h.io.cancel).not.toHaveBeenCalled();
+
+    if (["pending", "accepted", "streaming"].includes(status)) {
+      h.set({ turns: [{ ...previous, revision: 5, conversation_generation: 3 }] });
+      await h.app.refresh();
+      expect(projectMessages(h.app.getSnapshot())).toHaveLength(2);
+      await h.app.cancel();
+      expect(h.io.cancel).toHaveBeenCalledWith("mod_previous", "stopped_by_user");
+    }
+  });
+  it.each(["character_id", "conversation_id"] as const)("never supplements saved rows from a completed turn with a different %s", field => {
+    const completed = {
+      ...turn("foreign", 4, "completed"), [field]: "other", conversation_generation: 1,
+      tools: [{ turn_id: "turn_foreign", tool: "lookup", tool_trace_id: "0:0", result: { message: "private result" } }],
+    };
+    const view = {
+      ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a", revision: 4, generation: 3,
+      turns: [completed], messages: [
+        { id: 1, role: "user", content: "question", created_at: "now" },
+        { id: 2, role: "assistant", content: "saved answer", created_at: "now" },
+      ],
+    };
+    expect(projectMessages(view)).toEqual([
+      { id: 1, role: "user", text: "question" }, { id: 2, role: "kokoro", text: "saved answer" },
+    ]);
+  });
+  it("requires saved history anchors for old-generation completed results even ahead of the view revision", () => {
+    const completed = {
+      ...turn("old", 10, "completed"), conversation_generation: 1,
+      tools: [{ turn_id: "turn_old", tool: "lookup", tool_trace_id: "0:0", result: { message: "old result" } }],
+    };
+    expect(projectMessages({ ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a", generation: 3, turns: [completed] })).toEqual([]);
+  });
   it("subscribes before snapshot and rejects a read overtaken by an event", async () => {
     const h = harness(); const first = deferred<ChatViewSnapshot>();
     vi.mocked(h.io.read).mockReturnValueOnce(first.promise);
@@ -281,11 +352,11 @@ describe("UI-independent chat application", () => {
     const h = harness(); h.set({ revision: 30, turns: [deleted], messages: [] });
     await h.app.refresh(); expect(projectMessages(h.app.getSnapshot())).toEqual([]);
   });
-  it("does not restore tool-only results once another turn has reused the saved prompt", () => {
-    const old = { ...turn("old", 1, "completed"), assistant_message_id: null, text: "", tools: [{ turn_id: "turn_old", tool: "lookup", tool_trace_id: "0:0", result: { message: "old result" } }] };
-    const newer = turn("new", 2, "completed");
+  it.each(["completed", "cancelled", "error", "streaming"] as const)("does not restore tool-only results when a newer %s turn reused the prompt before revisit", status => {
+    const old = { ...turn("old", 1, "completed"), conversation_generation: 1, assistant_message_id: null, text: "", tools: [{ turn_id: "turn_old", tool: "lookup", tool_trace_id: "0:0", result: { message: "old result" } }] };
+    const newer = { ...turn("new", 2, status), conversation_generation: 2 };
     const user = { id: 1, role: "user", content: "question", created_at: "now" };
-    const view = { ...emptyChatView, character_id: old.character_id!, conversation_id: old.conversation_id, revision: 2, messages: [user] };
+    const view = { ...emptyChatView, character_id: old.character_id!, conversation_id: old.conversation_id, revision: 2, generation: 3, messages: [user] };
     expect(projectMessages({ ...view, turns: [old] }).map(message => message.role)).toEqual(["user", "kokoro"]);
     expect(projectMessages({ ...view, turns: [newer, old] }).map(message => message.role)).toEqual(["user"]);
   });
